@@ -23,6 +23,8 @@ from datetime import date, datetime, timedelta, timezone
 import numpy as np
 
 from . import config
+from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
+                      Scorer, SpeciesMean, species_scores)
 
 BUCKETS = [(0, 0, "novel (0 refs)"), (1, 1, "1 ref"), (2, 2, "2 refs"),
            (3, 5, "3-5 refs"), (6, 30, "6-30 refs"), (31, 10**9, "31+ refs")]
@@ -114,65 +116,8 @@ def build_index(ref: list[Record]) -> Index:
     return index
 
 
-class Scorer:
-    """Cosine similarity of query photos to every reference photo, on the GPU when there is one."""
+# Methods live in methods.py; re-exported here for callers and tests.
 
-    def __init__(self, ref_vecs: np.ndarray):
-        self.torch = None
-        try:
-            import torch
-            if torch.cuda.is_available():
-                self.torch = torch
-                self.ref = torch.from_numpy(ref_vecs.astype(np.float16)).cuda()
-        except ImportError:
-            pass
-        if self.torch is None:
-            self.ref = ref_vecs.astype(np.float32)
-
-    def sims(self, query: np.ndarray) -> np.ndarray:
-        if self.torch is not None:
-            q = self.torch.from_numpy(query.astype(np.float16)).cuda()
-            return (q @ self.ref.T).float().cpu().numpy()
-        return query.astype(np.float32) @ self.ref.T
-
-
-def species_scores(sims: np.ndarray, index: Index) -> np.ndarray:
-    """(n_species,): mean over query photos of each photo's best match within the species."""
-    return np.maximum.reduceat(sims, index.starts, axis=1).mean(axis=0)
-
-
-class NearestSpecimen:
-    """Score = mean over query photos of the best match among the species' reference photos."""
-    name = "nearest"
-
-    def fit(self, vectors: np.ndarray, index: Index) -> None:
-        self.index = index
-        self.scorer = Scorer(vectors[index.cols])   # species-sorted, so reduceat works
-
-    def species_scores(self, query: np.ndarray) -> np.ndarray:
-        return species_scores(self.scorer.sims(query), self.index)
-
-    def photo_sims(self, query: np.ndarray) -> np.ndarray:
-        """(q, reference photos) similarities, columns in index.cols order."""
-        return self.scorer.sims(query)
-
-
-class SpeciesMean:
-    """Score = mean over query photos of the similarity to the species' average vector."""
-    name = "species-mean"
-
-    def fit(self, vectors: np.ndarray, index: Index) -> None:
-        self.index = index
-        ref = vectors[index.cols].astype(np.float32)
-        sums = np.add.reduceat(ref, index.starts, axis=0)
-        protos = sums / np.linalg.norm(sums, axis=1, keepdims=True).clip(1e-12)
-        self.scorer = Scorer(protos.astype(np.float16))
-
-    def species_scores(self, query: np.ndarray) -> np.ndarray:
-        return self.scorer.sims(query).mean(axis=0)
-
-
-METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean)}
 
 
 def rank_scores(scores: np.ndarray, index: Index, rank: str) -> np.ndarray:
@@ -193,7 +138,8 @@ def top_labels(scores: np.ndarray, names: list[str], k: int) -> list[str]:
 
 
 # Candidate temperatures for turning scores into confidence (softmax(score / T)).
-T_GRID = np.geomspace(0.001, 0.3, 60)
+# Wide enough for cosine scores (~0.01) and log-probability scores (~1-10) alike.
+T_GRID = np.geomspace(0.001, 10.0, 90)
 
 
 def nll_by_temperature(scores: np.ndarray, true_idx: int) -> np.ndarray:
