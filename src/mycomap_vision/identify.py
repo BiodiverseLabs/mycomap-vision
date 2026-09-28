@@ -12,6 +12,7 @@ Without a comparison it falls back to a fixed temperature and says so.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from urllib.parse import quote
 
 import numpy as np
 
+from . import config
 from .embed import load_embeddings, normalise
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
                        with_rows)
@@ -62,6 +64,34 @@ def improvement_hints(n_photos: int, ranks: dict[str, list[dict]],
     return hints
 
 
+def cache_key(backbone: str, method: str, photo_ids: np.ndarray, species: list[str]) -> str:
+    """Identifies a trained model: the backbone, the method, and exactly which reference
+    photos (in order) and species it was trained on."""
+    h = hashlib.sha1(f"{backbone}|{method}|".encode())
+    h.update(np.asarray(photo_ids, dtype=np.int64).tobytes())
+    h.update("\x1f".join(species).encode())
+    return h.hexdigest()[:16]
+
+
+def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key: str) -> bool:
+    """Fit the model, reusing saved trained weights when this exact reference set has been
+    trained before. Returns True when loaded from the cache."""
+    kw = {"records": records} if getattr(model, "needs_context", False) else {}
+    trainable = hasattr(model, "state")
+    path = cache_dir / f"{key}.npz"
+    if trainable and path.exists():
+        with np.load(path) as saved:
+            model.fit(vectors, index, state={k: saved[k] for k in saved.files}, **kw)
+        return True
+    model.fit(vectors, index, **kw)
+    if trainable:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp.npz")
+        np.savez(tmp, **model.state())
+        tmp.replace(path)
+    return False
+
+
 @dataclass
 class PhotoInfo:
     source_url: str
@@ -73,7 +103,8 @@ class Identifier:
     """One backbone + method over all of its embedded, DNA-verified records."""
 
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
-                 embeddings_root: Path | None = None, calibration: dict | None = None):
+                 embeddings_root: Path | None = None, calibration: dict | None = None,
+                 model_cache: Path | None = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         self.backbone, self.method = backbone, method
@@ -87,10 +118,10 @@ class Identifier:
         self.index = build_index(records)
         self.model = METHODS[method]()
         self.uses_context = getattr(self.model, "needs_context", False)
-        if self.uses_context:
-            self.model.fit(vecs, self.index, records=records)
-        else:
-            self.model.fit(vecs, self.index)
+        self.loaded_from_cache = fit_cached(
+            self.model, vecs, self.index, records,
+            model_cache or config.DATA_DIR / "models",
+            cache_key(backbone, method, ids[self.index.cols], self.index.species))
         self.nearest = self.model if isinstance(self.model, NearestSpecimen) else NearestSpecimen()
         if self.nearest is not self.model:
             self.nearest.fit(vecs, self.index)

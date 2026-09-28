@@ -92,3 +92,33 @@ def test_a_comparison_fits_each_trained_method_once_for_both_scores(monkeypatch)
     ev.evaluate(vecs, ref, test, method="linear", fitted=fitted)
     ev.evaluate(vecs, ref, test, method="linear", fitted=fitted, first_photo_only=True)
     assert len(calls) == 1
+
+
+def test_trained_weights_are_saved_and_reused_for_the_same_reference_set(tmp_path, monkeypatch):
+    from mycomap_vision.identify import cache_key, fit_cached
+    vecs, recs, centres = clusters([8] * 4, seed=5)
+    index = build_index(recs)
+    trained = []
+    real = LinearHead.fit
+
+    def counting(self, vectors, index, state=None):
+        if state is None:
+            trained.append(1)
+        return real(self, vectors, index, state=state)
+
+    monkeypatch.setattr(LinearHead, "fit", counting)
+    key = cache_key("bb", "hybrid", np.arange(len(index.cols))[index.cols], index.species)
+    first, second = Hybrid(), Hybrid()
+    assert fit_cached(first, vecs, index, recs, tmp_path, key) is False
+    assert fit_cached(second, vecs, index, recs, tmp_path, key) is True
+    assert trained == [1]
+    q = centres[1][None, :].astype(np.float16)
+    assert np.allclose(first.species_scores(q), second.species_scores(q))
+
+
+def test_a_changed_reference_set_gets_a_new_cache_key():
+    from mycomap_vision.identify import cache_key
+    a = cache_key("bb", "linear", np.array([1, 2, 3]), ["A x", "B y"])
+    assert a != cache_key("bb", "linear", np.array([1, 2, 4]), ["A x", "B y"])
+    assert a != cache_key("bb", "linear", np.array([1, 2, 3]), ["A x", "B z"])
+    assert a != cache_key("other", "linear", np.array([1, 2, 3]), ["A x", "B y"])

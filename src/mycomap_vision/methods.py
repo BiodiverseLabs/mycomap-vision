@@ -106,7 +106,11 @@ class LinearHead:
     seed = 0
     balanced = True       # False = plain softmax (kept for comparison and tests)
 
-    def fit(self, vectors: np.ndarray, index) -> None:
+    def fit(self, vectors: np.ndarray, index, state: dict | None = None) -> None:
+        """Train; or, given a saved `state` (from state()), restore it instead."""
+        if state is not None:
+            self.w, self.b = state["w"], state["b"]
+            return
         x = vectors[index.cols].astype(np.float32) * self.scale
         counts = photos_per_species(index)
         y = np.repeat(np.arange(len(counts)), counts)
@@ -145,6 +149,9 @@ class LinearHead:
         return (w - self.lr * mhat_w / (np.sqrt(vhat_w) + eps),
                 b - self.lr * mhat_b / (np.sqrt(vhat_b) + eps))
 
+    def state(self) -> dict:
+        return {"w": self.w, "b": self.b}
+
     def photo_logits(self, query: np.ndarray) -> np.ndarray:
         """Per-photo logits with the frequency prior left out."""
         return (query.astype(np.float32) * self.scale) @ self.w + self.b
@@ -162,11 +169,14 @@ class Hybrid:
     name = "hybrid"
     nn_temperature = 0.02
 
-    def fit(self, vectors: np.ndarray, index) -> None:
+    def fit(self, vectors: np.ndarray, index, state: dict | None = None) -> None:
         self.nearest = NearestSpecimen()
         self.nearest.fit(vectors, index)
         self.head = LinearHead()
-        self.head.fit(vectors, index)
+        self.head.fit(vectors, index, state=state)
+
+    def state(self) -> dict:
+        return self.head.state()
 
     def species_scores(self, query: np.ndarray) -> np.ndarray:
         nn = log_softmax(self.nearest.species_scores(query) / self.nn_temperature)

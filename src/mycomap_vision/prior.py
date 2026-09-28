@@ -117,10 +117,20 @@ class WithPrior:
         self.name = f"{self.base.name}+prior"
         self.weight = weight
 
-    def fit(self, vectors: np.ndarray, index, records=None) -> None:
-        self.base.fit(vectors, index)
+    def fit(self, vectors: np.ndarray, index, records=None, state: dict | None = None) -> None:
+        if hasattr(self.base, "state"):
+            self.base.fit(vectors, index, state=state)
+        else:
+            self.base.fit(vectors, index)
         self.prior = RangeSeasonPrior()
         self.prior.fit(records or [], index.species)
+
+    @property
+    def trainable(self) -> bool:
+        return hasattr(self.base, "state")
+
+    def state(self) -> dict:
+        return self.base.state()
 
     def species_scores(self, query: np.ndarray, context: Context | None = None) -> np.ndarray:
         return self.base.species_scores(query) + self.weight * self.prior.log_prior(context)
