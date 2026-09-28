@@ -19,7 +19,10 @@ of green records?
    bucket from a self-terminating EC2 instance, within iNat's limits. See
    [deploy/aws/README.md](deploy/aws/README.md). (`mv download-photos` does the
    same into a local folder or any `--dest`.)
-4. Embeddings, baseline and comparison: next.
+4. `mv embed --backbone <alias or timm:/open_clip: spec>`: one vector per photo.
+5. `mv compare --backbones a,b --methods nearest,species-mean`: score models on the
+   same photos (newest 28 days vs older records); `mv scoreboard` lists results;
+   `mv models` lists backbones and methods. Plan: [docs/PLAN.md](docs/PLAN.md).
 
 `mv status` prints counts. `mv contributors [--arr-only]` writes the list of
 photographers, with their all-rights-reserved photo counts, for permission requests.

@@ -13,13 +13,16 @@ the best species score inside them, so every rank gets its own answer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
-from datetime import date, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
+
+from . import config
 
 BUCKETS = [(0, 0, "novel (0 refs)"), (1, 1, "1 ref"), (2, 2, "2 refs"),
            (3, 5, "3-5 refs"), (6, 30, "6-30 refs"), (31, 10**9, "31+ refs")]
@@ -138,6 +141,40 @@ def species_scores(sims: np.ndarray, index: Index) -> np.ndarray:
     return np.maximum.reduceat(sims, index.starts, axis=1).mean(axis=0)
 
 
+class NearestSpecimen:
+    """Score = mean over query photos of the best match among the species' reference photos."""
+    name = "nearest"
+
+    def fit(self, vectors: np.ndarray, index: Index) -> None:
+        self.index = index
+        self.scorer = Scorer(vectors[index.cols])   # species-sorted, so reduceat works
+
+    def species_scores(self, query: np.ndarray) -> np.ndarray:
+        return species_scores(self.scorer.sims(query), self.index)
+
+    def photo_sims(self, query: np.ndarray) -> np.ndarray:
+        """(q, reference photos) similarities, columns in index.cols order."""
+        return self.scorer.sims(query)
+
+
+class SpeciesMean:
+    """Score = mean over query photos of the similarity to the species' average vector."""
+    name = "species-mean"
+
+    def fit(self, vectors: np.ndarray, index: Index) -> None:
+        self.index = index
+        ref = vectors[index.cols].astype(np.float32)
+        sums = np.add.reduceat(ref, index.starts, axis=0)
+        protos = sums / np.linalg.norm(sums, axis=1, keepdims=True).clip(1e-12)
+        self.scorer = Scorer(protos.astype(np.float16))
+
+    def species_scores(self, query: np.ndarray) -> np.ndarray:
+        return self.scorer.sims(query).mean(axis=0)
+
+
+METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean)}
+
+
 def rank_scores(scores: np.ndarray, index: Index, rank: str) -> np.ndarray:
     """Best species score inside each label of `rank` (species: the scores themselves)."""
     if rank == "species":
@@ -167,14 +204,15 @@ def truth(rec: Record, rank: str) -> str:
 
 
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
-             first_photo_only: bool = False, top_k: int = 5) -> dict:
+             first_photo_only: bool = False, top_k: int = 5, method: str = "nearest") -> dict:
     index = build_index(ref)
     names = {rank: (index.species if rank == "species" else index.labels[rank]) for rank in RANKS}
-    scorer = Scorer(vectors[index.cols])       # species-sorted, so reduceat works directly
+    model = METHODS[method]()
+    model.fit(vectors, index)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
     for rec in test:
         rows = rec.photo_rows[:1] if first_photo_only else rec.photo_rows
-        scores = species_scores(scorer.sims(vectors[rows]), index)
+        scores = model.species_scores(vectors[rows])
         b = bucket_of(index.ref_count.get(rec.species, 0))
         for rank in RANKS:
             t = truth(rec, rank)
@@ -194,25 +232,122 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     return out
 
 
-def run(conn: sqlite3.Connection, backbone: str, test_days: int = 28,
-        max_test: int | None = None, seed: int = 0) -> dict:
+SCOREBOARD_SCHEMA = """
+create table if not exists eval_runs (
+  id              integer primary key autoincrement,
+  comparison_id   text not null,       -- runs in one comparison share test and reference photos
+  backbone        text not null,
+  method          text not null,
+  cutoff          text not null,
+  test_days       integer not null,
+  n_reference     integer not null,
+  n_test          integer not null,
+  record_set      text not null,       -- hash of the test and reference records and photos
+  species_top1    real, genus_top1 real, family_top1 real,
+  species_top1_first_photo real,
+  report_json     text not null,
+  code_version    text,
+  created_at      text not null
+);
+"""
+
+
+def with_rows(records: list[Record], row_of: dict[int, int]) -> list[Record]:
+    """Records whose photo_rows hold photo ids -> the same records with one backbone's rows."""
+    return [replace(r, photo_rows=[row_of[p] for p in r.photo_rows]) for r in records]
+
+
+def record_set_hash(ref: list[Record], test: list[Record]) -> str:
+    h = hashlib.sha1()
+    for tag, group in (("ref", ref), ("test", test)):
+        for r in sorted(group, key=lambda r: r.observation_id):
+            h.update(f"{tag}:{r.observation_id}:{r.species}:{sorted(r.photo_rows)}".encode())
+    return h.hexdigest()[:12]
+
+
+def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
+            test_days: int = 28, max_test: int | None = None, seed: int = 0,
+            embeddings_root=None, log=print) -> dict:
+    """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
+
+    Only photos embedded by every backbone count, so no model is judged on photos
+    another could not see.
+    """
     from .embed import load_embeddings
-    ids, vecs = load_embeddings(conn, backbone)
-    photo_row = {int(p): i for i, p in enumerate(ids.tolist())}
-    records = load_records(conn, photo_row)
+    methods = methods or ["nearest"]
+    for m in methods:
+        if m not in METHODS:
+            raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
+    loaded = {}
+    for b in backbones:
+        root = embeddings_root / b if embeddings_root else None
+        ids, vecs = load_embeddings(conn, b, root)
+        if not len(ids):
+            raise ValueError(f"no embeddings for {b!r}; run mv embed --backbone {b}")
+        loaded[b] = (ids, vecs)
+    common = set.intersection(*(set(ids.tolist()) for ids, _ in loaded.values()))
+    records = load_records(conn, {p: p for p in common})      # photo_rows hold photo ids
     ref, test, cutoff = split_by_time(records, test_days)
     if max_test and len(test) > max_test:
         rng = np.random.default_rng(seed)
         test = [test[i] for i in sorted(rng.choice(len(test), max_test, replace=False))]
-    report = {
-        "backbone": backbone, "cutoff": cutoff, "reference_records": len(ref),
-        "test_records": len(test),
-        "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)
-                                        / max(1, len(test)), 3),
-        "all_photos": evaluate(vecs, ref, test),
-        "first_photo_only": evaluate(vecs, ref, test, first_photo_only=True),
-    }
-    return report
+    rset = record_set_hash(ref, test)
+    comparison_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + rset[:6]
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.executescript(SCOREBOARD_SCHEMA)
+
+    def top1(res: dict, rank: str):
+        return res.get(rank, {}).get("all", {}).get("top1")
+
+    runs = []
+    for b, (ids, vecs) in loaded.items():
+        row_of = {int(p): i for i, p in enumerate(ids.tolist())}
+        ref_b, test_b = with_rows(ref, row_of), with_rows(test, row_of)
+        for m in methods:
+            log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
+            all_photos = evaluate(vecs, ref_b, test_b, method=m)
+            first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True)
+            report = {"backbone": b, "method": m, "all_photos": all_photos,
+                      "first_photo_only": first}
+            with conn:
+                conn.execute(
+                    "insert into eval_runs (comparison_id, backbone, method, cutoff, test_days, "
+                    "n_reference, n_test, record_set, species_top1, genus_top1, family_top1, "
+                    "species_top1_first_photo, report_json, code_version, created_at) "
+                    "values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (comparison_id, b, m, cutoff, test_days, len(ref), len(test), rset,
+                     top1(all_photos, "species"), top1(all_photos, "genus"),
+                     top1(all_photos, "family"), top1(first, "species"),
+                     json.dumps(report), config.code_version(), now))
+            runs.append(report)
+    return {"comparison_id": comparison_id, "cutoff": cutoff, "test_days": test_days,
+            "reference_records": len(ref), "test_records": len(test),
+            "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)
+                                            / max(1, len(test)), 3),
+            "shared_photos": len(common), "record_set": rset, "runs": runs}
+
+
+SCOREBOARD_COLUMNS = ["id", "comparison_id", "backbone", "method", "cutoff", "test_days",
+                      "n_reference", "n_test", "record_set", "species_top1", "genus_top1",
+                      "family_top1", "species_top1_first_photo", "code_version", "created_at"]
+
+
+def scoreboard(conn: sqlite3.Connection, comparison_id: str | None = None) -> list[dict]:
+    """Saved runs, newest comparison first, best species top-1 first within it."""
+    conn.executescript(SCOREBOARD_SCHEMA)
+    where, params = "", ()
+    if comparison_id:
+        where, params = "where comparison_id = ?", (comparison_id,)
+    rows = conn.execute(
+        f"select {', '.join(SCOREBOARD_COLUMNS)} from eval_runs {where} "
+        "order by comparison_id desc, species_top1 desc", params).fetchall()
+    return [dict(zip(SCOREBOARD_COLUMNS, r)) for r in rows]
+
+
+def run_report(conn: sqlite3.Connection, run_id: int) -> dict | None:
+    conn.executescript(SCOREBOARD_SCHEMA)
+    row = conn.execute("select report_json from eval_runs where id = ?", (run_id,)).fetchone()
+    return json.loads(row[0]) if row else None
 
 
 def format_report(report: dict) -> str:

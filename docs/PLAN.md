@@ -26,6 +26,31 @@ the working plan; update it as phases land.
 - [ ] iNat computer-vision baseline on the same test records.
 - [ ] First comparison report.
 
+## Models: modular, side by side, on a scoreboard
+
+A "model" here is a **backbone** (frozen image model -> vector per photo) plus a
+**method** (how photo vectors become species scores). Both are swappable:
+
+- Backbones: `models.py`. Any timm or open_clip model works by spec with no code
+  (`mv embed --backbone timm:<name>`); favourites get a short alias. Other
+  sources (Hugging Face transformers, ONNX, an API) are one loader class each.
+- Methods: `evaluate.METHODS`. Now `nearest` (best-matching DNA-verified
+  specimen) and `species-mean` (species average vector); trained heads,
+  multi-photo attention and the range prior plug in the same way.
+- `mv compare --backbones a,b,c --methods nearest,species-mean` scores every
+  pair on exactly the same test and reference photos (only photos every backbone
+  has embedded), and saves each run to the scoreboard (`eval_runs` in the
+  manifest, with the record-set hash and code version). `mv scoreboard` lists
+  them; the frontend shows them and runs models side by side on your photos.
+
+Screening policy: try many cheaply, fine-tune few. Frozen screening costs one
+embedding pass over a fixed screening set (minutes to an hour on the laptop
+GPU) and seconds to score, so 10-15 candidates is fine. Candidates to screen:
+BioCLIP 2, DINOv2 B/L/G, DINOv3 (gated weights; check license), SigLIP 2,
+EVA-02 (including its iNat21 fine-tunes in timm), CLIP ViT-L, ConvNeXt V2,
+plus iNat's own model as an external baseline on the same test records. The
+best 2-3 go on to fine-tuning in phase 1.
+
 ## Frontend (started 2026-09-28, grows with every phase)
 
 A web app to try the identifier as it develops. It follows mycomap.org's design
@@ -43,7 +68,8 @@ Pages:
   DNA-verified specimens with their photos, and hints on how to improve the ID.
 - **Data**: records, photos, licenses, download and embedding progress, names by
   number of DNA-verified records.
-- **Evaluation**: each evaluation report, by rank and by reference count.
+- **Models**: the scoreboard; each comparison by rank and by reference count.
+- Identify can run two or more models side by side on the same photos.
 - **How it works**: plain-language method and its limits.
 
 Later: photo view tags (cap, underside, stem, habitat) with "add an underside

@@ -169,6 +169,7 @@ def load_embeddings(conn: sqlite3.Connection, backbone: str,
                     root: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
     """All vectors of a backbone as (photo_ids, vectors), in shard order."""
     root = root or config.DATA_DIR / "embeddings" / backbone
+    conn.executescript(SCHEMA)
     shards = sorted({r[0] for r in conn.execute(
         "select distinct shard from embeddings where backbone = ?", (backbone,))})
     ids, vecs = [], []
@@ -178,74 +179,3 @@ def load_embeddings(conn: sqlite3.Connection, backbone: str,
     if not ids:
         return np.zeros(0, dtype=np.int64), np.zeros((0, 0), dtype=np.float16)
     return np.concatenate(ids), np.concatenate(vecs)
-
-
-# --- Real backbones (need torch; loaded only when asked for) -------------------
-
-class TimmBackbone:
-    """DINOv2 and other timm models: the pooled image feature."""
-
-    def __init__(self, name: str, timm_name: str):
-        import timm
-        import torch
-        self.torch = torch
-        self.name = name
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = timm.create_model(timm_name, pretrained=True, num_classes=0).eval().to(
-            self.device)
-        cfg = timm.data.resolve_data_config({}, model=self.model)
-        self.transform = timm.data.create_transform(**cfg)
-        self.dim = self.model.num_features
-
-    def prepare(self, image):
-        return self.transform(image)
-
-    def encode(self, items):
-        torch = self.torch
-        x = torch.stack([self._as_tensor(i) for i in items]).to(self.device, non_blocking=True)
-        with torch.inference_mode(), torch.autocast(self.device, dtype=torch.float16,
-                                                    enabled=self.device == "cuda"):
-            return self.model(x).float().cpu().numpy()
-
-    def _as_tensor(self, item):
-        return item if isinstance(item, self.torch.Tensor) else self.transform(item)
-
-
-class OpenClipBackbone:
-    """BioCLIP and other open_clip models: the image tower's embedding."""
-
-    def __init__(self, name: str, hub_name: str):
-        import open_clip
-        import torch
-        self.torch = torch
-        self.name = name
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        model, _, preprocess = open_clip.create_model_and_transforms(hub_name)
-        self.model = model.eval().to(self.device)
-        self.transform = preprocess
-        with torch.inference_mode():
-            probe = self.model.encode_image(
-                self.transform(Image.new("RGB", (64, 64))).unsqueeze(0).to(self.device))
-        self.dim = probe.shape[1]
-
-    def prepare(self, image):
-        return self.transform(image)
-
-    def encode(self, items):
-        torch = self.torch
-        x = torch.stack([self._as_tensor(i) for i in items]).to(self.device, non_blocking=True)
-        with torch.inference_mode(), torch.autocast(self.device, dtype=torch.float16,
-                                                    enabled=self.device == "cuda"):
-            return self.model.encode_image(x).float().cpu().numpy()
-
-    def _as_tensor(self, item):
-        return item if isinstance(item, self.torch.Tensor) else self.transform(item)
-
-
-BACKBONES: dict[str, Callable[[], Backbone]] = {
-    # Self-supervised, strong on fine-grained detail; 518 px input.
-    "dinov2-l14": lambda: TimmBackbone("dinov2-l14", "vit_large_patch14_dinov2.lvd142m"),
-    "dinov2-b14": lambda: TimmBackbone("dinov2-b14", "vit_base_patch14_dinov2.lvd142m"),
-    # Trained on the Tree of Life (includes fungi) with taxonomic text; 224 px input.
-    "bioclip-2": lambda: OpenClipBackbone("bioclip-2", "hf-hub:imageomics/bioclip-2"),
-}

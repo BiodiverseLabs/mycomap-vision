@@ -70,28 +70,62 @@ def cmd_aws_pull_manifest(conn, args) -> None:
 
 
 def cmd_embed(conn, args) -> None:
-    from . import embed
+    from . import embed, models
+    name = models.storage_name(args.backbone)
+    models.resolve_spec(args.backbone)          # fail early on an unknown backbone
     store = open_store(args.source, config.DATA_DIR)
-    todo = embed.photos_to_embed(conn, args.backbone, args.size, store.location,
+    todo = embed.photos_to_embed(conn, name, args.size, store.location,
                                  str(config.DATA_DIR), not args.all_regions, args.limit)
-    print(f"{len(todo):,} {args.size} photos to embed with {args.backbone} from {store.location}")
+    print(f"{len(todo):,} {args.size} photos to embed with {name} from {store.location}")
     if not todo:
         return
-    backbone = embed.BACKBONES[args.backbone]()
+    backbone = models.load_backbone(args.backbone)
     stats = embed.embed_photos(conn, store, backbone, todo,
-                               config.DATA_DIR / "embeddings" / args.backbone,
+                               config.DATA_DIR / "embeddings" / name,
                                batch_size=args.batch_size)
     print(json.dumps(stats.__dict__, indent=2))
 
 
-def cmd_evaluate(conn, args) -> None:
-    from . import evaluate
-    report = evaluate.run(conn, args.backbone, test_days=args.test_days, max_test=args.max_test)
+def cmd_compare(conn, args) -> None:
+    """Score several backbones and methods on the same test and reference photos."""
+    from . import evaluate, models
+    backbones = [models.storage_name(b.strip()) for b in args.backbones.split(",") if b.strip()]
+    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
+                              max_test=args.max_test)
     config.ensure_dirs()
-    path = config.REPORTS_DIR / f"eval-{args.backbone}-{report['cutoff']}.json"
-    path.write_text(evaluate.format_report(report), encoding="utf-8")
-    print(evaluate.format_report(report))
+    path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
+    path.write_text(evaluate.format_report(result), encoding="utf-8")
+    print_scoreboard(evaluate.scoreboard(conn, result["comparison_id"]))
     print(f"-> {path}")
+
+
+def print_scoreboard(rows: list[dict]) -> None:
+    pct = lambda v: "   -  " if v is None else f"{100 * v:5.1f}%"  # noqa: E731
+    print(f"{'comparison':<24} {'backbone':<28} {'method':<13} {'species':>7} {'genus':>7} "
+          f"{'family':>7} {'1st photo':>9}  test/ref")
+    for r in rows:
+        print(f"{r['comparison_id']:<24} {r['backbone']:<28} {r['method']:<13} "
+              f"{pct(r['species_top1']):>7} {pct(r['genus_top1']):>7} {pct(r['family_top1']):>7} "
+              f"{pct(r['species_top1_first_photo']):>9}  {r['n_test']}/{r['n_reference']}")
+
+
+def cmd_scoreboard(conn, args) -> None:
+    from . import evaluate
+    print_scoreboard(evaluate.scoreboard(conn, args.comparison))
+
+
+def cmd_models(conn, args) -> None:
+    from . import embed, evaluate, models
+    conn.executescript(embed.SCHEMA)
+    counts = dict(conn.execute("select backbone, count(*) from embeddings group by 1").fetchall())
+    print("Backbones (use an alias, or any timm:<name> / open_clip:<name>):")
+    for name, alias in models.ALIASES.items():
+        print(f"  {name:<14} {counts.pop(name, 0):>9,} photos embedded  {alias.note}")
+        print(f"  {'':<14} {alias.spec}")
+    for name, n in counts.items():
+        print(f"  {name:<14} {n:>9,} photos embedded")
+    print("Methods: " + ", ".join(evaluate.METHODS))
 
 
 def cmd_status(conn, args) -> None:
@@ -162,17 +196,24 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("embed", help="one vector per photo with a frozen backbone")
     p.add_argument("--backbone", required=True,
-                   choices=["dinov2-l14", "dinov2-b14", "bioclip-2"])
+                   help="an alias (mv models) or timm:<name> / open_clip:<name>")
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
     p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
     p.add_argument("--all-regions", action="store_true")
     p.add_argument("--limit", type=int)
     p.add_argument("--batch-size", type=int, default=32)
 
-    p = sub.add_parser("evaluate", help="identify the newest green records from older ones")
-    p.add_argument("--backbone", required=True)
+    p = sub.add_parser("compare", help="score backbones x methods on the same photos "
+                                       "(newest weeks vs older records); saves to the scoreboard")
+    p.add_argument("--backbones", required=True, help="comma-separated aliases or specs")
+    p.add_argument("--methods", default="nearest", help="comma-separated: nearest, species-mean")
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--max-test", type=int, help="sample this many test records")
+
+    p = sub.add_parser("scoreboard", help="saved comparison results")
+    p.add_argument("--comparison", help="only this comparison id")
+
+    sub.add_parser("models", help="known backbones, photos embedded, methods")
 
     sub.add_parser("status", help="counts of records, photos and licenses")
 
@@ -189,7 +230,9 @@ def main(argv: list[str] | None = None) -> int:
         "aws-launch-downloader": cmd_aws_launch_downloader,
         "aws-pull-manifest": cmd_aws_pull_manifest,
         "embed": cmd_embed,
-        "evaluate": cmd_evaluate,
+        "compare": cmd_compare,
+        "scoreboard": cmd_scoreboard,
+        "models": cmd_models,
         "status": cmd_status,
         "contributors": cmd_contributors,
     }[args.command]
