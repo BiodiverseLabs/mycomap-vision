@@ -118,6 +118,21 @@ def print_scoreboard(rows: list[dict]) -> None:
               f"{pct(r['species_top1_first_photo']):>9}  {r['n_test']}/{r['n_reference']}")
 
 
+def cmd_screen(conn, args) -> None:
+    """Embed several candidate backbones, then compare them with the baselines."""
+    from . import evaluate, screening
+    store = open_store(args.source, config.DATA_DIR)
+    split = lambda v: [x.strip() for x in v.split(",") if x.strip()]  # noqa: E731
+    result = screening.screen(conn, store, split(args.candidates), split(args.baselines),
+                              size=args.size, methods=split(args.methods),
+                              batch_size=args.batch_size)
+    config.ensure_dirs()
+    print(json.dumps({"embedded": result.embedded, "failed": result.failed,
+                      "compared": result.compared}, indent=2))
+    if result.comparison:
+        print_scoreboard(evaluate.scoreboard(conn, result.comparison["comparison_id"]))
+
+
 def cmd_scoreboard(conn, args) -> None:
     from . import evaluate
     print_scoreboard(evaluate.scoreboard(conn, args.comparison))
@@ -227,6 +242,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--max-test", type=int, help="sample this many test records")
 
+    p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
+                                      "any that fail), then compare them with the baselines")
+    p.add_argument("--candidates", required=True, help="comma-separated aliases or specs")
+    p.add_argument("--baselines", default="", help="already-embedded backbones to include")
+    p.add_argument("--methods", default="nearest,species-mean")
+    p.add_argument("--size", default="medium", choices=["small", "medium", "large"])
+    p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--batch-size", type=int, default=16)
+
     p = sub.add_parser("scoreboard", help="saved comparison results")
     p.add_argument("--comparison", help="only this comparison id")
 
@@ -253,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-policies": cmd_aws_policies,
         "embed": cmd_embed,
         "compare": cmd_compare,
+        "screen": cmd_screen,
         "scoreboard": cmd_scoreboard,
         "models": cmd_models,
         "serve": cmd_serve,
