@@ -73,3 +73,22 @@ def test_trained_methods_run_through_the_evaluation_and_calibrate():
         out = evaluate(vecs, ref, test, method=method)
         assert out["species"]["all"]["top1"] == 1.0
         assert out["calibration"]["species"]["n"] == 5
+
+
+def test_a_comparison_fits_each_trained_method_once_for_both_scores(monkeypatch):
+    from mycomap_vision import evaluate as ev
+    calls = []
+    real = LinearHead.fit
+
+    def counting(self, vectors, index):
+        calls.append(1)
+        return real(self, vectors, index)
+
+    monkeypatch.setattr(LinearHead, "fit", counting)
+    vecs, recs, _ = clusters([6] * 3, seed=4)
+    ref = [r for r in recs if not r.observation_id.endswith("-5")]
+    test = [r for r in recs if r.observation_id.endswith("-5")]
+    fitted = ev.fit_method(vecs, ref, "linear")
+    ev.evaluate(vecs, ref, test, method="linear", fitted=fitted)
+    ev.evaluate(vecs, ref, test, method="linear", fitted=fitted, first_photo_only=True)
+    assert len(calls) == 1

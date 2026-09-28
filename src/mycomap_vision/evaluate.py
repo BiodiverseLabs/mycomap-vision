@@ -171,16 +171,25 @@ def truth(rec: Record, rank: str) -> str:
     return {"species": rec.species, "genus": rec.genus, "family": rec.family}[rank]
 
 
-def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
-             first_photo_only: bool = False, top_k: int = 5, method: str = "nearest") -> dict:
+def fit_method(vectors: np.ndarray, ref: list[Record], method: str):
+    """(index, fitted model) for the reference records; reusable across evaluations."""
     index = build_index(ref)
-    names = {rank: (index.species if rank == "species" else index.labels[rank]) for rank in RANKS}
     model = METHODS[method]()
-    uses_context = getattr(model, "needs_context", False)
-    if uses_context:
+    if getattr(model, "needs_context", False):
         model.fit(vectors, index, records=ref)
     else:
         model.fit(vectors, index)
+    return index, model
+
+
+def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
+             first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
+             fitted=None) -> dict:
+    """Score the test records. `fitted` (from fit_method) skips refitting, which matters
+    for the trained methods."""
+    index, model = fitted or fit_method(vectors, ref, method)
+    names = {rank: (index.species if rank == "species" else index.labels[rank]) for rank in RANKS}
+    uses_context = getattr(model, "needs_context", False)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
     # Calibration: summed NLL per candidate temperature, over test records whose
     # true label is in the reference set (a novel species has no probability to give).
@@ -348,8 +357,9 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         ref_b, test_b = with_rows(ref, row_of), with_rows(test, row_of)
         for m in methods:
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
-            all_photos = evaluate(vecs, ref_b, test_b, method=m)
-            first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True)
+            fitted = fit_method(vecs, ref_b, m)
+            all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted)
+            first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted)
             runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
             "reference_records": len(ref), "test_records": len(test),
