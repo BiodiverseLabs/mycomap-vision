@@ -109,20 +109,25 @@ def download_one(session: requests.Session, gate: HostGate, photo_id: int, sourc
                   sha256=hashlib.sha256(body).hexdigest())
 
 
-def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: int | None):
-    """Photos of green records not yet held, attempted fewest times first."""
+def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: int | None,
+                   size: str = "medium"):
+    """Photos of green records not yet held at `size`, attempted fewest times first.
+
+    A photo held at another size is queued again, so switching sizes needs no reset.
+    """
     na = "and r.north_america = 1" if north_america_only else ""
     sql = f"""
       select distinct p.photo_id, p.source_url, p.host, p.attempts
       from photos p
       join observation_photos op on op.photo_id = p.photo_id
       join records r on r.observation_id = op.observation_id {na}
-      where p.status in ('pending', 'error') and p.attempts < {MAX_ATTEMPTS}
+      where (p.status in ('pending', 'error') and p.attempts < {MAX_ATTEMPTS})
+         or (p.status = 'done' and p.size is not ?)
       order by p.attempts, p.photo_id
     """
     if limit is not None:
         sql += f" limit {int(limit)}"
-    return conn.execute(sql).fetchall()
+    return conn.execute(sql, (size,)).fetchall()
 
 
 def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str) -> None:
@@ -142,7 +147,7 @@ def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str) -> Non
 def download_all(conn: sqlite3.Connection, size: str = "medium", north_america_only: bool = True,
                  limit: int | None = None, max_hours: float | None = None, log=print) -> dict:
     config.ensure_dirs()
-    rows = pending_photos(conn, north_america_only, limit)
+    rows = pending_photos(conn, north_america_only, limit, size)
     policies = default_policies()
     gates: dict[str, HostGate] = {}
     session = requests.Session()

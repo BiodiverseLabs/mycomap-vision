@@ -96,6 +96,14 @@ def test_pending_photos_cover_green_north_american_records_until_attempts_run_ou
     assert pending_photos(conn, True, None) == []
 
 
+def test_photos_held_at_another_size_are_queued_again_for_the_new_size(conn):
+    _seed(conn)
+    save_result(conn, Result(11, "done", "p", 5, "h"), "medium", "now")
+    save_result(conn, Result(12, "done", "p", 5, "h"), "large", "now")
+    assert [r["photo_id"] for r in pending_photos(conn, True, None, "large")] == [11]
+    assert [r["photo_id"] for r in pending_photos(conn, True, None, "medium")] == [12]
+
+
 def test_a_stopped_download_does_not_use_up_an_attempt(conn):
     _seed(conn)
     save_result(conn, Result(11, "error", error="stopped"), "medium", "now")
