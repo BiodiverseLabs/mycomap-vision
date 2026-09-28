@@ -96,9 +96,13 @@ Small test sets (68-91 records): read as direction, not precision.
   the wrong default (test records arrive at real frequencies), so plain training
   is now the default. Retest heads on the full data, where ~1,200 species have
   30+ records, on the AWS GPU trainer.
-- The range-and-season score lifted the trained methods' species accuracy a
-  little but cut the hybrid's genus accuracy (49.5% to 42.9%); needs its own test
-  (weight, cap, and applied to nearest-specimen log-probabilities) on more data.
+- The range-and-season score doesn't help yet. On nearest specimen (82 of 91 test
+  records have a location), weight 0 / 0.1 / 0.25 / 0.5 / 1 gave species 24.2 /
+  23.1 / 23.1 / 22.0 / 23.1% and genus 59.3 / 59.3 / 56.0 / 51.6 / 47.2%. With
+  1-4 records per species the ranges are too thin: a right species found 300 km
+  from its few records is penalised. Kept as experimental methods (+prior), not a
+  default; retest on the full data, where iNat's own location model adds ~1.5
+  points for iNat.
 
 ## Phase 1: a better identifier
 
