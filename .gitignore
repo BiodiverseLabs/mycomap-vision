@@ -1,0 +1,6 @@
+# Photos, manifests and exports hold contributors' images and live data.
+data/
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
