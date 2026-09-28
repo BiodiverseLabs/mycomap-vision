@@ -29,7 +29,10 @@ class ScreenResult:
 def screen(conn: sqlite3.Connection, store: PhotoStore, candidates: list[str],
            baselines: list[str], size: str = "medium", methods: list[str] | None = None,
            batch_size: int = 16, loader: Callable[[str], object] = models.load_backbone,
-           embeddings_root=None, compare: bool = True, log=print) -> ScreenResult:
+           embeddings_root=None, compare: bool = True, readers: int = 8,
+           after_embed: Callable[[str], None] | None = None, log=print) -> ScreenResult:
+    """`after_embed(name)` runs once a candidate has embedded every photo (the AWS trainer
+    uploads its shards there, so a later failure doesn't lose the hours spent)."""
     result = ScreenResult()
     for spec in candidates:
         name = models.storage_name(spec)
@@ -45,6 +48,7 @@ def screen(conn: sqlite3.Connection, store: PhotoStore, candidates: list[str],
                     raise RuntimeError(f"loader named the backbone {backbone.name!r}, "
                                        f"expected {name!r}")
                 stats = embed_photos(conn, store, backbone, todo, root, batch_size=batch_size,
+                                     readers=readers,
                                      log=lambda s: log(f"[{name}] {s.strip()}"))
                 per_second = round(stats.embedded / max(time.monotonic() - started, 1e-6), 1)
                 del backbone
@@ -53,6 +57,8 @@ def screen(conn: sqlite3.Connection, store: PhotoStore, candidates: list[str],
             if left:
                 raise RuntimeError(f"{len(left):,} photos still not embedded (unreadable?)")
             result.embedded[name] = {"per_second": per_second}
+            if after_embed is not None:
+                after_embed(name)
             log(f"[{name}] done" + (f", {per_second}/s" if per_second else " (already embedded)"))
         except Exception as e:  # keep screening the rest
             result.failed[name] = f"{e.__class__.__name__}: {e}"

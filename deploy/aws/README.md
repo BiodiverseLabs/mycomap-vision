@@ -80,3 +80,42 @@ Don't write to the local manifest while it runs. When the instance has gone
 ```
 .venv/Scripts/mv aws-pull-manifest
 ```
+
+## Running the GPU trainer
+
+The trainer embeds every large photo in S3 with the chosen backbones, compares
+every backbone x method on the newest weeks, uploads the results to
+`s3://<bucket>/runs/<run>/` and shuts itself down (backstop: max hours + 30 min).
+It starts from the Deep Learning Base GPU AMI (Amazon Linux 2023) on a
+`g6.2xlarge` (one NVIDIA L4, 8 vCPUs, about $1/hour on demand).
+
+One-time setup:
+
+1. **GPU quota** (AWS console, your region → Service Quotas → Amazon Elastic
+   Compute Cloud (Amazon EC2) → "Running On-Demand G and VT instances" →
+   Request increase). It is counted in vCPUs: 8 covers one g6.2xlarge. New
+   accounts often start at 0, and approval can take a day.
+2. **Ops policy**: it now also reads the Deep Learning AMI's public parameter
+   (`/aws/service/deeplearning/ami/*`). Print it with `mv aws-policies` and
+   replace the ops user's policy JSON (IAM → Users → the ops user → Permissions →
+   the policy → Edit → JSON). The instance role is unchanged.
+
+Then:
+
+```
+.venv/Scripts/mv aws-launch-trainer --backbones bioclip-2,dinov3-l16 --max-hours 12
+```
+
+It refuses to start if the manifest lists no photos of that size in the bucket,
+so run `mv aws-pull-manifest` after the download first. Only the last commit is
+sent. The log is copied to `s3://<bucket>/runs/<run>/train.log` every 15 minutes;
+each backbone's embeddings are uploaded as soon as it finishes. When
+`runs/<run>/result.json` exists, the run is complete:
+
+```
+.venv/Scripts/mv aws-pull-trainer --run <run>
+```
+
+The run's backbones replace the local embeddings (the old ones move to
+`data/embeddings-archive/<backbone>-before-<run>/`), and its comparison joins the
+scoreboard. Pulling the same run twice changes nothing.

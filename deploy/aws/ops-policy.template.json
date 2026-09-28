@@ -13,10 +13,13 @@
       "Resource": ["arn:aws:s3:::{{BUCKET}}", "arn:aws:s3:::{{BUCKET}}/*"]
     },
     {
-      "Sid": "LatestAmazonLinuxImage",
+      "Sid": "LatestAmazonLinuxAndDeepLearningImages",
       "Effect": "Allow",
       "Action": "ssm:GetParameter",
-      "Resource": "arn:aws:ssm:{{REGION}}::parameter/aws/service/ami-amazon-linux-latest/*"
+      "Resource": [
+        "arn:aws:ssm:{{REGION}}::parameter/aws/service/ami-amazon-linux-latest/*",
+        "arn:aws:ssm:{{REGION}}::parameter/aws/service/deeplearning/ami/*"
+      ]
     },
     {
       "Sid": "Describe",

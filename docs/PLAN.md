@@ -139,7 +139,11 @@ Setup needed first (Steve):
 - Budget alarm in place (a g5/g6.xlarge is roughly a dollar an hour on demand,
   less on spot; one full embedding pass should take a few hours).
 
-Build after the full photo set is in S3.
+Built 2026-09-28 (`mv aws-launch-trainer`, `mv aws-pull-trainer`; how to run it in
+deploy/aws/README.md): g6.2xlarge from the Deep Learning Base GPU AMI, each run in
+its own `runs/<run>/` folder (never the downloader's manifest), each backbone
+uploaded as soon as it is embedded, `result.json` last. Waiting on the GPU quota
+and the ops-policy update; first run after the download completes.
 
 ## Phase 3: the platform
 

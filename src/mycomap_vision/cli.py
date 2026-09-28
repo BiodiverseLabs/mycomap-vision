@@ -81,6 +81,43 @@ def cmd_aws_backup(conn, args) -> None:
     print(json.dumps(aws.backup(conn), indent=2))
 
 
+def _split(v: str) -> list[str]:
+    return [x.strip() for x in v.split(",") if x.strip()]
+
+
+def cmd_aws_launch_trainer(conn, args) -> None:
+    from . import aws
+    print(json.dumps(aws.launch_trainer(conn, _split(args.backbones), _split(args.methods),
+                                        size=args.size, max_hours=args.max_hours,
+                                        instance_type=args.instance_type,
+                                        test_days=args.test_days), indent=2))
+
+
+def cmd_aws_train_job(conn, args) -> None:
+    """Runs on the trainer instance (see aws.TRAINER_USER_DATA)."""
+    from . import trainer
+    from .storage import S3Store
+    store = S3Store(args.source)
+
+    def upload(path, key):
+        store.client.upload_file(str(path), store.bucket, key)
+    out = trainer.run_job(conn, store, _split(args.backbones), _split(args.methods), upload,
+                          args.run_id, size=args.size, test_days=args.test_days,
+                          batch_size=args.batch_size, readers=args.readers)
+    print(json.dumps(out, indent=2))
+    if out["comparison_id"]:
+        from . import evaluate
+        print_scoreboard(evaluate.scoreboard(conn, out["comparison_id"]))
+
+
+def cmd_aws_pull_trainer(conn, args) -> None:
+    from . import aws, evaluate
+    out = aws.pull_trainer(conn, args.run)
+    print(json.dumps(out, indent=2))
+    if out["comparison_id"]:
+        print_scoreboard(evaluate.scoreboard(conn, out["comparison_id"]))
+
+
 def cmd_embed(conn, args) -> None:
     from . import embed, models
     name = models.storage_name(args.backbone)
@@ -280,6 +317,30 @@ def main(argv: list[str] | None = None) -> int:
                    help="merge the instance's S3 copies into the local manifest")
     sub.add_parser("aws-backup", help="copy the manifest, embeddings and reports to S3")
 
+    p = sub.add_parser("aws-launch-trainer",
+                       help="embed the S3 photos and compare on a self-terminating GPU instance")
+    p.add_argument("--backbones", required=True, help="comma-separated aliases or specs")
+    p.add_argument("--methods", default="nearest,species-mean,linear,hybrid")
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--max-hours", type=float, default=12)
+    p.add_argument("--instance-type", default="g6.2xlarge")
+    p.add_argument("--test-days", type=int, default=28)
+
+    p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
+                                             "upload the results to runs/<run>/")
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--backbones", required=True)
+    p.add_argument("--methods", required=True)
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--source", required=True, help="s3://bucket holding the photos")
+    p.add_argument("--test-days", type=int, default=28)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--readers", type=int, default=16, help="parallel photo reads from S3")
+
+    p = sub.add_parser("aws-pull-trainer", help="bring a finished trainer run home: its "
+                                                "embeddings replace the local ones (archived)")
+    p.add_argument("--run", required=True, help="the run id aws-launch-trainer printed")
+
     p = sub.add_parser("embed", help="one vector per photo with a frozen backbone")
     p.add_argument("--backbone", required=True,
                    help="an alias (mv models) or timm:<name> / open_clip:<name>")
@@ -351,6 +412,9 @@ def main(argv: list[str] | None = None) -> int:
         "aws-pull-manifest": cmd_aws_pull_manifest,
         "aws-policies": cmd_aws_policies,
         "aws-backup": cmd_aws_backup,
+        "aws-launch-trainer": cmd_aws_launch_trainer,
+        "aws-train-job": cmd_aws_train_job,
+        "aws-pull-trainer": cmd_aws_pull_trainer,
         "embed": cmd_embed,
         "compare": cmd_compare,
         "screen": cmd_screen,
