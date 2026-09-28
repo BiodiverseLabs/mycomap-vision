@@ -32,6 +32,17 @@ ALIASES: dict[str, Alias] = {
                         "Self-supervised, fine detail, 518 px, base size"),
     "dinov2-l14": Alias("timm:vit_large_patch14_dinov2.lvd142m",
                         "Self-supervised, fine detail, 518 px, large size"),
+    # Screening candidates (docs/PLAN.md). Names checked against timm/open_clip 2026-09-28.
+    "dinov3-b16": Alias("timm:vit_base_patch16_dinov3.lvd1689m",
+                        "DINOv3 self-supervised, base size (Meta DINOv3 licence)"),
+    "dinov3-l16": Alias("timm:vit_large_patch16_dinov3.lvd1689m",
+                        "DINOv3 self-supervised, large size (Meta DINOv3 licence)"),
+    "siglip2-l16-384": Alias("open_clip:ViT-L-16-SigLIP2-384@webli",
+                             "SigLIP 2 image-text model, large, 384 px"),
+    "eva02-l14-448": Alias("timm:eva02_large_patch14_448.mim_m38m_ft_in22k",
+                           "EVA-02 large, ImageNet-22k fine-tune, 448 px"),
+    "convnextv2-l": Alias("timm:convnextv2_large.fcmae_ft_in22k_in1k_384",
+                          "ConvNeXt V2 large (a convolutional net, for contrast), 384 px"),
 }
 
 

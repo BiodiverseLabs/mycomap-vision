@@ -17,14 +17,16 @@ the working plan; update it as phases land.
 - [ ] Download large (1024 px) photos straight into S3 (`mv aws-launch-downloader`,
       ~250 GB, ~2 days for the capped all-rights-reserved part). Waiting on the
       one-time AWS setup in `deploy/aws/README.md`.
-- [x] Embedding pipeline (`mv embed`), three frozen backbones: BioCLIP 2
+- [x] Embedding pipeline (`mv embed`), any timm or open_clip backbone; tried so far: BioCLIP 2
       (~95 photos/s on the laptop 4070), DINOv2-B (~64/s), DINOv2-L at 518 px (~13/s).
-- [x] Evaluation harness (`mv evaluate`): identify the newest 28 days of green
+- [x] Evaluation harness (`mv compare`): identify the newest 28 days of green
       records from older ones, by nearest DNA-verified specimen; top-1/top-5 at
       family, genus, species, split by reference count (novel, 1, 2, 3-5, 6-30, 31+);
       all photos vs first photo only.
 - [ ] iNat computer-vision baseline on the same test records.
 - [ ] First comparison report.
+- [x] Web app and API (`mv serve`) with Identify, Models (scoreboard), Data, How it works;
+      confidence calibrated per rank from each model's latest comparison.
 
 ## Models: modular, side by side, on a scoreboard
 
@@ -45,11 +47,13 @@ A "model" here is a **backbone** (frozen image model -> vector per photo) plus a
 
 Screening policy: try many cheaply, fine-tune few. Frozen screening costs one
 embedding pass over a fixed screening set (minutes to an hour on the laptop
-GPU) and seconds to score, so 10-15 candidates is fine. Candidates to screen:
-BioCLIP 2, DINOv2 B/L/G, DINOv3 (gated weights; check license), SigLIP 2,
-EVA-02 (including its iNat21 fine-tunes in timm), CLIP ViT-L, ConvNeXt V2,
-plus iNat's own model as an external baseline on the same test records. The
-best 2-3 go on to fine-tuning in phase 1.
+GPU) and seconds to score, so 10-15 candidates is fine. Candidates to screen
+(aliases in `mv models`): BioCLIP 2, DINOv2 B/L (G too if it fits), DINOv3 B/L
+(in timm; Meta's DINOv3 licence needs a read before any public release), SigLIP 2
+L/384 (open_clip), EVA-02 L/448, ConvNeXt V2 L as a non-transformer contrast,
+plus iNat's own model as an external baseline on the same test records. (timm
+has no iNat-trained checkpoints, so that idea is dropped.) The best 2-3 go on
+to fine-tuning in phase 1.
 
 ## Frontend (started 2026-09-28, grows with every phase)
 

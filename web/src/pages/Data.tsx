@@ -4,9 +4,9 @@ import { PageHeader } from "@/components/Layout";
 import { api, num, pct } from "@/lib/api";
 
 const LICENSE_LABEL: Record<string, string> = {
-  open: "Open (CC0, CC-BY, CC-BY-SA)",
+  open: "Open",
   nc: "Non-commercial",
-  arr: "All rights reserved (permission sought)",
+  arr: "All rights reserved",
 };
 
 export function DataPage() {
@@ -36,7 +36,8 @@ export function DataPage() {
               <Card>
                 <CardHeader><CardTitle className="text-base">Names by number of DNA-verified records</CardTitle></CardHeader>
                 <CardContent>
-                  <Bars data={s.names_by_records} total={s.names} suffix=" records" />
+                  <Bars data={Object.fromEntries(Object.entries(s.names_by_records).map(([k, v]) => [`${k} record${k === "1" ? "" : "s"}`, v]))}
+                        total={s.names} />
                   <p className="text-xs text-muted-foreground mt-3">
                     Names with a single record still count: the identifier compares with each
                     specimen, so one good match can win.
@@ -49,6 +50,7 @@ export function DataPage() {
                   <Bars data={Object.fromEntries(Object.entries(s.photos_by_license).map(([k, v]) => [LICENSE_LABEL[k] ?? k, v]))}
                         total={s.photos} />
                   <p className="text-xs text-muted-foreground mt-3">
+                    Open: CC0, CC-BY, CC-BY-SA. Non-commercial: CC licences with NC or ND.{" "}
                     {num(s.contributors_arr)} photographers have all-rights-reserved photos in
                     the set; their photos are used for training only while permission is sought.
                   </p>
@@ -95,12 +97,12 @@ function Tile({ label, value, sub }: { label: string; value: string; sub?: strin
   );
 }
 
-function Bars({ data, total, suffix = "" }: { data: Record<string, number>; total: number; suffix?: string }) {
+function Bars({ data, total }: { data: Record<string, number>; total: number }) {
   return (
     <div className="space-y-2">
       {Object.entries(data).map(([k, v]) => (
-        <div key={k} className="grid grid-cols-[minmax(0,1fr)_2fr_auto] items-center gap-3 text-sm">
-          <span className="truncate text-[#5c4a3a]" title={k}>{k}{suffix}</span>
+        <div key={k} className="grid grid-cols-[9.5rem_minmax(0,1fr)_auto] items-center gap-3 text-sm">
+          <span className="truncate text-[#5c4a3a]" title={k}>{k}</span>
           <div className="h-2 rounded-full bg-muted overflow-hidden">
             <div className="h-full rounded-full bg-myco-green" style={{ width: `${(100 * v) / Math.max(1, total)}%` }} />
           </div>
