@@ -56,9 +56,11 @@ def test_snapshot_is_a_complete_copy_of_a_manifest_in_use(tmp_path):
 def test_old_manifests_gain_the_store_column(tmp_path):
     path = tmp_path / "old.sqlite"
     old = sqlite3.connect(path)
-    # The schema as first shipped: the same, minus the store column.
-    old.executescript("\n".join(line for line in SCHEMA.splitlines()
-                                if not line.strip().startswith("store ")))
+    # The schema as first shipped: no photos.store column and no photo_copies table.
+    before, rest = SCHEMA.split("-- Every held copy of a photo")
+    first = before + rest.split("primary key (photo_id, store, size)\n);")[1]
+    old.executescript("\n".join(line for line in first.splitlines()
+                                if not line.strip().startswith("store            text,")))
     assert "store" not in {r[1] for r in old.execute("pragma table_info(photos)")}
     old.close()
     conn = connect(path)
@@ -88,12 +90,44 @@ def test_instances_terminate_on_shutdown_and_carry_the_project_tag(monkeypatch):
     assert {s["ResourceType"] for s in args["TagSpecifications"]} == {"instance", "volume"}
 
 
-def test_pulling_the_manifest_refuses_while_it_is_open_here(tmp_path):
-    dest = tmp_path / "manifest.sqlite"
-    dest.write_bytes(b"")
-    (tmp_path / "manifest.sqlite-wal").write_bytes(b"")
-    with pytest.raises(RuntimeError, match="still open"):
-        aws.pull_manifest(dest)
+def test_pulling_the_instance_manifest_merges_s3_copies_and_keeps_local_work(tmp_path):
+    local = connect(tmp_path / "local" / "manifest.sqlite")
+    remote_path = tmp_path / "remote.sqlite"
+    remote = connect(remote_path)
+    for c in (local, remote):
+        c.executemany("insert into photos (photo_id, license_class, source_url, first_seen_at, "
+                      "license_checked_at, status) values (?, 'open', 'u', 't', 't', 'pending')",
+                      [(1,), (2,), (3,)])
+    local.execute("insert into photo_copies values (1, 'C:/data', 'medium', 'p/1.jpg', 1, 'h', 't')")
+    local.execute("create table embeddings (backbone text, photo_id int)")
+    local.execute("insert into embeddings values ('m', 1)")
+    remote.execute("insert into photo_copies values (1, 's3://b/', 'large', 'p/1.jpg', 9, 'h', 't')")
+    remote.execute("insert into photo_copies values (2, 's3://b/', 'large', 'p/2.jpg', 9, 'h', 't')")
+    remote.execute("update photos set status = 'missing', error = 'http 404' where photo_id = 3")
+    local.commit()
+    remote.commit()
+    remote.close()
+    out = aws.merge_manifest(local, remote_path)
+    assert out == {"s3_copies_added": 2, "marked_missing": 1}
+    copies = {tuple(r) for r in local.execute("select photo_id, store, size from photo_copies")}
+    assert copies == {(1, "C:/data", "medium"), (1, "s3://b/", "large"), (2, "s3://b/", "large")}
+    assert local.execute("select count(*) from embeddings").fetchone()[0] == 1
+    row = local.execute("select status, error from photos where photo_id = 3").fetchone()
+    assert tuple(row) == ("missing", "http 404")
+
+
+def test_single_copy_manifests_are_backfilled_with_their_own_folder_as_the_store(tmp_path):
+    path = tmp_path / "data" / "manifest.sqlite"
+    c = connect(path)
+    c.execute("insert into photos (photo_id, license_class, source_url, first_seen_at, "
+              "license_checked_at, status, local_path, size, store) values "
+              "(1, 'open', 'u', 't', 't', 'done', 'p/1.jpg', 'medium', null)")
+    c.execute("delete from photo_copies")
+    c.commit()
+    c.close()
+    again = connect(path)
+    rows = [tuple(r) for r in again.execute("select photo_id, store, size, path from photo_copies")]
+    assert rows == [(1, str(path.parent), "medium", "p/1.jpg")]
 
 
 

@@ -50,8 +50,8 @@ class S3Store:
         self.bucket, self.prefix = parse_s3_url(url)
         self.location = f"s3://{self.bucket}/{self.prefix}"
         if client is None:
-            import boto3
-            client = boto3.client("s3")
+            from .aws import s3_client
+            client = s3_client()
         self.client = client   # boto3 clients are safe to share across threads
 
     def key(self, relpath: str) -> str:
@@ -63,7 +63,8 @@ class S3Store:
                                ContentType=CONTENT_TYPES.get(ext, "application/octet-stream"))
 
     def get(self, relpath: str) -> bytes:
-        return self.client.get_object(Bucket=self.bucket, Key=self.key(relpath))["Body"].read()
+        with self.client.get_object(Bucket=self.bucket, Key=self.key(relpath))["Body"] as body:
+            return body.read()
 
     def upload_file(self, path: Path, relpath: str) -> None:
         self.client.upload_file(str(path), self.bucket, self.key(relpath))

@@ -141,7 +141,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             "photos": one("select count(*) from photos"),
             "photos_by_status": dict(q("select status, count(*) from photos group by 1")),
             "photos_by_license": dict(q("select license_class, count(*) from photos group by 1")),
-            "photos_by_size": dict(q("select size, count(*) from photos where status = 'done' "
+            "photos_by_size": dict(q("select size || case when store like 's3://%' "
+                                     "then ' (S3)' else '' end, count(*) from photo_copies "
                                      "group by 1")),
             "contributors_arr": one("select count(distinct owner_login) from photos "
                                     "where license_class = 'arr'"),

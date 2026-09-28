@@ -249,14 +249,17 @@ def read_jwt(path: Path = JWT_FILE) -> str:
 
 
 def photo_inputs(conn: sqlite3.Connection, rec: Record) -> list[tuple[int, Path]]:
-    """(photo id, local file) for the record's photos, in position order."""
+    """(photo id, local file) for the record's photos, in position order: the smallest
+    local copy of each (iNat's endpoint scales photos down anyway)."""
+    order = {"small": 0, "medium": 1, "large": 2, "original": 3}
     out = []
     for pid in rec.photo_rows:            # photo_rows hold photo ids in a SharedSet
-        row = conn.execute("select local_path, store from photos where photo_id = ?",
-                           (pid,)).fetchone()
-        if row and row[0]:
-            root = Path(row[1]) if row[1] and not str(row[1]).startswith("s3://") else config.DATA_DIR
-            out.append((pid, root / row[0]))
+        copies = [c for c in conn.execute(
+            "select store, size, path from photo_copies where photo_id = ? "
+            "and store not like 's3://%'", (pid,))]
+        if copies:
+            store, _, path = min(copies, key=lambda c: order.get(c[1], 9))
+            out.append((pid, Path(store) / path))
     return out
 
 

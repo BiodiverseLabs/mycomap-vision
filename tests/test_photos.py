@@ -145,3 +145,29 @@ def test_a_record_sample_takes_every_photo_of_the_chosen_records(conn):
     _seed(conn)
     got = pending_photos(conn, True, None, record_sample=1)
     assert sorted(r["photo_id"] for r in got) == [11, 12]    # both photos of record 5
+
+
+def test_a_laptop_sample_and_the_s3_set_are_tracked_as_separate_copies(conn):
+    _seed(conn)
+    save_result(conn, Result(11, "done", "p/11.jpg", 5, "h"), "medium", "now", "C:/data")
+    # Held on the laptop at medium, so still wanted in S3 at large...
+    assert 11 in [r["photo_id"] for r in pending_photos(conn, True, None, "large", "s3://b/")]
+    save_result(conn, Result(11, "done", "p/11.jpg", 9, "h"), "large", "now", "s3://b/")
+    assert 11 not in [r["photo_id"] for r in pending_photos(conn, True, None, "large", "s3://b/")]
+    # ...and the laptop copy is still there for local embedding.
+    assert 11 not in [r["photo_id"] for r in pending_photos(conn, True, None, "medium", "C:/data")]
+    copies = {tuple(r) for r in conn.execute("select store, size from photo_copies where photo_id = 11")}
+    assert copies == {("C:/data", "medium"), ("s3://b/", "large")}
+
+
+def test_only_failures_count_toward_the_attempt_limit(conn):
+    _seed(conn)
+    for size in ("small", "medium", "large", "original", "medium"):
+        save_result(conn, Result(11, "done", "p", 5, "h"), size, "now", "C:/data")
+    assert conn.execute("select attempts from photos where photo_id = 11").fetchone()[0] == 0
+
+
+def test_photos_gone_from_inat_are_not_queued_again(conn):
+    _seed(conn)
+    save_result(conn, Result(11, "missing", error="http 404"), "large", "now")
+    assert 11 not in [r["photo_id"] for r in pending_photos(conn, True, None, "large", "s3://b/")]

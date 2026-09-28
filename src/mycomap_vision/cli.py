@@ -73,8 +73,12 @@ def cmd_aws_policies(conn, args) -> None:
 
 def cmd_aws_pull_manifest(conn, args) -> None:
     from . import aws
-    conn.close()
-    print(f"Manifest replaced from S3: {aws.pull_manifest(config.MANIFEST_PATH)}")
+    print(json.dumps(aws.pull_manifest(conn, config.DATA_DIR / "aws"), indent=2))
+
+
+def cmd_aws_backup(conn, args) -> None:
+    from . import aws
+    print(json.dumps(aws.backup(conn), indent=2))
 
 
 def cmd_embed(conn, args) -> None:
@@ -247,7 +251,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="print the IAM policies filled in for MV_S3_BUCKET / MV_AWS_REGION")
 
     sub.add_parser("aws-pull-manifest",
-                   help="replace the local manifest with the one the instance wrote")
+                   help="merge the instance's S3 copies into the local manifest")
+    sub.add_parser("aws-backup", help="copy the manifest, embeddings and reports to S3")
 
     p = sub.add_parser("embed", help="one vector per photo with a frozen backbone")
     p.add_argument("--backbone", required=True,
@@ -311,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-launch-downloader": cmd_aws_launch_downloader,
         "aws-pull-manifest": cmd_aws_pull_manifest,
         "aws-policies": cmd_aws_policies,
+        "aws-backup": cmd_aws_backup,
         "embed": cmd_embed,
         "compare": cmd_compare,
         "screen": cmd_screen,

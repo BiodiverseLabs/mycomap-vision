@@ -67,26 +67,25 @@ def normalise(v: np.ndarray) -> np.ndarray:
 def photos_to_embed(conn: sqlite3.Connection, backbone: str, size: str, store_location: str,
                     local_location: str, north_america_only: bool = True,
                     limit: int | None = None) -> list[tuple[int, str]]:
-    """(photo_id, relpath) of held photos at `size` in the store, not yet embedded.
+    """(photo_id, relpath) of photos with a copy at `size` in the store, not yet embedded.
 
-    Photos downloaded before the manifest recorded a store count as local.
+    `local_location` is kept for callers; copies downloaded before stores were recorded
+    were filed under the manifest's own data folder when photo_copies was created.
     """
     conn.executescript(SCHEMA)
     na = "and r.north_america = 1" if north_america_only else ""
     sql = f"""
-      select distinct p.photo_id, p.local_path
-      from photos p
-      join observation_photos op on op.photo_id = p.photo_id
+      select distinct c.photo_id, c.path
+      from photo_copies c
+      join observation_photos op on op.photo_id = c.photo_id
       join records r on r.observation_id = op.observation_id {na}
-      left join embeddings e on e.backbone = ? and e.photo_id = p.photo_id
-      where p.status = 'done' and p.size = ? and coalesce(p.store, ?) = ?
-        and e.photo_id is null
-      order by p.photo_id
+      left join embeddings e on e.backbone = ? and e.photo_id = c.photo_id
+      where c.size = ? and c.store = ? and e.photo_id is null
+      order by c.photo_id
     """
     if limit is not None:
         sql += f" limit {int(limit)}"
-    return [(r[0], r[1]) for r in conn.execute(
-        sql, (backbone, size, local_location, store_location))]
+    return [(r[0], r[1]) for r in conn.execute(sql, (backbone, size, store_location))]
 
 
 def next_shard(conn: sqlite3.Connection, backbone: str) -> int:

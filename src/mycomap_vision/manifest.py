@@ -71,6 +71,19 @@ create table if not exists observation_photos (
   primary key (observation_id, photo_id)
 );
 
+-- Every held copy of a photo: one per size per store (a local folder or s3://bucket/).
+-- A photo can be medium on a laptop and large in S3 at the same time.
+create table if not exists photo_copies (
+  photo_id       integer not null,
+  store          text not null,
+  size           text not null,
+  path           text not null,        -- relative to the store
+  bytes          integer,
+  sha256         text,
+  downloaded_at  text,
+  primary key (photo_id, store, size)
+);
+
 -- A row each time a photo's license is seen to change (including the first sighting).
 create table if not exists license_history (
   photo_id         integer not null,
@@ -88,7 +101,22 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("pragma foreign_keys=on")
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)
+    _backfill_copies(conn, local_store=str(path.parent))
     return conn
+
+
+def _backfill_copies(conn: sqlite3.Connection, local_store: str) -> None:
+    """Manifests from before photo_copies held one copy per photo in the photos row.
+    Copy those into photo_copies once; a row with no store was downloaded to the
+    manifest's own data folder."""
+    if conn.execute("select 1 from photo_copies limit 1").fetchone():
+        return
+    with conn:
+        conn.execute(
+            "insert or ignore into photo_copies (photo_id, store, size, path, bytes, sha256, "
+            "downloaded_at) select photo_id, coalesce(store, ?), size, local_path, bytes, "
+            "sha256, downloaded_at from photos where status = 'done' and local_path is not null "
+            "and size is not null", (local_store,))
 
 
 # Columns added after a manifest may already exist; `create table if not exists`

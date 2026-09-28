@@ -112,11 +112,10 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
                    size: str = "medium", store_location: str | None = None,
                    random_order: bool = False, record_sample: int | None = None,
                    first_seen_since: str | None = None):
-    """Photos of green records not yet held at `size` (in `store_location`, when given),
-    attempted fewest times first.
-
-    A photo held at another size or in another store is queued again, so switching
-    sizes or moving to S3 needs no reset.
+    """Photos of green records with no copy at `size` (in `store_location`, when given),
+    failed fewest times first. Photos iNat no longer has, and ones that failed
+    MAX_ATTEMPTS times, are left out. A copy at another size or in another store
+    doesn't count, so a laptop sample and the S3 set are kept independently.
     """
     na = "and r.north_america = 1" if north_america_only else ""
     params: list = []
@@ -133,8 +132,9 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
       from photos p
       join observation_photos op on op.photo_id = p.photo_id
       join records r on r.observation_id = op.observation_id {na}
-      where (p.status in ('pending', 'error') and p.attempts < {MAX_ATTEMPTS})
-         or (p.status = 'done' and (p.size is not ? or (? is not null and p.store is not ?)))
+      where p.status != 'missing' and p.attempts < {MAX_ATTEMPTS}
+        and not exists (select 1 from photo_copies c where c.photo_id = p.photo_id
+                        and c.size = ? and (? is null or c.store = ?))
       order by {"random()" if random_order else "p.attempts, p.photo_id"}
     """
     if limit is not None:
@@ -144,11 +144,16 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
 
 def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str,
                 store_location: str | None = None) -> None:
+    """Record one download. A success adds a copy (the photos row keeps the latest one
+    for display); only failures count toward MAX_ATTEMPTS."""
     if r.status == "done":
         conn.execute(
+            "insert or replace into photo_copies (photo_id, store, size, path, bytes, sha256, "
+            "downloaded_at) values (?, ?, ?, ?, ?, ?, ?)",
+            (r.photo_id, store_location or "", size, r.local_path, r.bytes, r.sha256, now))
+        conn.execute(
             "update photos set status = 'done', local_path = ?, store = ?, size = ?, bytes = ?, "
-            "sha256 = ?, error = null, downloaded_at = ?, attempts = attempts + 1 "
-            "where photo_id = ?",
+            "sha256 = ?, error = null, downloaded_at = ? where photo_id = ?",
             (r.local_path, store_location, size, r.bytes, r.sha256, now, r.photo_id))
     elif r.error == "stopped":
         return

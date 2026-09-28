@@ -42,6 +42,7 @@ BUCKET={bucket}
 RUN=runs/{run_id}
 LOG=/var/log/mv-download.log
 exec > >(tee -a "$LOG") 2>&1
+export AWS_DEFAULT_REGION={region}
 # Backstop: power off after {backstop_minutes} minutes whatever happens.
 shutdown -h +{backstop_minutes}
 finish() {{
@@ -67,12 +68,24 @@ def render_user_data(run_id: str, size: str, max_hours: float, bucket_name: str)
     # The backstop leaves an hour for setup and the final manifest copy.
     backstop = int(max_hours * 60) + 60
     return USER_DATA.format(bucket=bucket_name, run_id=run_id, size=size, max_hours=max_hours,
+                            region=config.setting("MV_AWS_REGION", "us-east-2"),
                             backstop_minutes=backstop, manifest_key=MANIFEST_KEY)
 
 
 def session():
+    """This machine's AWS session: the MV_AWS_PROFILE profile when set (a laptop), else
+    the default chain (on the instance, its role)."""
     import boto3
-    return boto3.Session(profile_name=config.setting("MV_AWS_PROFILE"), region_name=region())
+    return boto3.Session(profile_name=config.setting("MV_AWS_PROFILE"),
+                         region_name=config.setting("MV_AWS_REGION"))
+
+
+def s3_client():
+    """One S3 client, shared across download threads, with adaptive retries."""
+    from botocore.config import Config
+    return session().client("s3", config=Config(retries={"mode": "adaptive",
+                                                         "total_max_attempts": 6},
+                                                max_pool_connections=32))
 
 
 def ensure_bucket(s3, bucket: str) -> bool:
@@ -127,7 +140,7 @@ def run_instance_args(run_id: str, ami: str, user_data: str,
 def launch_downloader(conn, size: str = "large", max_hours: float = 120,
                       instance_type: str = "t3.small", log=print) -> dict:
     sess = session()
-    s3, ec2, ssm = sess.client("s3"), sess.client("ec2"), sess.client("ssm")
+    s3, ec2, ssm = s3_client(), sess.client("ec2"), sess.client("ssm")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     b = bucket()
     if ensure_bucket(s3, b):
@@ -145,26 +158,63 @@ def launch_downloader(conn, size: str = "large", max_hours: float = 120,
             "manifest": f"s3://{b}/{MANIFEST_KEY}"}
 
 
-def pull_manifest(dest: Path) -> Path:
-    """Copy the instance's manifest back. Replaces the local one only after a full download."""
-    wal = dest.with_name(dest.name + "-wal")
-    if wal.exists():
-        raise RuntimeError(f"{wal} exists: the manifest is still open (a fetch or download "
-                           "running here?). Stop it first.")
-    s3 = session().client("s3")
-    tmp = dest.with_suffix(".download")
-    s3.download_file(bucket(), MANIFEST_KEY, str(tmp))
-    tmp.replace(dest)
-    return dest
+def merge_manifest(conn, remote_path: Path) -> dict:
+    """Bring an instance's results into this manifest without replacing it: its S3
+    copies are added, and photos it found gone from iNat are marked missing. Anything
+    done here meanwhile (local copies, embeddings, scoreboard) is left as it is."""
+    conn.execute("attach database ? as remote", (str(remote_path),))
+    try:
+        with conn:
+            before = conn.execute("select count(*) from photo_copies").fetchone()[0]
+            conn.execute(
+                "insert or ignore into photo_copies select * from remote.photo_copies "
+                "where store like 's3://%'")
+            added = conn.execute("select count(*) from photo_copies").fetchone()[0] - before
+            missing = conn.execute(
+                "update photos set status = 'missing', error = (select r.error from "
+                "remote.photos r where r.photo_id = photos.photo_id) "
+                "where status != 'done' and photo_id in "
+                "(select photo_id from remote.photos where status = 'missing')").rowcount
+    finally:
+        conn.execute("detach database remote")
+    return {"s3_copies_added": added, "marked_missing": missing}
+
+
+def pull_manifest(conn, work_dir: Path) -> dict:
+    """Download the instance's manifest and merge it in (see merge_manifest)."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    local = work_dir / "manifest-from-s3.sqlite"
+    s3_client().download_file(bucket(), MANIFEST_KEY, str(local))
+    return merge_manifest(conn, local)
+
+
+def backup(conn, log=print) -> dict:
+    """Copy what can't be re-derived cheaply to s3://<bucket>/backup/<date>/: a manifest
+    snapshot, the embeddings and the reports."""
+    from datetime import date
+    s3, b = s3_client(), bucket()
+    prefix = f"backup/{date.today().isoformat()}/"
+    snap = snapshot(conn, config.DATA_DIR / "manifest-backup.sqlite")
+    files = [(snap, prefix + "manifest.sqlite")]
+    for folder in ("embeddings", "reports"):
+        root = config.DATA_DIR / folder
+        if root.is_dir():
+            files += [(p, prefix + p.relative_to(config.DATA_DIR).as_posix())
+                      for p in root.rglob("*") if p.is_file()]
+    total = 0
+    for path, key in files:
+        s3.upload_file(str(path), b, key)
+        total += path.stat().st_size
+    log(f"backed up {len(files)} files, {total / 2**20:.0f} MB, to s3://{b}/{prefix}")
+    return {"files": len(files), "bytes": total, "prefix": f"s3://{b}/{prefix}"}
 
 
 def s3_checkpoint(conn, url: str):
     """A callable that snapshots the manifest and uploads it to `url` (s3://bucket/key)."""
-    import boto3
     from .storage import parse_s3_url
     bucket, key = parse_s3_url(url)
     key = key.rstrip("/")
-    client = boto3.client("s3")
+    client = s3_client()
     snap_path = config.DATA_DIR / "manifest-checkpoint.sqlite"
 
     def checkpoint() -> None:
