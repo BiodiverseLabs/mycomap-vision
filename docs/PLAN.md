@@ -87,6 +87,20 @@ production deploy at `vision.mycomap.org` on its own Lightsail box.
 Small test sets (68-91 records): read as direction, not precision.
 
 - BioCLIP 2 is far ahead of DINOv2-B (species 25% vs 10%, genus 62% vs 31%).
+- Full screen of 8 frozen backbones on the same 68 test records (comparison
+  20260928-235515-60274d, best method each, species / genus / family top-1):
+  iNat CV with location 29.4 / 67.7 / 70.6; iNat photo-only 27.9 / 64.7 / 67.7;
+  BioCLIP 2 25.0 / 61.8 / 71.4; EVA-02 L 13.2 / 33.8 / 44.6; DINOv2-L 10.3 / 36.8 /
+  44.6; DINOv2-B 10.3 / 30.9 / 41.1; ConvNeXt V2 L 8.8 / 29.4 / 32.1; SigLIP 2 L
+  5.9 / 19.1 / 28.6; DINOv3-B 5.9 / 11.8 / 21.4; DINOv3-L 4.4 / 14.7 / 21.4.
+  Laptop speeds (medium photos): DINOv3-B 169/s, DINOv3-L 57/s, BioCLIP 2 ~95/s,
+  DINOv2-L 20/s, ConvNeXt V2 L 20/s, SigLIP 2 17/s, EVA-02 L 17/s.
+  Nothing generic comes near BioCLIP 2, which was trained on the tree of life.
+  Centring the vectors on the reference mean didn't change any of this.
+- DINOv3 wasn't tested on equal terms: timm runs it at 256 px with average
+  pooling, while DINOv2 runs at 518 px on its class token. Retest DINOv3 at
+  ~512 px with class-token pooling before ruling it out (needs the backbone
+  loader to accept timm keyword arguments such as img_size and global_pool).
 - iNat's own model on the same 68 records: 27.9% species photo-only, 29.4% with
   location; BioCLIP 2 (species average), frozen and with only 5% of the reference
   data, reached 25.0% species and a higher family score (71.4% vs 70.6%).
