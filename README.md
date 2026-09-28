@@ -31,7 +31,7 @@ photographers, with their all-rights-reserved photo counts, for permission reque
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install --require-hashes -r requirements/dev.lock
+.venv/Scripts/python -m pip install --require-hashes -r requirements/dev.txt
 .venv/Scripts/python -m pip install -e . --no-deps
 .venv/Scripts/python -m pytest -q
 ```

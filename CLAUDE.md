@@ -34,7 +34,7 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
 
 ## Conventions
 
-- Python 3.11+, venv at `.venv`, `pip install -r requirements/dev.lock` then
+- Python 3.11+, venv at `.venv`, `pip install -r requirements/dev.txt` then
   `pip install -e . --no-deps`. Web app: `web/`, pnpm.
 - Tests next to every change: `.venv/Scripts/python -m pytest -q`. Name tests
   after the rule they protect, and check a new test fails when the guard is broken.

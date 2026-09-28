@@ -36,7 +36,7 @@ so the per-address limit applies to callers, not to the proxy.
 
 ## Dependencies
 
-Python dependencies are pinned with hashes in `requirements/*.lock`
+Python dependencies are pinned with hashes in `requirements/*.txt`
 (regenerate with `pip-compile --generate-hashes`); the web app is pinned by
 `web/pnpm-lock.yaml`. Backbone weights come from timm and open_clip via the
 Hugging Face hub; prefer safetensors weights, and only backbones on the allow-list
