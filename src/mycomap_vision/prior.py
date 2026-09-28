@@ -114,7 +114,7 @@ class WithPrior:
 
     def __init__(self, base_cls, weight: float = 1.0):
         self.base = base_cls()
-        self.name = f"{self.base.name}+prior"
+        self.name = f"{self.base.name}+prior"      # AsLogProb keeps its base's name
         self.weight = weight
 
     def fit(self, vectors: np.ndarray, index, records=None, state: dict | None = None) -> None:

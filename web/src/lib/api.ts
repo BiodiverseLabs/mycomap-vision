@@ -118,6 +118,8 @@ const METHOD_LABEL: Record<string, string> = {
   hybrid: "classifier + nearest specimen",
   "linear+prior": "trained classifier + range and season",
   "hybrid+prior": "classifier + nearest + range and season",
+  "nearest+prior": "nearest specimen + range and season",
+  "species-mean+prior": "species average + range and season",
 };
 
 /** Human names for scoreboard rows: iNat's model and our methods in plain words. */

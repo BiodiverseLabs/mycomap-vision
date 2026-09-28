@@ -99,3 +99,15 @@ def test_with_prior_needs_context_and_names_itself_after_its_base():
     from mycomap_vision.methods import LinearHead
     m = WithPrior(LinearHead)
     assert m.needs_context and m.name == "linear+prior"
+
+
+def test_similarity_methods_also_come_with_the_prior_on_a_log_probability_scale():
+    assert {"nearest+prior", "species-mean+prior"} <= set(METHODS)
+    m = METHODS["nearest+prior"]()
+    assert m.name == "nearest+prior" and m.needs_context
+    ref = [rec(r.observation_id, r.species, r.latitude, r.longitude, r.observed_on,
+               rows=[i]) for i, r in enumerate(EAST + WEST)]
+    vecs = np.tile(np.array([[1.0, 0.0]], dtype=np.float16), (len(ref) + 1, 1))
+    test = [rec("t-w", "Lookus occidentalis", 40.2, -120.1, "2026-04-18", rows=[len(ref)],
+                vdate="2026-09-20")]
+    assert evaluate(vecs, ref, test, method="nearest+prior")["species"]["all"]["top1"] == 1.0

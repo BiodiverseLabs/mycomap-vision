@@ -230,10 +230,32 @@ class Hybrid:
 
 METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean, LinearHead, Hybrid)}
 
-# Log-probability methods also come with the range-and-season score (prior.py).
+class AsLogProb:
+    """A similarity method's scores as log-probabilities (softmax at a fixed temperature),
+    so the range-and-season score can be added on the same scale."""
+
+    def __init__(self, base_cls, temperature: float = 0.02):
+        self.base = base_cls()
+        self.name = self.base.name
+        self.temperature = temperature
+
+    def fit(self, vectors: np.ndarray, index) -> None:
+        self.base.fit(vectors, index)
+
+    def species_scores(self, query: np.ndarray) -> np.ndarray:
+        return log_softmax(self.base.species_scores(query) / self.temperature)
+
+    def photo_sims(self, query: np.ndarray) -> np.ndarray:
+        return self.base.photo_sims(query)
+
+
+# Every method also comes with the range-and-season score (prior.py); similarity
+# methods are put on the log-probability scale first.
 from functools import partial  # noqa: E402
 
 from .prior import WithPrior  # noqa: E402
 
 for _base in (LinearHead, Hybrid):
     METHODS[f"{_base.name}+prior"] = partial(WithPrior, _base)
+for _base in (NearestSpecimen, SpeciesMean):
+    METHODS[f"{_base.name}+prior"] = partial(WithPrior, partial(AsLogProb, _base))
