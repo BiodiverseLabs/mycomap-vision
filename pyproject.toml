@@ -8,8 +8,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "boto3>=1.34"]
+dev = ["pytest>=8", "boto3>=1.34", "pillow", "numpy"]
 aws = ["boto3>=1.34"]
+# torch: install the CUDA build first (see README), then .[embed].
+embed = ["torch", "torchvision", "timm>=1.0", "open_clip_torch>=2.24", "pillow", "numpy"]
 
 [project.scripts]
 mv = "mycomap_vision.cli:main"

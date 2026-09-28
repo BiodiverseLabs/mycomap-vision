@@ -109,7 +109,8 @@ def download_one(session: requests.Session, gate: HostGate, photo_id: int, sourc
 
 
 def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: int | None,
-                   size: str = "medium", store_location: str | None = None):
+                   size: str = "medium", store_location: str | None = None,
+                   random_order: bool = False, record_sample: int | None = None):
     """Photos of green records not yet held at `size` (in `store_location`, when given),
     attempted fewest times first.
 
@@ -117,6 +118,10 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
     sizes or moving to S3 needs no reset.
     """
     na = "and r.north_america = 1" if north_america_only else ""
+    if record_sample:
+        # All photos of a random set of records: a small but complete reference set.
+        na += (" and r.observation_id in (select observation_id from records"
+               f" where north_america = 1 order by random() limit {int(record_sample)})")
     sql = f"""
       select distinct p.photo_id, p.source_url, p.host, p.attempts
       from photos p
@@ -124,7 +129,7 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
       join records r on r.observation_id = op.observation_id {na}
       where (p.status in ('pending', 'error') and p.attempts < {MAX_ATTEMPTS})
          or (p.status = 'done' and (p.size is not ? or (? is not null and p.store is not ?)))
-      order by p.attempts, p.photo_id
+      order by {"random()" if random_order else "p.attempts, p.photo_id"}
     """
     if limit is not None:
         sql += f" limit {int(limit)}"
@@ -151,11 +156,13 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                  north_america_only: bool = True, limit: int | None = None,
                  max_hours: float | None = None,
                  checkpoint: Callable[[], None] | None = None,
-                 checkpoint_every: float = 600, log=print) -> dict:
+                 checkpoint_every: float = 600, random_order: bool = False,
+                 record_sample: int | None = None, log=print) -> dict:
     """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
     runs every `checkpoint_every` seconds and once at the end."""
     config.ensure_dirs()
-    rows = pending_photos(conn, north_america_only, limit, size, store.location)
+    rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
+                          record_sample)
     policies = default_policies()
     gates: dict[str, HostGate] = {}
     session = requests.Session()

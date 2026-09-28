@@ -32,7 +32,8 @@ def cmd_download_photos(conn, args) -> None:
     print(f"Downloading {args.size} photos to {store.location}...")
     stats = photos.download_all(conn, store, size=args.size,
                                 north_america_only=not args.all_regions, limit=args.limit,
-                                max_hours=args.max_hours, checkpoint=checkpoint)
+                                max_hours=args.max_hours, checkpoint=checkpoint,
+                                random_order=args.random, record_sample=args.record_sample)
     stats["gb"] = round(stats["bytes"] / photos.GB, 2)
     print(json.dumps(stats, indent=2))
 
@@ -66,6 +67,31 @@ def cmd_aws_pull_manifest(conn, args) -> None:
     from . import aws
     conn.close()
     print(f"Manifest replaced from S3: {aws.pull_manifest(config.MANIFEST_PATH)}")
+
+
+def cmd_embed(conn, args) -> None:
+    from . import embed
+    store = open_store(args.source, config.DATA_DIR)
+    todo = embed.photos_to_embed(conn, args.backbone, args.size, store.location,
+                                 str(config.DATA_DIR), not args.all_regions, args.limit)
+    print(f"{len(todo):,} {args.size} photos to embed with {args.backbone} from {store.location}")
+    if not todo:
+        return
+    backbone = embed.BACKBONES[args.backbone]()
+    stats = embed.embed_photos(conn, store, backbone, todo,
+                               config.DATA_DIR / "embeddings" / args.backbone,
+                               batch_size=args.batch_size)
+    print(json.dumps(stats.__dict__, indent=2))
+
+
+def cmd_evaluate(conn, args) -> None:
+    from . import evaluate
+    report = evaluate.run(conn, args.backbone, test_days=args.test_days, max_test=args.max_test)
+    config.ensure_dirs()
+    path = config.REPORTS_DIR / f"eval-{args.backbone}-{report['cutoff']}.json"
+    path.write_text(evaluate.format_report(report), encoding="utf-8")
+    print(evaluate.format_report(report))
+    print(f"-> {path}")
 
 
 def cmd_status(conn, args) -> None:
@@ -120,6 +146,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-hours", type=float)
     p.add_argument("--dest", help="folder or s3://bucket/prefix (default: the data folder)")
     p.add_argument("--checkpoint-to", help="s3://bucket/key to copy the manifest to every 10 min")
+    p.add_argument("--random", action="store_true",
+                   help="random order, for a representative sample with --limit")
+    p.add_argument("--record-sample", type=int,
+                   help="only the photos of this many randomly chosen records")
 
     p = sub.add_parser("aws-launch-downloader",
                        help="download photos on a self-terminating EC2 instance into S3")
@@ -129,6 +159,20 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("aws-pull-manifest",
                    help="replace the local manifest with the one the instance wrote")
+
+    p = sub.add_parser("embed", help="one vector per photo with a frozen backbone")
+    p.add_argument("--backbone", required=True,
+                   choices=["dinov2-l14", "dinov2-b14", "bioclip-2"])
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--all-regions", action="store_true")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--batch-size", type=int, default=32)
+
+    p = sub.add_parser("evaluate", help="identify the newest green records from older ones")
+    p.add_argument("--backbone", required=True)
+    p.add_argument("--test-days", type=int, default=28)
+    p.add_argument("--max-test", type=int, help="sample this many test records")
 
     sub.add_parser("status", help="counts of records, photos and licenses")
 
@@ -144,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
         "download-photos": cmd_download_photos,
         "aws-launch-downloader": cmd_aws_launch_downloader,
         "aws-pull-manifest": cmd_aws_pull_manifest,
+        "embed": cmd_embed,
+        "evaluate": cmd_evaluate,
         "status": cmd_status,
         "contributors": cmd_contributors,
     }[args.command]

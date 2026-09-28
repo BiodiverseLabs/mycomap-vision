@@ -132,3 +132,16 @@ def test_photos_held_locally_are_queued_again_when_the_store_moves_to_s3(conn):
     assert [r["photo_id"] for r in pending_photos(conn, True, None, "large", "s3://b/")] == [11]
     # Without a store given, only the size matters.
     assert pending_photos(conn, True, None, "large") == []
+
+
+def test_random_order_still_returns_only_pending_photos(conn):
+    _seed(conn)
+    save_result(conn, Result(11, "done", "p", 5, "h"), "medium", "now")
+    got = pending_photos(conn, True, None, random_order=True)
+    assert [r["photo_id"] for r in got] == [12]
+
+
+def test_a_record_sample_takes_every_photo_of_the_chosen_records(conn):
+    _seed(conn)
+    got = pending_photos(conn, True, None, record_sample=1)
+    assert sorted(r["photo_id"] for r in got) == [11, 12]    # both photos of record 5

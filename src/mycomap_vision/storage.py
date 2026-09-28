@@ -15,6 +15,8 @@ class PhotoStore(Protocol):
 
     def put(self, relpath: str, body: bytes) -> None: ...
 
+    def get(self, relpath: str) -> bytes: ...
+
 
 class LocalStore:
     def __init__(self, root: Path):
@@ -27,6 +29,9 @@ class LocalStore:
         tmp = dest.with_suffix(dest.suffix + ".part")
         tmp.write_bytes(body)
         os.replace(tmp, dest)
+
+    def get(self, relpath: str) -> bytes:
+        return (self.root / relpath).read_bytes()
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:
@@ -56,6 +61,9 @@ class S3Store:
         ext = relpath.rsplit(".", 1)[-1].lower()
         self.client.put_object(Bucket=self.bucket, Key=self.key(relpath), Body=body,
                                ContentType=CONTENT_TYPES.get(ext, "application/octet-stream"))
+
+    def get(self, relpath: str) -> bytes:
+        return self.client.get_object(Bucket=self.bucket, Key=self.key(relpath))["Body"].read()
 
     def upload_file(self, path: Path, relpath: str) -> None:
         self.client.upload_file(str(path), self.bucket, self.key(relpath))
