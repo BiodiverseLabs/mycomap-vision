@@ -105,3 +105,18 @@ def test_calibration_is_sharper_for_a_reliable_model_than_for_a_guessing_one():
     assert sharp["n"] == flat["n"] == n_species
     assert sharp["temperature"] < flat["temperature"]
     assert T_GRID[0] <= sharp["temperature"] <= T_GRID[-1]
+
+
+def test_results_are_also_broken_down_by_project_and_observer():
+    test = [Record("q1", "Russula rara", "Russula", "Russulaceae", "2026-09-20", "ann", [4],
+                   projects=("Indiana", "Fungal Diversity")),
+            Record("q2", "Russula nova", "Russula", "Russulaceae", "2026-09-20", "bob", [5],
+                   projects=("Indiana",))]
+    out = evaluate(VEC, REF, test)
+    projects = {g["name"]: g for g in out["groups"]["project"]}
+    assert projects["Indiana"]["n"] == 2 and projects["Indiana"]["species_top1"] == 0.5
+    assert projects["Fungal Diversity"] == {"name": "Fungal Diversity", "n": 1,
+                                            "species_top1": 1.0, "genus_top1": 1.0}
+    observers = [g["name"] for g in out["groups"]["observer"]]
+    assert sorted(observers) == ["ann", "bob"]
+    assert out["groups"]["project"][0]["name"] == "Indiana"          # largest first

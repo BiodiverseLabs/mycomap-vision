@@ -95,11 +95,15 @@ export interface ScoreRun {
 }
 
 export type BucketScores = Record<string, { n: number; top1: number; top5: number }>;
+export interface GroupScore { name: string; n: number; species_top1: number | null; genus_top1: number | null }
+export type EvalResult = Record<Rank, BucketScores> & {
+  groups?: { project: GroupScore[]; observer: GroupScore[] };
+};
 export interface RunReport {
   backbone: string;
   method: string;
-  all_photos: Record<Rank, BucketScores>;
-  first_photo_only: Record<Rank, BucketScores>;
+  all_photos: EvalResult;
+  first_photo_only: EvalResult;
   // External baselines (iNat) add these.
   species_names_inat_knows?: number;
   species_by_observed_year?: Record<string, { n: number; top1: number; top5: number } | null>;

@@ -181,6 +181,37 @@ function RunDetail({ id }: { id: number }) {
           ))}
         </tbody>
       </table>
+      {q.data.all_photos.groups && (
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          {(["project", "observer"] as const).map((kind) => (
+            <div key={kind}>
+              <p className="text-xs text-muted-foreground mb-1">
+                By {kind} (largest first; batches can be dominated by one {kind}):
+              </p>
+              <table className="text-xs w-full">
+                <thead>
+                  <tr className="text-muted-foreground">
+                    <th className="text-left font-medium py-0.5 capitalize">{kind}</th>
+                    <th className="text-right font-medium">Tests</th>
+                    <th className="text-right font-medium">Species</th>
+                    <th className="text-right font-medium">Genus</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {q.data.all_photos.groups![kind].map((g) => (
+                    <tr key={g.name}>
+                      <td className="py-0.5 pr-2 truncate max-w-[14rem]" title={g.name}>{g.name}</td>
+                      <td className="text-right tabular-nums">{num(g.n)}</td>
+                      <td className="text-right tabular-nums">{pct(g.species_top1)}</td>
+                      <td className="text-right tabular-nums">{pct(g.genus_top1)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      )}
       {q.data.species_names_inat_knows != null && (
         <p className="text-xs text-muted-foreground mt-3">
           iNat has a taxon for {num(q.data.species_names_inat_knows)} of these test records' DNA

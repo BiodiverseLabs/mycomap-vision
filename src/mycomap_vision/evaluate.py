@@ -43,6 +43,7 @@ class Record:
     latitude: float | None = None       # true coordinates: used for scores, never shown
     longitude: float | None = None
     observed_on: str | None = None
+    projects: tuple[str, ...] = ()      # the .org projects that marked it green
 
 
 def context_of(rec: "Record"):
@@ -61,7 +62,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
              o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
-             coalesce(r.observed_on, o.observed_on)
+             coalesce(r.observed_on, o.observed_on), r.green_projects
       from records r
       join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
@@ -69,14 +70,15 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
       order by r.observation_id, op.position
     """).fetchall()
     recs: dict[str, Record] = {}
-    for oid, name, genus, family, vdate, login, pid, _pos, lat, lon, observed in rows:
+    for oid, name, genus, family, vdate, login, pid, _pos, lat, lon, observed, projects in rows:
         if pid not in photo_row or not clean(name):
             continue
         rec = recs.get(oid)
         if rec is None:
             rec = recs[oid] = Record(oid, clean(name), clean(genus) or clean(name).split()[0],
                                      clean(family), vdate, login, latitude=lat, longitude=lon,
-                                     observed_on=observed)
+                                     observed_on=observed,
+                                     projects=tuple(json.loads(projects or "[]")))
         rec.photo_rows.append(photo_row[pid])
     return list(recs.values())
 
@@ -171,6 +173,20 @@ def truth(rec: Record, rank: str) -> str:
     return {"species": rec.species, "genus": rec.genus, "family": rec.family}[rank]
 
 
+def summarise_groups(groups: dict, largest: int = 12) -> list[dict]:
+    """The largest groups first, each with its test count and genus/species top-1."""
+    rows = []
+    for key, c in groups.items():
+        n = c["species_n"] or c["genus_n"]
+        rows.append({"name": key, "n": n,
+                     "species_top1": round(c["species_top1"] / c["species_n"], 4)
+                     if c["species_n"] else None,
+                     "genus_top1": round(c["genus_top1"] / c["genus_n"], 4)
+                     if c["genus_n"] else None})
+    rows.sort(key=lambda r: (-r["n"], r["name"]))
+    return rows[:largest]
+
+
 def fit_method(vectors: np.ndarray, ref: list[Record], method: str):
     """(index, fitted model) for the reference records; reusable across evaluations."""
     index = build_index(ref)
@@ -196,6 +212,9 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     position = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
     nll = {rank: np.zeros(len(T_GRID)) for rank in RANKS}
     n_cal = Counter()
+    # Weekly batches are lumpy (one big project, one prolific observer), so results
+    # are also kept per project and per observer at genus and species.
+    groups = {"project": defaultdict(Counter), "observer": defaultdict(Counter)}
     for rec in test:
         rows = rec.photo_rows[:1] if first_photo_only else rec.photo_rows
         if uses_context:
@@ -217,11 +236,19 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 c["n"] += 1
                 c["top1"] += top[:1] == [t]
                 c[f"top{top_k}"] += t in top
+            if rank in ("genus", "species"):
+                keys = [("project", p) for p in (rec.projects or ("(none)",))]
+                keys.append(("observer", rec.observer or "(unknown)"))
+                for kind, key in keys:
+                    g = groups[kind][key]
+                    g[f"{rank}_n"] += 1
+                    g[f"{rank}_top1"] += top[:1] == [t]
     out = {}
     for rank in RANKS:
         out[rank] = {k: {"n": c["n"], "top1": round(c["top1"] / c["n"], 4),
                          f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
                      for k, c in tally[rank].items() if c["n"]}
+    out["groups"] = {kind: summarise_groups(g) for kind, g in groups.items()}
     out["calibration"] = {
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
                "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
