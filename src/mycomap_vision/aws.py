@@ -5,7 +5,8 @@ into the bucket, copies the manifest back every 10 minutes, uploads its log, and
 shuts itself down (which terminates it). A backstop shutdown is scheduled at boot
 so a stuck run cannot keep billing.
 
-Needs the `mycomap-vision` AWS profile (see deploy/aws/README.md).
+Settings (see .env.example and deploy/aws/README.md): MV_S3_BUCKET, MV_AWS_REGION,
+MV_AWS_PROFILE and MV_INSTANCE_ROLE.
 """
 
 from __future__ import annotations
@@ -19,11 +20,19 @@ from pathlib import Path
 from . import config
 from .manifest import snapshot
 
-PROFILE = "mycomap-vision"
-REGION = "us-east-2"
-BUCKET = "YOUR-BUCKET"
-INSTANCE_PROFILE = "mycomap-vision-instance"
 PROJECT_TAG = {"Key": "Project", "Value": "mycomap-vision"}
+
+
+def bucket() -> str:
+    return config.required("MV_S3_BUCKET", "the private S3 bucket for photos and manifests")
+
+
+def region() -> str:
+    return config.required("MV_AWS_REGION", "the AWS region of the bucket and instances")
+
+
+def instance_role() -> str:
+    return config.setting("MV_INSTANCE_ROLE", "mycomap-vision-instance")
 MANIFEST_KEY = "manifest/manifest.sqlite"
 AMI_PARAMETER = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 
@@ -54,19 +63,19 @@ MV_DATA_DIR=/opt/mv/data PYTHONUNBUFFERED=1 .venv/bin/mv download-photos \\
 """
 
 
-def render_user_data(run_id: str, size: str, max_hours: float, bucket: str = BUCKET) -> str:
+def render_user_data(run_id: str, size: str, max_hours: float, bucket_name: str) -> str:
     # The backstop leaves an hour for setup and the final manifest copy.
     backstop = int(max_hours * 60) + 60
-    return USER_DATA.format(bucket=bucket, run_id=run_id, size=size, max_hours=max_hours,
+    return USER_DATA.format(bucket=bucket_name, run_id=run_id, size=size, max_hours=max_hours,
                             backstop_minutes=backstop, manifest_key=MANIFEST_KEY)
 
 
 def session():
     import boto3
-    return boto3.Session(profile_name=PROFILE, region_name=REGION)
+    return boto3.Session(profile_name=config.setting("MV_AWS_PROFILE"), region_name=region())
 
 
-def ensure_bucket(s3, bucket: str = BUCKET) -> bool:
+def ensure_bucket(s3, bucket: str) -> bool:
     """Create the bucket private and encrypted if it does not exist. Returns True if created."""
     try:
         s3.head_bucket(Bucket=bucket)
@@ -75,7 +84,7 @@ def ensure_bucket(s3, bucket: str = BUCKET) -> bool:
         if e.response.get("Error", {}).get("Code") not in ("404", "NoSuchBucket"):
             raise
     s3.create_bucket(Bucket=bucket,
-                     CreateBucketConfiguration={"LocationConstraint": REGION})
+                     CreateBucketConfiguration={"LocationConstraint": region()})
     s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration={
         "BlockPublicAcls": True, "IgnorePublicAcls": True,
         "BlockPublicPolicy": True, "RestrictPublicBuckets": True})
@@ -103,7 +112,7 @@ def run_instance_args(run_id: str, ami: str, user_data: str,
         "ImageId": ami,
         "InstanceType": instance_type,
         "MinCount": 1, "MaxCount": 1,
-        "IamInstanceProfile": {"Name": INSTANCE_PROFILE},
+        "IamInstanceProfile": {"Name": instance_role()},
         "InstanceInitiatedShutdownBehavior": "terminate",
         "UserData": user_data,
         "MetadataOptions": {"HttpTokens": "required"},
@@ -120,19 +129,20 @@ def launch_downloader(conn, size: str = "large", max_hours: float = 120,
     sess = session()
     s3, ec2, ssm = sess.client("s3"), sess.client("ec2"), sess.client("ssm")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    if ensure_bucket(s3):
-        log(f"Created private bucket s3://{BUCKET} in {REGION}")
-    s3.put_object(Bucket=BUCKET, Key=f"runs/{run_id}/code.tar.gz", Body=code_tarball())
+    b = bucket()
+    if ensure_bucket(s3, b):
+        log(f"Created private bucket s3://{b} in {region()}")
+    s3.put_object(Bucket=b, Key=f"runs/{run_id}/code.tar.gz", Body=code_tarball())
     snap = snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
-    s3.upload_file(str(snap), BUCKET, MANIFEST_KEY)
+    s3.upload_file(str(snap), b, MANIFEST_KEY)
     log(f"Uploaded code and manifest for run {run_id}")
     ami = ssm.get_parameter(Name=AMI_PARAMETER)["Parameter"]["Value"]
     resp = ec2.run_instances(**run_instance_args(
-        run_id, ami, render_user_data(run_id, size, max_hours), instance_type))
+        run_id, ami, render_user_data(run_id, size, max_hours, b), instance_type))
     instance_id = resp["Instances"][0]["InstanceId"]
-    return {"run_id": run_id, "instance_id": instance_id, "region": REGION,
-            "log": f"s3://{BUCKET}/runs/{run_id}/download.log",
-            "manifest": f"s3://{BUCKET}/{MANIFEST_KEY}"}
+    return {"run_id": run_id, "instance_id": instance_id, "region": region(),
+            "log": f"s3://{b}/runs/{run_id}/download.log",
+            "manifest": f"s3://{b}/{MANIFEST_KEY}"}
 
 
 def pull_manifest(dest: Path) -> Path:
@@ -143,7 +153,7 @@ def pull_manifest(dest: Path) -> Path:
                            "running here?). Stop it first.")
     s3 = session().client("s3")
     tmp = dest.with_suffix(".download")
-    s3.download_file(BUCKET, MANIFEST_KEY, str(tmp))
+    s3.download_file(bucket(), MANIFEST_KEY, str(tmp))
     tmp.replace(dest)
     return dest
 
@@ -161,3 +171,13 @@ def s3_checkpoint(conn, url: str):
         snapshot(conn, snap_path)
         client.upload_file(str(snap_path), bucket, key)
     return checkpoint
+
+
+POLICY_DIR = config.REPO_ROOT / "deploy" / "aws"
+
+
+def render_policy(template: str) -> str:
+    """An IAM policy template with this deployment's bucket, region and role filled in."""
+    text = (POLICY_DIR / template).read_text(encoding="utf-8")
+    return (text.replace("{{BUCKET}}", bucket()).replace("{{REGION}}", region())
+                .replace("{{INSTANCE_ROLE}}", instance_role()))

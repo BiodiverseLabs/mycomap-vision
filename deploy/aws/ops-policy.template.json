@@ -10,13 +10,13 @@
         "s3:PutLifecycleConfiguration",
         "s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload"
       ],
-      "Resource": ["arn:aws:s3:::YOUR-BUCKET", "arn:aws:s3:::YOUR-BUCKET/*"]
+      "Resource": ["arn:aws:s3:::{{BUCKET}}", "arn:aws:s3:::{{BUCKET}}/*"]
     },
     {
       "Sid": "LatestAmazonLinuxImage",
       "Effect": "Allow",
       "Action": "ssm:GetParameter",
-      "Resource": "arn:aws:ssm:us-east-2::parameter/aws/service/ami-amazon-linux-latest/*"
+      "Resource": "arn:aws:ssm:{{REGION}}::parameter/aws/service/ami-amazon-linux-latest/*"
     },
     {
       "Sid": "Describe",
@@ -29,7 +29,7 @@
       "Sid": "LaunchOnlyTaggedInstances",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
-      "Resource": ["arn:aws:ec2:us-east-2:*:instance/*", "arn:aws:ec2:us-east-2:*:volume/*"],
+      "Resource": ["arn:aws:ec2:{{REGION}}:*:instance/*", "arn:aws:ec2:{{REGION}}:*:volume/*"],
       "Condition": {"StringEquals": {"aws:RequestTag/Project": "mycomap-vision"}}
     },
     {
@@ -37,10 +37,10 @@
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": [
-        "arn:aws:ec2:us-east-2::image/*",
-        "arn:aws:ec2:us-east-2:*:subnet/*",
-        "arn:aws:ec2:us-east-2:*:network-interface/*",
-        "arn:aws:ec2:us-east-2:*:security-group/*"
+        "arn:aws:ec2:{{REGION}}::image/*",
+        "arn:aws:ec2:{{REGION}}:*:subnet/*",
+        "arn:aws:ec2:{{REGION}}:*:network-interface/*",
+        "arn:aws:ec2:{{REGION}}:*:security-group/*"
       ]
     },
     {
@@ -54,14 +54,14 @@
       "Sid": "ManageOnlyOwnInstances",
       "Effect": "Allow",
       "Action": ["ec2:TerminateInstances", "ec2:StopInstances", "ec2:GetConsoleOutput"],
-      "Resource": "arn:aws:ec2:us-east-2:*:instance/*",
+      "Resource": "arn:aws:ec2:{{REGION}}:*:instance/*",
       "Condition": {"StringEquals": {"aws:ResourceTag/Project": "mycomap-vision"}}
     },
     {
       "Sid": "PassOnlyTheInstanceRole",
       "Effect": "Allow",
       "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::*:role/mycomap-vision-instance"
+      "Resource": "arn:aws:iam::*:role/{{INSTANCE_ROLE}}"
     }
   ]
 }

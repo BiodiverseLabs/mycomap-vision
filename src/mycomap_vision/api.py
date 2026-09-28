@@ -2,25 +2,28 @@
 
 Run: `.venv/Scripts/mv serve` (defaults to http://127.0.0.1:8010).
 Read-only over the manifest; identification runs on the local GPU when there is one.
+Public limits (request and image size, rate per IP, GPU queue, allowed backbones)
+are in guards.py and set from the environment.
 """
 
 from __future__ import annotations
 
+import io
 import sqlite3
 import threading
+import warnings
 from pathlib import Path
 from typing import Callable
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from PIL import Image, ImageOps
 
 from . import config, evaluate, models
 from .embed import SCHEMA as EMBED_SCHEMA
-from .embed import decode
+from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
+                     TooLarge, check_image_size)
 from .identify import Identifier
-
-MAX_PHOTOS = 10
-MAX_BYTES = 25 * 1024 * 1024
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
 
 
@@ -34,10 +37,39 @@ def open_manifest(path: Path) -> sqlite3.Connection:
 WEB_DIST = config.REPO_ROOT / "web" / "dist"
 
 
+def read_photo(upload: UploadFile) -> Image.Image:
+    """One uploaded photo, refusing oversized files and images before decoding them."""
+    body = upload.file.read(MAX_FILE_BYTES + 1)
+    if len(body) > MAX_FILE_BYTES:
+        raise HTTPException(413, f"{upload.filename} is over {MAX_FILE_BYTES // 2**20} MB")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            img = Image.open(io.BytesIO(body))
+        check_image_size(img)
+        img = ImageOps.exif_transpose(img)
+        return img.convert("RGB")
+    except TooLarge as e:
+        raise HTTPException(413, f"{upload.filename}: {e}")
+    except Exception:
+        raise HTTPException(400, f"{upload.filename} is not an image we can read")
+
+
 def create_app(manifest_path: Path | None = None, embeddings_root: Path | None = None,
                backbone_loader: Callable[[str], object] = models.load_backbone,
-               web_dist: Path | None = WEB_DIST) -> FastAPI:
+               web_dist: Path | None = WEB_DIST, limits: Limits | None = None) -> FastAPI:
     app = FastAPI(title="MycoMap Vision", version="0.1")
+    limits = limits or Limits.from_settings()
+    rate = RateLimiter(*limits.rate)
+    in_flight = Gate(limits.max_in_flight)
+
+    @app.middleware("http")
+    async def cap_request_size(request: Request, call_next):
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > MAX_REQUEST_BYTES:
+            return JSONResponse({"detail": "request too large"}, status_code=413)
+        return await call_next(request)
+
     conn = open_manifest(manifest_path or config.MANIFEST_PATH)
     db_lock = threading.Lock()
     gpu_lock = threading.Lock()
@@ -69,9 +101,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def health():
         return {"ok": True, "code_version": config.code_version()}
 
+    def ready_backbones() -> list[str]:
+        return [b for b, n in embedded_counts().items() if n and b in limits.allowed_backbones]
+
     @app.get("/api/models")
     def list_models():
-        counts = embedded_counts()
+        counts = {b: n for b, n in embedded_counts().items() if b in limits.allowed_backbones}
         out = []
         for name, alias in models.ALIASES.items():
             out.append({"backbone": name, "spec": alias.spec, "note": alias.note,
@@ -123,23 +158,32 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(404, "no such run")
         return report
 
+    # A plain (not async) route: FastAPI runs it in a worker thread, so GPU work
+    # never blocks the event loop and other requests keep being answered.
     @app.post("/api/identify")
-    async def identify(photos: list[UploadFile] = File(...),
-                       models_: str = Form("", alias="models")):
+    def identify(request: Request, photos: list[UploadFile] = File(...),
+                 models_: str = Form("", alias="models")):
+        client = request.client.host if request.client else "unknown"
+        wait = rate.check(client)
+        if wait:
+            raise HTTPException(429, "too many identifications from this address; "
+                                     f"try again in {int(wait) + 1} s",
+                                headers={"Retry-After": str(int(wait) + 1)})
         if not photos:
             raise HTTPException(400, "add at least one photo")
         if len(photos) > MAX_PHOTOS:
             raise HTTPException(400, f"at most {MAX_PHOTOS} photos")
-        images = []
-        for f in photos:
-            body = await f.read()
-            if len(body) > MAX_BYTES:
-                raise HTTPException(413, f"{f.filename} is over 25 MB")
-            try:
-                images.append(decode(body))
-            except Exception:
-                raise HTTPException(400, f"{f.filename} is not an image we can read")
-        ready = [b for b, n in embedded_counts().items() if n]
+        if not in_flight.enter():
+            raise HTTPException(503, "busy identifying other photos; try again shortly",
+                                headers={"Retry-After": "10"})
+        try:
+            return run_identify(photos, models_)
+        finally:
+            in_flight.leave()
+
+    def run_identify(photos: list[UploadFile], models_: str) -> dict:
+        images = [read_photo(f) for f in photos]
+        ready = ready_backbones()
         wanted = [m.strip() for m in models_.split(",") if m.strip()]
         if not wanted:
             if not ready:
@@ -149,6 +193,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         for spec in wanted:
             backbone, _, method = spec.partition("/")
             method = method or "nearest"
+            if backbone not in limits.allowed_backbones:
+                raise HTTPException(400, f"{backbone!r} is not offered here")
             if backbone not in ready:
                 raise HTTPException(400, f"{backbone!r} has no embeddings")
             if method not in evaluate.METHODS:

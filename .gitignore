@@ -4,3 +4,13 @@ data/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+
+# Local settings and anything key-shaped.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*
+# Private operating notes (Claude Code reads this file; it stays on this machine).
+CLAUDE.local.md

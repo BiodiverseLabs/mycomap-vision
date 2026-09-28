@@ -10,6 +10,7 @@ from test_models_and_scoreboard import Const, seed_two_species
 from mycomap_vision import evaluate
 from mycomap_vision.api import create_app
 from mycomap_vision.embed import embed_photos, photos_to_embed
+from mycomap_vision.guards import Limits
 from mycomap_vision.identify import improvement_hints, softmax_confidence
 
 
@@ -19,7 +20,13 @@ def png(red):
     return buf.getvalue()
 
 
-def app_with_model(conn, tmp_path, embed_all=True):
+def open_limits(**kw):
+    base = dict(rate=(1000, 60.0), max_in_flight=4, allowed_backbones={"m1"})
+    base.update(kw)
+    return Limits(**base)
+
+
+def app_with_model(conn, tmp_path, embed_all=True, limits=None):
     store = seed_two_species(conn, tmp_path)
     root = tmp_path / "emb"
     if embed_all:
@@ -27,7 +34,8 @@ def app_with_model(conn, tmp_path, embed_all=True):
         embed_photos(conn, store, Const("m1"), todo, root / "m1", log=lambda s: None)
     conn.commit()
     manifest = tmp_path / "manifest.sqlite"
-    return TestClient(create_app(manifest, root, backbone_loader=lambda name: Const(name)))
+    return TestClient(create_app(manifest, root, backbone_loader=lambda name: Const(name),
+                                 limits=limits or open_limits()))
 
 
 def post_photos(client, reds, models=""):
@@ -114,7 +122,8 @@ def test_the_built_site_is_served_with_client_routes_falling_back_to_index(conn,
     seed_two_species(conn, tmp_path)
     conn.commit()
     client = TestClient(create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
-                                   backbone_loader=lambda n: Const(n), web_dist=dist))
+                                   backbone_loader=lambda n: Const(n), web_dist=dist,
+                                   limits=open_limits()))
     assert client.get("/assets/a.js").text == "js"
     assert client.get("/models").text == "<html>app</html>"
     assert client.get("/../secret.txt").text != "outside"
@@ -163,3 +172,58 @@ def test_specimens_are_ranked_by_all_your_photos_not_one_lucky_match():
     out = ident.identify_vectors(q)
     assert [s["observation_id"] for s in out["specimens"]] == ["Y", "X"]
     assert out["ranks"]["species"][0]["name"] == "Yus b"
+
+
+
+def test_an_image_too_large_in_pixels_is_refused_before_decoding(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    buf = io.BytesIO()
+    Image.new("L", (8000, 6000)).save(buf, "PNG")           # 48 MP, a small file
+    res = client.post("/api/identify", files=[("photos", ("big.png", buf.getvalue(), "image/png"))])
+    assert res.status_code == 413 and "MP limit" in res.json()["detail"]
+
+
+def test_a_request_declaring_too_many_bytes_is_refused(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    res = client.post("/api/identify", content=b"x", headers={"content-length": str(200 * 2**20),
+                                                               "content-type": "multipart/form-data; boundary=x"})
+    assert res.status_code == 413
+
+
+def test_identifications_are_rate_limited_per_address(conn, tmp_path):
+    client = app_with_model(conn, tmp_path, limits=open_limits(rate=(2, 600.0)))
+    assert post_photos(client, [247], "m1/nearest").status_code == 200
+    assert post_photos(client, [247], "m1/nearest").status_code == 200
+    third = post_photos(client, [247], "m1/nearest")
+    assert third.status_code == 429 and int(third.headers["retry-after"]) > 0
+
+
+def test_a_full_gpu_queue_answers_busy_instead_of_piling_up(conn, tmp_path):
+    client = app_with_model(conn, tmp_path, limits=open_limits(max_in_flight=0))
+    res = post_photos(client, [247], "m1/nearest")
+    assert res.status_code == 503 and res.headers["retry-after"]
+
+
+def test_only_allowed_backbones_are_offered_or_loaded(conn, tmp_path):
+    loaded = []
+    store = seed_two_species(conn, tmp_path)
+    todo = photos_to_embed(conn, "m1", "large", store.location, "local")
+    embed_photos(conn, store, Const("m1"), todo, tmp_path / "emb" / "m1", log=lambda s: None)
+    conn.commit()
+    client = TestClient(create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
+                                   backbone_loader=lambda n: loaded.append(n) or Const(n),
+                                   limits=open_limits(allowed_backbones={"other"})))
+    assert client.get("/api/models").json()["ready"] == []
+    res = post_photos(client, [247], "m1/nearest")
+    assert res.status_code == 400 and "not offered" in res.json()["detail"]
+    assert loaded == []
+
+
+def test_rate_spec_and_limiter_window():
+    from mycomap_vision.guards import RateLimiter, parse_rate
+    assert parse_rate("30/600") == (30, 600.0) and parse_rate(None) == (30, 600.0)
+    t = [0.0]
+    lim = RateLimiter(1, 10, clock=lambda: t[0])
+    assert lim.check("a") == 0 and lim.check("a") == 10 and lim.check("b") == 0
+    t[0] = 10.5
+    assert lim.check("a") == 0

@@ -67,16 +67,18 @@ def test_old_manifests_gain_the_store_column(tmp_path):
 
 
 def test_the_instance_always_shuts_itself_down():
-    ud = aws.render_user_data("20260928-120000", "large", 120)
+    ud = aws.render_user_data("20260928-120000", "large", 120, "my-bucket")
     assert "shutdown -h +7260" in ud                 # backstop: max hours + 1 hour
     assert "trap finish EXIT" in ud and "shutdown -h now" in ud
+    assert "BUCKET=my-bucket" in ud
     assert "--size large" in ud and "--max-hours 120" in ud
     assert '--dest "s3://$BUCKET"' in ud
     assert "RUN=runs/20260928-120000" in ud
     assert 'aws s3 cp "s3://$BUCKET/$RUN/code.tar.gz"' in ud
 
 
-def test_instances_terminate_on_shutdown_and_carry_the_project_tag():
+def test_instances_terminate_on_shutdown_and_carry_the_project_tag(monkeypatch):
+    monkeypatch.delenv("MV_INSTANCE_ROLE", raising=False)
     args = aws.run_instance_args("r1", "ami-1", "#!/bin/bash")
     assert args["InstanceInitiatedShutdownBehavior"] == "terminate"
     assert args["IamInstanceProfile"] == {"Name": "mycomap-vision-instance"}
@@ -92,3 +94,35 @@ def test_pulling_the_manifest_refuses_while_it_is_open_here(tmp_path):
     (tmp_path / "manifest.sqlite-wal").write_bytes(b"")
     with pytest.raises(RuntimeError, match="still open"):
         aws.pull_manifest(dest)
+
+
+
+def test_iam_policies_are_filled_from_settings_with_no_placeholders_left(monkeypatch):
+    import json
+    monkeypatch.setenv("MV_S3_BUCKET", "bkt")
+    monkeypatch.setenv("MV_AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("MV_INSTANCE_ROLE", "role-x")
+    for name in ("instance-policy.template.json", "ops-policy.template.json"):
+        text = aws.render_policy(name)
+        assert "{{" not in text
+        json.loads(text)
+    ops = aws.render_policy("ops-policy.template.json")
+    assert "arn:aws:s3:::bkt/*" in ops and "eu-west-1" in ops and "role/role-x" in ops
+
+
+def test_missing_settings_say_which_variable_to_set(monkeypatch):
+    monkeypatch.delenv("MV_S3_BUCKET", raising=False)
+    with pytest.raises(RuntimeError, match="MV_S3_BUCKET"):
+        aws.bucket()
+
+
+def test_dotenv_fills_only_unset_variables(tmp_path, monkeypatch):
+    from mycomap_vision import config
+    env = tmp_path / ".env"
+    env.write_text("\n".join(["# comment", "MV_T1=from-file", "MV_T2='quoted'", ""]))
+    monkeypatch.setenv("MV_T1", "from-env")
+    monkeypatch.delenv("MV_T2", raising=False)
+    config.load_dotenv(env)
+    import os
+    assert os.environ["MV_T1"] == "from-env" and os.environ["MV_T2"] == "quoted"
+    monkeypatch.delenv("MV_T2")

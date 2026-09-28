@@ -31,11 +31,19 @@ photographers, with their all-rights-reserved photo counts, for permission reque
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"
+.venv/Scripts/python -m pip install --require-hashes -r requirements/dev.lock
+.venv/Scripts/python -m pip install -e . --no-deps
 .venv/Scripts/python -m pytest -q
 ```
 
-`mv export-records` needs the `SQL-ROUTE-HOST` SSH host (read-only .org route).
+For embeddings, install PyTorch for your GPU first (e.g. the CUDA build from
+download.pytorch.org), then `pip install -e ".[embed]"`. The web app is in `web/`
+(`pnpm install`, `pnpm build`); `mv serve` serves the API and the built site.
+See SECURITY.md for what stays private.
+
+Copy `.env.example` to `.env` and fill it in. `mv export-records` needs a read-only
+SQL route to the mycomap.org database (`MV_ORG_SQL_SSH_HOST`); the AWS commands need
+the AWS settings.
 
 ## Data
 
@@ -45,7 +53,7 @@ Everything lives under `data/` (git-ignored; override with `MV_DATA_DIR`):
   links and license history.
 - `raw/`: the records export and every iNat API answer (gzipped), as fetched.
 - `photos/<size>/<id % 1000>/<photo_id>.<ext>`: the images, under the same path in
-  `s3://YOUR-BUCKET/` when they are downloaded to S3.
+  the S3 bucket (`MV_S3_BUCKET`) when they are downloaded to S3.
 - `reports/`: contributor lists.
 
 ### Labels

@@ -1,6 +1,9 @@
 """Export the DNA-validated ("green in a project") records from mycomap.org.
 
-The source is the live .org database through the read-only `ssh SQL-ROUTE-HOST` route.
+The source is the live .org database through a read-only SQL route reached over
+SSH (host named by MV_ORG_SQL_SSH_HOST): it takes one SQL statement and answers a
+header line followed by rows.
+
 A record is a training candidate when any of its three flattened validation slots
 says 'yes'. Records validated in a fourth or later project and in none of the first
 three are missed; that gap is small and noted in the README.
@@ -152,7 +155,8 @@ def parse_export(text: str) -> list[dict]:
 
 def fetch_export() -> str:
     result = subprocess.run(
-        ["ssh", config.ORG_SQL_SSH_HOST, " ".join(EXPORT_SQL.split())],
+        ["ssh", config.required("MV_ORG_SQL_SSH_HOST", "the read-only SQL route for records"),
+         " ".join(EXPORT_SQL.split())],
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     if result.returncode != 0:

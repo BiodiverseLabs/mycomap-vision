@@ -63,6 +63,14 @@ def cmd_aws_launch_downloader(conn, args) -> None:
                                            instance_type=args.instance_type), indent=2))
 
 
+def cmd_aws_policies(conn, args) -> None:
+    """Print the IAM policies with this deployment's bucket, region and role filled in."""
+    from . import aws
+    for name in ("instance-policy.template.json", "ops-policy.template.json"):
+        print(f"=== {name.replace('.template', '')}")
+        print(aws.render_policy(name))
+
+
 def cmd_aws_pull_manifest(conn, args) -> None:
     from . import aws
     conn.close()
@@ -197,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-hours", type=float, default=120)
     p.add_argument("--instance-type", default="t3.small")
 
+    sub.add_parser("aws-policies",
+                   help="print the IAM policies filled in for MV_S3_BUCKET / MV_AWS_REGION")
+
     sub.add_parser("aws-pull-manifest",
                    help="replace the local manifest with the one the instance wrote")
 
@@ -239,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         "download-photos": cmd_download_photos,
         "aws-launch-downloader": cmd_aws_launch_downloader,
         "aws-pull-manifest": cmd_aws_pull_manifest,
+        "aws-policies": cmd_aws_policies,
         "embed": cmd_embed,
         "compare": cmd_compare,
         "scoreboard": cmd_scoreboard,
