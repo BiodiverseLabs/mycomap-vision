@@ -227,3 +227,52 @@ def test_rate_spec_and_limiter_window():
     assert lim.check("a") == 0 and lim.check("a") == 10 and lim.check("b") == 0
     t[0] = 10.5
     assert lim.check("a") == 0
+
+
+def jpeg_with_exif(lat, lon, when):
+    from fractions import Fraction
+    img = Image.new("RGB", (8, 8), (247, 0, 0))
+    exif = img.getexif()
+    gps = exif.get_ifd(0x8825)
+
+    def dms(v):
+        v = abs(v)
+        d = int(v)
+        m = int((v - d) * 60)
+        s = Fraction(round(((v - d) * 60 - m) * 60 * 100), 100)
+        return (Fraction(d), Fraction(m), s)
+    gps[1], gps[2] = ("N" if lat >= 0 else "S"), dms(lat)
+    gps[3], gps[4] = ("E" if lon >= 0 else "W"), dms(lon)
+    exif.get_ifd(0x8769)[36867] = when
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", exif=exif)
+    return buf.getvalue()
+
+
+def test_place_and_date_are_read_from_photo_exif():
+    from mycomap_vision.exif import place_and_date
+    lat, lon, when = place_and_date(Image.open(io.BytesIO(jpeg_with_exif(39.1653, -86.5264,
+                                                                          "2026:09:12 10:03:00"))))
+    assert round(lat, 3) == 39.165 and round(lon, 3) == -86.526 and when == "2026-09-12"
+    assert place_and_date(Image.new("RGB", (4, 4))) == (None, None, None)
+
+
+def test_entered_place_wins_and_photo_fills_the_gaps_rounded_in_the_answer():
+    from mycomap_vision.api import fill_context
+    from mycomap_vision.prior import Context
+    ctx, used = fill_context(Context(None, None, "2026-01-02"),
+                             [(None, None, None), (39.1653, -86.5264, "2026-09-12")])
+    assert (ctx.latitude, ctx.longitude, ctx.observed_on) == (39.1653, -86.5264, "2026-01-02")
+    assert used == {"latitude": 39.2, "longitude": -86.5, "observed_on": "2026-01-02",
+                    "place_from": "photo", "date_from": "entered"}
+
+
+def test_identify_reports_the_context_it_used(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    files = [("photos", ("p.jpg", jpeg_with_exif(39.1653, -86.5264, "2026:09:12 10:03:00"),
+                         "image/jpeg"))]
+    res = client.post("/api/identify", files=files, data={"models": "m1/nearest"}).json()
+    assert res["context_used"]["place_from"] == "photo"
+    assert res["context_used"]["latitude"] == 39.2
+    bad = client.post("/api/identify", files=files, data={"models": "m1/nearest", "lat": "95"})
+    assert bad.status_code == 400

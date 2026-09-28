@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { ArrowUpRight, ImagePlus, Lightbulb, Loader2, Microscope, X } from "lucide-react";
+import { ArrowUpRight, CalendarDays, ImagePlus, Lightbulb, Loader2, LocateFixed, MapPin,
+         Microscope, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,11 +9,14 @@ import { PageHeader } from "@/components/Layout";
 import {
   api,
   modelKey,
+  modelLabel,
   num,
   pct,
   RANKS,
   type Candidate,
+  type ContextUsed,
   type IdentifyResult,
+  type Where,
   type Rank,
   type Specimen,
 } from "@/lib/api";
@@ -23,6 +27,7 @@ const RANK_LABEL: Record<Rank, string> = { family: "Family", genus: "Genus", spe
 export function IdentifyPage() {
   const [files, setFiles] = useState<File[]>([]);
   const [chosen, setChosen] = useState<string[]>([]);
+  const [where, setWhere] = useState<Where>({});
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
 
   const options = useMemo(() => {
@@ -34,7 +39,7 @@ export function IdentifyPage() {
     if (!chosen.length && options.length) setChosen([options[0]]);
   }, [options, chosen.length]);
 
-  const run = useMutation({ mutationFn: () => api.identify(files, chosen) });
+  const run = useMutation({ mutationFn: () => api.identify(files, chosen, where) });
 
   return (
     <>
@@ -45,6 +50,7 @@ export function IdentifyPage() {
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 grid gap-8 lg:grid-cols-[360px_1fr]">
         <div className="space-y-6">
           <PhotoPicker files={files} setFiles={setFiles} />
+          <WhereWhen where={where} setWhere={setWhere} />
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Models</CardTitle>
@@ -79,7 +85,7 @@ export function IdentifyPage() {
                     />
                     <span>
                       <span className="font-medium">{backbone}</span>{" "}
-                      <span className="text-muted-foreground">· {method}</span>
+                      <span className="text-muted-foreground">· {modelLabel(backbone, method).how}</span>
                       {info && (
                         <span className="block text-xs text-muted-foreground">
                           {num(info.embedded_photos)} reference photos
@@ -105,6 +111,7 @@ export function IdentifyPage() {
 
         <div className="min-w-0">
           {!run.data && !run.isPending && <EmptyState />}
+          {run.data && <ContextLine used={run.data.context_used} />}
           {run.data && (
             <div
               className={`grid gap-6 ${run.data.results.length > 1 ? "xl:grid-cols-2" : ""}`}
@@ -188,6 +195,77 @@ function PhotoPicker({ files, setFiles }: { files: File[]; setFiles: (f: File[])
   );
 }
 
+function WhereWhen({ where, setWhere }: { where: Where; setWhere: (w: Where) => void }) {
+  const [locating, setLocating] = useState(false);
+  const locate = () => {
+    if (!navigator.geolocation) return;
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setWhere({ ...where, lat: pos.coords.latitude.toFixed(4), lng: pos.coords.longitude.toFixed(4) });
+        setLocating(false);
+      },
+      () => setLocating(false),
+      { timeout: 10_000 },
+    );
+  };
+  const input = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm";
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Where and when</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          Optional. Left empty, they're read from your photos when the photos carry them.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex items-center gap-2">
+          <MapPin className="h-4 w-4 text-myco-brown shrink-0" />
+          <input className={input} placeholder="Latitude" inputMode="decimal" value={where.lat ?? ""}
+                 onChange={(e) => setWhere({ ...where, lat: e.target.value })} aria-label="Latitude" />
+          <input className={input} placeholder="Longitude" inputMode="decimal" value={where.lng ?? ""}
+                 onChange={(e) => setWhere({ ...where, lng: e.target.value })} aria-label="Longitude" />
+          <Button type="button" variant="outline" size="icon" onClick={locate} disabled={locating}
+                  title="Use my location" aria-label="Use my location">
+            {locating ? <Loader2 className="animate-spin" /> : <LocateFixed />}
+          </Button>
+        </div>
+        <div className="flex items-center gap-2">
+          <CalendarDays className="h-4 w-4 text-myco-brown shrink-0" />
+          <input className={input} type="date" value={where.observedOn ?? ""}
+                 onChange={(e) => setWhere({ ...where, observedOn: e.target.value })} aria-label="Date found" />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ContextLine({ used }: { used: ContextUsed }) {
+  if (!used.place_from && !used.date_from) {
+    return (
+      <p className="mb-4 text-sm text-muted-foreground">
+        No place or date given or found in the photos, so models with a range-and-season
+        score used the photos alone.
+      </p>
+    );
+  }
+  const from = (f: string | null) => (f === "photo" ? "from your photo" : "as entered");
+  return (
+    <p className="mb-4 text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+      {used.place_from && (
+        <span className="inline-flex items-center gap-1">
+          <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from)})
+        </span>
+      )}
+      {used.date_from && (
+        <span className="inline-flex items-center gap-1">
+          <CalendarDays className="h-3.5 w-3.5" /> {used.observed_on} ({from(used.date_from)})
+        </span>
+      )}
+    </p>
+  );
+}
+
 function EmptyState() {
   return (
     <div className="rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-8 text-[#5c4a3a]">
@@ -212,7 +290,10 @@ function ResultCard({ r, files }: { r: IdentifyResult; files: File[] }) {
       <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-base text-[#4a3728]">
-            {r.model.backbone} <span className="font-normal text-muted-foreground">· {r.model.method}</span>
+            {r.model.backbone}{" "}
+            <span className="font-normal text-muted-foreground">
+              · {modelLabel(r.model.backbone, r.model.method).how}
+            </span>
           </CardTitle>
           <span className="text-xs text-muted-foreground">
             {num(r.reference.records)} records · {num(r.reference.species)} names ·{" "}

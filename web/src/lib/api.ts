@@ -34,6 +34,20 @@ export interface IdentifyResult {
   confidence_note: string;
 }
 
+export interface Where {
+  lat?: string;
+  lng?: string;
+  observedOn?: string;
+}
+
+export interface ContextUsed {
+  latitude: number | null;
+  longitude: number | null;
+  observed_on: string | null;
+  place_from: "entered" | "photo" | null;
+  date_from: "entered" | "photo" | null;
+}
+
 export interface ModelsInfo {
   backbones: {
     backbone: string;
@@ -96,6 +110,10 @@ const METHOD_LABEL: Record<string, string> = {
   "species-mean": "species average",
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",
+  linear: "trained classifier",
+  hybrid: "classifier + nearest specimen",
+  "linear+prior": "trained classifier + range and season",
+  "hybrid+prior": "classifier + nearest + range and season",
 };
 
 /** Human names for scoreboard rows: iNat's model and our methods in plain words. */
@@ -124,10 +142,16 @@ export const api = {
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
   run: (id: number) => getJson<RunReport>(`/api/scoreboard/${id}`),
-  async identify(photos: File[], models: string[]): Promise<{ results: IdentifyResult[] }> {
+  async identify(photos: File[], models: string[], where: Where = {}):
+      Promise<{ results: IdentifyResult[]; context_used: ContextUsed }> {
     const form = new FormData();
     photos.forEach((p) => form.append("photos", p));
     form.append("models", models.join(","));
+    if (where.lat?.trim() && where.lng?.trim()) {
+      form.append("lat", where.lat.trim());
+      form.append("lng", where.lng.trim());
+    }
+    if (where.observedOn) form.append("observed_on", where.observedOn);
     const res = await fetch("/api/identify", { method: "POST", body: form });
     if (!res.ok) throw new Error(await errorText(res));
     return res.json();

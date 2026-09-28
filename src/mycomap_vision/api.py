@@ -24,6 +24,7 @@ from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge, check_image_size)
+from .exif import place_and_date
 from .identify import Identifier
 from .prior import Context
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
@@ -39,8 +40,9 @@ def open_manifest(path: Path) -> sqlite3.Connection:
 WEB_DIST = config.REPO_ROOT / "web" / "dist"
 
 
-def read_photo(upload: UploadFile) -> Image.Image:
-    """One uploaded photo, refusing oversized files and images before decoding them."""
+def read_photo(upload: UploadFile) -> tuple[Image.Image, tuple]:
+    """One uploaded photo, refusing oversized files and images before decoding them.
+    Also returns its EXIF (latitude, longitude, date), used only for scoring."""
     body = upload.file.read(MAX_FILE_BYTES + 1)
     if len(body) > MAX_FILE_BYTES:
         raise HTTPException(413, f"{upload.filename} is over {MAX_FILE_BYTES // 2**20} MB")
@@ -49,12 +51,30 @@ def read_photo(upload: UploadFile) -> Image.Image:
             warnings.simplefilter("ignore", Image.DecompressionBombWarning)
             img = Image.open(io.BytesIO(body))
         check_image_size(img)
+        found = place_and_date(img)
         img = ImageOps.exif_transpose(img)
-        return img.convert("RGB")
+        return img.convert("RGB"), found
     except TooLarge as e:
         raise HTTPException(413, f"{upload.filename}: {e}")
     except Exception:
         raise HTTPException(400, f"{upload.filename} is not an image we can read")
+
+
+def fill_context(entered: Context, from_photos: list[tuple]) -> tuple[Context, dict]:
+    """What the caller entered wins; gaps are filled from the first photo that has them.
+    Returns the context and what was used, rounded to 0.1 degree for the response."""
+    lat, lng, when = entered.latitude, entered.longitude, entered.observed_on
+    place_from = "entered" if lat is not None and lng is not None else None
+    date_from = "entered" if when else None
+    for plat, plng, pdate in from_photos:
+        if place_from is None and plat is not None and plng is not None:
+            lat, lng, place_from = plat, plng, "photo"
+        if date_from is None and pdate:
+            when, date_from = pdate, "photo"
+    used = {"latitude": None if lat is None else round(lat, 1),
+            "longitude": None if lng is None else round(lng, 1),
+            "observed_on": when, "place_from": place_from, "date_from": date_from}
+    return Context(lat, lng, when), used
 
 
 def create_app(manifest_path: Path | None = None, embeddings_root: Path | None = None,
@@ -194,7 +214,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             in_flight.leave()
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context") -> dict:
-        images = [read_photo(f) for f in photos]
+        read = [read_photo(f) for f in photos]
+        images = [img for img, _ in read]
+        context, used = fill_context(context, [found for _, found in read])
         ready = ready_backbones()
         wanted = [m.strip() for m in models_.split(",") if m.strip()]
         if not wanted:
@@ -216,7 +238,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if backbone not in backbones:
                     backbones[backbone] = backbone_loader(backbone)
                 results.append(ident.identify(backbones[backbone], images, context=context))
-        return {"results": results}
+        return {"results": results, "context_used": used}
 
     # The built frontend (web/dist), when present: files as-is, any other
     # non-API path gets index.html so client-side routes work on reload.
