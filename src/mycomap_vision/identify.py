@@ -86,7 +86,11 @@ class Identifier:
         records = with_rows(by_id, row_of)
         self.index = build_index(records)
         self.model = METHODS[method]()
-        self.model.fit(vecs, self.index)
+        self.uses_context = getattr(self.model, "needs_context", False)
+        if self.uses_context:
+            self.model.fit(vecs, self.index, records=records)
+        else:
+            self.model.fit(vecs, self.index)
         self.nearest = self.model if isinstance(self.model, NearestSpecimen) else NearestSpecimen()
         if self.nearest is not self.model:
             self.nearest.fit(vecs, self.index)
@@ -117,9 +121,13 @@ class Identifier:
         return out
 
     def identify_vectors(self, query: np.ndarray, top_k: int = 5,
-                         n_specimens: int = 6) -> dict:
-        """Query photo vectors (already normalised) -> ranks, specimens, hints."""
-        scores = self.model.species_scores(query)
+                         n_specimens: int = 6, context=None) -> dict:
+        """Query photo vectors (already normalised) -> ranks, specimens, hints.
+        `context` (place and date) is used by methods with a range-and-season score."""
+        if self.uses_context:
+            scores = self.model.species_scores(query, context)
+        else:
+            scores = self.model.species_scores(query)
         ranks: dict[str, list[dict]] = {}
         for rank in RANKS:
             names = self.index.species if rank == "species" else self.index.labels[rank]
@@ -186,7 +194,7 @@ class Identifier:
                 f"{self.calibration['comparison_id']}). Early and approximate: it improves as "
                 "the reference set and weekly tests grow.")
 
-    def identify(self, backbone_model, images: list, top_k: int = 5) -> dict:
+    def identify(self, backbone_model, images: list, top_k: int = 5, context=None) -> dict:
         prepare = getattr(backbone_model, "prepare", None) or (lambda im: im)
         vecs = normalise(backbone_model.encode([prepare(im) for im in images]))
-        return self.identify_vectors(vecs, top_k)
+        return self.identify_vectors(vecs, top_k, context=context)

@@ -177,3 +177,11 @@ class Hybrid:
 
 
 METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean, LinearHead, Hybrid)}
+
+# Log-probability methods also come with the range-and-season score (prior.py).
+from functools import partial  # noqa: E402
+
+from .prior import WithPrior  # noqa: E402
+
+for _base in (LinearHead, Hybrid):
+    METHODS[f"{_base.name}+prior"] = partial(WithPrior, _base)

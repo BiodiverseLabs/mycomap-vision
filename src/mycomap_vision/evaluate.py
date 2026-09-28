@@ -40,6 +40,14 @@ class Record:
     validated_on: str | None
     observer: str | None
     photo_rows: list[int] = field(default_factory=list)   # rows into the vector matrix
+    latitude: float | None = None       # true coordinates: used for scores, never shown
+    longitude: float | None = None
+    observed_on: str | None = None
+
+
+def context_of(rec: "Record"):
+    from .prior import Context
+    return Context(rec.latitude, rec.longitude, rec.observed_on)
 
 
 def clean(s: str | None) -> str:
@@ -52,7 +60,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     na = "and r.north_america = 1" if north_america_only else ""
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
-             o.user_login, op.photo_id, op.position
+             o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
+             coalesce(r.observed_on, o.observed_on)
       from records r
       join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
@@ -60,13 +69,14 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
       order by r.observation_id, op.position
     """).fetchall()
     recs: dict[str, Record] = {}
-    for oid, name, genus, family, vdate, login, pid, _pos in rows:
+    for oid, name, genus, family, vdate, login, pid, _pos, lat, lon, observed in rows:
         if pid not in photo_row or not clean(name):
             continue
         rec = recs.get(oid)
         if rec is None:
             rec = recs[oid] = Record(oid, clean(name), clean(genus) or clean(name).split()[0],
-                                     clean(family), vdate, login)
+                                     clean(family), vdate, login, latitude=lat, longitude=lon,
+                                     observed_on=observed)
         rec.photo_rows.append(photo_row[pid])
     return list(recs.values())
 
@@ -166,7 +176,11 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     index = build_index(ref)
     names = {rank: (index.species if rank == "species" else index.labels[rank]) for rank in RANKS}
     model = METHODS[method]()
-    model.fit(vectors, index)
+    uses_context = getattr(model, "needs_context", False)
+    if uses_context:
+        model.fit(vectors, index, records=ref)
+    else:
+        model.fit(vectors, index)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
     # Calibration: summed NLL per candidate temperature, over test records whose
     # true label is in the reference set (a novel species has no probability to give).
@@ -175,7 +189,10 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     n_cal = Counter()
     for rec in test:
         rows = rec.photo_rows[:1] if first_photo_only else rec.photo_rows
-        scores = model.species_scores(vectors[rows])
+        if uses_context:
+            scores = model.species_scores(vectors[rows], context_of(rec))
+        else:
+            scores = model.species_scores(vectors[rows])
         b = bucket_of(index.ref_count.get(rec.species, 0))
         for rank in RANKS:
             t = truth(rec, rank)

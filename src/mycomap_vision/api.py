@@ -25,6 +25,7 @@ from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge, check_image_size)
 from .identify import Identifier
+from .prior import Context
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
 
 
@@ -168,7 +169,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # never blocks the event loop and other requests keep being answered.
     @app.post("/api/identify")
     def identify(request: Request, photos: list[UploadFile] = File(...),
-                 models_: str = Form("", alias="models")):
+                 models_: str = Form("", alias="models"), lat: float | None = Form(None),
+                 lng: float | None = Form(None), observed_on: str | None = Form(None)):
         client = request.client.host if request.client else "unknown"
         wait = rate.check(client)
         if wait:
@@ -182,12 +184,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if not in_flight.enter():
             raise HTTPException(503, "busy identifying other photos; try again shortly",
                                 headers={"Retry-After": "10"})
+        if lat is not None and not -90 <= lat <= 90 or lng is not None and not -180 <= lng <= 180:
+            in_flight.leave()
+            raise HTTPException(400, "latitude or longitude out of range")
+        context = Context(lat, lng, observed_on)
         try:
-            return run_identify(photos, models_)
+            return run_identify(photos, models_, context)
         finally:
             in_flight.leave()
 
-    def run_identify(photos: list[UploadFile], models_: str) -> dict:
+    def run_identify(photos: list[UploadFile], models_: str, context: "Context") -> dict:
         images = [read_photo(f) for f in photos]
         ready = ready_backbones()
         wanted = [m.strip() for m in models_.split(",") if m.strip()]
@@ -209,7 +215,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 ident = identifier(backbone, method)
                 if backbone not in backbones:
                     backbones[backbone] = backbone_loader(backbone)
-                results.append(ident.identify(backbones[backbone], images))
+                results.append(ident.identify(backbones[backbone], images, context=context))
         return {"results": results}
 
     # The built frontend (web/dist), when present: files as-is, any other

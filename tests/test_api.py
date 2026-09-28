@@ -167,7 +167,7 @@ def test_specimens_are_ranked_by_all_your_photos_not_one_lucky_match():
     ident.rec_starts = np.asarray([i for i, r in enumerate(ident.col_record)
                                    if i == 0 or r is not ident.col_record[i - 1]])
     ident.photos, ident.records, ident.embedded, ident.calibration = {}, 2, 4, None
-    ident.backbone, ident.method = "t", "nearest"
+    ident.backbone, ident.method, ident.uses_context = "t", "nearest", False
     ident.rank_counts = {k: Counter() for k in ("family", "genus", "species")}
     out = ident.identify_vectors(q)
     assert [s["observation_id"] for s in out["specimens"]] == ["Y", "X"]
