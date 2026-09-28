@@ -23,7 +23,8 @@ def license_class(code: str | None) -> str:
 
 
 SIZES = ("square", "thumb", "small", "medium", "large", "original")
-_SIZE_RE = re.compile(r"/(square|thumb|small|medium|large|original)\.([A-Za-z0-9]+)(?:\?.*)?$")
+# Old photos (around 2012-13) have no extension: ".../2511038/square." serves fine.
+_SIZE_RE = re.compile(r"/(square|thumb|small|medium|large|original)\.([A-Za-z0-9]*)(?:\?.*)?$")
 
 
 def sized_url(url: str, size: str) -> str:
@@ -38,7 +39,12 @@ def sized_url(url: str, size: str) -> str:
 
 def url_extension(url: str) -> str:
     m = _SIZE_RE.search(url)
-    return (m.group(2) if m else "jpg").lower()
+    return ((m.group(2) if m else "") or "jpg").lower()
+
+
+def taken_down(url: str) -> bool:
+    """iNat swaps a photo removed for copyright for a placeholder image."""
+    return "/assets/copyright-infringement" in url
 
 
 def host_of(url: str) -> str:

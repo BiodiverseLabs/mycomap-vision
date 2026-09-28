@@ -82,3 +82,15 @@ def test_byte_budget_blocks_until_old_bytes_age_out():
     clock.t += 3000
     assert b.wait_time() == 0
     assert b.used() == 60
+
+
+def test_old_photos_without_an_extension_still_resize_and_save_as_jpg():
+    url = "https://inaturalist-open-data.s3.amazonaws.com/photos/2511038/square."
+    assert sized_url(url, "large") == "https://inaturalist-open-data.s3.amazonaws.com/photos/2511038/large."
+    assert url_extension(url) == "jpg"
+
+
+def test_a_copyright_takedown_placeholder_is_recognised():
+    from mycomap_vision.licenses import taken_down
+    assert taken_down("https://www.inaturalist.org/assets/copyright-infringement-square.png")
+    assert not taken_down("https://static.inaturalist.org/photos/1/square.jpg")

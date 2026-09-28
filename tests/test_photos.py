@@ -171,3 +171,10 @@ def test_photos_gone_from_inat_are_not_queued_again(conn):
     _seed(conn)
     save_result(conn, Result(11, "missing", error="http 404"), "large", "now")
     assert 11 not in [r["photo_id"] for r in pending_photos(conn, True, None, "large", "s3://b/")]
+
+
+def test_a_photo_taken_down_for_copyright_is_missing_and_not_fetched(tmp_path):
+    s = FakeSession(FakeResp(200, JPEG))
+    r = download_one(s, gate(), 1, "https://www.inaturalist.org/assets/copyright-infringement-square.png",
+                     "large", LocalStore(tmp_path), threading.Event())
+    assert r.status == "missing" and "copyright" in r.error and s.urls == []

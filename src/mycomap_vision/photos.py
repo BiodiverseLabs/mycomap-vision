@@ -20,7 +20,8 @@ from typing import Callable
 import requests
 
 from . import config
-from .licenses import OPEN_DATA_HOST, STATIC_HOST, looks_like_image, photo_relpath, sized_url, url_extension
+from .licenses import (OPEN_DATA_HOST, STATIC_HOST, looks_like_image, photo_relpath, sized_url,
+                       taken_down, url_extension)
 from .ratelimit import ByteBudget, MinInterval
 from .storage import PhotoStore
 
@@ -75,6 +76,8 @@ class Result:
 
 def download_one(session: requests.Session, gate: HostGate, photo_id: int, source_url: str,
                  size: str, store: PhotoStore, stop: threading.Event) -> Result:
+    if taken_down(source_url):
+        return Result(photo_id, "missing", error="taken down on iNat (copyright)")
     try:
         url = sized_url(source_url, size)
     except ValueError as e:
