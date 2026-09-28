@@ -48,6 +48,15 @@ def log_softmax(z: np.ndarray, axis: int = -1) -> np.ndarray:
     return z - np.log(np.exp(z).sum(axis=axis, keepdims=True))
 
 
+def _cuda_torch():
+    """torch when a CUDA GPU is available, else None (numpy is used instead)."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    return torch if torch.cuda.is_available() else None
+
+
 def photos_per_species(index) -> np.ndarray:
     return np.diff(np.append(index.starts, len(index.cols)))
 
@@ -105,6 +114,7 @@ class LinearHead:
     weight_decay = 1e-4
     seed = 0
     balanced = True       # False = plain softmax (kept for comparison and tests)
+    device = "auto"       # "auto": the GPU when there is one, else numpy on the CPU
 
     def fit(self, vectors: np.ndarray, index, state: dict | None = None) -> None:
         """Train; or, given a saved `state` (from state()), restore it instead."""
@@ -116,6 +126,10 @@ class LinearHead:
         y = np.repeat(np.arange(len(counts)), counts)
         log_prior = (np.log(counts / counts.sum()) if self.balanced
                      else np.zeros(len(counts))).astype(np.float32)
+        torch = _cuda_torch() if self.device == "auto" else None
+        if torch is not None:
+            self.w, self.b = self._fit_torch(torch, x, y, log_prior)
+            return
         n, d = x.shape
         c = len(counts)
         w = np.zeros((d, c), dtype=np.float32)
@@ -137,6 +151,29 @@ class LinearHead:
                 step += 1
                 w, b = self._adam(w, b, gw, gb, adam, step)
         self.w, self.b = w, b
+
+    def _fit_torch(self, torch, x, y, log_prior):
+        """The same training on the GPU (Adam, same batches, weight decay as an L2 term)."""
+        dev = "cuda"
+        xt = torch.from_numpy(x).to(dev)
+        yt = torch.from_numpy(y).to(dev)
+        prior = torch.from_numpy(log_prior).to(dev)
+        w = torch.zeros((x.shape[1], len(log_prior)), device=dev, requires_grad=True)
+        b = torch.zeros(len(log_prior), device=dev, requires_grad=True)
+        opt = torch.optim.Adam([w, b], lr=self.lr)
+        gen = torch.Generator(device="cpu").manual_seed(self.seed)
+        n = len(y)
+        for _ in range(self.epochs):
+            order = torch.randperm(n, generator=gen).to(dev)
+            for start in range(0, n, self.batch):
+                idx = order[start:start + self.batch]
+                z = xt[idx] @ w + b + prior
+                l2 = 0.5 * self.weight_decay * (w * w).sum()
+                loss = torch.nn.functional.cross_entropy(z, yt[idx]) + l2
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+        return w.detach().cpu().numpy(), b.detach().cpu().numpy()
 
     def _adam(self, w, b, gw, gb, s, t, beta1=0.9, beta2=0.999, eps=1e-8):
         for key, g in (("w", gw), ("b", gb)):

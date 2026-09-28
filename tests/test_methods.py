@@ -122,3 +122,19 @@ def test_a_changed_reference_set_gets_a_new_cache_key():
     assert a != cache_key("bb", "linear", np.array([1, 2, 4]), ["A x", "B y"])
     assert a != cache_key("bb", "linear", np.array([1, 2, 3]), ["A x", "B z"])
     assert a != cache_key("other", "linear", np.array([1, 2, 3]), ["A x", "B y"])
+
+
+def test_gpu_and_numpy_training_agree_on_the_answer():
+    import pytest
+    from mycomap_vision.methods import _cuda_torch
+    if _cuda_torch() is None:
+        pytest.skip("no CUDA GPU here; the numpy path is covered by the other tests")
+    vecs, recs, centres = clusters([10] * 5, seed=6)
+    index = build_index(recs)
+    cpu, gpu = LinearHead(), LinearHead()
+    cpu.device = "numpy"
+    cpu.fit(vecs, index)
+    gpu.fit(vecs, index)
+    for c in centres:
+        q = c[None, :].astype(np.float16)
+        assert np.argmax(cpu.species_scores(q)) == np.argmax(gpu.species_scores(q))

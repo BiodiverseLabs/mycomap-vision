@@ -98,6 +98,27 @@ production deploy at `vision.mycomap.org` on its own Lightsail box.
   effort (all DNA records as the background). Shared with mycomap.org/conservation.
 - A separate, capped prior multiplied into the photo score; both shown.
 
+## Training on an AWS GPU instance (Steve, 2026-09-28)
+
+Embedding the full photo set and training the heads move off the laptop to a GPU
+instance started on demand, like the downloader: `mv aws-launch-trainer` starts
+it, it reads the large photos straight from S3, embeds them with the chosen
+backbones, trains and compares every method, writes embeddings, trained weights
+and the scoreboard back to S3, and shuts itself down (with a backstop). The
+laptop pulls the results with a merge, as for downloads. The linear classifier
+already trains on a CUDA GPU when one is present.
+
+Setup needed first (Steve):
+- A GPU quota: AWS console -> Service Quotas -> Amazon EC2 -> "Running On-Demand
+  G and VT instances" (and "All G and VT Spot Instance Requests" for spot), e.g.
+  8 vCPUs in us-east-2. New accounts often start at 0.
+- The ops policy gains read access to the Deep Learning AMI's public parameter
+  (/aws/service/deeplearning/ami/...), and spot requests if we use spot.
+- Budget alarm in place (a g5/g6.xlarge is roughly a dollar an hour on demand,
+  less on spot; one full embedding pass should take a few hours).
+
+Build after the full photo set is in S3.
+
 ## Phase 3: the platform
 
 - Own Lightsail instance (`vision.mycomap.org`), photos and models in S3, weekly
