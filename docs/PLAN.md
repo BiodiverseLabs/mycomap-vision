@@ -23,7 +23,9 @@ the working plan; update it as phases land.
       records from older ones, by nearest DNA-verified specimen; top-1/top-5 at
       family, genus, species, split by reference count (novel, 1, 2, 3-5, 6-30, 31+);
       all photos vs first photo only.
-- [ ] iNat computer-vision baseline on the same test records.
+- [ ] iNat computer-vision baseline on the same test records (`mv inat-baseline`:
+      best score across a record's photos, photo-only and with iNat's location
+      model; needs a 24-hour iNat token).
 - [ ] First comparison report.
 - [x] Web app and API (`mv serve`) with Identify, Models (scoreboard), Data, How it works;
       confidence calibrated per rank from each model's latest comparison.
@@ -101,6 +103,11 @@ production deploy at `vision.mycomap.org` on its own Lightsail box.
 - Own Lightsail instance (`vision.mycomap.org`), photos and models in S3, weekly
   job on a spot GPU: new green records → score them first (the weekly test),
   then add them to the reference set and retrain the small heads.
+- Prospective test on arrival (Steve, 2026-09-28): every new batch is scored by
+  every model, iNat's computer vision included (`mv inat-baseline`), *before*
+  its DNA barcode result exists; when the barcodes come back, the predictions are
+  validated instantly. Nothing can have seen the answer, so it is the fairest
+  test of all, and it covers provisional names, which iNat has begun to carry.
 - Model registry with an evaluation report per release; a release goes live only
   if it did not get worse.
 - API for mycomap.org (FungAI, Validate Records, record pages).

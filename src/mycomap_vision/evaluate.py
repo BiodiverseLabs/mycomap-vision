@@ -306,19 +306,22 @@ def record_set_hash(ref: list[Record], test: list[Record]) -> str:
     return h.hexdigest()[:12]
 
 
-def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
-            test_days: int = 28, max_test: int | None = None, seed: int = 0,
-            embeddings_root=None, log=print) -> dict:
-    """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
+@dataclass
+class SharedSet:
+    """Test and reference records every compared backbone can see, with their photos."""
+    loaded: dict                 # backbone -> (photo ids, vectors)
+    ref: list[Record]            # photo_rows hold photo ids
+    test: list[Record]
+    cutoff: str
+    record_set: str
+    shared_photos: int
 
-    Only photos embedded by every backbone count, so no model is judged on photos
-    another could not see.
-    """
+
+def shared_records(conn: sqlite3.Connection, backbones: list[str], test_days: int = 28,
+                   max_test: int | None = None, seed: int = 0,
+                   embeddings_root=None) -> SharedSet:
+    """The records a comparison of these backbones uses: only photos all of them embedded."""
     from .embed import load_embeddings
-    methods = methods or ["nearest"]
-    for m in methods:
-        if m not in METHODS:
-            raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
     loaded = {}
     for b in backbones:
         root = embeddings_root / b if embeddings_root else None
@@ -332,40 +335,73 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
     if max_test and len(test) > max_test:
         rng = np.random.default_rng(seed)
         test = [test[i] for i in sorted(rng.choice(len(test), max_test, replace=False))]
-    rset = record_set_hash(ref, test)
-    comparison_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + rset[:6]
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return SharedSet(loaded, ref, test, cutoff, record_set_hash(ref, test), len(common))
+
+
+def top1(res: dict, rank: str):
+    return res.get(rank, {}).get("all", {}).get("top1")
+
+
+def save_run(conn: sqlite3.Connection, comparison_id: str, backbone: str, method: str,
+             shared: SharedSet, test_days: int, all_photos: dict, first_photo: dict,
+             extra: dict | None = None) -> dict:
+    """One scoreboard row. `first_photo` may be {} for models that have no such variant."""
     conn.executescript(SCOREBOARD_SCHEMA)
+    report = {"backbone": backbone, "method": method, "all_photos": all_photos,
+              "first_photo_only": first_photo, **(extra or {})}
+    with conn:
+        conn.execute(
+            "insert into eval_runs (comparison_id, backbone, method, cutoff, test_days, "
+            "n_reference, n_test, record_set, species_top1, genus_top1, family_top1, "
+            "species_top1_first_photo, report_json, code_version, created_at) "
+            "values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (comparison_id, backbone, method, shared.cutoff, test_days, len(shared.ref),
+             len(shared.test), shared.record_set, top1(all_photos, "species"),
+             top1(all_photos, "genus"), top1(all_photos, "family"),
+             top1(first_photo, "species"), json.dumps(report), config.code_version(),
+             datetime.now(timezone.utc).isoformat(timespec="seconds")))
+    return report
 
-    def top1(res: dict, rank: str):
-        return res.get(rank, {}).get("all", {}).get("top1")
 
+def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
+            test_days: int = 28, max_test: int | None = None, seed: int = 0,
+            embeddings_root=None, log=print) -> dict:
+    """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
+
+    Only photos embedded by every backbone count, so no model is judged on photos
+    another could not see.
+    """
+    methods = methods or ["nearest"]
+    for m in methods:
+        if m not in METHODS:
+            raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
+    shared = shared_records(conn, backbones, test_days, max_test, seed, embeddings_root)
+    ref, test = shared.ref, shared.test
+    comparison_id = (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-"
+                     + shared.record_set[:6])
     runs = []
-    for b, (ids, vecs) in loaded.items():
+    for b, (ids, vecs) in shared.loaded.items():
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
         ref_b, test_b = with_rows(ref, row_of), with_rows(test, row_of)
         for m in methods:
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
             all_photos = evaluate(vecs, ref_b, test_b, method=m)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True)
-            report = {"backbone": b, "method": m, "all_photos": all_photos,
-                      "first_photo_only": first}
-            with conn:
-                conn.execute(
-                    "insert into eval_runs (comparison_id, backbone, method, cutoff, test_days, "
-                    "n_reference, n_test, record_set, species_top1, genus_top1, family_top1, "
-                    "species_top1_first_photo, report_json, code_version, created_at) "
-                    "values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (comparison_id, b, m, cutoff, test_days, len(ref), len(test), rset,
-                     top1(all_photos, "species"), top1(all_photos, "genus"),
-                     top1(all_photos, "family"), top1(first, "species"),
-                     json.dumps(report), config.code_version(), now))
-            runs.append(report)
-    return {"comparison_id": comparison_id, "cutoff": cutoff, "test_days": test_days,
+            runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first))
+    return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
             "reference_records": len(ref), "test_records": len(test),
             "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)
                                             / max(1, len(test)), 3),
-            "shared_photos": len(common), "record_set": rset, "runs": runs}
+            "shared_photos": shared.shared_photos, "record_set": shared.record_set,
+            "backbones": list(shared.loaded), "runs": runs}
+
+
+def comparison_backbones(conn: sqlite3.Connection, comparison_id: str) -> list[str]:
+    """The local backbones a saved comparison used (external baselines excluded)."""
+    conn.executescript(SCOREBOARD_SCHEMA)
+    rows = conn.execute("select distinct backbone from eval_runs where comparison_id = ? "
+                        "and backbone not like 'external:%'", (comparison_id,)).fetchall()
+    return [r[0] for r in rows]
 
 
 SCOREBOARD_COLUMNS = ["id", "comparison_id", "backbone", "method", "cutoff", "test_days",

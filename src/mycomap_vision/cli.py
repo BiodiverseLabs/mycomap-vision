@@ -133,6 +133,15 @@ def cmd_screen(conn, args) -> None:
         print_scoreboard(evaluate.scoreboard(conn, result.comparison["comparison_id"]))
 
 
+def cmd_inat_baseline(conn, args) -> None:
+    """Score a saved comparison's test records with iNat's computer vision."""
+    from . import evaluate, inat_cv
+    client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "inat_cv_cache")
+    result = inat_cv.run(conn, args.comparison, client)
+    print(json.dumps({k: v for k, v in result.items() if k != "runs"}, indent=2))
+    print_scoreboard(evaluate.scoreboard(conn, args.comparison))
+
+
 def cmd_scoreboard(conn, args) -> None:
     from . import evaluate
     print_scoreboard(evaluate.scoreboard(conn, args.comparison))
@@ -251,6 +260,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
     p.add_argument("--batch-size", type=int, default=16)
 
+    p = sub.add_parser("inat-baseline",
+                       help="add iNat's computer vision to a comparison, on the same records "
+                            "(needs a 24-hour token in data/secrets/inat_jwt.txt)")
+    p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
+
     p = sub.add_parser("scoreboard", help="saved comparison results")
     p.add_argument("--comparison", help="only this comparison id")
 
@@ -278,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         "embed": cmd_embed,
         "compare": cmd_compare,
         "screen": cmd_screen,
+        "inat-baseline": cmd_inat_baseline,
         "scoreboard": cmd_scoreboard,
         "models": cmd_models,
         "serve": cmd_serve,
