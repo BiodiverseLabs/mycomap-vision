@@ -156,7 +156,12 @@ class InatClient:
         for attempt in range(5):
             self.pace.wait()
             self.calls += 1
-            r = self.session.request(method, url, timeout=60, **kw)
+            try:
+                r = self.session.request(method, url, timeout=60, **kw)
+            except requests.RequestException:
+                # Dropped connections and TLS resets happen; back off and try again.
+                self.pace.pause(10 * (attempt + 1))
+                continue
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 401:

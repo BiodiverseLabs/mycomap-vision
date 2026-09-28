@@ -24,7 +24,8 @@ create table if not exists records (
   validated_on     text,               -- earliest green validation date (ISO), for weekly test sets
   label_conflict   integer not null default 0,  -- .org holds more than one name for the record
   names_json       text,
-  exported_at      text not null
+  exported_at      text not null,
+  first_seen_at    text                -- export that first listed it; null = before tracking
 );
 
 create table if not exists inat_observations (
@@ -92,7 +93,7 @@ def connect(path: Path) -> sqlite3.Connection:
 
 # Columns added after a manifest may already exist; `create table if not exists`
 # does not add them, so they are added here.
-_LATER_COLUMNS = {"photos": {"store": "text"}}
+_LATER_COLUMNS = {"photos": {"store": "text"}, "records": {"first_seen_at": "text"}}
 
 
 def snapshot(conn: sqlite3.Connection, dest: Path) -> Path:

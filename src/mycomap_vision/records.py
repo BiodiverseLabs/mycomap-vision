@@ -172,22 +172,33 @@ _COLUMNS = [
 ]
 
 
-def save_records(conn: sqlite3.Connection, records: list[dict]) -> None:
+def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
     """Upsert the export. Records no longer green on .org leave the candidate list;
-    their iNat metadata and photos stay in the manifest in case they turn green again."""
-    cols = ", ".join(f'"{c}"' for c in _COLUMNS)
-    marks = ", ".join("?" for _ in _COLUMNS)
+    their iNat metadata and photos stay in the manifest in case they turn green again.
+
+    Returns what changed: records new to the list (stamped first_seen_at with this
+    export), records removed, and records whose name changed on .org (a new label).
+    """
+    before = dict(conn.execute("select observation_id, scientific_name from records"))
+    cols = ", ".join(f'"{c}"' for c in _COLUMNS) + ', "first_seen_at"'
+    marks = ", ".join("?" for _ in _COLUMNS) + ", ?"
+    # first_seen_at is set on insert only, never on update.
     updates = ", ".join(f'"{c}" = excluded."{c}"' for c in _COLUMNS if c != "observation_id")
     with conn:
         conn.executemany(
             f"insert into records ({cols}) values ({marks}) "
             f"on conflict(observation_id) do update set {updates}",
-            [[r[c] for c in _COLUMNS] for r in records],
+            [[r[c] for c in _COLUMNS] + [r["exported_at"]] for r in records],
         )
         keep = {r["observation_id"] for r in records}
-        stale = [row[0] for row in conn.execute("select observation_id from records")
-                 if row[0] not in keep]
+        stale = [oid for oid in before if oid not in keep]
         conn.executemany("delete from records where observation_id = ?", [(s,) for s in stale])
+    return {
+        "new": sum(r["observation_id"] not in before for r in records),
+        "removed": len(stale),
+        "renamed": sum(r["observation_id"] in before
+                       and before[r["observation_id"]] != r["scientific_name"] for r in records),
+    }
 
 
 def export_records(conn: sqlite3.Connection) -> dict:
@@ -198,8 +209,10 @@ def export_records(conn: sqlite3.Connection) -> dict:
     Path(raw_path).write_text(text, encoding="utf-8")
     rows = parse_export(text)
     records = build_records(rows, exported_at)
-    save_records(conn, records)
+    changes = save_records(conn, records)
     return {
+        "exported_at": exported_at,
+        **changes,
         "rows": len(rows),
         "records": len(records),
         "north_america": sum(r["north_america"] for r in records),

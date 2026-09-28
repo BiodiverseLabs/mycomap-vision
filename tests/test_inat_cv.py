@@ -146,3 +146,30 @@ def test_the_baseline_refuses_a_comparison_whose_records_have_changed(conn, tmp_
     with pytest.raises(RuntimeError, match="changed since it ran"):
         inat_cv.run(conn, cmp["comparison_id"], FakeInat([], {}), tmp_path / "emb",
                     log=lambda s: None)
+
+
+def test_a_dropped_connection_is_retried_not_fatal(tmp_path):
+    import requests as rq
+
+    class Flaky:
+        headers = {}
+
+        def __init__(self):
+            self.n = 0
+
+        def request(self, method, url, timeout, **kw):
+            self.n += 1
+            if self.n == 1:
+                raise rq.exceptions.SSLError("EOF occurred in violation of protocol")
+
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {"results": []}
+            return R()
+
+    client = inat_cv.InatClient("jwt", tmp_path, session=Flaky(), interval=0,
+                                sleep=lambda s: None)
+    assert client.get("/taxa/1") == {"results": []}
+    assert client.calls == 2

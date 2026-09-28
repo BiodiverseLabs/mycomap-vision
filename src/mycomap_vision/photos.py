@@ -110,7 +110,8 @@ def download_one(session: requests.Session, gate: HostGate, photo_id: int, sourc
 
 def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: int | None,
                    size: str = "medium", store_location: str | None = None,
-                   random_order: bool = False, record_sample: int | None = None):
+                   random_order: bool = False, record_sample: int | None = None,
+                   first_seen_since: str | None = None):
     """Photos of green records not yet held at `size` (in `store_location`, when given),
     attempted fewest times first.
 
@@ -118,6 +119,11 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
     sizes or moving to S3 needs no reset.
     """
     na = "and r.north_america = 1" if north_america_only else ""
+    params: list = []
+    if first_seen_since:
+        # Only records that joined the list at or after this export (e.g. a refresh's new ones).
+        na += " and r.first_seen_at >= ?"
+        params.append(first_seen_since)
     if record_sample:
         # All photos of a random set of records: a small but complete reference set.
         na += (" and r.observation_id in (select observation_id from records"
@@ -133,7 +139,7 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
     """
     if limit is not None:
         sql += f" limit {int(limit)}"
-    return conn.execute(sql, (size, store_location, store_location)).fetchall()
+    return conn.execute(sql, (*params, size, store_location, store_location)).fetchall()
 
 
 def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str,
@@ -157,12 +163,13 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                  max_hours: float | None = None,
                  checkpoint: Callable[[], None] | None = None,
                  checkpoint_every: float = 600, random_order: bool = False,
-                 record_sample: int | None = None, log=print) -> dict:
+                 record_sample: int | None = None, first_seen_since: str | None = None,
+                 log=print) -> dict:
     """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
     runs every `checkpoint_every` seconds and once at the end."""
     config.ensure_dirs()
     rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
-                          record_sample)
+                          record_sample, first_seen_since)
     policies = default_policies()
     gates: dict[str, HostGate] = {}
     session = requests.Session()

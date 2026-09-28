@@ -142,6 +142,20 @@ def cmd_inat_baseline(conn, args) -> None:
     print_scoreboard(evaluate.scoreboard(conn, args.comparison))
 
 
+def cmd_refresh(conn, args) -> None:
+    """Export, fetch, download, embed and compare: the weekly loop."""
+    from . import refresh
+    store = open_store(args.dest, config.DATA_DIR)
+    backbones = [b.strip() for b in args.backbones.split(",") if b.strip()] or None
+    report = refresh.refresh(conn, store, scope=args.scope, size=args.size, backbones=backbones,
+                             compare=not args.no_compare)
+    print(json.dumps({"export": report.export, "fetch": report.fetch,
+                      "download": report.download, "embedded": report.embedded}, indent=2))
+    if report.comparison:
+        from . import evaluate
+        print_scoreboard(evaluate.scoreboard(conn, report.comparison["comparison_id"]))
+
+
 def cmd_scoreboard(conn, args) -> None:
     from . import evaluate
     print_scoreboard(evaluate.scoreboard(conn, args.comparison))
@@ -265,6 +279,14 @@ def main(argv: list[str] | None = None) -> int:
                             "(needs a 24-hour token in data/secrets/inat_jwt.txt)")
     p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
 
+    p = sub.add_parser("refresh", help="the weekly loop: export, fetch, download, embed, compare")
+    p.add_argument("--scope", default="new", choices=["new", "all"],
+                   help="download photos of new records only (laptop) or every missing photo")
+    p.add_argument("--dest", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--size", default="medium", choices=["small", "medium", "large"])
+    p.add_argument("--backbones", default="", help="default: every backbone already embedded")
+    p.add_argument("--no-compare", action="store_true")
+
     p = sub.add_parser("scoreboard", help="saved comparison results")
     p.add_argument("--comparison", help="only this comparison id")
 
@@ -293,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         "compare": cmd_compare,
         "screen": cmd_screen,
         "inat-baseline": cmd_inat_baseline,
+        "refresh": cmd_refresh,
         "scoreboard": cmd_scoreboard,
         "models": cmd_models,
         "serve": cmd_serve,
