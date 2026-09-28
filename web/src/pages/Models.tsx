@@ -4,15 +4,19 @@ import { Trophy } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/Layout";
-import { api, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
+import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
 
-const BUCKET_ORDER = ["all", "novel (0 refs)", "1 ref", "2 refs", "3-5 refs", "6-30 refs", "31+ refs"];
+const BUCKET_ORDER = ["all", "names iNat knows", "novel (0 refs)", "1 ref", "2 refs", "3-5 refs",
+                      "6-30 refs", "31+ refs"];
 
 export function ModelsPage() {
   const board = useQuery({ queryKey: ["scoreboard"], queryFn: api.scoreboard });
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const [open, setOpen] = useState<number | null>(null);
   const groups = groupBy(board.data?.runs ?? [], (r) => r.comparison_id);
+  const speed = Object.fromEntries(
+    (models.data?.backbones ?? []).map((b) => [b.backbone, b.photos_per_second]),
+  );
 
   return (
     <>
@@ -53,12 +57,16 @@ export function ModelsPage() {
                         <th className="text-right font-medium px-3 py-2" title="Species top-1 from the first photo only">
                           1st photo only
                         </th>
+                        <th className="text-right font-medium px-3 py-2" title="Embedding speed on the laptop GPU">
+                          Photos/s
+                        </th>
                         <th className="text-right font-medium px-4 py-2">Code</th>
                       </tr>
                     </thead>
                     <tbody>
                       {runs.map((r, i) => (
                         <RunRow key={r.id} r={r} best={i === 0} open={open === r.id}
+                                speed={speed[r.backbone] ?? null}
                                 onToggle={() => setOpen(open === r.id ? null : r.id)} />
                       ))}
                     </tbody>
@@ -97,24 +105,33 @@ export function ModelsPage() {
   );
 }
 
-function RunRow({ r, best, open, onToggle }: { r: ScoreRun; best: boolean; open: boolean; onToggle: () => void }) {
+function RunRow({ r, best, open, speed, onToggle }: {
+  r: ScoreRun; best: boolean; open: boolean; speed: number | null; onToggle: () => void;
+}) {
+  const label = modelLabel(r.backbone, r.method);
+  const external = r.backbone.startsWith("external:");
   return (
     <>
-      <tr className="border-b hover:bg-myco-green/5 cursor-pointer" onClick={onToggle}>
+      <tr className={`border-b hover:bg-myco-green/5 cursor-pointer ${external ? "bg-[#fbf7f0]" : ""}`}
+          onClick={onToggle}>
         <td className="px-4 py-2">
-          <span className="font-medium">{r.backbone}</span>{" "}
-          <span className="text-muted-foreground">· {r.method}</span>
+          <span className="font-medium">{label.name}</span>{" "}
+          <span className="text-muted-foreground">· {label.how}</span>
           {best && <Trophy className="inline h-3.5 w-3.5 ml-1.5 text-myco-green" />}
+          {external && <Badge variant="outline" className="ml-2 px-1.5 py-0 text-[10px] font-normal">baseline</Badge>}
         </td>
         <td className="px-3 py-2 text-right tabular-nums font-semibold">{pct(r.species_top1, 1)}</td>
         <td className="px-3 py-2 text-right tabular-nums">{pct(r.genus_top1, 1)}</td>
         <td className="px-3 py-2 text-right tabular-nums">{pct(r.family_top1, 1)}</td>
         <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{pct(r.species_top1_first_photo, 1)}</td>
+        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+          {external ? "API" : speed == null ? "–" : Math.round(speed)}
+        </td>
         <td className="px-4 py-2 text-right text-xs text-muted-foreground font-mono">{r.code_version}</td>
       </tr>
       {open && (
         <tr className="border-b bg-[#faf9f7]">
-          <td colSpan={6} className="px-4 py-3">
+          <td colSpan={7} className="px-4 py-3">
             <RunDetail id={r.id} />
           </td>
         </tr>
@@ -164,6 +181,27 @@ function RunDetail({ id }: { id: number }) {
           ))}
         </tbody>
       </table>
+      {q.data.species_names_inat_knows != null && (
+        <p className="text-xs text-muted-foreground mt-3">
+          iNat has a taxon for {num(q.data.species_names_inat_knows)} of these test records' DNA
+          names; it can't be right at species level for the others.
+        </p>
+      )}
+      {q.data.species_by_observed_year && (
+        <div className="mt-3">
+          <p className="text-xs text-muted-foreground mb-1">
+            Species top-1 by year observed (older photos are more likely to be in iNat's training
+            data):
+          </p>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {Object.entries(q.data.species_by_observed_year).map(([year, s]) => (
+              <span key={year} className="rounded border px-2 py-0.5 bg-white tabular-nums">
+                {year}: {s ? `${pct(s.top1)} of ${s.n}` : "–"}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

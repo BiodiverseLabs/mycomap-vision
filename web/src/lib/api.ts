@@ -35,7 +35,13 @@ export interface IdentifyResult {
 }
 
 export interface ModelsInfo {
-  backbones: { backbone: string; spec: string; note: string; embedded_photos: number }[];
+  backbones: {
+    backbone: string;
+    spec: string;
+    note: string;
+    embedded_photos: number;
+    photos_per_second: number | null;
+  }[];
   methods: string[];
   ready: string[];
 }
@@ -80,6 +86,22 @@ export interface RunReport {
   method: string;
   all_photos: Record<Rank, BucketScores>;
   first_photo_only: Record<Rank, BucketScores>;
+  // External baselines (iNat) add these.
+  species_names_inat_knows?: number;
+  species_by_observed_year?: Record<string, { n: number; top1: number; top5: number } | null>;
+}
+
+const METHOD_LABEL: Record<string, string> = {
+  nearest: "nearest specimen",
+  "species-mean": "species average",
+  "vision-max": "photo only, best photo",
+  "combined-max": "with location, best photo",
+};
+
+/** Human names for scoreboard rows: iNat's model and our methods in plain words. */
+export function modelLabel(backbone: string, method: string): { name: string; how: string } {
+  const name = backbone === "external:inat-cv" ? "iNat computer vision" : backbone;
+  return { name, how: METHOD_LABEL[method] ?? method };
 }
 
 async function getJson<T>(url: string): Promise<T> {

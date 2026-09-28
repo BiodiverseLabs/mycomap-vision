@@ -105,3 +105,14 @@ def test_photos_downloaded_before_stores_were_recorded_count_as_local(conn, tmp_
 def test_photos_at_other_sizes_are_not_embedded(conn, tmp_path):
     store = seed(conn, tmp_path, n=2)
     assert photos_to_embed(conn, "m", "medium", store.location, "local") == []
+
+
+def test_each_run_records_its_speed_and_small_runs_do_not_count(conn, tmp_path):
+    from mycomap_vision.embed import photos_per_second
+    store = seed(conn, tmp_path, n=3)
+    todo = photos_to_embed(conn, "mean-colour", "large", store.location, "local")
+    embed_photos(conn, store, MeanColour(), todo, tmp_path / "emb", log=lambda s: None)
+    assert [tuple(r) for r in conn.execute("select backbone, photos from embed_runs")] == [("mean-colour", 3)]
+    assert photos_per_second(conn) == {}                      # 3 photos: loading dominates
+    conn.execute("insert into embed_runs values ('big', 2000, 10.0, 'cuda', 't')")
+    assert photos_per_second(conn) == {"big": 200.0}

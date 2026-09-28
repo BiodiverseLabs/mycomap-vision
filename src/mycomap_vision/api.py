@@ -21,6 +21,7 @@ from PIL import Image, ImageOps
 
 from . import config, evaluate, models
 from .embed import SCHEMA as EMBED_SCHEMA
+from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge, check_image_size)
 from .identify import Identifier
@@ -107,12 +108,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     @app.get("/api/models")
     def list_models():
         counts = {b: n for b, n in embedded_counts().items() if b in limits.allowed_backbones}
+        with db_lock:
+            speed = photos_per_second(conn)
         out = []
         for name, alias in models.ALIASES.items():
             out.append({"backbone": name, "spec": alias.spec, "note": alias.note,
-                        "embedded_photos": counts.pop(name, 0)})
+                        "embedded_photos": counts.pop(name, 0),
+                        "photos_per_second": speed.get(name)})
         for name, n in counts.items():
-            out.append({"backbone": name, "spec": name, "note": "", "embedded_photos": n})
+            out.append({"backbone": name, "spec": name, "note": "", "embedded_photos": n,
+                        "photos_per_second": speed.get(name)})
         return {"backbones": out, "methods": list(evaluate.METHODS),
                 "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
 

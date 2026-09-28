@@ -31,6 +31,15 @@ create table if not exists embeddings (
   created_at text not null,
   primary key (backbone, photo_id)
 );
+
+-- One row per embedding run, for the speed shown next to accuracy.
+create table if not exists embed_runs (
+  backbone   text not null,
+  photos     integer not null,
+  seconds    real not null,
+  device     text,
+  created_at text not null
+);
 """
 
 
@@ -162,7 +171,22 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
                     f"{stats.embedded / max(time.monotonic() - started, 1e-6):.1f}/s")
     flush()
     stats.seconds = time.monotonic() - started
+    if stats.embedded:
+        with conn:
+            conn.execute("insert into embed_runs values (?, ?, ?, ?, ?)",
+                         (backbone.name, stats.embedded, stats.seconds,
+                          getattr(backbone, "device", None),
+                          datetime.now(timezone.utc).isoformat(timespec="seconds")))
     return stats
+
+
+def photos_per_second(conn: sqlite3.Connection) -> dict[str, float]:
+    """Each backbone's throughput over its runs of 1,000 photos or more (small runs are
+    dominated by model loading)."""
+    conn.executescript(SCHEMA)
+    rows = conn.execute("select backbone, sum(photos) / sum(seconds) from embed_runs "
+                        "where photos >= 1000 group by backbone").fetchall()
+    return {b: round(v, 1) for b, v in rows}
 
 
 def load_embeddings(conn: sqlite3.Connection, backbone: str,
