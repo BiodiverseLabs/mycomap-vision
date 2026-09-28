@@ -177,6 +177,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             return {"runs": evaluate.scoreboard(conn)}
 
+    @app.get("/api/prospective")
+    def prospective_report():
+        from . import prospective
+        with db_lock:
+            return {"models": prospective.report(conn)}
+
     @app.get("/api/scoreboard/{run_id}")
     def scoreboard_run(run_id: int):
         with db_lock:

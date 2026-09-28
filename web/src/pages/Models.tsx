@@ -77,6 +77,8 @@ export function ModelsPage() {
           </div>
         </section>
 
+        <Prospective />
+
         <section>
           <h2 className="font-display text-2xl text-[#4a3728] mb-3">Backbones</h2>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -102,6 +104,68 @@ export function ModelsPage() {
         </section>
       </div>
     </>
+  );
+}
+
+function Prospective() {
+  const q = useQuery({ queryKey: ["prospective"], queryFn: api.prospective });
+  const rows = q.data?.models ?? [];
+  return (
+    <section>
+      <h2 className="font-display text-2xl text-[#4a3728] mb-1">Advance predictions</h2>
+      <p className="text-sm text-muted-foreground mb-3 max-w-3xl">
+        Records with a sequence but no validation yet are identified now; when they turn green,
+        the saved answer is checked against the DNA name. Only predictions made before the
+        answer existed count.
+      </p>
+      {!rows.length ? (
+        <p className="text-sm text-muted-foreground">
+          None yet. Run <code>mv candidates</code>, then{" "}
+          <code>mv predict-pending --backbone bioclip-2</code>.
+        </p>
+      ) : (
+        <Card>
+          <CardContent className="p-0 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-xs uppercase tracking-wider text-muted-foreground">
+                <tr className="border-b">
+                  <th className="text-left font-medium px-4 py-2">Model</th>
+                  <th className="text-right font-medium px-3 py-2">Predicted</th>
+                  <th className="text-right font-medium px-3 py-2">Validated since</th>
+                  <th className="text-right font-medium px-3 py-2">Species</th>
+                  <th className="text-right font-medium px-3 py-2">Genus</th>
+                  <th className="text-right font-medium px-3 py-2">Family</th>
+                  <th className="text-right font-medium px-4 py-2" title="Average stated confidence in the top species; compare with the species column">
+                    Stated confidence
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const label = modelLabel(r.backbone, r.method);
+                  return (
+                    <tr key={`${r.backbone}/${r.method}`} className="border-b">
+                      <td className="px-4 py-2">
+                        <span className="font-medium">{label.name}</span>{" "}
+                        <span className="text-muted-foreground">· {label.how}</span>
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{num(r.predicted)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{num(r.resolved)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums font-semibold">{pct(r.species_top1, 1)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{pct(r.genus_top1, 1)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{pct(r.family_top1, 1)}</td>
+                      <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">
+                        {pct(r.mean_species_confidence, 1)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+    </section>
   );
 }
 

@@ -160,6 +160,32 @@ def cmd_refresh(conn, args) -> None:
         print_scoreboard(evaluate.scoreboard(conn, report.comparison["comparison_id"]))
 
 
+def cmd_candidates(conn, args) -> None:
+    """Records on .org that have a sequence but haven't been assessed yet."""
+    from . import prospective
+    print(f"{prospective.export_candidates(conn):,} candidates awaiting validation on .org")
+
+
+def cmd_predict_pending(conn, args) -> None:
+    """Identify not-yet-validated records now; check the answers when they turn green."""
+    from . import models, prospective
+    from .identify import Identifier
+    name = models.storage_name(args.backbone)
+    ids = prospective.unpredicted(conn, name, args.method, args.limit)
+    print(f"{len(ids):,} candidates to predict with {name} / {args.method}")
+    if not ids:
+        return
+    identifier = Identifier(conn, name, args.method)
+    stats = prospective.predict_pending(conn, identifier, models.load_backbone(args.backbone),
+                                        ids, prospective.PhotoFetcher())
+    print(json.dumps(stats, indent=2))
+
+
+def cmd_prospective(conn, args) -> None:
+    from . import prospective
+    print(json.dumps(prospective.report(conn), indent=2))
+
+
 def cmd_scoreboard(conn, args) -> None:
     from . import evaluate
     print_scoreboard(evaluate.scoreboard(conn, args.comparison))
@@ -292,6 +318,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--backbones", default="", help="default: every backbone already embedded")
     p.add_argument("--no-compare", action="store_true")
 
+    sub.add_parser("candidates", help="export records awaiting validation on .org")
+    p = sub.add_parser("predict-pending",
+                       help="identify records awaiting validation, to check once they're green")
+    p.add_argument("--backbone", required=True)
+    p.add_argument("--method", default="hybrid")
+    p.add_argument("--limit", type=int, help="newest candidates first")
+    sub.add_parser("prospective", help="how advance predictions fared once the DNA came in")
+
     p = sub.add_parser("scoreboard", help="saved comparison results")
     p.add_argument("--comparison", help="only this comparison id")
 
@@ -322,6 +356,9 @@ def main(argv: list[str] | None = None) -> int:
         "screen": cmd_screen,
         "inat-baseline": cmd_inat_baseline,
         "refresh": cmd_refresh,
+        "candidates": cmd_candidates,
+        "predict-pending": cmd_predict_pending,
+        "prospective": cmd_prospective,
         "scoreboard": cmd_scoreboard,
         "models": cmd_models,
         "serve": cmd_serve,

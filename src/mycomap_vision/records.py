@@ -153,10 +153,12 @@ def parse_export(text: str) -> list[dict]:
     return rows
 
 
-def fetch_export() -> str:
+def fetch_export(sql: str = EXPORT_SQL) -> str:
+    """Run one read-only statement on the .org route; the answer is a header line and
+    one JSON object per line (see parse_export)."""
     result = subprocess.run(
         ["ssh", config.required("MV_ORG_SQL_SSH_HOST", "the read-only SQL route for records"),
-         " ".join(EXPORT_SQL.split())],
+         " ".join(sql.split())],
         capture_output=True, text=True, encoding="utf-8", check=False,
     )
     if result.returncode != 0:

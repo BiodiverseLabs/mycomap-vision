@@ -141,7 +141,19 @@ async function errorText(res: Response): Promise<string> {
   }
 }
 
+export interface ProspectiveModel {
+  backbone: string;
+  method: string;
+  predicted: number;
+  resolved: number;
+  family_top1: number | null;
+  genus_top1: number | null;
+  species_top1: number | null;
+  mean_species_confidence: number | null;
+}
+
 export const api = {
+  prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
   models: () => getJson<ModelsInfo>("/api/models"),
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
