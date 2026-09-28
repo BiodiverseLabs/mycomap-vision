@@ -8,6 +8,7 @@ import json
 import sys
 
 from . import config, inat, manifest, photos, records
+from .storage import open_store
 
 
 def cmd_export_records(conn, args) -> None:
@@ -23,9 +24,15 @@ def cmd_fetch_inat(conn, args) -> None:
 
 
 def cmd_download_photos(conn, args) -> None:
-    print(f"Downloading {args.size} photos...")
-    stats = photos.download_all(conn, size=args.size, north_america_only=not args.all_regions,
-                                limit=args.limit, max_hours=args.max_hours)
+    store = open_store(args.dest, config.DATA_DIR)
+    checkpoint = None
+    if args.checkpoint_to:
+        from .aws import s3_checkpoint
+        checkpoint = s3_checkpoint(conn, args.checkpoint_to)
+    print(f"Downloading {args.size} photos to {store.location}...")
+    stats = photos.download_all(conn, store, size=args.size,
+                                north_america_only=not args.all_regions, limit=args.limit,
+                                max_hours=args.max_hours, checkpoint=checkpoint)
     stats["gb"] = round(stats["bytes"] / photos.GB, 2)
     print(json.dumps(stats, indent=2))
 
@@ -47,6 +54,18 @@ def status_report(conn) -> dict:
     out["downloaded_gb"] = round((q("select coalesce(sum(bytes), 0) from photos") or 0)
                                  / photos.GB, 2)
     return out
+
+
+def cmd_aws_launch_downloader(conn, args) -> None:
+    from . import aws
+    print(json.dumps(aws.launch_downloader(conn, size=args.size, max_hours=args.max_hours,
+                                           instance_type=args.instance_type), indent=2))
+
+
+def cmd_aws_pull_manifest(conn, args) -> None:
+    from . import aws
+    conn.close()
+    print(f"Manifest replaced from S3: {aws.pull_manifest(config.MANIFEST_PATH)}")
 
 
 def cmd_status(conn, args) -> None:
@@ -99,6 +118,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all-regions", action="store_true")
     p.add_argument("--limit", type=int)
     p.add_argument("--max-hours", type=float)
+    p.add_argument("--dest", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--checkpoint-to", help="s3://bucket/key to copy the manifest to every 10 min")
+
+    p = sub.add_parser("aws-launch-downloader",
+                       help="download photos on a self-terminating EC2 instance into S3")
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--max-hours", type=float, default=120)
+    p.add_argument("--instance-type", default="t3.small")
+
+    sub.add_parser("aws-pull-manifest",
+                   help="replace the local manifest with the one the instance wrote")
 
     sub.add_parser("status", help="counts of records, photos and licenses")
 
@@ -112,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         "export-records": cmd_export_records,
         "fetch-inat": cmd_fetch_inat,
         "download-photos": cmd_download_photos,
+        "aws-launch-downloader": cmd_aws_launch_downloader,
+        "aws-pull-manifest": cmd_aws_pull_manifest,
         "status": cmd_status,
         "contributors": cmd_contributors,
     }[args.command]

@@ -51,7 +51,8 @@ create table if not exists photos (
   first_seen_at    text not null,
   license_checked_at text not null,
   status           text not null default 'pending',  -- pending | done | missing | error
-  local_path       text,                 -- relative to the data dir
+  local_path       text,                 -- relative path inside `store`
+  store            text,                 -- where the file is: a folder or s3://bucket/prefix/
   size             text,
   bytes            integer,
   sha256           text,
@@ -85,4 +86,33 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.execute("pragma journal_mode=wal")
     conn.execute("pragma foreign_keys=on")
     conn.executescript(SCHEMA)
+    _add_missing_columns(conn)
     return conn
+
+
+# Columns added after a manifest may already exist; `create table if not exists`
+# does not add them, so they are added here.
+_LATER_COLUMNS = {"photos": {"store": "text"}}
+
+
+def snapshot(conn: sqlite3.Connection, dest: Path) -> Path:
+    """A consistent copy of the manifest while it is in use (safe to upload)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp")
+    tmp.unlink(missing_ok=True)
+    out = sqlite3.connect(tmp)
+    try:
+        conn.backup(out)
+    finally:
+        out.close()
+    tmp.replace(dest)
+    return dest
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    for table, cols in _LATER_COLUMNS.items():
+        have = {r[1] for r in conn.execute(f"pragma table_info({table})")}
+        for name, decl in cols.items():
+            if name not in have:
+                conn.execute(f"alter table {table} add column {name} {decl}")
+    conn.commit()

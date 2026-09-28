@@ -9,20 +9,20 @@ Hosts are limited separately:
 from __future__ import annotations
 
 import hashlib
-import os
 import sqlite3
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from typing import Callable
 
 import requests
 
 from . import config
 from .licenses import OPEN_DATA_HOST, STATIC_HOST, looks_like_image, photo_relpath, sized_url, url_extension
 from .ratelimit import ByteBudget, MinInterval
+from .storage import PhotoStore
 
 GB = 1024 ** 3
 MAX_ATTEMPTS = 4
@@ -74,13 +74,12 @@ class Result:
 
 
 def download_one(session: requests.Session, gate: HostGate, photo_id: int, source_url: str,
-                 size: str, data_dir: Path, stop: threading.Event) -> Result:
+                 size: str, store: PhotoStore, stop: threading.Event) -> Result:
     try:
         url = sized_url(source_url, size)
     except ValueError as e:
         return Result(photo_id, "error", error=str(e))
     rel = photo_relpath(photo_id, size, url_extension(source_url))
-    dest = data_dir / rel
     with gate.sem:
         while (w := gate.budget_wait()) > 0:
             if stop.wait(min(w, 60)):
@@ -101,19 +100,21 @@ def download_one(session: requests.Session, gate: HostGate, photo_id: int, sourc
         return Result(photo_id, "error", error=f"http {resp.status_code}")
     if not looks_like_image(body[:16]):
         return Result(photo_id, "error", error="not an image")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    tmp.write_bytes(body)
-    os.replace(tmp, dest)
+    try:
+        store.put(rel, body)
+    except Exception as e:  # a failed store write is retried like a failed download
+        return Result(photo_id, "error", error=f"store: {e.__class__.__name__}")
     return Result(photo_id, "done", local_path=rel, bytes=len(body),
                   sha256=hashlib.sha256(body).hexdigest())
 
 
 def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: int | None,
-                   size: str = "medium"):
-    """Photos of green records not yet held at `size`, attempted fewest times first.
+                   size: str = "medium", store_location: str | None = None):
+    """Photos of green records not yet held at `size` (in `store_location`, when given),
+    attempted fewest times first.
 
-    A photo held at another size is queued again, so switching sizes needs no reset.
+    A photo held at another size or in another store is queued again, so switching
+    sizes or moving to S3 needs no reset.
     """
     na = "and r.north_america = 1" if north_america_only else ""
     sql = f"""
@@ -122,20 +123,22 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
       join observation_photos op on op.photo_id = p.photo_id
       join records r on r.observation_id = op.observation_id {na}
       where (p.status in ('pending', 'error') and p.attempts < {MAX_ATTEMPTS})
-         or (p.status = 'done' and p.size is not ?)
+         or (p.status = 'done' and (p.size is not ? or (? is not null and p.store is not ?)))
       order by p.attempts, p.photo_id
     """
     if limit is not None:
         sql += f" limit {int(limit)}"
-    return conn.execute(sql, (size,)).fetchall()
+    return conn.execute(sql, (size, store_location, store_location)).fetchall()
 
 
-def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str) -> None:
+def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str,
+                store_location: str | None = None) -> None:
     if r.status == "done":
         conn.execute(
-            "update photos set status = 'done', local_path = ?, size = ?, bytes = ?, sha256 = ?, "
-            "error = null, downloaded_at = ?, attempts = attempts + 1 where photo_id = ?",
-            (r.local_path, size, r.bytes, r.sha256, now, r.photo_id))
+            "update photos set status = 'done', local_path = ?, store = ?, size = ?, bytes = ?, "
+            "sha256 = ?, error = null, downloaded_at = ?, attempts = attempts + 1 "
+            "where photo_id = ?",
+            (r.local_path, store_location, size, r.bytes, r.sha256, now, r.photo_id))
     elif r.error == "stopped":
         return
     else:
@@ -144,10 +147,15 @@ def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str) -> Non
             (r.status, r.error, r.photo_id))
 
 
-def download_all(conn: sqlite3.Connection, size: str = "medium", north_america_only: bool = True,
-                 limit: int | None = None, max_hours: float | None = None, log=print) -> dict:
+def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "medium",
+                 north_america_only: bool = True, limit: int | None = None,
+                 max_hours: float | None = None,
+                 checkpoint: Callable[[], None] | None = None,
+                 checkpoint_every: float = 600, log=print) -> dict:
+    """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
+    runs every `checkpoint_every` seconds and once at the end."""
     config.ensure_dirs()
-    rows = pending_photos(conn, north_america_only, limit, size)
+    rows = pending_photos(conn, north_america_only, limit, size, store.location)
     policies = default_policies()
     gates: dict[str, HostGate] = {}
     session = requests.Session()
@@ -169,6 +177,7 @@ def download_all(conn: sqlite3.Connection, size: str = "medium", north_america_o
     pending: set[Future] = set()
     it = iter(rows)
     finished = 0
+    last_checkpoint = time.monotonic()
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             def top_up():
@@ -178,7 +187,7 @@ def download_all(conn: sqlite3.Connection, size: str = "medium", north_america_o
                         return
                     pending.add(pool.submit(download_one, session, gate_for(row["host"]),
                                             row["photo_id"], row["source_url"], size,
-                                            config.DATA_DIR, stop))
+                                            store, stop))
             top_up()
             while pending:
                 done, _ = wait(pending, timeout=30, return_when=FIRST_COMPLETED)
@@ -187,7 +196,7 @@ def download_all(conn: sqlite3.Connection, size: str = "medium", north_america_o
                     for fut in done:
                         pending.discard(fut)
                         r = fut.result()
-                        save_result(conn, r, size, now)
+                        save_result(conn, r, size, now, store.location)
                         if r.error == "stopped":
                             continue
                         totals[r.status] += 1
@@ -199,8 +208,14 @@ def download_all(conn: sqlite3.Connection, size: str = "medium", north_america_o
                                 f"{totals['error']:,} errors, {time.monotonic() - started:.0f}s")
                 if deadline and time.monotonic() > deadline:
                     stop.set()
+                if checkpoint and time.monotonic() - last_checkpoint > checkpoint_every:
+                    checkpoint()
+                    last_checkpoint = time.monotonic()
                 top_up()
     except KeyboardInterrupt:
         stop.set()
         log("Stopping; progress so far is saved. Re-run to resume.")
+    finally:
+        if checkpoint:
+            checkpoint()
     return totals

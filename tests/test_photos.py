@@ -8,6 +8,7 @@ from mycomap_vision.photos import (MAX_ATTEMPTS, HostGate, HostPolicy, Result, d
                                    pending_photos, save_result)
 from mycomap_vision.ratelimit import ByteBudget
 from mycomap_vision.records import build_records, save_records
+from mycomap_vision.storage import LocalStore
 
 JPEG = b"\xff\xd8\xff\xe0" + b"x" * 100
 URL = "https://static.inaturalist.org/photos/1234/square.jpeg?99"
@@ -36,7 +37,7 @@ def gate():
 def test_a_downloaded_photo_is_stored_at_medium_size_with_its_hash(tmp_path):
     s = FakeSession(FakeResp(200, JPEG))
     g = gate()
-    r = download_one(s, g, 1234, URL, "medium", tmp_path, threading.Event())
+    r = download_one(s, g, 1234, URL, "medium", LocalStore(tmp_path), threading.Event())
     assert s.urls == ["https://static.inaturalist.org/photos/1234/medium.jpeg"]
     assert r.status == "done" and r.local_path == "photos/medium/234/1234.jpeg"
     assert (tmp_path / r.local_path).read_bytes() == JPEG
@@ -45,21 +46,21 @@ def test_a_downloaded_photo_is_stored_at_medium_size_with_its_hash(tmp_path):
 
 
 def test_a_deleted_photo_is_missing_not_an_error(tmp_path):
-    r = download_one(FakeSession(FakeResp(404)), gate(), 1, URL, "medium", tmp_path,
+    r = download_one(FakeSession(FakeResp(404)), gate(), 1, URL, "medium", LocalStore(tmp_path),
                      threading.Event())
     assert r.status == "missing"
 
 
 def test_an_html_error_page_is_not_saved_as_a_photo(tmp_path):
     r = download_one(FakeSession(FakeResp(200, b"<html>blocked</html>")), gate(), 1, URL,
-                     "medium", tmp_path, threading.Event())
+                     "medium", LocalStore(tmp_path), threading.Event())
     assert r.status == "error" and r.error == "not an image"
     assert not any(tmp_path.rglob("*.jpeg"))
 
 
 def test_rate_limited_answer_pauses_the_host(tmp_path):
     g = gate()
-    r = download_one(FakeSession(FakeResp(429)), g, 1, URL, "medium", tmp_path, threading.Event())
+    r = download_one(FakeSession(FakeResp(429)), g, 1, URL, "medium", LocalStore(tmp_path), threading.Event())
     assert r.status == "error" and r.error == "http 429"
     assert g.pacer._next > 0
 
@@ -70,7 +71,7 @@ def test_an_exhausted_byte_budget_waits_instead_of_downloading(tmp_path):
     stop = threading.Event()
     stop.set()                   # stop immediately rather than wait out the hour
     s = FakeSession(FakeResp(200, JPEG))
-    r = download_one(s, g, 1, URL, "medium", tmp_path, stop)
+    r = download_one(s, g, 1, URL, "medium", LocalStore(tmp_path), stop)
     assert r.error == "stopped" and s.urls == []
 
 
@@ -109,3 +110,25 @@ def test_a_stopped_download_does_not_use_up_an_attempt(conn):
     save_result(conn, Result(11, "error", error="stopped"), "medium", "now")
     row = conn.execute("select status, attempts from photos where photo_id = 11").fetchone()
     assert tuple(row) == ("pending", 0)
+
+
+class FailingStore:
+    location = "s3://b/"
+
+    def put(self, relpath, body):
+        raise ConnectionError("S3 unreachable")
+
+
+def test_a_failed_store_write_is_an_error_to_retry_not_a_done_photo(tmp_path):
+    r = download_one(FakeSession(FakeResp(200, JPEG)), gate(), 1, URL, "large", FailingStore(),
+                     threading.Event())
+    assert r.status == "error" and r.error == "store: ConnectionError"
+
+
+def test_photos_held_locally_are_queued_again_when_the_store_moves_to_s3(conn):
+    _seed(conn)
+    save_result(conn, Result(11, "done", "p", 5, "h"), "large", "now", "C:/data")
+    save_result(conn, Result(12, "done", "p", 5, "h"), "large", "now", "s3://b/")
+    assert [r["photo_id"] for r in pending_photos(conn, True, None, "large", "s3://b/")] == [11]
+    # Without a store given, only the size matters.
+    assert pending_photos(conn, True, None, "large") == []

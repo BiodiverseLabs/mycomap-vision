@@ -15,7 +15,10 @@ of green records?
 
 1. `mv export-records`: pull green records from mycomap.org into the manifest.
 2. `mv fetch-inat`: photo lists, licenses and owners from iNat (1 request/s).
-3. `mv download-photos`: medium (500 px) photos, within iNat's limits.
+3. `mv aws-launch-downloader`: large (1024 px) photos straight into the private S3
+   bucket from a self-terminating EC2 instance, within iNat's limits. See
+   [deploy/aws/README.md](deploy/aws/README.md). (`mv download-photos` does the
+   same into a local folder or any `--dest`.)
 4. Embeddings, baseline and comparison: next.
 
 `mv status` prints counts. `mv contributors [--arr-only]` writes the list of
@@ -38,7 +41,8 @@ Everything lives under `data/` (git-ignored; override with `MV_DATA_DIR`):
 - `manifest.sqlite`: records, iNat observations, photos, observation-photo
   links and license history.
 - `raw/`: the records export and every iNat API answer (gzipped), as fetched.
-- `photos/<size>/<id % 1000>/<photo_id>.<ext>`: the images.
+- `photos/<size>/<id % 1000>/<photo_id>.<ext>`: the images, under the same path in
+  `s3://YOUR-BUCKET/` when they are downloaded to S3.
 - `reports/`: contributor lists.
 
 ### Labels
