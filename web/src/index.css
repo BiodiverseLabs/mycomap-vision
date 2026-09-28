@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Colour tokens copied from mycomap.org (artifacts/macrofungi/src/index.css). */
+:root {
+  --background: 0 0% 100%;
+  --foreground: 20 14.3% 4.1%;
+  --muted: 60 4.8% 95.9%;
+  --muted-foreground: 25 5.3% 44.7%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 20 14.3% 4.1%;
+  --card: 0 0% 100%;
+  --card-foreground: 20 14.3% 4.1%;
+  --border: 20 5.9% 90%;
+  --input: 20 5.9% 90%;
+  --primary: 82 53% 51%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 21 39% 46%;
+  --secondary-foreground: 0 0% 100%;
+  --accent: 60 4.8% 95.9%;
+  --accent-foreground: 24 9.8% 10%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 60 9.1% 97.8%;
+  --ring: 82 53% 51%;
+  --radius: 0.5rem;
+  --myco-green: 82 53% 51%;
+  --myco-brown: 21 39% 46%;
+  --myco-tan: 18 39% 46%;
+  --myco-tan-light: 25 45% 65%;
+}
+
+.dark {
+  --background: 220 15% 13%;
+  --foreground: 210 20% 92%;
+  --muted: 220 14% 18%;
+  --muted-foreground: 215 12% 60%;
+  --popover: 220 15% 16%;
+  --popover-foreground: 210 20% 92%;
+  --card: 220 14% 17%;
+  --card-foreground: 210 20% 92%;
+  --border: 220 12% 24%;
+  --input: 220 12% 24%;
+  --secondary: 220 14% 22%;
+  --secondary-foreground: 210 20% 92%;
+  --accent: 220 14% 20%;
+  --accent-foreground: 210 20% 92%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+/* Scientific names: italic, as on mycomap.org. */
+.sci {
+  @apply font-species italic;
+}

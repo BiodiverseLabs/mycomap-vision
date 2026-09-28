@@ -128,6 +128,12 @@ def cmd_models(conn, args) -> None:
     print("Methods: " + ", ".join(evaluate.METHODS))
 
 
+def cmd_serve(conn, args) -> None:
+    from .api import serve
+    conn.close()
+    serve(args.host, args.port)
+
+
 def cmd_status(conn, args) -> None:
     print(json.dumps(status_report(conn), indent=2))
 
@@ -215,6 +221,10 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
+    p = sub.add_parser("serve", help="run the API for the frontend")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8010)
+
     sub.add_parser("status", help="counts of records, photos and licenses")
 
     p = sub.add_parser("contributors", help="write the contributor list as CSV")
@@ -233,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         "compare": cmd_compare,
         "scoreboard": cmd_scoreboard,
         "models": cmd_models,
+        "serve": cmd_serve,
         "status": cmd_status,
         "contributors": cmd_contributors,
     }[args.command]

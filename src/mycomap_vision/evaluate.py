@@ -192,6 +192,18 @@ def top_labels(scores: np.ndarray, names: list[str], k: int) -> list[str]:
     return [names[i] for i in idx[np.argsort(-scores[idx])]]
 
 
+# Candidate temperatures for turning scores into confidence (softmax(score / T)).
+T_GRID = np.geomspace(0.001, 0.3, 60)
+
+
+def nll_by_temperature(scores: np.ndarray, true_idx: int) -> np.ndarray:
+    """Negative log-likelihood of the true label under softmax(scores / T), for each T."""
+    z = scores[None, :].astype(np.float64) / T_GRID[:, None]
+    m = z.max(axis=1, keepdims=True)
+    lse = (m + np.log(np.exp(z - m).sum(axis=1, keepdims=True)))[:, 0]
+    return lse - z[:, true_idx]
+
+
 def bucket_of(n: int) -> str:
     for lo, hi, label in BUCKETS:
         if lo <= n <= hi:
@@ -210,6 +222,11 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     model = METHODS[method]()
     model.fit(vectors, index)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
+    # Calibration: summed NLL per candidate temperature, over test records whose
+    # true label is in the reference set (a novel species has no probability to give).
+    position = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
+    nll = {rank: np.zeros(len(T_GRID)) for rank in RANKS}
+    n_cal = Counter()
     for rec in test:
         rows = rec.photo_rows[:1] if first_photo_only else rec.photo_rows
         scores = model.species_scores(vectors[rows])
@@ -218,7 +235,11 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             t = truth(rec, rank)
             if not t:
                 continue
-            top = top_labels(rank_scores(scores, index, rank), names[rank], top_k)
+            rs = rank_scores(scores, index, rank)
+            if t in position[rank]:
+                nll[rank] += nll_by_temperature(rs, position[rank][t])
+                n_cal[rank] += 1
+            top = top_labels(rs, names[rank], top_k)
             for key in ("all", b):
                 c = tally[rank][key]
                 c["n"] += 1
@@ -229,7 +250,27 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
         out[rank] = {k: {"n": c["n"], "top1": round(c["top1"] / c["n"], 4),
                          f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
                      for k, c in tally[rank].items() if c["n"]}
+    out["calibration"] = {
+        rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
+               "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
+        for rank in RANKS if n_cal[rank]}
     return out
+
+
+def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> dict | None:
+    """The newest comparison's fitted temperatures for this model, with where they came from."""
+    conn.executescript(SCOREBOARD_SCHEMA)
+    row = conn.execute("select id, comparison_id, report_json from eval_runs "
+                       "where backbone = ? and method = ? order by id desc limit 1",
+                       (backbone, method)).fetchone()
+    if not row:
+        return None
+    cal = json.loads(row[2]).get("all_photos", {}).get("calibration")
+    if not cal:
+        return None
+    return {"run_id": row[0], "comparison_id": row[1],
+            "temperatures": {rank: c["temperature"] for rank, c in cal.items()},
+            "n": {rank: c["n"] for rank, c in cal.items()}}
 
 
 SCOREBOARD_SCHEMA = """

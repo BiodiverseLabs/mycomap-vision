@@ -80,3 +80,28 @@ def test_extra_photos_change_the_answer_only_through_their_own_similarity():
 def test_reference_count_buckets():
     assert [bucket_of(n) for n in (0, 1, 2, 4, 30, 31)] == [
         "novel (0 refs)", "1 ref", "2 refs", "3-5 refs", "6-30 refs", "31+ refs"]
+
+
+def test_calibration_is_sharper_for_a_reliable_model_than_for_a_guessing_one():
+    from mycomap_vision.evaluate import T_GRID
+    rng = np.random.default_rng(0)
+    dim, n_species = 16, 20
+    centres = rng.normal(size=(n_species, dim))
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+
+    def world(noise):
+        vecs, ref, test = [], [], []
+        for s in range(n_species):
+            for j in range(3):
+                v = centres[s] + noise * rng.normal(size=dim)
+                vecs.append(v / np.linalg.norm(v))
+                recs = ref if j < 2 else test
+                recs.append(rec(f"{s}-{j}", f"G{s} sp{s}", [len(vecs) - 1],
+                                "2026-01-01" if j < 2 else "2026-09-20", family=f"F{s}"))
+        return np.asarray(vecs, dtype=np.float16), ref, test
+
+    sharp = evaluate(*world(0.05))["calibration"]["species"]
+    flat = evaluate(*world(3.0))["calibration"]["species"]
+    assert sharp["n"] == flat["n"] == n_species
+    assert sharp["temperature"] < flat["temperature"]
+    assert T_GRID[0] <= sharp["temperature"] <= T_GRID[-1]

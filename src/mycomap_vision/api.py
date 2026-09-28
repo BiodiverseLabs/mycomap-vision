@@ -1,0 +1,182 @@
+"""HTTP API for the frontend (and later mycomap.org).
+
+Run: `.venv/Scripts/mv serve` (defaults to http://127.0.0.1:8010).
+Read-only over the manifest; identification runs on the local GPU when there is one.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Callable
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
+from . import config, evaluate, models
+from .embed import SCHEMA as EMBED_SCHEMA
+from .embed import decode
+from .identify import Identifier
+
+MAX_PHOTOS = 10
+MAX_BYTES = 25 * 1024 * 1024
+NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
+
+
+def open_manifest(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
+    conn.executescript(EMBED_SCHEMA)
+    conn.executescript(evaluate.SCOREBOARD_SCHEMA)
+    return conn
+
+
+WEB_DIST = config.REPO_ROOT / "web" / "dist"
+
+
+def create_app(manifest_path: Path | None = None, embeddings_root: Path | None = None,
+               backbone_loader: Callable[[str], object] = models.load_backbone,
+               web_dist: Path | None = WEB_DIST) -> FastAPI:
+    app = FastAPI(title="MycoMap Vision", version="0.1")
+    conn = open_manifest(manifest_path or config.MANIFEST_PATH)
+    db_lock = threading.Lock()
+    gpu_lock = threading.Lock()
+    identifiers: dict[tuple[str, str], tuple[tuple, Identifier]] = {}
+    backbones: dict[str, object] = {}
+
+    def q(sql: str, params: tuple = ()):
+        with db_lock:
+            return conn.execute(sql, params).fetchall()
+
+    def embedded_counts() -> dict[str, int]:
+        return dict(q("select backbone, count(*) from embeddings group by 1"))
+
+    def identifier(backbone: str, method: str) -> Identifier:
+        n = embedded_counts().get(backbone, 0)
+        with db_lock:
+            cal = evaluate.latest_calibration(conn, backbone, method)
+        version = (n, cal["run_id"] if cal else None)
+        cached = identifiers.get((backbone, method))
+        if cached and cached[0] == version:
+            return cached[1]
+        root = embeddings_root / backbone if embeddings_root else None
+        with db_lock:
+            ident = Identifier(conn, backbone, method, root, calibration=cal)
+        identifiers[(backbone, method)] = (version, ident)
+        return ident
+
+    @app.get("/api/health")
+    def health():
+        return {"ok": True, "code_version": config.code_version()}
+
+    @app.get("/api/models")
+    def list_models():
+        counts = embedded_counts()
+        out = []
+        for name, alias in models.ALIASES.items():
+            out.append({"backbone": name, "spec": alias.spec, "note": alias.note,
+                        "embedded_photos": counts.pop(name, 0)})
+        for name, n in counts.items():
+            out.append({"backbone": name, "spec": name, "note": "", "embedded_photos": n})
+        return {"backbones": out, "methods": list(evaluate.METHODS),
+                "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
+
+    @app.get("/api/stats")
+    def stats():
+        one = lambda sql: q(sql)[0][0]  # noqa: E731
+        name_counts = q("select count(*) from records where north_america = 1 "
+                        "and label_conflict = 0 and coalesce(scientific_name, '') <> '' "
+                        "group by scientific_name")
+        buckets = {label: 0 for _, _, label in NAME_BUCKETS}
+        for (n,) in name_counts:
+            for lo, hi, label in NAME_BUCKETS:
+                if lo <= n <= hi:
+                    buckets[label] += 1
+        return {
+            "records": one("select count(*) from records"),
+            "records_north_america": one("select count(*) from records where north_america = 1"),
+            "label_conflicts": one("select count(*) from records where label_conflict = 1"),
+            "inat_ok": one("select count(*) from inat_observations where status = 'ok'"),
+            "inat_missing": one("select count(*) from inat_observations where status = 'missing'"),
+            "photos": one("select count(*) from photos"),
+            "photos_by_status": dict(q("select status, count(*) from photos group by 1")),
+            "photos_by_license": dict(q("select license_class, count(*) from photos group by 1")),
+            "photos_by_size": dict(q("select size, count(*) from photos where status = 'done' "
+                                     "group by 1")),
+            "contributors_arr": one("select count(distinct owner_login) from photos "
+                                    "where license_class = 'arr'"),
+            "embedded": embedded_counts(),
+            "names": len(name_counts),
+            "names_by_records": buckets,
+        }
+
+    @app.get("/api/scoreboard")
+    def scoreboard():
+        with db_lock:
+            return {"runs": evaluate.scoreboard(conn)}
+
+    @app.get("/api/scoreboard/{run_id}")
+    def scoreboard_run(run_id: int):
+        with db_lock:
+            report = evaluate.run_report(conn, run_id)
+        if report is None:
+            raise HTTPException(404, "no such run")
+        return report
+
+    @app.post("/api/identify")
+    async def identify(photos: list[UploadFile] = File(...),
+                       models_: str = Form("", alias="models")):
+        if not photos:
+            raise HTTPException(400, "add at least one photo")
+        if len(photos) > MAX_PHOTOS:
+            raise HTTPException(400, f"at most {MAX_PHOTOS} photos")
+        images = []
+        for f in photos:
+            body = await f.read()
+            if len(body) > MAX_BYTES:
+                raise HTTPException(413, f"{f.filename} is over 25 MB")
+            try:
+                images.append(decode(body))
+            except Exception:
+                raise HTTPException(400, f"{f.filename} is not an image we can read")
+        ready = [b for b, n in embedded_counts().items() if n]
+        wanted = [m.strip() for m in models_.split(",") if m.strip()]
+        if not wanted:
+            if not ready:
+                raise HTTPException(503, "no model has embeddings yet")
+            wanted = [f"{ready[0]}/nearest"]
+        results = []
+        for spec in wanted:
+            backbone, _, method = spec.partition("/")
+            method = method or "nearest"
+            if backbone not in ready:
+                raise HTTPException(400, f"{backbone!r} has no embeddings")
+            if method not in evaluate.METHODS:
+                raise HTTPException(400, f"unknown method {method!r}")
+            with gpu_lock:
+                ident = identifier(backbone, method)
+                if backbone not in backbones:
+                    backbones[backbone] = backbone_loader(backbone)
+                results.append(ident.identify(backbones[backbone], images))
+        return {"results": results}
+
+    # The built frontend (web/dist), when present: files as-is, any other
+    # non-API path gets index.html so client-side routes work on reload.
+    if web_dist and (web_dist / "index.html").exists():
+        root = web_dist.resolve()
+
+        @app.get("/{path:path}", include_in_schema=False)
+        def site(path: str):
+            if path.startswith("api/"):
+                raise HTTPException(404, "no such API route")
+            target = (root / path).resolve()
+            if path and target.is_file() and target.is_relative_to(root):
+                return FileResponse(target)
+            return FileResponse(root / "index.html")
+
+    return app
+
+
+def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
+    import uvicorn
+    uvicorn.run(create_app(), host=host, port=port)
