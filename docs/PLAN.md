@@ -82,6 +82,24 @@ Later: photo view tags (cap, underside, stem, habitat) with "add an underside
 photo" hints, map for location, account-free sharing of a result, and the
 production deploy at `vision.mycomap.org` on its own Lightsail box.
 
+## Findings so far (8,000-record sample, 2026-09-28)
+
+Small test sets (68-91 records): read as direction, not precision.
+
+- BioCLIP 2 is far ahead of DINOv2-B (species 25% vs 10%, genus 62% vs 31%).
+- iNat's own model on the same 68 records: 27.9% species photo-only, 29.4% with
+  location; BioCLIP 2 (species average), frozen and with only 5% of the reference
+  data, reached 25.0% species and a higher family score (71.4% vs 70.6%).
+- Trained heads lose on this sample: nearest specimen 24% species; plain linear
+  classifier 13%; balanced-softmax linear 3%; hybrid 14-16%. Species here have a
+  median of 4 photos, too few for a classifier to add much. Balanced softmax was
+  the wrong default (test records arrive at real frequencies), so plain training
+  is now the default. Retest heads on the full data, where ~1,200 species have
+  30+ records, on the AWS GPU trainer.
+- The range-and-season score lifted the trained methods' species accuracy a
+  little but cut the hybrid's genus accuracy (49.5% to 42.9%); needs its own test
+  (weight, cap, and applied to nearest-specimen log-probabilities) on more data.
+
 ## Phase 1: a better identifier
 
 - Photo view tagging: a cheap LLM labels a seed set, a small head on the

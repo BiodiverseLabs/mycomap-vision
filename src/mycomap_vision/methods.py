@@ -6,7 +6,7 @@ photos. `index` is an evaluate.Index: reference photo rows grouped by species.
 
 - nearest       the best-matching DNA-verified specimen (no training)
 - species-mean  the species' average vector (no training)
-- linear        a trained linear classifier, frequency-neutral (balanced softmax)
+- linear        a trained linear classifier (balanced softmax available, off by default)
 - hybrid        linear + nearest: the classifier where data is rich, the specimen
                 lookup keeping single-record species in play
 """
@@ -103,8 +103,13 @@ class LinearHead:
 
     Measured on 300 photos of one species against 3 of another, at a photo exactly
     between them, balanced softmax cut the common species' lead in log-probability
-    from 11 to 2. It doesn't reach parity with so few photos; the hybrid's
-    nearest-specimen half covers the rest.
+    from 11 to 2.
+
+    But on the real 8,000-record sample (4,317 species, median 4 photos each) it
+    cost far more than it gave: species top-1 3% balanced against 13% plain, and 0%
+    against 36% for species with 6-30 records, because test records arrive at real
+    frequencies. So plain training is the default; the nearest-specimen lookup is
+    what keeps rare species in play. Retest on the full data (docs/PLAN.md).
     """
     name = "linear"
     scale = 16.0          # inputs are unit vectors; this lets logits get decisive
@@ -113,7 +118,7 @@ class LinearHead:
     lr = 0.05
     weight_decay = 1e-4
     seed = 0
-    balanced = True       # False = plain softmax (kept for comparison and tests)
+    balanced = False      # True = balanced softmax (see the class notes for why it's off)
     device = "auto"       # "auto": the GPU when there is one, else numpy on the CPU
 
     def fit(self, vectors: np.ndarray, index, state: dict | None = None) -> None:
