@@ -26,12 +26,31 @@ export interface Specimen {
   species_url: string;
 }
 
+/** Where one photo, scored on its own, puts the answer from all the photos together. */
+export interface OverallPlace {
+  name: string;
+  /** 1 = this photo alone agrees with the overall answer. */
+  position: number;
+  confidence: number;
+}
+
+/** What the model says from one of your photos on its own. */
+export interface PhotoResult {
+  /** Index into the photos sent (0-based). */
+  photo: number;
+  ranks: Record<Rank, Candidate[]>;
+  overall_top: Record<Rank, OverallPlace | null>;
+  specimens: Specimen[];
+}
+
 export interface IdentifyResult {
   model: { backbone: string; method: string };
   reference: { records: number; species: number; photos: number };
   photos: number;
+  /** The answer from all photos together (each photo's scores averaged). */
   ranks: Record<Rank, Candidate[]>;
   specimens: Specimen[];
+  per_photo: PhotoResult[];
   hints: string[];
   species_url: string | null;
   confidence_note: string;
