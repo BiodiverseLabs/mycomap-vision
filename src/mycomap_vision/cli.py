@@ -93,7 +93,8 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         size=args.size, max_hours=args.max_hours,
                                         instance_type=args.instance_type,
                                         test_days=args.test_days,
-                                        finetune=_split(args.finetune)), indent=2))
+                                        finetune=_split(args.finetune),
+                                        sample_records=args.sample_records), indent=2))
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -107,7 +108,7 @@ def cmd_aws_train_job(conn, args) -> None:
     out = trainer.run_job(conn, store, _split(args.backbones), _split(args.methods), upload,
                           args.run_id, size=args.size, test_days=args.test_days,
                           batch_size=args.batch_size, readers=args.readers,
-                          finetune=_split(args.finetune))
+                          finetune=_split(args.finetune), sample_records=args.sample_records)
     print(json.dumps(out, indent=2))
     if out["comparison_id"]:
         from . import evaluate
@@ -360,6 +361,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--finetune", default="",
                    help="backbones (also in --backbones) to fine-tune on the reference records")
+    p.add_argument("--sample-records", type=int,
+                   help="rehearsal: run everything on this many random records only "
+                        "(its results can't be merged home)")
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
                                              "upload the results to runs/<run>/")
@@ -372,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--readers", type=int, default=16, help="parallel photo reads from S3")
     p.add_argument("--finetune", default="")
+    p.add_argument("--sample-records", type=int)
 
     p = sub.add_parser("finetune", help="fine-tune a backbone's last blocks on the reference "
                                         "records (smoke test here; full runs on AWS)")

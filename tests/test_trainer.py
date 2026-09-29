@@ -79,6 +79,24 @@ def test_a_run_where_nothing_embedded_still_uploads_a_result(conn, tmp_path):
     assert "runs/r1/result.json" in uploads
 
 
+def test_a_rehearsal_runs_everything_on_a_few_records_and_is_never_merged_home(conn,
+                                                                             tmp_path):
+    store = seed_two_species(conn, tmp_path)
+    out = trainer.run_job(conn, store, ["timm:a"], ["nearest"], lambda p, k: None, "r1",
+                          loader=const_loader, data_dir=tmp_path / "inst", sample_records=3,
+                          log=lambda s: None)
+    assert out["sample_records"] == 3
+    assert conn.execute("select count(*) from records").fetchone()[0] == 3
+    assert conn.execute("select count(*) from embeddings").fetchone()[0] == 3   # 1 photo each
+    home = connect(tmp_path / "home" / "manifest.sqlite")
+    with pytest.raises(ValueError, match="rehearsal"):
+        trainer.merge_results(home, tmp_path / "inst" / "manifest-out.sqlite",
+                              tmp_path / "inst" / "embeddings", out, data_dir=tmp_path / "home")
+    ud = aws.render_trainer_user_data("r", ["bioclip-2"], ["nearest"], 1, "bkt",
+                                      sample_records=400)
+    assert ud.rstrip().endswith("--sample-records 400")
+
+
 # --- launching ---------------------------------------------------------------
 
 def test_the_trainer_always_shuts_itself_down_and_uses_its_own_manifest_copy():

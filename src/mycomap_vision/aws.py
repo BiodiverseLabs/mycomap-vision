@@ -268,13 +268,14 @@ aws s3 cp "s3://$BUCKET/$RUN/manifest-in.sqlite" data/manifest.sqlite
 export HF_HOME=/opt/mv/hf
 MV_DATA_DIR=/opt/mv/data PYTHONUNBUFFERED=1 timeout {job_seconds} .venv/bin/mv aws-train-job \\
   --run-id {run_id} --backbones {backbones} --methods {methods} --size {size} \\
-  --test-days {test_days} --source "s3://$BUCKET"{finetune_arg}
+  --test-days {test_days} --source "s3://$BUCKET"{finetune_arg}{sample_arg}
 """
 
 
 def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[str],
                              max_hours: float, bucket_name: str, size: str = "large",
-                             test_days: int = 28, finetune: list[str] | None = None) -> str:
+                             test_days: int = 28, finetune: list[str] | None = None,
+                             sample_records: int | None = None) -> str:
     # The job is killed at max_hours; the backstop leaves 30 minutes on top for setup
     # and the log upload.
     return TRAINER_USER_DATA.format(
@@ -282,7 +283,8 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
         backbones=",".join(backbones), methods=",".join(methods), size=size,
         test_days=test_days,
-        finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "")
+        finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "",
+        sample_arg=f" --sample-records {int(sample_records)}" if sample_records else "")
 
 
 def trainer_instance_args(run_id: str, ami: str, user_data: str, instance_type: str,
@@ -331,7 +333,8 @@ def check_trainer_request(conn, backbones: list[str], methods: list[str], size: 
 
 def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "large",
                    max_hours: float = 12, instance_type: str = TRAINER_INSTANCE_TYPE,
-                   test_days: int = 28, finetune: list[str] | None = None, log=print) -> dict:
+                   test_days: int = 28, finetune: list[str] | None = None,
+                   sample_records: int | None = None, log=print) -> dict:
     from .models import storage_name
     b = bucket()
     photos = check_trainer_request(conn, backbones, methods, size, f"s3://{b}/", finetune)
@@ -352,12 +355,13 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     names = [storage_name(x) for x in backbones]
     ft = [storage_name(x) for x in finetune or []]
     user_data = render_trainer_user_data(run_id, names, methods, max_hours, b, size, test_days,
-                                         ft)
+                                         ft, sample_records)
     resp = ec2.run_instances(**trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb))
     return {"run_id": run_id, "instance_id": resp["Instances"][0]["InstanceId"],
             "instance_type": instance_type, "region": region(), "backbones": names,
-            "finetune": ft, "methods": methods, "log": f"s3://{b}/runs/{run_id}/train.log"}
+            "finetune": ft, "methods": methods, "sample_records": sample_records,
+            "log": f"s3://{b}/runs/{run_id}/train.log"}
 
 
 def pull_trainer(conn, run_id: str, log=print) -> dict:

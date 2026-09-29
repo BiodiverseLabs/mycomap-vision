@@ -12,6 +12,7 @@ deleted, and the run's scoreboard rows are added once.
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import sqlite3
 from pathlib import Path
@@ -38,6 +39,27 @@ def clear_embeddings(conn: sqlite3.Connection) -> int:
         return conn.execute("delete from embeddings").rowcount
 
 
+def restrict_to_sample(conn: sqlite3.Connection, n: int, store_location: str, size: str,
+                       seed: int = 0) -> int:
+    """Keep only n random records (with photos in the store) in this manifest copy, for a
+    cheap rehearsal of the whole run. Only for the instance's own copy: it deletes the
+    other records. Returns how many were kept."""
+    ids = [r[0] for r in conn.execute(
+        "select distinct r.observation_id from records r "
+        "join observation_photos op on op.observation_id = r.observation_id "
+        "join photo_copies c on c.photo_id = op.photo_id "
+        "where c.store = ? and c.size = ? and r.north_america = 1 and r.label_conflict = 0 "
+        "order by r.observation_id", (store_location, size))]
+    keep = random.Random(seed).sample(ids, min(n, len(ids)))
+    with conn:
+        conn.execute("create temp table if not exists keep_records (id text primary key)")
+        conn.execute("delete from keep_records")
+        conn.executemany("insert into keep_records values (?)", [(i,) for i in keep])
+        conn.execute("delete from records where observation_id not in "
+                     "(select id from keep_records)")
+    return len(keep)
+
+
 def finetuned_name(base: str, run_id: str) -> str:
     return f"{base}-ft-{run_id}"
 
@@ -46,7 +68,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             upload: Callable[[Path, str], None], run_id: str, size: str = "large",
             test_days: int = 28, batch_size: int = 64, readers: int = 16,
             loader=None, data_dir: Path | None = None, finetune: list[str] | None = None,
-            finetuner=None, log=print) -> dict:
+            finetuner=None, sample_records: int | None = None, log=print) -> dict:
     """Embed, fine-tune, compare and upload. `upload(local_path, key)` copies one file to
     the bucket. `finetune` names backbones (also in `backbones`) to fine-tune;
     `finetuner(conn, base, name, embeddings_root, models_dir)` does it (default:
@@ -56,6 +78,10 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     prefix = run_prefix(run_id)
     cleared = clear_embeddings(conn)
     log(f"cleared {cleared:,} embedding rows brought from the laptop")
+    kept = None
+    if sample_records:
+        kept = restrict_to_sample(conn, sample_records, store.location, size)
+        log(f"REHEARSAL: kept {kept:,} random records; results won't be merged home")
 
     def upload_backbone(name: str) -> None:
         files = sorted(p for p in (root / name).glob("*.npy"))
@@ -106,6 +132,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                                                     "final_loss")}
                          for n, m in finetuned.items()},
            "comparison_id": comparison["comparison_id"] if comparison else None,
+           "sample_records": kept,
            "code_version": config.code_version()}
     snap = snapshot(conn, data_dir / "manifest-out.sqlite")
     upload(snap, f"{prefix}manifest-out.sqlite")
@@ -136,6 +163,9 @@ def merge_results(conn: sqlite3.Connection, remote_path: Path, staged: Path, res
     """
     data_dir = data_dir or config.DATA_DIR
     run_id = result["run_id"]
+    if result.get("sample_records"):
+        raise ValueError(f"run {run_id} was a rehearsal on {result['sample_records']:,} records; "
+                         "its results are not merged (they would replace real embeddings)")
     conn.executescript(EMBED_SCHEMA)
     conn.executescript(evaluate.SCOREBOARD_SCHEMA)
     conn.executescript(evaluate.FINETUNE_SCHEMA)
