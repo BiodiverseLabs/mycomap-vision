@@ -281,6 +281,25 @@ def cmd_status(conn, args) -> None:
     print(json.dumps(status_report(conn), indent=2))
 
 
+def cmd_permissions(conn, args) -> None:
+    """Photographers' answers from mycomap.org: pull them now, and/or show where they stand."""
+    from . import permissions
+    if args.sync:
+        try:
+            print(json.dumps(permissions.sync(conn), indent=2))
+        except permissions.PermissionSyncError as e:
+            print(f"sync failed: {e}", file=sys.stderr)
+            sys.exit(1)
+    print(json.dumps(permissions.status_report(conn), indent=2))
+
+
+def cmd_refresh_licenses(conn, args) -> None:
+    print(f"Re-reading iNat licences for records last checked over {args.older_than_hours} h ago "
+          "(1 request/s)...")
+    print(json.dumps(inat.refresh_licenses(conn, older_than_hours=args.older_than_hours,
+                                           limit=args.limit), indent=2))
+
+
 CONTRIBUTORS_SQL = """
 select p.owner_login, max(p.owner_name) as owner_name, p.owner_user_id,
        count(*) as photos,
@@ -466,6 +485,15 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="counts of records, photos and licenses")
 
+    p = sub.add_parser("permissions", help="photographers' answers from mycomap.org "
+                                           "(needs MV_ORG_BASE_URL and MV_ORG_VISION_KEY)")
+    p.add_argument("--sync", action="store_true", help="pull the answers now")
+
+    p = sub.add_parser("refresh-licenses", help="re-read photo licences from iNat for records "
+                                                "last checked long ago (mv serve can do this daily)")
+    p.add_argument("--older-than-hours", type=float, default=24)
+    p.add_argument("--limit", type=int, help="at most this many records, oldest first")
+
     p = sub.add_parser("contributors", help="write the contributor list as CSV")
     p.add_argument("--arr-only", action="store_true",
                    help="only people with all-rights-reserved photos")
@@ -497,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
         "models": cmd_models,
         "serve": cmd_serve,
         "status": cmd_status,
+        "permissions": cmd_permissions,
+        "refresh-licenses": cmd_refresh_licenses,
         "contributors": cmd_contributors,
     }[args.command]
     handler(conn, args)

@@ -394,6 +394,10 @@ function SpecimenCard({ s, files }: { s: Specimen; files: File[] }) {
       <a href={s.inat_url} target="_blank" rel="noreferrer" className="block aspect-square bg-muted">
         {s.photo_url ? (
           <img src={s.photo_url} alt={s.species} loading="lazy" className="h-full w-full object-cover" />
+        ) : s.photo_hidden ? (
+          <span className="flex h-full w-full items-center justify-center p-3 text-center text-xs text-muted-foreground">
+            Photo not shown: the photographer hasn't given permission. View it on iNaturalist.
+          </span>
         ) : null}
       </a>
       <div className="p-2 space-y-1">

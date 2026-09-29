@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from typing import Callable
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,6 +98,19 @@ class PhotoInfo:
     source_url: str
     license_class: str
     owner_login: str | None
+    owner_user_id: int | None = None
+
+
+def only_open_licences(info: PhotoInfo) -> bool:
+    """The showing rule when no photographers' answers are at hand: CC photos only."""
+    return info.license_class in ("open", "nc")
+
+
+def photo_info_rows(rows) -> dict[int, PhotoInfo]:
+    return {int(pid): PhotoInfo(url, lic, owner, uid) for pid, url, lic, owner, uid in rows}
+
+
+PHOTO_INFO_SQL = "select photo_id, source_url, license_class, owner_login, owner_user_id from photos"
 
 
 class Identifier:
@@ -144,17 +158,20 @@ class Identifier:
 
     @staticmethod
     def _photo_info(conn: sqlite3.Connection, photo_ids: set[int]) -> dict[int, PhotoInfo]:
-        out = {}
-        rows = conn.execute("select photo_id, source_url, license_class, owner_login from photos")
-        for pid, url, lic, owner in rows:
-            if pid in photo_ids:
-                out[pid] = PhotoInfo(url, lic, owner)
-        return out
+        infos = photo_info_rows(conn.execute(PHOTO_INFO_SQL))
+        return {pid: info for pid, info in infos.items() if pid in photo_ids}
 
     def identify_vectors(self, query: np.ndarray, top_k: int = 5,
-                         n_specimens: int = 6, context=None) -> dict:
+                         n_specimens: int = 6, context=None,
+                         photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
+                         may_show: Callable[[PhotoInfo], bool] = only_open_licences) -> dict:
         """Query photo vectors (already normalised) -> ranks, specimens, hints.
-        `context` (place and date) is used by methods with a range-and-season score."""
+        `context` (place and date) is used by methods with a range-and-season score.
+
+        A specimen's photo is shown only if `may_show` allows it (permissions.py:
+        CC licence, or the owner's grant). `photo_lookup` reads licence and owner
+        now rather than when the model was built, so a licence change on iNat or a
+        withdrawal on mycomap.org applies to the next identification."""
         if self.uses_context:
             scores = self.model.species_scores(query, context)
         else:
@@ -176,23 +193,27 @@ class Identifier:
         sims = self.nearest.photo_sims(query)                 # (q, reference photos)
         per_record = np.maximum.reduceat(sims, self.rec_starts, axis=1)   # (q, records)
         record_score = per_record.mean(axis=0)
-        specimens = []
+        picked = []
         for ri in np.argsort(-record_score)[:n_specimens].tolist():
             lo = int(self.rec_starts[ri])
             hi = int(self.rec_starts[ri + 1]) if ri + 1 < len(self.rec_starts) else sims.shape[1]
             block = sims[:, lo:hi]
             q_best, c_best = np.unravel_index(int(block.argmax()), block.shape)
             col = lo + int(c_best)
-            rec = self.col_record[col]
-            pid = int(self.col_photo[col])
-            info = self.photos.get(pid)
+            picked.append((ri, int(q_best), self.col_record[col], int(self.col_photo[col])))
+        infos = photo_lookup([p for *_, p in picked]) if photo_lookup else self.photos
+        specimens = []
+        for ri, q_best, rec, pid in picked:
+            info = infos.get(pid)
+            shown = info is not None and may_show(info)
             specimens.append({
                 "observation_id": rec.observation_id,
                 "species": rec.species, "genus": rec.genus, "family": rec.family,
                 "similarity": round(float(record_score[ri]), 4),
-                "matched_query_photo": int(q_best),
-                "photo_url": sized_url(info.source_url, "medium") if info else None,
-                "photo_owner": info.owner_login if info else None,
+                "matched_query_photo": q_best,
+                "photo_url": sized_url(info.source_url, "medium") if shown else None,
+                "photo_owner": info.owner_login if shown else None,
+                "photo_hidden": info is not None and not shown,
                 "inat_url": INAT_OBS_URL + rec.observation_id,
                 "species_url": ORG_SPECIES_URL + quote(rec.species),
             })
@@ -225,7 +246,9 @@ class Identifier:
                 f"{self.calibration['comparison_id']}). Early and approximate: it improves as "
                 "the reference set and weekly tests grow.")
 
-    def identify(self, backbone_model, images: list, top_k: int = 5, context=None) -> dict:
+    def identify(self, backbone_model, images: list, top_k: int = 5, context=None,
+                 photo_lookup=None, may_show: Callable[[PhotoInfo], bool] = only_open_licences) -> dict:
         prepare = getattr(backbone_model, "prepare", None) or (lambda im: im)
         vecs = normalise(backbone_model.encode([prepare(im) for im in images]))
-        return self.identify_vectors(vecs, top_k, context=context)
+        return self.identify_vectors(vecs, top_k, context=context, photo_lookup=photo_lookup,
+                                     may_show=may_show)

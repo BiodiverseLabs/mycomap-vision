@@ -19,13 +19,13 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, ImageOps
 
-from . import config, evaluate, models
+from . import config, evaluate, inat, models, permissions
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge, check_image_size)
 from .exif import place_and_date
-from .identify import Identifier
+from .identify import PHOTO_INFO_SQL, Identifier, photo_info_rows
 from .prior import Context
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
 
@@ -34,7 +34,32 @@ def open_manifest(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.executescript(EMBED_SCHEMA)
     conn.executescript(evaluate.SCOREBOARD_SCHEMA)
+    permissions.ensure_schema(conn)
     return conn
+
+
+def _setting_number(name: str) -> float | None:
+    raw = config.setting(name)
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
+
+
+def start_background(name: str, every_seconds: float, work: Callable[[], None],
+                     log=print) -> threading.Thread:
+    """Run `work` now and then every `every_seconds`, on a daemon thread. A failure
+    is logged and retried next time; it never stops the server."""
+    def loop():
+        while True:
+            try:
+                work()
+            except Exception as e:  # noqa: BLE001 - keep serving whatever went wrong
+                log(f"[{name}] {type(e).__name__}: {e}")
+            threading.Event().wait(every_seconds)
+    t = threading.Thread(target=loop, name=name, daemon=True)
+    t.start()
+    return t
 
 
 WEB_DIST = config.REPO_ROOT / "web" / "dist"
@@ -79,7 +104,11 @@ def fill_context(entered: Context, from_photos: list[tuple]) -> tuple[Context, d
 
 def create_app(manifest_path: Path | None = None, embeddings_root: Path | None = None,
                backbone_loader: Callable[[str], object] = models.load_backbone,
-               web_dist: Path | None = WEB_DIST, limits: Limits | None = None) -> FastAPI:
+               web_dist: Path | None = WEB_DIST, limits: Limits | None = None,
+               background: bool = True, log=print) -> FastAPI:
+    """`background` starts, when their settings are present, the photographers'-answers
+    sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
+    default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default)."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     limits = limits or Limits.from_settings()
     rate = RateLimiter(*limits.rate)
@@ -92,7 +121,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return JSONResponse({"detail": "request too large"}, status_code=413)
         return await call_next(request)
 
-    conn = open_manifest(manifest_path or config.MANIFEST_PATH)
+    manifest_path = manifest_path or config.MANIFEST_PATH
+    conn = open_manifest(manifest_path)
     db_lock = threading.Lock()
     gpu_lock = threading.Lock()
     identifiers: dict[tuple[str, str], tuple[tuple, Identifier]] = {}
@@ -105,11 +135,27 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def embedded_counts() -> dict[str, int]:
         return dict(q("select backbone, count(*) from embeddings group by 1"))
 
-    def identifier(backbone: str, method: str) -> Identifier:
+    def permission_view() -> permissions.PermissionView:
+        with db_lock:
+            return permissions.PermissionView.load(conn)
+
+    def permission_status() -> dict:
+        with db_lock:
+            return permissions.status_report(conn)
+
+    def photo_lookup(photo_ids: list[int]) -> dict:
+        """Licence and owner as they are now (not when the model was built)."""
+        if not photo_ids:
+            return {}
+        marks = ",".join("?" for _ in photo_ids)
+        return photo_info_rows(q(f"{PHOTO_INFO_SQL} where photo_id in ({marks})", tuple(photo_ids)))
+
+    def identifier(backbone: str, method: str, view: permissions.PermissionView) -> Identifier:
         n = embedded_counts().get(backbone, 0)
         with db_lock:
             cal = evaluate.latest_calibration(conn, backbone, method)
-        version = (n, cal["run_id"] if cal else None)
+        # A change in who has said no rebuilds the reference set without their photos.
+        version = (n, cal["run_id"] if cal else None, view.fingerprint())
         cached = identifiers.get((backbone, method))
         if cached and cached[0] == version:
             return cached[1]
@@ -168,6 +214,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             "contributors_arr": one("select count(distinct owner_login) from photos "
                                     "where license_class = 'arr'"),
             "embedded": embedded_counts(),
+            "permissions": permission_status(),
             "names": len(name_counts),
             "names_by_records": buckets,
         }
@@ -229,6 +276,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not ready:
                 raise HTTPException(503, "no model has embeddings yet")
             wanted = [f"{ready[0]}/nearest"]
+        view = permission_view()
+
+        def may_show(info) -> bool:
+            return view.may_show(info.license_class, info.owner_user_id)
+
         results = []
         for spec in wanted:
             backbone, _, method = spec.partition("/")
@@ -240,11 +292,42 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if method not in evaluate.METHODS:
                 raise HTTPException(400, f"unknown method {method!r}")
             with gpu_lock:
-                ident = identifier(backbone, method)
+                ident = identifier(backbone, method, view)
                 if backbone not in backbones:
                     backbones[backbone] = backbone_loader(backbone)
-                results.append(ident.identify(backbones[backbone], images, context=context))
+                results.append(ident.identify(backbones[backbone], images, context=context,
+                                              photo_lookup=photo_lookup, may_show=may_show))
         return {"results": results, "context_used": used}
+
+    # Background: keep photographers' answers and photo licences current.
+    if background:
+        base_url, key = config.setting("MV_ORG_BASE_URL"), config.setting("MV_ORG_VISION_KEY")
+        if base_url and key:
+            every = _setting_number("MV_PERMISSIONS_SYNC_SECONDS") or 300
+
+            def sync_permissions():
+                own = sqlite3.connect(manifest_path, timeout=30)
+                try:
+                    permissions.sync(own, base_url, key)
+                finally:
+                    own.close()
+            start_background("permissions", every, sync_permissions, log)
+        else:
+            log("[permissions] MV_ORG_BASE_URL / MV_ORG_VISION_KEY not set: all-rights-reserved "
+                "photos are not shown, and refusals on mycomap.org are not picked up.")
+        hours = _setting_number("MV_LICENSE_REFRESH_HOURS")
+        if hours and hours > 0:
+            def refresh_licences():
+                own = sqlite3.connect(manifest_path, timeout=30)
+                own.row_factory = sqlite3.Row
+                try:
+                    stats = inat.refresh_licenses(own, older_than_hours=hours, log=log)
+                    if stats["requested"]:
+                        log(f"[licences] re-read {stats['requested']:,} records, "
+                            f"{stats['license_changes']:,} licence changes")
+                finally:
+                    own.close()
+            start_background("licences", 3600, refresh_licences, log)
 
     # The built frontend (web/dist), when present: files as-is, any other
     # non-API path gets index.html so client-side routes work on reload.

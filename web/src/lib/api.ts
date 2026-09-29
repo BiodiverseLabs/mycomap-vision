@@ -19,6 +19,8 @@ export interface Specimen {
   matched_query_photo: number;
   photo_url: string | null;
   photo_owner: string | null;
+  /** True when the photo exists but may not be shown (all rights reserved, no grant). */
+  photo_hidden: boolean;
   inat_url: string;
   species_url: string;
 }
@@ -72,6 +74,13 @@ export interface Stats {
   photos_by_size: Record<string, number>;
   contributors_arr: number;
   embedded: Record<string, number>;
+  permissions: {
+    granted: number;
+    withdrawn: number;
+    last_good_sync: string | null;
+    last_attempt: { attempted_at: string; ok: boolean; error: string | null } | null;
+    fresh_for_showing: boolean;
+  };
   names: number;
   names_by_records: Record<string, number>;
 }
