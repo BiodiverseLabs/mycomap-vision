@@ -12,6 +12,9 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
 - **Respect iNat's limits.** API: 1 request/s at most (iNat asks for ≤60/min).
   Media: CC photos from the AWS Open Data bucket; all-rights-reserved photos from
   `static.inaturalist.org` under 5 GB/hour and 24 GB/day (we cap at 4 and 20).
+  Only Steve may raise the day cap for a run (`--static-day-gb`), as he did on
+  2026-09-29 to finish the all-rights-reserved photos (MycoMap works with iNat
+  regularly); the 4 GB hourly cap is never raised.
   Always send `config.USER_AGENT`. Never put a user's email in a header or URL.
 - **Keep provenance.** Every photo keeps owner, license, license history and
   hash. All-rights-reserved photos are for training only while permission is

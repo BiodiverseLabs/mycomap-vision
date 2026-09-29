@@ -35,7 +35,8 @@ def cmd_download_photos(conn, args) -> None:
                                 max_hours=args.max_hours, checkpoint=checkpoint,
                                 random_order=args.random, record_sample=args.record_sample,
                                 held_at=args.held_at,
-                                hosts=(photos.OPEN_DATA_HOST,) if args.open_data_only else None)
+                                hosts=(photos.OPEN_DATA_HOST,) if args.open_data_only else None,
+                                policies=photos.default_policies(args.static_day_gb))
     stats["gb"] = round(stats["bytes"] / photos.GB, 2)
     print(json.dumps(stats, indent=2))
 
@@ -62,7 +63,8 @@ def status_report(conn) -> dict:
 def cmd_aws_launch_downloader(conn, args) -> None:
     from . import aws
     print(json.dumps(aws.launch_downloader(conn, size=args.size, max_hours=args.max_hours,
-                                           instance_type=args.instance_type), indent=2))
+                                           instance_type=args.instance_type,
+                                           static_day_gb=args.static_day_gb), indent=2))
 
 
 def cmd_aws_policies(conn, args) -> None:
@@ -334,6 +336,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--held-at", choices=["small", "medium", "large"],
                    help="only photos the destination already holds at this other size "
                         "(fetch a sample again at a new size)")
+    p.add_argument("--static-day-gb", type=float, default=20,
+                   help="day cap for all-rights-reserved photos from static.inaturalist.org "
+                        "(default 20, under iNat's 24); raise only by a person's decision. "
+                        "The 4 GB hourly cap stays")
     p.add_argument("--open-data-only", action="store_true",
                    help="only photos in iNat's open-data bucket; leaves the capped host's "
                         "daily budget to another downloader")
@@ -343,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
     p.add_argument("--max-hours", type=float, default=120)
     p.add_argument("--instance-type", default="t3.small")
+    p.add_argument("--static-day-gb", type=float, default=20,
+                   help="day cap for the static host on the instance (see download-photos)")
 
     sub.add_parser("aws-policies",
                    help="print the IAM policies filled in for MV_S3_BUCKET / MV_AWS_REGION")

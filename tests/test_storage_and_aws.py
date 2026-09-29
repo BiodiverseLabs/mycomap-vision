@@ -76,6 +76,8 @@ def test_the_instance_always_shuts_itself_down():
     assert "--size large" in ud and "--max-hours 120" in ud
     assert '--dest "s3://$BUCKET"' in ud
     assert "RUN=runs/20260928-120000" in ud
+    assert "--static-day-gb 20" in ud                # the default cap unless raised
+    assert "--static-day-gb 50" in aws.render_user_data("r", "large", 1, "b", 50)
     assert 'aws s3 cp "s3://$BUCKET/$RUN/code.tar.gz"' in ud
 
 

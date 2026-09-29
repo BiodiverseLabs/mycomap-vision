@@ -84,6 +84,17 @@ def test_byte_budget_blocks_until_old_bytes_age_out():
     assert b.used() == 60
 
 
+def test_raising_the_day_cap_never_raises_the_hourly_cap():
+    from mycomap_vision.licenses import STATIC_HOST
+    from mycomap_vision.photos import GB, default_policies
+    hour, day = default_policies()[STATIC_HOST].budgets
+    assert (hour.limit, day.limit) == (4 * GB, 20 * GB)
+    hour, day = default_policies(static_day_gb=50)[STATIC_HOST].budgets
+    assert (hour.limit, hour.window, day.limit) == (4 * GB, 3600, 50 * GB)
+    with pytest.raises(ValueError):
+        default_policies(static_day_gb=2)
+
+
 def test_bytes_from_an_earlier_run_count_until_they_age_out():
     clock = FakeClock()
     b = ByteBudget(limit=100, window=3600, clock=clock)

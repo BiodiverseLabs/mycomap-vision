@@ -60,14 +60,16 @@ python3.11 -m venv .venv
 aws s3 cp "s3://$BUCKET/{manifest_key}" data/manifest.sqlite
 MV_DATA_DIR=/opt/mv/data PYTHONUNBUFFERED=1 .venv/bin/mv download-photos \\
   --size {size} --dest "s3://$BUCKET" --checkpoint-to "s3://$BUCKET/{manifest_key}" \\
-  --max-hours {max_hours}
+  --max-hours {max_hours} --static-day-gb {static_day_gb}
 """
 
 
-def render_user_data(run_id: str, size: str, max_hours: float, bucket_name: str) -> str:
+def render_user_data(run_id: str, size: str, max_hours: float, bucket_name: str,
+                     static_day_gb: float = 20) -> str:
     # The backstop leaves an hour for setup and the final manifest copy.
     backstop = int(max_hours * 60) + 60
     return USER_DATA.format(bucket=bucket_name, run_id=run_id, size=size, max_hours=max_hours,
+                            static_day_gb=static_day_gb,
                             region=config.setting("MV_AWS_REGION", "us-east-2"),
                             backstop_minutes=backstop, manifest_key=MANIFEST_KEY)
 
@@ -138,7 +140,8 @@ def run_instance_args(run_id: str, ami: str, user_data: str,
 
 
 def launch_downloader(conn, size: str = "large", max_hours: float = 120,
-                      instance_type: str = "t3.small", log=print) -> dict:
+                      instance_type: str = "t3.small", static_day_gb: float = 20,
+                      log=print) -> dict:
     sess = session()
     s3, ec2, ssm = s3_client(), sess.client("ec2"), sess.client("ssm")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -151,7 +154,7 @@ def launch_downloader(conn, size: str = "large", max_hours: float = 120,
     log(f"Uploaded code and manifest for run {run_id}")
     ami = ssm.get_parameter(Name=AMI_PARAMETER)["Parameter"]["Value"]
     resp = ec2.run_instances(**run_instance_args(
-        run_id, ami, render_user_data(run_id, size, max_hours, b), instance_type))
+        run_id, ami, render_user_data(run_id, size, max_hours, b, static_day_gb), instance_type))
     instance_id = resp["Instances"][0]["InstanceId"]
     return {"run_id": run_id, "instance_id": instance_id, "region": region(),
             "log": f"s3://{b}/runs/{run_id}/download.log",

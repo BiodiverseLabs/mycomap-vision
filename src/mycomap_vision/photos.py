@@ -37,11 +37,20 @@ class HostPolicy:
     budgets: list[ByteBudget] = field(default_factory=list)
 
 
-def default_policies() -> dict[str, HostPolicy]:
+STATIC_HOUR_GB = 4
+STATIC_DAY_GB = 20
+
+
+def default_policies(static_day_gb: float = STATIC_DAY_GB) -> dict[str, HostPolicy]:
+    """`static_day_gb` raises the static host's day cap for one run, when a person has
+    decided to (see CLAUDE.md); the hourly cap, which paces the load on iNat's
+    server, is never raised."""
+    if static_day_gb < STATIC_HOUR_GB:
+        raise ValueError(f"a day cap under the hourly cap ({STATIC_HOUR_GB} GB) makes no sense")
     return {
         OPEN_DATA_HOST: HostPolicy(concurrency=8, min_interval=0.02),
         STATIC_HOST: HostPolicy(concurrency=2, min_interval=0.25, budgets=[
-            ByteBudget(4 * GB, 3600), ByteBudget(20 * GB, 86400)]),
+            ByteBudget(STATIC_HOUR_GB * GB, 3600), ByteBudget(int(static_day_gb * GB), 86400)]),
     }
 
 
