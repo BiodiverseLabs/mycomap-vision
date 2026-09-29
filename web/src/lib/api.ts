@@ -83,6 +83,8 @@ export interface ModelsInfo {
   }[];
   methods: string[];
   ready: string[];
+  /** Most models one identification may run on this server (null: no limit). */
+  max_models?: number | null;
 }
 
 export interface Stats {

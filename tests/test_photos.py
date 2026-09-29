@@ -211,6 +211,30 @@ def test_a_restarted_downloader_counts_what_earlier_runs_fetched(conn):
     assert (hour.used(), day.used()) == (800, 1300)
 
 
+def test_photos_held_in_one_store_are_copied_to_another_with_their_hash_checked(conn,
+                                                                               tmp_path):
+    _seed(conn)                                   # photos 11 and 12
+    src, dest = LocalStore(tmp_path / "s3"), LocalStore(tmp_path / "laptop")
+    good, bad = JPEG, b"\xff\xd8\xff\xe0 changed since download"
+    for pid, body in ((11, good), (12, bad)):
+        src.put(f"photos/large/{pid}.jpg", body)
+        save_result(conn, Result(pid, "done", f"photos/large/{pid}.jpg", len(good),
+                                 hashlib.sha256(good).hexdigest()), "large", "t", src.location)
+    # Only photo 11 is in the laptop's medium sample.
+    save_result(conn, Result(11, "done", "photos/medium/11.jpg", 5, "h"), "medium", "t",
+                dest.location)
+    out = photos.copy_photos(conn, src, dest, "large", held_at="medium", log=lambda s: None)
+    assert (out["queued"], out["copied"]) == (1, 1)
+    assert (tmp_path / "laptop" / "photos/large/11.jpg").read_bytes() == good
+    # Without the filter, 12 is tried too, and its changed file is refused.
+    out = photos.copy_photos(conn, src, dest, "large", log=lambda s: None)
+    assert (out["queued"], out["copied"], out["mismatch"]) == (1, 0, 1)
+    assert not (tmp_path / "laptop" / "photos/large/12.jpg").exists()
+    held = {tuple(r) for r in conn.execute(
+        "select photo_id, size from photo_copies where store = ?", (dest.location,))}
+    assert held == {(11, "medium"), (11, "large")}
+
+
 def test_random_order_still_returns_only_pending_photos(conn):
     _seed(conn)
     save_result(conn, Result(11, "done", "p", 5, "h"), "medium", "now")

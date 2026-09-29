@@ -41,6 +41,15 @@ def cmd_download_photos(conn, args) -> None:
     print(json.dumps(stats, indent=2))
 
 
+def cmd_copy_photos(conn, args) -> None:
+    source = open_store(args.source, config.DATA_DIR)
+    dest = open_store(args.dest, config.DATA_DIR)
+    print(f"Copying {args.size} photos from {source.location} to {dest.location}...")
+    stats = photos.copy_photos(conn, source, dest, args.size, held_at=args.held_at)
+    stats["gb"] = round(stats["bytes"] / photos.GB, 2)
+    print(json.dumps(stats, indent=2))
+
+
 def status_report(conn) -> dict:
     q = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
     out = {
@@ -377,6 +386,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="only photos in iNat's open-data bucket; leaves the capped host's "
                         "daily budget to another downloader")
 
+    p = sub.add_parser("copy-photos", help="copy photos we already hold from one store to "
+                                           "another (e.g. S3 to this machine), hash-checked")
+    p.add_argument("--source", required=True, help="folder or s3://bucket/prefix")
+    p.add_argument("--dest", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--held-at", choices=["small", "medium", "large"],
+                   help="only photos the destination already holds at this other size")
+
     p = sub.add_parser("aws-launch-downloader",
                        help="download photos on a self-terminating EC2 instance into S3")
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
@@ -535,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
         "export-records": cmd_export_records,
         "fetch-inat": cmd_fetch_inat,
         "download-photos": cmd_download_photos,
+        "copy-photos": cmd_copy_photos,
         "aws-launch-downloader": cmd_aws_launch_downloader,
         "aws-pull-manifest": cmd_aws_pull_manifest,
         "aws-policies": cmd_aws_policies,

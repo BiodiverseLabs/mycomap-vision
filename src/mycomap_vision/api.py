@@ -32,7 +32,7 @@ from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge, check_image_size)
 from .exif import place_and_date
-from .identify import PHOTO_INFO_SQL, Identifier, photo_info_rows
+from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
 from .prior import Context
 from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
                      safe_return_to, verify_token)
@@ -297,8 +297,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if cached and cached[0] == version:
             return cached[1]
         root = embeddings_root / backbone if embeddings_root else None
-        with db_lock:
-            ident = Identifier(conn, backbone, method, root, calibration=cal)
+        # Its own connection, not the shared one: building reads the whole reference set
+        # (tens of seconds on the box), and holding db_lock that long stalled every
+        # other page. gpu_lock (held by the caller) still keeps builds one at a time.
+        own = sqlite3.connect(manifest_path, timeout=30)
+        try:
+            ident = Identifier(own, backbone, method, root, calibration=cal,
+                               train=limits.fit_on_demand)
+        finally:
+            own.close()
         identifiers[(backbone, method)] = (version, ident)
         models.release_memory()
         return ident
@@ -327,7 +334,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         for name, n in counts.items():
             out.append({"backbone": name, "spec": name, "note": "", "embedded_photos": n,
                         "photos_per_second": speed.get(name)})
-        return {"backbones": out, "methods": list(evaluate.METHODS),
+        return {"backbones": out,
+                "methods": [m for m in evaluate.METHODS if limits.method_allowed(m)],
+                "max_models": limits.max_models,
                 "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
 
     @app.get("/api/stats")
@@ -418,6 +427,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not ready:
                 raise HTTPException(503, "no model has embeddings yet")
             wanted = [f"{ready[0]}/nearest"]
+        if limits.max_models and len(wanted) > limits.max_models:
+            raise HTTPException(400, f"compare at most {limits.max_models} models at a time here")
         view = permission_view()
 
         def may_show(info) -> bool:
@@ -433,8 +444,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise HTTPException(400, f"{backbone!r} has no embeddings")
             if method not in evaluate.METHODS:
                 raise HTTPException(400, f"unknown method {method!r}")
+            if not limits.method_allowed(method):
+                raise HTTPException(400, f"{method!r} is not offered here")
             with gpu_lock:
-                ident, model = prepared(backbone, method, view)
+                try:
+                    ident, model = prepared(backbone, method, view)
+                except NotTrainedHere as e:
+                    raise HTTPException(503, f"{backbone}/{method} isn't ready on this "
+                                             f"server ({e})") from e
                 results.append(ident.identify(model, images, context=context,
                                               photo_lookup=photo_lookup, may_show=may_show))
         return {"results": results, "context_used": used}
@@ -462,8 +479,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 method = method or "nearest"
                 if backbone not in limits.allowed_backbones or backbone not in ready:
                     raise ValueError(f"{backbone!r} is not offered here or has no embeddings")
-                if method not in evaluate.METHODS:
-                    raise ValueError(f"unknown method {method!r}")
+                if method not in evaluate.METHODS or not limits.method_allowed(method):
+                    raise ValueError(f"{method!r} is unknown or not offered here")
                 with gpu_lock:
                     prepared(backbone, method, permission_view())
                 names.append(f"{backbone}/{method}")

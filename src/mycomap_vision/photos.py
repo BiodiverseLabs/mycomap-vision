@@ -221,6 +221,59 @@ def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str,
             (r.status, r.error, r.photo_id))
 
 
+def copy_photos(conn: sqlite3.Connection, source: PhotoStore, dest: PhotoStore, size: str,
+                held_at: str | None = None, workers: int = 16, log=print) -> dict:
+    """Copy photos we already hold in one store into another (e.g. S3 -> laptop), so no
+    photo is fetched from iNat twice. Each file must match the hash recorded when it was
+    downloaded; a mismatch is reported and not recorded. `held_at` keeps only photos
+    the destination already holds at that other size (a sample at a new size)."""
+    from concurrent.futures import ThreadPoolExecutor as Pool
+    extra, params = "", [source.location, size, dest.location, size]
+    if held_at:
+        extra = (" and exists (select 1 from photo_copies h where h.photo_id = s.photo_id"
+                 " and h.store = ? and h.size = ?)")
+        params += [dest.location, held_at]
+    rows = conn.execute(
+        "select s.photo_id, s.path, s.bytes, s.sha256 from photo_copies s "
+        "where s.store = ? and s.size = ? and not exists (select 1 from photo_copies d "
+        "where d.photo_id = s.photo_id and d.store = ? and d.size = ?)" + extra
+        + " order by s.photo_id", params).fetchall()
+    totals = {"queued": len(rows), "copied": 0, "mismatch": 0, "error": 0, "bytes": 0}
+
+    def one(row):
+        pid, path, _n, sha = row
+        try:
+            body = source.get(path)
+        except Exception as e:
+            return pid, path, None, f"read: {e.__class__.__name__}"
+        if sha and hashlib.sha256(body).hexdigest() != sha:
+            return pid, path, None, "hash mismatch"
+        try:
+            dest.put(path, body)
+        except Exception as e:
+            return pid, path, None, f"write: {e.__class__.__name__}"
+        return pid, path, body, None
+
+    with Pool(max_workers=workers) as pool:
+        for i, (pid, path, body, err) in enumerate(pool.map(one, rows), 1):
+            if err:
+                totals["mismatch" if err == "hash mismatch" else "error"] += 1
+                log(f"  photo {pid}: {err}")
+            else:
+                now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                with conn:
+                    conn.execute(
+                        "insert or replace into photo_copies (photo_id, store, size, path, "
+                        "bytes, sha256, downloaded_at) values (?, ?, ?, ?, ?, ?, ?)",
+                        (pid, dest.location, size, path, len(body),
+                         hashlib.sha256(body).hexdigest(), now))
+                totals["copied"] += 1
+                totals["bytes"] += len(body)
+            if i % 1000 == 0:
+                log(f"  {i:,}/{len(rows):,} photos")
+    return totals
+
+
 def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "medium",
                  north_america_only: bool = True, limit: int | None = None,
                  max_hours: float | None = None,
