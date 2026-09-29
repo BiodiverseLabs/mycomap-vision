@@ -38,8 +38,9 @@ echo "==> Python packages"
 
 echo "==> building the web app"
 rm -rf web/dist-next
-pnpm --dir web install --frozen-lockfile
-pnpm --dir web exec vite build --outDir dist-next --emptyOutDir
+# From inside web/: corepack reads the pnpm version pinned there ("packageManager");
+# run from the repo root it would fetch the newest pnpm, which refuses the pin.
+(cd web && pnpm install --frozen-lockfile && pnpm exec vite build --outDir dist-next --emptyOutDir)
 rm -rf web/dist-prev
 [ -d web/dist ] && mv web/dist web/dist-prev
 mv web/dist-next web/dist

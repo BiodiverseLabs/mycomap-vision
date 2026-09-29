@@ -74,7 +74,9 @@ safe to re-run.
 ### 3. Settings
 
 In `/etc/mycomap-vision/vision.env`, replace `<BUCKET>` and `<REGION>` with the
-values from the laptop's `.env`. Then put the sign-in bridge's public key in
+values from the laptop's `.env` (the folder is root's, so edit with sudo:
+`sudo sed -i 's/<BUCKET>/.../; s/<REGION>/.../' /etc/mycomap-vision/vision.env`,
+or `sudo nano`). Then put the sign-in bridge's public key in
 place. It is the same key the dev site uses (`DEV_BRIDGE_PUBLIC_KEY` in the dev
 box's ecosystem file). It is public, so pasting it is fine:
 
@@ -162,8 +164,12 @@ proxy status **DNS only** (grey cloud) for now. When it resolves
 (`dig +short vision.mycomap.org`), on the box:
 
 ```bash
-sudo certbot certonly --webroot -w /var/www/html -d vision.mycomap.org
+sudo certbot certonly --webroot -w /var/www/html -d vision.mycomap.org \
+  --email info@mycomap.org --agree-tos --no-eff-email
 ```
+
+Expiry warnings go to info@mycomap.org (Steve, 2026-09-29; the Library's account
+uses the same address).
 
 ### 9. nginx site
 

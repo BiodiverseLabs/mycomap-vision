@@ -99,3 +99,9 @@ def test_the_box_may_only_read_releases(monkeypatch):
 def test_scripts_stop_at_the_first_failure():
     for name in ("provision.sh", "deploy.sh", "cloudflare-realip.sh"):
         assert "set -euo pipefail" in read(name), name
+
+
+def test_the_web_build_runs_where_its_pnpm_version_is_pinned():
+    deploy = read("deploy.sh")
+    assert "pnpm --dir" not in deploy
+    assert "(cd web && pnpm install --frozen-lockfile" in deploy
