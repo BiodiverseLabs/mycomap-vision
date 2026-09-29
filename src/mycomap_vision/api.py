@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -75,6 +76,23 @@ def start_background(name: str, every_seconds: float, work: Callable[[], None],
 WEB_DIST = config.REPO_ROOT / "web" / "dist"
 
 
+def preload_specs(value: str | None) -> list[str]:
+    """MV_PRELOAD: comma list of backbone/method to load at startup; "default" is the
+    model an identification uses when none is named. Unset or "off": none."""
+    if not value or value.strip().lower() in ("off", "none", "0", "false"):
+        return []
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+@dataclass
+class Preload:
+    """What the server loaded at startup, for /api/health."""
+    state: str = "off"                 # off | loading | ready | failed
+    models: list[str] = field(default_factory=list)
+    seconds: float | None = None
+    error: str | None = None
+
+
 def read_photo(upload: UploadFile) -> tuple[Image.Image, tuple]:
     """One uploaded photo, refusing oversized files and images before decoding them.
     Also returns its EXIF (latitude, longitude, date), used only for scoring."""
@@ -116,11 +134,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                backbone_loader: Callable[[str], object] = models.load_backbone,
                web_dist: Path | None = WEB_DIST, limits: Limits | None = None,
                signin: SigninConfig | None = None, background: bool = True,
-               note=print) -> FastAPI:
+               note=print, preload: list[str] | None = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
-    `note` prints what they report."""
+    `note` prints what they report.
+
+    `preload` (default: MV_PRELOAD) names models to load and index on a background
+    thread at startup, so the first person to identify doesn't wait for it (about
+    30-45 s on the server box). The server answers meanwhile; an identification that
+    arrives first waits for the load and then uses it."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     limits = limits or Limits.from_settings()
     signin = signin or SigninConfig.from_settings()
@@ -280,9 +303,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         models.release_memory()
         return ident
 
+    warm = Preload()
+
     @app.get("/api/health")
     def health():
-        return {"ok": True, "code_version": config.code_version()}
+        return {"ok": True, "code_version": config.code_version(),
+                "preload": {"state": warm.state, "models": warm.models,
+                            "seconds": warm.seconds, "error": warm.error}}
 
     def ready_backbones() -> list[str]:
         return [b for b, n in embedded_counts().items() if n and b in limits.allowed_backbones]
@@ -407,13 +434,50 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if method not in evaluate.METHODS:
                 raise HTTPException(400, f"unknown method {method!r}")
             with gpu_lock:
-                ident = identifier(backbone, method, view)
-                if backbone not in backbones:
-                    backbones[backbone] = backbone_loader(backbone)
-                    models.release_memory()
-                results.append(ident.identify(backbones[backbone], images, context=context,
+                ident, model = prepared(backbone, method, view)
+                results.append(ident.identify(model, images, context=context,
                                               photo_lookup=photo_lookup, may_show=may_show))
         return {"results": results, "context_used": used}
+
+    def prepared(backbone: str, method: str, view) -> tuple[Identifier, object]:
+        """The index and the model for one backbone/method, loaded once. Call with
+        gpu_lock held."""
+        ident = identifier(backbone, method, view)
+        if backbone not in backbones:
+            backbones[backbone] = backbone_loader(backbone)
+            models.release_memory()
+        return ident, backbones[backbone]
+
+    def run_preload(specs: list[str]) -> None:
+        start = time.monotonic()
+        try:
+            ready = ready_backbones()
+            names = []
+            for spec in specs:
+                if spec == "default":
+                    if not ready:
+                        raise ValueError("no model has embeddings yet")
+                    spec = f"{ready[0]}/nearest"
+                backbone, _, method = spec.partition("/")
+                method = method or "nearest"
+                if backbone not in limits.allowed_backbones or backbone not in ready:
+                    raise ValueError(f"{backbone!r} is not offered here or has no embeddings")
+                if method not in evaluate.METHODS:
+                    raise ValueError(f"unknown method {method!r}")
+                with gpu_lock:
+                    prepared(backbone, method, permission_view())
+                names.append(f"{backbone}/{method}")
+            warm.models, warm.state = names, "ready"
+            warm.seconds = round(time.monotonic() - start, 1)
+            note(f"[preload] {', '.join(names)} ready in {warm.seconds} s")
+        except Exception as e:  # noqa: BLE001 - the server keeps answering; loads on demand
+            warm.state, warm.error = "failed", f"{type(e).__name__}: {e}"
+            note(f"[preload] {warm.error}")
+
+    specs = preload_specs(config.setting("MV_PRELOAD")) if preload is None else preload
+    if specs:
+        warm.state = "loading"
+        threading.Thread(target=run_preload, args=(specs,), name="preload", daemon=True).start()
 
     # Background: keep photographers' answers and photo licences current.
     if background:
