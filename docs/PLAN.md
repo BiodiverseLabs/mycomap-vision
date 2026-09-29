@@ -112,6 +112,22 @@ Small test sets (68-91 records): read as direction, not precision.
   3 records of 91 separate fine-tuned from frozen at species, so this is a
   direction, not a result; the full-data run decides. The trained heads still
   lose on top of it (linear 9.9%, hybrid 17.6%).
+- Large (1024 px) vs medium (500 px) photos make no measurable difference on the
+  sample. The four contenders were re-embedded at large (the medium vectors are in
+  data/embeddings-archive/<model>-medium) and scored in comparison
+  20260929-031844-85e107: 77 test records against 6,805, fewer than before because
+  the 5,039 all-rights-reserved sample photos have no large copy yet. On exactly
+  those records and photos, species / genus / family, nearest specimen, medium ->
+  large: BioCLIP 2 23.4/58.4/65.1 -> 26.0/58.4/68.2; fine-tuned 26.0/59.7/68.2 ->
+  26.0/58.4/69.8; DINOv3-L 512 10.4/37.7/41.3 -> 7.8/36.4/42.9; EVA-02 L
+  9.1/32.5/46.0 -> 10.4/29.9/38.1. Every change is 1-2 records of 77, in both
+  directions. iNat on the same 77: 26.0 / 66.2 / 70.1 photo-only, 27.3 / 66.2 /
+  70.1 with location, so frozen and fine-tuned BioCLIP 2 tie iNat at species here
+  and trail it by ~8 points at genus. On this set the fine-tuned model ties the
+  frozen one at species (it led by 3 records on the 91-record set), with better
+  family and first-photo scores (24.7 vs 20.8). The sample can't separate these;
+  the full data (~5,000 test records) will. Large photos stay the default for the
+  full run: they cost nothing extra there and keep detail for crops later.
 - iNat's own model on the same 68 records: 27.9% species photo-only, 29.4% with
   location; BioCLIP 2 (species average), frozen and with only 5% of the reference
   data, reached 25.0% species and a higher family score (71.4% vs 70.6%).
