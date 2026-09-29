@@ -5,6 +5,10 @@ Any timm or open_clip model can be used by name, with no code change:
     timm:<model name>               e.g. timm:vit_large_patch14_dinov2.lvd142m
     open_clip:<hub or model name>   e.g. open_clip:hf-hub:imageomics/bioclip-2
 
+A timm spec can carry model options after "?", e.g.
+timm:vit_large_patch16_dinov3.lvd1689m?img_size=512&global_pool=token
+(input size and pooling); the photos are then resized to that input size too.
+
 Short aliases below name the ones we use often. The storage name of a backbone
 (its embeddings folder and scoreboard key) is the alias, or a filesystem-safe
 form of the spec.
@@ -37,6 +41,12 @@ ALIASES: dict[str, Alias] = {
                         "DINOv3 self-supervised, base size (Meta DINOv3 licence)"),
     "dinov3-l16": Alias("timm:vit_large_patch16_dinov3.lvd1689m",
                         "DINOv3 self-supervised, large size (Meta DINOv3 licence)"),
+    # timm's DINOv3 default is 256 px with averaged patch tokens, which lost badly to
+    # DINOv2 at 518 px on its class token (docs/PLAN.md); these match DINOv2's setup.
+    "dinov3-b16-512": Alias("timm:vit_base_patch16_dinov3.lvd1689m?img_size=512&global_pool=token",
+                            "DINOv3 base at 512 px on the class token"),
+    "dinov3-l16-512": Alias("timm:vit_large_patch16_dinov3.lvd1689m?img_size=512&global_pool=token",
+                            "DINOv3 large at 512 px on the class token"),
     "siglip2-l16-384": Alias("open_clip:ViT-L-16-SigLIP2-384@webli",
                              "SigLIP 2 image-text model, large, 384 px"),
     "eva02-l14-448": Alias("timm:eva02_large_patch14_448.mim_m38m_ft_in22k",
@@ -65,6 +75,28 @@ def resolve_spec(name_or_spec: str) -> str:
                      f"({', '.join(ALIASES)}) or timm:<name> / open_clip:<name>")
 
 
+def split_options(target: str) -> tuple[str, dict]:
+    """'model?img_size=512&global_pool=token' -> ('model', {'img_size': 512, ...})."""
+    name, _, query = target.partition("?")
+    options = {}
+    for part in filter(None, query.split("&")):
+        key, sep, value = part.partition("=")
+        if not sep or not key:
+            raise ValueError(f"bad model option {part!r} in {target!r}: use key=value")
+        options[key] = int(value) if value.isdigit() else value
+    return name, options
+
+
+def data_config(cfg: dict, options: dict) -> dict:
+    """timm's preprocessing config follows the pretrained size, not an img_size option;
+    without this the photo would be shrunk to the old size before the model sees it."""
+    size = options.get("img_size")
+    if size is None:
+        return cfg
+    h, w = (size, size) if isinstance(size, int) else size
+    return {**cfg, "input_size": (cfg["input_size"][0], h, w)}
+
+
 class TimmBackbone:
     """Any timm model: its pooled image feature (classifier removed)."""
 
@@ -74,9 +106,10 @@ class TimmBackbone:
         self.torch = torch
         self.name = name
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = timm.create_model(timm_name, pretrained=True, num_classes=0).eval().to(
-            self.device)
-        cfg = timm.data.resolve_data_config({}, model=self.model)
+        timm_name, options = split_options(timm_name)
+        self.model = timm.create_model(timm_name, pretrained=True, num_classes=0,
+                                       **options).eval().to(self.device)
+        cfg = data_config(timm.data.resolve_data_config({}, model=self.model), options)
         self.transform = timm.data.create_transform(**cfg)
         self.dim = self.model.num_features
 

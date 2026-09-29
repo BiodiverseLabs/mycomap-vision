@@ -32,6 +32,27 @@ def unit(*v):
     return a / np.linalg.norm(a)
 
 
+def test_model_options_in_a_spec_reach_the_model_and_the_photo_resize():
+    name, options = models.split_options(
+        "vit_large_patch16_dinov3.lvd1689m?img_size=512&global_pool=token")
+    assert name == "vit_large_patch16_dinov3.lvd1689m"
+    assert options == {"img_size": 512, "global_pool": "token"}
+    assert models.split_options("plain_model") == ("plain_model", {})
+    with pytest.raises(ValueError, match="key=value"):
+        models.split_options("m?img_size")
+    # timm keeps the pretrained 256 px in its config; the photos must follow img_size.
+    cfg = {"input_size": (3, 256, 256), "crop_pct": 1.0}
+    assert models.data_config(cfg, options)["input_size"] == (3, 512, 512)
+    assert models.data_config(cfg, {"global_pool": "token"}) is cfg
+
+
+def test_dinov3_at_512_px_is_a_separate_backbone_from_the_default():
+    assert models.storage_name("dinov3-l16-512") == "dinov3-l16-512"
+    spec = models.resolve_spec("dinov3-l16-512")
+    assert spec != models.resolve_spec("dinov3-l16") and "img_size=512" in spec
+    assert models.storage_name(spec) == "dinov3-l16-512"
+
+
 def test_species_mean_scores_against_each_species_average():
     vecs = np.stack([unit(1, 0), unit(0.6, 0.8), unit(0, 1), unit(0.8, 0.6)]).astype(np.float16)
     ref = [evaluate.Record("a", "A x", "A", "F", "2026-01-01", "u", [0]),
