@@ -215,10 +215,11 @@ class Identifier:
         n_q = int(query.shape[0])
         sims = self.nearest.photo_sims(query)                 # (q, reference photos)
         if self.model is self.nearest:
-            # The nearest-specimen score is the mean of each photo's own scores, so
-            # both come from the one similarity matrix.
-            per_photo = np.maximum.reduceat(sims, self.index.starts, axis=1)
-            scores = per_photo.mean(axis=0)
+            # Nearest-specimen methods combine each photo's own best matches, so the
+            # record's scores and each photo's come from the one similarity matrix.
+            best = np.maximum.reduceat(sims, self.index.starts, axis=1)
+            scores = self.model.combine(best)
+            per_photo = np.stack([self.model.combine(best[i:i + 1]) for i in range(n_q)])
         else:
             scores = self._species_scores(query, context)
             per_photo = (np.stack([self._species_scores(query[i:i + 1], context)

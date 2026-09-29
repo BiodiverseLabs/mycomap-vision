@@ -1,7 +1,7 @@
 import numpy as np
 
 from mycomap_vision.evaluate import METHODS, Record, build_index, evaluate
-from mycomap_vision.methods import Hybrid, LinearHead
+from mycomap_vision.methods import Hybrid, LinearHead, NearestMix, NearestSpecimen, mix_photo_votes
 
 
 def clusters(sizes, dim=16, spread=0.15, seed=0):
@@ -138,3 +138,51 @@ def test_gpu_and_numpy_training_agree_on_the_answer():
     for c in centres:
         q = c[None, :].astype(np.float16)
         assert np.argmax(cpu.species_scores(q)) == np.argmax(gpu.species_scores(q))
+
+
+# --- nearest-mix: each photo votes with its own probabilities -----------------
+
+# Species: X, Y, then four others. Scores are each photo's best match per species.
+# The underside picks Y over X and rules the others out; the habitat shot favours X
+# a little over Y, but fits the four others nearly as well as X.
+UNDERSIDE = [0.76, 0.80, 0.50, 0.50, 0.50, 0.50]
+HABITAT = [0.80, 0.74, 0.79, 0.79, 0.79, 0.79]
+
+
+def test_a_photo_that_fits_many_species_alike_barely_moves_the_answer():
+    per_photo = np.asarray([UNDERSIDE, HABITAT])
+    assert int(np.argmax(per_photo.mean(axis=0))) == 0, "plain mean: the habitat tips it to X"
+    mixed = mix_photo_votes(per_photo, 0.02)
+    assert int(np.argmax(mixed)) == 1, "mixed: the underside's clear vote for Y carries it"
+    assert np.isclose(np.exp(mixed).sum(), 1.0), "a record's scores are log-probabilities"
+
+
+def test_the_temperature_runs_from_majority_vote_to_the_plain_mean():
+    per_photo = np.asarray([UNDERSIDE, HABITAT, HABITAT])
+    mean_order = np.argsort(-per_photo.mean(axis=0), kind="stable")
+    assert list(np.argsort(-mix_photo_votes(per_photo, 100.0), kind="stable")) == list(mean_order)
+    assert int(np.argmax(mix_photo_votes(per_photo, 1e-4))) == 0, "two photos of three back X"
+
+
+def test_one_photo_ranks_species_the_same_under_nearest_and_nearest_mix():
+    vecs, recs, centres = clusters([4] * 6, seed=5)
+    index = build_index(recs)
+    plain, mixed = NearestSpecimen(), NearestMix()
+    plain.fit(vecs, index)
+    mixed.fit(vecs, index)
+    for c in centres:
+        q = c[None, :].astype(np.float16)
+        assert list(np.argsort(-plain.species_scores(q))[:3]) == \
+            list(np.argsort(-mixed.species_scores(q))[:3])
+
+
+def test_nearest_mix_runs_through_the_evaluation_and_calibrates_with_or_without_place():
+    assert {"nearest-mix", "nearest-mix+prior"} <= set(METHODS)
+    vecs, recs, _ = clusters([6] * 5, seed=3)
+    ref = [r for r in recs if not r.observation_id.endswith("-5")]
+    test = [Record(r.observation_id, r.species, r.genus, r.family, "2026-09-20", "u",
+                   r.photo_rows) for r in recs if r.observation_id.endswith("-5")]
+    for method in ("nearest-mix", "nearest-mix+prior"):
+        out = evaluate(vecs, ref, test, method=method)
+        assert out["species"]["all"]["top1"] == 1.0, method
+        assert out["calibration"]["species"]["n"] == 5, method

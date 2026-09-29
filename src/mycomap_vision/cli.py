@@ -471,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("compare", help="score backbones x methods on the same photos "
                                        "(newest weeks vs older records); saves to the scoreboard")
     p.add_argument("--backbones", required=True, help="comma-separated aliases or specs")
-    p.add_argument("--methods", default="nearest", help="comma-separated: nearest, species-mean")
+    p.add_argument("--methods", default="nearest", help="comma-separated, e.g. nearest,nearest-mix (mv models lists them)")
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--max-test", type=int, help="sample this many test records")
 

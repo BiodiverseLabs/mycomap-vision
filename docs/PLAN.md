@@ -39,8 +39,10 @@ A "model" here is a **backbone** (frozen image model -> vector per photo) plus a
   (`mv embed --backbone timm:<name>`); favourites get a short alias. Other
   sources (Hugging Face transformers, ONNX, an API) are one loader class each.
 - Methods: `evaluate.METHODS`. Now `nearest` (best-matching DNA-verified
-  specimen) and `species-mean` (species average vector); trained heads,
-  multi-photo attention and the range prior plug in the same way.
+  specimen), `nearest-mix` (the same matches, but each photo votes with its own
+  probabilities, so a photo that fits many species alike counts for little) and
+  `species-mean` (species average vector); trained heads, multi-photo attention
+  and the range prior plug in the same way. `mv models` lists them all.
 - `mv compare --backbones a,b,c --methods nearest,species-mean` scores every
   pair on exactly the same test and reference photos (only photos every backbone
   has embedded), and saves each run to the scoreboard (`eval_runs` in the

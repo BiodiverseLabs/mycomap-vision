@@ -5,6 +5,8 @@ species_scores(query) -> one score per species (higher is better) for a record's
 photos. `index` is an evaluate.Index: reference photo rows grouped by species.
 
 - nearest       the best-matching DNA-verified specimen (no training)
+- nearest-mix   the same matches, but each photo votes with its own probabilities,
+                so a photo that fits many species alike counts for little (no training)
 - species-mean  the species' average vector (no training)
 - linear        a trained linear classifier (balanced softmax available, off by default)
 - hybrid        linear + nearest: the classifier where data is rich, the specimen
@@ -82,11 +84,45 @@ class NearestSpecimen:
         self.scorer = Scorer(vectors[index.cols])   # species-sorted, so reduceat works
 
     def species_scores(self, query: np.ndarray) -> np.ndarray:
-        return species_scores(self.scorer.sims(query), self.index)
+        return self.combine(np.maximum.reduceat(self.scorer.sims(query), self.index.starts,
+                                                axis=1))
+
+    def combine(self, per_photo: np.ndarray) -> np.ndarray:
+        """(q, species) per-photo best matches -> (species,) scores for the record."""
+        return per_photo.mean(axis=0)
 
     def photo_sims(self, query: np.ndarray) -> np.ndarray:
         """(q, reference photos) similarities, columns in index.cols order."""
         return self.scorer.sims(query)
+
+
+def mix_photo_votes(per_photo: np.ndarray, temperature: float) -> np.ndarray:
+    """(q, species) scores -> (species,) log of the mean of each photo's softmax.
+
+    Averaging probabilities, not log-probabilities: the mean of log-softmaxes ranks
+    species exactly as the plain mean of scores does (each photo's normaliser is the
+    same for every species), so it would change nothing."""
+    logp = log_softmax(per_photo.astype(np.float64) / temperature, axis=1)
+    top = logp.max(axis=0)
+    return top + np.log(np.exp(logp - top).mean(axis=0))
+
+
+class NearestMix(NearestSpecimen):
+    """Nearest-specimen matches, with each photo voting by its own probabilities.
+
+    Plain `nearest` averages every photo's raw scores, so each photo counts the same.
+    Here each photo first turns its scores into probabilities over species, and those
+    are averaged. A photo that clearly picks one species (a sharp underside) puts
+    nearly all its vote there; one that fits many species about equally (a habitat
+    shot, or a view the references lack) spreads its vote thin and barely moves the
+    answer. The temperature sets how sharp a photo's vote is: near 0 each photo backs
+    only its best species (a majority vote); large, it approaches plain `nearest`.
+    """
+    name = "nearest-mix"
+    temperature = 0.02    # the same fixed scale as the nearest-specimen log-probabilities
+
+    def combine(self, per_photo: np.ndarray) -> np.ndarray:
+        return mix_photo_votes(per_photo, self.temperature).astype(np.float32)
 
 
 class SpeciesMean:
@@ -240,7 +276,7 @@ class Hybrid:
         return self.nearest.photo_sims(query)
 
 
-METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean, LinearHead, Hybrid)}
+METHODS = {m.name: m for m in (NearestSpecimen, NearestMix, SpeciesMean, LinearHead, Hybrid)}
 
 class AsLogProb:
     """A similarity method's scores as log-probabilities (softmax at a fixed temperature),
@@ -267,7 +303,7 @@ from functools import partial  # noqa: E402
 
 from .prior import WithPrior  # noqa: E402
 
-for _base in (LinearHead, Hybrid):
+for _base in (LinearHead, Hybrid, NearestMix):     # already log-probabilities
     METHODS[f"{_base.name}+prior"] = partial(WithPrior, _base)
 for _base in (NearestSpecimen, SpeciesMean):
     METHODS[f"{_base.name}+prior"] = partial(WithPrior, partial(AsLogProb, _base))

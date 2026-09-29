@@ -206,6 +206,22 @@ def test_each_photo_is_also_scored_on_its_own_and_says_where_it_puts_the_overall
         assert abs(score - (own[0][name] + own[1][name]) / 2) < 1e-3
 
 
+def test_nearest_mix_answers_by_its_own_rule_on_the_identify_page_too():
+    from mycomap_vision.methods import NearestMix
+    ident = cap_and_underside_identifier()
+    ident.model = ident.nearest = NearestMix()
+    ident.nearest.fit(np.stack([unit(1, 0, 0), unit(0, 0, 1), unit(1, .8, 0),
+                                unit(.8, 1, 0)]).astype(np.float16), ident.index)
+    ident.method = "nearest-mix"
+    out = ident.identify_vectors(CAP_AND_UNDERSIDE)
+    want = ident.model.species_scores(CAP_AND_UNDERSIDE)
+    got = {c["name"]: c["score"] for c in out["ranks"]["species"]}
+    for i, name in enumerate(ident.index.species):
+        assert abs(got[name] - float(want[i])) < 1e-3, "combined: the mixed votes, not the mean"
+    cap = out["per_photo"][0]["ranks"]["species"]
+    assert cap[0]["name"] == "Xus a" and cap[0]["score"] > -1e-3, "one photo: its own log-probabilities"
+
+
 def test_a_photos_own_specimens_show_the_reference_photo_that_matched_that_photo():
     from mycomap_vision.identify import PhotoInfo
     photos = {p: PhotoInfo(f"https://static.inaturalist.org/photos/{p}/large.jpg", "open", "o")
