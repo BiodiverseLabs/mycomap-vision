@@ -97,10 +97,21 @@ Small test sets (68-91 records): read as direction, not precision.
   DINOv2-L 20/s, ConvNeXt V2 L 20/s, SigLIP 2 17/s, EVA-02 L 17/s.
   Nothing generic comes near BioCLIP 2, which was trained on the tree of life.
   Centring the vectors on the reference mean didn't change any of this.
-- DINOv3 wasn't tested on equal terms: timm runs it at 256 px with average
-  pooling, while DINOv2 runs at 518 px on its class token. Retest DINOv3 at
-  ~512 px with class-token pooling before ruling it out (needs the backbone
-  loader to accept timm keyword arguments such as img_size and global_pool).
+- DINOv3 wasn't tested on equal terms at first: timm runs it at 256 px with
+  average pooling, while DINOv2 runs at 518 px on its class token. At 512 px on
+  the class token (dinov3-l16-512; comparison 20260929-010339-60274d, same 68
+  records) DINOv3-L went from 4.4 / 14.7 to 16.2 / 42.6 species / genus, the best
+  general-purpose model, still well behind BioCLIP 2 (25.0 / 61.8). DINOv3-B at
+  512: 14.7 / 38.2. About 20 photos/s each on the laptop.
+- Fine-tuning BioCLIP 2 helps even on the sample (bioclip-2-ft-sample: last 4
+  blocks, 2 passes over the 30,252 reference photos of 8,003 records, 4,317
+  species, 23 min on the laptop). Same 91 test records (comparison
+  20260929-012938-3f9ac9), species / genus / family top-1, best method each:
+  iNat with location 29.7 / 69.2 / 73.6; iNat photo-only 28.6 / 67.0 / 71.4;
+  fine-tuned BioCLIP 2 27.5 / 63.7 / 72.0; frozen BioCLIP 2 24.2 / 60.4 / 68.0.
+  3 records of 91 separate fine-tuned from frozen at species, so this is a
+  direction, not a result; the full-data run decides. The trained heads still
+  lose on top of it (linear 9.9%, hybrid 17.6%).
 - iNat's own model on the same 68 records: 27.9% species photo-only, 29.4% with
   location; BioCLIP 2 (species average), frozen and with only 5% of the reference
   data, reached 25.0% species and a higher family score (71.4% vs 70.6%).
