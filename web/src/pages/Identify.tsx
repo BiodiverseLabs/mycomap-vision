@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
 import { ArrowUpRight, CalendarDays, ImagePlus, Lightbulb, Loader2, LocateFixed, MapPin,
          Microscope, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,11 +16,15 @@ import {
   type Candidate,
   type ContextUsed,
   type IdentifyResult,
+  type ModelsInfo,
   type Where,
   type Rank,
   type Specimen,
 } from "@/lib/api";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
+import {
+  BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
+} from "@/lib/modelChoice";
 
 const MAX_PHOTOS = 10;
 const RANK_LABEL: Record<Rank, string> = { family: "Family", genus: "Genus", species: "Species" };
@@ -31,15 +35,6 @@ export function IdentifyPage() {
   const [where, setWhere] = useState<Where>({});
   const [found, setFound] = useState<Map<File, PhotoPlaceDate>>(new Map());
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
-
-  const options = useMemo(() => {
-    if (!models.data) return [];
-    return models.data.ready.flatMap((b) => models.data.methods.map((m) => modelKey(b, m)));
-  }, [models.data]);
-
-  useEffect(() => {
-    if (!chosen.length && options.length) setChosen([options[0]]);
-  }, [options, chosen.length]);
 
   // Read each new photo's place and date, then fill the fields once every photo is read.
   const reading = useRef(new Set<File>());
@@ -65,52 +60,7 @@ export function IdentifyPage() {
         <div className="space-y-6">
           <PhotoPicker files={files} setFiles={setFiles} />
           <WhereWhen where={where} setWhere={setWhere} />
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Models</CardTitle>
-              <p className="text-sm text-muted-foreground">
-                Pick two or more to compare them side by side.
-              </p>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {models.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-              {models.isError && (
-                <p className="text-sm text-destructive">
-                  The API isn't answering. Start it with <code>mv serve</code>.
-                </p>
-              )}
-              {models.data && !options.length && (
-                <p className="text-sm text-muted-foreground">
-                  No model has embedded photos yet. Run <code>mv embed</code> first.
-                </p>
-              )}
-              {options.map((key) => {
-                const [backbone, method] = key.split("/");
-                const info = models.data?.backbones.find((b) => b.backbone === backbone);
-                return (
-                  <label key={key} className="flex items-start gap-2 text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
-                      className="mt-1 accent-[hsl(var(--myco-green))]"
-                      checked={chosen.includes(key)}
-                      onChange={(e) =>
-                        setChosen(e.target.checked ? [...chosen, key] : chosen.filter((c) => c !== key))
-                      }
-                    />
-                    <span>
-                      <span className="font-medium">{backbone}</span>{" "}
-                      <span className="text-muted-foreground">· {modelLabel(backbone, method).how}</span>
-                      {info && (
-                        <span className="block text-xs text-muted-foreground">
-                          {num(info.embedded_photos)} reference photos
-                        </span>
-                      )}
-                    </span>
-                  </label>
-                );
-              })}
-            </CardContent>
-          </Card>
+          <ModelPicker models={models} onChange={setChosen} />
           <Button
             size="lg"
             className="w-full"
@@ -292,6 +242,132 @@ function ContextLine({ used, sent }: { used: ContextUsed; sent?: Where }) {
   );
 }
 
+const selectClass =
+  "w-full rounded-md border bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[hsl(var(--myco-green))]";
+
+/**
+ * One scoring method (default: the trained classifier, where offered) with two
+ * add-on switches, and optionally a second model to compare side by side (the page
+ * never runs more than MAX_COMPARED, nor the server's max_models). Reports the
+ * backbone/method keys to run.
+ */
+function ModelPicker({ models, onChange }: {
+  models: UseQueryResult<ModelsInfo>;
+  onChange: (keys: string[]) => void;
+}) {
+  const offered = models.data?.methods ?? [];
+  const ready = models.data?.ready ?? [];
+  const bases = offeredBases(offered);
+  const [backbone, setBackbone] = useState<string | null>(null);
+  const [choice, setChoice] = useState<Choice | null>(null);
+  const [comparing, setComparing] = useState(false);
+  const [second, setSecond] = useState<{ backbone: string; method: string } | null>(null);
+
+  // Defaults once the server says what it offers.
+  useEffect(() => {
+    if (!backbone && ready.length) setBackbone(ready[0]);
+    if (!choice && offered.length) setChoice(defaultChoice(offered));
+  }, [ready, offered, backbone, choice]);
+
+  const method = choice ? resolveMethod(choice, offered) : null;
+  const first = backbone && method ? modelKey(backbone, method) : null;
+  // The second model starts as something different from the first: another method
+  // on the same backbone, else the same method on another backbone.
+  useEffect(() => {
+    if (!comparing || second || !backbone || !method) return;
+    const otherMethod = offered.find((m) => m !== method);
+    const otherBackbone = ready.find((b) => b !== backbone);
+    if (otherMethod) setSecond({ backbone, method: otherMethod });
+    else if (otherBackbone) setSecond({ backbone: otherBackbone, method });
+  }, [comparing, second, backbone, method, offered, ready]);
+  const secondKey = comparing && second ? modelKey(second.backbone, second.method) : null;
+  const keys = [first, secondKey].filter((k, i, all): k is string => !!k && all.indexOf(k) === i);
+  useEffect(() => onChange(keys), [keys.join("|")]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const switches = choice ? switchesFor(choice.base, offered) : { weighNearest: false, usePlace: false };
+  const cap = Math.min(MAX_COMPARED, models.data?.max_models ?? MAX_COMPARED);
+  const canCompare = cap >= 2 && ready.length * offered.length > 1;
+  const info = models.data?.backbones.find((b) => b.backbone === backbone);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Model</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {models.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+        {models.isError && (
+          <p className="text-sm text-destructive">
+            The API isn't answering. Start it with <code>mv serve</code>.
+          </p>
+        )}
+        {models.data && (!ready.length || !bases.length) && (
+          <p className="text-sm text-muted-foreground">
+            No model has embedded photos yet. Run <code>mv embed</code> first.
+          </p>
+        )}
+        {choice && ready.length > 0 && (
+          <fieldset className="space-y-3">
+            {ready.length > 1 && (
+              <select className={selectClass} value={backbone ?? ""} onChange={(e) => setBackbone(e.target.value)}
+                aria-label="Backbone" data-testid="select-backbone">
+                {ready.map((b) => <option key={b} value={b}>{b}</option>)}
+              </select>
+            )}
+            <select className={selectClass} value={choice.base} aria-label="Model"
+              onChange={(e) => setChoice({ ...choice, base: e.target.value as Base })} data-testid="select-method">
+              {bases.map((b) => <option key={b} value={b}>{BASE_LABEL[b]}</option>)}
+            </select>
+            {switches.weighNearest && (
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="checkbox" className="mt-1 accent-[hsl(var(--myco-green))]" checked={choice.weighNearest}
+                  onChange={(e) => setChoice({ ...choice, weighNearest: e.target.checked })} data-testid="switch-nearest" />
+                <span>Also weigh the nearest specimens</span>
+              </label>
+            )}
+            {switches.usePlace && (
+              <label className="flex items-start gap-2 text-sm cursor-pointer">
+                <input type="checkbox" className="mt-1 accent-[hsl(var(--myco-green))]" checked={choice.usePlace}
+                  onChange={(e) => setChoice({ ...choice, usePlace: e.target.checked })} data-testid="switch-place" />
+                <span>Use place and date (range and season)</span>
+              </label>
+            )}
+            {info && (
+              <p className="text-xs text-muted-foreground">
+                {num(info.embedded_photos)} reference photos · {backbone && method ? modelLabel(backbone, method).how : ""}
+              </p>
+            )}
+          </fieldset>
+        )}
+        {canCompare && (
+          <details className="pt-1" open={comparing} onToggle={(e) => setComparing((e.target as HTMLDetailsElement).open)}>
+            <summary className="cursor-pointer text-sm text-muted-foreground" data-testid="toggle-compare">
+              Compare with a second model
+            </summary>
+            {second && (
+              <div className="mt-2 space-y-2">
+                {ready.length > 1 && (
+                  <select className={selectClass} value={second.backbone} aria-label="Second model backbone"
+                    onChange={(e) => setSecond({ ...second, backbone: e.target.value })} data-testid="select-second-backbone">
+                    {ready.map((b) => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                )}
+                <select className={selectClass} value={second.method} aria-label="Second model"
+                  onChange={(e) => setSecond({ ...second, method: e.target.value })} data-testid="select-second-method">
+                  {offered.map((m) => <option key={m} value={m}>{modelLabel(second.backbone, m).how}</option>)}
+                </select>
+                {secondKey === first && (
+                  <p className="text-xs text-muted-foreground">Same as the first model; pick another to compare.</p>
+                )}
+              </div>
+            )}
+          </details>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function EmptyState() {
   return (
     <div className="rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-8 text-[#5c4a3a]">
@@ -300,7 +376,7 @@ function EmptyState() {
         <li>An answer at every rank (family, genus, species), each with its own confidence.</li>
         <li>The closest DNA-verified specimens, with their photos, so you can compare by eye.</li>
         <li>Advice on what would firm up the identification.</li>
-        <li>Several models side by side, to see where they agree.</li>
+        <li>Optionally a second model side by side, to see where they agree.</li>
       </ul>
       <p className="mt-4 text-xs">
         Early development: the reference set grows as photos are downloaded, and confidence is

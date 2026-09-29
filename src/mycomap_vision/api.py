@@ -336,6 +336,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         "photos_per_second": speed.get(name)})
         return {"backbones": out,
                 "methods": [m for m in evaluate.METHODS if limits.method_allowed(m)],
+                "max_models": limits.max_models,
                 "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
 
     @app.get("/api/stats")
@@ -426,6 +427,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not ready:
                 raise HTTPException(503, "no model has embeddings yet")
             wanted = [f"{ready[0]}/nearest"]
+        if limits.max_models and len(wanted) > limits.max_models:
+            raise HTTPException(400, f"compare at most {limits.max_models} models at a time here")
         view = permission_view()
 
         def may_show(info) -> bool:
