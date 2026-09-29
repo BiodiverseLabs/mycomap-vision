@@ -20,6 +20,7 @@ import {
   type Rank,
   type Specimen,
 } from "@/lib/api";
+import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 
 const MAX_PHOTOS = 10;
 const RANK_LABEL: Record<Rank, string> = { family: "Family", genus: "Genus", species: "Species" };
@@ -28,6 +29,7 @@ export function IdentifyPage() {
   const [files, setFiles] = useState<File[]>([]);
   const [chosen, setChosen] = useState<string[]>([]);
   const [where, setWhere] = useState<Where>({});
+  const [found, setFound] = useState<Map<File, PhotoPlaceDate>>(new Map());
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
 
   const options = useMemo(() => {
@@ -39,7 +41,19 @@ export function IdentifyPage() {
     if (!chosen.length && options.length) setChosen([options[0]]);
   }, [options, chosen.length]);
 
-  const run = useMutation({ mutationFn: () => api.identify(files, chosen, where) });
+  // Read each new photo's place and date, then fill the fields once every photo is read.
+  const reading = useRef(new Set<File>());
+  useEffect(() => {
+    files.filter((f) => !found.has(f) && !reading.current.has(f)).forEach((f) => {
+      reading.current.add(f);
+      readPhotoPlaceDate(f).then((pd) => setFound((m) => new Map(m).set(f, pd)));
+    });
+  }, [files, found]);
+  useEffect(() => {
+    if (files.every((f) => found.has(f))) setWhere((w) => fillFromPhotos(w, files.map((f) => found.get(f))));
+  }, [files, found]);
+
+  const run = useMutation({ mutationFn: (sent: Where) => api.identify(files, chosen, sent) });
 
   return (
     <>
@@ -101,7 +115,7 @@ export function IdentifyPage() {
             size="lg"
             className="w-full"
             disabled={!files.length || !chosen.length || run.isPending}
-            onClick={() => run.mutate()}
+            onClick={() => run.mutate(where)}
           >
             {run.isPending ? <Loader2 className="animate-spin" /> : <Microscope />}
             {run.isPending ? "Identifying…" : `Identify from ${files.length || "your"} photo${files.length === 1 ? "" : "s"}`}
@@ -111,7 +125,7 @@ export function IdentifyPage() {
 
         <div className="min-w-0">
           {!run.data && !run.isPending && <EmptyState />}
-          {run.data && <ContextLine used={run.data.context_used} />}
+          {run.data && <ContextLine used={run.data.context_used} sent={run.variables} />}
           {run.data && (
             <div
               className={`grid gap-6 ${run.data.results.length > 1 ? "xl:grid-cols-2" : ""}`}
@@ -202,7 +216,8 @@ function WhereWhen({ where, setWhere }: { where: Where; setWhere: (w: Where) => 
     setLocating(true);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setWhere({ ...where, lat: pos.coords.latitude.toFixed(4), lng: pos.coords.longitude.toFixed(4) });
+        setWhere({ ...where, lat: pos.coords.latitude.toFixed(4), lng: pos.coords.longitude.toFixed(4),
+                   placeFromPhoto: undefined });
         setLocating(false);
       },
       () => setLocating(false),
@@ -215,16 +230,17 @@ function WhereWhen({ where, setWhere }: { where: Where; setWhere: (w: Where) => 
       <CardHeader className="pb-3">
         <CardTitle className="text-base">Where and when</CardTitle>
         <p className="text-sm text-muted-foreground">
-          Optional. Left empty, they're read from your photos when the photos carry them.
+          Optional. Filled in from your photos when they carry a place or date; change them if
+          they're wrong.
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-2">
           <MapPin className="h-4 w-4 text-myco-brown shrink-0" />
           <input className={input} placeholder="Latitude" inputMode="decimal" value={where.lat ?? ""}
-                 onChange={(e) => setWhere({ ...where, lat: e.target.value })} aria-label="Latitude" />
+                 onChange={(e) => setWhere({ ...where, lat: e.target.value, placeFromPhoto: undefined })} aria-label="Latitude" />
           <input className={input} placeholder="Longitude" inputMode="decimal" value={where.lng ?? ""}
-                 onChange={(e) => setWhere({ ...where, lng: e.target.value })} aria-label="Longitude" />
+                 onChange={(e) => setWhere({ ...where, lng: e.target.value, placeFromPhoto: undefined })} aria-label="Longitude" />
           <Button type="button" variant="outline" size="icon" onClick={locate} disabled={locating}
                   title="Use my location" aria-label="Use my location">
             {locating ? <Loader2 className="animate-spin" /> : <LocateFixed />}
@@ -233,14 +249,22 @@ function WhereWhen({ where, setWhere }: { where: Where; setWhere: (w: Where) => 
         <div className="flex items-center gap-2">
           <CalendarDays className="h-4 w-4 text-myco-brown shrink-0" />
           <input className={input} type="date" value={where.observedOn ?? ""}
-                 onChange={(e) => setWhere({ ...where, observedOn: e.target.value })} aria-label="Date found" />
+                 onChange={(e) => setWhere({ ...where, observedOn: e.target.value, dateFromPhoto: undefined })} aria-label="Date found" />
         </div>
+        {(where.placeFromPhoto || where.dateFromPhoto) && (
+          <p className="text-xs text-muted-foreground">
+            {where.placeFromPhoto === where.dateFromPhoto
+              ? `Place and date from photo ${where.placeFromPhoto}.`
+              : [where.placeFromPhoto && `Place from photo ${where.placeFromPhoto}.`,
+                 where.dateFromPhoto && `Date from photo ${where.dateFromPhoto}.`].filter(Boolean).join(" ")}
+          </p>
+        )}
       </CardContent>
     </Card>
   );
 }
 
-function ContextLine({ used }: { used: ContextUsed }) {
+function ContextLine({ used, sent }: { used: ContextUsed; sent?: Where }) {
   if (!used.place_from && !used.date_from) {
     return (
       <p className="mb-4 text-sm text-muted-foreground">
@@ -249,17 +273,19 @@ function ContextLine({ used }: { used: ContextUsed }) {
       </p>
     );
   }
-  const from = (f: string | null) => (f === "photo" ? "from your photo" : "as entered");
+  // Places and dates filled in from a photo reach the server as entered; say where they came from.
+  const from = (f: string | null, photo?: number) =>
+    f === "photo" ? "from your photo" : photo ? `from photo ${photo}` : "as entered";
   return (
     <p className="mb-4 text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
       {used.place_from && (
         <span className="inline-flex items-center gap-1">
-          <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from)})
+          <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from, sent?.placeFromPhoto)})
         </span>
       )}
       {used.date_from && (
         <span className="inline-flex items-center gap-1">
-          <CalendarDays className="h-3.5 w-3.5" /> {used.observed_on} ({from(used.date_from)})
+          <CalendarDays className="h-3.5 w-3.5" /> {used.observed_on} ({from(used.date_from, sent?.dateFromPhoto)})
         </span>
       )}
     </p>
