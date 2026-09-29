@@ -17,7 +17,14 @@ import numpy as np
 
 
 class Scorer:
-    """Cosine similarity of query photos to every reference photo, on the GPU when there is one."""
+    """Cosine similarity of query photos to every reference photo, on the GPU when there is one.
+
+    On the CPU the reference vectors stay in the dtype they came in (float16 from the
+    embeddings), and each block is widened to float32 only while it is scored. The
+    scores are the same as scoring a float32 copy, without holding that copy: for the
+    full photo set it is 1.8 GB, more than the server box can spare."""
+
+    CHUNK = 65_536       # reference photos widened at a time (192 MB at 768 dimensions)
 
     def __init__(self, ref_vecs: np.ndarray):
         self.torch = None
@@ -29,13 +36,18 @@ class Scorer:
         except ImportError:
             pass
         if self.torch is None:
-            self.ref = ref_vecs.astype(np.float32)
+            keep = ref_vecs.dtype if ref_vecs.dtype in (np.float16, np.float32) else np.float32
+            self.ref = np.ascontiguousarray(ref_vecs, dtype=keep)
 
     def sims(self, query: np.ndarray) -> np.ndarray:
         if self.torch is not None:
             q = self.torch.from_numpy(query.astype(np.float16)).cuda()
             return (q @ self.ref.T).float().cpu().numpy()
-        return query.astype(np.float32) @ self.ref.T
+        q = query.astype(np.float32)
+        out = np.empty((len(q), len(self.ref)), dtype=np.float32)
+        for s in range(0, len(self.ref), self.CHUNK):
+            out[:, s:s + self.CHUNK] = q @ self.ref[s:s + self.CHUNK].astype(np.float32).T
+        return out
 
 
 def species_scores(sims: np.ndarray, index) -> np.ndarray:

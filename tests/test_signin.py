@@ -210,8 +210,21 @@ def test_signing_out_ends_the_session(conn, tmp_path):
     c = site(conn, tmp_path, "all")
     sign_in(c)
     assert c.get("/api/stats").status_code == 200
-    assert c.post("/auth/signout").status_code == 200
+    out = c.post("/auth/signout")
+    assert out.status_code == 200
     assert c.get("/api/stats").status_code == 401
+
+
+def test_signing_out_lands_on_an_open_page_not_one_that_signs_you_back_in(conn, tmp_path):
+    c = site(conn, tmp_path, "all")
+    sign_in(c)
+    nxt = c.post("/auth/signout").json()["next"]
+    assert nxt == "/auth/signed-out"
+    page = c.get(nxt)                                  # no session, whole site gated
+    assert page.status_code == 200
+    assert 'href="/auth/signin"' in page.text.replace("'", '"')
+    assert f"{ISSUER}/api/logout" in page.text          # mycomap.org's own sign-out
+    assert c.get("/api/me").json()["user"] is None
 
 
 def test_identify_mode_leaves_the_site_open_and_gates_only_identification(conn, tmp_path):

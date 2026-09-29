@@ -16,7 +16,9 @@ form of the spec.
 
 from __future__ import annotations
 
+import gc
 import re
+import sys
 from dataclasses import dataclass
 from typing import Callable
 
@@ -142,30 +144,78 @@ class TimmBackbone:
             return self._forward(x).float().cpu().numpy()
 
 
+def release_memory() -> None:
+    """Hand memory freed after loading back to the OS (glibc keeps it otherwise), so
+    the server's footprint is what it holds, not what loading once needed."""
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        import ctypes
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except OSError:
+            pass
+
+
+def load_open_clip_image_tower(model_name: str, pretrained: str | None):
+    """(image tower, preprocess) of an open_clip model. Only the image tower is ever
+    used (encode_image is the tower's output), so the text tower is never kept.
+
+    For a Hugging Face model with a safetensors checkpoint, the model is laid out
+    without memory ("meta") and only the image tower's weights are read into it:
+    BioCLIP 2 then peaks at 1.55 GB instead of 3.2 GB (whole model plus a second
+    copy while loading), measured on the 4 GB server box, with identical vectors."""
+    import open_clip
+    if model_name.startswith("hf-hub:") and not pretrained:
+        try:
+            from huggingface_hub import hf_hub_download
+            from safetensors import safe_open
+            path = hf_hub_download(model_name[len("hf-hub:"):], "open_clip_model.safetensors")
+        except Exception:        # no safetensors file (or not cached offline): the plain way
+            path = None
+        if path:
+            model, _, preprocess = open_clip.create_model_and_transforms(
+                model_name, load_weights=False, pretrained_text=False, device="meta")
+            tower = model.visual
+            del model
+            with safe_open(path, "pt") as f:
+                weights = {k[len("visual."):]: f.get_tensor(k)
+                           for k in f.keys() if k.startswith("visual.")}
+            tower.load_state_dict(weights, strict=True, assign=True)
+            del weights
+            left = [n for n, t in list(tower.named_parameters()) + list(tower.named_buffers())
+                    if t.device.type == "meta"]
+            if left:
+                raise RuntimeError(f"{model_name}: no weights for {left[:3]}")
+            return tower, preprocess
+    model, _, preprocess = open_clip.create_model_and_transforms(model_name,
+                                                                 pretrained=pretrained)
+    tower = model.visual
+    del model
+    return tower, preprocess
+
+
 class OpenClipBackbone(TimmBackbone):
     """Any open_clip model: the image tower's embedding."""
 
     def __init__(self, name: str, clip_name: str):
-        import open_clip
         import torch
         self.torch = torch
         self.name = name
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         model_name, _, pretrained = clip_name.partition("@")
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained or None)
-        self.model = model.eval().to(self.device)
-        self.transform = preprocess
+        tower, self.transform = load_open_clip_image_tower(model_name, pretrained or None)
+        self.model = tower.eval().to(self.device)
+        release_memory()
         with torch.inference_mode():
-            probe = self.model.encode_image(
+            probe = self.model(
                 self.transform(Image.new("RGB", (64, 64))).unsqueeze(0).to(self.device))
         self.dim = probe.shape[1]
 
     def _forward(self, x):
-        return self.model.encode_image(x)
+        return self.model(x)          # = CLIP.encode_image (the tower, not normalised)
 
     def image_module(self):
-        return self.model.visual
+        return self.model
 
 
 class FinetunedBackbone:

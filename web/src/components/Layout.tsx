@@ -105,8 +105,7 @@ function Account() {
       <button
         className={link}
         onClick={async () => {
-          await api.signOut();
-          location.reload();
+          location.href = await api.signOut();
         }}
       >
         Sign out

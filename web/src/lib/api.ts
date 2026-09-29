@@ -176,8 +176,11 @@ export const signInUrl = () =>
 
 export const api = {
   me: () => getJson<Me>("/api/me"),
-  async signOut() {
-    await fetch("/auth/signout", { method: "POST" });
+  /** Where to go next: an open page, because a gated one would sign you straight back in. */
+  async signOut(): Promise<string> {
+    const res = await fetch("/auth/signout", { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    return typeof body.next === "string" ? body.next : "/";
   },
   prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
   models: () => getJson<ModelsInfo>("/api/models"),

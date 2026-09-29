@@ -204,11 +204,36 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         res.delete_cookie(NONCE_COOKIE, path="/auth/")
         return res
 
+    # Signing out ends this site's session only. The browser must not go back to a
+    # gated page afterwards: that sends it to mycomap.org, which (still signed in)
+    # signs it straight back in. So it lands here, an open page that says so.
     @app.post("/auth/signout", include_in_schema=False)
     def signout():
-        res = JSONResponse({"ok": True})
+        res = JSONResponse({"ok": True, "next": "/auth/signed-out"})
         res.delete_cookie(SESSION_COOKIE, path="/")
         return res
+
+    @app.get("/auth/signed-out", include_in_schema=False)
+    def signed_out():
+        if not signin.enabled:
+            raise HTTPException(404, "sign-in is not configured here")
+        issuer = html.escape(signin.issuer)
+        return HTMLResponse(
+            "<!doctype html><html lang=en><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width, initial-scale=1'>"
+            "<title>Signed out - MycoMap Vision</title>"
+            "<style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:15vh auto;"
+            "padding:0 1rem;color:#374151}h1{color:#4a3728;font-size:1.4rem}"
+            "a.btn{display:inline-block;margin:.25rem .5rem .25rem 0;padding:.55rem 1rem;"
+            "border-radius:.375rem;text-decoration:none;font-weight:600}"
+            ".go{background:#4a7c3f;color:#fff}.alt{border:1px solid #d1d5db;color:#374151}"
+            "</style>"
+            "<h1>You've signed out of MycoMap Vision</h1>"
+            f"<p>You're still signed in on {issuer.removeprefix('https://')}, so signing "
+            "in here again takes one click.</p>"
+            "<p><a class='btn go' href='/auth/signin'>Sign in again</a>"
+            f"<a class='btn alt' href='{issuer}/api/logout'>Also sign out of "
+            f"{issuer.removeprefix('https://')}</a></p>")
 
     manifest_path = manifest_path or config.MANIFEST_PATH
     conn = open_manifest(manifest_path)
@@ -252,6 +277,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             ident = Identifier(conn, backbone, method, root, calibration=cal)
         identifiers[(backbone, method)] = (version, ident)
+        models.release_memory()
         return ident
 
     @app.get("/api/health")
@@ -384,6 +410,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 ident = identifier(backbone, method, view)
                 if backbone not in backbones:
                     backbones[backbone] = backbone_loader(backbone)
+                    models.release_memory()
                 results.append(ident.identify(backbones[backbone], images, context=context,
                                               photo_lookup=photo_lookup, may_show=may_show))
         return {"results": results, "context_used": used}
