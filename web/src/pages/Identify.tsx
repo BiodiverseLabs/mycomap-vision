@@ -396,7 +396,7 @@ function SpecimenCard({ s, files }: { s: Specimen; files: File[] }) {
           <img src={s.photo_url} alt={s.species} loading="lazy" className="h-full w-full object-cover" />
         ) : s.photo_withheld ? (
           <span className="flex h-full w-full items-center justify-center p-3 text-center text-xs text-muted-foreground">
-            Photo not shown here (all rights reserved). View it on iNaturalist.
+            Photo not shown here: all rights reserved, and the photographer hasn't given permission. View it on iNaturalist.
           </span>
         ) : null}
       </a>

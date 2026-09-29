@@ -15,7 +15,7 @@ as a **release** in S3.
 | App | `/var/www/mycomap-vision`, a clone of the repo; `.venv` with CPU-only torch |
 | Server | systemd unit `mycomap-vision`: `mv serve` on 127.0.0.1:8010 (API **and** the built site) |
 | Settings | `/etc/mycomap-vision/vision.env` (600), linked as the repo's `.env` |
-| Secrets | `/etc/mycomap-vision/session-secret` (made on the box), `signin-public.pem` (public key, not secret), `~/.aws/credentials` (read-only key, typed by a person) |
+| Secrets | `/etc/mycomap-vision/session-secret` (made on the box), `signin-public.pem` (public key, not secret), `org-vision-key` (mycomap.org's `VISION_API_KEY`, typed by a person), `~/.aws/credentials` (read-only key, typed by a person) |
 | Data | `/srv/mycomap-vision/releases/<id>/`, the live one named in `current.txt`; model weights in `/srv/mycomap-vision/hf` |
 | Front | nginx + Let's Encrypt; Cloudflare DNS for `vision.mycomap.org` |
 
@@ -107,6 +107,27 @@ routine deploy, once the `feat/signin-bridge-sites` change is on main:
 ```js
 SIGNIN_BRIDGE_SITES: "https://vision.mycomap.org",
 ```
+
+### 5b. Photographers' answers from mycomap.org (Steve, production + box)
+
+The box reads who granted or withdrew permission from mycomap.org every 5
+minutes (`permissions.py`). Until it can, all-rights-reserved photos are never
+shown. One key, known to both sides:
+
+1. On the laptop (Git Bash): `openssl rand -hex 32`
+2. On the mycomap.org box, in the same `env` block as above:
+   `VISION_API_KEY: "<key>",` (takes effect at the next routine deploy).
+3. On this box, typed by you:
+
+```bash
+sudo tee /etc/mycomap-vision/org-vision-key >/dev/null   # paste the key, then Ctrl-D
+sudo chown ubuntu:ubuntu /etc/mycomap-vision/org-vision-key
+sudo chmod 600 /etc/mycomap-vision/org-vision-key
+```
+
+`vision.env` already has `MV_ORG_BASE_URL`, `MV_ORG_VISION_KEY_FILE` and
+`MV_LICENSE_REFRESH_HOURS=24`. After a restart, `.venv/bin/mv permissions` shows
+the last read.
 
 ### 6. First release (laptop, then box)
 

@@ -10,8 +10,8 @@ import gzip
 import json
 import sqlite3
 import time
-from datetime import datetime, timezone
-from typing import Iterable, Iterator
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Iterable, Iterator
 
 import requests
 
@@ -218,4 +218,44 @@ def fetch_all(conn: sqlite3.Connection, refresh: bool = False, north_america_onl
             log(f"  {done:,}/{len(ids):,} observations, {totals['photos_new']:,} new photos, "
                 f"{time.monotonic() - started:.0f}s")
     totals["requested"] = len(ids)
+    return totals
+
+
+def stale_ids(conn: sqlite3.Connection, older_than: str, limit: int | None = None) -> list[str]:
+    """iNat records whose details (and so photo licences) were last read before
+    `older_than` (ISO), oldest first."""
+    sql = ("select o.observation_id from inat_observations o join records r "
+           "on r.observation_id = o.observation_id where r.source = 'inat' and o.fetched_at < ? "
+           "order by o.fetched_at, cast(o.observation_id as integer)")
+    ids = [row[0] for row in conn.execute(sql, (older_than,))]
+    return ids[:limit] if limit is not None else ids
+
+
+def refresh_licenses(conn: sqlite3.Connection, older_than_hours: float = 24, limit: int | None = None,
+                     log=print, session: requests.Session | None = None,
+                     fetch: Callable[..., list[dict]] | None = None,
+                     now: Callable[[], datetime] | None = None) -> dict:
+    """Re-read iNat details for records last checked more than `older_than_hours` ago,
+    so licence changes on iNat reach the manifest (and what the identifier may show).
+    Same API, fields and 1 request/s as fetch_all; changes go to license_history.
+    A full pass over ~160k records is ~800 requests (~14 minutes)."""
+    now = now or (lambda: datetime.now(timezone.utc))
+    cutoff = (now() - timedelta(hours=older_than_hours)).isoformat(timespec="seconds")
+    ids = stale_ids(conn, cutoff, limit)
+    fetch = fetch or fetch_batch
+    if session is None:
+        session = requests.Session()
+        session.headers["User-Agent"] = config.USER_AGENT
+    limiter = MinInterval(1.0)
+    totals = {"requested": len(ids), "ok": 0, "missing": 0, "photos_new": 0,
+              "license_changes": 0, "batches": 0}
+    for batch in chunks(ids, BATCH):
+        results = fetch(session, batch, limiter)
+        stats = save_batch(conn, batch, results, now().isoformat(timespec="seconds"))
+        for k, v in stats.items():
+            totals[k] += v
+        totals["batches"] += 1
+        if totals["batches"] % 50 == 0:
+            log(f"  licences: {totals['ok'] + totals['missing']:,}/{len(ids):,} records re-read, "
+                f"{totals['license_changes']:,} changes")
     return totals

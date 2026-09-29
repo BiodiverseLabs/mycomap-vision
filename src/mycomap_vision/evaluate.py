@@ -25,6 +25,8 @@ import numpy as np
 from . import config
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
+from .permissions import EXCLUDED_FROM_USE_SQL
+from .permissions import ensure_schema as ensure_permissions_schema
 
 BUCKETS = [(0, 0, "novel (0 refs)"), (1, 1, "1 ref"), (2, 2, "2 refs"),
            (3, 5, "3-5 refs"), (6, 30, "6-30 refs"), (31, 10**9, "31+ refs")]
@@ -57,8 +59,13 @@ def clean(s: str | None) -> str:
 
 def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
                  north_america_only: bool = True) -> list[Record]:
-    """Green, unconflicted iNat records with at least one embedded photo."""
+    """Green, unconflicted iNat records with at least one embedded photo.
+
+    Every reference set, comparison and training run is built here, so this is
+    where photos a photographer has refused us (all rights reserved, permission
+    withdrawn on mycomap.org; see permissions.py) are left out."""
     na = "and r.north_america = 1" if north_america_only else ""
+    ensure_permissions_schema(conn)
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
              o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
@@ -66,7 +73,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
       from records r
       join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
-      where r.label_conflict = 0 {na}
+      where r.label_conflict = 0 {na} and {EXCLUDED_FROM_USE_SQL}
       order by r.observation_id, op.position
     """).fetchall()
     recs: dict[str, Record] = {}

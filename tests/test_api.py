@@ -37,7 +37,7 @@ def app_with_model(conn, tmp_path, embed_all=True, limits=None, arr_photos=()):
     conn.commit()
     manifest = tmp_path / "manifest.sqlite"
     return TestClient(create_app(manifest, root, backbone_loader=lambda name: Const(name),
-                                 limits=limits or open_limits()))
+                                 limits=limits or open_limits(), background=False))
 
 
 def post_photos(client, reds, models=""):

@@ -9,6 +9,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from .permissions import SCHEMA as PERMISSIONS_SCHEMA
+
 SCHEMA = """
 create table if not exists records (
   observation_id   text primary key,   -- .org observations.observation_id (an iNat id for iNat records)
@@ -90,7 +92,7 @@ create table if not exists license_history (
   license_code     text,
   seen_at          text not null
 );
-"""
+""" + PERMISSIONS_SCHEMA
 
 
 def connect(path: Path) -> sqlite3.Connection:

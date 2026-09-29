@@ -32,6 +32,22 @@ of green records?
 `mv status` prints counts. `mv contributors [--arr-only]` writes the list of
 photographers, with their all-rights-reserved photo counts, for permission requests.
 
+### Photo permission
+
+Photographers answer on mycomap.org (its `docs/vision-photo-permissions.md`).
+`mv serve` reads the answers every 5 minutes from mycomap.org's
+`/api/vision/photo-permissions` (settings `MV_ORG_BASE_URL`, `MV_ORG_VISION_KEY`;
+`mv permissions --sync` does it by hand, `mv permissions` shows where they stand):
+
+- an all-rights-reserved photo is shown as an example match only with its
+  owner's grant, read within the last hour; otherwise the card says it isn't shown;
+- a photographer who declines or withdraws has their all-rights-reserved photos
+  left out of the reference set at once, and out of comparisons and training
+  (`evaluate.load_records`); no answer yet = still used while permission is sought;
+- licences are read when the photo is shown, and `mv refresh-licenses` (or
+  `MV_LICENSE_REFRESH_HOURS=24` in `mv serve`) re-reads them from iNat, so a
+  licence change there is picked up.
+
 ## Setup (Windows, Git Bash or PowerShell)
 
 ```bash

@@ -52,7 +52,16 @@ export function DataPage() {
                   <p className="text-xs text-muted-foreground mt-3">
                     Open: CC0, CC-BY, CC-BY-SA. Non-commercial: CC licences with NC or ND.{" "}
                     {num(s.contributors_arr)} photographers have all-rights-reserved photos in
-                    the set; their photos are used for training only while permission is sought.
+                    the set; their photos are used for training only while permission is sought,
+                    and shown only once they grant it.
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-2" data-testid="text-permissions">
+                    Permission from mycomap.org: {num(s.permissions.granted)} granted,{" "}
+                    {num(s.permissions.withdrawn)} declined or withdrawn (their all-rights-reserved
+                    photos are left out).{" "}
+                    {s.permissions.last_good_sync
+                      ? `Last read ${new Date(s.permissions.last_good_sync).toLocaleString()}${s.permissions.fresh_for_showing ? "" : " (too long ago: all-rights-reserved photos are hidden until it is read again)"}.`
+                      : "Not read yet: all-rights-reserved photos are hidden."}
                   </p>
                 </CardContent>
               </Card>
