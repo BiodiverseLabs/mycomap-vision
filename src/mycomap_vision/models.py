@@ -60,6 +60,8 @@ def storage_name(spec: str) -> str:
     """Filesystem- and URL-safe key for a backbone: its alias, or a slug of its spec."""
     if spec in ALIASES:
         return spec
+    if spec.startswith("finetuned:"):
+        return spec.partition(":")[2]
     for name, alias in ALIASES.items():
         if alias.spec == spec:
             return name
@@ -69,10 +71,14 @@ def storage_name(spec: str) -> str:
 def resolve_spec(name_or_spec: str) -> str:
     if name_or_spec in ALIASES:
         return ALIASES[name_or_spec].spec
-    if name_or_spec.startswith(("timm:", "open_clip:")):
+    if name_or_spec.startswith(("timm:", "open_clip:", "finetuned:")):
         return name_or_spec
+    from .finetune import models_dir
+    if re.fullmatch(r"[A-Za-z0-9._-]+", name_or_spec) and             (models_dir() / f"{name_or_spec}.json").is_file():
+        return f"finetuned:{name_or_spec}"
     raise ValueError(f"unknown backbone {name_or_spec!r}: use an alias "
-                     f"({', '.join(ALIASES)}) or timm:<name> / open_clip:<name>")
+                     f"({', '.join(ALIASES)}), a fine-tuned model in data/models, "
+                     "or timm:<name> / open_clip:<name>")
 
 
 def split_options(target: str) -> tuple[str, dict]:
@@ -119,6 +125,14 @@ class TimmBackbone:
     def _forward(self, x):
         return self.model(x)
 
+    def image_module(self):
+        """The image network, whose parameters fine-tuning trains."""
+        return self.model
+
+    def forward_features(self, x):
+        """Embeddings with gradients, for training (encode() is inference only)."""
+        return self._forward(x)
+
     def encode(self, items):
         torch = self.torch
         x = torch.stack([i if isinstance(i, torch.Tensor) else self.transform(i)
@@ -150,10 +164,50 @@ class OpenClipBackbone(TimmBackbone):
     def _forward(self, x):
         return self.model.encode_image(x)
 
+    def image_module(self):
+        return self.model.visual
+
+
+class FinetunedBackbone:
+    """A base backbone with the weights fine-tuning trained put back in (finetune.py)."""
+
+    def __init__(self, name: str, model_name: str, root=None):
+        import torch
+
+        from .finetune import read_meta, models_dir
+        root = root or models_dir()
+        meta = read_meta(model_name, root)
+        base = load_backbone(meta["base_spec"])
+        trained = torch.load(root / meta["weights"], map_location="cpu", weights_only=True)
+        module = base.image_module()
+        own = dict(module.named_parameters())
+        unknown = sorted(set(trained) - set(own))
+        if unknown:
+            raise ValueError(f"{model_name}: weights for parameters {base.name} doesn't have: "
+                             f"{unknown[:3]}")
+        with torch.no_grad():
+            for n, value in trained.items():
+                own[n].copy_(value.to(own[n].device, own[n].dtype))
+        self.base, self.meta, self.name = base, meta, name
+        self.dim, self.device, self.transform = base.dim, base.device, base.transform
+
+    def prepare(self, image):
+        return self.base.prepare(image)
+
+    def encode(self, items):
+        return self.base.encode(items)
+
+    def image_module(self):
+        return self.base.image_module()
+
+    def forward_features(self, x):
+        return self.base.forward_features(x)
+
 
 LOADERS: dict[str, Callable[[str, str], object]] = {
     "timm": TimmBackbone,
     "open_clip": OpenClipBackbone,
+    "finetuned": FinetunedBackbone,
 }
 
 

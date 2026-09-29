@@ -106,6 +106,11 @@ Then:
 .venv/Scripts/mv aws-launch-trainer --backbones bioclip-2,dinov3-l16 --max-hours 12
 ```
 
+Add `--finetune bioclip-2` to also fine-tune BioCLIP 2's last blocks on the
+reference records (about 2 passes over the photos), then embed and score the
+fine-tuned model next to the frozen one. It is saved as `bioclip-2-ft-<run>` and
+comes home with `aws-pull-trainer` (weights in `data/models/`).
+
 It refuses to start if the manifest lists no photos of that size in the bucket,
 so run `mv aws-pull-manifest` after the download first. Only the last commit is
 sent. The log is copied to `s3://<bucket>/runs/<run>/train.log` every 15 minutes;

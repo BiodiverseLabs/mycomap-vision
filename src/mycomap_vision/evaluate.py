@@ -292,6 +292,34 @@ create table if not exists eval_runs (
 """
 
 
+# Fine-tuned backbones (finetune.py) and the newest validation date they trained on.
+FINETUNE_SCHEMA = """
+create table if not exists finetunes (
+  name            text primary key,
+  base            text not null,
+  trained_through text not null,
+  test_days       integer not null,
+  meta_json       text not null,
+  created_at      text not null
+);
+"""
+
+
+def check_not_trained_on_test(conn: sqlite3.Connection, backbones: list[str],
+                              cutoff: str) -> None:
+    """Refuse to score a fine-tuned model on records it may have trained on: test records
+    are those validated after `cutoff`, so it must have trained on nothing later."""
+    conn.executescript(FINETUNE_SCHEMA)
+    for b in backbones:
+        row = conn.execute("select trained_through from finetunes where name = ?",
+                           (b,)).fetchone()
+        if row and row[0] > cutoff:
+            raise ValueError(
+                f"{b} was trained on records validated up to {row[0]}, but this comparison "
+                f"tests records validated after {cutoff}; its score would be inflated. "
+                "Use a shorter --test-days or a model trained on less.")
+
+
 def with_rows(records: list[Record], row_of: dict[int, int]) -> list[Record]:
     """Records whose photo_rows hold photo ids -> the same records with one backbone's rows."""
     return [replace(r, photo_rows=[row_of[p] for p in r.photo_rows]) for r in records]
@@ -375,6 +403,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         if m not in METHODS:
             raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
     shared = shared_records(conn, backbones, test_days, max_test, seed, embeddings_root)
+    check_not_trained_on_test(conn, list(shared.loaded), shared.cutoff)
     ref, test = shared.ref, shared.test
     comparison_id = (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-"
                      + shared.record_set[:6])

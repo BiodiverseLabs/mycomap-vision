@@ -125,6 +125,15 @@ Small test sets (68-91 records): read as direction, not precision.
 - Learned multi-photo weighting (attention over photo embeddings with view tags).
 - Fine-tune the best backbone on well-sampled species (metric learning), keep
   nearest-specimen lookup for the long tail (43% of names have one record).
+  Built 2026-09-28 (`finetune.py`; `mv finetune` on the laptop, `--finetune` on the
+  AWS trainer): the last 4 of 24 blocks train, the rest stay frozen; a cosine
+  classifier at species, genus and family starts from the frozen model's class
+  averages; photos drawn with weight 1/sqrt(species photos); no hue or saturation
+  augmentation (colour identifies fungi). It trains only on the comparison's
+  reference records, saves the date it trained through, and `mv compare`
+  refuses to score it on anything up to that date. The result is used like any
+  backbone (`<base>-ft-<run>`), so nearest, species-mean and the heads all run on
+  it, next to the frozen base.
 - Hierarchical, calibrated confidence per rank (so 80% means right 80% of the time).
 - Crops of the fruiting body from the large photos.
 

@@ -90,7 +90,8 @@ def cmd_aws_launch_trainer(conn, args) -> None:
     print(json.dumps(aws.launch_trainer(conn, _split(args.backbones), _split(args.methods),
                                         size=args.size, max_hours=args.max_hours,
                                         instance_type=args.instance_type,
-                                        test_days=args.test_days), indent=2))
+                                        test_days=args.test_days,
+                                        finetune=_split(args.finetune)), indent=2))
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -103,7 +104,8 @@ def cmd_aws_train_job(conn, args) -> None:
         store.client.upload_file(str(path), store.bucket, key)
     out = trainer.run_job(conn, store, _split(args.backbones), _split(args.methods), upload,
                           args.run_id, size=args.size, test_days=args.test_days,
-                          batch_size=args.batch_size, readers=args.readers)
+                          batch_size=args.batch_size, readers=args.readers,
+                          finetune=_split(args.finetune))
     print(json.dumps(out, indent=2))
     if out["comparison_id"]:
         from . import evaluate
@@ -116,6 +118,23 @@ def cmd_aws_pull_trainer(conn, args) -> None:
     print(json.dumps(out, indent=2))
     if out["comparison_id"]:
         print_scoreboard(evaluate.scoreboard(conn, out["comparison_id"]))
+
+
+def cmd_finetune(conn, args) -> None:
+    """Fine-tune on this machine (a smoke test on the sample; full runs go to AWS)."""
+    from datetime import datetime
+
+    from . import finetune, models
+    base = models.storage_name(args.base)
+    name = args.name or f"{base}-ft-{datetime.now():%Y%m%d-%H%M%S}"
+    cfg = finetune.FinetuneConfig(epochs=args.epochs, blocks=args.blocks,
+                                  batch_size=args.batch_size, workers=args.workers,
+                                  max_steps=args.max_steps)
+    meta = finetune.finetune(conn, base, open_store(args.source, config.DATA_DIR), args.size,
+                             name, cfg, test_days=args.test_days)
+    print(json.dumps(meta, indent=2))
+    print(f"next: mv embed --backbone {name} --size {args.size}, then mv compare "
+          f"--backbones {base},{name}")
 
 
 def cmd_embed(conn, args) -> None:
@@ -325,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-hours", type=float, default=12)
     p.add_argument("--instance-type", default="g6.2xlarge")
     p.add_argument("--test-days", type=int, default=28)
+    p.add_argument("--finetune", default="",
+                   help="backbones (also in --backbones) to fine-tune on the reference records")
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
                                              "upload the results to runs/<run>/")
@@ -336,6 +357,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--readers", type=int, default=16, help="parallel photo reads from S3")
+    p.add_argument("--finetune", default="")
+
+    p = sub.add_parser("finetune", help="fine-tune a backbone's last blocks on the reference "
+                                        "records (smoke test here; full runs on AWS)")
+    p.add_argument("--base", required=True, help="an embedded backbone, e.g. bioclip-2")
+    p.add_argument("--name", help="default: <base>-ft-<date-time>")
+    p.add_argument("--size", default="medium", choices=["small", "medium", "large"])
+    p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--epochs", type=float, default=1.0)
+    p.add_argument("--blocks", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--max-steps", type=int)
+    p.add_argument("--test-days", type=int, default=28)
 
     p = sub.add_parser("aws-pull-trainer", help="bring a finished trainer run home: its "
                                                 "embeddings replace the local ones (archived)")
@@ -415,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-launch-trainer": cmd_aws_launch_trainer,
         "aws-train-job": cmd_aws_train_job,
         "aws-pull-trainer": cmd_aws_pull_trainer,
+        "finetune": cmd_finetune,
         "embed": cmd_embed,
         "compare": cmd_compare,
         "screen": cmd_screen,

@@ -1,9 +1,10 @@
 """The full-data run on a GPU instance, and bringing its results home.
 
 `run_job` runs on the instance (see aws.launch_trainer): it embeds every large
-photo in S3 with each backbone, compares every backbone x method on the newest
-weeks, and uploads the embeddings, the manifest, the reports and a result.json
-to s3://<bucket>/runs/<run>/. `merge_results` runs on the laptop: the run's
+photo in S3 with each backbone, optionally fine-tunes some of them on the
+reference records (finetune.py) and embeds with the result, compares every
+backbone x method on the newest weeks, and uploads the embeddings, fine-tuned
+weights, the manifest, the reports and a result.json to s3://<bucket>/runs/<run>/. `merge_results` runs on the laptop: the run's
 backbones replace the local (sample) embeddings, which are archived rather than
 deleted, and the run's scoreboard rows are added once.
 """
@@ -37,11 +38,19 @@ def clear_embeddings(conn: sqlite3.Connection) -> int:
         return conn.execute("delete from embeddings").rowcount
 
 
+def finetuned_name(base: str, run_id: str) -> str:
+    return f"{base}-ft-{run_id}"
+
+
 def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list[str],
             upload: Callable[[Path, str], None], run_id: str, size: str = "large",
             test_days: int = 28, batch_size: int = 64, readers: int = 16,
-            loader=None, data_dir: Path | None = None, log=print) -> dict:
-    """Embed, compare and upload. `upload(local_path, key)` copies one file to the bucket."""
+            loader=None, data_dir: Path | None = None, finetune: list[str] | None = None,
+            finetuner=None, log=print) -> dict:
+    """Embed, fine-tune, compare and upload. `upload(local_path, key)` copies one file to
+    the bucket. `finetune` names backbones (also in `backbones`) to fine-tune;
+    `finetuner(conn, base, name, embeddings_root, models_dir)` does it (default:
+    finetune.finetune with its default settings) and returns the model's metadata."""
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
@@ -58,6 +67,30 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     result = screen(conn, store, backbones, [], size=size, methods=methods,
                     batch_size=batch_size, embeddings_root=root, readers=readers,
                     after_embed=upload_backbone, compare=False, log=log, **kw)
+    finetuned, ft_failed = {}, {}
+    for base in finetune or []:
+        from . import models
+        base = models.storage_name(base)
+        name = finetuned_name(base, run_id)
+        if base not in result.embedded:
+            ft_failed[name] = f"{base} was not embedded"
+            continue
+        try:
+            meta = (finetuner or _default_finetuner(store, size, test_days, log))(
+                conn, base, name, root, data_dir / "models")
+            for suffix in (".pt", ".json"):
+                upload(data_dir / "models" / f"{name}{suffix}", f"{prefix}models/{name}{suffix}")
+            finetuned[name] = meta
+        except Exception as e:  # keep the rest of the run
+            ft_failed[name] = f"{e.__class__.__name__}: {e}"
+            log(f"[{name}] FINE-TUNING FAILED: {ft_failed[name]}")
+    if finetuned:
+        ft = screen(conn, store, list(finetuned), [], size=size, methods=methods,
+                    batch_size=batch_size, embeddings_root=root, readers=readers,
+                    after_embed=upload_backbone, compare=False, log=log, **kw)
+        result.embedded.update(ft.embedded)
+        result.failed.update(ft.failed)
+    result.failed.update(ft_failed)
     comparison = None
     if result.embedded:
         comparison = evaluate.compare(conn, list(result.embedded), methods, test_days=test_days,
@@ -68,6 +101,10 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         upload(report, f"{prefix}reports/{report.name}")
     out = {"run_id": run_id, "size": size, "methods": methods,
            "embedded": result.embedded, "failed": result.failed,
+           "finetuned": {n: {k: m.get(k) for k in ("base", "trained_through", "records",
+                                                    "photos", "species", "steps", "minutes",
+                                                    "final_loss")}
+                         for n, m in finetuned.items()},
            "comparison_id": comparison["comparison_id"] if comparison else None,
            "code_version": config.code_version()}
     snap = snapshot(conn, data_dir / "manifest-out.sqlite")
@@ -77,6 +114,14 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     res.write_text(json.dumps(out, indent=2), encoding="utf-8")
     upload(res, prefix + RESULT_FILE)
     return out
+
+
+def _default_finetuner(store, size, test_days, log):
+    def run(conn, base, name, embeddings_root, models_dir):
+        from .finetune import finetune
+        return finetune(conn, base, store, size, name, test_days=test_days,
+                        embeddings_root=embeddings_root, out_dir=models_dir, log=log)
+    return run
 
 
 def merge_results(conn: sqlite3.Connection, remote_path: Path, staged: Path, result: dict,
@@ -93,9 +138,24 @@ def merge_results(conn: sqlite3.Connection, remote_path: Path, staged: Path, res
     run_id = result["run_id"]
     conn.executescript(EMBED_SCHEMA)
     conn.executescript(evaluate.SCOREBOARD_SCHEMA)
+    conn.executescript(evaluate.FINETUNE_SCHEMA)
     replaced, archived = [], []
+    finetuned = list(result.get("finetuned", {}))
+    # Fine-tuned weights first: their embeddings are no use without them.
+    for name in finetuned:
+        dest = data_dir / "models"
+        dest.mkdir(parents=True, exist_ok=True)
+        for suffix in (".pt", ".json"):
+            src = staged.parent / "models" / f"{name}{suffix}"
+            if not src.is_file():
+                raise FileNotFoundError(f"run {run_id} has no {src.name} staged")
+            shutil.copyfile(src, dest / src.name)
     conn.execute("attach database ? as remote", (str(remote_path),))
     try:
+        if finetuned:
+            with conn:
+                conn.execute("insert or replace into finetunes select * from remote.finetunes "
+                             f"where name in ({','.join('?' * len(finetuned))})", finetuned)
         for name in result.get("embedded", {}):
             src = staged / name
             if not src.is_dir():
