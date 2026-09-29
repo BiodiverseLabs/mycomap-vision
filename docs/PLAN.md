@@ -216,3 +216,27 @@ work stays on the self-terminating instances. The site reads **releases** from S
 a read-only IAM user. Sign-in reuses mycomap.org's bridge (Steve: anyone with a
 mycomap.org account before launch; later maybe identify-only); the box holds only
 the public key.
+
+### Serving speed (roadmap, Steve 2026-09-29)
+
+The box only answers; **all training runs on the EC2 GPU instance** (the box has
+MV_FIT_ON_DEMAND=0 and offers only methods whose training ships in a release).
+Today: nearest specimen, ~2-3 s a photo on the 4 GB box, fine while use is light.
+Lightsail CPUs are burstable: sustained use (or any heavy job) spends the credits
+and throttles the box to ~1/5 speed, so real traffic means moving the answering to
+a non-burstable compute instance.
+
+- [ ] **8-bit image tower, again with the full-set model.** Re-export the model the
+  EC2 run produces (fine-tuned or not) to ONNX and quantize it; also try a gentler
+  int8 that keeps the attention layers at full precision, to keep more answers
+  identical. Switch only if accuracy holds at species, genus and family.
+  First try (2026-09-29, frozen BioCLIP 2, sample index, 2,000 photos, own record
+  left out): species 14.1% vs 14.5% full, genus 47.5 vs 48.2, family 47.5 vs 47.4;
+  but only 74 / 81 / 85% of answers identical, top confidence moved by 0.025
+  typically (0.11 at the 95th percentile); 328 ms a photo on 8 laptop threads vs
+  ~1.4 s full precision on 4. Kept full precision. The ONNX export fused LayerNorm
+  and GELU but not attention (open_clip's attention doesn't match ORT's patterns).
+- [ ] Re-time on the box once its CPU credits have recovered (the 9/29 box timings
+  were taken while throttled and don't count).
+- [ ] When traffic justifies it: answering on a non-burstable compute instance
+  (e.g. c7i with AMX), or a GPU, for well under a second a photo.
