@@ -24,6 +24,11 @@ of green records?
    same photos (newest 28 days vs older records); `mv scoreboard` lists results;
    `mv models` lists backbones and methods. Plan: [docs/PLAN.md](docs/PLAN.md).
 
+6. `mv release --backbones bioclip-2 --make-current`: publish what the public site
+   serves to S3; the server box pulls it with `mv pull-release`. The site
+   (vision.mycomap.org, its own Lightsail box, sign-in with a mycomap.org account)
+   is set up and deployed as in [docs/deploy.md](docs/deploy.md).
+
 `mv status` prints counts. `mv contributors [--arr-only]` writes the list of
 photographers, with their all-rights-reserved photo counts, for permission requests.
 

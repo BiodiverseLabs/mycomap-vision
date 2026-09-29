@@ -1,0 +1,59 @@
+# nginx site for vision.mycomap.org. Install as /etc/nginx/sites-available/mycomap-vision
+# AFTER certbot has issued the certificate (see docs/deploy.md).
+#
+# Everything, the built site included, goes to the one Python process, because
+# that is where the mycomap.org sign-in gate lives: nginx serving web/dist itself
+# would let pages past it.
+#
+# Rules carried over from mycomap.org's incidents:
+# - proxy_intercept_errors off, so an API error is never turned into a page
+#   (nginx keeps the method across the internal redirect: a failed POST looks like a 405);
+# - header buffers big enough for security headers (a 6 KB CSP once 502'd .org);
+# - a location with its own add_header loses the server's, so each includes the snippet.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name vision.mycomap.org;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    # nginx 1.24 (Ubuntu 24.04) predates the separate `http2 on;` directive.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name vision.mycomap.org;
+
+    ssl_certificate     /etc/letsencrypt/live/vision.mycomap.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/vision.mycomap.org/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:VisionSSL:10m;
+    ssl_session_timeout 1d;
+
+    # The visitor's address behind Cloudflare (cloudflare-realip.sh).
+    include /etc/nginx/snippets/cloudflare-realip.conf;
+
+    # Up to 10 photos of 25 MB, 80 MB per request (guards.py); the app checks again.
+    client_max_body_size 80m;
+
+    proxy_buffer_size 16k;
+    proxy_buffers 8 16k;
+    proxy_busy_buffers_size 32k;
+
+    include /etc/nginx/snippets/mycomap-vision-headers.conf;
+
+    location / {
+        proxy_pass http://127.0.0.1:<PORT>;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Replaced, not appended: the app trusts this header from 127.0.0.1 only,
+        # and $remote_addr is already the real visitor (realip above).
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Identifying runs on the CPU: a few seconds a photo, longer on a cold start.
+        proxy_read_timeout 180s;
+        proxy_request_buffering on;
+        proxy_intercept_errors off;
+    }
+}

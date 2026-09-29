@@ -1,6 +1,7 @@
 import { Link, useLocation } from "wouter";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowUpRight, Menu, X } from "lucide-react";
+import { api, signInUrl, type Me } from "@/lib/api";
 
 // Header and footer follow mycomap.org's PublicLayout and MainNavigation so the
 // two sites read as one: sticky white header, logo + "MycoMap" in brown, grey
@@ -54,6 +55,7 @@ function Header() {
             </nav>
           </div>
           <div className="flex items-center gap-2">
+            <Account />
             <a
               href="https://mycomap.org"
               className="hidden sm:inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:text-myco-green hover:bg-myco-green/5"
@@ -83,6 +85,33 @@ function Header() {
         )}
       </div>
     </header>
+  );
+}
+
+/** Who is signed in (with their mycomap.org account), when this site uses sign-in. */
+function Account() {
+  const [me, setMe] = useState<Me | null>(null);
+  useEffect(() => {
+    api.me().then(setMe).catch(() => setMe(null));
+  }, []);
+  if (!me || me.signin === "off") return null;
+  const link = "px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:text-myco-green hover:bg-myco-green/5";
+  if (!me.user) {
+    return <a href={signInUrl()} className={link}>Sign in</a>;
+  }
+  return (
+    <span className="flex items-center gap-1 text-sm text-gray-600">
+      <span className="hidden md:inline">{me.user.name ?? "Signed in"}</span>
+      <button
+        className={link}
+        onClick={async () => {
+          await api.signOut();
+          location.reload();
+        }}
+      >
+        Sign out
+      </button>
+    </span>
   );
 }
 

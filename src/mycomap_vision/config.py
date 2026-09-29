@@ -42,8 +42,21 @@ def required(name: str, purpose: str) -> str:
     return value
 
 
-# Everything downloaded or derived lives here and is never committed.
-DATA_DIR = Path(setting("MV_DATA_DIR") or REPO_ROOT / "data")
+def release_data_dir(root: Path) -> Path:
+    """On the server box: the release <root>/current.txt names (see release.py), or
+    <root>/no-release before the first `mv pull-release`."""
+    pointer = root / "current.txt"
+    rid = pointer.read_text(encoding="utf-8").strip() if pointer.is_file() else ""
+    if not rid or "/" in rid or "\\" in rid or rid.startswith("."):
+        return root / "no-release"
+    return root / "releases" / rid
+
+
+# Everything downloaded or derived lives here and is never committed. A server box
+# sets MV_RELEASE_ROOT instead and reads the current release.
+RELEASE_ROOT = Path(setting("MV_RELEASE_ROOT")) if setting("MV_RELEASE_ROOT") else None
+DATA_DIR = Path(setting("MV_DATA_DIR")
+                or (release_data_dir(RELEASE_ROOT) if RELEASE_ROOT else REPO_ROOT / "data"))
 MANIFEST_PATH = DATA_DIR / "manifest.sqlite"
 RAW_DIR = DATA_DIR / "raw"
 PHOTOS_DIR = DATA_DIR / "photos"

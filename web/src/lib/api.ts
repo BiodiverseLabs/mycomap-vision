@@ -135,6 +135,7 @@ async function getJson<T>(url: string): Promise<T> {
 }
 
 async function errorText(res: Response): Promise<string> {
+  if (res.status === 401) return "Sign in with your mycomap.org account to use this.";
   try {
     const body = await res.json();
     return typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`;
@@ -154,7 +155,20 @@ export interface ProspectiveModel {
   mean_species_confidence: number | null;
 }
 
+export interface Me {
+  signin: "off" | "identify" | "all";
+  user: { id: string; name: string | null } | null;
+}
+
+/** mycomap.org signs people in here; come back to the page they were on. */
+export const signInUrl = () =>
+  `/auth/signin?returnTo=${encodeURIComponent(location.pathname + location.search)}`;
+
 export const api = {
+  me: () => getJson<Me>("/api/me"),
+  async signOut() {
+    await fetch("/auth/signout", { method: "POST" });
+  },
   prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
   models: () => getJson<ModelsInfo>("/api/models"),
   stats: () => getJson<Stats>("/api/stats"),

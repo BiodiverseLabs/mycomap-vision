@@ -3,20 +3,26 @@
 Run: `.venv/Scripts/mv serve` (defaults to http://127.0.0.1:8010).
 Read-only over the manifest; identification runs on the local GPU when there is one.
 Public limits (request and image size, rate per IP, GPU queue, allowed backbones)
-are in guards.py and set from the environment.
+are in guards.py and set from the environment. Sign-in with a mycomap.org account
+(off, identify only, or the whole site) is in signin.py.
 """
 
 from __future__ import annotations
 
+import html
 import io
+import logging
+import secrets
 import sqlite3
 import threading
+import time
 import warnings
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from PIL import Image, ImageOps
 
 from . import config, evaluate, models
@@ -27,6 +33,10 @@ from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits
 from .exif import place_and_date
 from .identify import Identifier
 from .prior import Context
+from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
+                     safe_return_to, verify_token)
+
+log = logging.getLogger("mycomap_vision.api")
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
 
 
@@ -79,9 +89,11 @@ def fill_context(entered: Context, from_photos: list[tuple]) -> tuple[Context, d
 
 def create_app(manifest_path: Path | None = None, embeddings_root: Path | None = None,
                backbone_loader: Callable[[str], object] = models.load_backbone,
-               web_dist: Path | None = WEB_DIST, limits: Limits | None = None) -> FastAPI:
+               web_dist: Path | None = WEB_DIST, limits: Limits | None = None,
+               signin: SigninConfig | None = None) -> FastAPI:
     app = FastAPI(title="MycoMap Vision", version="0.1")
     limits = limits or Limits.from_settings()
+    signin = signin or SigninConfig.from_settings()
     rate = RateLimiter(*limits.rate)
     in_flight = Gate(limits.max_in_flight)
 
@@ -91,6 +103,82 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if length and length.isdigit() and int(length) > MAX_REQUEST_BYTES:
             return JSONResponse({"detail": "request too large"}, status_code=413)
         return await call_next(request)
+
+    def person(request: Request) -> dict | None:
+        """The signed-in person from our session cookie, or None."""
+        if not signin.enabled:
+            return None
+        return signin.sessions.read(request.cookies.get(SESSION_COOKIE))
+
+    # Registered after cap_request_size, so it runs first: nothing is read for a
+    # request that isn't allowed in.
+    @app.middleware("http")
+    async def require_signin(request: Request, call_next):
+        path = request.url.path
+        if signin.needs_session(request.method, path) and not person(request):
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "sign in with your mycomap.org account",
+                                     "signin": "/auth/signin"}, status_code=401)
+            here = path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(f"/auth/signin?returnTo={quote(here, safe='')}",
+                                    status_code=302)
+        return await call_next(request)
+
+    def signin_failed(reason: str) -> HTMLResponse:
+        return HTMLResponse(
+            "<!doctype html><meta charset=utf-8><title>Sign-in did not complete</title>"
+            "<p>Sign-in with your mycomap.org account did not complete "
+            f"({html.escape(reason)}).</p><p><a href=\"/auth/signin\">Try again</a></p>",
+            status_code=401)
+
+    @app.get("/api/me")
+    def me(request: Request):
+        p = person(request)
+        return {"signin": signin.mode,
+                "user": {"id": p["sub"], "name": p.get("name")} if p else None}
+
+    @app.get("/auth/signin", include_in_schema=False)
+    def signin_start(returnTo: str | None = None):  # noqa: N803 (the .org name)
+        if not signin.enabled:
+            raise HTTPException(404, "sign-in is not configured here")
+        nonce = secrets.token_urlsafe(24)
+        res = RedirectResponse(signin.authorize_url(nonce), status_code=302)
+        res.set_cookie(NONCE_COOKIE, signin.nonces.sign(
+            {"nonce": nonce, "returnTo": safe_return_to(returnTo),
+             "exp": time.time() + NONCE_TTL_SECONDS}),
+            max_age=NONCE_TTL_SECONDS, path="/auth/", httponly=True,
+            secure=signin.secure_cookies, samesite="lax")
+        return res
+
+    @app.get("/auth/dev-bridge/callback", include_in_schema=False)
+    def signin_callback(request: Request, token: str = ""):
+        if not signin.enabled:
+            raise HTTPException(404, "sign-in is not configured here")
+        pending = signin.nonces.read(request.cookies.get(NONCE_COOKIE))
+        if not pending or not token:
+            return signin_failed("the sign-in link expired")
+        try:
+            claims = verify_token(token, signin.public_key, aud=signin.origin,
+                                  nonce=pending["nonce"])
+        except SigninError as e:
+            log.warning("sign-in token refused: %s", e.reason)
+            return signin_failed("expired" if e.reason == "expired" else "not accepted")
+        name = claims.get("name")
+        session = {"sub": claims["sub"],
+                   "name": name[:120] if isinstance(name, str) else None,
+                   "exp": time.time() + signin.session_days * 86400}
+        res = RedirectResponse(safe_return_to(pending.get("returnTo")), status_code=302)
+        res.set_cookie(SESSION_COOKIE, signin.sessions.sign(session),
+                       max_age=int(signin.session_days * 86400), path="/", httponly=True,
+                       secure=signin.secure_cookies, samesite="lax")
+        res.delete_cookie(NONCE_COOKIE, path="/auth/")
+        return res
+
+    @app.post("/auth/signout", include_in_schema=False)
+    def signout():
+        res = JSONResponse({"ok": True})
+        res.delete_cookie(SESSION_COOKIE, path="/")
+        return res
 
     conn = open_manifest(manifest_path or config.MANIFEST_PATH)
     db_lock = threading.Lock()
@@ -265,4 +353,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
 def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     import uvicorn
-    uvicorn.run(create_app(), host=host, port=port)
+    # Behind nginx the client is in X-Forwarded-For; trust it only from nginx itself,
+    # so the per-address rate limit sees people, not 127.0.0.1.
+    uvicorn.run(create_app(), host=host, port=port, proxy_headers=True,
+                forwarded_allow_ips=config.setting("MV_FORWARDED_ALLOW_IPS", "127.0.0.1"))

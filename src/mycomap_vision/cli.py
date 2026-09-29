@@ -70,7 +70,8 @@ def cmd_aws_launch_downloader(conn, args) -> None:
 def cmd_aws_policies(conn, args) -> None:
     """Print the IAM policies with this deployment's bucket, region and role filled in."""
     from . import aws
-    for name in ("instance-policy.template.json", "ops-policy.template.json"):
+    for name in ("instance-policy.template.json", "ops-policy.template.json",
+                 "box-policy.template.json"):
         print(f"=== {name.replace('.template', '')}")
         print(aws.render_policy(name))
 
@@ -277,6 +278,19 @@ def cmd_serve(conn, args) -> None:
     serve(args.host, args.port)
 
 
+def cmd_release(conn, args) -> None:
+    from . import release
+    print(json.dumps(release.publish(conn, _split(args.backbones), label=args.label,
+                                     make_current=args.make_current), indent=2))
+
+
+def cmd_pull_release(conn, args) -> None:
+    from . import release
+    if not config.RELEASE_ROOT:
+        raise SystemExit("pull-release runs on the server box: set MV_RELEASE_ROOT")
+    print(json.dumps(release.pull(config.RELEASE_ROOT, args.release, keep=args.keep), indent=2))
+
+
 def cmd_status(conn, args) -> None:
     print(json.dumps(status_report(conn), indent=2))
 
@@ -464,6 +478,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8010)
 
+    p = sub.add_parser("release", help="publish what the site serves (manifest, embeddings, "
+                                       "fine-tuned weights) to s3://<bucket>/releases/<id>/")
+    p.add_argument("--backbones", required=True, help="comma list of backbones to serve")
+    p.add_argument("--label", help="appended to the release id, e.g. bioclip2-full")
+    p.add_argument("--make-current", action="store_true",
+                   help="also point releases/current.json at it (the box pulls that one)")
+
+    p = sub.add_parser("pull-release", help="(server box) download a release, verify it and "
+                                            "make it current; then restart the server")
+    p.add_argument("--release", help="a release id (default: releases/current.json)")
+    p.add_argument("--keep", type=int, default=2, help="releases kept on disk (default 2)")
+
     sub.add_parser("status", help="counts of records, photos and licenses")
 
     p = sub.add_parser("contributors", help="write the contributor list as CSV")
@@ -471,6 +497,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="only people with all-rights-reserved photos")
 
     args = parser.parse_args(argv)
+    if args.command == "pull-release":        # before any release exists: no manifest yet
+        cmd_pull_release(None, args)
+        return 0
+    if config.RELEASE_ROOT and not config.DATA_DIR.is_dir():
+        parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
     conn = manifest.connect(config.MANIFEST_PATH)
     handler = {
         "export-records": cmd_export_records,
@@ -497,6 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         "models": cmd_models,
         "serve": cmd_serve,
         "status": cmd_status,
+        "release": cmd_release,
         "contributors": cmd_contributors,
     }[args.command]
     handler(conn, args)

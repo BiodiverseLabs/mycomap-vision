@@ -1,0 +1,30 @@
+# systemd unit for vision.mycomap.org: the API and the built site, one process.
+# Installed by provision.sh as /etc/systemd/system/mycomap-vision.service.
+#
+# One process on purpose: the model and the reference vectors live in its memory,
+# and a second worker would need a second copy the 4 GB box doesn't have.
+
+[Unit]
+Description=MycoMap Vision (API and site)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/var/www/mycomap-vision
+EnvironmentFile=/etc/mycomap-vision/vision.env
+ExecStart=/var/www/mycomap-vision/.venv/bin/mv serve --host 127.0.0.1 --port 8010
+Restart=on-failure
+RestartSec=5
+# Leave room for nginx and sshd on the 4 GB box: the server is killed and
+# restarted before it can starve the machine.
+MemoryMax=3500M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/mycomap-vision
+
+[Install]
+WantedBy=multi-user.target

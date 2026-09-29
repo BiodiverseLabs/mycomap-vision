@@ -208,3 +208,11 @@ and the ops-policy update; first run after the download completes.
 - Model registry with an evaluation report per release; a release goes live only
   if it did not get worse.
 - API for mycomap.org (FungAI, Validate Records, record pages).
+
+Hosting kit built 2026-09-29 (docs/deploy.md, deploy/lightsail/): 4 GB Lightsail
+box (Steve's choice; 8 GB if the full index won't fit), CPU inference only, all GPU
+work stays on the self-terminating instances. The site reads **releases** from S3
+(`mv release` / `mv pull-release`, checksummed, previous kept for rollback) through
+a read-only IAM user. Sign-in reuses mycomap.org's bridge (Steve: anyone with a
+mycomap.org account before launch; later maybe identify-only); the box holds only
+the public key.
