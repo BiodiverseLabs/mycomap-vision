@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from bisect import bisect_left
 from typing import Callable
 from collections import Counter
 from dataclasses import dataclass
@@ -85,7 +86,8 @@ def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key:
     trained before. Returns True when loaded from the cache. With train=False a
     trainable model without saved weights raises NotTrainedHere instead of training."""
     kw = {"records": records} if getattr(model, "needs_context", False) else {}
-    trainable = hasattr(model, "state")
+    # WithPrior always has state(), but only a trained base has anything to save.
+    trainable = getattr(model, "trainable", hasattr(model, "state"))
     path = cache_dir / f"{key}.npz"
     if trainable and path.exists():
         with np.load(path) as saved:
@@ -197,19 +199,73 @@ class Identifier:
     def identify_vectors(self, query: np.ndarray, top_k: int = 5,
                          n_specimens: int = 6, context=None,
                          photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
-                         may_show: Callable[[PhotoInfo], bool] = only_open_licences) -> dict:
+                         may_show: Callable[[PhotoInfo], bool] = only_open_licences,
+                         n_photo_specimens: int = 3) -> dict:
         """Query photo vectors (already normalised) -> ranks, specimens, hints.
         `context` (place and date) is used by methods with a range-and-season score.
+
+        The main answer uses all the photos together. `per_photo` gives what the same
+        model says from each photo on its own, so a person can see which photo pulled
+        the answer which way (an underside may match well while the cap does not).
 
         A specimen's photo is shown only if `may_show` allows it (permissions.py:
         CC licence, or the owner's grant). `photo_lookup` reads licence and owner
         now rather than when the model was built, so a licence change on iNat or a
         withdrawal on mycomap.org applies to the next identification."""
-        if self.uses_context:
-            scores = self.model.species_scores(query, context)
+        n_q = int(query.shape[0])
+        sims = self.nearest.photo_sims(query)                 # (q, reference photos)
+        if self.model is self.nearest:
+            # The nearest-specimen score is the mean of each photo's own scores, so
+            # both come from the one similarity matrix.
+            per_photo = np.maximum.reduceat(sims, self.index.starts, axis=1)
+            scores = per_photo.mean(axis=0)
         else:
-            scores = self.model.species_scores(query)
-        ranks: dict[str, list[dict]] = {}
+            scores = self._species_scores(query, context)
+            per_photo = (np.stack([self._species_scores(query[i:i + 1], context)
+                                   for i in range(n_q)]) if n_q > 1 else scores[None, :])
+        ranks = self._ranks(scores, top_k)
+        # Records are ranked by the same rule as species: for each of your photos,
+        # its best match among the record's photos, averaged over your photos.
+        per_record = np.maximum.reduceat(sims, self.rec_starts, axis=1)   # (q, records)
+        picks = self._pick_specimens(sims, per_record.mean(axis=0), None, n_specimens)
+        photo_picks = [self._pick_specimens(sims, per_record[i], i, n_photo_specimens)
+                       for i in range(n_q)]
+        wanted = [p for pk in [picks, *photo_picks] for *_, ids, _ in pk for p in ids]
+        infos = photo_lookup(sorted(set(wanted))) if photo_lookup else self.photos
+        top = {rank: (ranks[rank][0]["name"] if ranks[rank] else None) for rank in RANKS}
+        photos = []
+        for i in range(n_q):
+            own = self._ranks(per_photo[i], top_k, with_position_of=top)
+            photos.append({
+                "photo": i,
+                "ranks": {rank: own[rank]["candidates"] for rank in RANKS},
+                "overall_top": {rank: own[rank]["position_of"] for rank in RANKS},
+                "specimens": self._specimens(photo_picks[i], infos, may_show),
+            })
+        top_species = top["species"]
+        return {
+            "model": {"backbone": self.backbone, "method": self.method},
+            "reference": {"records": self.records, "species": len(self.index.species),
+                          "photos": self.embedded},
+            "photos": n_q,
+            "ranks": ranks,
+            "specimens": self._specimens(picks, infos, may_show),
+            "per_photo": photos,
+            "hints": improvement_hints(n_q, ranks, self.index.ref_count.get(top_species, 0)),
+            "species_url": (ORG_SPECIES_URL + quote(top_species)) if top_species else None,
+            "calibration": self.calibration,
+            "confidence_note": self.confidence_note(),
+        }
+
+    def _species_scores(self, query: np.ndarray, context) -> np.ndarray:
+        if self.uses_context:
+            return self.model.species_scores(query, context)
+        return self.model.species_scores(query)
+
+    def _ranks(self, scores: np.ndarray, top_k: int, with_position_of: dict | None = None) -> dict:
+        """Top candidates at every rank. With `with_position_of` ({rank: name}), each rank
+        is {"candidates": [...], "position_of": where that name places here, 1-based}."""
+        ranks: dict = {}
         for rank in RANKS:
             names = self.index.species if rank == "species" else self.index.labels[rank]
             rs = rank_scores(scores, self.index, rank)
@@ -217,28 +273,54 @@ class Identifier:
             conf = np.zeros_like(rs, dtype=np.float64)
             conf[finite] = softmax_confidence(rs[finite], self.temperature(rank))
             order = np.argsort(-np.where(finite, rs, -np.inf))[:top_k]
-            ranks[rank] = [{"name": names[i], "score": round(float(rs[i]), 4),
-                            "confidence": round(float(conf[i]), 4),
-                            "reference_records": self.rank_counts[rank][names[i]]}
-                           for i in order if finite[i]]
-        # Records are ranked by the same rule as species: for each of your photos,
-        # its best match among the record's photos, averaged over your photos.
-        sims = self.nearest.photo_sims(query)                 # (q, reference photos)
-        per_record = np.maximum.reduceat(sims, self.rec_starts, axis=1)   # (q, records)
-        record_score = per_record.mean(axis=0)
+            candidates = [{"name": names[i], "score": round(float(rs[i]), 4),
+                           "confidence": round(float(conf[i]), 4),
+                           "reference_records": self.rank_counts[rank][names[i]]}
+                          for i in order if finite[i]]
+            if with_position_of is None:
+                ranks[rank] = candidates
+                continue
+            ranks[rank] = {"candidates": candidates,
+                           "position_of": self._position(with_position_of.get(rank), names,
+                                                         rs, finite, conf)}
+        return ranks
+
+    @staticmethod
+    def _position(name: str | None, names: list[str], rs: np.ndarray, finite: np.ndarray,
+                  conf: np.ndarray) -> dict | None:
+        """Where `name` places among these scores (1 = first), and its confidence here."""
+        if name is None:
+            return None
+        j = bisect_left(names, name)                      # names are sorted (build_index)
+        if j >= len(names) or names[j] != name or not finite[j]:
+            return None
+        return {"name": name, "position": int((rs[finite] > rs[j]).sum()) + 1,
+                "confidence": round(float(conf[j]), 4)}
+
+    def _pick_specimens(self, sims: np.ndarray, record_score: np.ndarray,
+                        photo: int | None, n: int) -> list:
+        """The n best records by `record_score`. With `photo`, only that query photo's
+        matches count when choosing which of the record's photos to show."""
+        n = min(n, len(record_score))
+        if n <= 0:
+            return []
+        top = np.argpartition(-record_score, n - 1)[:n]
         picked = []
-        for ri in np.argsort(-record_score)[:n_specimens].tolist():
+        for ri in top[np.argsort(-record_score[top], kind="stable")].tolist():
             lo = int(self.rec_starts[ri])
             hi = int(self.rec_starts[ri + 1]) if ri + 1 < len(self.rec_starts) else sims.shape[1]
-            block = sims[:, lo:hi]
+            block = sims[:, lo:hi] if photo is None else sims[photo:photo + 1, lo:hi]
             q_best, c_best = np.unravel_index(int(block.argmax()), block.shape)
             col = lo + int(c_best)
             photo_ids = [int(p) for p in self.col_photo[lo:hi].tolist()]
-            picked.append((ri, int(q_best), self.col_record[col], photo_ids, block.max(axis=0)))
-        infos = (photo_lookup([p for *_, ids, _ in picked for p in ids]) if photo_lookup
-                 else self.photos)
+            picked.append((float(record_score[ri]), int(q_best) if photo is None else photo,
+                           self.col_record[col], photo_ids, block.max(axis=0)))
+        return picked
+
+    @staticmethod
+    def _specimens(picked: list, infos: dict, may_show: Callable[[PhotoInfo], bool]) -> list[dict]:
         specimens = []
-        for ri, q_best, rec, photo_ids, photo_scores in picked:
+        for score, q_best, rec, photo_ids, photo_scores in picked:
             # The photo shown: the record's best match among those that may be shown (a
             # CC licence, or the owner's grant), which need not be the photo that matched best.
             candidates = [infos.get(p) for p in photo_ids]
@@ -247,7 +329,7 @@ class Identifier:
             specimens.append({
                 "observation_id": rec.observation_id,
                 "species": rec.species, "genus": rec.genus, "family": rec.family,
-                "similarity": round(float(record_score[ri]), 4),
+                "similarity": round(score, 4),
                 "matched_query_photo": q_best,
                 "photo_url": sized_url(info.source_url, "medium") if info else None,
                 "photo_owner": info.owner_login if info else None,
@@ -255,20 +337,7 @@ class Identifier:
                 "inat_url": INAT_OBS_URL + rec.observation_id,
                 "species_url": ORG_SPECIES_URL + quote(rec.species),
             })
-        top_species = ranks["species"][0]["name"] if ranks["species"] else None
-        return {
-            "model": {"backbone": self.backbone, "method": self.method},
-            "reference": {"records": self.records, "species": len(self.index.species),
-                          "photos": self.embedded},
-            "photos": int(query.shape[0]),
-            "ranks": ranks,
-            "specimens": specimens,
-            "hints": improvement_hints(int(query.shape[0]), ranks,
-                                       self.index.ref_count.get(top_species, 0)),
-            "species_url": (ORG_SPECIES_URL + quote(top_species)) if top_species else None,
-            "calibration": self.calibration,
-            "confidence_note": self.confidence_note(),
-        }
+        return specimens
 
     def temperature(self, rank: str) -> float:
         if self.calibration:

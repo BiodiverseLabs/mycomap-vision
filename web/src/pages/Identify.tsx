@@ -17,6 +17,7 @@ import {
   type ContextUsed,
   type IdentifyResult,
   type ModelsInfo,
+  type PhotoResult,
   type Where,
   type Rank,
   type Specimen,
@@ -48,7 +49,12 @@ export function IdentifyPage() {
     if (files.every((f) => found.has(f))) setWhere((w) => fillFromPhotos(w, files.map((f) => found.get(f))));
   }, [files, found]);
 
-  const run = useMutation({ mutationFn: (sent: Where) => api.identify(files, chosen, sent) });
+  // The photos go with the request, so results keep pointing at the photos they scored
+  // even if the picker changes afterwards.
+  const run = useMutation({
+    mutationFn: (sent: { where: Where; files: File[] }) => api.identify(sent.files, chosen, sent.where),
+  });
+  const sentUrls = useObjectUrls(run.variables?.files ?? NO_FILES);
 
   return (
     <>
@@ -65,7 +71,7 @@ export function IdentifyPage() {
             size="lg"
             className="w-full"
             disabled={!files.length || !chosen.length || run.isPending}
-            onClick={() => run.mutate(where)}
+            onClick={() => run.mutate({ where, files })}
           >
             {run.isPending ? <Loader2 className="animate-spin" /> : <Microscope />}
             {run.isPending ? "Identifying…" : `Identify from ${files.length || "your"} photo${files.length === 1 ? "" : "s"}`}
@@ -75,13 +81,14 @@ export function IdentifyPage() {
 
         <div className="min-w-0">
           {!run.data && !run.isPending && <EmptyState />}
-          {run.data && <ContextLine used={run.data.context_used} sent={run.variables} />}
+          {run.data && <ContextLine used={run.data.context_used} sent={run.variables?.where} />}
           {run.data && (
             <div
               className={`grid gap-6 ${run.data.results.length > 1 ? "xl:grid-cols-2" : ""}`}
             >
               {run.data.results.map((r) => (
-                <ResultCard key={modelKey(r.model.backbone, r.model.method)} r={r} files={files} />
+                <ResultCard key={`${modelKey(r.model.backbone, r.model.method)}@${run.submittedAt}`}
+                            r={r} urls={sentUrls} />
               ))}
             </div>
           )}
@@ -91,11 +98,19 @@ export function IdentifyPage() {
   );
 }
 
+const NO_FILES: File[] = [];
+
+/** Object URLs for local files, released when the files change or the page closes. */
+function useObjectUrls(files: File[]): string[] {
+  const urls = useMemo(() => files.map((f) => URL.createObjectURL(f)), [files]);
+  useEffect(() => () => urls.forEach((u) => URL.revokeObjectURL(u)), [urls]);
+  return urls;
+}
+
 function PhotoPicker({ files, setFiles }: { files: File[]; setFiles: (f: File[]) => void }) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
-  const urls = useMemo(() => files.map((f) => URL.createObjectURL(f)), [files]);
-  useEffect(() => () => urls.forEach((u) => URL.revokeObjectURL(u)), [urls]);
+  const urls = useObjectUrls(files);
   const add = (list: FileList | null) => {
     if (!list) return;
     const images = Array.from(list).filter((f) => f.type.startsWith("image/"));
@@ -375,6 +390,7 @@ function EmptyState() {
       <ul className="mt-4 space-y-2 text-sm list-disc pl-5">
         <li>An answer at every rank (family, genus, species), each with its own confidence.</li>
         <li>The closest DNA-verified specimens, with their photos, so you can compare by eye.</li>
+        <li>How each of your photos scores on its own, to see which ones agree.</li>
         <li>Advice on what would firm up the identification.</li>
         <li>Optionally a second model side by side, to see where they agree.</li>
       </ul>
@@ -386,7 +402,12 @@ function EmptyState() {
   );
 }
 
-function ResultCard({ r, files }: { r: IdentifyResult; files: File[] }) {
+function ResultCard({ r, urls }: { r: IdentifyResult; urls: string[] }) {
+  // null: all photos together (the main answer). A number: that photo on its own.
+  const [view, setView] = useState<number | null>(null);
+  const photo = view == null ? null : (r.per_photo.find((p) => p.photo === view) ?? null);
+  const ranks = photo ? photo.ranks : r.ranks;
+  const specimens = photo ? photo.specimens : r.specimens;
   return (
     <Card className="overflow-hidden">
       <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3">
@@ -404,13 +425,20 @@ function ResultCard({ r, files }: { r: IdentifyResult; files: File[] }) {
         </div>
       </CardHeader>
       <CardContent className="pt-5 space-y-6">
+        {r.per_photo.length > 1 && (
+          <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} />
+        )}
+        {photo && <PhotoVerdict p={photo} />}
         <div className="space-y-5">
           {RANKS.map((rank) => (
-            <RankBlock key={rank} rank={rank} candidates={r.ranks[rank]} />
+            <RankBlock key={rank} rank={rank} candidates={ranks[rank]} />
           ))}
-          <p className="text-xs text-muted-foreground">{r.confidence_note}</p>
+          <p className="text-xs text-muted-foreground">
+            {r.confidence_note}
+            {photo && " One photo on its own is a rougher guide than all of them together."}
+          </p>
         </div>
-        {r.hints.length > 0 && (
+        {!photo && r.hints.length > 0 && (
           <div className="rounded-md border border-myco-tan-light/50 bg-[#fbf7f0] p-3 space-y-1.5">
             {r.hints.map((h) => (
               <p key={h} className="flex gap-2 text-sm text-[#5c4a3a]">
@@ -422,16 +450,118 @@ function ResultCard({ r, files }: { r: IdentifyResult; files: File[] }) {
         )}
         <div>
           <h3 className="text-sm font-semibold text-[#4a3728] mb-2">
-            Closest DNA-verified specimens
+            {photo
+              ? `Closest DNA-verified specimens to photo ${photo.photo + 1}`
+              : "Closest DNA-verified specimens"}
           </h3>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {r.specimens.map((s) => (
-              <SpecimenCard key={s.observation_id} s={s} files={files} />
+            {specimens.map((s) => (
+              <SpecimenCard key={s.observation_id} s={s} urls={urls} showMatched={!photo} />
             ))}
           </div>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+const ordinal = (n: number) => {
+  const v = n % 100;
+  return `${n}${v >= 11 && v <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] ?? "th"}`;
+};
+
+/** All photos together, or one photo on its own. Each tile shows how that photo alone
+ *  rates the overall species answer, so a photo pulling the other way stands out. */
+function PhotoSwitcher({ r, urls, view, setView }: {
+  r: IdentifyResult;
+  urls: string[];
+  view: number | null;
+  setView: (v: number | null) => void;
+}) {
+  const top = r.ranks.species[0]?.name;
+  const tile = (on: boolean) =>
+    `flex shrink-0 flex-col items-center gap-1 rounded-md p-1 transition-colors ${
+      on ? "bg-myco-green/10 ring-2 ring-myco-green" : "hover:bg-muted"
+    }`;
+  return (
+    <div>
+      <p className="mb-2 text-xs text-muted-foreground">
+        {top ? (
+          <>
+            Under each photo: how it rates <span className="sci">{top}</span> on its own. Click a
+            photo to see its own results.
+          </>
+        ) : (
+          "Click a photo to see its own results."
+        )}
+      </p>
+      <div className="flex gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Results for">
+        <button type="button" role="tab" aria-selected={view == null} className={tile(view == null)}
+                onClick={() => setView(null)} aria-label="All photos combined">
+          <span className="flex h-14 w-14 flex-col items-center justify-center rounded border border-[#A87146]/30 bg-[#f8f5f0] text-[#4a3728] leading-tight">
+            <span className="text-sm font-semibold">All {r.per_photo.length}</span>
+            <span className="text-[10px]">photos</span>
+          </span>
+          <span className="text-[11px] text-muted-foreground">combined</span>
+        </button>
+        {r.per_photo.map((p) => {
+          const place = p.overall_top.species;
+          const agrees = place?.position === 1;
+          return (
+            <button
+              key={p.photo}
+              type="button"
+              role="tab"
+              aria-selected={view === p.photo}
+              className={tile(view === p.photo)}
+              onClick={() => setView(p.photo)}
+              title={place ? `Photo ${p.photo + 1} on its own puts ${place.name} ${ordinal(place.position)} (${pct(place.confidence)})` : undefined}
+            >
+              <span className="relative h-14 w-14 overflow-hidden rounded border bg-muted">
+                {urls[p.photo] && (
+                  <img src={urls[p.photo]} alt={`Your photo ${p.photo + 1}`} className="h-full w-full object-cover" />
+                )}
+                <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[10px] text-white">
+                  {p.photo + 1}
+                </span>
+              </span>
+              <span className={`text-[11px] tabular-nums ${agrees ? "font-semibold text-myco-green" : "text-muted-foreground"}`}>
+                {place ? pct(place.confidence) : "–"}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PhotoVerdict({ p }: { p: PhotoResult }) {
+  const species = p.overall_top.species;
+  const genus = p.overall_top.genus;
+  const n = p.photo + 1;
+  return (
+    <div className="rounded-md border border-[#A87146]/20 bg-[#faf9f7] p-3 text-sm text-[#5c4a3a]">
+      <span className="font-semibold text-[#4a3728]">Photo {n} on its own.</span>{" "}
+      {species &&
+        (species.position === 1 ? (
+          <>
+            It agrees with the answer from all photos, <span className="sci">{species.name}</span>{" "}
+            ({pct(species.confidence)}).
+          </>
+        ) : (
+          <>
+            It puts <span className="sci">{species.name}</span>, the answer from all photos,{" "}
+            {ordinal(species.position)} ({pct(species.confidence)}).
+          </>
+        ))}
+      {genus && genus.position > 1 && (
+        <>
+          {" "}At genus level it puts <span className="sci">{genus.name}</span>{" "}
+          {ordinal(genus.position)}.
+        </>
+      )}
+    </div>
   );
 }
 
@@ -489,8 +619,8 @@ function Bar({ value, strong }: { value: number; strong?: boolean }) {
   );
 }
 
-function SpecimenCard({ s, files }: { s: Specimen; files: File[] }) {
-  const matched = files[s.matched_query_photo];
+function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; showMatched: boolean }) {
+  const matched = showMatched && urls[s.matched_query_photo];
   return (
     <div className="rounded-md border overflow-hidden bg-white">
       <a href={s.inat_url} target="_blank" rel="noreferrer" className="block aspect-square bg-muted">

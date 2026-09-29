@@ -201,6 +201,25 @@ def test_identify_shows_arr_photos_only_with_a_fresh_grant_and_drops_refusals(co
     assert specimens(client)["106"]["photo_url"] is None, "answers not refreshed lately: fail closed"
 
 
+def test_each_photos_own_specimens_follow_the_same_showing_rule(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    set_photo(conn, 1006, "arr", 42)   # obs 106, the closest match to red 247
+    set_photo(conn, 1007, "arr", 43)   # obs 107, the closest match to red 12
+    permissions.save_snapshot(conn, answer((42, "granted"), (43, "withdrawn")),
+                              datetime.now(timezone.utc))
+    res = post_photos(client, [247, 12], "m1/nearest")
+    assert res.status_code == 200, res.text
+    red, blue = res.json()["results"][0]["per_photo"]
+    by_obs = {s["observation_id"]: s for s in red["specimens"]}
+    assert by_obs["106"]["photo_url"].endswith("/medium.jpg") and by_obs["106"]["photo_owner"] == "alice"
+    assert all(s["observation_id"] != "107" for p in (red, blue) for s in p["specimens"]), \
+        "a withdrawn photographer's record is out of every photo's list"
+    permissions.save_snapshot(conn, answer((43, "withdrawn")), datetime.now(timezone.utc))
+    red = post_photos(client, [247, 12], "m1/nearest").json()["results"][0]["per_photo"][0]
+    s106 = next(s for s in red["specimens"] if s["observation_id"] == "106")
+    assert s106["photo_url"] is None and s106["photo_withheld"], "no grant: not shown"
+
+
 def test_a_licence_change_applies_to_the_next_identification(conn, tmp_path):
     client = app_with_model(conn, tmp_path)
     assert specimens(client)["106"]["photo_url"] is not None

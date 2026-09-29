@@ -143,16 +143,21 @@ def test_confidence_uses_the_models_latest_calibration_once_compared(conn, tmp_p
     assert "Calibrated on" in after["confidence_note"]
 
 
-def test_specimens_are_ranked_by_all_your_photos_not_one_lucky_match():
+def unit(*v):
+    a = np.asarray(v, dtype=np.float32)
+    return a / np.linalg.norm(a)
+
+
+# Query photos: a cap view and an underside view.
+CAP_AND_UNDERSIDE = np.stack([unit(1, 0, 0), unit(0, 1, 0)]).astype(np.float16)
+
+
+def cap_and_underside_identifier(photos=None):
+    """Record X matches the cap perfectly and nothing else; record Y matches both views
+    well (its photo 2 is closer to the cap, photo 3 to the underside)."""
     from mycomap_vision.evaluate import Record, build_index, NearestSpecimen
     from mycomap_vision.identify import Identifier
 
-    def unit(*v):
-        a = np.asarray(v, dtype=np.float32)
-        return a / np.linalg.norm(a)
-
-    # Query photos: a cap view and an underside view.
-    q = np.stack([unit(1, 0, 0), unit(0, 1, 0)]).astype(np.float16)
     vecs = np.stack([
         unit(1, 0, 0), unit(0, 0, 1),        # record X: perfect cap match, nothing else
         unit(1, .8, 0), unit(.8, 1, 0),      # record Y: good match to both views
@@ -168,12 +173,71 @@ def test_specimens_are_ranked_by_all_your_photos_not_one_lucky_match():
     ident.col_record = [rec_of[int(c)] for c in ident.index.cols.tolist()]
     ident.rec_starts = np.asarray([i for i, r in enumerate(ident.col_record)
                                    if i == 0 or r is not ident.col_record[i - 1]])
-    ident.photos, ident.records, ident.embedded, ident.calibration = {}, 2, 4, None
+    ident.photos, ident.records, ident.embedded, ident.calibration = photos or {}, 2, 4, None
     ident.backbone, ident.method, ident.uses_context = "t", "nearest", False
     ident.rank_counts = {k: Counter() for k in ("family", "genus", "species")}
-    out = ident.identify_vectors(q)
+    return ident
+
+
+def test_specimens_are_ranked_by_all_your_photos_not_one_lucky_match():
+    out = cap_and_underside_identifier().identify_vectors(CAP_AND_UNDERSIDE)
     assert [s["observation_id"] for s in out["specimens"]] == ["Y", "X"]
     assert out["ranks"]["species"][0]["name"] == "Yus b"
+
+
+def test_each_photo_is_also_scored_on_its_own_and_says_where_it_puts_the_overall_answer():
+    out = cap_and_underside_identifier().identify_vectors(CAP_AND_UNDERSIDE)
+    cap, underside = out["per_photo"]
+    assert (cap["photo"], underside["photo"]) == (0, 1)
+    # The cap alone prefers X (a perfect match); the underside alone prefers Y.
+    assert cap["ranks"]["species"][0]["name"] == "Xus a"
+    assert underside["ranks"]["species"][0]["name"] == "Yus b"
+    # Both say where they put the answer from all photos together (Yus b).
+    assert cap["overall_top"]["species"]["name"] == "Yus b"
+    assert cap["overall_top"]["species"]["position"] == 2
+    assert underside["overall_top"]["species"]["position"] == 1
+    genus = cap["overall_top"]["genus"]
+    assert (genus["name"], genus["position"]) == ("Yus", 2)
+    assert cap["overall_top"]["species"]["confidence"] < 0.5
+    # The main answer is the average of the photos' own scores.
+    overall = {c["name"]: c["score"] for c in out["ranks"]["species"]}
+    own = [{c["name"]: c["score"] for c in p["ranks"]["species"]} for p in out["per_photo"]]
+    for name, score in overall.items():
+        assert abs(score - (own[0][name] + own[1][name]) / 2) < 1e-3
+
+
+def test_a_photos_own_specimens_show_the_reference_photo_that_matched_that_photo():
+    from mycomap_vision.identify import PhotoInfo
+    photos = {p: PhotoInfo(f"https://static.inaturalist.org/photos/{p}/large.jpg", "open", "o")
+              for p in range(4)}
+    out = cap_and_underside_identifier(photos).identify_vectors(CAP_AND_UNDERSIDE)
+    cap, underside = out["per_photo"]
+    assert [s["observation_id"] for s in cap["specimens"]] == ["X", "Y"]
+    assert [s["observation_id"] for s in underside["specimens"]] == ["Y", "X"]
+    assert all(s["matched_query_photo"] == 0 for s in cap["specimens"])
+    assert all(s["matched_query_photo"] == 1 for s in underside["specimens"])
+    y_for_cap = next(s for s in cap["specimens"] if s["observation_id"] == "Y")
+    assert "/photos/2/" in y_for_cap["photo_url"], "Y's photo closest to the cap"
+    assert "/photos/3/" in underside["specimens"][0]["photo_url"], "Y's photo closest to the underside"
+    assert underside["specimens"][0]["similarity"] < 1 and cap["specimens"][0]["similarity"] > 0.99
+
+
+def test_every_offered_method_answers_and_gives_each_photo_its_own_answer(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    offered = client.get("/api/models").json()["methods"]
+    assert "nearest+prior" in offered and "species-mean+prior" in offered
+    for method in offered:
+        res = post_photos(client, [247, 12], f"m1/{method}")
+        assert res.status_code == 200, f"{method}: {res.text}"
+        [r] = res.json()["results"]
+        red, blue = r["per_photo"]
+        assert red["specimens"] and blue["specimens"], method
+        if not method.startswith(("linear", "hybrid")):     # trained ones: too few records here
+            assert red["ranks"]["species"][0]["name"] == "A x", method
+            assert blue["ranks"]["species"][0]["name"] == "B y", method
+        [single] = post_photos(client, [247], f"m1/{method}").json()["results"]
+        assert single["per_photo"][0]["ranks"] == single["ranks"], \
+            f"{method}: one photo on its own is the whole answer"
 
 
 
