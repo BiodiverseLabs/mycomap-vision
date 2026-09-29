@@ -105,3 +105,53 @@ def test_the_web_build_runs_where_its_pnpm_version_is_pinned():
     deploy = read("deploy.sh")
     assert "pnpm --dir" not in deploy
     assert "(cd web && pnpm install --frozen-lockfile" in deploy
+
+
+def _git_bash():
+    import os
+    import shutil
+    if os.name == "nt":
+        path = r"C:\Program Files\Git\bin\bash.exe"     # not WSL's bash.exe
+        return path if os.path.exists(path) else None
+    return shutil.which("bash")
+
+
+def test_a_pull_that_changes_deploy_sh_runs_the_new_script(tmp_path):
+    import subprocess
+
+    import pytest
+    bash = _git_bash()
+    if not bash:
+        pytest.skip("needs bash and git")
+
+    def git(cwd, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                        "core.autocrlf=false", *args], cwd=cwd, check=True,
+                       capture_output=True)
+
+    script = read("deploy.sh").replace("\r\n", "\n")
+    origin = tmp_path / "origin"
+    (origin / "deploy" / "lightsail").mkdir(parents=True)
+    target = origin / "deploy" / "lightsail" / "deploy.sh"
+    target.write_bytes(script.encode())
+    git(origin, "init", "-q", "-b", "main")
+    git(origin, "add", "-A")
+    git(origin, "commit", "-q", "-m", "old")
+    app = tmp_path / "app"
+    git(tmp_path, "clone", "-q", str(origin), str(app))
+    # The next commit changes the script: its new line must run in this deploy.
+    marker = 'echo "    now at $(git log --oneline -1)"\n'
+    assert marker in script
+    target.write_bytes(script.replace(marker, marker + 'echo "NEW SCRIPT RAN"\n').encode())
+    git(origin, "commit", "-q", "-am", "new")
+    env_file = tmp_path / "vision.env"
+    env_file.write_text("MV_S3_BUCKET=b\n")
+    import os
+    env = {**os.environ, "APP_DIR": str(app).replace("\\", "/"),
+           "ENV_FILE": str(env_file).replace("\\", "/"), "DEPLOY_STOP_AFTER_PULL": "1",
+           "HOME": str(tmp_path).replace("\\", "/")}
+    out = subprocess.run([bash, str(app / "deploy" / "lightsail" / "deploy.sh")], env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "running the new one" in out.stdout
+    assert out.stdout.count("NEW SCRIPT RAN") == 1

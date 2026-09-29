@@ -204,7 +204,11 @@ cd /var/www/mycomap-vision && bash deploy/lightsail/deploy.sh
 ```
 
 It pulls `main`, installs, builds the web app into a new folder before swapping
-it in, restarts the server, waits for it and runs `verify.sh`. The deploy is
+it in, restarts the server, waits for it and runs `verify.sh`. If the pull changed
+`deploy.sh` itself, it starts the new copy first (bash would otherwise finish the
+old one). The server loads the model and index at startup (`MV_PRELOAD=default`,
+about 30 s); the deploy waits for that and prints how long it took, and
+`/api/health` shows it under `preload`. The deploy is
 done when verify passes.
 
 ## New release (model data)
