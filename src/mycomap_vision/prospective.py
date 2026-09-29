@@ -22,7 +22,7 @@ from typing import Callable
 import numpy as np
 import requests
 
-from . import config
+from . import config, names
 from .embed import decode
 from .inat import parse_observation
 from .licenses import sized_url, taken_down
@@ -183,7 +183,8 @@ def report(conn: sqlite3.Connection) -> list[dict]:
     """Per model: how its advance predictions fared once the DNA answer came in.
 
     A prediction counts only if made before the record first appeared green here
-    (records.first_seen_at), so the answer can't have been known.
+    (records.first_seen_at), so the answer can't have been known. Names are compared
+    by label (names.py), so an answer spelled another way than the DNA name is right.
     """
     conn.executescript(SCHEMA)
     rows = conn.execute("""
@@ -198,10 +199,15 @@ def report(conn: sqlite3.Connection) -> list[dict]:
         totals[(backbone, method)] += 1
     by_model: dict[tuple, Counter] = {}
     conf: dict[tuple, list] = {}
-    for backbone, method, result_json, species, genus, family, _p, _f in rows:
+    results = [json.loads(r[2]) for r in rows]
+    # A model that predicted before a name was respelled answers with the old spelling.
+    labels = names.manifest_labels(conn, extra=[top[0]["name"] for result in results
+                                                if (top := result.get("species"))])
+    label = lambda name: labels.get(name, name)  # noqa: E731
+    for (backbone, method, _json, species, genus, family, _p, _f), result in zip(rows, results):
         key = (backbone, method)
         c = by_model.setdefault(key, Counter())
-        result = json.loads(result_json)
+        species = label(species)
         truth = {"species": species, "genus": genus or (species or "").split(" ")[0],
                  "family": family}
         c["resolved"] += 1
@@ -209,10 +215,11 @@ def report(conn: sqlite3.Connection) -> list[dict]:
             top = result.get(rank) or []
             if truth[rank] and top:
                 c[f"{rank}_n"] += 1
-                c[f"{rank}_top1"] += top[0]["name"] == truth[rank]
+                c[f"{rank}_top1"] += label(top[0]["name"]) == truth[rank]
         top_sp = (result.get("species") or [None])[0]
         if top_sp:
-            conf.setdefault(key, []).append((top_sp["confidence"], top_sp["name"] == species))
+            conf.setdefault(key, []).append((top_sp["confidence"],
+                                             label(top_sp["name"]) == species))
     out = []
     for key in sorted(set(totals) | set(by_model)):
         c = by_model.get(key, Counter())

@@ -69,6 +69,14 @@ def test_a_provisional_name_iNat_carries_is_matched_as_is():
     assert resolve_truth(taxa, rec) == Truth(species=5, genus=10, family=100, species_known=True)
 
 
+def test_a_name_iNat_knows_only_as_org_spells_it_is_still_known():
+    taxa = FakeTaxa([FAM, GEN, {"id": 5, "name": "Clitocybe sp-IN13", "rank": "species",
+                                "ancestors": [FAM, GEN]}])
+    rec = Record("1", "Clitocybe sp. 'IN13'", "Clitocybe", "X", None, None, [],
+                 stored_name="Clitocybe sp-IN13")
+    assert resolve_truth(taxa, rec) == Truth(species=5, genus=10, family=100, species_known=True)
+
+
 def test_a_name_iNat_lacks_still_gets_genus_and_family_in_iNats_taxonomy():
     taxa = FakeTaxa([FAM, GEN])
     rec = Record("1", "Clitocybe sp. 'IN99'", "Clitocybe", "Our family spelling", None, None, [])

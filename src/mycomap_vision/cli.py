@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sqlite3
 import sys
 
 from . import config, inat, manifest, photos, records
@@ -300,6 +301,44 @@ def cmd_pull_release(conn, args) -> None:
     print(json.dumps(release.pull(config.RELEASE_ROOT, args.release, keep=args.keep), indent=2))
 
 
+def shown(name: str) -> str:
+    """A name with what can't be seen made visible (a non-breaking space, a character
+    that was lost on the way), as Python would write it."""
+    return "".join(c if c.isprintable() and ord(c) != 0xFFFD
+                   else c.encode("unicode_escape").decode() for c in name)
+
+
+def cmd_name_spellings(conn, args) -> None:
+    """Names written more than one way: which Vision merges, which wait for a person."""
+    from . import names
+    if hasattr(sys.stdout, "reconfigure"):      # a console that can't print a curly quote
+        sys.stdout.reconfigure(errors="backslashreplace")
+    rows = names.name_counts(conn)
+    groups = names.group_name_variants(rows)
+    report = names.summary(rows, groups)
+    if args.json:
+        print(json.dumps({"summary": report, "groups": [g.as_dict() for g in groups]},
+                         indent=2))
+        return
+    merged, left = report["merged_in_vision"], report["left_for_a_person"]
+    print(f"{report['names']:,} names in the manifest are {report['labels']:,} labels in Vision")
+    print(f"{report['groups']:,} names need a fix on mycomap.org "
+          f"({report['records_to_fix']:,} records)")
+    print(f"  merged in Vision (only the writing differs): {merged['groups']:,} names, "
+          f"{merged['spellings']:,} spellings, {merged['records']:,} records "
+          f"({merged['records_relabelled']:,} re-labelled)")
+    print(f"  left for a person, kept as separate labels: {left['groups']:,} names, "
+          f"{left['spellings']:,} spellings, {left['records']:,} records")
+    for g in groups:
+        if g.confidence != "check":
+            continue
+        proposed = f"proposed: {g.proposed_name}" if g.proposed_name else "a person chooses"
+        print()
+        print(f"{shown(g.key)}  [{', '.join(g.reasons)}]  {proposed}")
+        for s in g.spellings:
+            print(f"  {s.records:>7,}  {shown(s.name)}")
+
+
 def cmd_status(conn, args) -> None:
     print(json.dumps(status_report(conn), indent=2))
 
@@ -528,6 +567,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="counts of records, photos and licenses")
 
+    p = sub.add_parser("name-spellings", help="names written more than one way: those Vision "
+                                              "merges and those a person has to decide "
+                                              "(read-only)")
+    p.add_argument("--json", action="store_true", help="the full list, as JSON")
+
     p = sub.add_parser("permissions", help="photographers' answers from mycomap.org "
                                            "(needs MV_ORG_BASE_URL and MV_ORG_VISION_KEY)")
     p.add_argument("--sync", action="store_true", help="pull the answers now")
@@ -547,6 +591,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if config.RELEASE_ROOT and not config.DATA_DIR.is_dir():
         parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
+    if args.command == "name-spellings":      # read-only: the manifest is opened as it is
+        conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
+        cmd_name_spellings(conn, args)
+        return 0
     conn = manifest.connect(config.MANIFEST_PATH)
     handler = {
         "export-records": cmd_export_records,

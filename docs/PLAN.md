@@ -29,6 +29,21 @@ the working plan; update it as phases land.
 - [ ] First comparison report.
 - [x] Web app and API (`mv serve`) with Identify, Models (scoreboard), Data, How it works;
       confidence calibrated per rank from each model's latest comparison.
+- [x] Name spellings (2026-09-29, Steve's decision). The same temporary-code name reaches
+      us written several ways (`Inocybe sp. 'PNW18'`, `Inocybe PNW18`, `Inocybe "sp-PNW18"`),
+      and each spelling used to count as its own species. Now spellings that differ only in
+      how they are written (quotes, `sp.`, spacing, capitals, odd characters, a hyphen) are
+      one species, under the house style `Genus sp. 'CODE'`. What needs a person is left
+      alone and only reported: a code also in use as a plain name (`Craterellus
+      neotubaeformis` / `Craterellus sp. 'neotubaeformis'`), IN7 / IN07, a described code
+      (`'AZ brown 01'`). The rule is mycomap.org's (`services/nameVariants.ts`), copied in
+      `names.py` and held to the same test file; the manifest keeps every name as .org
+      spells it, and labels are worked out when records are loaded. `mv name-spellings`
+      lists both kinds. On the manifest of 2026-09-29: 20,609 names become 19,843 labels;
+      1,035 names merged (2,546 records re-labelled), 87 left for a person (1,720 records).
+      Among records with photos, the newest 28 days (1,973 records) go from 203 species
+      with no reference record to 193. Comparisons made before this can't be given an iNat
+      baseline any more (their record set changed): run `mv compare` again.
 
 ## Models: modular, side by side, on a scoreboard
 

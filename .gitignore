@@ -1,5 +1,7 @@
 # Photos, manifests and exports hold contributors' images and live data.
 data/
+# ...but not the test fixtures (the spelling rules shared with mycomap.org).
+!tests/data/
 .venv/
 __pycache__/
 *.egg-info/

@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import warnings
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -26,7 +27,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from PIL import Image, ImageOps
 
-from . import config, evaluate, inat, models, permissions
+from . import config, evaluate, inat, models, names, permissions
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
@@ -342,11 +343,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     @app.get("/api/stats")
     def stats():
         one = lambda sql: q(sql)[0][0]  # noqa: E731
-        name_counts = q("select count(*) from records where north_america = 1 "
-                        "and label_conflict = 0 and coalesce(scientific_name, '') <> '' "
-                        "group by scientific_name")
+        with db_lock:
+            labels = names.manifest_labels(conn)
+        # Spellings of one name count as one name (names.py).
+        name_counts = Counter()
+        for name, n in q("select scientific_name, count(*) from records where north_america = 1 "
+                         "and label_conflict = 0 and coalesce(scientific_name, '') <> '' "
+                         "group by scientific_name"):
+            name_counts[labels.get(name, name).strip()] += n
         buckets = {label: 0 for _, _, label in NAME_BUCKETS}
-        for (n,) in name_counts:
+        for n in name_counts.values():
             for lo, hi, label in NAME_BUCKETS:
                 if lo <= n <= hi:
                     buckets[label] += 1

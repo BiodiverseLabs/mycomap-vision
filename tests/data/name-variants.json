@@ -1,0 +1,433 @@
+{
+  "about": "Which spellings are one name. Shared by mycomap.org (services/nameVariants.ts) and MycoMap Vision (mycomap_vision/names.py); both test suites read a copy of this file, so the two copies must stay identical.",
+  "names": [
+    {
+      "name": "Inocybe sp. 'PNW18'",
+      "key": "inocybe sp. 'pnw18'",
+      "houseStyle": "Inocybe sp. 'PNW18'",
+      "isCode": true
+    },
+    {
+      "name": "Inocybe PNW18",
+      "key": "inocybe sp. 'pnw18'",
+      "houseStyle": "Inocybe sp. 'PNW18'",
+      "isCode": true
+    },
+    {
+      "name": "Clitocybe \"sp-PNW01\"",
+      "key": "clitocybe sp. 'pnw1'",
+      "houseStyle": "Clitocybe sp. 'PNW01'",
+      "isCode": true
+    },
+    {
+      "name": "Clitocybe sp. 'PNW01'",
+      "key": "clitocybe sp. 'pnw1'",
+      "houseStyle": "Clitocybe sp. 'PNW01'",
+      "isCode": true
+    },
+    {
+      "name": "Lepiota \"flammeotincta-IN02\"",
+      "key": "lepiota sp. 'flammeotincta-in2'",
+      "houseStyle": "Lepiota sp. 'flammeotincta-IN02'",
+      "isCode": true
+    },
+    {
+      "name": "Mycena \u201csp-IN22\u201d",
+      "key": "mycena sp. 'in22'",
+      "houseStyle": "Mycena sp. 'IN22'",
+      "isCode": true
+    },
+    {
+      "name": "Mycena \ufffdsp-IN22\ufffd",
+      "key": "mycena sp. 'in22'",
+      "houseStyle": "Mycena sp. 'IN22'",
+      "isCode": true
+    },
+    {
+      "name": "Marasmiellus sp. \u2018candidus-CA01\u2019",
+      "key": "marasmiellus sp. 'candidus-ca1'",
+      "houseStyle": "Marasmiellus sp. 'candidus-CA01'",
+      "isCode": true
+    },
+    {
+      "name": "Pholiota 'mixta PNW01'",
+      "key": "pholiota sp. 'mixta-pnw1'",
+      "houseStyle": "Pholiota sp. 'mixta-PNW01'",
+      "isCode": true
+    },
+    {
+      "name": "Cuphophyllus pratensis PNW06",
+      "key": "cuphophyllus sp. 'pratensis-pnw6'",
+      "houseStyle": "Cuphophyllus sp. 'pratensis-PNW06'",
+      "isCode": true
+    },
+    {
+      "name": "Panellus stipticus-CA01",
+      "key": "panellus sp. 'stipticus-ca1'",
+      "houseStyle": "Panellus sp. 'stipticus-CA01'",
+      "isCode": true
+    },
+    {
+      "name": "Cortinarius Harrower135",
+      "key": "cortinarius sp. 'harrower135'",
+      "houseStyle": "Cortinarius sp. 'Harrower135'",
+      "isCode": true
+    },
+    {
+      "name": "Russula Woo33a",
+      "key": "russula sp. 'woo33a'",
+      "houseStyle": "Russula sp. 'Woo33a'",
+      "isCode": true
+    },
+    {
+      "name": "Thaxterogaster sp. KL-2023a",
+      "key": "thaxterogaster sp. 'kl2023a'",
+      "houseStyle": "Thaxterogaster sp. 'KL-2023a'",
+      "isCode": true
+    },
+    {
+      "name": "Russula \"sp-IN1\"",
+      "key": "russula sp. 'in1'",
+      "houseStyle": "Russula sp. 'IN01'",
+      "isCode": true
+    },
+    {
+      "name": "Russula sp. 'IN1'",
+      "key": "russula sp. 'in1'",
+      "houseStyle": "Russula sp. 'IN1'",
+      "isCode": true
+    },
+    {
+      "name": "Russula sp. 'IN100'",
+      "key": "russula sp. 'in100'",
+      "houseStyle": "Russula sp. 'IN100'",
+      "isCode": true
+    },
+    {
+      "name": "Amanita \"flavoconia-01\"",
+      "key": "amanita sp. 'flavoconia1'",
+      "houseStyle": "Amanita sp. 'flavoconia-01'",
+      "isCode": true
+    },
+    {
+      "name": "Amanita sp. 'flavoconia01'",
+      "key": "amanita sp. 'flavoconia1'",
+      "houseStyle": "Amanita sp. 'flavoconia01'",
+      "isCode": true
+    },
+    {
+      "name": "Exobasidium  sp. 'BC01'",
+      "key": "exobasidium sp. 'bc1'",
+      "houseStyle": "Exobasidium sp. 'BC01'",
+      "isCode": true
+    },
+    {
+      "name": "Collybiopsis sp. 'IN01 x IN02'",
+      "key": "collybiopsis sp. 'in01-x-in2'",
+      "houseStyle": "Collybiopsis sp. 'IN01 x IN02'",
+      "isCode": true
+    },
+    {
+      "name": "Russula sp. 'Green Madrone'",
+      "key": "russula sp. 'green-madrone'",
+      "houseStyle": "Russula sp. 'Green Madrone'",
+      "isCode": true
+    },
+    {
+      "name": "Lactarius \u201cacrid orange\u201d",
+      "key": "lactarius sp. 'acrid-orange'",
+      "houseStyle": "Lactarius sp. 'acrid-orange'",
+      "isCode": true
+    },
+    {
+      "name": "Amanita \"pacificogemmata\"",
+      "key": "amanita sp. 'pacificogemmata'",
+      "houseStyle": "Amanita sp. 'pacificogemmata'",
+      "isCode": true
+    },
+    {
+      "name": "Agaricus 'andrewsii-braendlei'",
+      "key": "agaricus sp. 'andrewsii-braendlei'",
+      "houseStyle": "Agaricus sp. 'andrewsii-braendlei'",
+      "isCode": true
+    },
+    {
+      "name": "Amanita spadicea",
+      "key": "amanita spadicea",
+      "houseStyle": "Amanita spadicea",
+      "isCode": false
+    },
+    {
+      "name": "Amanita 'spadicea-IN01'",
+      "key": "amanita sp. 'spadicea-in1'",
+      "houseStyle": "Amanita sp. 'spadicea-IN01'",
+      "isCode": true
+    },
+    {
+      "name": "Amanita thria",
+      "key": "amanita thria",
+      "houseStyle": "Amanita thria",
+      "isCode": false
+    },
+    {
+      "name": "Amanita sp. 'thria'",
+      "key": "amanita sp. 'thria'",
+      "houseStyle": "Amanita sp. 'thria'",
+      "isCode": true
+    },
+    {
+      "name": "Cortinarius sp.",
+      "key": "cortinarius sp.",
+      "houseStyle": "Cortinarius sp.",
+      "isCode": false
+    },
+    {
+      "name": "Tricholoma lutescentifolium\u00a0",
+      "key": "tricholoma lutescentifolium",
+      "houseStyle": "Tricholoma lutescentifolium",
+      "isCode": false
+    },
+    {
+      "name": "Xanthoconium affine\u00a0var.\u00a0reticulatum",
+      "key": "xanthoconium affine var. reticulatum",
+      "houseStyle": "Xanthoconium affine var. reticulatum",
+      "isCode": false
+    },
+    {
+      "name": "galerina laticeps",
+      "key": "galerina laticeps",
+      "houseStyle": "galerina laticeps",
+      "isCode": false
+    },
+    {
+      "name": "Amanita muscaria var. guessowii",
+      "key": "amanita muscaria var. guessowii",
+      "houseStyle": "Amanita muscaria var. guessowii",
+      "isCode": false
+    },
+    {
+      "name": "Arrhenia2 PNW04",
+      "key": "arrhenia2 pnw04",
+      "houseStyle": "Arrhenia2 PNW04",
+      "isCode": false
+    },
+    {
+      "name": "Agaricus \ufb01ssuratus",
+      "key": "agaricus fissuratus",
+      "houseStyle": "Agaricus fissuratus",
+      "isCode": false
+    }
+  ],
+  "notNames": [
+    "",
+    "delete",
+    "sample mixup",
+    "sequence mixup",
+    "uncultured Russula",
+    "https://www.inaturalist.org/observations/323393868",
+    "Amanita",
+    "Polyporales"
+  ],
+  "groups": [
+    {
+      "rule": "An old-format spelling joins the house-style spelling, which is kept",
+      "rows": [
+        [
+          "Clitocybe sp. 'PNW01'",
+          112
+        ],
+        [
+          "Clitocybe \"sp-PNW01\"",
+          6
+        ]
+      ],
+      "expect": {
+        "proposedName": "Clitocybe sp. 'PNW01'",
+        "proposedIsNew": false,
+        "confidence": "same",
+        "recordsToFix": 6
+      }
+    },
+    {
+      "rule": "An old-format spelling on its own is rewritten into house style",
+      "rows": [
+        [
+          "Galerina \"sp-CA02\"",
+          24
+        ]
+      ],
+      "expect": {
+        "proposedName": "Galerina sp. 'CA02'",
+        "proposedIsNew": true,
+        "confidence": "same",
+        "recordsToFix": 24
+      }
+    },
+    {
+      "rule": "The hyphenated spelling is kept even when the spaced one has more records",
+      "rows": [
+        [
+          "Clitocybe sp. 'fuscidisca PNW10'",
+          65
+        ],
+        [
+          "Clitocybe sp. 'fuscidisca-PNW10'",
+          31
+        ]
+      ],
+      "expect": {
+        "proposedName": "Clitocybe sp. 'fuscidisca-PNW10'",
+        "proposedIsNew": false,
+        "confidence": "same",
+        "recordsToFix": 65
+      }
+    },
+    {
+      "rule": "A hyphen before the number never changes a name that is already in house style",
+      "rows": [
+        [
+          "Amanita sp. 'flavoconia-01'",
+          199
+        ],
+        [
+          "Amanita \"flavoconia-01\"",
+          24
+        ]
+      ],
+      "expect": {
+        "proposedName": "Amanita sp. 'flavoconia-01'",
+        "proposedIsNew": false,
+        "confidence": "same",
+        "recordsToFix": 24
+      }
+    },
+    {
+      "rule": "IN7 and IN07 are grouped, the two-digit spelling is proposed, and a person checks",
+      "rows": [
+        [
+          "Mycena sp. 'IN7'",
+          88
+        ],
+        [
+          "Mycena sp. 'IN07'",
+          16
+        ]
+      ],
+      "expect": {
+        "proposedName": "Mycena sp. 'IN07'",
+        "proposedIsNew": false,
+        "confidence": "check",
+        "recordsToFix": 88
+      }
+    },
+    {
+      "rule": "A code that is also in use as a plain name is for a person to decide",
+      "rows": [
+        [
+          "Craterellus sp. 'neotubaeformis'",
+          55
+        ],
+        [
+          "Craterellus neotubaeformis",
+          19
+        ]
+      ],
+      "expect": {
+        "proposedName": null,
+        "proposedIsNew": false,
+        "confidence": "check",
+        "recordsToFix": 74
+      }
+    },
+    {
+      "rule": "A non-breaking space is the same name",
+      "rows": [
+        [
+          "Tricholoma lutescentifolium",
+          40
+        ],
+        [
+          "Tricholoma lutescentifolium\u00a0",
+          7
+        ]
+      ],
+      "expect": {
+        "proposedName": "Tricholoma lutescentifolium",
+        "proposedIsNew": false,
+        "confidence": "same",
+        "recordsToFix": 7
+      }
+    },
+    {
+      "rule": "A described code keeps its spaces, and a respelling of it is checked by a person",
+      "rows": [
+        [
+          "Neoboletus sp. 'AZ brown 01'",
+          9
+        ],
+        [
+          "Neoboletus sp. 'AZ-brown-01'",
+          1
+        ]
+      ],
+      "expect": {
+        "proposedName": "Neoboletus sp. 'AZ-brown-01'",
+        "proposedIsNew": false,
+        "confidence": "check",
+        "recordsToFix": 9
+      }
+    }
+  ],
+  "noGroup": [
+    [
+      [
+        "Amanita muscaria",
+        500
+      ],
+      [
+        "Amanita muscaria var. guessowii",
+        173
+      ]
+    ],
+    [
+      [
+        "Russula sp. 'IN1'",
+        196
+      ],
+      [
+        "Russula sp. 'IN10'",
+        12
+      ],
+      [
+        "Russula sp. 'IN100'",
+        13
+      ]
+    ],
+    [
+      [
+        "Collybiopsis sp. 'IN01 x IN02'",
+        11
+      ]
+    ],
+    [
+      [
+        "Amanita spadicea",
+        3
+      ],
+      [
+        "Amanita sp. 'spadicea-IN01'",
+        4
+      ]
+    ],
+    [
+      [
+        "Inocybe sp. 'PNW18'",
+        20
+      ],
+      [
+        "Cortinarius sp. 'PNW18'",
+        5
+      ]
+    ]
+  ]
+}
