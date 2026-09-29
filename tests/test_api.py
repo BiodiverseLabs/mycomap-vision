@@ -26,8 +26,10 @@ def open_limits(**kw):
     return Limits(**base)
 
 
-def app_with_model(conn, tmp_path, embed_all=True, limits=None):
+def app_with_model(conn, tmp_path, embed_all=True, limits=None, arr_photos=()):
     store = seed_two_species(conn, tmp_path)
+    conn.executemany("update photos set license_class = 'arr' where photo_id = ?",
+                     [(p,) for p in arr_photos])
     root = tmp_path / "emb"
     if embed_all:
         todo = photos_to_embed(conn, "m1", "large", store.location, "local")
@@ -276,3 +278,24 @@ def test_identify_reports_the_context_it_used(conn, tmp_path):
     assert res["context_used"]["latitude"] == 39.2
     bad = client.post("/api/identify", files=files, data={"models": "m1/nearest", "lat": "95"})
     assert bad.status_code == 400
+
+
+def test_results_never_show_an_all_rights_reserved_photo(conn, tmp_path):
+    # Record 100 (the reddest A x) has only an all-rights-reserved photo.
+    client = app_with_model(conn, tmp_path, arr_photos=[1000])
+    [r] = post_photos(client, [250], "m1/nearest").json()["results"]
+    by_obs = {s["observation_id"]: s for s in r["specimens"]}
+    hidden = by_obs["100"]
+    assert hidden["photo_url"] is None and hidden["photo_owner"] is None
+    assert hidden["photo_withheld"] is True
+    assert hidden["inat_url"].endswith("/100")          # the record itself is still linked
+    shown = [s for o, s in by_obs.items() if o != "100"]
+    assert shown and all(s["photo_url"] and s["photo_withheld"] is False for s in shown)
+
+
+def test_a_record_shows_its_best_matching_openly_licensed_photo():
+    from mycomap_vision.identify import pick_shown
+    scores = [0.9, 0.8, 0.7, 0.95]
+    assert pick_shown(scores, ["arr", "nc", "open", "arr"]) == 1
+    assert pick_shown(scores, ["arr", None, "arr", "arr"]) is None
+    assert pick_shown(scores, ["open", "open", "open", "open"]) == 3

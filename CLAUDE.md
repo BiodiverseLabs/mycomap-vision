@@ -18,7 +18,8 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   Always send `config.USER_AGENT`. Never put a user's email in a header or URL.
 - **Keep provenance.** Every photo keeps owner, license, license history and
   hash. All-rights-reserved photos are for training only while permission is
-  sought; never publish or redistribute them.
+  sought; never publish or redistribute them. Identify results show only Creative
+  Commons photos (`identify.SHOWN_LICENSES`, Steve 2026-09-29).
 - **Keep the data private.** `data/` (photos, manifest, embeddings, contributor
   lists) and the S3 bucket are never committed, published or made public. Trained
   models and embedding indexes count as data until their photo permissions allow

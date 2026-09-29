@@ -216,6 +216,5 @@ stands. Before publishing a full release, either:
   and verify with `SIGNIN=identify bash deploy/lightsail/verify.sh`.
 - Search engines: delete the `X-Robots-Tag` line in `nginx-vision-headers.conf`
   (and its test), copy the file to the box and reload nginx.
-- Before any page is open to people without an account, the nearest-specimen
-  results must stop showing all-rights-reserved photos. The repo rules forbid
-  publishing them.
+- Results only ever show Creative Commons photos (`identify.SHOWN_LICENSES`); a
+  record with only all-rights-reserved photos is linked to iNat without a photo.

@@ -19,6 +19,8 @@ export interface Specimen {
   matched_query_photo: number;
   photo_url: string | null;
   photo_owner: string | null;
+  /** True when none of the record's photos is Creative Commons licensed. */
+  photo_withheld: boolean;
   inat_url: string;
   species_url: string;
 }

@@ -92,6 +92,21 @@ def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key:
     return False
 
 
+# Licence classes whose photos may be shown in results: Creative Commons (with or
+# without non-commercial / no-derivatives terms). All-rights-reserved photos are for
+# training only while permission is sought, so a result never shows one.
+SHOWN_LICENSES = frozenset({"open", "nc"})
+
+
+def pick_shown(scores, licenses: list[str | None]) -> int | None:
+    """Index of the best-scoring photo that may be shown, or None if none may."""
+    best = None
+    for i, lic in enumerate(licenses):
+        if lic in SHOWN_LICENSES and (best is None or scores[i] > scores[best]):
+            best = i
+    return best
+
+
 @dataclass
 class PhotoInfo:
     source_url: str
@@ -184,8 +199,11 @@ class Identifier:
             q_best, c_best = np.unravel_index(int(block.argmax()), block.shape)
             col = lo + int(c_best)
             rec = self.col_record[col]
-            pid = int(self.col_photo[col])
-            info = self.photos.get(pid)
+            # The photo shown: the record's best match among those whose licence allows
+            # showing it, which need not be the photo that matched best.
+            infos = [self.photos.get(int(p)) for p in self.col_photo[lo:hi].tolist()]
+            shown = pick_shown(block.max(axis=0), [i.license_class if i else None for i in infos])
+            info = infos[shown] if shown is not None else None
             specimens.append({
                 "observation_id": rec.observation_id,
                 "species": rec.species, "genus": rec.genus, "family": rec.family,
@@ -193,6 +211,7 @@ class Identifier:
                 "matched_query_photo": int(q_best),
                 "photo_url": sized_url(info.source_url, "medium") if info else None,
                 "photo_owner": info.owner_login if info else None,
+                "photo_withheld": info is None,
                 "inat_url": INAT_OBS_URL + rec.observation_id,
                 "species_url": ORG_SPECIES_URL + quote(rec.species),
             })
