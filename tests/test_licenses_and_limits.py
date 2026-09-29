@@ -84,6 +84,18 @@ def test_byte_budget_blocks_until_old_bytes_age_out():
     assert b.used() == 60
 
 
+def test_bytes_from_an_earlier_run_count_until_they_age_out():
+    clock = FakeClock()
+    b = ByteBudget(limit=100, window=3600, clock=clock)
+    b.add_past(3000, 80)         # fetched 50 minutes before this run started
+    b.add_past(4000, 999)        # outside the window: ignored
+    assert b.used() == 80
+    b.add(40)                    # 120: over the limit until the old 80 ages out
+    assert b.wait_time() == pytest.approx(600)
+    clock.t += 600
+    assert b.wait_time() == 0 and b.used() == 40
+
+
 def test_old_photos_without_an_extension_still_resize_and_save_as_jpg():
     url = "https://inaturalist-open-data.s3.amazonaws.com/photos/2511038/square."
     assert sized_url(url, "large") == "https://inaturalist-open-data.s3.amazonaws.com/photos/2511038/large."

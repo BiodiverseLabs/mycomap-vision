@@ -76,3 +76,15 @@ class ByteBudget:
             self._trim(now)
             self._events.append((now, n))
             self._used += n
+
+    def add_past(self, seconds_ago: float, n: int) -> None:
+        """Count bytes fetched `seconds_ago` (e.g. by an earlier run), so a restart
+        doesn't start with a fresh budget."""
+        if seconds_ago >= self.window:
+            return
+        with self._lock:
+            now = self._clock()
+            self._events.append((now - max(seconds_ago, 0.0), n))
+            self._events = deque(sorted(self._events))
+            self._used += n
+            self._trim(now)

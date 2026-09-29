@@ -3,9 +3,11 @@ import threading
 
 from conftest import inat_obs
 
+from mycomap_vision import photos
 from mycomap_vision.inat import save_batch
+from mycomap_vision.licenses import OPEN_DATA_HOST, STATIC_HOST
 from mycomap_vision.photos import (MAX_ATTEMPTS, HostGate, HostPolicy, Result, download_one,
-                                   pending_photos, save_result)
+                                   pending_photos, save_result, seed_budgets)
 from mycomap_vision.ratelimit import ByteBudget
 from mycomap_vision.records import build_records, save_records
 from mycomap_vision.storage import LocalStore
@@ -152,6 +154,61 @@ def test_the_capped_host_can_be_left_to_another_downloader(conn):
     open_only = pending_photos(conn, True, None, "large", "C:/data", held_at="medium",
                                hosts=("inaturalist-open-data.s3.amazonaws.com",))
     assert [r["host"] for r in open_only] == ["inaturalist-open-data.s3.amazonaws.com"]
+
+
+class FakeHTTP:
+    """Stands in for requests.Session inside download_all: every photo downloads."""
+
+    def __init__(self):
+        self.headers = {}
+
+    def mount(self, *a):
+        pass
+
+    def get(self, url, timeout):
+        return FakeResp(200, JPEG)
+
+
+def test_a_host_waiting_for_its_daily_budget_does_not_hold_up_the_others(conn, tmp_path,
+                                                                         monkeypatch):
+    # 30 all-rights-reserved photos come first in the queue, then 10 open ones. The
+    # static host's day budget is used up (as on 2026-09-29, when the AWS downloader
+    # sat for 9 hours with 206k open photos still to fetch).
+    rows = [{"observation_id": "5", "scientific_name": "X", "continent": "North America",
+             "validation_status_1": "yes"}]
+    save_records(conn, build_records(rows, "t"))
+    save_batch(conn, ["5"], [inat_obs(5, photos=(
+        [(i, 100 + i, None, STATIC_HOST) for i in range(30)]
+        + [(30 + i, 200 + i, "cc0", OPEN_DATA_HOST) for i in range(10)]))], "t")
+    monkeypatch.setattr(photos.requests, "Session", FakeHTTP)
+    day = ByteBudget(10, 86400)
+    day.add(10)
+    policies = {STATIC_HOST: HostPolicy(concurrency=2, min_interval=0, budgets=[day]),
+                OPEN_DATA_HOST: HostPolicy(concurrency=8, min_interval=0)}
+    totals = photos.download_all(conn, LocalStore(tmp_path), size="large", policies=policies,
+                                 max_hours=2 / 3600, poll=0.05, log=lambda s: None)
+    assert totals["done"] == 10
+    done = {r[0] for r in conn.execute("select photo_id from photo_copies")}
+    assert done == set(range(200, 210))
+    # The waiting static photos were stopped, not failed: no attempts used up.
+    assert conn.execute("select max(attempts) from photos where photo_id < 200").fetchone()[0] == 0
+
+
+def test_a_restarted_downloader_counts_what_earlier_runs_fetched(conn):
+    from datetime import datetime, timedelta, timezone
+    _seed(conn)                                   # photo 11 is static, 12 open data
+    now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
+    ago = lambda **kw: (now - timedelta(**kw)).isoformat(timespec="seconds")  # noqa: E731
+    conn.executemany("insert into photo_copies values (?, ?, 'large', 'p', ?, 'h', ?)", [
+        (11, "s3://b/", 800, ago(minutes=10)),    # inside the hour and the day
+        (11, "C:/data", 500, ago(hours=2)),       # inside the day only
+        (11, "D:/old", 700, ago(hours=30)),       # outside both
+        (12, "s3://b/", 5000, ago(minutes=5)),    # another host
+    ])
+    hour, day = ByteBudget(1000, 3600), ByteBudget(2000, 86400)
+    policies = {STATIC_HOST: HostPolicy(2, 0, [hour, day]), OPEN_DATA_HOST: HostPolicy(8, 0)}
+    assert seed_budgets(conn, policies, now=now) == {STATIC_HOST: 1300}
+    assert (hour.used(), day.used()) == (800, 1300)
 
 
 def test_random_order_still_returns_only_pending_photos(conn):

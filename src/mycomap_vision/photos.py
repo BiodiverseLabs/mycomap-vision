@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import threading
 import time
+from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -62,6 +63,37 @@ class HostGate:
     def consume(self, n: int) -> None:
         for b in self.policy.budgets:
             b.add(n)
+
+
+def seed_budgets(conn: sqlite3.Connection, policies: dict[str, HostPolicy],
+                 now: datetime | None = None) -> dict[str, int]:
+    """Count each host's downloads still inside its budget windows (from any earlier run,
+    any store): a restarted downloader must not get a fresh day's budget. Returns the
+    bytes counted per host."""
+    now = now or datetime.now(timezone.utc)
+    counted = {}
+    for host, policy in policies.items():
+        if not policy.budgets:
+            continue
+        longest = max(b.window for b in policy.budgets)
+        total = 0
+        for when, n in conn.execute(
+                "select c.downloaded_at, c.bytes from photo_copies c join photos p on "
+                "p.photo_id = c.photo_id where p.host = ? and c.downloaded_at is not null "
+                "and c.bytes is not null", (host,)):
+            try:
+                t = datetime.fromisoformat(when)
+            except ValueError:
+                continue
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            ago = (now - t).total_seconds()
+            if ago < longest:
+                for b in policy.budgets:
+                    b.add_past(ago, n)
+                total += n
+        counted[host] = total
+    return counted
 
 
 @dataclass
@@ -187,13 +219,22 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                  checkpoint_every: float = 600, random_order: bool = False,
                  record_sample: int | None = None, first_seen_since: str | None = None,
                  held_at: str | None = None, hosts: tuple[str, ...] | None = None,
+                 policies: dict[str, HostPolicy] | None = None, poll: float = 30,
                  log=print) -> dict:
     """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
-    runs every `checkpoint_every` seconds and once at the end."""
+    runs every `checkpoint_every` seconds and once at the end.
+
+    Each host has its own lane: at most its concurrency in flight, so a host waiting
+    for its byte budget (the capped static host, for hours) can't hold the threads
+    the others need. Budgets start from what earlier runs fetched (seed_budgets)."""
     config.ensure_dirs()
     rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
                           record_sample, first_seen_since, held_at, hosts)
-    policies = default_policies()
+    policies = policies or default_policies()
+    seeded = seed_budgets(conn, policies)
+    for host, n in seeded.items():
+        if n:
+            log(f"  {host}: {n / GB:.1f} GB already fetched inside its budget windows")
     gates: dict[str, HostGate] = {}
     session = requests.Session()
     session.headers["User-Agent"] = config.USER_AGENT
@@ -209,29 +250,36 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
             gates[host] = HostGate(policies.get(host, FALLBACK))
         return gates[host]
 
-    # Enough workers to keep every host at its own concurrency; the gates do the limiting.
-    workers = sum(p.concurrency for p in policies.values()) + FALLBACK.concurrency
-    pending: set[Future] = set()
-    it = iter(rows)
+    lanes: dict[str, deque] = {}
+    for row in rows:
+        lanes.setdefault(row["host"], deque()).append(row)
+
+    def cap(host: str) -> int:
+        return policies.get(host, FALLBACK).concurrency
+
+    # One thread per lane slot, so every host can run at its own concurrency at once.
+    workers = max(1, sum(cap(h) for h in lanes))
+    pending: dict[Future, str] = {}
+    in_flight: dict[str, int] = {h: 0 for h in lanes}
     finished = 0
     last_checkpoint = time.monotonic()
     try:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             def top_up():
-                while len(pending) < workers * 4 and not stop.is_set():
-                    row = next(it, None)
-                    if row is None:
-                        return
-                    pending.add(pool.submit(download_one, session, gate_for(row["host"]),
-                                            row["photo_id"], row["source_url"], size,
-                                            store, stop))
+                for host, lane in lanes.items():
+                    while lane and in_flight[host] < cap(host) and not stop.is_set():
+                        row = lane.popleft()
+                        fut = pool.submit(download_one, session, gate_for(host),
+                                          row["photo_id"], row["source_url"], size, store, stop)
+                        pending[fut] = host
+                        in_flight[host] += 1
             top_up()
             while pending:
-                done, _ = wait(pending, timeout=30, return_when=FIRST_COMPLETED)
+                done, _ = wait(list(pending), timeout=poll, return_when=FIRST_COMPLETED)
                 now = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 with conn:
                     for fut in done:
-                        pending.discard(fut)
+                        in_flight[pending.pop(fut)] -= 1
                         r = fut.result()
                         save_result(conn, r, size, now, store.location)
                         if r.error == "stopped":
