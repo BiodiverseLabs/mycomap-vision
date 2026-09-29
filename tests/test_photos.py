@@ -134,6 +134,26 @@ def test_photos_held_locally_are_queued_again_when_the_store_moves_to_s3(conn):
     assert pending_photos(conn, True, None, "large") == []
 
 
+def test_a_sample_can_be_fetched_again_at_a_new_size_without_touching_the_rest(conn):
+    _seed(conn)
+    save_result(conn, Result(12, "done", "p/12.jpg", 5, "h"), "medium", "now", "C:/data")
+    got = pending_photos(conn, True, None, "large", "C:/data", held_at="medium")
+    assert [r["photo_id"] for r in got] == [12]        # 11 isn't in the sample
+    # Held at medium somewhere else doesn't count as this store's sample.
+    assert pending_photos(conn, True, None, "large", "s3://b/", held_at="medium") == []
+
+
+def test_the_capped_host_can_be_left_to_another_downloader(conn):
+    _seed(conn)
+    for pid in (11, 12):
+        save_result(conn, Result(pid, "done", f"p/{pid}.jpg", 5, "h"), "medium", "now", "C:/data")
+    both = pending_photos(conn, True, None, "large", "C:/data", held_at="medium")
+    assert sorted(r["photo_id"] for r in both) == [11, 12]
+    open_only = pending_photos(conn, True, None, "large", "C:/data", held_at="medium",
+                               hosts=("inaturalist-open-data.s3.amazonaws.com",))
+    assert [r["host"] for r in open_only] == ["inaturalist-open-data.s3.amazonaws.com"]
+
+
 def test_random_order_still_returns_only_pending_photos(conn):
     _seed(conn)
     save_result(conn, Result(11, "done", "p", 5, "h"), "medium", "now")

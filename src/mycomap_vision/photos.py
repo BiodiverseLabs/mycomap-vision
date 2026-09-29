@@ -114,11 +114,17 @@ def download_one(session: requests.Session, gate: HostGate, photo_id: int, sourc
 def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: int | None,
                    size: str = "medium", store_location: str | None = None,
                    random_order: bool = False, record_sample: int | None = None,
-                   first_seen_since: str | None = None):
+                   first_seen_since: str | None = None, held_at: str | None = None,
+                   hosts: tuple[str, ...] | None = None):
     """Photos of green records with no copy at `size` (in `store_location`, when given),
     failed fewest times first. Photos iNat no longer has, and ones that failed
     MAX_ATTEMPTS times, are left out. A copy at another size or in another store
     doesn't count, so a laptop sample and the S3 set are kept independently.
+
+    `held_at` keeps only photos the store already holds at that other size (a
+    sample fetched again at a new size); `hosts` keeps only photos served from
+    those hosts (e.g. the open-data bucket, when another machine is using the
+    capped host's budget).
     """
     na = "and r.north_america = 1" if north_america_only else ""
     params: list = []
@@ -130,6 +136,14 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
         # All photos of a random set of records: a small but complete reference set.
         na += (" and r.observation_id in (select observation_id from records"
                f" where north_america = 1 order by random() limit {int(record_sample)})")
+    extra, tail = "", []
+    if held_at:
+        extra += (" and exists (select 1 from photo_copies h where h.photo_id = p.photo_id"
+                  " and h.size = ? and (? is null or h.store = ?))")
+        tail += [held_at, store_location, store_location]
+    if hosts:
+        extra += f" and p.host in ({','.join('?' * len(hosts))})"
+        tail += list(hosts)
     sql = f"""
       select distinct p.photo_id, p.source_url, p.host, p.attempts
       from photos p
@@ -137,12 +151,12 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
       join records r on r.observation_id = op.observation_id {na}
       where p.status != 'missing' and p.attempts < {MAX_ATTEMPTS}
         and not exists (select 1 from photo_copies c where c.photo_id = p.photo_id
-                        and c.size = ? and (? is null or c.store = ?))
+                        and c.size = ? and (? is null or c.store = ?)){extra}
       order by {"random()" if random_order else "p.attempts, p.photo_id"}
     """
     if limit is not None:
         sql += f" limit {int(limit)}"
-    return conn.execute(sql, (*params, size, store_location, store_location)).fetchall()
+    return conn.execute(sql, (*params, size, store_location, store_location, *tail)).fetchall()
 
 
 def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str,
@@ -172,12 +186,13 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                  checkpoint: Callable[[], None] | None = None,
                  checkpoint_every: float = 600, random_order: bool = False,
                  record_sample: int | None = None, first_seen_since: str | None = None,
+                 held_at: str | None = None, hosts: tuple[str, ...] | None = None,
                  log=print) -> dict:
     """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
     runs every `checkpoint_every` seconds and once at the end."""
     config.ensure_dirs()
     rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
-                          record_sample, first_seen_since)
+                          record_sample, first_seen_since, held_at, hosts)
     policies = default_policies()
     gates: dict[str, HostGate] = {}
     session = requests.Session()

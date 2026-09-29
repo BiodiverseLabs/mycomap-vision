@@ -33,7 +33,9 @@ def cmd_download_photos(conn, args) -> None:
     stats = photos.download_all(conn, store, size=args.size,
                                 north_america_only=not args.all_regions, limit=args.limit,
                                 max_hours=args.max_hours, checkpoint=checkpoint,
-                                random_order=args.random, record_sample=args.record_sample)
+                                random_order=args.random, record_sample=args.record_sample,
+                                held_at=args.held_at,
+                                hosts=(photos.OPEN_DATA_HOST,) if args.open_data_only else None)
     stats["gb"] = round(stats["bytes"] / photos.GB, 2)
     print(json.dumps(stats, indent=2))
 
@@ -322,6 +324,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="random order, for a representative sample with --limit")
     p.add_argument("--record-sample", type=int,
                    help="only the photos of this many randomly chosen records")
+    p.add_argument("--held-at", choices=["small", "medium", "large"],
+                   help="only photos the destination already holds at this other size "
+                        "(fetch a sample again at a new size)")
+    p.add_argument("--open-data-only", action="store_true",
+                   help="only photos in iNat's open-data bucket; leaves the capped host's "
+                        "daily budget to another downloader")
 
     p = sub.add_parser("aws-launch-downloader",
                        help="download photos on a self-terminating EC2 instance into S3")
