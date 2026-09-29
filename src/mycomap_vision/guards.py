@@ -91,13 +91,26 @@ class Limits:
     rate: tuple[int, float]
     max_in_flight: int
     allowed_backbones: set[str]
+    # None = every method. The server box lists only what it can answer in seconds.
+    allowed_methods: set[str] | None = None
+    # False = never train a method's classifier on this machine (minutes of CPU on the
+    # box; hours at the full photo set). A trained method then needs its saved training.
+    fit_on_demand: bool = True
 
     @classmethod
     def from_settings(cls) -> "Limits":
         allowed = config.setting("MV_ALLOWED_BACKBONES")
+        methods = config.setting("MV_METHODS")
         return cls(
             rate=parse_rate(config.setting("MV_RATE_LIMIT")),
             max_in_flight=int(config.setting("MV_MAX_QUEUE", "4")),
             allowed_backbones=({b.strip() for b in allowed.split(",") if b.strip()}
                                if allowed else set(models.ALIASES)),
+            allowed_methods=({m.strip() for m in methods.split(",") if m.strip()}
+                             if methods else None),
+            fit_on_demand=(config.setting("MV_FIT_ON_DEMAND", "1").lower()
+                           not in ("0", "false", "no", "off")),
         )
+
+    def method_allowed(self, method: str) -> bool:
+        return self.allowed_methods is None or method in self.allowed_methods

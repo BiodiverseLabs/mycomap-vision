@@ -74,9 +74,16 @@ def cache_key(backbone: str, method: str, photo_ids: np.ndarray, species: list[s
     return h.hexdigest()[:16]
 
 
-def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key: str) -> bool:
+class NotTrainedHere(RuntimeError):
+    """A trained method with no saved training for this reference set, on a machine
+    that must not train (MV_FIT_ON_DEMAND=0)."""
+
+
+def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key: str,
+               train: bool = True) -> bool:
     """Fit the model, reusing saved trained weights when this exact reference set has been
-    trained before. Returns True when loaded from the cache."""
+    trained before. Returns True when loaded from the cache. With train=False a
+    trainable model without saved weights raises NotTrainedHere instead of training."""
     kw = {"records": records} if getattr(model, "needs_context", False) else {}
     trainable = hasattr(model, "state")
     path = cache_dir / f"{key}.npz"
@@ -84,6 +91,9 @@ def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key:
         with np.load(path) as saved:
             model.fit(vectors, index, state={k: saved[k] for k in saved.files}, **kw)
         return True
+    if trainable and not train:
+        raise NotTrainedHere(f"{getattr(model, 'name', 'this method')} has no saved training "
+                             "for this reference set, and this server doesn't train")
     model.fit(vectors, index, **kw)
     if trainable:
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -140,7 +150,7 @@ class Identifier:
 
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
                  embeddings_root: Path | None = None, calibration: dict | None = None,
-                 model_cache: Path | None = None):
+                 model_cache: Path | None = None, train: bool = True):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         self.backbone, self.method = backbone, method
@@ -157,7 +167,8 @@ class Identifier:
         self.loaded_from_cache = fit_cached(
             self.model, vecs, self.index, records,
             model_cache or config.DATA_DIR / "models",
-            cache_key(backbone, method, ids[self.index.cols], self.index.species))
+            cache_key(backbone, method, ids[self.index.cols], self.index.species),
+            train=train)
         self.nearest = self.model if isinstance(self.model, NearestSpecimen) else NearestSpecimen()
         if self.nearest is not self.model:
             self.nearest.fit(vecs, self.index)
