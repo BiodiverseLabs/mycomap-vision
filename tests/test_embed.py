@@ -5,8 +5,8 @@ from PIL import Image
 
 from conftest import inat_obs
 
-from mycomap_vision.embed import (decode, embed_photos, load_embeddings, normalise,
-                                  photos_to_embed)
+from mycomap_vision.embed import (archive_embeddings, decode, embed_photos, load_embeddings,
+                                  normalise, photos_to_embed)
 from mycomap_vision.inat import save_batch
 from mycomap_vision.photos import Result, save_result
 from mycomap_vision.records import build_records, save_records
@@ -100,6 +100,27 @@ def test_photos_downloaded_before_stores_were_recorded_count_as_local(conn, tmp_
     conn.execute("update photos set store = null")
     assert len(photos_to_embed(conn, "m", "large", store.location, store.location)) == 1
     assert photos_to_embed(conn, "m", "large", "s3://b/", store.location) == []
+
+
+def test_archived_embeddings_are_kept_aside_and_every_photo_is_embedded_again(conn, tmp_path):
+    import pytest
+    store = seed(conn, tmp_path, n=3)
+    data = tmp_path / "data"
+    todo = photos_to_embed(conn, "mean-colour", "large", store.location, "local")
+    embed_photos(conn, store, MeanColour(), todo, data / "embeddings" / "mean-colour",
+                 log=lambda s: None)
+    out = archive_embeddings(conn, "mean-colour", "medium", data_dir=data)
+    assert out["rows"] == 3
+    kept = data / "embeddings-archive" / "mean-colour-medium"
+    assert np.load(kept / "shard-00000.ids.npy").tolist() == [100, 101, 102]
+    assert not (data / "embeddings" / "mean-colour").exists()
+    assert len(photos_to_embed(conn, "mean-colour", "large", store.location, "local")) == 3
+    # An earlier archive is never overwritten, and there is nothing left to archive now.
+    (data / "embeddings" / "mean-colour").mkdir(parents=True)
+    with pytest.raises(FileExistsError):
+        archive_embeddings(conn, "mean-colour", "medium", data_dir=data)
+    with pytest.raises(ValueError, match="no embeddings"):
+        archive_embeddings(conn, "other", "medium", data_dir=data)
 
 
 def test_photos_at_other_sizes_are_not_embedded(conn, tmp_path):

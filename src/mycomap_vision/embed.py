@@ -179,6 +179,31 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
     return stats
 
 
+def archive_embeddings(conn: sqlite3.Connection, backbone: str, label: str,
+                       data_dir: Path | None = None) -> dict:
+    """Set a backbone's embeddings aside (e.g. before embedding the same photos at another
+    size): the folder moves to embeddings-archive/<backbone>-<label>, and its rows leave
+    the index, so every photo counts as not embedded. Nothing is deleted; each shard's
+    .ids.npy file says which photos it holds. Refuses to overwrite an earlier archive."""
+    import shutil
+    data_dir = data_dir or config.DATA_DIR
+    conn.executescript(SCHEMA)
+    src = data_dir / "embeddings" / backbone
+    dest = data_dir / "embeddings-archive" / f"{backbone}-{label}"
+    if dest.exists():
+        raise FileExistsError(f"{dest} already exists; choose another label")
+    rows = conn.execute("select count(*) from embeddings where backbone = ?",
+                        (backbone,)).fetchone()[0]
+    if not rows and not src.exists():
+        raise ValueError(f"{backbone} has no embeddings to archive")
+    if src.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+    with conn:
+        conn.execute("delete from embeddings where backbone = ?", (backbone,))
+    return {"backbone": backbone, "rows": rows, "archive": str(dest)}
+
+
 def photos_per_second(conn: sqlite3.Connection) -> dict[str, float]:
     """Each backbone's throughput over its runs of 1,000 photos or more (small runs are
     dominated by model loading)."""

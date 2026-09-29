@@ -156,6 +156,12 @@ def cmd_embed(conn, args) -> None:
     print(json.dumps(stats.__dict__, indent=2))
 
 
+def cmd_archive_embeddings(conn, args) -> None:
+    from . import embed, models
+    for b in _split(args.backbones):
+        print(json.dumps(embed.archive_embeddings(conn, models.storage_name(b), args.label)))
+
+
 def cmd_compare(conn, args) -> None:
     """Score several backbones and methods on the same test and reference photos."""
     from . import evaluate, models
@@ -393,6 +399,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int)
     p.add_argument("--batch-size", type=int, default=32)
 
+    p = sub.add_parser("archive-embeddings",
+                       help="set backbones' embeddings aside (kept in data/embeddings-archive), "
+                            "e.g. to embed the same photos again at another size")
+    p.add_argument("--backbones", required=True, help="comma-separated aliases or names")
+    p.add_argument("--label", required=True, help="e.g. medium; names the archive folder")
+
     p = sub.add_parser("compare", help="score backbones x methods on the same photos "
                                        "(newest weeks vs older records); saves to the scoreboard")
     p.add_argument("--backbones", required=True, help="comma-separated aliases or specs")
@@ -460,6 +472,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-pull-trainer": cmd_aws_pull_trainer,
         "finetune": cmd_finetune,
         "embed": cmd_embed,
+        "archive-embeddings": cmd_archive_embeddings,
         "compare": cmd_compare,
         "screen": cmd_screen,
         "inat-baseline": cmd_inat_baseline,
