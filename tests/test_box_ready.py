@@ -76,3 +76,19 @@ def test_other_pages_answer_while_an_index_is_being_built(conn, tmp_path, monkey
     assert time.monotonic() - start < 1.0                 # not stuck behind the build
     t.join(10)
     assert done["r"].status_code == 200
+
+
+def test_a_comparison_is_capped_so_it_cannot_outlast_the_proxy(conn, tmp_path):
+    c = client(tmp_path, seeded(conn, tmp_path), max_models=2)
+    assert c.get("/api/models").json()["max_models"] == 2
+    assert post_photos(c, [247], "m1/nearest,m1/species-mean").status_code == 200
+    r = post_photos(c, [247], "m1/nearest,m1/species-mean,m1/nearest+prior")
+    assert r.status_code == 400 and "at most 2" in r.json()["detail"]
+
+
+def test_the_model_limit_comes_from_settings(monkeypatch):
+    from mycomap_vision.guards import Limits
+    monkeypatch.setenv("MV_MAX_MODELS", "2")
+    assert Limits.from_settings().max_models == 2
+    monkeypatch.delenv("MV_MAX_MODELS")
+    assert Limits.from_settings().max_models is None

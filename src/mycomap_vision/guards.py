@@ -96,6 +96,9 @@ class Limits:
     # False = never train a method's classifier on this machine (minutes of CPU on the
     # box; hours at the full photo set). A trained method then needs its saved training.
     fit_on_demand: bool = True
+    # Most models one identification may run (None = no limit). The box: 2, so a
+    # side-by-side comparison can't outlast the proxy's timeout.
+    max_models: int | None = None
 
     @classmethod
     def from_settings(cls) -> "Limits":
@@ -110,6 +113,8 @@ class Limits:
                              if methods else None),
             fit_on_demand=(config.setting("MV_FIT_ON_DEMAND", "1").lower()
                            not in ("0", "false", "no", "off")),
+            max_models=(int(config.setting("MV_MAX_MODELS")) if (config.setting("MV_MAX_MODELS") or "").isdigit()
+                        else None),
         )
 
     def method_allowed(self, method: str) -> bool:
