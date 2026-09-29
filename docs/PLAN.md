@@ -146,6 +146,21 @@ Small test sets (68-91 records): read as direction, not precision.
   from its few records is penalised. Kept as experimental methods (+prior), not a
   default; retest on the full data, where iNat's own location model adds ~1.5
   points for iNat.
+- Weighting photos by how decisive they are doesn't help (`nearest-mix`, 2026-09-29).
+  Each photo's nearest-specimen scores become its own softmax over species, and the
+  probabilities are averaged, so a photo that fits many species alike counts for
+  little. BioCLIP 2, all 5,704 multi-photo records in the sample, each identified
+  with its own record left out (not a time split; relative comparison only).
+  Species top-1, plain `nearest` 22.2%; mix at temperature 0.005 / 0.01 / 0.02 /
+  0.05 / 0.1: 20.2 / 20.6 / 21.1 / 22.0 / 22.4% (genus 61.0% vs 56.9-61.6%). At
+  0.02, of the records where the two disagree, nearest is right on 203 and mix on
+  141 (p ~ 0.001); at 0.05 and 0.1 they tie (134 vs 147, 96 vs 89). Leaving out
+  the observer's other records too gives the same picture (nearest 20.5%, mix@0.05
+  20.8%). The sharper each photo's vote, the worse: a photo sure of itself is often
+  sure of a lookalike, and the plain average lets the other photos outvote it.
+  Time-split `mv compare` on 77 records (20260929-214409-85e107, at 0.02) moved by
+  2 records either way: noise. Kept as `nearest-mix` at 0.05; retest on the full
+  set with the fine-tuned model.
 
 ## Phase 1: a better identifier
 

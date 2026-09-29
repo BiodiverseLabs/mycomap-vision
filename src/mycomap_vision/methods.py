@@ -119,7 +119,9 @@ class NearestMix(NearestSpecimen):
     only its best species (a majority vote); large, it approaches plain `nearest`.
     """
     name = "nearest-mix"
-    temperature = 0.02    # the same fixed scale as the nearest-specimen log-probabilities
+    # Sharper votes did worse (docs/PLAN.md, 2026-09-29: 0.02 lost to nearest on 5,704
+    # records); 0.05 ties it, so a retest on the full data tests a real contender.
+    temperature = 0.05
 
     def combine(self, per_photo: np.ndarray) -> np.ndarray:
         return mix_photo_votes(per_photo, self.temperature).astype(np.float32)

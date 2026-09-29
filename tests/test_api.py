@@ -219,7 +219,8 @@ def test_nearest_mix_answers_by_its_own_rule_on_the_identify_page_too():
     for i, name in enumerate(ident.index.species):
         assert abs(got[name] - float(want[i])) < 1e-3, "combined: the mixed votes, not the mean"
     cap = out["per_photo"][0]["ranks"]["species"]
-    assert cap[0]["name"] == "Xus a" and cap[0]["score"] > -1e-3, "one photo: its own log-probabilities"
+    assert cap[0]["name"] == "Xus a"
+    assert abs(sum(np.exp(c["score"]) for c in cap) - 1) < 1e-3, "one photo: its own log-probabilities"
 
 
 def test_a_photos_own_specimens_show_the_reference_photo_that_matched_that_photo():
