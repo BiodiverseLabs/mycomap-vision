@@ -11,7 +11,7 @@ import io
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Protocol
@@ -100,6 +100,10 @@ class EmbedStats:
     unreadable: int = 0
     shards: int = 0
     seconds: float = 0.0
+    # (photo_id, why) of each photo that could not be read or decoded; they are left
+    # unembedded, and screening decides whether there are too many (skip_threshold).
+    skipped: list = field(default_factory=list)
+    stopped: bool = False          # should_stop() said stop before every batch was done
 
 
 def _batches(items: list, n: int) -> Iterable[list]:
@@ -110,7 +114,11 @@ def _batches(items: list, n: int) -> Iterable[list]:
 def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone,
                  todo: list[tuple[int, str]], out_dir: Path, batch_size: int = 32,
                  shard_rows: int = 8192, readers: int = 8,
-                 log: Callable[[str], None] = print) -> EmbedStats:
+                 log: Callable[[str], None] = print,
+                 should_stop: Callable[[], bool] | None = None) -> EmbedStats:
+    """Embed `todo`. A photo that can't be read or decoded is skipped and listed in
+    stats.skipped with the reason. `should_stop()` is asked before each batch; when it
+    says stop, what is embedded so far is saved and stats.stopped is set."""
     conn.executescript(SCHEMA)
     out_dir.mkdir(parents=True, exist_ok=True)
     stats = EmbedStats()
@@ -141,20 +149,29 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
     def load(item: tuple[int, str]):
         pid, rel = item
         try:
-            return pid, prepare(decode(store.get(rel)))
-        except Exception:
-            return pid, None
+            # decode converts to RGB, which reads every pixel: a truncated file fails here.
+            return pid, prepare(decode(store.get(rel))), None
+        except Exception as e:           # unreadable, corrupt, truncated, gone
+            return pid, None, f"{e.__class__.__name__}: {e}"[:300]
 
     with ThreadPoolExecutor(max_workers=readers) as pool:
         # Submit the next batch's reads before encoding this one, so they overlap.
         batches = list(_batches(todo, batch_size))
         ahead = [pool.submit(load, it) for it in batches[0]] if batches else []
         for bi in range(len(batches)):
+            if should_stop is not None and should_stop():
+                for f in ahead:
+                    f.cancel()
+                stats.stopped = True
+                log(f"  stopped at {stats.embedded:,}/{len(todo):,} photos (time limit)")
+                break
             loaded = [f.result() for f in ahead]
             ahead = ([pool.submit(load, it) for it in batches[bi + 1]]
                      if bi + 1 < len(batches) else [])
-            good = [(pid, img) for pid, img in loaded if img is not None]
-            stats.unreadable += len(loaded) - len(good)
+            good = [(pid, img) for pid, img, _ in loaded if img is not None]
+            bad = [(pid, why) for pid, img, why in loaded if img is None]
+            stats.unreadable += len(bad)
+            stats.skipped.extend(bad)
             if not good:
                 continue
             vecs = normalise(backbone.encode([img for _, img in good]))

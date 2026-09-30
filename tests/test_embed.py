@@ -137,3 +137,25 @@ def test_each_run_records_its_speed_and_small_runs_do_not_count(conn, tmp_path):
     assert photos_per_second(conn) == {}                      # 3 photos: loading dominates
     conn.execute("insert into embed_runs values ('big', 2000, 10.0, 'cuda', 't')")
     assert photos_per_second(conn) == {"big": 200.0}
+
+
+def test_a_corrupt_or_truncated_photo_is_skipped_with_its_reason(conn, tmp_path):
+    store = seed(conn, tmp_path, n=3, broken={101})
+    whole = jpeg((10, 200, 30))
+    store.put("photos/large/102.jpg", whole[: len(whole) // 2])     # cut off mid-file
+    todo = photos_to_embed(conn, "mean-colour", "large", store.location, "local")
+    stats = embed_photos(conn, store, MeanColour(), todo, tmp_path / "emb", log=lambda s: None)
+    assert stats.embedded == 1
+    assert [pid for pid, _ in stats.skipped] == [101, 102]
+    assert all(why for _, why in stats.skipped)
+    assert "truncated" in dict(stats.skipped)[102].lower()
+
+
+def test_embedding_stops_between_batches_when_asked_and_keeps_what_it_did(conn, tmp_path):
+    store = seed(conn, tmp_path, n=5)
+    todo = photos_to_embed(conn, "mean-colour", "large", store.location, "local")
+    backbone = MeanColour()
+    stats = embed_photos(conn, store, backbone, todo, tmp_path / "emb", batch_size=2,
+                         should_stop=lambda: backbone.calls >= 2, log=lambda s: None)
+    assert stats.stopped and stats.embedded == 4
+    assert len(photos_to_embed(conn, "mean-colour", "large", store.location, "local")) == 1

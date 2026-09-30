@@ -202,13 +202,38 @@ Setup needed first (Steve):
 - The ops policy gains read access to the Deep Learning AMI's public parameter
   (/aws/service/deeplearning/ami/...), and spot requests if we use spot.
 - Budget alarm in place (a g5/g6.xlarge is roughly a dollar an hour on demand,
-  less on spot; one full embedding pass should take a few hours).
+  less on spot; one embedding pass of the 593k large photos is 3-4.5 h for
+  BioCLIP 2, 9-13 h for DINOv3-L at 512 px).
 
 Built 2026-09-28 (`mv aws-launch-trainer`, `mv aws-pull-trainer`; how to run it in
 deploy/aws/README.md): g6.2xlarge from the Deep Learning Base GPU AMI, each run in
 its own `runs/<run>/` folder (never the downloader's manifest), each backbone
 uploaded as soon as it is embedded, `result.json` last. Waiting on the GPU quota
 and the ops-policy update; first run after the download completes.
+
+Fixed before the first run (Steve, 2026-09-30; branch fix/trainer-before-first-run):
+- The first run is BioCLIP 2 + its fine-tune alone, with a 24 h limit (now the
+  launcher's defaults). The earlier plan (BioCLIP 2 + DINOv3-L 512 + fine-tune,
+  14 h) needed ~25 h (19-34) and ran DINOv3 before the fine-tune, so the limit
+  would have cut the fine-tune. Stages now run as: each backbone to fine-tune,
+  its fine-tune, the fine-tuned model's embedding, then any other backbone.
+  The launcher estimates the hours (laptop speeds at large photos x 1.5 for the
+  L4: about 16 h for the first run, 29 h with DINOv3-L added) and refuses a run
+  that doesn't fit `--max-hours` unless `--allow-over-time`.
+- Each finished stage is uploaded at once with a progress.json; the job stops
+  itself 45 min before the limit and ends `stopped`; `aws-pull-trainer` brings
+  home the finished stages of a stopped or killed run and names what's missing.
+  A backbone the run didn't finish, or whose copy doesn't match the run's index,
+  never replaces local embeddings.
+- Unreadable photos are skipped, listed with the reason (runs/<run>/skipped/) and
+  counted; a backbone fails only when more than 1% of its photos are unreadable.
+- The run records the exact commit it ran (launch refuses a dirty tree or an
+  unpushed commit unless allowed), and the instance installs only pinned, hashed
+  packages (requirements/trainer.txt, made by
+  deploy/aws/lock_instance_requirements.py for Linux x86_64 / CPython 3.11).
+- After the first run, replace the laptop-measured rates in trainer.py with the
+  L4's own (progress.json has each stage's speed); DINOv3-L 512 then gets a run of
+  its own if it still earns one.
 
 ## Phase 3: the platform
 

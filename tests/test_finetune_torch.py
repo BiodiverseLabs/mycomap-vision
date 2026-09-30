@@ -83,3 +83,18 @@ def test_training_changes_only_the_tail_and_the_saved_model_reloads(conn, tmp_pa
         assert torch.equal(p, after[n].detach())
     img = __import__("PIL.Image", fromlist=["x"]).new("RGB", (8, 8), (200, 10, 10))
     assert not np.allclose(ft.encode([img]), Tiny().encode([img]))
+
+
+def test_a_fine_tune_stopped_by_the_time_limit_saves_and_registers_nothing(conn, tmp_path):
+    from mycomap_vision.screening import Stopped
+    store, root = embedded(conn, tmp_path, "tiny", Tiny())
+    steps = []
+    cfg = finetune.FinetuneConfig(blocks=1, batch_size=4, workers=0, max_steps=5)
+    with pytest.raises(Stopped, match="time limit"):
+        finetune.finetune(conn, "tiny", store, "large", "tiny-ft", cfg, 28, root,
+                          tmp_path / "models", loader=lambda s: Tiny(),
+                          log=lambda s: steps.append(s),
+                          should_stop=lambda: len(steps) >= 1)
+    assert not (tmp_path / "models" / "tiny-ft.pt").exists()
+    conn.executescript(__import__("mycomap_vision.evaluate", fromlist=["x"]).FINETUNE_SCHEMA)
+    assert conn.execute("select count(*) from finetunes where name = 'tiny-ft'").fetchone()[0] == 0

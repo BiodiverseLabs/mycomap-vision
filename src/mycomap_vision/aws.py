@@ -12,6 +12,8 @@ MV_AWS_PROFILE and MV_INSTANCE_ROLE.
 from __future__ import annotations
 
 import io
+import json
+import re
 import subprocess
 import tarfile
 from datetime import datetime, timezone
@@ -56,9 +58,11 @@ mkdir -p /opt/mv/data && cd /opt/mv
 aws s3 cp "s3://$BUCKET/$RUN/code.tar.gz" code.tar.gz
 tar xzf code.tar.gz
 python3.11 -m venv .venv
-.venv/bin/pip install -q ".[aws]"
+# Pinned, hash-checked packages; the project itself runs from src/, not installed.
+.venv/bin/pip install -q --require-hashes -r requirements/downloader.txt || exit 1
 aws s3 cp "s3://$BUCKET/{manifest_key}" data/manifest.sqlite
-MV_DATA_DIR=/opt/mv/data PYTHONUNBUFFERED=1 .venv/bin/mv download-photos \\
+MV_DATA_DIR=/opt/mv/data PYTHONPATH=/opt/mv/src PYTHONUNBUFFERED=1 \\
+  .venv/bin/python -m mycomap_vision.cli download-photos \\
   --size {size} --dest "s3://$BUCKET" --checkpoint-to "s3://$BUCKET/{manifest_key}" \\
   --max-hours {max_hours} --static-day-gb {static_day_gb}
 """
@@ -109,15 +113,43 @@ def ensure_bucket(s3, bucket: str) -> bool:
     return True
 
 
-def code_tarball() -> bytes:
-    """The committed code (HEAD), never the data folder or uncommitted edits."""
-    out = subprocess.run(["git", "archive", "--format=tar.gz", "HEAD"], cwd=config.REPO_ROOT,
+def code_tarball(ref: str = "HEAD") -> bytes:
+    """One commit's code (HEAD by default), never the data folder or uncommitted edits."""
+    out = subprocess.run(["git", "archive", "--format=tar.gz", ref], cwd=config.REPO_ROOT,
                          capture_output=True, check=True)
     # Sanity check: it must be a readable tar with pyproject.toml at the top.
     with tarfile.open(fileobj=io.BytesIO(out.stdout), mode="r:gz") as t:
         if "pyproject.toml" not in t.getnames():
             raise RuntimeError("git archive produced no pyproject.toml")
     return out.stdout
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def release_commit(repo: Path | None = None, allow_dirty: bool = False,
+                   allow_unpushed: bool = False, log=print) -> str:
+    """The full sha of the commit an instance will run (HEAD, shipped as `git archive`).
+
+    Refused, unless allowed: uncommitted changes to tracked files (they are not sent, so
+    the run would not be the code in front of you), and a commit no remote branch holds
+    (the run's code_version would name a commit nobody else can look up)."""
+    repo = repo or config.REPO_ROOT
+    sha = _git(repo, "rev-parse", "HEAD")
+    if _git(repo, "status", "--porcelain", "--untracked-files=no"):
+        msg = (f"uncommitted changes in {repo}: the instance runs commit {sha[:10]} "
+               "WITHOUT them. Commit (and push) first")
+        if not allow_dirty:
+            raise ValueError(msg + ", or pass --allow-dirty.")
+        log(f"WARNING: {msg}.")
+    if not _git(repo, "branch", "-r", "--contains", sha):
+        msg = f"commit {sha[:10]} is on no remote branch (git push it)"
+        if not allow_unpushed:
+            raise ValueError(msg + ", or pass --allow-unpushed.")
+        log(f"WARNING: {msg}; the run will name a commit only this machine has.")
+    return sha
 
 
 def run_instance_args(run_id: str, ami: str, user_data: str,
@@ -264,26 +296,43 @@ mkdir -p /opt/mv/data && cd /opt/mv
 aws s3 cp "s3://$BUCKET/$RUN/code.tar.gz" code.tar.gz
 tar xzf code.tar.gz
 python3.11 -m venv .venv
-.venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q ".[aws,embed]"
+# Pinned, hash-checked packages (requirements/trainer.txt: torch from PyPI with its CUDA
+# runtime; the Base AMI has the driver and no torch). The project runs from src/.
+.venv/bin/pip install -q --require-hashes -r requirements/trainer.txt || exit 1
+.venv/bin/python -c "import sys, torch; ok = torch.cuda.is_available(); \\
+print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'GPU', ok and torch.cuda.get_device_name(0)); \\
+sys.exit(0 if ok else 1)" || {{ echo "torch cannot use the GPU (driver older than its CUDA?)"; exit 1; }}
 # The run's own copy of the manifest; the downloader's shared one is never touched.
 aws s3 cp "s3://$BUCKET/$RUN/manifest-in.sqlite" data/manifest.sqlite
 export HF_HOME=/opt/mv/hf
-MV_DATA_DIR=/opt/mv/data PYTHONUNBUFFERED=1 timeout {job_seconds} .venv/bin/mv aws-train-job \\
+# The commit this code was archived from (there is no .git here to ask).
+export MV_CODE_VERSION={code_version}
+# The job stops itself after {stop_hours} h, between batches, and uploads what it
+# finished; `timeout` is only the hard backstop at the time limit.
+MV_DATA_DIR=/opt/mv/data PYTHONPATH=/opt/mv/src PYTHONUNBUFFERED=1 timeout {job_seconds} \\
+  .venv/bin/python -m mycomap_vision.cli aws-train-job \\
   --run-id {run_id} --backbones {backbones} --methods {methods} --size {size} \\
-  --test-days {test_days} --source "s3://$BUCKET"{finetune_arg}{sample_arg}
+  --test-days {test_days} --stop-after-hours {stop_hours} \\
+  --source "s3://$BUCKET"{finetune_arg}{sample_arg}
 """
 
 
 def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[str],
                              max_hours: float, bucket_name: str, size: str = "large",
                              test_days: int = 28, finetune: list[str] | None = None,
-                             sample_records: int | None = None) -> str:
-    # The job is killed at max_hours; the backstop leaves 30 minutes on top for setup
+                             sample_records: int | None = None,
+                             code_version: str = "unknown") -> str:
+    # The job is killed at max_hours, and stops itself STOP_MARGIN_HOURS before that so
+    # it can upload what it finished; the backstop leaves 30 minutes on top for setup
     # and the log upload.
+    from .trainer import STOP_MARGIN_HOURS
+    if not re.fullmatch(r"[0-9a-f]{7,40}(-dirty)?|unknown", code_version):
+        raise ValueError(f"not a commit sha: {code_version!r}")
+    stop = max(max_hours - STOP_MARGIN_HOURS, max_hours / 2)
     return TRAINER_USER_DATA.format(
         bucket=bucket_name, run_id=run_id, region=config.setting("MV_AWS_REGION", "us-east-2"),
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
+        stop_hours=round(stop, 2), code_version=code_version,
         backbones=",".join(backbones), methods=",".join(methods), size=size,
         test_days=test_days,
         finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "",
@@ -334,64 +383,138 @@ def check_trainer_request(conn, backbones: list[str], methods: list[str], size: 
     return n
 
 
+def photos_for_estimate(conn, photos: int, size: str, store_location: str,
+                        sample_records: int | None) -> int:
+    """How many photos a run will handle: all of them, or a rehearsal's share."""
+    if not sample_records:
+        return photos
+    records = conn.execute(
+        "select count(distinct op.observation_id) from observation_photos op "
+        "join photo_copies c on c.photo_id = op.photo_id where c.store = ? and c.size = ?",
+        (store_location, size)).fetchone()[0]
+    return round(photos * min(1.0, sample_records / max(records, 1)))
+
+
+def check_run_time(est: dict, max_hours: float, allow_over_time: bool = False,
+                   log=print) -> None:
+    """Refuse a run the time limit would cut short, unless allowed; warn when it's tight."""
+    from .trainer import STOP_MARGIN_HOURS
+    total, usable = est["total_hours"], max_hours - STOP_MARGIN_HOURS
+    if total > usable:
+        msg = (f"the run needs about {total} h, and --max-hours {max_hours} leaves {usable:.2f} h "
+               "before it stops itself")
+        if not allow_over_time:
+            raise ValueError(f"{msg}. Raise --max-hours, drop backbones, or pass "
+                             "--allow-over-time to run it anyway (it stops at the limit and "
+                             "keeps the stages it finished).")
+        log(f"WARNING: {msg}; the last stages will not finish (--allow-over-time).")
+    elif total > 0.8 * usable:
+        log(f"Note: the estimate ({total} h) is close to the limit ({usable:.2f} h usable).")
+
+
 def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "large",
-                   max_hours: float = 12, instance_type: str = TRAINER_INSTANCE_TYPE,
+                   max_hours: float = 24, instance_type: str = TRAINER_INSTANCE_TYPE,
                    test_days: int = 28, finetune: list[str] | None = None,
-                   sample_records: int | None = None, log=print) -> dict:
+                   sample_records: int | None = None, allow_over_time: bool = False,
+                   allow_dirty: bool = False, allow_unpushed: bool = False,
+                   log=print) -> dict:
+    """Check the request, the time it needs and the commit it ships, all before anything
+    is paid for; then upload the code and the manifest and start the instance."""
+    from . import trainer
     from .models import storage_name
     b = bucket()
     photos = check_trainer_request(conn, backbones, methods, size, f"s3://{b}/", finetune)
-    if config.code_version().endswith("-dirty"):
-        log("Note: uncommitted changes are not sent; the instance runs the last commit.")
+    names = [storage_name(x) for x in backbones]
+    ft = [storage_name(x) for x in finetune or []]
+    est = trainer.estimate(trainer.plan_stages(names, ft, "<run>"),
+                           photos_for_estimate(conn, photos, size, f"s3://{b}/",
+                                               sample_records))
+    log(trainer.format_estimate(est))
+    check_run_time(est, max_hours, allow_over_time, log)
+    sha = release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)
     sess = session()
     s3, ec2, ssm = s3_client(), sess.client("ec2"), sess.client("ssm")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    s3.put_object(Bucket=b, Key=f"runs/{run_id}/code.tar.gz", Body=code_tarball())
+    s3.put_object(Bucket=b, Key=f"runs/{run_id}/code.tar.gz", Body=code_tarball(sha))
     snap = snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
     s3.upload_file(str(snap), b, f"runs/{run_id}/manifest-in.sqlite")
-    log(f"Uploaded code and manifest for run {run_id} ({photos:,} {size} photos in S3)")
+    log(f"Uploaded commit {sha[:10]} and the manifest for run {run_id} "
+        f"({photos:,} {size} photos in S3)")
     ami = ssm.get_parameter(Name=TRAINER_AMI_PARAMETER)["Parameter"]["Value"]
     image = ec2.describe_images(ImageIds=[ami])["Images"][0]
     root = image["RootDeviceName"]
     snapshot_gb = next((m["Ebs"]["VolumeSize"] for m in image["BlockDeviceMappings"]
                         if m.get("DeviceName") == root and "Ebs" in m), 100)
-    names = [storage_name(x) for x in backbones]
-    ft = [storage_name(x) for x in finetune or []]
     user_data = render_trainer_user_data(run_id, names, methods, max_hours, b, size, test_days,
-                                         ft, sample_records)
+                                         ft, sample_records, code_version=sha)
     resp = ec2.run_instances(**trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb))
     return {"run_id": run_id, "instance_id": resp["Instances"][0]["InstanceId"],
             "instance_type": instance_type, "region": region(), "backbones": names,
             "finetune": ft, "methods": methods, "sample_records": sample_records,
-            "log": f"s3://{b}/runs/{run_id}/train.log"}
+            "code_version": sha, "max_hours": max_hours, "estimate_hours": est["total_hours"],
+            "log": f"s3://{b}/runs/{run_id}/train.log",
+            "progress": f"s3://{b}/runs/{run_id}/progress.json"}
 
 
 def pull_trainer(conn, run_id: str, log=print) -> dict:
-    """Download a finished trainer run and merge it (see trainer.merge_results)."""
-    import json
+    """Download a trainer run and merge it (see trainer.merge_results): the whole run when
+    result.json is there, otherwise the stages progress.json says are done (a run stopped
+    by its time limit, killed, or still going). What is missing is reported, and a
+    backbone the run didn't finish never replaces the local embeddings."""
+    from botocore.exceptions import ClientError
 
     from . import trainer
     s3, b = s3_client(), bucket()
     prefix = trainer.run_prefix(run_id)
     work = config.DATA_DIR / "aws" / f"run-{run_id}"
     work.mkdir(parents=True, exist_ok=True)
-    try:
-        s3.download_file(b, prefix + trainer.RESULT_FILE, str(work / trainer.RESULT_FILE))
-    except s3.exceptions.ClientError as e:
-        raise RuntimeError(f"run {run_id} has no {trainer.RESULT_FILE} yet: still running, "
-                           f"or it failed (see s3://{b}/{prefix}train.log)") from e
-    result = json.loads((work / trainer.RESULT_FILE).read_text(encoding="utf-8"))
-    s3.download_file(b, prefix + "manifest-out.sqlite", str(work / "manifest-out.sqlite"))
+
+    def fetch(name: str) -> Path | None:
+        try:
+            s3.download_file(b, prefix + name, str(work / name))
+            return work / name
+        except ClientError:
+            return None
+
+    doc = source = None
+    for name in (trainer.RESULT_FILE, trainer.PROGRESS_FILE):
+        path = fetch(name)
+        if path is not None:
+            doc, source = json.loads(path.read_text(encoding="utf-8")), name
+            break
+    if doc is None:
+        raise RuntimeError(f"run {run_id} has neither {trainer.RESULT_FILE} nor "
+                           f"{trainer.PROGRESS_FILE}: not started yet, or it failed during "
+                           f"setup (see s3://{b}/{prefix}train.log)")
+    summary = trainer.run_summary(doc)
+    if not summary["complete"]:
+        log(f"run {run_id} is NOT complete (state: {summary.get('state')}, last written "
+            f"{doc.get('updated_at') or doc.get('finished_at')}); bringing home only the "
+            f"stages it finished: {', '.join(summary['done']) or 'none'}")
+        for m in summary["missing"]:
+            log(f"  missing: {m['stage']} ({m['status']}{': ' + m['why'] if m['why'] else ''})")
+    index = fetch(trainer.INDEX_FILE) or fetch("manifest-out.sqlite")
+    if index is None:
+        raise RuntimeError(f"run {run_id} has no {trainer.INDEX_FILE} yet: no stage finished")
     staged = work / "embeddings"
-    for sub, dest_root in (("embeddings/", staged), ("models/", work / "models"),
-                           ("reports/", config.REPORTS_DIR)):
+    wanted = [(f"embeddings/{n}/", staged / n) for n in summary["embedded"]]
+    wanted += [(f"models/{n}.", work / "models") for n in summary["finetuned"]]
+    wanted += [("reports/", config.REPORTS_DIR), ("skipped/", work / "skipped")]
+    for sub, dest_root in wanted:
         for page in s3.get_paginator("list_objects_v2").paginate(Bucket=b, Prefix=prefix + sub):
             for obj in page.get("Contents", []):
-                dest = dest_root / obj["Key"][len(prefix + sub):]
+                dest = dest_root / obj["Key"].rsplit("/", 1)[-1]
                 if dest.exists() and dest.stat().st_size == obj["Size"]:
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 s3.download_file(b, obj["Key"], str(dest))
-    log(f"downloaded run {run_id}; merging")
-    return trainer.merge_results(conn, work / "manifest-out.sqlite", staged, result)
+    log(f"downloaded run {run_id} (commit {summary.get('code_version')}); merging")
+    merged = trainer.merge_results(conn, index, staged, doc)
+    for name, why in merged["refused"].items():
+        log(f"NOT merged: {name}: {why} (local embeddings left as they were)")
+    (work / "pulled.json").write_text(json.dumps(
+        {**merged, "pulled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+         "from": source},
+        indent=2), encoding="utf-8")
+    return merged

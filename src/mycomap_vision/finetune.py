@@ -214,12 +214,15 @@ def train_transform(eval_transform):
 
 def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
              cfg: FinetuneConfig | None = None, test_days: int = 28, embeddings_root=None,
-             out_dir: Path | None = None, loader=None, log=print) -> dict:
-    """Train, save <name>.pt and <name>.json in out_dir, register; returns the metadata."""
+             out_dir: Path | None = None, loader=None, log=print, should_stop=None) -> dict:
+    """Train, save <name>.pt and <name>.json in out_dir, register; returns the metadata.
+    `should_stop()` is asked before each step; when it says stop, screening.Stopped is
+    raised and nothing is saved (a half-trained model is not the model asked for)."""
     import torch
     import torch.nn.functional as F
 
     from . import models
+    from .screening import Stopped
     cfg = cfg or FinetuneConfig()
     out_dir = out_dir or models_dir()
     started = time.monotonic()
@@ -268,6 +271,8 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
     use_bf16 = dev == "cuda" and torch.cuda.is_bf16_supported()
     step, seen, t0, losses = 0, 0, time.monotonic(), []
     for batch in data:
+        if should_stop is not None and should_stop():
+            raise Stopped(f"stopped at step {step:,} of {steps:,} (time limit); not saved")
         if batch is None:
             continue
         x, y = batch[0].to(dev, non_blocking=True), batch[1].to(dev)
