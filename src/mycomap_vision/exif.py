@@ -10,6 +10,8 @@ from datetime import datetime
 
 from PIL import Image
 
+from .dates import real_date
+
 GPS_IFD = 0x8825
 EXIF_IFD = 0x8769
 DATETIME_ORIGINAL = 36867
@@ -48,4 +50,4 @@ def place_and_date(img: Image.Image) -> tuple[float | None, float | None, str | 
             when = datetime.strptime(str(raw).strip()[:19], "%Y:%m:%d %H:%M:%S").date().isoformat()
         except ValueError:
             when = None
-    return lat, lon, when
+    return lat, lon, real_date(when)        # 1970-01-01: a camera clock never set

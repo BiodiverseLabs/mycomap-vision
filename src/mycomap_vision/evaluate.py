@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 import numpy as np
 
 from . import config, names
+from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
 from .permissions import EXCLUDED_FROM_USE_SQL
@@ -74,7 +75,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
              o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
-             coalesce(r.observed_on, o.observed_on), r.green_projects
+             r.observed_on, o.observed_on, r.green_projects
       from records r
       join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
@@ -83,7 +84,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     """).fetchall()
     labels = names.manifest_labels(conn)
     recs: dict[str, Record] = {}
-    for oid, name, genus, family, vdate, login, pid, _pos, lat, lon, observed, projects in rows:
+    for (oid, name, genus, family, vdate, login, pid, _pos, lat, lon, org_observed,
+         inat_observed, projects) in rows:
         if pid not in photo_row or not clean(name):
             continue
         rec = recs.get(oid)
@@ -94,8 +96,12 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
             rec = recs[oid] = Record(oid, label,
                                      label.split()[0] if respelled
                                      else clean(genus) or label.split()[0],
-                                     clean(family), vdate, login, latitude=lat, longitude=lon,
-                                     observed_on=observed,
+                                     clean(family), real_date(vdate), login,
+                                     latitude=lat, longitude=lon,
+                                     # .org's date, else iNat's; 1970-01-01 is neither
+                                     # (a manifest exported before dates.py may hold it).
+                                     observed_on=real_date(org_observed)
+                                     or real_date(inat_observed),
                                      projects=tuple(json.loads(projects or "[]")),
                                      stored_name=clean(name) if respelled else "")
         rec.photo_rows.append(photo_row[pid])

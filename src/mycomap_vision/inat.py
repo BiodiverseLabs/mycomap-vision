@@ -16,6 +16,7 @@ from typing import Callable, Iterable, Iterator
 import requests
 
 from . import config
+from .dates import real_date
 from .licenses import host_of, license_class
 from .ratelimit import MinInterval
 
@@ -76,7 +77,7 @@ def parse_observation(obs: dict) -> tuple[dict, list[dict]]:
         "obscured": int(bool(obs.get("obscured"))),
         "taxon_geoprivacy": obs.get("taxon_geoprivacy"),
         "positional_accuracy": obs.get("positional_accuracy"),
-        "observed_on": obs.get("observed_on"),
+        "observed_on": real_date(obs.get("observed_on")),     # 1970-01-01: no date
         "inat_latitude": lat,
         "inat_longitude": lng,
         "user_id": user.get("id"),

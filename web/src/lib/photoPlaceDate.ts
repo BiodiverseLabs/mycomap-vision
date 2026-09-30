@@ -37,13 +37,17 @@ export async function readPhotoPlaceDate(photo: Blob): Promise<PhotoPlaceDate> {
   return { lat, lng, date: exifDate(tags.DateTimeOriginal) ?? exifDate(tags.ModifyDate) };
 }
 
-/** "2026:09:27 14:05:00" (EXIF local time) -> "2026-09-27"; anything else -> null. */
+/**
+ * "2026:09:27 14:05:00" (EXIF local time) -> "2026-09-27"; anything else -> null.
+ * 1970-01-01 is a camera whose clock was never set, not a date: null, like the server's dates.py.
+ */
 export function exifDate(raw: unknown): string | null {
   const m = typeof raw === "string" ? /^\s*(\d{4}):(\d{2}):(\d{2})/.exec(raw) : null;
   if (!m) return null;
   const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
   const day = new Date(Date.UTC(y, mo - 1, d));
   if (y < 1900 || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) return null;
+  if (y === 1970 && mo === 1 && d === 1) return null;
   return `${m[1]}-${m[2]}-${m[3]}`;
 }
 

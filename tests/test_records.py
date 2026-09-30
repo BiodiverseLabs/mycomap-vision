@@ -21,6 +21,29 @@ def test_validation_dates_parse_from_org_text_format():
     assert parse_validation_date("") is None
 
 
+def test_a_1970_01_01_observation_date_is_exported_as_no_date(conn):
+    records = build_records([row("1", observed_on="1970-01-01"),
+                             row("2", observed_on="1970-01-02"),
+                             row("3", observed_on="2025-09-01")], "t")
+    assert [r["observed_on"] for r in records] == [None, "1970-01-02", "2025-09-01"]
+    # A manifest that still holds the placeholder from an older export is cleaned by
+    # the next export, which rewrites every record.
+    conn.execute("insert into records (observation_id, source, north_america, exported_at, "
+                 "observed_on) values ('1', 'inat', 1, 'old', '1970-01-01')")
+    save_records(conn, records)
+    got = dict(conn.execute("select observation_id, observed_on from records").fetchall())
+    assert got == {"1": None, "2": "1970-01-02", "3": "2025-09-01"}
+
+
+def test_a_1970_01_01_validation_date_is_no_date():
+    assert parse_validation_date("1/1/1970") is None
+    assert parse_validation_date("1/1/1970 00:00") is None
+    assert parse_validation_date("1970-01-01T00:00:00") is None
+    assert parse_validation_date("1/2/1970") == "1970-01-02"
+    r = build_records([row("1", validation_date_1="1/1/1970")], "t")[0]
+    assert r["validated_on"] is None
+
+
 def test_north_america_uses_continent_then_country_then_coordinates():
     assert is_north_america("North America", "ES", None, None)
     assert not is_north_america("Europe", "US", None, None)

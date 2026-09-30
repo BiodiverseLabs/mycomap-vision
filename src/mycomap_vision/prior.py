@@ -19,6 +19,8 @@ from datetime import date
 
 import numpy as np
 
+from .dates import is_placeholder_date
+
 EARTH_KM = 6371.0
 
 
@@ -30,6 +32,9 @@ class Context:
 
     @property
     def day_of_year(self) -> int | None:
+        """None when there is no date, including the 1970-01-01 placeholder (dates.py)."""
+        if is_placeholder_date(self.observed_on):
+            return None
         try:
             return date.fromisoformat((self.observed_on or "")[:10]).timetuple().tm_yday
         except ValueError:

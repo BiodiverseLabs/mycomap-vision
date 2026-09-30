@@ -36,6 +36,7 @@ from typing import Callable
 import requests
 
 from . import config
+from .dates import real_date
 from .evaluate import (RANKS, Record, SharedSet, bucket_of, comparison_backbones, save_run,
                        shared_records)
 from .ratelimit import MinInterval
@@ -286,7 +287,7 @@ def run(conn: sqlite3.Connection, comparison_id: str, client: InatClient,
                            "inat_observations where observation_id = ?",
                            (rec.observation_id,)).fetchone()
         lat, lng, observed = obs if obs else (None, None, None)
-        years[rec.observation_id] = (observed or "")[:4] or "unknown"
+        years[rec.observation_id] = (real_date(observed) or "")[:4] or "unknown"
         photo_scores[rec.observation_id] = [
             parse_aggregated(client.score_image(pid, path.read_bytes(), lat, lng))
             for pid, path in photo_inputs(conn, rec)]

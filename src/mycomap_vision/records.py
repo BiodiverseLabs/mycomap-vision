@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import config
+from .dates import real_date
 
 EXPORT_SQL = """
 select row_to_json(t)::text from (
@@ -61,17 +62,20 @@ _MDY = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})")
 
 
 def parse_validation_date(s: str | None) -> str | None:
-    """.org stores validation dates as text, usually 'M/D/YYYY ...'. Returns ISO or None."""
+    """.org stores validation dates as text, usually 'M/D/YYYY ...'. Returns ISO or None
+    (also for the 1970-01-01 placeholder, see dates.py)."""
     if not s:
         return None
     s = s.strip()
     m = _MDY.match(s)
     try:
         if m:
-            return date(int(m.group(3)), int(m.group(1)), int(m.group(2))).isoformat()
-        return date.fromisoformat(s[:10]).isoformat()
+            iso = date(int(m.group(3)), int(m.group(1)), int(m.group(2))).isoformat()
+        else:
+            iso = date.fromisoformat(s[:10]).isoformat()
     except ValueError:
         return None
+    return real_date(iso)
 
 
 def _num(v) -> float | None:
@@ -129,7 +133,9 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
             "genus": first.get("genus"), "species": first.get("species"),
             "infraspecies": first.get("infraspecies"),
             "latitude": lat, "longitude": lng,
-            "observed_on": first.get("observed_on"),
+            # 1970-01-01 is .org's placeholder for "no date": stored as none, so
+            # evaluation falls back to iNat's date.
+            "observed_on": real_date(first.get("observed_on")),
             "state": first.get("state"), "country": first.get("country"),
             "continent": first.get("continent"),
             "north_america": int(is_north_america(first.get("continent"), first.get("country"), lat, lng)),

@@ -120,3 +120,33 @@ def test_results_are_also_broken_down_by_project_and_observer():
     observers = [g["name"] for g in out["groups"]["observer"]]
     assert sorted(observers) == ["ann", "bob"]
     assert out["groups"]["project"][0]["name"] == "Indiana"          # largest first
+
+
+def test_a_1970_01_01_org_date_falls_back_to_the_inat_date(conn):
+    from conftest import inat_obs
+
+    from mycomap_vision.evaluate import load_records
+    from mycomap_vision.inat import save_batch
+    from mycomap_vision.records import build_records, save_records
+
+    host = "inaturalist-open-data.s3.amazonaws.com"
+    rows = [{"observation_id": oid, "scientific_name": "Russula emetica", "genus": "Russula",
+             "family": "Russulaceae", "continent": "North America", "observed_on": observed,
+             "validation_status_1": "yes", "validation_date_1": "9/2/2026"}
+            for oid, observed in (("1", "1970-01-01"), ("2", "2024-06-30"), ("3", "1970-01-01"))]
+    save_records(conn, build_records(rows, "t"))
+    save_batch(conn, ["1", "2", "3"],
+               [inat_obs(1, photos=[(0, 11, "cc0", host)], observed_on="2023-08-14"),
+                inat_obs(2, photos=[(0, 12, "cc0", host)], observed_on="2023-08-15"),
+                inat_obs(3, photos=[(0, 13, "cc0", host)], observed_on=None)], "t")
+
+    def dates():
+        return {r.observation_id: r.observed_on
+                for r in load_records(conn, {11: 0, 12: 1, 13: 2})}
+
+    assert dates() == {"1": "2023-08-14", "2": "2024-06-30", "3": None}
+    # A manifest exported before the rule still holds the placeholder: same answer.
+    conn.execute("update records set observed_on = '1970-01-01' where observation_id in ('1', '3')")
+    conn.execute("update inat_observations set observed_on = '1970-01-01' "
+                 "where observation_id = '3'")
+    assert dates() == {"1": "2023-08-14", "2": "2024-06-30", "3": None}
