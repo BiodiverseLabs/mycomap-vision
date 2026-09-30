@@ -167,7 +167,7 @@ def cmd_embed(conn, args) -> None:
     stats = embed.embed_photos(conn, store, backbone, todo,
                                config.DATA_DIR / "embeddings" / name,
                                batch_size=args.batch_size)
-    print(json.dumps(stats.__dict__, indent=2))
+    print(json.dumps({**stats.__dict__, "skipped": stats.skipped[:20]}, indent=2))
 
 
 def cmd_archive_embeddings(conn, args) -> None:
