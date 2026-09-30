@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from bisect import bisect_left
-from typing import Callable
+from typing import Callable, NamedTuple
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +24,8 @@ from urllib.parse import quote
 import numpy as np
 
 from . import config
-from .embed import load_embeddings, normalise
+from .embed import normalise
+from .serving import map_embeddings
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
                        with_rows)
 from .licenses import sized_url
@@ -147,16 +148,29 @@ def photo_info_rows(rows) -> dict[int, PhotoInfo]:
 PHOTO_INFO_SQL = "select photo_id, source_url, license_class, owner_login, owner_user_id from photos"
 
 
+class Specimen(NamedTuple):
+    """What a result needs of a reference record, kept after the build instead of the
+    whole Record (dates, places, projects, photo lists): ~0.5 GB less at the full set."""
+    observation_id: str
+    species: str
+    genus: str
+    family: str
+
+
 class Identifier:
-    """One backbone + method over all of its embedded, DNA-verified records."""
+    """One backbone + method over all of its embedded, DNA-verified records.
+
+    The reference vectors are memory-mapped from the embedding files (serving.py), not
+    read into memory. `photo_info=False` skips the owner and licence of every reference
+    photo, for callers that look them up per identification (the API does)."""
 
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
                  embeddings_root: Path | None = None, calibration: dict | None = None,
-                 model_cache: Path | None = None, train: bool = True):
+                 model_cache: Path | None = None, train: bool = True, photo_info: bool = True):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         self.backbone, self.method = backbone, method
-        ids, vecs = load_embeddings(conn, backbone, embeddings_root)
+        ids, vecs = map_embeddings(conn, backbone, embeddings_root)
         if not len(ids):
             raise ValueError(f"no embeddings for {backbone!r}")
         self.embedded = len(ids)
@@ -175,21 +189,33 @@ class Identifier:
         if self.nearest is not self.model:
             self.nearest.fit(vecs, self.index)
         # Per reference column: photo id and record.
-        rec_of_row = {row: r for r in records for row in r.photo_rows}
+        interned = {}
+        specimen = {id(r): Specimen(r.observation_id,
+                                    *(interned.setdefault(s, s) for s in (r.species, r.genus, r.family)))
+                    for r in records}
+        rec_of_row = {row: specimen[id(r)] for r in records for row in r.photo_rows}
         self.col_photo = ids[self.index.cols]
         self.col_record = [rec_of_row[int(c)] for c in self.index.cols.tolist()]
+        del rec_of_row, specimen
         # A record's photos are contiguous in index.cols: where each record starts.
         self.rec_starts = np.asarray(
             [i for i, r in enumerate(self.col_record)
              if i == 0 or r is not self.col_record[i - 1]], dtype=np.int64)
         self.calibration = calibration
-        self.photos = self._photo_info(conn, set(int(p) for p in self.col_photo.tolist()))
+        self.photos = (self._photo_info(conn, set(int(p) for p in self.col_photo.tolist()))
+                       if photo_info else {})
         self.records = len(records)
         self.rank_counts = {rank: Counter() for rank in RANKS}
         for r in records:
             for rank in RANKS:
                 self.rank_counts[rank][{"species": r.species, "genus": r.genus,
                                         "family": r.family}[rank]] += 1
+
+    def warm(self) -> None:
+        """Score one blank photo: reads every reference vector once, which proves the
+        files are whole and brings them into the page cache, so the first identification
+        after a (re)build doesn't wait on the disk."""
+        self.nearest.photo_sims(np.zeros((1, self.nearest.scorer.ref.shape[1]), np.float16))
 
     @staticmethod
     def _photo_info(conn: sqlite3.Connection, photo_ids: set[int]) -> dict[int, PhotoInfo]:
