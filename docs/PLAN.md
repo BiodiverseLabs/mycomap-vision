@@ -44,6 +44,23 @@ the working plan; update it as phases land.
       Among records with photos, the newest 28 days (1,973 records) go from 203 species
       with no reference record to 193. Comparisons made before this can't be given an iNat
       baseline any more (their record set changed): run `mv compare` again.
+- [x] Family from iNaturalist (2026-09-30, Steve's decision). 30,648 records had a blank
+      family and 227 genera carried several families on .org. Now family (and order,
+      class, phylum) comes from iNat's taxonomy, one answer per genus, so every record of a
+      genus has the same family (`taxonomy.py`). `mv fetch-taxonomy` asks iNat for each
+      genus the records use, within Fungi only (a plant or bee genus of the same name is
+      ignored), at 1 request/s, and keeps every answer in `data/taxonomy/inat_genera.sqlite`
+      (never the manifest; resumable, `--refresh`, `--older-than DAYS`; a release ships
+      it). A genus in doubt keeps .org's family and is listed in
+      `data/reports/taxonomy-doubts.csv` (`mv taxonomy`). First run, 2026-09-30: 2,050 genus
+      names, 2,743 requests in ~46 min; 1,428 applied. Listed: 421 where iNat's family
+      differs from most .org records (applied: Clitocybe to Clitocybaceae, Hygrocybe to
+      Hygrophoraceae, Galerina to Hymenogastraceae, Cantharellus to Hydnaceae...), 251 with
+      no fungal genus of that name on iNat (family names in the genus column, slime moulds,
+      bees, plants), 85 inactive (with iNat's replacement, e.g. Marasmiellus to
+      Collybiopsis), 72 iNat puts in no family, 32 not a Latin genus name, 87 one-word names
+      iNat has at no rank above genus (mostly subgenera and sections: Cyanula, Dermocybe).
+      Records: 27,788 blank families filled, 33,326 changed.
 
 ## Models: modular, side by side, on a scoreboard
 

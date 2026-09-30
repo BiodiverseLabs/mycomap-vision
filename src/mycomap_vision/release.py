@@ -5,6 +5,7 @@ A release is the folder s3://<bucket>/releases/<id>/:
     manifest.sqlite             a snapshot of the manifest
     embeddings/<backbone>/...   the served backbones' vectors
     models/<name>.json, .pt     fine-tuned weights, when a served backbone is one
+    taxonomy/inat_genera.sqlite iNat's families per genus (taxonomy.py), when fetched
     release.json                id, backbones, code version, and every file with its
                                 size and sha256; written LAST, so a release without
                                 it is unfinished and is never pulled
@@ -32,6 +33,7 @@ from pathlib import Path
 
 from . import config
 from .manifest import snapshot
+from .taxonomy import CACHE as TAXONOMY_CACHE
 
 PREFIX = "releases/"
 CURRENT_KEY = PREFIX + "current.json"
@@ -75,6 +77,9 @@ def release_files(conn, backbones: list[str], data_dir: Path) -> list[tuple[Path
             if not weights.is_file():
                 raise ValueError(f"{b!r}: weights file {meta['weights']} is missing")
             files += [(meta_path, f"models/{b}.json"), (weights, f"models/{meta['weights']}")]
+    # iNat's families per genus (taxonomy.py): the site labels records as comparisons do.
+    if (data_dir / TAXONOMY_CACHE).is_file():
+        files.append((data_dir / TAXONOMY_CACHE, TAXONOMY_CACHE.as_posix()))
     return files
 
 

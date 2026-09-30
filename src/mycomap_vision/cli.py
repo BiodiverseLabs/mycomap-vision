@@ -339,6 +339,22 @@ def cmd_name_spellings(conn, args) -> None:
             print(f"  {s.records:>7,}  {shown(s.name)}")
 
 
+def cmd_fetch_taxonomy(conn, args) -> None:
+    """Family, order, class and phylum per genus from iNat (1 request/s, resumable)."""
+    from . import taxonomy
+    print("Asking iNat about each genus the records use (read-only, 1 request/s)...")
+    print(json.dumps(taxonomy.fetch(conn, refresh=args.refresh,
+                                    older_than_days=args.older_than, limit=args.limit),
+                     indent=2))
+    print(json.dumps(taxonomy.report(conn), indent=2))
+
+
+def cmd_taxonomy(conn, args) -> None:
+    """What the iNat taxonomy changes, and the genera a person should look at."""
+    from . import taxonomy
+    print(json.dumps(taxonomy.report(conn), indent=2))
+
+
 def cmd_status(conn, args) -> None:
     print(json.dumps(status_report(conn), indent=2))
 
@@ -572,6 +588,17 @@ def main(argv: list[str] | None = None) -> int:
                                               "(read-only)")
     p.add_argument("--json", action="store_true", help="the full list, as JSON")
 
+    p = sub.add_parser("fetch-taxonomy", help="family, order, class and phylum of every genus "
+                                              "from iNat, kept in data/taxonomy/ (1 request/s; "
+                                              "a re-run resumes)")
+    p.add_argument("--refresh", action="store_true", help="ask about every genus again")
+    p.add_argument("--older-than", type=float, metavar="DAYS",
+                   help="ask again about genera answered more than DAYS ago")
+    p.add_argument("--limit", type=int, help="at most this many genera, most records first")
+
+    sub.add_parser("taxonomy", help="what iNat's taxonomy changes, and the genera in doubt "
+                                    "(data/reports/taxonomy-doubts.csv; no network)")
+
     p = sub.add_parser("permissions", help="photographers' answers from mycomap.org "
                                            "(needs MV_ORG_BASE_URL and MV_ORG_VISION_KEY)")
     p.add_argument("--sync", action="store_true", help="pull the answers now")
@@ -591,9 +618,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if config.RELEASE_ROOT and not config.DATA_DIR.is_dir():
         parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
-    if args.command == "name-spellings":      # read-only: the manifest is opened as it is
+    read_only = {"name-spellings": cmd_name_spellings, "fetch-taxonomy": cmd_fetch_taxonomy,
+                 "taxonomy": cmd_taxonomy}
+    if args.command in read_only:             # the manifest is opened as it is, read-only
         conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
-        cmd_name_spellings(conn, args)
+        read_only[args.command](conn, args)
         return 0
     conn = manifest.connect(config.MANIFEST_PATH)
     handler = {

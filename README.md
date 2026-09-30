@@ -33,6 +33,10 @@ of green records?
 photographers, with their all-rights-reserved photo counts, for permission requests.
 `mv name-spellings [--json]` lists the names written more than one way: how many
 Vision merges, and the ones a person has to decide (read-only).
+`mv fetch-taxonomy [--refresh | --older-than DAYS]` asks iNat for the family, order,
+class and phylum of every genus the records use (1 request/s, resumable, kept in
+`data/taxonomy/inat_genera.sqlite`); `mv taxonomy` reports what that changes and writes
+the genera in doubt to `data/reports/taxonomy-doubts.csv` (no network).
 
 ### Photo permission
 
@@ -77,7 +81,9 @@ Everything lives under `data/` (git-ignored; override with `MV_DATA_DIR`):
 - `raw/`: the records export and every iNat API answer (gzipped), as fetched.
 - `photos/<size>/<id % 1000>/<photo_id>.<ext>`: the images, under the same path in
   the S3 bucket (`MV_S3_BUCKET`) when they are downloaded to S3.
-- `reports/`: contributor lists.
+- `reports/`: contributor lists, the genera in doubt (`taxonomy-doubts.csv`).
+- `taxonomy/inat_genera.sqlite`: iNat's answer for each genus and every taxon fetched
+  (never inside the manifest; a release ships it).
 
 ### Labels
 
@@ -91,6 +97,13 @@ both `Inocybe sp. 'PNW18'`. Only differences in writing are merged; a code that 
 also in use as a plain name, IN7 / IN07 and described codes stay separate until
 someone decides on mycomap.org. The manifest keeps the name as .org spells it
 (`names.py`, the same rule as mycomap.org's `services/nameVariants.ts`).
+
+Family (and order, class, phylum) comes from iNaturalist's taxonomy, one answer per
+genus, so every record of a genus has the same family (`taxonomy.py`, Steve
+2026-09-30). The genus is looked up within Fungi only; a genus in any doubt (not on
+iNat, two fungal genera of that name, inactive, provisional, not a Latin name) keeps
+.org's family and is listed by `mv taxonomy`, as is any genus whose iNat family
+differs from what most of its records say on .org (iNat's is applied).
 
 ### Photos and licenses
 

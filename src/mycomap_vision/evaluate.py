@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config, names
+from . import config, names, taxonomy
 from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
@@ -69,7 +69,9 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
 
     A record's species is its label: the stored name, or the one spelling its
     name shares with the other ways of writing it (names.py). Labels come from
-    every name in the manifest, so test and reference records of one taxon agree."""
+    every name in the manifest, so test and reference records of one taxon agree.
+    Family is iNaturalist's for the genus when the taxonomy cache beside the manifest
+    answers it (taxonomy.py), else .org's."""
     na = "and r.north_america = 1" if north_america_only else ""
     ensure_permissions_schema(conn)
     rows = conn.execute(f"""
@@ -83,6 +85,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
       order by r.observation_id, op.position
     """).fetchall()
     labels = names.manifest_labels(conn)
+    tax = taxonomy.for_manifest(conn)
     recs: dict[str, Record] = {}
     for (oid, name, genus, family, vdate, login, pid, _pos, lat, lon, org_observed,
          inat_observed, projects) in rows:
@@ -93,10 +96,9 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
             label = clean(labels.get(name, name))
             respelled = label != clean(name)
             # A merged label names its own genus: the genus column may be as old as the spelling.
-            rec = recs[oid] = Record(oid, label,
-                                     label.split()[0] if respelled
-                                     else clean(genus) or label.split()[0],
-                                     clean(family), real_date(vdate), login,
+            lab = taxonomy.labels_for(label, genus, family, respelled, tax)
+            rec = recs[oid] = Record(oid, lab.species, lab.genus, lab.family,
+                                     real_date(vdate), login,
                                      latitude=lat, longitude=lon,
                                      # .org's date, else iNat's; 1970-01-01 is neither
                                      # (a manifest exported before dates.py may hold it).
