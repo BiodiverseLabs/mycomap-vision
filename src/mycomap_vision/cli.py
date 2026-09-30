@@ -103,6 +103,12 @@ def _split(v: str) -> list[str]:
 def cmd_aws_launch_trainer(conn, args) -> None:
     from . import aws
     finetune = [] if args.finetune.strip().lower() == "none" else _split(args.finetune)
+    if args.resume:
+        chosen = [f"--{k.replace('_', '-')}" for k in RUN_OWN_OPTIONS
+                  if getattr(args, k) != args.parser_defaults[k]]
+        if chosen:
+            print(f"--resume keeps the run's own settings; ignoring {', '.join(chosen)}",
+                  file=sys.stderr)
     print(json.dumps(aws.launch_trainer(conn, _split(args.backbones), _split(args.methods),
                                         size=args.size, max_hours=args.max_hours,
                                         instance_type=args.instance_type,
@@ -110,7 +116,13 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         sample_records=args.sample_records,
                                         allow_over_time=args.allow_over_time,
                                         allow_dirty=args.allow_dirty,
-                                        allow_unpushed=args.allow_unpushed), indent=2))
+                                        allow_unpushed=args.allow_unpushed,
+                                        spot=args.spot, spot_max_price=args.spot_max_price,
+                                        resume=args.resume), indent=2))
+
+
+# What a resumed run takes from the run itself, not from the command line.
+RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records")
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -119,6 +131,12 @@ def cmd_aws_train_job(conn, args) -> None:
     from .storage import S3Store
     store = S3Store(args.source)
     should_stop = trainer.deadline(args.stop_after_hours)
+    watcher = None
+    if args.spot:
+        from .spot import SpotWatcher
+        watcher = SpotWatcher().start()
+        print("Spot instance: watching for an interruption notice every "
+              f"{watcher.interval:.0f} s")
 
     def upload(path, key):
         store.client.upload_file(str(path), store.bucket, key)
@@ -126,7 +144,11 @@ def cmd_aws_train_job(conn, args) -> None:
                           args.run_id, size=args.size, test_days=args.test_days,
                           batch_size=args.batch_size, readers=args.readers,
                           finetune=_split(args.finetune), sample_records=args.sample_records,
-                          should_stop=should_stop)
+                          should_stop=should_stop, interrupted=watcher,
+                          resume=trainer.RunFiles(store.client, store.bucket)
+                          if args.resume else None)
+    if watcher is not None:
+        watcher.stop()
     print(json.dumps(out, indent=2))
     if out["comparison_id"]:
         from . import evaluate
@@ -230,14 +252,16 @@ def cmd_inat_baseline(conn, args) -> None:
 
 
 def cmd_refresh(conn, args) -> None:
-    """Export, fetch, download, embed and compare: the weekly loop."""
+    """Export, fetch, new genera's taxonomy, download, embed and compare: the weekly loop."""
     from . import refresh
     store = open_store(args.dest, config.DATA_DIR)
     backbones = [b.strip() for b in args.backbones.split(",") if b.strip()] or None
     report = refresh.refresh(conn, store, scope=args.scope, size=args.size, backbones=backbones,
-                             compare=not args.no_compare)
+                             compare=not args.no_compare, lookup_taxonomy=not args.no_taxonomy,
+                             taxonomy_minutes=args.taxonomy_minutes)
     print(json.dumps({"export": report.export, "fetch": report.fetch,
-                      "download": report.download, "embedded": report.embedded}, indent=2))
+                      "taxonomy": report.taxonomy, "download": report.download,
+                      "embedded": report.embedded}, indent=2))
     if report.comparison:
         from . import evaluate
         print_scoreboard(evaluate.scoreboard(conn, report.comparison["comparison_id"]))
@@ -492,6 +516,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="launch with uncommitted changes (they are NOT sent)")
     p.add_argument("--allow-unpushed", action="store_true",
                    help="launch a commit that is on no remote branch")
+    p.add_argument("--spot", action="store_true",
+                   help="a one-time Spot instance instead of On-Demand (uses the \"All G and "
+                        "VT Spot Instance Requests\" quota); on AWS's 2-minute notice the run "
+                        "keeps its finished stages and ends 'interrupted'")
+    p.add_argument("--spot-max-price", type=float, metavar="DOLLARS_PER_HOUR",
+                   help="with --spot: the most to pay an hour (default: the On-Demand price)")
+    p.add_argument("--resume", metavar="RUN",
+                   help="continue that run (stopped, interrupted or killed) under its own run "
+                        "id: its finished stages are restored, only the rest run; it keeps "
+                        "its own backbones, fine-tunes, methods, size and manifest")
+    p.set_defaults(parser_defaults={k: p.get_default(k) for k in RUN_OWN_OPTIONS})
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
                                              "upload the results to runs/<run>/")
@@ -508,6 +543,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
                         "finished; set by the launcher to leave time before the hard limit")
+    p.add_argument("--spot", action="store_true",
+                   help="watch the instance metadata for a Spot interruption notice")
+    p.add_argument("--resume", action="store_true",
+                   help="restore the stages this run finished before, from its S3 folder")
 
     p = sub.add_parser("finetune", help="fine-tune a backbone's last blocks on the reference "
                                         "records (smoke test here; full runs on AWS)")
@@ -563,13 +602,19 @@ def main(argv: list[str] | None = None) -> int:
                             "(needs a 24-hour token in data/secrets/inat_jwt.txt)")
     p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
 
-    p = sub.add_parser("refresh", help="the weekly loop: export, fetch, download, embed, compare")
+    p = sub.add_parser("refresh", help="the weekly loop: export, fetch, taxonomy of new genera, "
+                                       "download, embed, compare")
     p.add_argument("--scope", default="new", choices=["new", "all"],
                    help="download photos of new records only (laptop) or every missing photo")
     p.add_argument("--dest", help="folder or s3://bucket/prefix (default: the data folder)")
     p.add_argument("--size", default="medium", choices=["small", "medium", "large"])
     p.add_argument("--backbones", default="", help="default: every backbone already embedded")
     p.add_argument("--no-compare", action="store_true")
+    p.add_argument("--no-taxonomy", action="store_true",
+                   help="skip asking iNat about genera new since the last lookup")
+    p.add_argument("--taxonomy-minutes", type=float, default=20,
+                   help="stop asking iNat about new genera after this long; the next "
+                        "refresh carries on (default 20)")
 
     sub.add_parser("candidates", help="export records awaiting validation on .org")
     p = sub.add_parser("predict-pending",

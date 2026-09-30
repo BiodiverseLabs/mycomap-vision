@@ -74,6 +74,10 @@ and a snapshot of the manifest, and starts a `t3.small`. The instance's log is
 copied to `s3://<bucket>/runs/<run>/download.log` every 15 minutes, and the
 manifest to `s3://<bucket>/manifest/manifest.sqlite` every 10.
 
+The downloader always runs On-Demand: it copies its manifest to S3 only every
+10 minutes, so an instance taken back would lose up to 10 minutes of bookkeeping
+and could fetch those photos from iNat again, against iNat's hourly and daily caps.
+
 Don't write to the local manifest while it runs. When the instance has gone
 (terminated), bring its manifest home:
 
@@ -94,11 +98,22 @@ One-time setup:
 1. **GPU quota** (AWS console, your region → Service Quotas → Amazon Elastic
    Compute Cloud (Amazon EC2) → "Running On-Demand G and VT instances" →
    Request increase). It is counted in vCPUs: 8 covers one g6.2xlarge. New
-   accounts often start at 0, and approval can take a day.
+   accounts often start at 0, and approval can take a day. For `--spot` the
+   quota is "All G and VT Spot Instance Requests" (also vCPUs, 8 for one
+   g6.2xlarge); either one is enough to run.
 2. **Ops policy**: it now also reads the Deep Learning AMI's public parameter
    (`/aws/service/deeplearning/ami/*`). Print it with `mv aws-policies` and
    replace the ops user's policy JSON (IAM → Users → the ops user → Permissions →
    the policy → Edit → JSON). The instance role is unchanged.
+3. **For Spot** (once): the ops policy now also lets `RunInstances` create the
+   Spot request that comes with a Spot instance
+   (`spot-instances-request/*`, still only with the `Project=mycomap-vision`
+   tag), and create EC2's Spot service-linked role (`AWSServiceRoleForEC2Spot`,
+   nothing else) if the account doesn't have it yet. Replace the ops user's
+   policy JSON with the one `mv aws-policies` prints, as in step 2. The role
+   itself can also be made by hand, once, by an admin:
+   `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`
+   (an error saying it already exists is fine).
 
 ### The first run
 
@@ -155,7 +170,7 @@ The log is copied to `s3://<bucket>/runs/<run>/train.log` every 15 minutes. As
 each stage finishes, its outputs are uploaded at once (embeddings, fine-tuned
 weights, a small `index.sqlite`) and `runs/<run>/progress.json` is rewritten: the
 stages done, their photo counts, speeds and times, the code version, and the
-state (`running`, `comparing`, `finished`, `stopped`).
+state (`running`, `comparing`, `finished`, `stopped`, or `interrupted` on Spot).
 
 The job stops itself 45 minutes before `--max-hours` (between batches, or
 between fine-tuning steps), uploads what finished, and ends `stopped`; a stage it
@@ -167,14 +182,56 @@ with the reason in `runs/<run>/skipped/<backbone>.tsv`, and counted in the
 progress. If more than 1% of a backbone's photos can't be read, something
 systemic is wrong and that backbone fails instead.
 
+### On Spot
+
+```
+.venv/Scripts/mv aws-launch-trainer --spot [--spot-max-price 0.60]
+```
+
+`--spot` asks for a one-time Spot `g6.2xlarge` instead of On-Demand: the same
+instance, usually well under the On-Demand price, but AWS may take it back. With
+no `--spot-max-price` the most it pays is the On-Demand price. If EC2 won't start
+it, the launcher says why in plain words: no capacity free right now
+(`InsufficientInstanceCapacity`: try again later), the Spot quota used up or still
+0 (`MaxSpotInstanceCountExceeded`), the price above the cap (`SpotMaxPriceTooLow`),
+or the On-Demand quota too low (`VcpuLimitExceeded`). Nothing is running then; the
+run's code and manifest in S3 cost next to nothing.
+
+When AWS takes a Spot instance back it gives two minutes' notice in the instance
+metadata. The job asks for it every 5 seconds; on notice it drops the stage under
+way (never uploaded half done, as at the time limit), writes progress.json with
+the state `interrupted` (the time limit gives `stopped`), and exits. The stages it
+had finished are already in S3. There is no manifest copy then (no time for it;
+the pull reads the run's `index.sqlite`), and no comparison.
+
+### Resuming a run
+
+```
+.venv/Scripts/mv aws-launch-trainer --resume <run> [--spot] [--max-hours 24]
+```
+
+continues a run that was interrupted, stopped by its time limit, or killed, under
+its own run id. It keeps the run's own backbones, fine-tunes, methods, photo size,
+test days and manifest (`runs/<run>/manifest-in.sqlite`; other options for those
+are ignored, with a warning). The instance downloads the stages progress.json
+lists as done (embeddings, fine-tuned weights, index rows), checks them against
+the run's index as a pull does, and runs only the others; a done stage whose
+files are incomplete is run again. The estimate counts only what is left. It
+ships the commit you are on (`runs/<run>/code-resume-<time>.tar.gz`); if that
+differs from the run's first commit the launcher says so, and progress.json keeps
+each earlier attempt (`attempts`: when, its state and commit). It refuses while
+the run's instance is still alive (it could still write to the folder), and a run
+that is already complete.
+
 ### Bringing it home
 
 ```
 .venv/Scripts/mv aws-pull-trainer --run <run>
 ```
 
-It works on a complete run (result.json), a stopped one, or one killed outright
-(it then reads progress.json), and says which stages are missing and why. Each
+It works on a complete run (result.json), a stopped or interrupted one, or one
+killed outright (it then reads progress.json), and says which stages are missing
+and why, and how to run just those (`--resume <run>`). Each
 backbone the run embedded completely replaces the local embeddings (the old ones
 move to `data/embeddings-archive/<backbone>-before-<run>/`); a backbone it did
 not finish, or whose downloaded copy doesn't match the run's index, never

@@ -163,7 +163,7 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
                 for f in ahead:
                     f.cancel()
                 stats.stopped = True
-                log(f"  stopped at {stats.embedded:,}/{len(todo):,} photos (time limit)")
+                log(f"  stopped at {stats.embedded:,}/{len(todo):,} photos (told to stop)")
                 break
             loaded = [f.result() for f in ahead]
             ahead = ([pool.submit(load, it) for it in batches[bi + 1]]

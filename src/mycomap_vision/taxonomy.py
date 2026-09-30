@@ -329,11 +329,18 @@ class RecordNames:
 
 def fetch(conn: sqlite3.Connection, cache: Path | None = None, client: InatTaxa | None = None,
           refresh: bool = False, older_than_days: float | None = None, limit: int | None = None,
+          max_minutes: float | None = None, clock: Callable[[], float] = time.monotonic,
           log=print) -> dict:
     """Ask iNat about every genus (and one-word name) the records use that the cache
     hasn't answered; then fetch the ranks of their ancestors. Resumable: each answer is
-    saved as it comes."""
+    saved as it comes. `max_minutes`: no new name is asked after that long (the one
+    being asked finishes, and the ancestors of every answer so far are still fetched);
+    the next run carries on with the rest."""
     client = client or InatTaxa()
+    end = None if max_minutes is None else clock() + max_minutes * 60
+
+    def out_of_time() -> bool:
+        return end is not None and clock() >= end
     db = open_cache(cache or cache_path())
     try:
         rn = RecordNames.from_manifest(conn)
@@ -359,7 +366,13 @@ def fetch(conn: sqlite3.Connection, cache: Path | None = None, client: InatTaxa 
             f"(~{len(todo) * 1.3 / 60:.0f} min at 1 request/s)")
         stats = Counter()
         started = time.monotonic()
+        asked_genera = 0
         for i, g in enumerate(todo, 1):
+            if out_of_time():
+                log(f"  time is up ({max_minutes:g} min): {len(todo) - asked_genera:,} genera "
+                    "left for the next run")
+                break
+            asked_genera += 1
             a = ask_genus(client, db, g)
             _save_answer(db, a, now_iso())
             stats[a.reason or "ok"] += 1
@@ -371,13 +384,19 @@ def fetch(conn: sqlite3.Connection, cache: Path | None = None, client: InatTaxa 
                   if (row := db.execute("select reason from answers where name = ? and "
                                         "kind = 'genus'", (w,)).fetchone())
                   and row[0] == NOT_FOUND and not asked(w, "higher")]
+        asked_higher = 0
         for w in higher:
+            if out_of_time():
+                break
+            asked_higher += 1
             a = ask_higher(client, db, w)
             _save_answer(db, a, now_iso())
             stats["higher: " + (a.reason or "ok")] += 1
         resolve_ancestors(client, db, log)
-        return {"genera": len(genera), "asked": len(todo), "higher_asked": len(higher),
-                "requests": client.calls, "answers": dict(stats)}
+        left = len(todo) - asked_genera + len(higher) - asked_higher
+        return {"genera": len(genera), "asked": asked_genera, "higher_asked": asked_higher,
+                "requests": client.calls, "answers": dict(stats), "left": left,
+                "out_of_time": bool(left)}
     finally:
         db.close()
 

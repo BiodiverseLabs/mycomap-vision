@@ -293,7 +293,7 @@ trap finish EXIT
 nvidia-smi || {{ echo "no GPU visible"; exit 1; }}
 dnf install -y -q python3.11 python3.11-pip python3.11-devel
 mkdir -p /opt/mv/data && cd /opt/mv
-aws s3 cp "s3://$BUCKET/$RUN/code.tar.gz" code.tar.gz
+aws s3 cp "s3://$BUCKET/$RUN/{code_key}" code.tar.gz
 tar xzf code.tar.gz
 python3.11 -m venv .venv
 # Pinned, hash-checked packages (requirements/trainer.txt: torch from PyPI with its CUDA
@@ -313,7 +313,7 @@ MV_DATA_DIR=/opt/mv/data PYTHONPATH=/opt/mv/src PYTHONUNBUFFERED=1 timeout {job_
   .venv/bin/python -m mycomap_vision.cli aws-train-job \\
   --run-id {run_id} --backbones {backbones} --methods {methods} --size {size} \\
   --test-days {test_days} --stop-after-hours {stop_hours} \\
-  --source "s3://$BUCKET"{finetune_arg}{sample_arg}
+  --source "s3://$BUCKET"{finetune_arg}{sample_arg}{spot_arg}{resume_arg}
 """
 
 
@@ -321,28 +321,48 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                              max_hours: float, bucket_name: str, size: str = "large",
                              test_days: int = 28, finetune: list[str] | None = None,
                              sample_records: int | None = None,
-                             code_version: str = "unknown") -> str:
+                             code_version: str = "unknown", spot: bool = False,
+                             resume: bool = False, code_key: str = "code.tar.gz") -> str:
     # The job is killed at max_hours, and stops itself STOP_MARGIN_HOURS before that so
     # it can upload what it finished; the backstop leaves 30 minutes on top for setup
     # and the log upload.
     from .trainer import STOP_MARGIN_HOURS
     if not re.fullmatch(r"[0-9a-f]{7,40}(-dirty)?|unknown", code_version):
         raise ValueError(f"not a commit sha: {code_version!r}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.tar\.gz", code_key):
+        raise ValueError(f"not a code archive name: {code_key!r}")
     stop = max(max_hours - STOP_MARGIN_HOURS, max_hours / 2)
     return TRAINER_USER_DATA.format(
         bucket=bucket_name, run_id=run_id, region=config.setting("MV_AWS_REGION", "us-east-2"),
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
-        stop_hours=round(stop, 2), code_version=code_version,
+        stop_hours=round(stop, 2), code_version=code_version, code_key=code_key,
         backbones=",".join(backbones), methods=",".join(methods), size=size,
         test_days=test_days,
         finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "",
-        sample_arg=f" --sample-records {int(sample_records)}" if sample_records else "")
+        sample_arg=f" --sample-records {int(sample_records)}" if sample_records else "",
+        spot_arg=" --spot" if spot else "", resume_arg=" --resume" if resume else "")
+
+
+def spot_market_options(max_price: float | None = None) -> dict:
+    """RunInstances' InstanceMarketOptions for a one-time Spot instance that AWS
+    terminates (never stops or hibernates) when it takes the capacity back. With no
+    max price the cap is the On-Demand price."""
+    opts = {"SpotInstanceType": "one-time", "InstanceInterruptionBehavior": "terminate"}
+    if max_price is not None:
+        if not float(max_price) > 0:
+            raise ValueError("--spot-max-price must be above 0 (dollars an hour)")
+        opts["MaxPrice"] = f"{float(max_price):.4f}"
+    return {"MarketType": "spot", "SpotOptions": opts}
 
 
 def trainer_instance_args(run_id: str, ami: str, user_data: str, instance_type: str,
-                          root_device: str, snapshot_gb: int) -> dict:
+                          root_device: str, snapshot_gb: int, spot: bool = False,
+                          spot_max_price: float | None = None) -> dict:
     """Like the downloader's, with a disk big enough for the image plus model weights and
-    embeddings (~1.2 GB per 1024-wide backbone)."""
+    embeddings (~1.2 GB per 1024-wide backbone). `spot`: a one-time Spot instance (its
+    Spot request carries the project tag too) instead of On-Demand."""
+    if spot_max_price is not None and not spot:
+        raise ValueError("--spot-max-price needs --spot")
     args = run_instance_args(run_id, ami, user_data, instance_type)
     args["TagSpecifications"] = [
         {"ResourceType": spec["ResourceType"],
@@ -352,7 +372,59 @@ def trainer_instance_args(run_id: str, ami: str, user_data: str, instance_type: 
     args["BlockDeviceMappings"] = [{"DeviceName": root_device,
                                     "Ebs": {"VolumeSize": max(snapshot_gb, 1) + 60,
                                             "VolumeType": "gp3", "DeleteOnTermination": True}}]
+    if spot:
+        args["InstanceMarketOptions"] = spot_market_options(spot_max_price)
+        args["TagSpecifications"].append({"ResourceType": "spot-instances-request",
+                                          "Tags": args["TagSpecifications"][0]["Tags"]})
     return args
+
+
+# Why EC2 refused to start the instance, said plainly. Nothing runs and nothing is
+# billed; the run's code (and manifest) in S3 cost next to nothing.
+LAUNCH_ERRORS = {
+    "InsufficientInstanceCapacity":
+        "AWS has no {type} free right now in the zone it picked{market}. Try again in a "
+        "while (capacity comes and goes), or another --instance-type.",
+    "MaxSpotInstanceCountExceeded":
+        "the account's Spot quota is used up or still 0: Service Quotas -> Amazon EC2 -> "
+        "\"All G and VT Spot Instance Requests\" (vCPUs; a {type} needs {vcpus}). An "
+        "increase request may still be pending.",
+    "SpotMaxPriceTooLow":
+        "the Spot price for {type} is above --spot-max-price. Raise it, or leave it out "
+        "(the cap is then the On-Demand price).",
+    "VcpuLimitExceeded":
+        "the account's {quota} quota is too low for a {type} ({vcpus} vCPUs): Service "
+        "Quotas -> Amazon EC2 -> \"{quota}\". An increase request may still be pending.",
+}
+INSTANCE_VCPUS = {"g6.xlarge": 4, "g6.2xlarge": 8, "g6.4xlarge": 16, "g5.xlarge": 4,
+                  "g5.2xlarge": 8}
+
+
+class LaunchRefused(RuntimeError):
+    """EC2 would not start the instance; the message says why and what to do."""
+
+
+def start_instance(ec2, args: dict, run_id: str) -> dict:
+    """ec2.run_instances(**args), with a capacity, quota or price refusal explained."""
+    from botocore.exceptions import ClientError
+    try:
+        return ec2.run_instances(**args)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code not in LAUNCH_ERRORS:
+            raise
+        spot = "InstanceMarketOptions" in args
+        itype = args.get("InstanceType", "?")
+        why = LAUNCH_ERRORS[code].format(
+            type=itype, vcpus=INSTANCE_VCPUS.get(itype, "several"),
+            market=" for Spot" if spot else "",
+            quota="All G and VT Spot Instance Requests" if spot
+            else "Running On-Demand G and VT instances")
+        if code == "VcpuLimitExceeded" and not spot:
+            why += " Or launch on Spot (--spot) if that quota is granted."
+        raise LaunchRefused(f"EC2 refused to start run {run_id} ({code}): {why} Nothing is "
+                            f"running. AWS said: {e.response.get('Error', {}).get('Message')}"
+                            ) from e
 
 
 def check_trainer_request(conn, backbones: list[str], methods: list[str], size: str,
@@ -412,45 +484,129 @@ def check_run_time(est: dict, max_hours: float, allow_over_time: bool = False,
         log(f"Note: the estimate ({total} h) is close to the limit ({usable:.2f} h usable).")
 
 
+SPOT_NOTE = ("Spot: AWS may take the instance back with 2 minutes' notice. The stage "
+             "under way is then dropped, the finished ones are kept in S3 (progress.json "
+             "says \"interrupted\"), and `mv aws-launch-trainer --resume {run}` runs the rest.")
+
+
+def read_s3_json(s3, bucket_name: str, key: str) -> dict | None:
+    from botocore.exceptions import ClientError
+    try:
+        return json.loads(s3.get_object(Bucket=bucket_name, Key=key)["Body"].read())
+    except ClientError:
+        return None
+
+
+def live_trainer_instances(ec2, run_id: str) -> list[str]:
+    """Instances of this run that are still starting or running (they may still write
+    to runs/<run>/)."""
+    resp = ec2.describe_instances(Filters=[
+        {"Name": "tag:Name", "Values": [f"mv-trainer-{run_id}"]},
+        {"Name": "instance-state-name", "Values": ["pending", "running", "stopping"]}])
+    return [i["InstanceId"] for r in resp.get("Reservations", []) for i in r.get("Instances", [])]
+
+
 def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "large",
                    max_hours: float = 24, instance_type: str = TRAINER_INSTANCE_TYPE,
                    test_days: int = 28, finetune: list[str] | None = None,
                    sample_records: int | None = None, allow_over_time: bool = False,
                    allow_dirty: bool = False, allow_unpushed: bool = False,
-                   log=print) -> dict:
+                   spot: bool = False, spot_max_price: float | None = None,
+                   resume: str | None = None, log=print) -> dict:
     """Check the request, the time it needs and the commit it ships, all before anything
-    is paid for; then upload the code and the manifest and start the instance."""
+    is paid for; then upload the code and the manifest and start the instance.
+
+    `spot`: a one-time Spot instance instead of On-Demand (`spot_max_price` in dollars an
+    hour; none = the On-Demand price). `resume`: continue that run instead of starting a
+    new one: same run id, its own backbones, fine-tunes, methods and manifest; the
+    stages it finished are restored on the instance and only the others run (and are
+    all the estimate counts)."""
     from . import trainer
     from .models import storage_name
+    if spot_max_price is not None and not spot:
+        raise ValueError("--spot-max-price needs --spot")
     b = bucket()
+    done: set = set()
+    prev = None
+    if resume:
+        prev = read_s3_json(s3_client(), b, trainer.run_prefix(resume) + trainer.PROGRESS_FILE) \
+            or read_s3_json(s3_client(), b, trainer.run_prefix(resume) + trainer.RESULT_FILE)
+        if prev is None:
+            raise ValueError(f"run {resume} has no progress.json in s3://{b}/: nothing to "
+                             "resume (launch a new run)")
+        if trainer.run_summary(prev)["complete"]:
+            raise ValueError(f"run {resume} is complete: nothing to resume")
+        req = trainer.resume_request(prev)
+        backbones, finetune, methods = req["backbones"], req["finetune"], req["methods"]
+        size, test_days, sample_records, done = (req["size"], req["test_days"],
+                                                 req["sample_records"], req["done"])
+        log(f"Resuming run {resume} (state {prev.get('state')}, last written "
+            f"{prev.get('updated_at')}): its own backbones {', '.join(backbones)}, "
+            f"fine-tune {', '.join(finetune) or 'none'}, methods {', '.join(methods)}, "
+            f"{size} photos and its own manifest")
     photos = check_trainer_request(conn, backbones, methods, size, f"s3://{b}/", finetune)
     names = [storage_name(x) for x in backbones]
     ft = [storage_name(x) for x in finetune or []]
-    est = trainer.estimate(trainer.plan_stages(names, ft, "<run>"),
-                           photos_for_estimate(conn, photos, size, f"s3://{b}/",
-                                               sample_records))
+    plan = trainer.plan_stages(names, ft, resume or "<run>")
+    left = [s for s in plan if (s.kind, s.name) not in done]
+    if resume and not left:
+        raise ValueError(f"every stage of run {resume} is done; only its comparison is "
+                         "missing: pull it and run mv compare on the laptop")
+    if done:
+        log(f"  already done, restored on the instance: "
+            f"{', '.join(f'{k} {n}' for k, n in sorted(done))}")
+    est = trainer.estimate(left, photos_for_estimate(conn, photos, size, f"s3://{b}/",
+                                                     sample_records))
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
     sha = release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)
+    if prev is not None and prev.get("code_version") not in (None, sha):
+        log(f"Note: run {resume} ran commit {str(prev.get('code_version'))[:10]}; the rest "
+            f"runs commit {sha[:10]} (both are recorded in progress.json)")
     sess = session()
     s3, ec2, ssm = s3_client(), sess.client("ec2"), sess.client("ssm")
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    s3.put_object(Bucket=b, Key=f"runs/{run_id}/code.tar.gz", Body=code_tarball(sha))
-    snap = snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
-    s3.upload_file(str(snap), b, f"runs/{run_id}/manifest-in.sqlite")
-    log(f"Uploaded commit {sha[:10]} and the manifest for run {run_id} "
-        f"({photos:,} {size} photos in S3)")
+    if resume:
+        run_id = resume
+        busy = live_trainer_instances(ec2, run_id)
+        if busy:
+            raise ValueError(f"run {run_id} still has a live instance ({', '.join(busy)}): it "
+                             "may still write to its folder. Wait until it has terminated.")
+        from botocore.exceptions import ClientError
+        try:
+            s3.head_object(Bucket=b, Key=f"runs/{run_id}/manifest-in.sqlite")
+        except ClientError:
+            raise ValueError(f"run {run_id} has no manifest-in.sqlite left in S3 to resume "
+                             "from; launch a new run") from None
+        attempt = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        code_key = f"code-resume-{attempt}.tar.gz"
+        s3.put_object(Bucket=b, Key=f"runs/{run_id}/{code_key}", Body=code_tarball(sha))
+        log(f"Uploaded commit {sha[:10]} to resume run {run_id}; it keeps the run's own "
+            f"manifest ({photos:,} {size} photos in S3)")
+    else:
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        code_key = "code.tar.gz"
+        s3.put_object(Bucket=b, Key=f"runs/{run_id}/{code_key}", Body=code_tarball(sha))
+        snap = snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
+        s3.upload_file(str(snap), b, f"runs/{run_id}/manifest-in.sqlite")
+        log(f"Uploaded commit {sha[:10]} and the manifest for run {run_id} "
+            f"({photos:,} {size} photos in S3)")
+    if spot:
+        log(SPOT_NOTE.format(run=run_id))
     ami = ssm.get_parameter(Name=TRAINER_AMI_PARAMETER)["Parameter"]["Value"]
     image = ec2.describe_images(ImageIds=[ami])["Images"][0]
     root = image["RootDeviceName"]
     snapshot_gb = next((m["Ebs"]["VolumeSize"] for m in image["BlockDeviceMappings"]
                         if m.get("DeviceName") == root and "Ebs" in m), 100)
     user_data = render_trainer_user_data(run_id, names, methods, max_hours, b, size, test_days,
-                                         ft, sample_records, code_version=sha)
-    resp = ec2.run_instances(**trainer_instance_args(run_id, ami, user_data, instance_type,
-                                                     root, snapshot_gb))
+                                         ft, sample_records, code_version=sha, spot=spot,
+                                         resume=bool(resume), code_key=code_key)
+    resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
+                                                     root, snapshot_gb, spot, spot_max_price),
+                          run_id)
     return {"run_id": run_id, "instance_id": resp["Instances"][0]["InstanceId"],
-            "instance_type": instance_type, "region": region(), "backbones": names,
+            "instance_type": instance_type, "market": "spot" if spot else "on-demand",
+            "spot_max_price": spot_max_price, "resumed": bool(resume),
+            "region": region(), "backbones": names,
             "finetune": ft, "methods": methods, "sample_records": sample_records,
             "code_version": sha, "max_hours": max_hours, "estimate_hours": est["total_hours"],
             "log": f"s3://{b}/runs/{run_id}/train.log",
@@ -494,6 +650,10 @@ def pull_trainer(conn, run_id: str, log=print) -> dict:
             f"stages it finished: {', '.join(summary['done']) or 'none'}")
         for m in summary["missing"]:
             log(f"  missing: {m['stage']} ({m['status']}{': ' + m['why'] if m['why'] else ''})")
+        if summary["missing"]:
+            still = summary.get("state") in ("running", "comparing")
+            log(f"  to run only the missing stages{' once its instance has gone' if still else ''}"
+                f": mv aws-launch-trainer --resume {run_id}")
     index = fetch(trainer.INDEX_FILE) or fetch("manifest-out.sqlite")
     if index is None:
         raise RuntimeError(f"run {run_id} has no {trainer.INDEX_FILE} yet: no stage finished")
