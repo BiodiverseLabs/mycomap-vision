@@ -83,11 +83,11 @@ Don't write to the local manifest while it runs. When the instance has gone
 
 ## Running the GPU trainer
 
-The trainer embeds every large photo in S3 with the chosen backbones, compares
-every backbone x method on the newest weeks, uploads the results to
-`s3://<bucket>/runs/<run>/` and shuts itself down (backstop: max hours + 30 min).
-It starts from the Deep Learning Base GPU AMI (Amazon Linux 2023) on a
-`g6.2xlarge` (one NVIDIA L4, 8 vCPUs, about $1/hour on demand).
+The trainer embeds every large photo in S3 with the chosen backbones, fine-tunes
+some of them, compares every backbone x method on the newest weeks, uploads the
+results to `s3://<bucket>/runs/<run>/` and shuts itself down (backstop: max
+hours + 30 min). It starts from the Deep Learning Base GPU AMI (Amazon Linux
+2023) on a `g6.2xlarge` (one NVIDIA L4, 8 vCPUs, about $1/hour on demand).
 
 One-time setup:
 
@@ -100,27 +100,85 @@ One-time setup:
    replace the ops user's policy JSON (IAM → Users → the ops user → Permissions →
    the policy → Edit → JSON). The instance role is unchanged.
 
-Then:
+### The first run
 
 ```
-.venv/Scripts/mv aws-launch-trainer --backbones bioclip-2,dinov3-l16 --max-hours 12
+.venv/Scripts/mv aws-launch-trainer
 ```
 
-Add `--finetune bioclip-2` to also fine-tune BioCLIP 2's last blocks on the
-reference records (about 2 passes over the photos), then embed and score the
-fine-tuned model next to the frozen one. It is saved as `bioclip-2-ft-<run>` and
-comes home with `aws-pull-trainer` (weights in `data/models/`).
+With no options this is the recommended first run: BioCLIP 2, then fine-tuning
+it (its last 4 blocks, about 2 passes over the photos), then embedding with the
+fine-tuned model (`bioclip-2-ft-<run>`), with a 24-hour limit. The spelled-out
+form is `--backbones bioclip-2 --finetune bioclip-2 --max-hours 24`.
 
-It refuses to start if the manifest lists no photos of that size in the bucket,
-so run `mv aws-pull-manifest` after the download first. Only the last commit is
-sent. The log is copied to `s3://<bucket>/runs/<run>/train.log` every 15 minutes;
-each backbone's embeddings are uploaded as soon as it finishes. When
-`runs/<run>/result.json` exists, the run is complete:
+Before anything is paid for, the launcher prints a time estimate and refuses a
+run that would not fit in `--max-hours`. The speeds behind it (`EMBED_RATES`,
+`FINETUNE_RATES` in `src/mycomap_vision/trainer.py`) were measured on the laptop
+at large photos, and the estimate multiplies them by 1.5 to stay safe on the L4.
+For the 593,214 large photos the first run comes to about 16 h (11 h at laptop
+speed): 4.5 h to embed, 6 h to fine-tune, 4.5 h to embed again, and an hour for
+setup and the comparison. Adding `dinov3-l16-512` would add about 13 h (29 h in
+all), so it waits for a second run, or pass `--allow-over-time` to launch anyway.
+Once a real run has finished, replace the rates with its own (progress.json
+records each stage's speed).
+
+The work goes in this order: each backbone to fine-tune, its fine-tune and the
+fine-tuned model's embedding come first; other backbones follow. If time runs
+out, it is the extra backbones that are left undone.
+
+### What it ships
+
+The launcher sends the exact commit you are on (`git archive <sha>`) and refuses
+when tracked files have uncommitted changes (they would not be sent;
+`--allow-dirty` to go anyway) or when the commit is on no remote branch (push it
+first; `--allow-unpushed` to go anyway). The instance records that sha as the
+run's `code_version` in progress.json, result.json and every scoreboard row.
+
+The instance installs only pinned, hash-checked packages from
+`requirements/trainer.txt` (`pip install --require-hashes`); the downloader uses
+`requirements/downloader.txt`. torch comes from PyPI with its CUDA runtime as
+wheels; the Base AMI brings the NVIDIA driver and no torch, so nothing is
+installed over a CUDA build of the image's. torch 2.14 is built for CUDA 13,
+which needs NVIDIA driver 580 or newer: the instance checks that torch can see
+the GPU and stops at once if it can't. To update the pins (needs PyPI access):
+
+```
+.venv/Scripts/python deploy/aws/lock_instance_requirements.py
+```
+
+(pip-compile can't be used for these: it resolves for the machine it runs on,
+and on Windows it leaves out torch's Linux-only CUDA packages.)
+
+### While it runs, and when it stops
+
+The log is copied to `s3://<bucket>/runs/<run>/train.log` every 15 minutes. As
+each stage finishes, its outputs are uploaded at once (embeddings, fine-tuned
+weights, a small `index.sqlite`) and `runs/<run>/progress.json` is rewritten: the
+stages done, their photo counts, speeds and times, the code version, and the
+state (`running`, `comparing`, `finished`, `stopped`).
+
+The job stops itself 45 minutes before `--max-hours` (between batches, or
+between fine-tuning steps), uploads what finished, and ends `stopped`; a stage it
+was in the middle of is dropped, never uploaded half done. The comparison is
+then left to the laptop (`mv compare` after pulling).
+
+A photo that can't be read (corrupt, truncated, missing) is skipped and listed
+with the reason in `runs/<run>/skipped/<backbone>.tsv`, and counted in the
+progress. If more than 1% of a backbone's photos can't be read, something
+systemic is wrong and that backbone fails instead.
+
+### Bringing it home
 
 ```
 .venv/Scripts/mv aws-pull-trainer --run <run>
 ```
 
-The run's backbones replace the local embeddings (the old ones move to
-`data/embeddings-archive/<backbone>-before-<run>/`), and its comparison joins the
-scoreboard. Pulling the same run twice changes nothing.
+It works on a complete run (result.json), a stopped one, or one killed outright
+(it then reads progress.json), and says which stages are missing and why. Each
+backbone the run embedded completely replaces the local embeddings (the old ones
+move to `data/embeddings-archive/<backbone>-before-<run>/`); a backbone it did
+not finish, or whose downloaded copy doesn't match the run's index, never
+replaces anything. The run's comparison, when there is one, joins the
+scoreboard. What was pulled, with the run's commit, is kept in
+`data/aws/run-<run>/pulled.json`. Pulling the same run twice changes nothing,
+and pulling again after a run was still going adds the stages finished since.
