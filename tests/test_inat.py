@@ -18,6 +18,11 @@ def test_photos_come_back_in_position_order_with_owner_and_license():
     assert all(p["owner_login"] == "alice" for p in photos)
 
 
+def test_an_inat_date_of_1970_01_01_is_stored_as_no_date():
+    assert parse_observation(inat_obs(5, observed_on="1970-01-01"))[0]["observed_on"] is None
+    assert parse_observation(inat_obs(5))[0]["observed_on"] == "2025-09-01"
+
+
 def test_ids_inat_does_not_return_are_marked_missing(conn):
     stats = save_batch(conn, ["5", "6"], [inat_obs(5, photos=[(0, 11, "cc0", OPEN)])], "t1")
     assert stats["ok"] == 1 and stats["missing"] == 1

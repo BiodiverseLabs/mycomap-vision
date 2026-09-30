@@ -333,6 +333,35 @@ def test_entered_place_wins_and_photo_fills_the_gaps_rounded_in_the_answer():
                     "place_from": "photo", "date_from": "entered"}
 
 
+def test_a_1970_01_01_date_typed_or_from_a_camera_clock_is_no_date():
+    from mycomap_vision.api import fill_context
+    from mycomap_vision.exif import place_and_date
+    from mycomap_vision.prior import Context
+    # A camera whose clock was never set: the place is read, the date is not.
+    lat, lon, when = place_and_date(Image.open(io.BytesIO(jpeg_with_exif(39.1653, -86.5264,
+                                                                          "1970:01:01 00:00:00"))))
+    assert round(lat, 3) == 39.165 and when is None
+    # Typed (or sent by an API caller), it doesn't stop a photo's real date filling in,
+    # and a photo's placeholder is passed over for the next photo's date.
+    ctx, used = fill_context(Context(None, None, "1970-01-01"),
+                             [(None, None, "1970-01-01"), (None, None, "2026-09-12")])
+    assert ctx.observed_on == "2026-09-12"
+    assert (used["observed_on"], used["date_from"]) == ("2026-09-12", "photo")
+    ctx, used = fill_context(Context(None, None, "1/1/1970"), [(None, None, "1970-01-01")])
+    assert ctx.observed_on is None and ctx.day_of_year is None
+    assert (used["observed_on"], used["date_from"]) == (None, None)
+
+
+def test_identify_ignores_a_1970_01_01_date(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    files = [("photos", ("p.jpg", jpeg_with_exif(39.1653, -86.5264, "1970:01:01 00:00:00"),
+                         "image/jpeg"))]
+    res = client.post("/api/identify", files=files,
+                      data={"models": "m1/nearest", "observed_on": "1970-01-01"}).json()
+    assert (res["context_used"]["observed_on"], res["context_used"]["date_from"]) == (None, None)
+    assert res["context_used"]["place_from"] == "photo"
+
+
 def test_identify_reports_the_context_it_used(conn, tmp_path):
     client = app_with_model(conn, tmp_path)
     files = [("photos", ("p.jpg", jpeg_with_exif(39.1653, -86.5264, "2026:09:12 10:03:00"),

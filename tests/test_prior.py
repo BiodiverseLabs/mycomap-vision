@@ -52,6 +52,23 @@ def test_no_place_or_date_means_no_effect():
     assert np.all(fitted().log_prior(None) == 0)
 
 
+def test_a_1970_01_01_date_gives_the_season_score_nothing():
+    # The query: an unset date has no day of the year, so no season score.
+    assert Context(None, None, "1970-01-01").day_of_year is None
+    assert Context(None, None, "1970-01-01T00:00:00Z").day_of_year is None
+    assert Context(None, None, "1970-01-02").day_of_year == 2
+    assert np.all(fitted().log_prior(Context(None, None, "1970-01-01")) == 0)
+    # The references: records "observed" on the placeholder don't make a species look
+    # like a New Year species; the score is as if they had no date.
+    placeholder = [rec(f"p{i}", "Lookus orientalis", 40, -80, "1970-01-01") for i in range(20)]
+    undated = [rec(f"p{i}", "Lookus orientalis", 40, -80, None) for i in range(20)]
+    with_placeholder, without = RangeSeasonPrior(), RangeSeasonPrior()
+    with_placeholder.fit(EAST + WEST + placeholder, SPECIES)
+    without.fit(EAST + WEST + undated, SPECIES)
+    new_year = Context(None, None, "2026-01-03")
+    assert np.array_equal(with_placeholder.log_prior(new_year), without.log_prior(new_year))
+
+
 def test_heavy_sampling_in_one_area_does_not_favour_every_species_there():
     # 200 records of a common species in the east make the east heavily sampled; a
     # species recorded evenly east and west must not look like an eastern species.

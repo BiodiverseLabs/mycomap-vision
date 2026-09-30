@@ -46,6 +46,18 @@ const A: PhotoPlaceDate = { lat: 42.28, lng: -83.74, date: "2026-09-27" };
 const DATE_ONLY: PhotoPlaceDate = { lat: null, lng: null, date: "2025-10-03" };
 const NOTHING: PhotoPlaceDate = { lat: null, lng: null, date: null };
 
+test("a 1970-01-01 EXIF date is a camera clock never set, not a date", async () => {
+  assert.equal(exifDate("1970:01:01 00:00:00"), null);
+  assert.equal(exifDate("1970:01:02 00:00:00"), "1970-01-02");
+  // The photo's place is still read; its date is not, so it can't fill the form:
+  // the next photo's real date does.
+  const unset = await readPhotoPlaceDate(photo("unset-clock.jpg"));
+  assert.deepEqual(unset, { lat: 42.28, lng: -83.74, date: null });
+  assert.deepEqual(fillFromPhotos({}, [unset, DATE_ONLY]),
+                   { lat: "42.2800", lng: "-83.7400", placeFromPhoto: 1,
+                     observedOn: "2025-10-03", dateFromPhoto: 2 });
+});
+
 test("empty fields fill from the first photo that has each", () => {
   assert.deepEqual(fillFromPhotos({}, [NOTHING, DATE_ONLY, A]),
                    { lat: "42.2800", lng: "-83.7400", placeFromPhoto: 3,

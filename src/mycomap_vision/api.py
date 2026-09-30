@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from PIL import Image, ImageOps
 
 from . import config, evaluate, inat, models, names, permissions
+from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
@@ -116,13 +117,15 @@ def read_photo(upload: UploadFile) -> tuple[Image.Image, tuple]:
 
 def fill_context(entered: Context, from_photos: list[tuple]) -> tuple[Context, dict]:
     """What the caller entered wins; gaps are filled from the first photo that has them.
-    Returns the context and what was used, rounded to 0.1 degree for the response."""
-    lat, lng, when = entered.latitude, entered.longitude, entered.observed_on
+    Returns the context and what was used, rounded to 0.1 degree for the response.
+    A 1970-01-01 date, typed or from a photo, counts as none (dates.py)."""
+    lat, lng, when = entered.latitude, entered.longitude, real_date(entered.observed_on)
     place_from = "entered" if lat is not None and lng is not None else None
     date_from = "entered" if when else None
     for plat, plng, pdate in from_photos:
         if place_from is None and plat is not None and plng is not None:
             lat, lng, place_from = plat, plng, "photo"
+        pdate = real_date(pdate)
         if date_from is None and pdate:
             when, date_from = pdate, "photo"
     used = {"latitude": None if lat is None else round(lat, 1),
