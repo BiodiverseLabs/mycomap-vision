@@ -12,6 +12,7 @@ Without a comparison it falls back to a fixed temperature and says so.
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import sqlite3
 from bisect import bisect_left
@@ -149,12 +150,42 @@ PHOTO_INFO_SQL = "select photo_id, source_url, license_class, owner_login, owner
 
 
 class Specimen(NamedTuple):
-    """What a result needs of a reference record, kept after the build instead of the
-    whole Record (dates, places, projects, photo lists): ~0.5 GB less at the full set."""
+    """What a result needs of a reference record."""
     observation_id: str
     species: str
     genus: str
     family: str
+
+
+class Specimens:
+    """The reference record behind each column, kept as arrays. The Records a build
+    reads (dates, places, projects, photo lists) are Python objects; keeping them, or
+    any small object made alongside them, held ~0.5 GB at the full photo set, because
+    the allocator can't hand back memory a survivor shares. These arrays: ~10 MB."""
+
+    def __init__(self, records: list, col_rows: list[int]):
+        at = {id(r): i for i, r in enumerate(records)}
+        rec_of_row = {row: at[id(r)] for r in records for row in r.photo_rows}
+        self.rec = np.fromiter((rec_of_row[c] for c in col_rows), dtype=np.int32,
+                               count=len(col_rows))
+        names = sorted({n for r in records for n in (r.species, r.genus, r.family)})
+        pos = {n: i for i, n in enumerate(names)}
+        self.names = np.array(names or [""])
+        self.obs = np.array([r.observation_id for r in records] or [""])
+        self.taxa = np.array([(pos[r.species], pos[r.genus], pos[r.family]) for r in records],
+                             dtype=np.int32).reshape(-1, 3)
+
+    def __len__(self) -> int:
+        return len(self.rec)
+
+    def __getitem__(self, col: int) -> Specimen:
+        r = int(self.rec[col])
+        sp, ge, fa = (str(self.names[i]) for i in self.taxa[r])
+        return Specimen(str(self.obs[r]), sp, ge, fa)
+
+    def starts(self) -> np.ndarray:
+        """Where each record's run of columns starts (a record's photos are contiguous)."""
+        return np.flatnonzero(np.diff(self.rec, prepend=-1) != 0).astype(np.int64)
 
 
 class Identifier:
@@ -189,18 +220,9 @@ class Identifier:
         if self.nearest is not self.model:
             self.nearest.fit(vecs, self.index)
         # Per reference column: photo id and record.
-        interned = {}
-        specimen = {id(r): Specimen(r.observation_id,
-                                    *(interned.setdefault(s, s) for s in (r.species, r.genus, r.family)))
-                    for r in records}
-        rec_of_row = {row: specimen[id(r)] for r in records for row in r.photo_rows}
         self.col_photo = ids[self.index.cols]
-        self.col_record = [rec_of_row[int(c)] for c in self.index.cols.tolist()]
-        del rec_of_row, specimen
-        # A record's photos are contiguous in index.cols: where each record starts.
-        self.rec_starts = np.asarray(
-            [i for i, r in enumerate(self.col_record)
-             if i == 0 or r is not self.col_record[i - 1]], dtype=np.int64)
+        self.col_record = Specimens(records, self.index.cols.tolist())
+        self.rec_starts = self.col_record.starts()
         self.calibration = calibration
         self.photos = (self._photo_info(conn, set(int(p) for p in self.col_photo.tolist()))
                        if photo_info else {})
@@ -210,6 +232,28 @@ class Identifier:
             for rank in RANKS:
                 self.rank_counts[rank][{"species": r.species, "genus": r.genus,
                                         "family": r.family}[rank]] += 1
+        # The names the index keeps were made while the records were read, scattered
+        # among them, and would keep that memory (~0.5 GB at the full set) from going
+        # back to the OS. Park them in arrays, let the records go, and make them again.
+        del records, by_id, row_of
+        self._remake_names()
+
+    def _remake_names(self) -> None:
+        index = self.index
+
+        def park(counter):
+            return np.array(list(counter), dtype=str), np.array(list(counter.values()), np.int64)
+        species = np.array(index.species, dtype=str)
+        refs = np.array([index.ref_count[s] for s in index.species], dtype=np.int64)
+        labels = {rank: np.array(names, dtype=str) for rank, names in index.labels.items()}
+        counts = {rank: park(c) for rank, c in self.rank_counts.items()}
+        index.species = index.ref_count = index.labels = self.rank_counts = None
+        gc.collect()
+        index.species = species.tolist()
+        index.ref_count = Counter(dict(zip(index.species, refs.tolist())))
+        index.labels = {rank: names.tolist() for rank, names in labels.items()}
+        self.rank_counts = {rank: Counter(dict(zip(names.tolist(), n.tolist())))
+                            for rank, (names, n) in counts.items()}
 
     def warm(self) -> None:
         """Score one blank photo: reads every reference vector once, which proves the

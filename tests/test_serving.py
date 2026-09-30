@@ -95,6 +95,21 @@ def test_building_an_index_never_reads_the_reference_vectors_into_memory(conn, t
     assert peak < vec_bytes, f"identifying allocated {peak / 2**20:.1f} MB"
 
 
+def test_a_built_index_keeps_no_record_objects(conn, tmp_path):
+    """The records a build reads are ~0.5 GB of small objects at the full set; the index
+    keeps arrays instead (identify.Specimens), so that memory goes back to the OS."""
+    from mycomap_vision.evaluate import Record
+    big_reference(conn, tmp_path / "emb", records=60, photos_each=2, shard_rows=50)
+    ident = Identifier(conn, "big", "nearest", tmp_path / "emb" / "big", photo_info=False)
+    gc.collect()
+    ours = {str(5000 + i) for i in range(60)}
+    assert not [o for o in gc.get_objects()
+                if type(o) is Record and o.observation_id in ours]
+    first = ident.col_record[0]
+    assert first.observation_id.isdigit() and first.species.startswith("G")
+    assert len(ident.rec_starts) == 60
+
+
 def test_scores_read_from_disk_are_the_scores_of_the_vectors_in_memory(conn, tmp_path,
                                                                       monkeypatch):
     big_reference(conn, tmp_path / "emb", records=120, photos_each=3, shard_rows=100)
