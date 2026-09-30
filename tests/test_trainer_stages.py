@@ -394,13 +394,13 @@ class FakeS3:
         return Pages()
 
 
-def pull(tmp_path, monkeypatch, bucket_root, home):
+def pull(tmp_path, monkeypatch, bucket_root, home, said=None):
     monkeypatch.setattr(aws, "s3_client", lambda: FakeS3(bucket_root))
     monkeypatch.setattr(aws, "bucket", lambda: "bkt")
     monkeypatch.setattr(config, "DATA_DIR", home)
     monkeypatch.setattr(config, "REPORTS_DIR", home / "reports")
     conn = connect(home / "manifest.sqlite")
-    return conn, aws.pull_trainer(conn, "r1", log=lambda s: None)
+    return conn, aws.pull_trainer(conn, "r1", log=(said if said is not None else []).append)
 
 
 def rows(conn, backbone):
@@ -419,9 +419,12 @@ def test_a_stopped_run_brings_home_its_finished_backbones_and_leaves_the_rest(tm
     bucket_root = rec.write_bucket(tmp_path / "bucket")
     laptop, home = laptop_with_sample(tmp_path, names=("timm_a", "timm_b"))
     laptop.close()
-    conn, merged = pull(tmp_path, monkeypatch, bucket_root, home)
+    said = []
+    conn, merged = pull(tmp_path, monkeypatch, bucket_root, home, said)
     assert merged["replaced"] == ["timm_a"] and merged["complete"] is False
     assert [m["stage"] for m in merged["missing"]] == ["embed timm_b"]
+    assert "NOT complete" in said[0] and "stages it finished: embed timm_a" in said[0]
+    assert said[1].strip().startswith("missing: embed timm_b (stopped")
     assert rows(conn, "timm_a") == 8
     assert rows(conn, "timm_b") == 2                           # the laptop's, untouched
     assert not (home / "embeddings-archive" / "timm_b-before-r1").exists()

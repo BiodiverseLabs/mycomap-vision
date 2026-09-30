@@ -345,7 +345,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
            "finetuned": {n: {k: m.get(k) for k in FINETUNE_KEYS} for n, m in finetuned.items()},
            "comparison_id": comparison["comparison_id"] if comparison else None,
            "sample_records": kept, "code_version": config.code_version(),
-           "stages": progress.data["stages"]}
+           "stages": progress.data["stages"], "finished_at": _now()}
     snap = snapshot(conn, data_dir / "manifest-out.sqlite")
     upload(snap, f"{prefix}manifest-out.sqlite")
     progress.data.update(state=out["state"], comparison_id=out["comparison_id"],
@@ -378,10 +378,12 @@ def run_summary(doc: dict) -> dict:
     progress.json (still running, stopped, or killed): the backbones it embedded
     completely, the models it fine-tuned, and the stages that are missing, with why."""
     if "stages" not in doc:                 # a result.json from before stages were recorded
-        return {**doc, "complete": True, "missing": []}
-    embedded, finetuned, missing = {}, {}, []
+        return {**doc, "complete": True, "missing": [],
+                "done": list(doc.get("embedded", {})) + list(doc.get("finetuned", {}))}
+    embedded, finetuned, missing, done = {}, {}, [], []
     for s in doc["stages"]:
         if s.get("status") == "done":
+            done.append(f"{s['kind']} {s['name']}")
             if s["kind"] == "embed":
                 embedded[s["name"]] = {k: s.get(k) for k in ("photos", "skipped",
                                                               "per_second", "seconds")}
@@ -393,7 +395,7 @@ def run_summary(doc: dict) -> dict:
     return {"run_id": doc["run_id"], "state": doc.get("state"),
             "complete": doc.get("state") == "finished" and not missing,
             "code_version": doc.get("code_version"), "embedded": embedded,
-            "finetuned": finetuned, "missing": missing,
+            "finetuned": finetuned, "missing": missing, "done": done,
             "comparison_id": doc.get("comparison_id"),
             "sample_records": doc.get("sample_records")}
 

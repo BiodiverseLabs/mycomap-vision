@@ -489,9 +489,9 @@ def pull_trainer(conn, run_id: str, log=print) -> dict:
                            f"setup (see s3://{b}/{prefix}train.log)")
     summary = trainer.run_summary(doc)
     if not summary["complete"]:
-        log(f"run {run_id} is NOT complete (state: {summary.get('state')}, last update "
-            f"{doc.get('updated_at')}); bringing home only the stages it finished: "
-            f"{', '.join(list(summary['embedded']) + list(summary['finetuned'])) or 'none'}")
+        log(f"run {run_id} is NOT complete (state: {summary.get('state')}, last written "
+            f"{doc.get('updated_at') or doc.get('finished_at')}); bringing home only the "
+            f"stages it finished: {', '.join(summary['done']) or 'none'}")
         for m in summary["missing"]:
             log(f"  missing: {m['stage']} ({m['status']}{': ' + m['why'] if m['why'] else ''})")
     index = fetch(trainer.INDEX_FILE) or fetch("manifest-out.sqlite")
