@@ -131,6 +131,16 @@ sudo chmod 600 /etc/mycomap-vision/org-vision-key
 `MV_LICENSE_REFRESH_HOURS=24`. After a restart, `.venv/bin/mv permissions` shows
 the last read.
 
+Only a well-formed answer replaces the box's copy. mycomap.org never deletes an
+answer, so an answer that leaves out anyone the box already has (an empty one
+included) is refused as suspicious: the last good list stays, withdrawals
+included, and the refusal shows under `last_attempt` in `mv permissions` and as an
+error in `journalctl -u mycomap-vision`. If people really were removed on
+mycomap.org, take the shorter list once with
+`.venv/bin/mv permissions --sync --accept-shrink`. The last good list is also kept
+in `/srv/mycomap-vision/state/photo-permissions.json`, outside the releases, and
+put back at startup when it is newer than the new release's manifest.
+
 ### 6. First release (laptop, then box)
 
 A release is what the site serves: a snapshot of the manifest, the served
@@ -225,17 +235,32 @@ restart.
 
 ## Memory on the 4 GB box
 
-The server holds three things in RAM:
-- BioCLIP 2, about 1.7 GB with its unused text tower;
-- the reference vectors, float16, about 1.5 KB per photo, so about 0.9 GB for all ~593k photos;
-- the nearest-specimen index, which today is a float32 copy of those vectors, about 1.8 GB for all photos.
+Measured in a Linux container with the box's packages, on the full photo set
+(593,224 reference photos; `anon` is memory only the process holds, `RSS` also
+counts file pages mapped from disk, which the kernel can drop and re-read):
 
-A sample-sized release fits easily. The full photo set does not fit as the code
-stands. Before publishing a full release, either:
-- trim the server's memory: drop the text tower, keep the nearest-specimen copy
-  in float16, and free the vectors once the index is built; or
-- move to the 8 GB plan: take a snapshot, create a bigger instance from it,
-  move the static IP.
+| | anon | RSS |
+|---|---|---|
+| BioCLIP 2 + index, steady | 0.6 GB | 2.7 GB |
+| peak while rebuilding the index (a withdrawal) | 1.1 GB | 4.0 GB* |
+| peak at startup (loading the model and building the index) | 2.1 GB | 3.0 GB |
+| an identification with 10 phone photos | +0.1 GB | |
+
+\* RSS counts the vector files twice while the old and new index both map them;
+they are one copy in memory. Before `fix/serving-memory-and-withdrawals` the same
+steps took 1.8 GB anon steady and 4.8 GB anon (6.1 GB RSS) while rebuilding.
+
+What is where:
+- BioCLIP 2's image tower, ~1.2 GB, read from its safetensors file.
+- The reference vectors, float16, ~1.5 KB per photo (0.9 GB for all photos),
+  memory-mapped from the release's embedding files (`serving.py`), never copied
+  into memory. A rebuilt index maps the same files, and is built on its own
+  thread and swapped in whole; identifications wait for it (up to
+  `MV_INDEX_WAIT_SECONDS`, default 20) or get "try again shortly".
+- The index's own tables, ~70 MB (`identify.Specimens`). Building one needs
+  ~0.5 GB for a few seconds while the records are read.
+- Uploaded photos, kept at twice the model's input size (448 px for BioCLIP 2),
+  ~1 MB each (`uploads.py`).
 
 `MemoryMax=3500M` in the unit makes the server restart rather than starve sshd.
 `journalctl -u mycomap-vision` shows when that happens.

@@ -1,5 +1,6 @@
 """Photographers' answers from mycomap.org, and what may be shown or used because of them."""
 
+import json
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -81,10 +82,13 @@ def test_fetch_failures_say_why_and_never_repeat_the_key(response, reason):
 def test_a_sync_replaces_the_copy_and_records_the_attempt(conn):
     permissions.sync(conn, "https://org", KEY, fetcher=lambda b, k: answer((1, "granted"), (2, "withdrawn")),
                      now=lambda: NOW)
-    stats = permissions.sync(conn, "https://org", KEY, fetcher=lambda b, k: answer((2, "granted")),
+    # Person 2 changed their mind: a grant is the one way out of a withdrawal.
+    stats = permissions.sync(conn, "https://org", KEY,
+                             fetcher=lambda b, k: answer((1, "granted"), (2, "granted")),
                              now=lambda: NOW + timedelta(minutes=5))
-    assert stats == {"people": 1, "granted": 1, "withdrawn": 0}
-    assert [tuple(r) for r in conn.execute("select inat_user_id, status from photo_permissions")] == [(2, "granted")]
+    assert stats == {"people": 2, "granted": 2, "withdrawn": 0}
+    assert [tuple(r) for r in conn.execute("select inat_user_id, status from photo_permissions "
+                                           "order by 1")] == [(1, "granted"), (2, "granted")]
     assert permissions.last_good_sync(conn) == NOW + timedelta(minutes=5)
 
 
@@ -101,6 +105,119 @@ def test_a_failed_or_malformed_sync_keeps_the_previous_copy_and_is_recorded(conn
     assert permissions.last_good_sync(conn) == NOW
     report = permissions.status_report(conn)
     assert report["last_attempt"]["ok"] is False and report["granted"] == 1
+
+
+def copy_of(conn):
+    return [tuple(r) for r in conn.execute("select inat_user_id, status from photo_permissions "
+                                           "order by 1")]
+
+
+def synced(conn, *rows, at=NOW, **kw):
+    return permissions.sync(conn, "https://org", KEY, fetcher=lambda b, k: answer(*rows),
+                            now=lambda: at, **kw)
+
+
+@pytest.mark.parametrize("bad, why", [
+    (lambda b, k: answer(), "it is empty"),
+    (lambda b, k: answer((1, "granted")), "leaves out 1 of the 2 people"),
+    (lambda b, k: answer((1, "granted"), (3, "granted")), "leaves out 1 of the 2 people"),
+    (lambda b, k: {"generatedAt": "2026-10-01T12:00:00Z"}, "no permissions list"),
+    (lambda b, k: {"permissions": [{"inatUserId": 2, "status": "granted"}]}, "no generatedAt"),
+    (lambda b, k: [], "no permissions list"),
+])
+def test_an_empty_or_malformed_answer_never_clears_the_withdrawals(conn, bad, why):
+    synced(conn, (1, "granted"), (2, "withdrawn"))
+    with pytest.raises(PermissionSyncError, match=why):
+        permissions.sync(conn, "https://org", KEY, fetcher=bad, now=lambda: NOW + timedelta(minutes=5))
+    assert copy_of(conn) == [(1, "granted"), (2, "withdrawn")], "the last good list is kept"
+    assert permissions.last_good_sync(conn) == NOW
+    assert permissions.status_report(conn)["last_attempt"]["ok"] is False
+
+
+def test_a_refused_answer_is_logged_loudly_with_what_to_do(conn, caplog):
+    synced(conn, (2, "withdrawn"))
+    with pytest.raises(PermissionSyncError):
+        synced(conn, at=NOW + timedelta(minutes=5))
+    [msg] = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert "REFUSED" in msg and "1 of them withdrawn" in msg and "--accept-shrink" in msg
+
+
+def test_the_first_answer_may_be_empty_and_later_ones_may_grow(conn):
+    assert synced(conn) == {"people": 0, "granted": 0, "withdrawn": 0}
+    synced(conn, (1, "withdrawn"), at=NOW + timedelta(minutes=5))
+    synced(conn, (1, "withdrawn"), (3, "granted"), at=NOW + timedelta(minutes=10))
+    assert copy_of(conn) == [(1, "withdrawn"), (3, "granted")]
+
+
+def test_an_operator_can_accept_a_shorter_list_on_purpose(conn):
+    synced(conn, (1, "granted"), (2, "withdrawn"))
+    synced(conn, (1, "granted"), at=NOW + timedelta(minutes=5), accept_shrink=True)
+    assert copy_of(conn) == [(1, "granted")]
+
+
+def test_a_good_answer_is_saved_outside_the_manifest_and_a_refused_one_is_not(conn, tmp_path):
+    state = tmp_path / "state" / "photo-permissions.json"
+    synced(conn, (2, "withdrawn"), state=state)
+    saved = json.loads(state.read_text())
+    assert saved["answer"]["permissions"][0]["inatUserId"] == 2
+    with pytest.raises(PermissionSyncError):
+        synced(conn, at=NOW + timedelta(minutes=5), state=state)
+    assert json.loads(state.read_text()) == saved
+
+
+def test_the_server_box_keeps_the_last_good_list_under_the_release_root(monkeypatch, tmp_path):
+    from mycomap_vision import config
+    monkeypatch.delenv("MV_PERMISSIONS_STATE", raising=False)
+    monkeypatch.setattr(config, "RELEASE_ROOT", tmp_path)
+    assert permissions.state_path() == tmp_path / "state" / "photo-permissions.json"
+    monkeypatch.setattr(config, "RELEASE_ROOT", None)
+    assert permissions.state_path() is None
+    monkeypatch.setenv("MV_PERMISSIONS_STATE", str(tmp_path / "x.json"))
+    assert permissions.state_path() == tmp_path / "x.json"
+
+
+def test_a_withdrawal_holds_across_a_restart_onto_a_new_releases_manifest(conn, tmp_path,
+                                                                          monkeypatch):
+    from fastapi.testclient import TestClient
+    from test_api import open_limits
+    from test_models_and_scoreboard import Const
+    state = tmp_path / "state.json"
+    monkeypatch.setenv("MV_PERMISSIONS_STATE", str(state))
+    client = app_with_model(conn, tmp_path)
+    set_photo(conn, 1002, "arr", 43)                 # obs 102
+    permissions.sync(conn, "https://org", KEY, fetcher=lambda b, k: answer((43, "withdrawn")),
+                     now=lambda: datetime.now(timezone.utc))
+    assert "102" not in specimens(client)
+
+    def new_release_and_restart():
+        # The new release's manifest was snapshotted before anyone answered, and
+        # mycomap.org can't be reached (no background sync).
+        conn.execute("delete from photo_permissions")
+        conn.execute("delete from permission_syncs")
+        conn.commit()
+        return TestClient(api.create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
+                                         backbone_loader=lambda n: Const(n), limits=open_limits(),
+                                         background=False, web_dist=None, note=lambda s: None))
+    assert "102" not in specimens(new_release_and_restart()), "withdrawn stays out"
+    assert copy_of(conn) == [(43, "withdrawn")]
+    state.unlink()                                   # without the saved list, it would be back
+    assert "102" in specimens(new_release_and_restart())
+
+
+def test_a_saved_list_older_than_the_manifests_copy_is_not_put_back(conn, tmp_path):
+    state = tmp_path / "state.json"
+    synced(conn, (2, "withdrawn"), state=state)
+    synced(conn, (2, "granted"), at=NOW + timedelta(hours=1), state=None)
+    assert permissions.restore_last_good(conn, state, note=lambda s: None) is False
+    assert copy_of(conn) == [(2, "granted")]
+
+
+def test_an_unreadable_saved_list_is_said_and_ignored(conn, tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text("{not json")
+    notes = []
+    assert permissions.restore_last_good(conn, state, note=notes.append) is False
+    assert notes and "unreadable" in notes[0]
 
 
 # --- the showing rule ----------------------------------------------------------
@@ -214,7 +331,8 @@ def test_each_photos_own_specimens_follow_the_same_showing_rule(conn, tmp_path):
     assert by_obs["106"]["photo_url"].endswith("/medium.jpg") and by_obs["106"]["photo_owner"] == "alice"
     assert all(s["observation_id"] != "107" for p in (red, blue) for s in p["specimens"]), \
         "a withdrawn photographer's record is out of every photo's list"
-    permissions.save_snapshot(conn, answer((43, "withdrawn")), datetime.now(timezone.utc))
+    permissions.save_snapshot(conn, answer((43, "withdrawn")), datetime.now(timezone.utc),
+                              accept_shrink=True)          # 42's answer removed on purpose
     red = post_photos(client, [247, 12], "m1/nearest").json()["results"][0]["per_photo"][0]
     s106 = next(s for s in red["specimens"] if s["observation_id"] == "106")
     assert s106["photo_url"] is None and s106["photo_withheld"], "no grant: not shown"

@@ -348,7 +348,7 @@ def cmd_permissions(conn, args) -> None:
     from . import permissions
     if args.sync:
         try:
-            print(json.dumps(permissions.sync(conn), indent=2))
+            print(json.dumps(permissions.sync(conn, accept_shrink=args.accept_shrink), indent=2))
         except permissions.PermissionSyncError as e:
             print(f"sync failed: {e}", file=sys.stderr)
             sys.exit(1)
@@ -575,6 +575,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("permissions", help="photographers' answers from mycomap.org "
                                            "(needs MV_ORG_BASE_URL and MV_ORG_VISION_KEY)")
     p.add_argument("--sync", action="store_true", help="pull the answers now")
+    p.add_argument("--accept-shrink", action="store_true",
+                   help="with --sync: take an answer that leaves out people the last good "
+                        "list has (refused otherwise: mycomap.org never deletes an answer)")
 
     p = sub.add_parser("refresh-licenses", help="re-read photo licences from iNat for records "
                                                 "last checked long ago (mv serve can do this daily)")

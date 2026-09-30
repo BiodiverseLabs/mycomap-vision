@@ -10,13 +10,11 @@ are in guards.py and set from the environment. Sign-in with a mycomap.org accoun
 from __future__ import annotations
 
 import html
-import io
 import logging
 import secrets
 import sqlite3
 import threading
 import time
-import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,15 +23,14 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from PIL import Image, ImageOps
+from PIL import Image
 
-from . import config, evaluate, inat, models, names, permissions
+from . import config, evaluate, inat, models, names, permissions, serving, uploads
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
-                     TooLarge, check_image_size)
-from .exif import place_and_date
+                     TooLarge)
 from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
 from .prior import Context
 from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
@@ -95,20 +92,16 @@ class Preload:
     error: str | None = None
 
 
-def read_photo(upload: UploadFile) -> tuple[Image.Image, tuple]:
-    """One uploaded photo, refusing oversized files and images before decoding them.
-    Also returns its EXIF (latitude, longitude, date), used only for scoring."""
+def read_photo(upload: UploadFile, side: int = uploads.kept_side([])) -> tuple[Image.Image, tuple]:
+    """One uploaded photo, refusing oversized files and images before decoding them,
+    decoded once and kept only at the size the models need (uploads.py: shorter side
+    `side`). Also returns its EXIF (latitude, longitude, date), read before shrinking,
+    used only for scoring."""
     body = upload.file.read(MAX_FILE_BYTES + 1)
     if len(body) > MAX_FILE_BYTES:
         raise HTTPException(413, f"{upload.filename} is over {MAX_FILE_BYTES // 2**20} MB")
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-            img = Image.open(io.BytesIO(body))
-        check_image_size(img)
-        found = place_and_date(img)
-        img = ImageOps.exif_transpose(img)
-        return img.convert("RGB"), found
+        return uploads.decode_upload(body, side)
     except TooLarge as e:
         raise HTTPException(413, f"{upload.filename}: {e}")
     except Exception:
@@ -264,9 +257,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     manifest_path = manifest_path or config.MANIFEST_PATH
     conn = open_manifest(manifest_path)
+    # Before anything is built: a new release's manifest may hold an older list of who
+    # withdrew than the one this box last read (permissions.py).
+    permissions.restore_last_good(conn, note=note)
     db_lock = threading.Lock()
     gpu_lock = threading.Lock()
-    identifiers: dict[tuple[str, str], tuple[tuple, Identifier]] = {}
     backbones: dict[str, object] = {}
 
     def q(sql: str, params: tuple = ()):
@@ -291,28 +286,37 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         marks = ",".join("?" for _ in photo_ids)
         return photo_info_rows(q(f"{PHOTO_INFO_SQL} where photo_id in ({marks})", tuple(photo_ids)))
 
+    def build_index(key: tuple[str, str], version: tuple) -> Identifier:
+        backbone, method = key
+        with db_lock:
+            cal = evaluate.latest_calibration(conn, backbone, method)
+        root = embeddings_root / backbone if embeddings_root else None
+        # Its own connection, not the shared one: building reads the whole reference set
+        # (tens of seconds on the box), and holding db_lock that long stalled every
+        # other page. ServedIndexes runs builds one at a time, off the request path.
+        own = sqlite3.connect(manifest_path, timeout=30)
+        try:
+            ident = Identifier(own, backbone, method, root, calibration=cal,
+                               train=limits.fit_on_demand, photo_info=False)
+        finally:
+            own.close()
+        ident.warm()
+        return ident
+
+    # Rebuilt (someone withdrew, a new calibration) on its own thread and swapped in
+    # whole; the old index is released after, and serves on if a build fails.
+    indexes = serving.ServedIndexes(build_index, note=note, release=models.release_memory,
+                                    wait=_setting_number("MV_INDEX_WAIT_SECONDS") or 20.0)
+
     def identifier(backbone: str, method: str, view: permissions.PermissionView) -> Identifier:
+        """The index as the data stand now. May wait for a rebuild (serving.Updating if
+        it takes too long); never call it holding gpu_lock."""
         n = embedded_counts().get(backbone, 0)
         with db_lock:
             cal = evaluate.latest_calibration(conn, backbone, method)
         # A change in who has said no rebuilds the reference set without their photos.
         version = (n, cal["run_id"] if cal else None, view.fingerprint())
-        cached = identifiers.get((backbone, method))
-        if cached and cached[0] == version:
-            return cached[1]
-        root = embeddings_root / backbone if embeddings_root else None
-        # Its own connection, not the shared one: building reads the whole reference set
-        # (tens of seconds on the box), and holding db_lock that long stalled every
-        # other page. gpu_lock (held by the caller) still keeps builds one at a time.
-        own = sqlite3.connect(manifest_path, timeout=30)
-        try:
-            ident = Identifier(own, backbone, method, root, calibration=cal,
-                               train=limits.fit_on_demand)
-        finally:
-            own.close()
-        identifiers[(backbone, method)] = (version, ident)
-        models.release_memory()
-        return ident
+        return indexes.get((backbone, method), version)
 
     warm = Preload()
 
@@ -414,6 +418,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(400, "add at least one photo")
         if len(photos) > MAX_PHOTOS:
             raise HTTPException(400, f"at most {MAX_PHOTOS} photos")
+        # The content-length check (cap_request_size) misses a chunked upload.
+        if sum(f.size or 0 for f in photos) > MAX_REQUEST_BYTES:
+            raise HTTPException(413, f"the photos are over {MAX_REQUEST_BYTES // 2**20} MB together")
         if not in_flight.enter():
             raise HTTPException(503, "busy identifying other photos; try again shortly",
                                 headers={"Retry-After": "10"})
@@ -427,7 +434,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             in_flight.leave()
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context") -> dict:
-        read = [read_photo(f) for f in photos]
+        side = uploads.kept_side(list(backbones.values()))
+        read = [read_photo(f, side) for f in photos]         # one at a time, kept small
         images = [img for img, _ in read]
         context, used = fill_context(context, [found for _, found in read])
         ready = ready_backbones()
@@ -455,24 +463,24 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise HTTPException(400, f"unknown method {method!r}")
             if not limits.method_allowed(method):
                 raise HTTPException(400, f"{method!r} is not offered here")
+            try:
+                ident = identifier(backbone, method, view)
+            except NotTrainedHere as e:
+                raise HTTPException(503, f"{backbone}/{method} isn't ready on this "
+                                         f"server ({e})") from e
+            except serving.Updating as e:
+                raise HTTPException(503, str(e), headers={"Retry-After": "30"}) from e
             with gpu_lock:
-                try:
-                    ident, model = prepared(backbone, method, view)
-                except NotTrainedHere as e:
-                    raise HTTPException(503, f"{backbone}/{method} isn't ready on this "
-                                             f"server ({e})") from e
-                results.append(ident.identify(model, images, context=context,
+                results.append(ident.identify(backbone_model(backbone), images, context=context,
                                               photo_lookup=photo_lookup, may_show=may_show))
         return {"results": results, "context_used": used}
 
-    def prepared(backbone: str, method: str, view) -> tuple[Identifier, object]:
-        """The index and the model for one backbone/method, loaded once. Call with
-        gpu_lock held."""
-        ident = identifier(backbone, method, view)
+    def backbone_model(backbone: str):
+        """The model for one backbone, loaded once. Call with gpu_lock held."""
         if backbone not in backbones:
             backbones[backbone] = backbone_loader(backbone)
             models.release_memory()
-        return ident, backbones[backbone]
+        return backbones[backbone]
 
     def run_preload(specs: list[str]) -> None:
         start = time.monotonic()
@@ -490,8 +498,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise ValueError(f"{backbone!r} is not offered here or has no embeddings")
                 if method not in evaluate.METHODS or not limits.method_allowed(method):
                     raise ValueError(f"{method!r} is unknown or not offered here")
+                identifier(backbone, method, permission_view())
                 with gpu_lock:
-                    prepared(backbone, method, permission_view())
+                    backbone_model(backbone)
                 names.append(f"{backbone}/{method}")
             warm.models, warm.state = names, "ready"
             warm.seconds = round(time.monotonic() - start, 1)

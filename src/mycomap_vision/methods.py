@@ -32,10 +32,13 @@ class Scorer:
             import torch
             if torch.cuda.is_available():
                 self.torch = torch
-                self.ref = torch.from_numpy(ref_vecs.astype(np.float16)).cuda()
+                self.ref = torch.from_numpy(np.asarray(ref_vecs, dtype=np.float16)).cuda()
         except ImportError:
             pass
         if self.torch is None:
+            if hasattr(ref_vecs, "sims"):       # memory-mapped (serving.MappedSelection)
+                self.ref = ref_vecs
+                return
             keep = ref_vecs.dtype if ref_vecs.dtype in (np.float16, np.float32) else np.float32
             self.ref = np.ascontiguousarray(ref_vecs, dtype=keep)
 
@@ -43,11 +46,21 @@ class Scorer:
         if self.torch is not None:
             q = self.torch.from_numpy(query.astype(np.float16)).cuda()
             return (q @ self.ref.T).float().cpu().numpy()
+        if hasattr(self.ref, "sims"):
+            return self.ref.sims(query)
         q = query.astype(np.float32)
         out = np.empty((len(q), len(self.ref)), dtype=np.float32)
         for s in range(0, len(self.ref), self.CHUNK):
             out[:, s:s + self.CHUNK] = q @ self.ref[s:s + self.CHUNK].astype(np.float32).T
         return out
+
+
+def reference_rows(vectors, index):
+    """The reference photos' vectors in species order (vectors[index.cols]). From
+    memory-mapped vectors (serving.MappedVectors) this is a selection scored straight
+    from disk, not a copy in memory."""
+    select = getattr(vectors, "select", None)
+    return select(index.cols) if select is not None else vectors[index.cols]
 
 
 def species_scores(sims: np.ndarray, index) -> np.ndarray:
@@ -79,7 +92,7 @@ class NearestSpecimen:
 
     def fit(self, vectors: np.ndarray, index) -> None:
         self.index = index
-        self.scorer = Scorer(vectors[index.cols])   # species-sorted, so reduceat works
+        self.scorer = Scorer(reference_rows(vectors, index))   # species-sorted, so reduceat works
 
     def species_scores(self, query: np.ndarray) -> np.ndarray:
         return species_scores(self.scorer.sims(query), self.index)
