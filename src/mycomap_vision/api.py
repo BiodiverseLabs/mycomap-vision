@@ -10,13 +10,11 @@ are in guards.py and set from the environment. Sign-in with a mycomap.org accoun
 from __future__ import annotations
 
 import html
-import io
 import logging
 import secrets
 import sqlite3
 import threading
 import time
-import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,15 +23,14 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from PIL import Image, ImageOps
+from PIL import Image
 
-from . import config, evaluate, inat, models, names, permissions, serving
+from . import config, evaluate, inat, models, names, permissions, serving, uploads
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
-                     TooLarge, check_image_size)
-from .exif import place_and_date
+                     TooLarge)
 from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
 from .prior import Context
 from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
@@ -95,20 +92,16 @@ class Preload:
     error: str | None = None
 
 
-def read_photo(upload: UploadFile) -> tuple[Image.Image, tuple]:
-    """One uploaded photo, refusing oversized files and images before decoding them.
-    Also returns its EXIF (latitude, longitude, date), used only for scoring."""
+def read_photo(upload: UploadFile, side: int = uploads.kept_side([])) -> tuple[Image.Image, tuple]:
+    """One uploaded photo, refusing oversized files and images before decoding them,
+    decoded once and kept only at the size the models need (uploads.py: shorter side
+    `side`). Also returns its EXIF (latitude, longitude, date), read before shrinking,
+    used only for scoring."""
     body = upload.file.read(MAX_FILE_BYTES + 1)
     if len(body) > MAX_FILE_BYTES:
         raise HTTPException(413, f"{upload.filename} is over {MAX_FILE_BYTES // 2**20} MB")
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-            img = Image.open(io.BytesIO(body))
-        check_image_size(img)
-        found = place_and_date(img)
-        img = ImageOps.exif_transpose(img)
-        return img.convert("RGB"), found
+        return uploads.decode_upload(body, side)
     except TooLarge as e:
         raise HTTPException(413, f"{upload.filename}: {e}")
     except Exception:
@@ -422,6 +415,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(400, "add at least one photo")
         if len(photos) > MAX_PHOTOS:
             raise HTTPException(400, f"at most {MAX_PHOTOS} photos")
+        # The content-length check (cap_request_size) misses a chunked upload.
+        if sum(f.size or 0 for f in photos) > MAX_REQUEST_BYTES:
+            raise HTTPException(413, f"the photos are over {MAX_REQUEST_BYTES // 2**20} MB together")
         if not in_flight.enter():
             raise HTTPException(503, "busy identifying other photos; try again shortly",
                                 headers={"Retry-After": "10"})
@@ -435,7 +431,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             in_flight.leave()
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context") -> dict:
-        read = [read_photo(f) for f in photos]
+        side = uploads.kept_side(list(backbones.values()))
+        read = [read_photo(f, side) for f in photos]         # one at a time, kept small
         images = [img for img, _ in read]
         context, used = fill_context(context, [found for _, found in read])
         ready = ready_backbones()
