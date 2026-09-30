@@ -3,3 +3,5 @@
 *.service text eol=lf
 *.template text eol=lf
 *.conf text eol=lf
+# A copy of mycomap.org's file, kept byte for byte.
+tests/data/name-variants.json -text

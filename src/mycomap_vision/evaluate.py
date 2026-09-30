@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config
+from . import config, names
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
 from .permissions import EXCLUDED_FROM_USE_SQL
@@ -46,6 +46,7 @@ class Record:
     longitude: float | None = None
     observed_on: str | None = None
     projects: tuple[str, ...] = ()      # the .org projects that marked it green
+    stored_name: str = ""              # the name as .org spells it, when the label differs
 
 
 def context_of(rec: "Record"):
@@ -63,7 +64,11 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
 
     Every reference set, comparison and training run is built here, so this is
     where photos a photographer has refused us (all rights reserved, permission
-    withdrawn on mycomap.org; see permissions.py) are left out."""
+    withdrawn on mycomap.org; see permissions.py) are left out.
+
+    A record's species is its label: the stored name, or the one spelling its
+    name shares with the other ways of writing it (names.py). Labels come from
+    every name in the manifest, so test and reference records of one taxon agree."""
     na = "and r.north_america = 1" if north_america_only else ""
     ensure_permissions_schema(conn)
     rows = conn.execute(f"""
@@ -76,16 +81,23 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
       where r.label_conflict = 0 {na} and {EXCLUDED_FROM_USE_SQL}
       order by r.observation_id, op.position
     """).fetchall()
+    labels = names.manifest_labels(conn)
     recs: dict[str, Record] = {}
     for oid, name, genus, family, vdate, login, pid, _pos, lat, lon, observed, projects in rows:
         if pid not in photo_row or not clean(name):
             continue
         rec = recs.get(oid)
         if rec is None:
-            rec = recs[oid] = Record(oid, clean(name), clean(genus) or clean(name).split()[0],
+            label = clean(labels.get(name, name))
+            respelled = label != clean(name)
+            # A merged label names its own genus: the genus column may be as old as the spelling.
+            rec = recs[oid] = Record(oid, label,
+                                     label.split()[0] if respelled
+                                     else clean(genus) or label.split()[0],
                                      clean(family), vdate, login, latitude=lat, longitude=lon,
                                      observed_on=observed,
-                                     projects=tuple(json.loads(projects or "[]")))
+                                     projects=tuple(json.loads(projects or "[]")),
+                                     stored_name=clean(name) if respelled else "")
         rec.photo_rows.append(photo_row[pid])
     return list(recs.values())
 

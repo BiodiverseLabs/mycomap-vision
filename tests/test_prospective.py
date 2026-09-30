@@ -91,3 +91,39 @@ def test_only_predictions_made_before_the_record_turned_green_count(conn):
     assert model["predicted"] == 3 and model["resolved"] == 2
     assert model["species_top1"] == 0.5 and model["genus_top1"] == 1.0
     assert model["mean_species_confidence"] == 0.7
+
+
+def predicted_then_validated(conn, pairs):
+    """Records predicted on 9/1 (the answer given) that turned green on 9/10 (the DNA name)."""
+    green = []
+    for i, (answer, dna_name) in enumerate(pairs):
+        oid = str(50 + i)
+        conn.execute("insert into predictions values (?, 'm1', 'hybrid', "
+                     "'2026-09-01T00:00:00+00:00', 'v', 1, 1, ?)",
+                     (oid, json.dumps({"species": [{"name": answer, "confidence": 0.6}],
+                                       "genus": [{"name": answer.split()[0], "confidence": 0.9}]})))
+        green.append({"observation_id": oid, "scientific_name": dna_name,
+                      "genus": dna_name.split()[0], "family": "F",
+                      "continent": "North America", "validation_status_1": "yes"})
+    save_records(conn, build_records(green, "2026-09-10T00:00:00+00:00"))
+    [model] = prospective.report(conn)
+    return model
+
+
+def test_an_answer_spelled_another_way_than_the_dna_name_is_right(conn):
+    conn.executescript(prospective.SCHEMA)
+    model = predicted_then_validated(conn, [
+        ("Inocybe PNW18", "Inocybe sp. 'PNW18'"),          # an old spelling, gone from .org
+        ("Clitocybe sp. 'PNW01'", 'Clitocybe "sp-PNW01"'),  # the label of a name not yet fixed
+        ("Inocybe sp. 'PNW18'", "Inocybe sp. 'PNW19'")])    # another code: wrong
+    assert model["resolved"] == 3
+    assert model["species_top1"] == round(2 / 3, 4)
+    assert model["genus_top1"] == 1.0
+
+
+def test_an_answer_that_differs_by_more_than_spelling_is_still_wrong(conn):
+    conn.executescript(prospective.SCHEMA)
+    model = predicted_then_validated(conn, [
+        ("Mycena sp. 'IN7'", "Mycena sp. 'IN07'"),                           # a person decides
+        ("Craterellus neotubaeformis", "Craterellus sp. 'neotubaeformis'")])
+    assert model["resolved"] == 2 and model["species_top1"] == 0.0

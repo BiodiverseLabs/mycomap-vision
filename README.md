@@ -31,6 +31,8 @@ of green records?
 
 `mv status` prints counts. `mv contributors [--arr-only]` writes the list of
 photographers, with their all-rights-reserved photo counts, for permission requests.
+`mv name-spellings [--json]` lists the names written more than one way: how many
+Vision merges, and the ones a person has to decide (read-only).
 
 ### Photo permission
 
@@ -83,6 +85,12 @@ The label is the record's `scientific_name` on .org. A record is included when
 any of its three flattened validation slots on .org is `yes`. Records green only
 in a fourth or later project are missed (small). Records with more than one name
 on .org are flagged `label_conflict` and are not used for training.
+
+Spellings of one name are one label: `Inocybe PNW18` and `Inocybe "sp-PNW18"` are
+both `Inocybe sp. 'PNW18'`. Only differences in writing are merged; a code that is
+also in use as a plain name, IN7 / IN07 and described codes stay separate until
+someone decides on mycomap.org. The manifest keeps the name as .org spells it
+(`names.py`, the same rule as mycomap.org's `services/nameVariants.ts`).
 
 ### Photos and licenses
 

@@ -223,6 +223,8 @@ def lookup(client, name: str, rank: str) -> dict | None:
 def resolve_truth(client, rec: Record) -> Truth:
     # Full name first: iNat now carries some provisional names as species-rank taxa.
     sp = lookup(client, rec.species, "species")
+    if sp is None and rec.stored_name:      # iNat may know the name as .org still spells it
+        sp = lookup(client, rec.stored_name, "species")
     binomial = plain_binomial(rec.species)
     if sp is None and binomial and binomial != rec.species:
         sp = lookup(client, binomial, "species")
