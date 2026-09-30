@@ -61,6 +61,17 @@ the working plan; update it as phases land.
       Collybiopsis), 72 iNat puts in no family, 32 not a Latin genus name, 87 one-word names
       iNat has at no rank above genus (mostly subgenera and sections: Cyanula, Dermocybe).
       Records: 27,788 blank families filled, 33,326 changed.
+- [x] One-word names at genus level only (2026-09-30, Steve's decision). A name of one
+      word ("Russula", "Agaricales", "Fungi") used to be a species of its own. Now such a
+      record has no species label, adds no species class (in the index, the trained heads
+      and fine-tuning it is a genus-level group), is never a species candidate in a result,
+      and isn't scored at species; it counts at genus when the word is a genus (iNat says
+      so, or, when iNat can't, the genus column agrees) and at family. A record with no
+      label left at family, genus or species is left out. On the manifest of 2026-09-29:
+      542 one-word names on 2,997 records (2,616 from iNat; 1,968 usable: North America,
+      photos, no conflict). 377 names (1,570 records) are genera, 69 (188 records) name
+      only a family, 96 (1,239 records: Unknown 506, Fungi 344, Agaricales 97...) have no
+      label at any rank Vision scores and are left out.
 
 ## Models: modular, side by side, on a scoreboard
 

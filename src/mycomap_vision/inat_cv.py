@@ -112,8 +112,10 @@ def score_records(records: list[Record], photo_scores: dict[str, list[dict]],
             photos = photos[:1]
         ranked = best_per_rank(photos, score)
         truth = truths[rec.observation_id]
-        b = bucket_of(ref_count.get(rec.species, 0))
+        b = bucket_of(ref_count.get(rec.unit, 0))
         for rank in RANKS:
+            if rank == "species" and not rec.species:
+                continue          # a one-word name has no species to be right about
             want = getattr(truth, rank)
             top = [tid for tid, _ in ranked[rank][:top_k]]
             hit1 = want is not None and top[:1] == [want]
@@ -223,10 +225,11 @@ def lookup(client, name: str, rank: str) -> dict | None:
 
 def resolve_truth(client, rec: Record) -> Truth:
     # Full name first: iNat now carries some provisional names as species-rank taxa.
-    sp = lookup(client, rec.species, "species")
-    if sp is None and rec.stored_name:      # iNat may know the name as .org still spells it
+    # A one-word name has no species (it is only scored at genus and family).
+    sp = lookup(client, rec.species, "species") if rec.species else None
+    if sp is None and rec.species and rec.stored_name:   # iNat may know .org's spelling
         sp = lookup(client, rec.stored_name, "species")
-    binomial = plain_binomial(rec.species)
+    binomial = plain_binomial(rec.species) if rec.species else None
     if sp is None and binomial and binomial != rec.species:
         sp = lookup(client, binomial, "species")
     genus_taxon = None
@@ -236,6 +239,9 @@ def resolve_truth(client, rec: Record) -> Truth:
         genus_taxon = lookup(client, rec.genus, "genus") if rec.genus else None
         genus_id = int(genus_taxon["id"]) if genus_taxon else None
         family_id = _ancestor(genus_taxon, "family") if genus_taxon else None
+        if genus_taxon is None and not rec.genus and rec.family:   # named only to family
+            family_taxon = lookup(client, rec.family, "family")
+            family_id = int(family_taxon["id"]) if family_taxon else None
     return Truth(species=int(sp["id"]) if sp else None, genus=genus_id, family=family_id,
                  species_known=sp is not None)
 
@@ -278,7 +284,7 @@ def run(conn: sqlite3.Connection, comparison_id: str, client: InatClient,
     if shared.record_set != saved[0]:
         raise RuntimeError("the comparison's records have changed since it ran (new data or "
                            "embeddings); run mv compare again and score that one")
-    ref_count = Counter(r.species for r in shared.ref)
+    ref_count = Counter(r.unit for r in shared.ref)
     photo_scores: dict[str, list[dict]] = {}
     truths: dict[str, Truth] = {}
     years: dict[str, str] = {}

@@ -9,6 +9,8 @@ Steve's decisions (2026-09-30):
   current replacement is named), a provisional one, one iNat puts in no family, or a
   name that isn't a Latin genus (a code, a note, a typo). A genus whose iNat family
   differs from the family most of its records carry on .org is applied, and listed.
+- A one-word name ("Russula", "Agaricales", "Fungi") is never a species
+  (`labels_for`): it counts at genus when the word is a genus, and at the ranks above.
 
 The lookup (`mv fetch-taxonomy`) asks iNat's public API, read-only, at most one
 request a second, with a User-Agent, backing off on 429 and 5xx. Names are searched
@@ -100,7 +102,7 @@ def is_latin_word(name: str) -> bool:
 
 
 def one_word(label: str) -> bool:
-    """A name of one word ('Russula', 'Agaricales')."""
+    """A name of one word ('Russula', 'Agaricales'): never a species (Steve, 2026-09-30)."""
     return len((label or "").split()) == 1
 
 
@@ -483,28 +485,40 @@ def for_manifest(conn: sqlite3.Connection) -> Taxonomy | None:
 
 @dataclass(frozen=True)
 class Labels:
-    species: str
+    species: str        # '' for a one-word name
     genus: str
     family: str
-    unit: str           # what the index groups the record under
+    unit: str           # what the index groups the record under: the species, or the one word
 
 
 def labels_for(label: str, genus_col: str, family_col: str, respelled: bool,
                tax: Taxonomy | None) -> Labels:
     """A record's species, genus and family.
 
-    Species: the label. Genus: a merged spelling names its own genus, otherwise the
-    genus column (the first word if blank). Family: iNat's for that genus when the
-    cache has an answer free of doubt, else .org's."""
+    Species: the label, unless it is one word, then none. Genus: a merged spelling
+    names its own genus, otherwise the genus column (the first word if blank); a
+    one-word name is its own genus when iNat has it as a genus, or, when iNat can't
+    say, when the genus column agrees. Family: iNat's for that genus when the cache
+    has an answer free of doubt, else a one-word higher name's own, else .org's."""
     label, genus_col, family_col = clean(label), clean(genus_col), clean(family_col)
     words = label.split()
     if not words:
         return Labels("", "", "", "")
-    species, unit = label, label
-    genus = words[0] if respelled else (genus_col or words[0])
+    if len(words) > 1:
+        species, unit = label, label
+        genus = words[0] if respelled else (genus_col or words[0])
+    else:
+        species, unit = "", label
+        is_genus = tax.is_genus(label) if tax else None
+        if is_genus is None:
+            is_genus = genus_col == label and is_latin_word(label)
+        genus = label if is_genus else ""
     family = family_col
-    if tax and genus in tax.genera:
-        family = tax.genera[genus]["family"]
+    if tax:
+        if genus and genus in tax.genera:
+            family = tax.genera[genus]["family"]
+        elif not genus and label in tax.higher:
+            family = tax.higher[label]["family"]
     return Labels(species, genus, family, unit)
 
 

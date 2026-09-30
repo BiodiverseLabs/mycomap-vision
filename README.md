@@ -105,6 +105,12 @@ iNat, two fungal genera of that name, inactive, provisional, not a Latin name) k
 .org's family and is listed by `mv taxonomy`, as is any genus whose iNat family
 differs from what most of its records say on .org (iNat's is applied).
 
+A one-word name ("Russula", "Agaricales") is never a species: the record has no
+species label, adds no species class, is never a species candidate and isn't scored
+at species. It counts at genus when the word is a genus (iNat says so, or, when iNat
+can't, the genus column agrees) and at family. A record left with no label at family,
+genus or species ("Fungi", "Agaricales", "Unknown") is left out.
+
 ### Photos and licenses
 
 All photos of green records are pulled, including all-rights-reserved ones

@@ -267,7 +267,8 @@ class Identifier:
         is {"candidates": [...], "position_of": where that name places here, 1-based}."""
         ranks: dict = {}
         for rank in RANKS:
-            names = self.index.species if rank == "species" else self.index.labels[rank]
+            # Species candidates are species only: never a one-word name (evaluate.Index).
+            names = self.index.labels[rank]
             rs = rank_scores(scores, self.index, rank)
             finite = np.isfinite(rs)
             conf = np.zeros_like(rs, dtype=np.float64)
@@ -328,6 +329,9 @@ class Identifier:
             info = candidates[shown] if shown is not None else None
             specimens.append({
                 "observation_id": rec.observation_id,
+                # A record named only to genus or family has no species; `name` is what it
+                # is named, at the finest rank it has.
+                "name": rec.species or rec.genus or rec.family,
                 "species": rec.species, "genus": rec.genus, "family": rec.family,
                 "similarity": round(score, 4),
                 "matched_query_photo": q_best,
@@ -335,7 +339,7 @@ class Identifier:
                 "photo_owner": info.owner_login if info else None,
                 "photo_withheld": info is None,
                 "inat_url": INAT_OBS_URL + rec.observation_id,
-                "species_url": ORG_SPECIES_URL + quote(rec.species),
+                "species_url": ORG_SPECIES_URL + quote(rec.species) if rec.species else None,
             })
         return specimens
 

@@ -9,6 +9,9 @@ a query record is the mean, over the query's photos, of each photo's best cosine
 similarity to any reference photo of that species. A species with one specimen
 competes on equal terms with one that has a thousand. Genus and family scores are
 the best species score inside them, so every rank gets its own answer.
+
+A record named with one word ("Russula", "Cortinariaceae") has no species: it is
+scored against, and scored on, its genus and family only (taxonomy.labels_for).
 """
 
 from __future__ import annotations
@@ -48,6 +51,12 @@ class Record:
     observed_on: str | None = None
     projects: tuple[str, ...] = ()      # the .org projects that marked it green
     stored_name: str = ""              # the name as .org spells it, when the label differs
+    taxon: str = ""                    # a one-word name ("Russula"): species is then ''
+
+    @property
+    def unit(self) -> str:
+        """What the index groups the record under: its species, or its one-word name."""
+        return self.species or self.taxon
 
 
 def context_of(rec: "Record"):
@@ -70,8 +79,11 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     A record's species is its label: the stored name, or the one spelling its
     name shares with the other ways of writing it (names.py). Labels come from
     every name in the manifest, so test and reference records of one taxon agree.
-    Family is iNaturalist's for the genus when the taxonomy cache beside the manifest
-    answers it (taxonomy.py), else .org's."""
+
+    A one-word name is no species: the record counts at genus (when the word is a
+    genus) and family only. Family is iNaturalist's for the genus when the taxonomy
+    cache beside the manifest answers it (taxonomy.py), else .org's. A record left
+    with no label at any rank ("Unknown", "Agaricales") is left out."""
     na = "and r.north_america = 1" if north_america_only else ""
     ensure_permissions_schema(conn)
     rows = conn.execute(f"""
@@ -87,9 +99,10 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     labels = names.manifest_labels(conn)
     tax = taxonomy.for_manifest(conn)
     recs: dict[str, Record] = {}
+    unlabelled: set[str] = set()
     for (oid, name, genus, family, vdate, login, pid, _pos, lat, lon, org_observed,
          inat_observed, projects) in rows:
-        if pid not in photo_row or not clean(name):
+        if pid not in photo_row or not clean(name) or oid in unlabelled:
             continue
         rec = recs.get(oid)
         if rec is None:
@@ -97,6 +110,9 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
             respelled = label != clean(name)
             # A merged label names its own genus: the genus column may be as old as the spelling.
             lab = taxonomy.labels_for(label, genus, family, respelled, tax)
+            if not (lab.species or lab.genus or lab.family):
+                unlabelled.add(oid)
+                continue
             rec = recs[oid] = Record(oid, lab.species, lab.genus, lab.family,
                                      real_date(vdate), login,
                                      latitude=lat, longitude=lon,
@@ -105,7 +121,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
                                      observed_on=real_date(org_observed)
                                      or real_date(inat_observed),
                                      projects=tuple(json.loads(projects or "[]")),
-                                     stored_name=clean(name) if respelled else "")
+                                     stored_name=clean(name) if respelled else "",
+                                     taxon="" if lab.species else lab.unit)
         rec.photo_rows.append(photo_row[pid])
     return list(recs.values())
 
@@ -121,8 +138,13 @@ def split_by_time(records: list[Record], test_days: int) -> tuple[list[Record], 
 
 @dataclass
 class Index:
-    """Reference photos grouped by species, for per-species max-similarity."""
-    species: list[str]                 # species order
+    """Reference photos grouped by species, for per-species max-similarity.
+
+    The groups ("species" here, for the methods) are the records' units: a species,
+    or for records named with one word, that name. A one-word group has no species
+    label (label_of["species"] is -1): it scores at genus and family only, so it is
+    never a species candidate."""
+    species: list[str]                 # group (unit) order
     cols: np.ndarray                   # reference photo rows (into vectors), sorted by species
     starts: np.ndarray                 # start offset of each species in cols
     ref_count: Counter                 # reference records per species
@@ -136,9 +158,9 @@ def build_index(ref: list[Record]) -> Index:
     taxa: dict[str, Record] = {}
     count = Counter()
     for r in ref:
-        by_species[r.species].extend(r.photo_rows)
-        taxa.setdefault(r.species, r)
-        count[r.species] += 1
+        by_species[r.unit].extend(r.photo_rows)
+        taxa.setdefault(r.unit, r)
+        count[r.unit] += 1
     species = sorted(by_species)
     cols, starts = [], []
     for s in species:
@@ -160,12 +182,14 @@ def build_index(ref: list[Record]) -> Index:
 
 
 def rank_scores(scores: np.ndarray, index: Index, rank: str) -> np.ndarray:
-    """Best species score inside each label of `rank` (species: the scores themselves)."""
-    if rank == "species":
-        return scores
-    out = np.full(len(index.labels[rank]), -np.inf, dtype=np.float32)
+    """Best group score inside each label of `rank`, in index.labels[rank] order.
+    Species: the scores of the groups that are species (one each, in the same order),
+    without the one-word groups."""
     lab = index.label_of[rank]
     keep = lab >= 0
+    if rank == "species":
+        return scores[keep]
+    out = np.full(len(index.labels[rank]), -np.inf, dtype=np.float32)
     np.maximum.at(out, lab[keep], scores[keep])
     return out
 
@@ -231,7 +255,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     """Score the test records. `fitted` (from fit_method) skips refitting, which matters
     for the trained methods."""
     index, model = fitted or fit_method(vectors, ref, method)
-    names = {rank: (index.species if rank == "species" else index.labels[rank]) for rank in RANKS}
+    names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
     # Calibration: summed NLL per candidate temperature, over test records whose
@@ -248,10 +272,10 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             scores = model.species_scores(vectors[rows], context_of(rec))
         else:
             scores = model.species_scores(vectors[rows])
-        b = bucket_of(index.ref_count.get(rec.species, 0))
+        b = bucket_of(index.ref_count.get(rec.unit, 0))
         for rank in RANKS:
             t = truth(rec, rank)
-            if not t:
+            if not t:          # e.g. species of a one-word name: not scored at that rank
                 continue
             rs = rank_scores(scores, index, rank)
             if t in position[rank]:
@@ -356,7 +380,7 @@ def record_set_hash(ref: list[Record], test: list[Record]) -> str:
     h = hashlib.sha1()
     for tag, group in (("ref", ref), ("test", test)):
         for r in sorted(group, key=lambda r: r.observation_id):
-            h.update(f"{tag}:{r.observation_id}:{r.species}:{sorted(r.photo_rows)}".encode())
+            h.update(f"{tag}:{r.observation_id}:{r.unit}:{sorted(r.photo_rows)}".encode())
     return h.hexdigest()[:12]
 
 

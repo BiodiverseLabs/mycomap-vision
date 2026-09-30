@@ -61,13 +61,16 @@ class RangeSeasonPrior:
 
     def fit(self, records, species: list[str]) -> None:
         """records: reference records (with latitude, longitude, observed_on, genus);
-        species: the index's species order, which scores follow."""
+        species: the index's group order (evaluate.Index.species), which scores follow.
+        A record named with one word is in its own group; a group with no genus
+        borrows strength from itself only."""
         pos = {s: i for i, s in enumerate(species)}
-        genera = sorted({r.genus for r in records})
+        genus_of = lambda r: r.genus or r.unit  # noqa: E731
+        genera = sorted({genus_of(r) for r in records})
         gpos = {g: i for i, g in enumerate(genera)}
-        rows = [(pos[r.species], gpos[r.genus], r.latitude, r.longitude,
+        rows = [(pos[r.unit], gpos[genus_of(r)], r.latitude, r.longitude,
                  Context(observed_on=r.observed_on).day_of_year)
-                for r in records if r.species in pos]
+                for r in records if r.unit in pos]
         self.n_species, self.n_genera = len(species), len(genera)
         self.sp = np.array([r[0] for r in rows], dtype=np.int64)
         self.ge = np.array([r[1] for r in rows], dtype=np.int64)
