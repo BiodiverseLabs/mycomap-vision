@@ -44,6 +44,34 @@ the working plan; update it as phases land.
       Among records with photos, the newest 28 days (1,973 records) go from 203 species
       with no reference record to 193. Comparisons made before this can't be given an iNat
       baseline any more (their record set changed): run `mv compare` again.
+- [x] Family from iNaturalist (2026-09-30, Steve's decision). 30,648 records had a blank
+      family and 227 genera carried several families on .org. Now family (and order,
+      class, phylum) comes from iNat's taxonomy, one answer per genus, so every record of a
+      genus has the same family (`taxonomy.py`). `mv fetch-taxonomy` asks iNat for each
+      genus the records use, within Fungi only (a plant or bee genus of the same name is
+      ignored), at 1 request/s, and keeps every answer in `data/taxonomy/inat_genera.sqlite`
+      (never the manifest; resumable, `--refresh`, `--older-than DAYS`; a release ships
+      it). A genus in doubt keeps .org's family and is listed in
+      `data/reports/taxonomy-doubts.csv` (`mv taxonomy`). First run, 2026-09-30: 2,050 genus
+      names, 2,743 requests in ~46 min; 1,428 applied. Listed: 421 where iNat's family
+      differs from most .org records (applied: Clitocybe to Clitocybaceae, Hygrocybe to
+      Hygrophoraceae, Galerina to Hymenogastraceae, Cantharellus to Hydnaceae...), 251 with
+      no fungal genus of that name on iNat (family names in the genus column, slime moulds,
+      bees, plants), 85 inactive (with iNat's replacement, e.g. Marasmiellus to
+      Collybiopsis), 72 iNat puts in no family, 32 not a Latin genus name, 87 one-word names
+      iNat has at no rank above genus (mostly subgenera and sections: Cyanula, Dermocybe).
+      Records: 27,788 blank families filled, 33,326 changed.
+- [x] One-word names at genus level only (2026-09-30, Steve's decision). A name of one
+      word ("Russula", "Agaricales", "Fungi") used to be a species of its own. Now such a
+      record has no species label, adds no species class (in the index, the trained heads
+      and fine-tuning it is a genus-level group), is never a species candidate in a result,
+      and isn't scored at species; it counts at genus when the word is a genus (iNat says
+      so, or, when iNat can't, the genus column agrees) and at family. A record with no
+      label left at family, genus or species is left out. On the manifest of 2026-09-29:
+      542 one-word names on 2,997 records (2,616 from iNat; 1,968 usable: North America,
+      photos, no conflict). 377 names (1,570 records) are genera, 69 (188 records) name
+      only a family, 96 (1,239 records: Unknown 506, Fungi 344, Agaricales 97...) have no
+      label at any rank Vision scores and are left out.
 
 ## Models: modular, side by side, on a scoreboard
 

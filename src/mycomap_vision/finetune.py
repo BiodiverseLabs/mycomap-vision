@@ -65,6 +65,9 @@ class TrainSet:
     trained_through: str                    # the comparison cutoff: newest date trained on
     records: int
     vectors: np.ndarray = field(repr=False, default=None)   # the base model's embeddings
+    # Per item: its record's group (a species, or a one-word name, which has no species
+    # label but still trains at genus and family). Photos are drawn by group.
+    units: np.ndarray = field(repr=False, default=None)
 
 
 def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, size: str,
@@ -76,9 +79,12 @@ def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, siz
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     paths = dict(conn.execute("select photo_id, path from photo_copies where store = ? and "
                               "size = ?", (store_location, size)).fetchall())
+    # A one-word name ("Russula") has no species label: -1 there, trained at genus and
+    # family only, and it adds no species class.
     names = {rank: sorted({evaluate.truth(r, rank) for r in shared.ref} - {""}) for rank in RANKS}
     pos = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
-    items, labels, rows = [], [], []
+    unit_pos = {u: i for i, u in enumerate(sorted({r.unit for r in shared.ref}))}
+    items, labels, rows, units = [], [], [], []
     for rec in shared.ref:
         lab = [pos[rank].get(evaluate.truth(rec, rank), -1) for rank in RANKS]
         for pid in rec.photo_rows:              # photo ids here (shared_records)
@@ -86,10 +92,12 @@ def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, siz
                 items.append((pid, paths[pid]))
                 labels.append(lab)
                 rows.append(row_of[pid])
+                units.append(unit_pos[rec.unit])
     if not items:
         raise ValueError(f"no {size} photos of reference records in {store_location}")
     return TrainSet(items, np.asarray(labels, dtype=np.int64).reshape(-1, 3), names,
-                    np.asarray(rows, dtype=np.int64), shared.cutoff, len(shared.ref), vecs)
+                    np.asarray(rows, dtype=np.int64), shared.cutoff, len(shared.ref), vecs,
+                    np.asarray(units, dtype=np.int64))
 
 
 def class_prototypes(vectors: np.ndarray, labels: np.ndarray, n_classes: int) -> np.ndarray:
@@ -259,7 +267,9 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, (s + 1) / warm) * 0.5 * (1 + np.cos(np.pi * min(s / steps, 1))))
     transform, crop = train_transform(backbone.transform)
-    weights = sampling_weights(ts.labels[:, 0], cfg.sampling_power)
+    # By group, not species label: a one-word record has none and would never be drawn.
+    weights = sampling_weights(ts.units if ts.units is not None else ts.labels[:, 0],
+                               cfg.sampling_power)
     sampler = torch.utils.data.WeightedRandomSampler(
         torch.from_numpy(weights), num_samples=steps * cfg.batch_size, replacement=True,
         generator=torch.Generator().manual_seed(cfg.seed))

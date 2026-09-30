@@ -22,7 +22,7 @@ from typing import Callable
 import numpy as np
 import requests
 
-from . import config, names
+from . import config, names, taxonomy
 from .embed import decode
 from .inat import parse_observation
 from .licenses import sized_url, taken_down
@@ -204,12 +204,16 @@ def report(conn: sqlite3.Connection) -> list[dict]:
     labels = names.manifest_labels(conn, extra=[top[0]["name"] for result in results
                                                 if (top := result.get("species"))])
     label = lambda name: labels.get(name, name)  # noqa: E731
-    for (backbone, method, _json, species, genus, family, _p, _f), result in zip(rows, results):
+    tax = taxonomy.for_manifest(conn)
+    for (backbone, method, _json, name, genus, family, _p, _f), result in zip(rows, results):
         key = (backbone, method)
         c = by_model.setdefault(key, Counter())
-        species = label(species)
-        truth = {"species": species, "genus": genus or (species or "").split(" ")[0],
-                 "family": family}
+        # The same labels as training and comparisons: a one-word name has no species
+        # answer to check, and family is iNat's for the genus when the cache has it.
+        lab = taxonomy.labels_for(label(name) or "", genus, family,
+                                  (label(name) or "").strip() != (name or "").strip(), tax)
+        species = lab.species
+        truth = {"species": species, "genus": lab.genus, "family": lab.family}
         c["resolved"] += 1
         for rank in RANKS:
             top = result.get(rank) or []
@@ -217,7 +221,7 @@ def report(conn: sqlite3.Connection) -> list[dict]:
                 c[f"{rank}_n"] += 1
                 c[f"{rank}_top1"] += label(top[0]["name"]) == truth[rank]
         top_sp = (result.get("species") or [None])[0]
-        if top_sp:
+        if top_sp and species:
             conf.setdefault(key, []).append((top_sp["confidence"],
                                              label(top_sp["name"]) == species))
     out = []

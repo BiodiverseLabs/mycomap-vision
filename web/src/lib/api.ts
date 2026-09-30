@@ -12,6 +12,9 @@ export interface Candidate {
 
 export interface Specimen {
   observation_id: string;
+  /** What the record is named, at the finest rank it has (its species, else genus or family). */
+  name?: string;
+  /** "" when the record is named only to genus or higher: then it has no species page. */
   species: string;
   genus: string;
   family: string;
@@ -23,7 +26,7 @@ export interface Specimen {
    *  and the photographer hasn't given permission). */
   photo_withheld: boolean;
   inat_url: string;
-  species_url: string;
+  species_url: string | null;
 }
 
 /** Where one photo, scored on its own, puts the answer from all the photos together. */

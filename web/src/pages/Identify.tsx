@@ -625,7 +625,7 @@ function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; s
     <div className="rounded-md border overflow-hidden bg-white">
       <a href={s.inat_url} target="_blank" rel="noreferrer" className="block aspect-square bg-muted">
         {s.photo_url ? (
-          <img src={s.photo_url} alt={s.species} loading="lazy" className="h-full w-full object-cover" />
+          <img src={s.photo_url} alt={s.name ?? s.species} loading="lazy" className="h-full w-full object-cover" />
         ) : s.photo_withheld ? (
           <span className="flex h-full w-full items-center justify-center p-3 text-center text-xs text-muted-foreground">
             Photo not shown here: all rights reserved, and the photographer hasn't given permission. View it on iNaturalist.
@@ -633,9 +633,16 @@ function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; s
         ) : null}
       </a>
       <div className="p-2 space-y-1">
-        <a href={s.species_url} className="sci block text-sm font-semibold text-[#4a3728] leading-tight hover:text-myco-green">
-          {s.species}
-        </a>
+        {s.species_url ? (
+          <a href={s.species_url} className="sci block text-sm font-semibold text-[#4a3728] leading-tight hover:text-myco-green">
+            {s.species}
+          </a>
+        ) : (
+          // Named only to genus or family on mycomap.org: no species, so no species page.
+          <span className="sci block text-sm font-semibold text-[#4a3728] leading-tight">
+            {s.name ?? (s.genus || s.family)}
+          </span>
+        )}
         <div className="flex items-center justify-between text-xs text-muted-foreground">
           <Badge variant="outline" className="px-1.5 py-0 font-normal">
             {pct(s.similarity)} alike
