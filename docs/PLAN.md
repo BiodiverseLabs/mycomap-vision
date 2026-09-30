@@ -263,6 +263,19 @@ Fixed before the first run (Steve, 2026-09-30; branch fix/trainer-before-first-r
   L4's own (progress.json has each stage's speed); DINOv3-L 512 then gets a run of
   its own if it still earns one.
 
+Spot (Steve, 2026-09-30; branch feat/spot-trainer-weekly-taxonomy): the On-Demand
+G quota is 0 and its increase is pending, as is the Spot one (filed 9/28), so the
+trainer can run on either. `mv aws-launch-trainer --spot [--spot-max-price]` asks
+for a one-time Spot g6.2xlarge that AWS terminates when it takes it back. The job
+polls the instance metadata (IMDSv2) every 5 s for the two-minute notice; on it,
+the stage under way is dropped and the run ends `interrupted` (the finished stages
+are already in S3), which the pull treats like `stopped`. `--resume <run>` relaunches
+a run under its own id, restores its finished stages on the new instance (checked
+against the run's index) and runs only the rest; the estimate counts only those.
+Capacity, quota and price refusals are explained. The ops policy gains the Spot
+request resource and the Spot service-linked role (the role already exists in the
+account, made 2026-09-29). The downloader stays On-Demand.
+
 ## Phase 3: the platform
 
 - Own Lightsail instance (`vision.mycomap.org`), photos and models in S3, weekly

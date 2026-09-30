@@ -12,6 +12,13 @@ has had its turn it compares every backbone x method on the newest weeks and
 uploads the report, the manifest and result.json (last: its presence means the
 run is complete).
 
+On a Spot instance, `interrupted()` (spot.SpotWatcher) says when AWS has given its
+two-minute notice: the stage under way is abandoned like at the time limit, and
+the run ends "interrupted" at once (progress.json first, no manifest copy). A run
+that did not finish can be resumed under the same run id (`resume`): the stages
+progress.json lists as done are downloaded from runs/<run>/ and checked against
+its index, and only the others run.
+
 `merge_results` runs on the laptop: each backbone the run embedded completely
 replaces the local (sample) embeddings, which are archived rather than deleted,
 and the run's scoreboard rows are added once. A stopped run brings home the
@@ -218,18 +225,118 @@ class Progress:
         self.upload(self.path, self.key)
 
 
+class RunFiles:
+    """Read access to one bucket's run files, for a resumed run: fetch(key, dest) -> bool
+    (False when the key isn't there) and keys(prefix) -> [key]."""
+
+    def __init__(self, client, bucket: str):
+        self.client, self.bucket = client, bucket
+
+    def fetch(self, key: str, dest: Path) -> bool:
+        from botocore.exceptions import ClientError
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.client.download_file(self.bucket, key, str(dest))
+            return True
+        except ClientError:
+            return False
+
+    def keys(self, prefix: str) -> list[str]:
+        out = []
+        for page in self.client.get_paginator("list_objects_v2").paginate(
+                Bucket=self.bucket, Prefix=prefix):
+            out += [o["Key"] for o in page.get("Contents", [])]
+        return out
+
+
+def read_run_doc(files, run_id: str, work: Path) -> dict | None:
+    """A run's progress.json (its latest word), else its result.json; None if neither."""
+    for name in (PROGRESS_FILE, RESULT_FILE):
+        if files.fetch(run_prefix(run_id) + name, work / name):
+            return json.loads((work / name).read_text(encoding="utf-8"))
+    return None
+
+
+def restore_finished(conn: sqlite3.Connection, files, run_id: str, stages: list[Stage],
+                     old: dict, data_dir: Path, log=print) -> dict[int, dict]:
+    """Bring the stages an earlier attempt of this run finished back onto this machine:
+    their embeddings (shards and index rows) and fine-tuned weights, from runs/<run>/.
+    A stage is taken only when its files are all there and agree with the run's index
+    (as for a pull); anything else is run again. Returns {stage index: its old record}."""
+    prefix = run_prefix(run_id)
+    done = {(s.get("kind"), s.get("name")): s for s in old.get("stages", [])
+            if s.get("status") == "done"}
+    if not done:
+        return {}
+    index = data_dir / "resume" / INDEX_FILE
+    if not files.fetch(prefix + INDEX_FILE, index):
+        log(f"run {run_id} has no {INDEX_FILE}: every stage runs again")
+        return {}
+    conn.executescript(EMBED_SCHEMA)
+    conn.executescript(evaluate.SCOREBOARD_SCHEMA)
+    conn.executescript(evaluate.FINETUNE_SCHEMA)
+    restored: dict[int, dict] = {}
+    finetuned: set[str] = set()
+    conn.execute("attach database ? as remote", (str(index),))
+    try:
+        for i, s in enumerate(stages):
+            prev = done.get((s.kind, s.name))
+            if prev is None:
+                continue
+            if s.kind == "finetune":
+                models_dir = data_dir / "models"
+                got = all(files.fetch(f"{prefix}models/{s.name}{suffix}",
+                                      models_dir / f"{s.name}{suffix}")
+                          for suffix in (".pt", ".json"))
+                if not got or not _remote_is_finetune(conn, s.name):
+                    log(f"[{s.name}] its weights or index row are missing: fine-tuning again")
+                    continue
+                with conn:
+                    conn.execute("insert or replace into finetunes select * from "
+                                 "remote.finetunes where name = ?", (s.name,))
+                finetuned.add(s.name)
+            else:
+                if s.base and s.name not in finetuned:
+                    log(f"[{s.name}] its fine-tuned weights were not restored: embedding again")
+                    continue
+                dest = data_dir / "embeddings" / s.name
+                for key in files.keys(f"{prefix}embeddings/{s.name}/"):
+                    files.fetch(key, dest / key.rsplit("/", 1)[-1])
+                problem = _staged_problem(conn, s.name, dest, prev.get("photos"))
+                if problem:
+                    log(f"[{s.name}] not restored ({problem}): embedding again")
+                    shutil.rmtree(dest, ignore_errors=True)
+                    continue
+                with conn:
+                    conn.execute("delete from embeddings where backbone = ?", (s.name,))
+                    conn.execute("insert into embeddings select * from remote.embeddings "
+                                 "where backbone = ?", (s.name,))
+                    conn.execute("insert into embed_runs select * from remote.embed_runs "
+                                 "where backbone = ? except select * from main.embed_runs",
+                                 (s.name,))
+            restored[i] = prev
+            log(f"[{s.name}] {s.kind} restored from the earlier attempt")
+    finally:
+        conn.execute("detach database remote")
+    return restored
+
+
 def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list[str],
             upload: Callable[[Path, str], None], run_id: str, size: str = "large",
             test_days: int = 28, batch_size: int = 64, readers: int = 16,
             loader=None, data_dir: Path | None = None, finetune: list[str] | None = None,
             finetuner=None, sample_records: int | None = None,
-            should_stop: Callable[[], bool] | None = None, log=print) -> dict:
+            should_stop: Callable[[], bool] | None = None,
+            interrupted: Callable[[], bool] | None = None, resume=None, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
     key)` copies one file to the bucket. `finetuner(conn, base, name, embeddings_root,
     models_dir)` fine-tunes (default: finetune.finetune with its default settings) and
-    returns the model's metadata. `should_stop()` (the time limit, see deadline) is asked
-    between batches, steps and stages; once it says stop, the stage under way is
-    abandoned (never uploaded), no new stage starts, and the run ends "stopped"."""
+    returns the model's metadata. `should_stop()` (the time limit, see deadline) and
+    `interrupted()` (a Spot notice, see spot.SpotWatcher) are asked between batches,
+    steps and stages; once either says stop, the stage under way is abandoned (never
+    uploaded), no new stage starts, and the run ends "stopped" (the time limit) or
+    "interrupted" (Spot). `resume` (RunFiles over the bucket) continues an earlier
+    attempt of the same run: the stages it finished are restored, not run again."""
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
@@ -240,13 +347,33 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     if sample_records:
         kept = restrict_to_sample(conn, sample_records, store.location, size)
         log(f"REHEARSAL: kept {kept:,} random records; results won't be merged home")
+    restored: dict[int, dict] = {}
+    attempts: list[dict] = []
+    if resume is not None:
+        old = read_run_doc(resume, run_id, data_dir / "resume")
+        if old is None:
+            raise RuntimeError(f"nothing to resume: run {run_id} has no {PROGRESS_FILE}")
+        restored = restore_finished(conn, resume, run_id, stages, old, data_dir, log)
+        attempts = list(old.get("attempts") or []) + [
+            {k: old.get(k) for k in ("started_at", "updated_at", "state", "code_version")}]
+        log(f"RESUMING run {run_id}: {len(restored)} of {len(stages)} stages restored")
     log("stages: " + ", ".join(f"{s.kind} {s.name}" for s in stages))
     progress = Progress(data_dir / PROGRESS_FILE, prefix + PROGRESS_FILE, upload,
                         run_id=run_id, code_version=config.code_version(), size=size,
-                        methods=methods, sample_records=kept,
-                        stages=[{**asdict(s), "status": "pending"} for s in stages])
+                        methods=methods, test_days=test_days, sample_records=kept,
+                        attempts=attempts,
+                        stages=[{**restored[i], "restored": True} if i in restored
+                                else {**asdict(s), "status": "pending"}
+                                for i, s in enumerate(stages)])
     progress.save()
-    stopping = should_stop or (lambda: False)
+    deadline_hit = should_stop or (lambda: False)
+    notice = interrupted or (lambda: False)
+
+    def stopping() -> bool:
+        return notice() or deadline_hit()
+
+    def why_stopped() -> str:
+        return "Spot interruption" if notice() else "time limit"
     kw = {"loader": loader} if loader is not None else {}
 
     def publish(files: list[tuple[Path, str]]) -> None:
@@ -257,6 +384,15 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
 
     embedded, failed, stopped, finetuned, skipped_counts = {}, {}, {}, {}, {}
     for i, s in enumerate(stages):
+        if i in restored:                   # finished by an earlier attempt of this run
+            prev = restored[i]
+            if s.kind == "embed":
+                embedded[s.name] = {k: prev.get(k) for k in ("per_second", "photos",
+                                                              "skipped", "seconds")}
+                skipped_counts[s.name] = prev.get("skipped") or 0
+            else:
+                finetuned[s.name] = {k: prev.get(k) for k in FINETUNE_KEYS}
+            continue
         # A stage whose input didn't come about: stopped with it, or failed with it.
         needs = None
         if s.kind == "finetune" and s.base not in embedded:
@@ -265,7 +401,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             needs, why = s.name, f"{s.name} was not fine-tuned"
         if needs is not None:
             if needs in stopped:
-                why = f"not started (time limit): {why}"
+                why = f"not started ({why_stopped()}): {why}"
                 stopped.setdefault(s.name, why)
                 progress.stage(i, status="stopped", error=why)
             else:
@@ -274,7 +410,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                 progress.stage(i, status="skipped", error=why)
             continue
         if stopping():
-            stopped[s.name] = "not started (time limit)"
+            stopped[s.name] = f"not started ({why_stopped()})"
             progress.stage(i, status="stopped", error=stopped[s.name])
             continue
         progress.stage(i, status="running", started_at=_now())
@@ -282,7 +418,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         if s.kind == "embed":
             r = screen(conn, store, [s.spec], [], size=size, methods=methods,
                        batch_size=batch_size, embeddings_root=root, readers=readers,
-                       compare=False, should_stop=should_stop, log=log, **kw)
+                       compare=False, should_stop=stopping, log=log, **kw)
             bad = r.skipped.get(s.name, [])
             skip_file = None
             if bad:
@@ -300,7 +436,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                 embedded[s.name] = info
                 progress.stage(i, status="done", finished_at=_now(), **info)
             elif s.name in r.stopped:
-                stopped[s.name] = r.stopped[s.name]
+                stopped[s.name] = f"{r.stopped[s.name]} ({why_stopped()})"
                 progress.stage(i, status="stopped", error=stopped[s.name],
                                skipped=len(bad), seconds=round(time.monotonic() - t0, 1))
             else:
@@ -309,7 +445,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         else:
             try:
                 meta = (finetuner or _default_finetuner(store, size, test_days, log,
-                                                        should_stop))(
+                                                        stopping))(
                     conn, s.base, s.name, root, data_dir / "models")
                 publish([(data_dir / "models" / f"{s.name}{suffix}",
                           f"{prefix}models/{s.name}{suffix}") for suffix in (".pt", ".json")])
@@ -318,17 +454,20 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                                seconds=round(time.monotonic() - t0, 1),
                                **{k: meta.get(k) for k in FINETUNE_KEYS})
             except Stopped as e:
-                stopped[s.name] = str(e)
-                log(f"[{s.name}] FINE-TUNING STOPPED: {e}")
-                progress.stage(i, status="stopped", error=str(e))
+                stopped[s.name] = str(e).replace("(time limit)", f"({why_stopped()})")
+                log(f"[{s.name}] FINE-TUNING STOPPED: {stopped[s.name]}")
+                progress.stage(i, status="stopped", error=stopped[s.name])
             except Exception as e:  # keep the rest of the run
                 failed[s.name] = f"{e.__class__.__name__}: {e}"
                 log(f"[{s.name}] FINE-TUNING FAILED: {failed[s.name]}")
                 progress.stage(i, status="failed", error=failed[s.name])
     comparison = None
-    if stopped:
-        progress.data["comparison"] = ("skipped: the run was stopped by its time limit; "
-                                       "run mv compare on the laptop after pulling")
+    was_interrupted = notice()
+    state = "interrupted" if was_interrupted else "stopped" if stopped else "finished"
+    if stopped or was_interrupted:
+        progress.data["comparison"] = (f"skipped: the run was stopped by {why_stopped()}; "
+                                       "run mv compare on the laptop after pulling, or "
+                                       "resume the run")
     elif embedded:
         progress.data["state"] = "comparing"
         progress.save()
@@ -338,16 +477,19 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(evaluate.format_report(comparison), encoding="utf-8")
         publish([(report, f"{prefix}reports/{report.name}")])
-    out = {"run_id": run_id, "size": size, "methods": methods, "state":
-           "stopped" if stopped else "finished",
+    out = {"run_id": run_id, "size": size, "methods": methods, "state": state,
            "embedded": embedded, "failed": failed, "stopped": stopped,
            "skipped_photos": skipped_counts,
            "finetuned": {n: {k: m.get(k) for k in FINETUNE_KEYS} for n, m in finetuned.items()},
            "comparison_id": comparison["comparison_id"] if comparison else None,
            "sample_records": kept, "code_version": config.code_version(),
            "stages": progress.data["stages"], "finished_at": _now()}
-    snap = snapshot(conn, data_dir / "manifest-out.sqlite")
-    upload(snap, f"{prefix}manifest-out.sqlite")
+    if not was_interrupted:
+        # With a Spot notice there are two minutes: progress.json goes up at once, and
+        # the manifest copy (a fallback the pull needs only when no stage finished) is
+        # left out.
+        snap = snapshot(conn, data_dir / "manifest-out.sqlite")
+        upload(snap, f"{prefix}manifest-out.sqlite")
     progress.data.update(state=out["state"], comparison_id=out["comparison_id"],
                          finished_at=_now())
     progress.save()
@@ -398,6 +540,22 @@ def run_summary(doc: dict) -> dict:
             "finetuned": finetuned, "missing": missing, "done": done,
             "comparison_id": doc.get("comparison_id"),
             "sample_records": doc.get("sample_records")}
+
+
+def resume_request(doc: dict) -> dict:
+    """What a run was asked to do, read back from its progress.json (or result.json), so
+    a resumed attempt plans exactly the same stages under the same run id."""
+    stages = doc.get("stages")
+    if not stages:
+        raise ValueError(f"run {doc.get('run_id')} records no stages: it can't be resumed "
+                         "(it predates resumable runs); launch a new run")
+    spec_of = {s["name"]: s["spec"] for s in stages if s["kind"] == "embed" and not s.get("base")}
+    finetune = [spec_of[s["base"]] for s in stages if s["kind"] == "finetune"]
+    return {"backbones": list(spec_of.values()), "finetune": finetune,
+            "methods": list(doc.get("methods") or []), "size": doc.get("size") or "large",
+            "test_days": int(doc.get("test_days") or 28),
+            "sample_records": doc.get("sample_records"),
+            "done": {(s["kind"], s["name"]) for s in stages if s.get("status") == "done"}}
 
 
 def _remote_is_finetune(conn: sqlite3.Connection, name: str) -> bool:

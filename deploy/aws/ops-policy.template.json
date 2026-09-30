@@ -32,7 +32,8 @@
       "Sid": "LaunchOnlyTaggedInstances",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
-      "Resource": ["arn:aws:ec2:{{REGION}}:*:instance/*", "arn:aws:ec2:{{REGION}}:*:volume/*"],
+      "Resource": ["arn:aws:ec2:{{REGION}}:*:instance/*", "arn:aws:ec2:{{REGION}}:*:volume/*",
+                   "arn:aws:ec2:{{REGION}}:*:spot-instances-request/*"],
       "Condition": {"StringEquals": {"aws:RequestTag/Project": "mycomap-vision"}}
     },
     {
@@ -59,6 +60,13 @@
       "Action": ["ec2:TerminateInstances", "ec2:StopInstances", "ec2:GetConsoleOutput"],
       "Resource": "arn:aws:ec2:{{REGION}}:*:instance/*",
       "Condition": {"StringEquals": {"aws:ResourceTag/Project": "mycomap-vision"}}
+    },
+    {
+      "Sid": "SpotServiceLinkedRoleOnce",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleForEC2Spot",
+      "Condition": {"StringEquals": {"iam:AWSServiceName": "spot.amazonaws.com"}}
     },
     {
       "Sid": "PassOnlyTheInstanceRole",
