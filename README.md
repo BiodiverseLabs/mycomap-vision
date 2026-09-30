@@ -36,7 +36,10 @@ Vision merges, and the ones a person has to decide (read-only).
 `mv fetch-taxonomy [--refresh | --older-than DAYS]` asks iNat for the family, order,
 class and phylum of every genus the records use (1 request/s, resumable, kept in
 `data/taxonomy/inat_genera.sqlite`); `mv taxonomy` reports what that changes and writes
-the genera in doubt to `data/reports/taxonomy-doubts.csv` (no network).
+the genera in doubt to `data/reports/taxonomy-doubts.csv` (no network). The weekly
+`mv refresh` asks only about genera no lookup has answered yet, for at most 20 minutes
+(`--taxonomy-minutes`; the next refresh carries on), and goes on without it when iNat
+is down; `--no-taxonomy` skips it.
 
 ### Photo permission
 

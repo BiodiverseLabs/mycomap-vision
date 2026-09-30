@@ -274,7 +274,9 @@ a run under its own id, restores its finished stages on the new instance (checke
 against the run's index) and runs only the rest; the estimate counts only those.
 Capacity, quota and price refusals are explained. The ops policy gains the Spot
 request resource and the Spot service-linked role (the role already exists in the
-account, made 2026-09-29). The downloader stays On-Demand.
+account, made 2026-09-29). The downloader stays On-Demand. The weekly `mv refresh`
+now also asks iNat about genera new since the last taxonomy lookup (at most 20 min,
+never failing the refresh; `--no-taxonomy`).
 
 ## Phase 3: the platform
 
