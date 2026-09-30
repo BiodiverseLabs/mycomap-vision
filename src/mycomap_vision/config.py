@@ -72,7 +72,12 @@ def ensure_dirs() -> None:
 
 
 def code_version() -> str:
-    """Short commit of this checkout, with -dirty when there are uncommitted changes."""
+    """Short commit of this checkout, with -dirty when there are uncommitted changes.
+
+    MV_CODE_VERSION wins when set: an EC2 instance runs a `git archive` of one commit,
+    with no .git to ask, so the launcher passes that commit's sha."""
+    if os.environ.get("MV_CODE_VERSION", "").strip():
+        return os.environ["MV_CODE_VERSION"].strip()
     try:
         head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT,
                               capture_output=True, text=True, check=True).stdout.strip()

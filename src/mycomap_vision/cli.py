@@ -102,12 +102,15 @@ def _split(v: str) -> list[str]:
 
 def cmd_aws_launch_trainer(conn, args) -> None:
     from . import aws
+    finetune = [] if args.finetune.strip().lower() == "none" else _split(args.finetune)
     print(json.dumps(aws.launch_trainer(conn, _split(args.backbones), _split(args.methods),
                                         size=args.size, max_hours=args.max_hours,
                                         instance_type=args.instance_type,
-                                        test_days=args.test_days,
-                                        finetune=_split(args.finetune),
-                                        sample_records=args.sample_records), indent=2))
+                                        test_days=args.test_days, finetune=finetune,
+                                        sample_records=args.sample_records,
+                                        allow_over_time=args.allow_over_time,
+                                        allow_dirty=args.allow_dirty,
+                                        allow_unpushed=args.allow_unpushed), indent=2))
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -115,13 +118,15 @@ def cmd_aws_train_job(conn, args) -> None:
     from . import trainer
     from .storage import S3Store
     store = S3Store(args.source)
+    should_stop = trainer.deadline(args.stop_after_hours)
 
     def upload(path, key):
         store.client.upload_file(str(path), store.bucket, key)
     out = trainer.run_job(conn, store, _split(args.backbones), _split(args.methods), upload,
                           args.run_id, size=args.size, test_days=args.test_days,
                           batch_size=args.batch_size, readers=args.readers,
-                          finetune=_split(args.finetune), sample_records=args.sample_records)
+                          finetune=_split(args.finetune), sample_records=args.sample_records,
+                          should_stop=should_stop)
     print(json.dumps(out, indent=2))
     if out["comparison_id"]:
         from . import evaluate
@@ -450,17 +455,27 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("aws-launch-trainer",
                        help="embed the S3 photos and compare on a self-terminating GPU instance")
-    p.add_argument("--backbones", required=True, help="comma-separated aliases or specs")
+    p.add_argument("--backbones", default="bioclip-2",
+                   help="comma-separated aliases or specs (default: bioclip-2)")
     p.add_argument("--methods", default="nearest,species-mean,linear,hybrid")
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
-    p.add_argument("--max-hours", type=float, default=12)
+    p.add_argument("--max-hours", type=float, default=24,
+                   help="time limit; the job stops itself 45 minutes before it (default 24)")
     p.add_argument("--instance-type", default="g6.2xlarge")
     p.add_argument("--test-days", type=int, default=28)
-    p.add_argument("--finetune", default="",
-                   help="backbones (also in --backbones) to fine-tune on the reference records")
+    p.add_argument("--finetune", default="bioclip-2",
+                   help="backbones (also in --backbones) to fine-tune on the reference records "
+                        "(default: bioclip-2; 'none' for no fine-tuning)")
     p.add_argument("--sample-records", type=int,
                    help="rehearsal: run everything on this many random records only "
                         "(its results can't be merged home)")
+    p.add_argument("--allow-over-time", action="store_true",
+                   help="launch even when the time estimate exceeds --max-hours (the run "
+                        "stops at the limit and keeps the stages it finished)")
+    p.add_argument("--allow-dirty", action="store_true",
+                   help="launch with uncommitted changes (they are NOT sent)")
+    p.add_argument("--allow-unpushed", action="store_true",
+                   help="launch a commit that is on no remote branch")
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
                                              "upload the results to runs/<run>/")
@@ -474,6 +489,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--readers", type=int, default=16, help="parallel photo reads from S3")
     p.add_argument("--finetune", default="")
     p.add_argument("--sample-records", type=int)
+    p.add_argument("--stop-after-hours", type=float,
+                   help="stop cleanly (between batches) after this long and upload what "
+                        "finished; set by the launcher to leave time before the hard limit")
 
     p = sub.add_parser("finetune", help="fine-tune a backbone's last blocks on the reference "
                                         "records (smoke test here; full runs on AWS)")
@@ -488,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-steps", type=int)
     p.add_argument("--test-days", type=int, default=28)
 
-    p = sub.add_parser("aws-pull-trainer", help="bring a finished trainer run home: its "
+    p = sub.add_parser("aws-pull-trainer", help="bring a trainer run home (or the stages a "
+                                                "stopped one finished): its complete "
                                                 "embeddings replace the local ones (archived)")
     p.add_argument("--run", required=True, help="the run id aws-launch-trainer printed")
 
