@@ -257,6 +257,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     manifest_path = manifest_path or config.MANIFEST_PATH
     conn = open_manifest(manifest_path)
+    # Before anything is built: a new release's manifest may hold an older list of who
+    # withdrew than the one this box last read (permissions.py).
+    permissions.restore_last_good(conn, note=note)
     db_lock = threading.Lock()
     gpu_lock = threading.Lock()
     backbones: dict[str, object] = {}

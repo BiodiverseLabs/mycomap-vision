@@ -12,16 +12,34 @@ service key), and applies two rules:
   is left out (evaluate.load_records). Owners who haven't answered stay in while
   permission is being sought (Steve, 2026-09-28).
 
+Only a well-formed answer replaces the copy. A failed, malformed or suspicious one
+changes nothing: the last good list stays, withdrawals included, and the failure is
+recorded and logged. mycomap.org keeps one answer per person and never deletes one
+(a person's status only moves between granted and withdrawn), and its answer has no
+count or version to say "the list really is shorter"; so an answer that leaves out
+anyone the last good list has, an empty one included, is refused as suspicious. If
+people really were removed there, `mv permissions --sync --accept-shrink` takes it.
+
+The last good list is also saved outside the manifest (state_path(): on the server
+box <MV_RELEASE_ROOT>/state/photo-permissions.json), because a new release brings its
+own manifest; the server puts the newer of the two back at startup, so a withdrawal
+holds across restarts and releases even if mycomap.org can't be reached then.
+
 Settings: MV_ORG_BASE_URL (e.g. https://mycomap.org) and MV_ORG_VISION_KEY or
 MV_ORG_VISION_KEY_FILE (the key set as VISION_API_KEY on mycomap.org). Never logged.
+MV_PERMISSIONS_STATE overrides where the last good list is saved.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 import requests
@@ -60,6 +78,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     if have < 2:
         conn.executescript(SCHEMA)
 
+
+log = logging.getLogger("mycomap_vision.permissions")
 
 PATH = "/api/vision/photo-permissions"
 STATUSES = ("granted", "withdrawn")
@@ -134,10 +154,13 @@ def fetch(base_url: str, key: str, session: requests.Session | None = None,
 
 def clean_rows(payload: dict) -> list[tuple]:
     """Validate the answer into rows for photo_permissions. A malformed answer is
-    refused whole rather than half-applied."""
+    refused whole rather than half-applied: it must carry mycomap.org's clock
+    (generatedAt) and a list of well-formed rows."""
     rows = payload.get("permissions") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise PermissionSyncError("answer has no permissions list")
+    if not isinstance(payload.get("generatedAt"), str) or not payload["generatedAt"].strip():
+        raise PermissionSyncError("answer has no generatedAt: not the photo-permissions answer")
     out, seen = [], set()
     for p in rows:
         uid = p.get("inatUserId") if isinstance(p, dict) else None
@@ -150,8 +173,24 @@ def clean_rows(payload: dict) -> list[tuple]:
     return out
 
 
-def save_snapshot(conn: sqlite3.Connection, payload: dict, attempted_at: datetime) -> dict:
+def save_snapshot(conn: sqlite3.Connection, payload: dict, attempted_at: datetime,
+                  accept_shrink: bool = False) -> dict:
+    """Replace the copy with a well-formed answer. Refuses (PermissionSyncError) one that
+    leaves out anyone the copy has, unless `accept_shrink` (see the module notes)."""
     rows = clean_rows(payload)
+    had = {int(u) for (u,) in conn.execute("select inat_user_id from photo_permissions")}
+    left_out = had - {r[0] for r in rows}
+    if left_out and not accept_shrink:
+        withdrawn = sum(1 for (u,) in conn.execute(
+            "select inat_user_id from photo_permissions where status = 'withdrawn'")
+            if int(u) in left_out)
+        raise PermissionSyncError(
+            f"REFUSED a suspicious answer: it leaves out {len(left_out)} of the {len(had)} people "
+            f"in the last good list ({withdrawn} of them withdrawn)"
+            + (", it is empty" if not rows else "")
+            + ". mycomap.org never deletes an answer, so the last good list is kept and its "
+            "withdrawals still apply. If people really were removed there, run "
+            "`mv permissions --sync --accept-shrink`.")
     with conn:
         conn.execute("delete from photo_permissions")
         conn.executemany("insert into photo_permissions values (?, ?, ?, ?, ?, ?, ?)", rows)
@@ -168,10 +207,60 @@ def record_failure(conn: sqlite3.Connection, attempted_at: datetime, error: str)
                       (iso(attempted_at), error[:500]))
 
 
+_STATE_DEFAULT = object()
+
+
+def state_path() -> Path | None:
+    """Where the last good list is saved outside the manifest: MV_PERMISSIONS_STATE, or on
+    the server box <MV_RELEASE_ROOT>/state/photo-permissions.json. None elsewhere (a
+    laptop keeps one manifest, which is copy enough)."""
+    explicit = config.setting("MV_PERMISSIONS_STATE")
+    if explicit:
+        return Path(explicit)
+    return config.RELEASE_ROOT / "state" / "photo-permissions.json" if config.RELEASE_ROOT else None
+
+
+def save_state(path: Path, payload: dict, attempted_at: datetime) -> None:
+    """Write the last good answer atomically (a crash leaves the previous file whole)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"saved_at": iso(attempted_at), "answer": payload}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def restore_last_good(conn: sqlite3.Connection, path=_STATE_DEFAULT,
+                      note: Callable[[str], None] = print) -> bool:
+    """At startup: when the saved last good list is newer than the manifest's copy (a new
+    release brings an older one), put it back, with the time it was read. True if it was."""
+    path = state_path() if path is _STATE_DEFAULT else path
+    if not path or not Path(path).is_file():
+        return False
+    try:
+        saved = json.loads(Path(path).read_text(encoding="utf-8"))
+        at = parse_time(saved["saved_at"])
+        clean_rows(saved["answer"])
+    except (OSError, ValueError, KeyError, TypeError, PermissionSyncError) as e:
+        note(f"[permissions] the saved last good list ({path}) is unreadable, not used: "
+             f"{type(e).__name__}: {e}")
+        return False
+    here = last_good_sync(conn)
+    if here is not None and here >= at:
+        return False
+    # The saved list is the newest good one this deployment has read, so it replaces
+    # an older copy even where that copy has more people.
+    stats = save_snapshot(conn, saved["answer"], at, accept_shrink=True)
+    note(f"[permissions] restored the last good list read {iso(at)} ({stats['granted']} granted, "
+         f"{stats['withdrawn']} withdrawn): newer than this manifest's copy")
+    return True
+
+
 def sync(conn: sqlite3.Connection, base_url: str | None = None, key: str | None = None,
-         fetcher: Callable[[str, str], dict] = fetch, now: Callable[[], datetime] = now_utc) -> dict:
-    """Pull the answers and replace the local copy. On failure the previous copy is
-    kept (and ages out for showing), and the failure is recorded."""
+         fetcher: Callable[[str, str], dict] = fetch, now: Callable[[], datetime] = now_utc,
+         accept_shrink: bool = False, state=_STATE_DEFAULT) -> dict:
+    """Pull the answers and replace the local copy. On failure (unreachable, refused,
+    malformed, suspicious) the previous copy is kept (it ages out for showing, while its
+    withdrawals still apply), and the failure is recorded and logged. A good answer is
+    also saved to `state` (default: state_path())."""
     base_url = base_url or config.required("MV_ORG_BASE_URL", "mycomap.org's address, "
                                            "e.g. https://mycomap.org")
     key = key or org_key()
@@ -180,10 +269,16 @@ def sync(conn: sqlite3.Connection, base_url: str | None = None, key: str | None 
                            "VISION_API_KEY on mycomap.org); see .env.example.")
     attempted = now()
     try:
-        return save_snapshot(conn, fetcher(base_url, key), attempted)
+        payload = fetcher(base_url, key)
+        stats = save_snapshot(conn, payload, attempted, accept_shrink=accept_shrink)
     except PermissionSyncError as e:
         record_failure(conn, attempted, str(e))
+        log.error("photo permissions not updated, the last good list is kept: %s", e)
         raise
+    path = state_path() if state is _STATE_DEFAULT else state
+    if path:
+        save_state(Path(path), payload, attempted)
+    return stats
 
 
 def last_good_sync(conn: sqlite3.Connection) -> datetime | None:
