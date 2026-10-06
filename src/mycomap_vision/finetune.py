@@ -220,6 +220,39 @@ def train_transform(eval_transform):
     ]), size
 
 
+def is_worker_crash(error: BaseException) -> bool:
+    """A DataLoader worker died or failed: "DataLoader worker (pid(s) ...) exited
+    unexpectedly", or an error raised inside a worker process."""
+    text = str(error)
+    return isinstance(error, (RuntimeError, OSError)) and (
+        "DataLoader worker" in text or "in DataLoader worker process" in text)
+
+
+def batches_with_fallback(make_loader, workers: int, steps: int, seed: int, current_step,
+                          on_fallback):
+    """Batches from make_loader(workers, steps_left, seed). If the loader's worker
+    processes crash (on Windows a semaphore can be refused; anywhere a worker can be
+    killed), carry on from the same step with no workers, so training keeps its
+    progress. A failure with no workers is a real error and is raised."""
+    loader = iter(make_loader(workers, steps, seed))
+    while True:
+        try:
+            batch = next(loader)
+        except StopIteration:
+            return
+        except Exception as error:  # noqa: BLE001 - only worker crashes are absorbed
+            if workers == 0 or not is_worker_crash(error):
+                raise
+            at = current_step()
+            on_fallback(at, error)
+            workers = 0
+            if steps - at <= 0:
+                return
+            loader = iter(make_loader(0, steps - at, seed + at))
+            continue
+        yield batch
+
+
 def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
              cfg: FinetuneConfig | None = None, test_days: int = 28, embeddings_root=None,
              out_dir: Path | None = None, loader=None, log=print, should_stop=None) -> dict:
@@ -270,17 +303,28 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
     # By group, not species label: a one-word record has none and would never be drawn.
     weights = sampling_weights(ts.units if ts.units is not None else ts.labels[:, 0],
                                cfg.sampling_power)
-    sampler = torch.utils.data.WeightedRandomSampler(
-        torch.from_numpy(weights), num_samples=steps * cfg.batch_size, replacement=True,
-        generator=torch.Generator().manual_seed(cfg.seed))
-    data = torch.utils.data.DataLoader(
-        PhotoDataset(store.location, ts.items, ts.labels, transform, draft=2 * crop),
-        batch_size=cfg.batch_size, sampler=sampler, num_workers=cfg.workers,
-        collate_fn=_collate, drop_last=True, persistent_workers=cfg.workers > 0,
-        pin_memory=dev == "cuda")
+    dataset = PhotoDataset(store.location, ts.items, ts.labels, transform, draft=2 * crop)
+
+    def make_loader(workers: int, steps_left: int, seed: int):
+        sampler = torch.utils.data.WeightedRandomSampler(
+            torch.from_numpy(weights), num_samples=steps_left * cfg.batch_size, replacement=True,
+            generator=torch.Generator().manual_seed(seed))
+        return torch.utils.data.DataLoader(
+            dataset, batch_size=cfg.batch_size, sampler=sampler, num_workers=workers,
+            collate_fn=_collate, drop_last=True, persistent_workers=workers > 0,
+            pin_memory=dev == "cuda")
+
     use_bf16 = dev == "cuda" and torch.cuda.is_bf16_supported()
     step, seen, t0, losses = 0, 0, time.monotonic(), []
-    for batch in data:
+    fallback = {"at_step": None}
+
+    def fell_back(at_step: int, error: Exception):
+        fallback["at_step"] = at_step
+        log(f"[{name}] loader workers crashed at step {at_step:,} ({error}); "
+            f"carrying on without workers")
+
+    for batch in batches_with_fallback(make_loader, cfg.workers, steps, cfg.seed,
+                                       lambda: step, fell_back):
         if should_stop is not None and should_stop():
             raise Stopped(f"stopped at step {step:,} of {steps:,} (time limit); not saved")
         if batch is None:
@@ -314,6 +358,7 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             "species": len(ts.names["species"]), "steps": step, "photos_seen": seen,
             "final_loss": round(float(np.mean(losses[-100:])), 4) if losses else None,
             "blocks_trained": cfg.blocks, "of_blocks": n_blocks, "size": size,
+            "loader_fallback_at_step": fallback["at_step"],
             "config": asdict(cfg), "minutes": round((time.monotonic() - started) / 60, 1),
             "code_version": config.code_version(),
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
