@@ -339,7 +339,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def health():
         return {"ok": True, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
-                            "seconds": warm.seconds, "error": warm.error}}
+                            "seconds": warm.seconds, "error": warm.error},
+                "nightly": nightly_health()}
+
+    def nightly_health() -> dict:
+        if not layer:
+            return {"enabled": False}
+        with db_lock:
+            return nightly.health(conn, nightly_settings, nightly_zone)
 
     def ready_backbones() -> list[str]:
         return [b for b, n in embedded_counts().items() if n and b in limits.allowed_backbones]
@@ -561,6 +568,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     # The nightly update (nightly.py): runs here because this process holds the model.
     nightly_settings = nightly_settings or (nightly.Settings.from_env() if layer else None)
+    nightly_zone = None
+    if layer:
+        try:
+            nightly_zone = nightly_settings.zone()
+        except Exception as e:  # noqa: BLE001 - reported; the schedule below would fail too
+            note(f"[nightly] time zone {nightly_settings.tz!r}: {type(e).__name__}: {e}")
 
     def run_nightly(accept_removals: bool = False) -> dict:
         """One nightly update, then the preloaded indexes rebuilt so the first person
@@ -597,8 +610,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return report
 
     app.state.run_nightly = run_nightly if layer else None
-    if layer and background:
-        schedule = nightly.Schedule(layer, nightly_settings, nightly_settings.zone())
+    if layer and background and nightly_zone is None:
+        note("[nightly] NOT scheduled: fix MV_NIGHTLY_TZ (an IANA name, e.g. America/New_York)")
+    elif layer and background:
+        schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
         nightly.start(schedule, run_nightly, note)
 
     # The built frontend (web/dist), when present: files as-is, any other

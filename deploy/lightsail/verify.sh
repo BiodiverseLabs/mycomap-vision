@@ -7,6 +7,8 @@
 #   RESOLVE_IP=127.0.0.1 bash deploy/lightsail/verify.sh   # bypass Cloudflare, hit local nginx
 #   BASE=http://127.0.0.1:8010 bash deploy/lightsail/verify.sh  # the app only, before nginx exists
 #   SIGNIN=identify bash deploy/lightsail/verify.sh        # after the site opens up
+# Run from the repo root (deploy.sh does). The nightly update's state is printed as
+# ok/WARN lines and never fails the check.
 # =============================================================================
 set -uo pipefail
 
@@ -56,6 +58,11 @@ if [[ "$BASE" == https://* ]]; then
   check "certificate good for 14+ days" bash -c \
     "echo | openssl s_client -servername $HOST -connect ${RESOLVE_IP:-$HOST}:443 2>/dev/null | openssl x509 -noout -checkend 1209600"
 fi
+
+# The nightly update (nightly.py): reported, never a failure. A night can fail
+# because mycomap.org was briefly down; the next one makes it good.
+PY=.venv/bin/python; [ -x "$PY" ] || PY=python3
+get "$BASE/api/health" | PYTHONPATH=src "$PY" -m mycomap_vision.nightly_notes | sed 's/^/  /'
 
 # On the box itself: the service and a release.
 if systemctl list-unit-files mycomap-vision.service >/dev/null 2>&1; then

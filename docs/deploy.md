@@ -276,6 +276,18 @@ list, when that is more) is refused as suspicious until you take it with
 `--accept-removals`. Every run, refused ones included, is listed by `mv nightly`
 and logged under `[nightly]` in `journalctl -u mycomap-vision`.
 
+`/api/health` carries a `nightly` block: `state` (`never`, `running`, `ok`,
+`failed`), when the last run started and the last one succeeded, what it changed,
+the next run, and each backbone's layer size with `new_release_due`. It holds no
+error text (the page is public); `mv nightly` on the box has the reason.
+`verify.sh` prints it as `ok` / `WARN` lines (`mycomap_vision/nightly_notes.py`):
+a failed or refused last run, no successful run for 26 hours, a run going on
+3 hours, and a layer past 20% of the release are warnings, never failures.
+
+When a new release is due, build one from an up-to-date manifest and publish and
+pull it as under "New release". It already holds what the nights added, so its
+fresh layer starts (nearly) empty.
+
 ## Memory on the 4 GB box
 
 Measured in a Linux container with the box's packages, on the full photo set
