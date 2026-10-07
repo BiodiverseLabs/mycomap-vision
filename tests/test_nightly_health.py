@@ -42,7 +42,8 @@ def test_health_reports_what_the_last_night_changed(box):
     night(layer, seed_rows()[1:] + [row(300, "C z")], FakeOutside({300: 130}))
     block = health_of(box, layer)
     assert block["state"] == "ok" and block["last_ok_at"] and not block["refused"]
-    assert block["changed"] == {"new": 1, "removed": 1, "renamed": 0, "embedded": 1}
+    assert block["changed"] == {"new": 1, "removed": 1, "renamed": 0, "embedded": 1,
+                                "predicted": 0}
     assert block["layer"]["m1"]["nightly_photos"] == 1
 
 

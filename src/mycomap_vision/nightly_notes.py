@@ -52,7 +52,8 @@ def notes(block: dict | None, now: datetime | None = None,
         c = block.get("changed") or {}
         out.append(("ok", f"last nightly run {block.get('last_run_at')}: "
                           f"{c.get('new', 0)} new, {c.get('removed', 0)} removed, "
-                          f"{c.get('renamed', 0)} renamed, {c.get('embedded', 0)} photos embedded; "
+                          f"{c.get('renamed', 0)} renamed, {c.get('embedded', 0)} photos embedded, "
+                          f"{c.get('predicted', 0)} advance predictions; "
                           f"next {nxt}"))
     if state != "never":
         if last_ok is None:

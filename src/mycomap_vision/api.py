@@ -136,7 +136,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                layer: "nightly.Layer | None" = None,
                nightly_settings: "nightly.Settings | None" = None,
                nightly_fetch: Callable[[], tuple[list[dict], str]] | None = None,
-               nightly_steps: "nightly.Steps | None" = None) -> FastAPI:
+               nightly_steps: "nightly.Steps | None" = None,
+               nightly_fetch_pending: Callable[[], tuple[list[dict], str]] | None = None,
+               photo_fetcher: Callable[[], object] | None = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -144,8 +146,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     `layer` (serve() passes it when MV_NIGHTLY is on): the nightly update's layer
     (nightly.py). `manifest_path` is then its manifest, the index adds its shards, and
-    with `background` the nightly update runs on its schedule. `nightly_fetch` and
-    `nightly_steps` replace the reads of mycomap.org and iNat (tests).
+    with `background` the nightly update runs on its schedule. `nightly_fetch`,
+    `nightly_fetch_pending`, `nightly_steps` and `photo_fetcher` replace the reads of
+    mycomap.org and iNat (tests).
 
     `preload` (default: MV_PRELOAD) names models to load and index on a background
     thread at startup, so the first person to identify doesn't wait for it (about
@@ -578,12 +581,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def run_nightly(accept_removals: bool = False) -> dict:
         """One nightly update, then the preloaded indexes rebuilt so the first person
         after it doesn't wait for the new reference set."""
-        fetch = nightly_fetch
-        if fetch is None:
+        def org() -> tuple[str, str]:
             base_url, key = config.setting("MV_ORG_BASE_URL"), permissions.org_key()
             if not (base_url and key):
                 raise RuntimeError("MV_ORG_BASE_URL / MV_ORG_VISION_KEY(_FILE) not set")
-            fetch = lambda: nightly.fetch_green(base_url, key, log=note)  # noqa: E731
+            return base_url, key
+        fetch = nightly_fetch or (lambda: nightly.fetch_green(*org(), log=note))
+        fetch_pending = nightly_fetch_pending or (lambda: nightly.fetch_pending(*org(), log=note))
 
         def loaded(backbone: str):
             def get():
@@ -607,7 +611,29 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                 index_version(backbone, method, permission_view()), wait=None)
                 except Exception as e:  # noqa: BLE001 - the next identification retries
                     note(f"[nightly] rebuilding {spec} failed: {type(e).__name__}: {e}")
+        # Advance predictions with the model people get by default, on the index just
+        # rebuilt: what it says before the DNA answer, scored once the record turns green.
+        if nightly_settings.predict > 0 and warm.models:
+            report["predictions"] = predict_pending_tonight(report["id"], fetch_pending)
         return report
+
+    def predict_pending_tonight(run_id: int, fetch_pending) -> dict:
+        from .prospective import PhotoFetcher
+        backbone, _, method = warm.models[0].partition("/")
+
+        def served():
+            ident = indexes.get((backbone, method),
+                                index_version(backbone, method, permission_view()), wait=None)
+            with gpu_lock:
+                return ident, nightly.Locked(backbone_model(backbone), gpu_lock)
+        own = manifest.connect(manifest_path)
+        own.execute("pragma busy_timeout = 30000")
+        try:
+            return nightly.advance_predictions(own, run_id, fetch_pending, served,
+                                               (photo_fetcher or PhotoFetcher)(),
+                                               nightly_settings.predict, log=note)
+        finally:
+            own.close()
 
     app.state.run_nightly = run_nightly if layer else None
     if layer and background and nightly_zone is None:
@@ -639,7 +665,8 @@ def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     # so the per-address rate limit sees people, not 127.0.0.1.
     # The nightly update serves the release's layer copy (nightly.py); a new release
     # gets a fresh layer here, and the old release's layer is deleted.
-    layer = nightly.prepare(config.RELEASE_ROOT, prune=True)         if nightly.enabled() and config.RELEASE_ROOT else None
+    on = nightly.enabled() and config.RELEASE_ROOT
+    layer = nightly.prepare(config.RELEASE_ROOT, prune=True) if on else None
     app = create_app(layer.manifest, layer=layer) if layer else create_app()
     uvicorn.run(app, host=host, port=port, proxy_headers=True,
                 forwarded_allow_ips=config.setting("MV_FORWARDED_ALLOW_IPS", "127.0.0.1"))
