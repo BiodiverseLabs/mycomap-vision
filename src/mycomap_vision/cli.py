@@ -384,6 +384,26 @@ def cmd_taxonomy(conn, args) -> None:
     print(json.dumps(taxonomy.report(conn), indent=2))
 
 
+def cmd_guests(conn, args) -> None:
+    """Records whose DNA name is a guest of the fungus in the photo (guests.py)."""
+    from . import guests, names, taxonomy
+    labels = names.manifest_labels(conn)
+    tax = taxonomy.for_manifest(conn)
+    counts: dict[tuple[str, str], int] = {}
+    for name, genus, family in conn.execute("select scientific_name, genus, family from records"):
+        label = (labels.get(name, name) or "").strip()
+        lab = taxonomy.labels_for(label, genus, family, label != (name or "").strip(), tax)
+        group = guests.group_of(lab.genus)
+        if group:
+            counts[(group, lab.genus)] = counts.get((group, lab.genus), 0) + 1
+    out = {}
+    for group in guests.GROUPS:
+        rows = sorted(((g, n) for (gr, g), n in counts.items() if gr == group), key=lambda r: -r[1])
+        out[group] = {"left out": bool(guests.excluded(next(iter(guests.GROUPS[group])))),
+                      "records": sum(n for _, n in rows), "genera": dict(rows)}
+    print(json.dumps(out, indent=2))
+
+
 def cmd_status(conn, args) -> None:
     print(json.dumps(status_report(conn), indent=2))
 
@@ -662,6 +682,8 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("taxonomy", help="what iNat's taxonomy changes, and the genera in doubt "
                                     "(data/reports/taxonomy-doubts.csv; no network)")
+    sub.add_parser("guests", help="records whose DNA name is a yeast or parasite of the "
+                                  "fungus in the photo, and which are left out (guests.py)")
 
     p = sub.add_parser("permissions", help="photographers' answers from mycomap.org "
                                            "(needs MV_ORG_BASE_URL and MV_ORG_VISION_KEY)")
@@ -686,7 +708,7 @@ def main(argv: list[str] | None = None) -> int:
     if config.RELEASE_ROOT and not config.DATA_DIR.is_dir():
         parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
     read_only = {"name-spellings": cmd_name_spellings, "fetch-taxonomy": cmd_fetch_taxonomy,
-                 "taxonomy": cmd_taxonomy}
+                 "taxonomy": cmd_taxonomy, "guests": cmd_guests}
     if args.command in read_only:             # the manifest is opened as it is, read-only
         conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
         read_only[args.command](conn, args)

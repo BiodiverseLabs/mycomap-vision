@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config, names, taxonomy
+from . import config, guests, names, taxonomy
 from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
@@ -83,7 +83,9 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     A one-word name is no species: the record counts at genus (when the word is a
     genus) and family only. Family is iNaturalist's for the genus when the taxonomy
     cache beside the manifest answers it (taxonomy.py), else .org's. A record left
-    with no label at any rank ("Unknown", "Agaricales") is left out."""
+    with no label at any rank ("Unknown", "Agaricales") is left out, and so is a record
+    whose DNA name is a guest of the fungus in the photo (a yeast inside a puffball;
+    guests.py)."""
     na = "and r.north_america = 1" if north_america_only else ""
     ensure_permissions_schema(conn)
     rows = conn.execute(f"""
@@ -110,7 +112,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
             respelled = label != clean(name)
             # A merged label names its own genus: the genus column may be as old as the spelling.
             lab = taxonomy.labels_for(label, genus, family, respelled, tax)
-            if not (lab.species or lab.genus or lab.family):
+            if not (lab.species or lab.genus or lab.family) or guests.excluded(lab.genus):
                 unlabelled.add(oid)
                 continue
             rec = recs[oid] = Record(oid, lab.species, lab.genus, lab.family,
