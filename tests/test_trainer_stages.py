@@ -487,3 +487,55 @@ def test_a_run_with_nothing_uploaded_yet_is_refused_with_where_to_look(tmp_path,
     (tmp_path / "bucket").mkdir()
     with pytest.raises(RuntimeError, match="neither result.json nor progress.json"):
         pull(tmp_path, monkeypatch, tmp_path / "bucket", tmp_path / "home")
+
+
+def test_the_instance_gets_the_inat_taxonomy_beside_its_manifest_before_the_job_runs():
+    u = aws.render_trainer_user_data("r1", ["bioclip-2"], ["nearest"], 2, "bkt")
+    fetch = 'aws s3 cp "s3://$BUCKET/$RUN/taxonomy/inat_genera.sqlite" data/taxonomy/inat_genera.sqlite'
+    assert fetch in u
+    assert u.index("data/manifest.sqlite") < u.index(fetch) < u.index("aws-train-job")
+    assert "inat_genera.sqlite \\\n  || echo" in u, "a missing file is reported, and the line continues in bash"
+
+
+def _launch(conn, tmp_path, monkeypatch, with_taxonomy):
+    seed_two_species(conn, tmp_path)
+    seed_s3_photos(conn)
+    ec2, s3, said = FakeEC2(), FakeLaunchS3(), []
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")
+    (tmp_path / "data").mkdir(exist_ok=True)
+    if with_taxonomy:
+        import sqlite3
+        from mycomap_vision import taxonomy
+        path = taxonomy.cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(path) as db:
+            db.execute("create table answers (name text)")
+            db.execute("insert into answers values ('Russula')")
+    monkeypatch.setattr(aws, "bucket", lambda: "bkt")
+    monkeypatch.setenv("MV_AWS_REGION", "us-east-2")
+    monkeypatch.setattr(aws, "s3_client", lambda: s3)
+    monkeypatch.setattr(aws, "session", lambda: type("S", (), {
+        "client": lambda self, n: {"ec2": ec2, "ssm": FakeSSM()}[n]})())
+    monkeypatch.setattr(aws, "release_commit", lambda **k: "0123456789abcdef0123456789abcdef01234567")
+    monkeypatch.setattr(aws, "code_tarball", lambda ref: b"tgz")
+    out = aws.launch_trainer(conn, ["bioclip-2"], ["nearest"], finetune=["bioclip-2"], log=said.append)
+    return out, s3, said
+
+
+def test_a_launch_sends_the_inat_taxonomy_with_the_run(conn, tmp_path, monkeypatch):
+    import sqlite3
+    out, s3, said = _launch(conn, tmp_path, monkeypatch, with_taxonomy=True)
+    key = f"runs/{out['run_id']}/taxonomy/inat_genera.sqlite"
+    assert key in s3.objects
+    sent = tmp_path / "sent.sqlite"
+    sent.write_bytes(s3.objects[key])
+    with sqlite3.connect(sent) as db:
+        assert db.execute("select name from answers").fetchall() == [("Russula",)]
+    assert not any("WARNING" in line for line in said)
+
+
+def test_a_launch_without_a_taxonomy_cache_says_so_and_still_runs(conn, tmp_path, monkeypatch):
+    out, s3, said = _launch(conn, tmp_path, monkeypatch, with_taxonomy=False)
+    assert not any(k.endswith("taxonomy/inat_genera.sqlite") for k in s3.objects)
+    assert any("WARNING: no iNat taxonomy" in line for line in said)
+    assert out["run_id"]
