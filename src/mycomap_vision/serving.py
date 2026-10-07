@@ -113,20 +113,37 @@ class MappedSelection:
         return out
 
 
-def map_embeddings(conn: sqlite3.Connection, backbone: str,
-                   root: Path | None = None) -> tuple[np.ndarray, MappedVectors]:
+def layer_first_shard(conn: sqlite3.Connection, backbone: str) -> int | None:
+    """The first shard number the nightly update wrote for `backbone`, or None (no layer)."""
+    has = conn.execute("select 1 from sqlite_master where type = 'table' and "
+                       "name = 'nightly_layer'").fetchone()
+    if not has:
+        return None
+    row = conn.execute("select first_shard from nightly_layer where backbone = ?",
+                       (backbone,)).fetchone()
+    return None if row is None else int(row[0])
+
+
+def map_embeddings(conn: sqlite3.Connection, backbone: str, root: Path | None = None,
+                   layer_root: Path | None = None) -> tuple[np.ndarray, MappedVectors]:
     """embed.load_embeddings, with the vectors memory-mapped instead of read in: the same
     photo ids and rows, in the same order. Refuses shards whose ids and vectors differ in
-    length (a truncated file fails to map at all)."""
+    length (a truncated file fails to map at all).
+
+    `layer_root`: where the nightly update (nightly.py) writes the shards it adds after
+    the release's. Shards from the backbone's first nightly shard on are read from
+    <layer_root>/<backbone>/, the rest from `root`."""
     from .embed import SCHEMA
     root = root or config.DATA_DIR / "embeddings" / backbone
     conn.executescript(SCHEMA)
     shards = sorted({r[0] for r in conn.execute(
         "select distinct shard from embeddings where backbone = ?", (backbone,))})
+    first_layer = layer_first_shard(conn, backbone) if layer_root else None
     ids, vecs = [], []
     for s in shards:
-        i = np.load(root / f"shard-{s:05d}.ids.npy")
-        v = np.load(root / f"shard-{s:05d}.npy", mmap_mode="r")
+        here = layer_root / backbone if first_layer is not None and s >= first_layer else root
+        i = np.load(here / f"shard-{s:05d}.ids.npy")
+        v = np.load(here / f"shard-{s:05d}.npy", mmap_mode="r")
         if v.ndim != 2 or len(v) != len(i):
             raise ValueError(f"{backbone} shard {s}: {len(i)} photo ids but vectors of shape "
                              f"{v.shape}")

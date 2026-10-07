@@ -193,15 +193,17 @@ class Identifier:
 
     The reference vectors are memory-mapped from the embedding files (serving.py), not
     read into memory. `photo_info=False` skips the owner and licence of every reference
-    photo, for callers that look them up per identification (the API does)."""
+    photo, for callers that look them up per identification (the API does).
+    `layer_root` holds the shards the nightly update added (nightly.py)."""
 
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
                  embeddings_root: Path | None = None, calibration: dict | None = None,
-                 model_cache: Path | None = None, train: bool = True, photo_info: bool = True):
+                 model_cache: Path | None = None, train: bool = True, photo_info: bool = True,
+                 layer_root: Path | None = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         self.backbone, self.method = backbone, method
-        ids, vecs = map_embeddings(conn, backbone, embeddings_root)
+        ids, vecs = map_embeddings(conn, backbone, embeddings_root, layer_root)
         if not len(ids):
             raise ValueError(f"no embeddings for {backbone!r}")
         self.embedded = len(ids)

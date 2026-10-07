@@ -114,7 +114,8 @@ def test_scores_read_from_disk_are_the_scores_of_the_vectors_in_memory(conn, tmp
                                                                       monkeypatch):
     big_reference(conn, tmp_path / "emb", records=120, photos_each=3, shard_rows=100)
     mapped = Identifier(conn, "big", "nearest", tmp_path / "emb" / "big")
-    monkeypatch.setattr(identify, "map_embeddings", load_embeddings)     # the old way
+    monkeypatch.setattr(identify, "map_embeddings",                       # the old way
+                        lambda c, b, root, layer_root=None: load_embeddings(c, b, root))
     in_memory = Identifier(conn, "big", "nearest", tmp_path / "emb" / "big")
     assert isinstance(in_memory.nearest.scorer.ref, np.ndarray)
     ids, vecs = load_embeddings(conn, "big", tmp_path / "emb" / "big")
