@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import sqlite3
 import subprocess
 import tarfile
 from datetime import datetime, timezone
@@ -304,6 +305,11 @@ print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'GPU', ok and torc
 sys.exit(0 if ok else 1)" || {{ echo "torch cannot use the GPU (driver older than its CUDA?)"; exit 1; }}
 # The run's own copy of the manifest; the downloader's shared one is never touched.
 aws s3 cp "s3://$BUCKET/$RUN/manifest-in.sqlite" data/manifest.sqlite
+# iNat's family per genus, beside the manifest where labels look for it (taxonomy.py);
+# without it the run labels families with .org's, as the laptop would not.
+mkdir -p data/taxonomy
+aws s3 cp "s3://$BUCKET/$RUN/{taxonomy_key}" data/taxonomy/inat_genera.sqlite \\
+  || echo "no iNat taxonomy for this run: families are .org's"
 export HF_HOME=/opt/mv/hf
 # The commit this code was archived from (there is no .git here to ask).
 export MV_CODE_VERSION={code_version}
@@ -315,6 +321,27 @@ MV_DATA_DIR=/opt/mv/data PYTHONPATH=/opt/mv/src PYTHONUNBUFFERED=1 timeout {job_
   --test-days {test_days} --stop-after-hours {stop_hours} \\
   --source "s3://$BUCKET"{finetune_arg}{sample_arg}{spot_arg}{resume_arg}
 """
+
+
+TAXONOMY_KEY = "taxonomy/inat_genera.sqlite"
+
+
+def ship_taxonomy(s3, bucket_name: str, run_id: str, log=print) -> bool:
+    """Send the iNat taxonomy cache with the run, so the instance labels families and
+    one-word names as this laptop does. A run without it falls back to .org's families,
+    which is said loudly rather than refused."""
+    from . import taxonomy
+    src = taxonomy.cache_path()
+    if not src.is_file():
+        log(f"WARNING: no iNat taxonomy at {src}: this run labels families with .org's. "
+            "Run `mv fetch-taxonomy` first to use iNaturalist's.")
+        return False
+    copy = config.DATA_DIR / "taxonomy-upload.sqlite"
+    with sqlite3.connect(src) as live, sqlite3.connect(copy) as out:
+        live.backup(out)                       # a consistent copy, even mid-write
+    s3.upload_file(str(copy), bucket_name, f"runs/{run_id}/{TAXONOMY_KEY}")
+    log(f"Uploaded the iNat taxonomy for run {run_id}")
+    return True
 
 
 def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[str],
@@ -336,6 +363,7 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         bucket=bucket_name, run_id=run_id, region=config.setting("MV_AWS_REGION", "us-east-2"),
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
         stop_hours=round(stop, 2), code_version=code_version, code_key=code_key,
+        taxonomy_key=TAXONOMY_KEY,
         backbones=",".join(backbones), methods=",".join(methods), size=size,
         test_days=test_days,
         finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "",
@@ -590,6 +618,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         s3.upload_file(str(snap), b, f"runs/{run_id}/manifest-in.sqlite")
         log(f"Uploaded commit {sha[:10]} and the manifest for run {run_id} "
             f"({photos:,} {size} photos in S3)")
+        ship_taxonomy(s3, b, run_id, log)
     if spot:
         log(SPOT_NOTE.format(run=run_id))
     ami = ssm.get_parameter(Name=TRAINER_AMI_PARAMETER)["Parameter"]["Value"]
