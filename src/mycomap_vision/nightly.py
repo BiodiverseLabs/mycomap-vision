@@ -628,6 +628,33 @@ def start(schedule: Schedule, job: Callable[[bool], dict], note=print, tick: flo
 # ---------------------------------------------------------------------------
 # Reporting
 
+def health(conn: sqlite3.Connection, settings: Settings, zone: tzinfo | None = None,
+           now: datetime | None = None) -> dict:
+    """The nightly part of /api/health (public, so no error text, which can name hosts or
+    paths: `mv nightly` on the box has that). nightly_notes.py turns it into lines."""
+    ensure_schema(conn)
+    last = conn.execute("select started_at, ok, report, error from nightly_runs "
+                        "order by id desc limit 1").fetchone()
+    ok_at = conn.execute("select max(finished_at) from nightly_runs where ok = 1").fetchone()[0]
+    layer = {b: {k: s[k] for k in ("release_photos", "nightly_photos", "share", "new_release_due")}
+             for b, s in layer_sizes(conn, settings.warn_share).items()}
+    out = {"enabled": True, "last_ok_at": ok_at, "layer": layer,
+           "new_release_due": any(s["new_release_due"] for s in layer.values()),
+           "next_run": iso(next_run(now or now_utc(), settings.at, zone)) if zone else None}
+    if last is None:
+        return {**out, "state": "never", "last_run_at": None}
+    started, ok, report, error = last
+    report = json.loads(report) if report else {}
+    records = report.get("records") or {}
+    out.update(state="running" if ok is None else ("ok" if ok else "failed"), last_run_at=started,
+               # Every refusal of mycomap.org's answer says so (fetch_green, run_once).
+               refused=bool(error) and "nothing was changed" in error,
+               changed={"new": records.get("new", 0), "removed": records.get("removed", 0),
+                        "renamed": records.get("renamed", 0),
+                        "embedded": sum((report.get("embedded") or {}).values())})
+    return out
+
+
 def status(conn: sqlite3.Connection, settings: Settings, now: datetime | None = None,
            zone: tzinfo | None = None, runs: int = 5) -> dict:
     """The last runs, the layer's size per backbone and when the next run is."""
