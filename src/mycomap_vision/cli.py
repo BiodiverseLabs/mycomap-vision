@@ -288,6 +288,44 @@ def cmd_predict_pending(conn, args) -> None:
     print(json.dumps(stats, indent=2))
 
 
+def cmd_nightly(conn, args) -> None:
+    """The nightly update (nightly.py): what it did, what tonight would change, or run it now.
+    --plan only reads, so it also runs before the update is turned on (and on a laptop)."""
+    from . import nightly, permissions
+    settings = nightly.Settings.from_env()
+    if args.plan:
+        base_url, key = config.setting("MV_ORG_BASE_URL"), permissions.org_key()
+        if not (base_url and key):
+            raise SystemExit("set MV_ORG_BASE_URL and MV_ORG_VISION_KEY(_FILE)")
+        rows, generated = nightly.fetch_green(base_url, key)
+        plan = nightly.changes(conn, records.build_records(rows, generated))
+        limit = settings.removal_limit(plan["before"])
+        plan["removals_refused"] = plan["removed"] > limit
+        plan["removal_limit"] = limit
+        print(json.dumps(plan, indent=2))
+        return
+    if not (config.RELEASE_ROOT and nightly.enabled()):
+        raise SystemExit("the nightly update runs on the server box: set MV_RELEASE_ROOT and "
+                         "MV_NIGHTLY=1")
+    layer = nightly.layer_for(config.RELEASE_ROOT)
+    if args.now:
+        if not layer.manifest.is_file():
+            raise SystemExit("the server has not made this release's layer yet: start it first")
+        if args.accept_removals:
+            layer.accept_removals.touch()
+        layer.run_now.touch()
+        print("asked the server to run the nightly update within a minute"
+              + (", taking the removals" if args.accept_removals else "")
+              + "; `mv nightly` shows the result")
+        return
+    zone = None
+    try:
+        zone = settings.zone()
+    except Exception as e:  # noqa: BLE001 - the report is still useful without it
+        print(f"(time zone {settings.tz!r}: {e})", file=sys.stderr)
+    print(json.dumps(nightly.status(conn, settings, zone=zone), indent=2))
+
+
 def cmd_prospective(conn, args) -> None:
     from . import prospective
     print(json.dumps(prospective.report(conn), indent=2))
@@ -642,6 +680,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--backbone", required=True)
     p.add_argument("--method", default="hybrid")
     p.add_argument("--limit", type=int, help="newest candidates first")
+    p = sub.add_parser("nightly", help="(server box) the nightly update: last runs and layer "
+                       "size; --plan shows tonight's changes; --now runs it within a minute")
+    p.add_argument("--plan", action="store_true",
+                   help="read mycomap.org and print what tonight would change, changing nothing")
+    p.add_argument("--now", action="store_true", help="ask the running server to update now")
+    p.add_argument("--accept-removals", action="store_true",
+                   help="with --now: take an answer that removes more records than the limit")
     sub.add_parser("prospective", help="how advance predictions fared once the DNA came in")
 
     p = sub.add_parser("scoreboard", help="saved comparison results")
@@ -713,7 +758,9 @@ def main(argv: list[str] | None = None) -> int:
         conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
         read_only[args.command](conn, args)
         return 0
-    conn = manifest.connect(config.MANIFEST_PATH)
+    from . import nightly
+    # On the server box with the nightly update on, its layer copy is the live manifest.
+    conn = manifest.connect(nightly.served_manifest())
     handler = {
         "export-records": cmd_export_records,
         "fetch-inat": cmd_fetch_inat,
@@ -736,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
         "candidates": cmd_candidates,
         "predict-pending": cmd_predict_pending,
         "prospective": cmd_prospective,
+        "nightly": cmd_nightly,
         "scoreboard": cmd_scoreboard,
         "models": cmd_models,
         "serve": cmd_serve,

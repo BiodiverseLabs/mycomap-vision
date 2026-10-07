@@ -233,6 +233,49 @@ done when verify passes.
 To roll back, run `.venv/bin/mv pull-release --release <previous id>` and
 restart.
 
+## Nightly update (between releases)
+
+With `MV_NIGHTLY=1` the server keeps the reference set in step with mycomap.org
+every night at 3 a.m. Eastern (`nightly.py`): records that stopped being green
+leave it and renamed records carry their new name that same night. Records new to
+the green list get their iNat details and photos, are embedded on this box's CPU
+with the served model (about 0.7 s a photo, at most `MV_NIGHTLY_MAX_PHOTOS` a
+night), and join it. Their photos are deleted once embedded; only the vectors stay.
+
+The release is never written. The server works on a layer beside it,
+`/srv/mycomap-vision/state/nightly/<release id>/` (a copy of the release's
+manifest, the nightly shards and iNat's answers). A new release starts a fresh
+layer, and the old one is deleted when the server starts on the new release. When
+a backbone's nightly photos pass 20% of the release's, `mv nightly` says a new
+release is due.
+
+Before turning it on:
+
+1. mycomap.org serves `GET /api/vision/green-records` (the .org branch
+   `feat/vision-green-records`, deployed there), with the same `VISION_API_KEY` as
+   the photographers' answers (5b).
+2. Cloudflare lets the box through to it: widen the WAF Skip rule for this box
+   from the exact path `/api/vision/photo-permissions` to
+   `starts_with(http.request.uri.path, "/api/vision/")` (Steve).
+3. On this box, `.venv/bin/mv nightly --plan` reads mycomap.org and prints what the
+   first night would change, changing nothing.
+
+Then add `MV_NIGHTLY=1` to `/etc/mycomap-vision/vision.env` and restart. The first
+start copies the release's manifest (a few seconds).
+
+```bash
+.venv/bin/mv nightly                          # last runs, layer size, next run
+.venv/bin/mv nightly --plan                   # what tonight would change
+.venv/bin/mv nightly --now                    # ask the server to run within a minute
+.venv/bin/mv nightly --now --accept-removals  # take a large removal it refused
+```
+
+An answer that is missing, malformed, empty or short of the total mycomap.org
+announced changes nothing. One that removes more than 500 records (or 2% of the
+list, when that is more) is refused as suspicious until you take it with
+`--accept-removals`. Every run, refused ones included, is listed by `mv nightly`
+and logged under `[nightly]` in `journalctl -u mycomap-vision`.
+
 ## Memory on the 4 GB box
 
 Measured in a Linux container with the box's packages, on the full photo set

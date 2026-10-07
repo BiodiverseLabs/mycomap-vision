@@ -25,7 +25,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from PIL import Image
 
-from . import config, evaluate, inat, models, names, permissions, serving, uploads
+from . import (config, evaluate, inat, manifest, models, names, nightly, permissions, serving,
+               uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
@@ -131,11 +132,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                backbone_loader: Callable[[str], object] = models.load_backbone,
                web_dist: Path | None = WEB_DIST, limits: Limits | None = None,
                signin: SigninConfig | None = None, background: bool = True,
-               note=print, preload: list[str] | None = None) -> FastAPI:
+               note=print, preload: list[str] | None = None,
+               layer: "nightly.Layer | None" = None,
+               nightly_settings: "nightly.Settings | None" = None,
+               nightly_fetch: Callable[[], tuple[list[dict], str]] | None = None,
+               nightly_steps: "nightly.Steps | None" = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
     `note` prints what they report.
+
+    `layer` (serve() passes it when MV_NIGHTLY is on): the nightly update's layer
+    (nightly.py). `manifest_path` is then its manifest, the index adds its shards, and
+    with `background` the nightly update runs on its schedule. `nightly_fetch` and
+    `nightly_steps` replace the reads of mycomap.org and iNat (tests).
 
     `preload` (default: MV_PRELOAD) names models to load and index on a background
     thread at startup, so the first person to identify doesn't wait for it (about
@@ -297,7 +307,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         own = sqlite3.connect(manifest_path, timeout=30)
         try:
             ident = Identifier(own, backbone, method, root, calibration=cal,
-                               train=limits.fit_on_demand, photo_info=False)
+                               train=limits.fit_on_demand, photo_info=False,
+                               layer_root=layer.embeddings if layer else None)
         finally:
             own.close()
         ident.warm()
@@ -311,12 +322,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def identifier(backbone: str, method: str, view: permissions.PermissionView) -> Identifier:
         """The index as the data stand now. May wait for a rebuild (serving.Updating if
         it takes too long); never call it holding gpu_lock."""
+        return indexes.get((backbone, method), index_version(backbone, method, view))
+
+    def index_version(backbone: str, method: str, view: permissions.PermissionView) -> tuple:
         n = embedded_counts().get(backbone, 0)
         with db_lock:
             cal = evaluate.latest_calibration(conn, backbone, method)
+            # A night that only removed or renamed records leaves n alone.
+            night = nightly.layer_version(conn) if layer else 0
         # A change in who has said no rebuilds the reference set without their photos.
-        version = (n, cal["run_id"] if cal else None, view.fingerprint())
-        return indexes.get((backbone, method), version)
+        return (n, cal["run_id"] if cal else None, view.fingerprint(), night)
 
     warm = Preload()
 
@@ -544,6 +559,48 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     own.close()
             start_background("licences", 3600, refresh_licences, note)
 
+    # The nightly update (nightly.py): runs here because this process holds the model.
+    nightly_settings = nightly_settings or (nightly.Settings.from_env() if layer else None)
+
+    def run_nightly(accept_removals: bool = False) -> dict:
+        """One nightly update, then the preloaded indexes rebuilt so the first person
+        after it doesn't wait for the new reference set."""
+        fetch = nightly_fetch
+        if fetch is None:
+            base_url, key = config.setting("MV_ORG_BASE_URL"), permissions.org_key()
+            if not (base_url and key):
+                raise RuntimeError("MV_ORG_BASE_URL / MV_ORG_VISION_KEY(_FILE) not set")
+            fetch = lambda: nightly.fetch_green(base_url, key, log=note)  # noqa: E731
+
+        def loaded(backbone: str):
+            def get():
+                with gpu_lock:
+                    return backbone_model(backbone)
+            return get
+        served = {b: loaded(b) for b in ready_backbones()}
+        own = manifest.connect(manifest_path)
+        own.execute("pragma busy_timeout = 30000")      # the permissions sync writes too
+        try:
+            report = nightly.run_once(own, layer, fetch, served, nightly_settings,
+                                      encode_lock=gpu_lock, accept_removals=accept_removals,
+                                      steps=nightly_steps, log=note)
+        finally:
+            own.close()
+        if report["changed"]:
+            for spec in warm.models:
+                backbone, _, method = spec.partition("/")
+                try:
+                    indexes.get((backbone, method),
+                                index_version(backbone, method, permission_view()), wait=None)
+                except Exception as e:  # noqa: BLE001 - the next identification retries
+                    note(f"[nightly] rebuilding {spec} failed: {type(e).__name__}: {e}")
+        return report
+
+    app.state.run_nightly = run_nightly if layer else None
+    if layer and background:
+        schedule = nightly.Schedule(layer, nightly_settings, nightly_settings.zone())
+        nightly.start(schedule, run_nightly, note)
+
     # The built frontend (web/dist), when present: files as-is, any other
     # non-API path gets index.html so client-side routes work on reload.
     if web_dist and (web_dist / "index.html").exists():
@@ -565,5 +622,9 @@ def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     import uvicorn
     # Behind nginx the client is in X-Forwarded-For; trust it only from nginx itself,
     # so the per-address rate limit sees people, not 127.0.0.1.
-    uvicorn.run(create_app(), host=host, port=port, proxy_headers=True,
+    # The nightly update serves the release's layer copy (nightly.py); a new release
+    # gets a fresh layer here, and the old release's layer is deleted.
+    layer = nightly.prepare(config.RELEASE_ROOT, prune=True)         if nightly.enabled() and config.RELEASE_ROOT else None
+    app = create_app(layer.manifest, layer=layer) if layer else create_app()
+    uvicorn.run(app, host=host, port=port, proxy_headers=True,
                 forwarded_allow_ips=config.setting("MV_FORWARDED_ALLOW_IPS", "127.0.0.1"))

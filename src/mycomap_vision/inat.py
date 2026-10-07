@@ -11,6 +11,7 @@ import json
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 import requests
@@ -192,12 +193,14 @@ def fetch_batch(session: requests.Session, ids: list[str], limiter: MinInterval)
 
 
 def fetch_all(conn: sqlite3.Connection, refresh: bool = False, north_america_only: bool = True,
-              limit: int | None = None, log=print) -> dict:
+              limit: int | None = None, raw_dir: Path | None = None, log=print) -> dict:
+    """iNat's details for records not fetched before. `raw_dir`: where each answer is
+    kept gzipped (default <data>/raw/inat; the nightly update keeps its own)."""
     config.ensure_dirs()
     ids = pending_ids(conn, refresh, north_america_only)
     if limit is not None:
         ids = ids[:limit]
-    raw_dir = config.RAW_DIR / "inat"
+    raw_dir = raw_dir or config.RAW_DIR / "inat"
     raw_dir.mkdir(parents=True, exist_ok=True)
     session = requests.Session()
     session.headers["User-Agent"] = config.USER_AGENT

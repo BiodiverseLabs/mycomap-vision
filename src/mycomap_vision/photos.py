@@ -156,7 +156,7 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
                    size: str = "medium", store_location: str | None = None,
                    random_order: bool = False, record_sample: int | None = None,
                    first_seen_since: str | None = None, held_at: str | None = None,
-                   hosts: tuple[str, ...] | None = None):
+                   hosts: tuple[str, ...] | None = None, unembedded_for: str | None = None):
     """Photos of green records with no copy at `size` (in `store_location`, when given),
     failed fewest times first. Photos iNat no longer has, and ones that failed
     MAX_ATTEMPTS times, are left out. A copy at another size or in another store
@@ -166,6 +166,9 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
     sample fetched again at a new size); `hosts` keeps only photos served from
     those hosts (e.g. the open-data bucket, when another machine is using the
     capped host's budget).
+
+    `unembedded_for` keeps only photos with no vector yet from that backbone (the
+    nightly update: the release's photos are embedded but not held on the box).
     """
     na = "and r.north_america = 1" if north_america_only else ""
     params: list = []
@@ -185,6 +188,10 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
     if hosts:
         extra += f" and p.host in ({','.join('?' * len(hosts))})"
         tail += list(hosts)
+    if unembedded_for:
+        extra += (" and not exists (select 1 from embeddings e where e.backbone = ?"
+                  " and e.photo_id = p.photo_id)")
+        tail.append(unembedded_for)
     sql = f"""
       select distinct p.photo_id, p.source_url, p.host, p.attempts
       from photos p
@@ -282,7 +289,7 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                  record_sample: int | None = None, first_seen_since: str | None = None,
                  held_at: str | None = None, hosts: tuple[str, ...] | None = None,
                  policies: dict[str, HostPolicy] | None = None, poll: float = 30,
-                 log=print) -> dict:
+                 unembedded_for: str | None = None, log=print) -> dict:
     """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
     runs every `checkpoint_every` seconds and once at the end.
 
@@ -291,7 +298,7 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
     the others need. Budgets start from what earlier runs fetched (seed_budgets)."""
     config.ensure_dirs()
     rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
-                          record_sample, first_seen_since, held_at, hosts)
+                          record_sample, first_seen_since, held_at, hosts, unembedded_for)
     policies = policies or default_policies()
     seeded = seed_budgets(conn, policies)
     for host, n in seeded.items():
