@@ -93,8 +93,10 @@ def export_candidates(conn: sqlite3.Connection, fetch: Callable[[str], str] | No
 
 
 def unpredicted(conn: sqlite3.Connection, backbone: str, method: str,
-                limit: int | None = None) -> list[str]:
-    """North American candidates, still not green, with no prediction from this model."""
+                limit: int | None = None, seen_since: str | None = None) -> list[str]:
+    """North American candidates, still not green, with no prediction from this model.
+    `seen_since`: only candidates an export at or after that time still listed (a
+    record rejected since then stays in the table but is no longer pending)."""
     conn.executescript(SCHEMA)
     sql = """
       select c.observation_id from candidates c
@@ -102,11 +104,12 @@ def unpredicted(conn: sqlite3.Connection, backbone: str, method: str,
         and p.backbone = ? and p.method = ?
       left join records r on r.observation_id = c.observation_id
       where c.north_america = 1 and p.observation_id is null and r.observation_id is null
+        and (? is null or c.last_seen_at >= ?)
       order by cast(c.observation_id as integer) desc
     """
     if limit:
         sql += f" limit {int(limit)}"
-    return [r[0] for r in conn.execute(sql, (backbone, method))]
+    return [r[0] for r in conn.execute(sql, (backbone, method, seen_since, seen_since))]
 
 
 class PhotoFetcher:

@@ -67,6 +67,7 @@ from .release import RELEASE_ID, current_release
 from .storage import LocalStore
 
 PATH = "/api/vision/green-records"
+PENDING_PATH = "/api/vision/pending-records"
 PAGE_LIMIT = 5000
 MAX_PAGES = 1000                 # 5 million records: far past any real answer
 LOCK_STALE_SECONDS = 6 * 3600    # a lock this old was left by a run that died
@@ -142,6 +143,7 @@ class Settings:
     max_removed: int = 500               # removals refused above max(this, share of the list)
     max_removed_share: float = 0.02
     warn_share: float = 0.20             # layer / release photos that call for a new release
+    predict: int = 300                   # advance predictions a night (0: none)
 
     def __post_init__(self):
         if not _AT.match(self.at):
@@ -155,7 +157,8 @@ class Settings:
                    size=config.setting("MV_NIGHTLY_PHOTO_SIZE", "large"),
                    max_removed=int(_number("MV_NIGHTLY_MAX_REMOVED", 500)),
                    max_removed_share=_number("MV_NIGHTLY_MAX_REMOVED_SHARE", 0.02),
-                   warn_share=_number("MV_NIGHTLY_WARN_SHARE", 0.20))
+                   warn_share=_number("MV_NIGHTLY_WARN_SHARE", 0.20),
+                   predict=int(_number("MV_NIGHTLY_PREDICT", 300)))
 
     def zone(self) -> tzinfo:
         from zoneinfo import ZoneInfo
@@ -319,8 +322,25 @@ def fetch_green(base_url: str, key: str, session: requests.Session | None = None
     malformed page, a cursor that repeats, an empty list, and a list short of (or past)
     the total the first page announced by more than 1% (records turning green while
     the pages are read move it a little)."""
+    return fetch_pages(base_url, key, PATH, "green", session=session, limit=limit,
+                       timeout=timeout, log=log)
+
+
+def fetch_pending(base_url: str, key: str, session: requests.Session | None = None,
+                  limit: int = PAGE_LIMIT, timeout: float = 120,
+                  log=print) -> tuple[list[dict], str]:
+    """Every record awaiting validation (GET /api/vision/pending-records), for the
+    advance predictions; checked as fetch_green, but an empty list is an answer."""
+    return fetch_pages(base_url, key, PENDING_PATH, "pending", session=session, limit=limit,
+                       timeout=timeout, allow_empty=True, log=log)
+
+
+def fetch_pages(base_url: str, key: str, path: str, what: str,
+                session: requests.Session | None = None, limit: int = PAGE_LIMIT,
+                timeout: float = 120, allow_empty: bool = False,
+                log=print) -> tuple[list[dict], str]:
     session = session or requests.Session()
-    url = base_url.rstrip("/") + PATH
+    url = base_url.rstrip("/") + path
     headers = {"Authorization": f"Bearer {key}", "User-Agent": config.USER_AGENT}
     rows: list[dict] = []
     after, total, generated = "", None, None
@@ -347,7 +367,7 @@ def fetch_green(base_url: str, key: str, session: requests.Session | None = None
         nxt = payload.get("next") if isinstance(payload, dict) else None
         if not isinstance(records, list) or payload.get("count") != len(records) \
                 or not (nxt is None or isinstance(nxt, str)):
-            raise _fail(f"page {page + 1} is not a green-records page")
+            raise _fail(f"page {page + 1} is not a {what}-records page")
         if any(not isinstance(r, dict) or r.get("observation_id") in (None, "") for r in records):
             raise _fail(f"page {page + 1} holds a record without an observation_id")
         if page == 0:
@@ -363,11 +383,11 @@ def fetch_green(base_url: str, key: str, session: requests.Session | None = None
         after = nxt
     else:
         raise _fail(f"more than {MAX_PAGES} pages")
-    if not rows:
-        raise _fail("mycomap.org listed no green records")
+    if not rows and not allow_empty:
+        raise _fail(f"mycomap.org listed no {what} records")
     if abs(len(rows) - total) > max(50, total // 100):
-        raise _fail(f"mycomap.org announced {total:,} green rows but sent {len(rows):,}")
-    log(f"[nightly] {len(rows):,} green rows from mycomap.org in {page + 1} pages")
+        raise _fail(f"mycomap.org announced {total:,} {what} rows but sent {len(rows):,}")
+    log(f"[nightly] {len(rows):,} {what} rows from mycomap.org in {page + 1} pages")
     return rows, generated
 
 
@@ -565,6 +585,45 @@ def drop_embedded_photos(conn: sqlite3.Connection, store: LocalStore, backbones:
 
 
 # ---------------------------------------------------------------------------
+# Advance predictions
+
+def advance_predictions(conn: sqlite3.Connection, run_id: int,
+                        fetch: Callable[[], tuple[list[dict], str]],
+                        served: Callable[[], tuple[object, object]], fetcher, limit: int,
+                        log=print) -> dict:
+    """Predict up to `limit` of the records awaiting validation (newest first) with the
+    served index and model (`served()` gives both), from their iNat photos
+    (prospective.py: held in memory, never stored), and add what happened to nightly
+    run `run_id`. Each prediction is scored by
+    `mv prospective` once its record turns green; one made after that never counts.
+    Only records mycomap.org still lists as pending tonight are predicted."""
+    from . import prospective
+    try:
+        identifier, backbone_model = served()
+        rows, _generated = fetch()
+        seen = iso(now_utc())
+        prospective.save_candidates(conn, rows, seen)
+        ids = prospective.unpredicted(conn, identifier.backbone, identifier.method, limit,
+                                      seen_since=seen)
+        stats = prospective.predict_pending(conn, identifier, backbone_model, ids, fetcher,
+                                            log=log)
+        out = {"model": f"{identifier.backbone}/{identifier.method}", "pending": len(rows),
+               "asked": len(ids), **stats}
+        log(f"[nightly] advance predictions: {stats.get('predicted', 0):,} of "
+            f"{len(ids):,} asked ({len(rows):,} pending)")
+    except Exception as e:  # noqa: BLE001 - the reference set is already updated
+        out = {"error": f"{type(e).__name__}: {e}"[:500]}
+        log(f"[nightly] advance predictions failed: {out['error']}")
+    with conn:
+        row = conn.execute("select report from nightly_runs where id = ?", (run_id,)).fetchone()
+        report = json.loads(row[0]) if row and row[0] else {}
+        report["predictions"] = out
+        conn.execute("update nightly_runs set report = ? where id = ?",
+                     (json.dumps(report), run_id))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # When
 
 def next_run(now: datetime, at: str, zone: tzinfo) -> datetime:
@@ -651,7 +710,8 @@ def health(conn: sqlite3.Connection, settings: Settings, zone: tzinfo | None = N
                refused=bool(error) and "nothing was changed" in error,
                changed={"new": records.get("new", 0), "removed": records.get("removed", 0),
                         "renamed": records.get("renamed", 0),
-                        "embedded": sum((report.get("embedded") or {}).values())})
+                        "embedded": sum((report.get("embedded") or {}).values()),
+                        "predicted": (report.get("predictions") or {}).get("predicted", 0)})
     return out
 
 

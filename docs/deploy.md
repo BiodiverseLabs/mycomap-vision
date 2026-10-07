@@ -284,6 +284,15 @@ error text (the page is public); `mv nightly` on the box has the reason.
 a failed or refused last run, no successful run for 26 hours, a run going on
 3 hours, and a layer past 20% of the release are warnings, never failures.
 
+After the reference set, the night makes **advance predictions**: up to
+`MV_NIGHTLY_PREDICT` (300) records still awaiting validation on mycomap.org
+(`GET /api/vision/pending-records`), newest first, are identified from their iNat
+photos with the model people get by default (the first in `MV_PRELOAD`), photos
+held in memory only. Each prediction is scored once its record turns green, and
+only if it was made before: `.venv/bin/mv prospective` on the box. That is the
+honest test of the model, since nothing could have seen the answer. A failure here
+is recorded under `predictions` in `mv nightly` and never undoes the night's update.
+
 When a new release is due, build one from an up-to-date manifest and publish and
 pull it as under "New release". It already holds what the nights added, so its
 fresh layer starts (nearly) empty.
