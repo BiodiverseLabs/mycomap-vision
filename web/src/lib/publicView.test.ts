@@ -1,7 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { headline, modelName, sendWaitingInLine } from "./publicView";
-import type { ScoreRun } from "./api";
+import { headline, identifyGate, modelName, sendWaitingInLine } from "./publicView";
+import type { Me, ScoreRun } from "./api";
+
+test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
+  const me = (signin: Me["signin"], user: Me["user"]): Me => ({ signin, user });
+  const someone = { id: "7", name: "Ann" };
+  assert.equal(identifyGate(me("identify", null)), "sign-in");
+  assert.equal(identifyGate(me("all", null)), "sign-in");
+  assert.equal(identifyGate(me("identify", someone)), "ready");
+  assert.equal(identifyGate(me("off", null)), "ready", "an open site needs no account");
+  assert.equal(identifyGate(undefined), "checking");
+  assert.equal(identifyGate(undefined, true), "ready", "unknown: the server decides");
+});
 
 test("visitors read a model's name, not its file name", () => {
   assert.equal(modelName("bioclip-2-ft-20261007-165400"),

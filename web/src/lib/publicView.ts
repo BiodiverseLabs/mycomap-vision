@@ -1,7 +1,7 @@
 // What the public pages show: plain model names, the served model's latest measured
 // results, and waiting in line instead of an error when the server is busy.
 
-import type { ScoreRun } from "./api";
+import type { Me, ScoreRun } from "./api";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
@@ -43,6 +43,18 @@ export function headline(runs: ScoreRun[], served: string[], method = "nearest")
     ?? same.find((r) => r.backbone === "external:inat-cv") ?? null;
   return { comparisonId: ours.comparison_id, cutoff: ours.cutoff, nTest: ours.n_test,
            nReference: ours.n_reference, ours, inat };
+}
+
+/** Whether this visitor can identify now. "sign-in": the site asks for a mycomap.org
+ *  account to identify and they have none yet, so the page asks them to sign in before they
+ *  pick photos (a sign-in leaves the page, and the photos would be lost). When who they are
+ *  can't be told, the server decides (it answers 401, and the page offers sign-in then). */
+export type IdentifyGate = "checking" | "ready" | "sign-in";
+
+export function identifyGate(me: Me | null | undefined, failed = false): IdentifyGate {
+  if (failed) return "ready";
+  if (!me) return "checking";
+  return me.signin === "off" || me.user ? "ready" : "sign-in";
 }
 
 /** Send, and when the server says it is busy (503 with Retry-After), wait in line and send
