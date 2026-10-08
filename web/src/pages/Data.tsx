@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/Layout";
 import { api, num, pct } from "@/lib/api";
+import { modelName } from "@/lib/publicView";
 
 const LICENSE_LABEL: Record<string, string> = {
   open: "Open",
@@ -22,14 +23,12 @@ export function DataPage() {
         {q.isError && <p className="text-destructive text-sm">The API isn't answering.</p>}
         {s && (
           <>
-            <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-4 grid-cols-2 lg:grid-cols-3">
               <Tile label="DNA-validated records" value={num(s.records)}
                     sub={`${num(s.records_north_america)} in North America`} />
               <Tile label="Names" value={num(s.names)} sub="North America, no label conflicts" />
               <Tile label="Photos" value={num(s.photos)}
                     sub={`${(s.photos / Math.max(1, s.inat_ok)).toFixed(1)} per record`} />
-              <Tile label="Photos held" value={num(Object.values(s.photos_by_size).reduce((a, b) => a + b, 0))}
-                    sub={Object.entries(s.photos_by_size).map(([k, v]) => `${num(v)} ${k}`).join(" · ") || "none yet"} />
             </div>
 
             <div className="grid gap-6 lg:grid-cols-2">
@@ -66,19 +65,18 @@ export function DataPage() {
                 </CardContent>
               </Card>
               <Card>
-                <CardHeader><CardTitle className="text-base">Download</CardTitle></CardHeader>
-                <CardContent>
-                  <Bars data={s.photos_by_status} total={s.photos} />
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader><CardTitle className="text-base">Embedded photos by backbone</CardTitle></CardHeader>
+                <CardHeader><CardTitle className="text-base">Photos the identifier compares with</CardTitle></CardHeader>
                 <CardContent>
                   {Object.keys(s.embedded).length ? (
-                    <Bars data={s.embedded} total={s.photos} />
+                    <Bars data={Object.fromEntries(Object.entries(s.embedded).map(([b, n]) => [modelName(b), n]))}
+                          total={s.photos} />
                   ) : (
                     <p className="text-sm text-muted-foreground">None yet.</p>
                   )}
+                  <p className="text-xs text-muted-foreground mt-3">
+                    The rest are photos of records outside North America, or that iNaturalist no
+                    longer serves. New records join every night.
+                  </p>
                 </CardContent>
               </Card>
             </div>

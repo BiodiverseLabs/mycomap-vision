@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/Layout";
 import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
+import { modelName } from "@/lib/publicView";
 
 const BUCKET_ORDER = ["all", "names iNat knows", "novel (0 refs)", "1 ref", "2 refs", "3-5 refs",
                       "6-30 refs", "31+ refs"];
@@ -14,9 +15,6 @@ export function ModelsPage() {
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const [open, setOpen] = useState<number | null>(null);
   const groups = groupBy(board.data?.runs ?? [], (r) => r.comparison_id);
-  const speed = Object.fromEntries(
-    (models.data?.backbones ?? []).map((b) => [b.backbone, b.photos_per_second]),
-  );
 
   return (
     <>
@@ -30,19 +28,62 @@ export function ModelsPage() {
           <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Scoreboard</h2>
           {board.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
           {board.data && !board.data.runs.length && (
-            <p className="text-sm text-muted-foreground">
-              No comparisons yet. Run <code>mv compare --backbones a,b --methods nearest,species-mean</code>.
-            </p>
+            <p className="text-sm text-muted-foreground">No tests published yet.</p>
           )}
           <div className="space-y-6">
-            {groups.map(([cid, runs]) => (
+            {groups.slice(0, 1).map(([cid, runs]) => (
+              <Comparison key={cid} cid={cid} runs={runs} open={open} setOpen={setOpen} />
+            ))}
+            {groups.length > 1 && (
+              <details className="rounded-lg border border-[#A87146]/20 p-4">
+                <summary className="cursor-pointer text-sm text-muted-foreground">
+                  Earlier tests ({groups.length - 1}), from development, on smaller sets
+                </summary>
+                <div className="space-y-6 mt-4">
+                  {groups.slice(1).map(([cid, runs]) => (
+                    <Comparison key={cid} cid={cid} runs={runs} open={open} setOpen={setOpen} />
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+        </section>
+
+        <Prospective />
+
+        <section>
+          <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Models in use</h2>
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {models.data?.backbones.filter((b) => b.embedded_photos).map((b) => (
+              <Card key={b.backbone}>
+                <CardContent className="pt-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-[#4a3728]" title={b.backbone}>{modelName(b.backbone)}</span>
+                    <Badge variant="default">{num(b.embedded_photos)} photos</Badge>
+                  </div>
+                  {b.note && <p className="text-sm text-muted-foreground mt-1">{b.note}</p>}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </section>
+      </div>
+    </>
+  );
+}
+
+function Comparison({ cid, runs, open, setOpen }: {
+  cid: string; runs: ScoreRun[]; open: number | null; setOpen: (id: number | null) => void;
+}) {
+  return (
               <Card key={cid}>
                 <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <CardTitle className="text-base text-[#4a3728]">Comparison {cid}</CardTitle>
-                    <span className="text-xs text-muted-foreground">
-                      test: green after {runs[0].cutoff} · {num(runs[0].n_test)} test /{" "}
-                      {num(runs[0].n_reference)} reference records · set {runs[0].record_set}
+                    <CardTitle className="text-base text-[#4a3728]">
+                      Test on {num(runs[0].n_test)} records validated after {runs[0].cutoff}
+                    </CardTitle>
+                    <span className="text-xs text-muted-foreground" title={`comparison ${cid}, set ${runs[0].record_set}`}>
+                      identified from {num(runs[0].n_reference)} earlier DNA-verified records
                     </span>
                   </div>
                 </CardHeader>
@@ -54,56 +95,20 @@ export function ModelsPage() {
                         <th className="text-right font-medium px-3 py-2">Species</th>
                         <th className="text-right font-medium px-3 py-2">Genus</th>
                         <th className="text-right font-medium px-3 py-2">Family</th>
-                        <th className="text-right font-medium px-3 py-2" title="Species top-1 from the first photo only">
+                        <th className="text-right font-medium px-4 py-2" title="Species top-1 from the first photo only">
                           1st photo only
                         </th>
-                        <th className="text-right font-medium px-3 py-2" title="Embedding speed on the laptop GPU">
-                          Photos/s
-                        </th>
-                        <th className="text-right font-medium px-4 py-2">Code</th>
                       </tr>
                     </thead>
                     <tbody>
                       {runs.map((r, i) => (
                         <RunRow key={r.id} r={r} best={i === 0} open={open === r.id}
-                                speed={speed[r.backbone] ?? null}
                                 onToggle={() => setOpen(open === r.id ? null : r.id)} />
                       ))}
                     </tbody>
                   </table>
                 </CardContent>
               </Card>
-            ))}
-          </div>
-        </section>
-
-        <Prospective />
-
-        <section>
-          <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Backbones</h2>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {models.data?.backbones.map((b) => (
-              <Card key={b.backbone}>
-                <CardContent className="pt-4">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-[#4a3728]">{b.backbone}</span>
-                    <Badge variant={b.embedded_photos ? "default" : "outline"}>
-                      {b.embedded_photos ? `${num(b.embedded_photos)} photos` : "not embedded"}
-                    </Badge>
-                  </div>
-                  <p className="text-sm text-muted-foreground mt-1">{b.note}</p>
-                  <p className="text-xs text-muted-foreground mt-2 break-all font-mono">{b.spec}</p>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-          <p className="text-sm text-muted-foreground mt-3">
-            Methods: {models.data?.methods.join(", ")}. Any timm or open_clip model can be added with{" "}
-            <code>mv embed --backbone timm:&lt;name&gt;</code> and scored with <code>mv compare</code>.
-          </p>
-        </section>
-      </div>
-    </>
   );
 }
 
@@ -118,11 +123,10 @@ function Prospective() {
         the saved answer is checked against the DNA name. Only predictions made before the
         answer existed count.
       </p>
-      {!rows.length ? (
-        <p className="text-sm text-muted-foreground">
-          None yet. Run <code>mv candidates</code>, then{" "}
-          <code>mv predict-pending --backbone bioclip-2</code>.
-        </p>
+      {q.isLoading ? (
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      ) : !rows.length ? (
+        <p className="text-sm text-muted-foreground">None yet.</p>
       ) : (
         <Card>
           <CardContent className="p-0 overflow-x-auto">
@@ -169,8 +173,8 @@ function Prospective() {
   );
 }
 
-function RunRow({ r, best, open, speed, onToggle }: {
-  r: ScoreRun; best: boolean; open: boolean; speed: number | null; onToggle: () => void;
+function RunRow({ r, best, open, onToggle }: {
+  r: ScoreRun; best: boolean; open: boolean; onToggle: () => void;
 }) {
   const label = modelLabel(r.backbone, r.method);
   const external = r.backbone.startsWith("external:");
@@ -187,15 +191,11 @@ function RunRow({ r, best, open, speed, onToggle }: {
         <td className="px-3 py-2 text-right tabular-nums font-semibold">{pct(r.species_top1, 1)}</td>
         <td className="px-3 py-2 text-right tabular-nums">{pct(r.genus_top1, 1)}</td>
         <td className="px-3 py-2 text-right tabular-nums">{pct(r.family_top1, 1)}</td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{pct(r.species_top1_first_photo, 1)}</td>
-        <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-          {external ? "API" : speed == null ? "–" : Math.round(speed)}
-        </td>
-        <td className="px-4 py-2 text-right text-xs text-muted-foreground font-mono">{r.code_version}</td>
+        <td className="px-4 py-2 text-right tabular-nums text-muted-foreground">{pct(r.species_top1_first_photo, 1)}</td>
       </tr>
       {open && (
         <tr className="border-b bg-[#faf9f7]">
-          <td colSpan={7} className="px-4 py-3">
+          <td colSpan={5} className="px-4 py-3" title={`code ${r.code_version}`}>
             <RunDetail id={r.id} />
           </td>
         </tr>

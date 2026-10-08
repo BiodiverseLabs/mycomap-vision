@@ -1,5 +1,7 @@
 // Types and calls for the MycoMap Vision API (`mv serve`, proxied at /api).
 
+import { modelName, sendWaitingInLine } from "./publicView";
+
 export type Rank = "family" | "genus" | "species";
 export const RANKS: Rank[] = ["family", "genus", "species"];
 
@@ -97,9 +99,7 @@ export interface Stats {
   inat_ok: number;
   inat_missing: number;
   photos: number;
-  photos_by_status: Record<string, number>;
   photos_by_license: Record<string, number>;
-  photos_by_size: Record<string, number>;
   contributors_arr: number;
   embedded: Record<string, number>;
   permissions: {
@@ -161,8 +161,7 @@ const METHOD_LABEL: Record<string, string> = {
 
 /** Human names for scoreboard rows: iNat's model and our methods in plain words. */
 export function modelLabel(backbone: string, method: string): { name: string; how: string } {
-  const name = backbone === "external:inat-cv" ? "iNat computer vision" : backbone;
-  return { name, how: METHOD_LABEL[method] ?? method };
+  return { name: modelName(backbone), how: METHOD_LABEL[method] ?? method };
 }
 
 async function getJson<T>(url: string): Promise<T> {
@@ -214,7 +213,9 @@ export const api = {
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
   run: (id: number) => getJson<RunReport>(`/api/scoreboard/${id}`),
-  async identify(photos: File[], models: string[], where: Where = {}):
+  /** `onWait(attempt, seconds)`: the server was busy and the photos wait in line. */
+  async identify(photos: File[], models: string[], where: Where = {},
+                 onWait?: (attempt: number, seconds: number) => void):
       Promise<{ results: IdentifyResult[]; context_used: ContextUsed }> {
     const form = new FormData();
     photos.forEach((p) => form.append("photos", p));
@@ -224,7 +225,8 @@ export const api = {
       form.append("lng", where.lng.trim());
     }
     if (where.observedOn) form.append("observed_on", where.observedOn);
-    const res = await fetch("/api/identify", { method: "POST", body: form });
+    const res = await sendWaitingInLine(
+      () => fetch("/api/identify", { method: "POST", body: form }), onWait);
     if (!res.ok) throw new Error(await errorText(res));
     return res.json();
   },
