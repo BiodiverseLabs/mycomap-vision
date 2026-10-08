@@ -10,7 +10,7 @@ export function AboutPage() {
         A photo identifier built on DNA, not on community votes.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-3xl space-y-6 text-[#5c4a3a] leading-relaxed">
-        <Section title="DNA-verified references only">
+        <Section title="DNA-verified references only - Updated daily">
           Most photo identifiers learn from records named by community agreement, so their
           mistakes are built in. MycoMap Vision learns only from records whose name is backed by
           DNA sequencing and marked green in a MycoMap project. Every night it picks up the
