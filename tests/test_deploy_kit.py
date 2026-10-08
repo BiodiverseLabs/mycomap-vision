@@ -3,6 +3,8 @@
 import json
 import re
 
+from test_nightly import box  # noqa: F401  (a server box with a release, for the preload wait)
+
 from mycomap_vision import aws, config, guards
 
 KIT = config.REPO_ROOT / "deploy" / "lightsail"
@@ -105,6 +107,49 @@ def test_the_web_build_runs_where_its_pnpm_version_is_pinned():
     deploy = read("deploy.sh")
     assert "pnpm --dir" not in deploy
     assert "(cd web && pnpm install --frozen-lockfile" in deploy
+
+
+def _preload_state_seen_by_deploy(health_body: str) -> str:
+    """Run deploy.sh's own parsing of /api/health on `health_body`, in bash."""
+    import re
+    import subprocess
+
+    import pytest
+    bash = _git_bash()
+    if not bash:
+        pytest.skip("needs bash")
+    script = read("deploy.sh").replace("\r\n", "\n")
+    pipe = re.search(r'2>/dev/null \\\n\s*(\| grep -o .*?)\)"', script).group(1)
+    out = subprocess.run([bash, "-c", f"cat {pipe}"], input=health_body, capture_output=True,
+                         text=True, check=True)
+    return out.stdout.strip()
+
+
+def test_deploy_waits_for_the_model_and_not_for_the_nightly_updates_state(box):
+    import time
+
+    from fastapi.testclient import TestClient
+    from test_api import open_limits
+    from test_models_and_scoreboard import Const
+    from test_nightly import QUIET, RID
+
+    from mycomap_vision import nightly
+    from mycomap_vision.api import create_app
+    layer = nightly.prepare(box, **QUIET)
+    client = TestClient(create_app(
+        layer.manifest, box / "releases" / RID / "embeddings",
+        backbone_loader=lambda name: Const(name), limits=open_limits(), background=False,
+        layer=layer, note=lambda s: None, preload=["m1/nearest"],
+        nightly_settings=nightly.Settings()))
+    for _ in range(200):
+        body = client.get("/api/health").text
+        if '"preload":{"state":"loading"' not in body:
+            break
+        time.sleep(0.05)
+    assert '"nightly":' in body and body.count('"state":') == 2     # both blocks have a state
+    assert _preload_state_seen_by_deploy(body) == "ready"
+    assert _preload_state_seen_by_deploy('{"ok":true,"preload":{"state":"failed","error":"x"},'
+                                         '"nightly":{"state":"ok"}}') == "failed"
 
 
 def _git_bash():
