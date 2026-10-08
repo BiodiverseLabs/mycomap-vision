@@ -26,6 +26,14 @@ RID = "20261001-000000-test"
 SEED = [("A x", "1/1/2026"), ("A x", "1/2/2026"), ("A x", "1/3/2026"), ("B y", "1/1/2026"),
         ("B y", "1/2/2026"), ("B y", "1/3/2026"), ("A x", "9/20/2026"), ("B y", "9/21/2026")]
 QUIET = dict(log=lambda s: None)
+# mycomap.org's own answer when VISION_API_KEY is unset (requireVisionKey).
+NO_KEY = {"code": "not_configured", "message": "VISION_API_KEY is not set on this deployment."}
+
+
+@pytest.fixture(autouse=True)
+def no_retry_pauses(monkeypatch):
+    """A failing page is asked again after pauses of minutes; not in tests."""
+    monkeypatch.setattr(nightly, "PAGE_RETRY_PAUSES", (0.0, 0.0))
 
 
 def row(oid, name, when="10/1/2026"):
@@ -368,7 +376,8 @@ def test_every_page_is_read_with_the_key_following_the_cursor():
 
 @pytest.mark.parametrize("pages, reason", [
     ({"": Page(401)}, "refused the key"),
-    ({"": Page(503)}, "no VISION_API_KEY"),
+    ({"": Page(503, NO_KEY)}, "no VISION_API_KEY"),
+    ({"": Page(503)}, "answered 503"),           # a busy server or a proxy, not the key
     ({"": Page(500)}, "answered 500"),
     ({"": Page(200)}, "not JSON"),
     ({"": Page(200, {"permissions": []})}, "not a green-records page"),
@@ -383,6 +392,47 @@ def test_a_bad_answer_is_refused_whole_and_never_repeats_the_key(pages, reason):
         nightly.fetch_green("https://mycomap.org", "secret-key-" + "x" * 30, session=Pages(pages),
                             **QUIET)
     assert "secret-key" not in str(e.value) and "nothing was changed" in str(e.value)
+
+
+class Flaky:
+    """Fails the first `fails` requests (an exception or a response), then answers."""
+
+    def __init__(self, fails, then):
+        self.fails, self.then, self.calls = list(fails), then, 0
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.calls += 1
+        if self.fails:
+            got = self.fails.pop(0)
+            if isinstance(got, Exception):
+                raise got
+            return got
+        return self.then
+
+
+def test_a_page_that_fails_is_asked_again_after_a_pause():
+    import requests
+    slept = []
+    s = Flaky([requests.ReadTimeout("slow"), Page(500)], page(seed_rows(), None, total=8))
+    rows, _ = nightly.fetch_pending("https://mycomap.org", "k" * 40, session=s, pauses=(30, 120),
+                                    sleep=slept.append, **QUIET)
+    assert len(rows) == 8 and s.calls == 3 and slept == [30, 120]
+
+
+def test_a_page_that_keeps_failing_is_refused_after_its_tries():
+    s = Flaky([Page(500), Page(502), Page(504)], page(seed_rows(), None, total=8))
+    with pytest.raises(nightly.NightlyRefused, match="answered 504 on page 1, 3 tries"):
+        nightly.fetch_green("https://mycomap.org", "k" * 40, session=s, pauses=(1, 1),
+                            sleep=lambda s: None, **QUIET)
+
+
+@pytest.mark.parametrize("answer", [Page(401), Page(400), Page(503, NO_KEY)])
+def test_a_refused_key_a_bad_request_or_a_missing_key_is_not_asked_again(answer):
+    s = Flaky([answer], page(seed_rows(), None, total=8))
+    with pytest.raises(nightly.NightlyRefused):
+        nightly.fetch_green("https://mycomap.org", "k" * 40, session=s, pauses=(1, 1),
+                            sleep=lambda s: None, **QUIET)
+    assert s.calls == 1
 
 
 def test_an_unreachable_mycomap_org_is_refused():

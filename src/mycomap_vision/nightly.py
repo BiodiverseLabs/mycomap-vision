@@ -71,6 +71,7 @@ PENDING_PATH = "/api/vision/pending-records"
 PAGE_LIMIT = 5000
 MAX_PAGES = 1000                 # 5 million records: far past any real answer
 LOCK_STALE_SECONDS = 6 * 3600    # a lock this old was left by a run that died
+PAGE_RETRY_PAUSES = (30.0, 120.0)  # a page that fails is asked again after these pauses
 
 SCHEMA = """
 -- Where each backbone's nightly shards start, and how many photos the release had.
@@ -353,7 +354,8 @@ def _fail(reason: str) -> NightlyRefused:
 
 
 def fetch_green(base_url: str, key: str, session: requests.Session | None = None,
-                limit: int = PAGE_LIMIT, timeout: float = 120, log=print) -> tuple[list[dict], str]:
+                limit: int = PAGE_LIMIT, timeout: float = 120, pauses=None, sleep=None,
+                log=print) -> tuple[list[dict], str]:
     """Every green record from mycomap.org, page by page: (rows, mycomap.org's clock).
 
     Refuses (NightlyRefused, with a reason that never includes the key) a failed or
@@ -361,22 +363,54 @@ def fetch_green(base_url: str, key: str, session: requests.Session | None = None
     the total the first page announced by more than 1% (records turning green while
     the pages are read move it a little)."""
     return fetch_pages(base_url, key, PATH, "green", session=session, limit=limit,
-                       timeout=timeout, log=log)
+                       timeout=timeout, pauses=pauses, sleep=sleep, log=log)
 
 
 def fetch_pending(base_url: str, key: str, session: requests.Session | None = None,
-                  limit: int = PAGE_LIMIT, timeout: float = 120,
+                  limit: int = PAGE_LIMIT, timeout: float = 120, pauses=None, sleep=None,
                   log=print) -> tuple[list[dict], str]:
     """Every record awaiting validation (GET /api/vision/pending-records), for the
     advance predictions; checked as fetch_green, but an empty list is an answer."""
     return fetch_pages(base_url, key, PENDING_PATH, "pending", session=session, limit=limit,
-                       timeout=timeout, allow_empty=True, log=log)
+                       timeout=timeout, allow_empty=True, pauses=pauses, sleep=sleep, log=log)
+
+
+def org_says_no_key(resp) -> bool:
+    """mycomap.org's own 503 for an unset VISION_API_KEY (requireVisionKey), as opposed to a
+    503 from anything else on the way (a busy server, nginx, Cloudflare)."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("code") == "not_configured"
+
+
+def get_page(session, url: str, params: dict, headers: dict, timeout: float, base_url: str,
+             page: int, pauses=None, sleep=None, log=print):
+    """One page, asked again after each pause in `pauses` when the network or mycomap.org
+    fails (a 5xx, a timeout: on 2026-10-08 one page timed out once and lost the night's
+    advance predictions). A refused key, a bad request or a missing key are not retried."""
+    pauses = PAGE_RETRY_PAUSES if pauses is None else pauses
+    sleep = sleep or time.sleep
+    for attempt in range(len(pauses) + 1):
+        try:
+            resp = session.get(url, params=params, headers=headers, timeout=timeout)
+            why = None if resp.status_code < 500 or org_says_no_key(resp) \
+                else f"mycomap.org answered {resp.status_code}"
+        except requests.RequestException as e:
+            resp, why = None, f"could not reach {base_url}: {type(e).__name__}"
+        if why is None:
+            return resp
+        if attempt == len(pauses):
+            raise _fail(f"{why} on page {page + 1}, {attempt + 1} tries")
+        log(f"[nightly] {why} on page {page + 1}; asking again in {pauses[attempt]:.0f} s")
+        sleep(pauses[attempt])
 
 
 def fetch_pages(base_url: str, key: str, path: str, what: str,
                 session: requests.Session | None = None, limit: int = PAGE_LIMIT,
                 timeout: float = 120, allow_empty: bool = False,
-                log=print) -> tuple[list[dict], str]:
+                pauses=None, sleep=None, log=print) -> tuple[list[dict], str]:
     session = session or requests.Session()
     url = base_url.rstrip("/") + path
     headers = {"Authorization": f"Bearer {key}", "User-Agent": config.USER_AGENT}
@@ -387,13 +421,11 @@ def fetch_pages(base_url: str, key: str, path: str, what: str,
         params = {"limit": str(limit)}
         if after:
             params["after"] = after
-        try:
-            resp = session.get(url, params=params, headers=headers, timeout=timeout)
-        except requests.RequestException as e:
-            raise _fail(f"could not reach {base_url}: {type(e).__name__}") from None
+        resp = get_page(session, url, params, headers, timeout, base_url, page, pauses,
+                        sleep, log)
         if resp.status_code == 401:
             raise _fail("mycomap.org refused the key (401): check MV_ORG_VISION_KEY")
-        if resp.status_code == 503:
+        if resp.status_code == 503:                     # org_says_no_key: never retried
             raise _fail("mycomap.org has no VISION_API_KEY set (503)")
         if resp.status_code != 200:
             raise _fail(f"mycomap.org answered {resp.status_code} on page {page + 1}")
