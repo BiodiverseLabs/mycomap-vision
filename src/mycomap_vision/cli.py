@@ -331,6 +331,34 @@ def cmd_prospective(conn, args) -> None:
     print(json.dumps(prospective.report(conn), indent=2))
 
 
+def cmd_scoreboard_export(conn, args) -> None:
+    """One model's rows of a comparison as JSON, for mv scoreboard-import on another machine."""
+    from . import scoreboard_io
+    text = json.dumps(scoreboard_io.export_runs(conn, args.comparison, args.backbone), indent=1)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"wrote {args.out}", file=sys.stderr)
+    else:
+        print(text)
+
+
+def cmd_scoreboard_import(conn, args) -> None:
+    """Rows from mv scoreboard-export into this machine's scoreboard (on the server box: the
+    manifest the site serves). `-` reads them from standard input."""
+    from . import scoreboard_io
+    if args.file == "-":
+        text = sys.stdin.read()
+    else:
+        with open(args.file, encoding="utf-8") as f:
+            text = f.read()
+    try:
+        result = scoreboard_io.import_runs(conn, json.loads(text))
+    except (scoreboard_io.ImportRefused, ValueError) as e:
+        raise SystemExit(f"not imported: {e}")
+    print(json.dumps(result, indent=2))
+
+
 def cmd_scoreboard(conn, args) -> None:
     from . import evaluate
     print_scoreboard(evaluate.scoreboard(conn, args.comparison))
@@ -692,6 +720,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("scoreboard", help="saved comparison results")
     p.add_argument("--comparison", help="only this comparison id")
 
+    p = sub.add_parser("scoreboard-export", help="one model's rows of a comparison as JSON "
+                       "(e.g. the iNat baseline, for the server box)")
+    p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
+    p.add_argument("--backbone", default="external:inat-cv",
+                   help="whose rows (default: the iNat baseline)")
+    p.add_argument("--out", help="write to this file (default: standard output)")
+    p = sub.add_parser("scoreboard-import", help="(server box) add rows from scoreboard-export "
+                       "to a comparison this machine has; '-' reads standard input")
+    p.add_argument("file", help="the export, or - for standard input")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
     p = sub.add_parser("serve", help="run the API for the frontend")
@@ -785,6 +822,8 @@ def main(argv: list[str] | None = None) -> int:
         "prospective": cmd_prospective,
         "nightly": cmd_nightly,
         "scoreboard": cmd_scoreboard,
+        "scoreboard-export": cmd_scoreboard_export,
+        "scoreboard-import": cmd_scoreboard_import,
         "models": cmd_models,
         "serve": cmd_serve,
         "status": cmd_status,
