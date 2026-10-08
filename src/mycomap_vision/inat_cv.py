@@ -176,16 +176,19 @@ class InatClient:
             raise RuntimeError(f"iNat answered {r.status_code}: {r.text[:200]}")
         raise RuntimeError("iNat kept failing; stopped. Rerun to resume (answers are cached).")
 
-    def score_image(self, photo_id: int, image: bytes, lat: float | None,
+    def score_image(self, photo_id: int, image, lat: float | None,
                     lng: float | None) -> dict:
+        """iNat's vision answer for one photo. `image` is the photo's bytes, or a function
+        giving them: then it is read only when the answer is not cached already."""
         loc = f"{lat:.4f},{lng:.4f}" if lat is not None and lng is not None else "none"
         data = {"aggregated": "true"}
         if loc != "none":
             data.update(lat=str(lat), lng=str(lng))
 
         def fetch():
+            body = image() if callable(image) else image
             return self._request("POST", f"{API}/computervision/score_image", data=data,
-                                 files={"image": (f"{photo_id}.jpg", image, "image/jpeg")},
+                                 files={"image": (f"{photo_id}.jpg", body, "image/jpeg")},
                                  headers={"Authorization": self.jwt})
         return self._cached(f"score:{photo_id}:{loc}", fetch)
 
@@ -257,19 +260,40 @@ def read_jwt(path: Path = JWT_FILE) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def photo_inputs(conn: sqlite3.Connection, rec: Record) -> list[tuple[int, Path]]:
-    """(photo id, local file) for the record's photos, in position order: the smallest
-    local copy of each (iNat's endpoint scales photos down anyway)."""
-    order = {"small": 0, "medium": 1, "large": 2, "original": 3}
+PHOTO_SIZES = {"small": 0, "medium": 1, "large": 2, "original": 3}
+
+
+def photo_inputs(conn: sqlite3.Connection, rec: Record,
+                 stores: dict | None = None) -> list[tuple[int, object]]:
+    """(photo id, source) for the record's photos, in position order. The source is the
+    smallest copy on this machine (iNat's endpoint scales photos down anyway), else a
+    function reading the smallest copy held in S3: a laptop keeps only a sample, and the
+    full run's test photos live in S3 alone (before 2026-10-08 they were skipped, and
+    those records scored as misses). `stores` caches the S3 clients by location."""
+    stores = {} if stores is None else stores
     out = []
     for pid in rec.photo_rows:            # photo_rows hold photo ids in a SharedSet
-        copies = [c for c in conn.execute(
-            "select store, size, path from photo_copies where photo_id = ? "
-            "and store not like 's3://%'", (pid,))]
-        if copies:
-            store, _, path = min(copies, key=lambda c: order.get(c[1], 9))
+        copies = conn.execute("select store, size, path from photo_copies where photo_id = ?",
+                              (pid,)).fetchall()
+        local = [c for c in copies if not str(c[0]).startswith("s3://")]
+        remote = [c for c in copies if str(c[0]).startswith("s3://")]
+        if local:
+            store, _, path = min(local, key=lambda c: PHOTO_SIZES.get(c[1], 9))
             out.append((pid, Path(store) / path))
+        elif remote:
+            store, _, path = min(remote, key=lambda c: PHOTO_SIZES.get(c[1], 9))
+            if store not in stores:
+                from .storage import S3Store
+                stores[store] = S3Store(store)
+            out.append((pid, lambda s=stores[store], p=path: s.get(p)))
     return out
+
+
+def read_source(source) -> bytes:
+    return source() if callable(source) else Path(source).read_bytes()
+
+
+MAX_WITHOUT_PHOTOS = 0.02     # test records with no photo to send: more than this, refuse
 
 
 def run(conn: sqlite3.Connection, comparison_id: str, client: InatClient,
@@ -285,6 +309,14 @@ def run(conn: sqlite3.Connection, comparison_id: str, client: InatClient,
         raise RuntimeError("the comparison's records have changed since it ran (new data or "
                            "embeddings); run mv compare again and score that one")
     ref_count = Counter(r.unit for r in shared.ref)
+    # Every test record needs a photo to send; one without would count as a miss for
+    # iNat. Checked before the first call, so a run can't quietly score nothing.
+    inputs = {rec.observation_id: photo_inputs(conn, rec) for rec in shared.test}
+    bare = [oid for oid, got in inputs.items() if not got]
+    if len(bare) > MAX_WITHOUT_PHOTOS * len(shared.test):
+        raise RuntimeError(f"{len(bare):,} of {len(shared.test):,} test records have no photo "
+                           "on this machine or in S3 to send to iNat (first: "
+                           f"{', '.join(bare[:5])}); nothing was scored")
     photo_scores: dict[str, list[dict]] = {}
     truths: dict[str, Truth] = {}
     years: dict[str, str] = {}
@@ -295,12 +327,16 @@ def run(conn: sqlite3.Connection, comparison_id: str, client: InatClient,
         lat, lng, observed = obs if obs else (None, None, None)
         years[rec.observation_id] = (real_date(observed) or "")[:4] or "unknown"
         photo_scores[rec.observation_id] = [
-            parse_aggregated(client.score_image(pid, path.read_bytes(), lat, lng))
-            for pid, path in photo_inputs(conn, rec)]
+            parse_aggregated(client.score_image(pid, lambda s=src: read_source(s), lat, lng))
+            for pid, src in inputs[rec.observation_id]]
         truths[rec.observation_id] = resolve_truth(client, rec)
         if i % 10 == 0:
             log(f"  {i}/{len(shared.test)} test records, {client.calls} iNat calls")
     known = sum(t.species_known for t in truths.values())
+    # A rerun replaces this comparison's earlier iNat rows (a broken run must not linger).
+    with conn:
+        conn.execute("delete from eval_runs where comparison_id = ? and backbone = ?",
+                     (comparison_id, BACKBONE))
     runs = []
     for method, score in (("vision-max", "vision"), ("combined-max", "combined")):
         all_photos = score_records(shared.test, photo_scores, truths, ref_count, score)
@@ -316,4 +352,5 @@ def run(conn: sqlite3.Connection, comparison_id: str, client: InatClient,
                              extra={"species_names_inat_knows": known,
                                     "species_by_observed_year": by_year}))
     return {"comparison_id": comparison_id, "test_records": len(shared.test),
-            "species_names_inat_knows": known, "inat_calls": client.calls, "runs": runs}
+            "without_photos": len(bare), "species_names_inat_knows": known,
+            "inat_calls": client.calls, "runs": runs}
