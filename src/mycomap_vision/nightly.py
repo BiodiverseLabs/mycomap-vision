@@ -244,11 +244,22 @@ def prepare(release_root: Path, release_id: str | None = None, prune: bool = Fal
             shutil.copy2(cache, layer.taxonomy_cache)
         conn = sqlite3.connect(tmp)
         try:
-            start_layer(conn)
+            start_layer(conn, layer.release_dir)
         finally:
             conn.close()
         os.replace(tmp, layer.manifest)
         log(f"[nightly] new layer for release {layer.release_id} (manifest copied)")
+    else:
+        # A layer made before start_layer looked at the release noted every backbone in
+        # the manifest; forget those the release ships no vectors for.
+        conn = sqlite3.connect(layer.manifest, timeout=30)
+        try:
+            dropped = drop_unshipped(conn, layer.release_dir)
+        finally:
+            conn.close()
+        if dropped:
+            log(f"[nightly] layer no longer tracks {len(dropped)} backbones the release "
+                f"ships no vectors for: {', '.join(dropped)}")
     if prune:
         for old in (layer.root.parent.iterdir() if layer.root.parent.is_dir() else []):
             if old.is_dir() and old.name != layer.release_id and RELEASE_ID.match(old.name):
@@ -257,15 +268,42 @@ def prepare(release_root: Path, release_id: str | None = None, prune: bool = Fal
     return layer
 
 
-def start_layer(conn: sqlite3.Connection) -> None:
-    """Note, for every backbone the release embedded, where nightly shards begin."""
+def shipped_backbones(release_dir: Path) -> set[str]:
+    """Backbones whose vectors the release holds (release.py ships embeddings/<backbone>/
+    only for the backbones it serves; its manifest still lists every backbone the laptop
+    ever embedded)."""
+    root = release_dir / "embeddings"
+    return {p.name for p in root.iterdir() if p.is_dir()} if root.is_dir() else set()
+
+
+def start_layer(conn: sqlite3.Connection, release_dir: Path) -> None:
+    """Note, for every backbone the release ships vectors for, where nightly shards begin."""
     ensure_schema(conn)
     at = iso(now_utc())
+    shipped = shipped_backbones(release_dir)
     with conn:
         for (backbone, n) in conn.execute(
                 "select backbone, count(*) from embeddings group by backbone").fetchall():
-            conn.execute("insert or ignore into nightly_layer values (?, ?, ?, ?)",
-                         (backbone, next_shard(conn, backbone), n, at))
+            if backbone in shipped:
+                conn.execute("insert or ignore into nightly_layer values (?, ?, ?, ?)",
+                             (backbone, next_shard(conn, backbone), n, at))
+
+
+def drop_unshipped(conn: sqlite3.Connection, release_dir: Path) -> list[str]:
+    """Forget layer rows of backbones the release ships no vectors for, unless a night
+    already added shards for one (never true: only served backbones are embedded)."""
+    ensure_schema(conn)
+    shipped = shipped_backbones(release_dir)
+    doomed = []
+    for backbone, first in conn.execute(
+            "select backbone, first_shard from nightly_layer order by backbone").fetchall():
+        added = conn.execute("select count(*) from embeddings where backbone = ? and shard >= ?",
+                             (backbone, first)).fetchone()[0]
+        if backbone not in shipped and not added:
+            doomed.append(backbone)
+    with conn:
+        conn.executemany("delete from nightly_layer where backbone = ?", [(b,) for b in doomed])
+    return doomed
 
 
 def served_manifest() -> Path:

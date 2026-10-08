@@ -13,6 +13,7 @@ import html
 import logging
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from collections import Counter
@@ -659,8 +660,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     return app
 
 
+def line_buffered_output(streams=None) -> None:
+    """Write each line of what the server reports as it happens. Under systemd, stdout is
+    a pipe to the journal and Python fills a block before writing it, so a nightly run's
+    lines arrived minutes late, or only with the next one."""
+    for stream in streams if streams is not None else (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(line_buffering=True)
+
+
 def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     import uvicorn
+    line_buffered_output()
     # Behind nginx the client is in X-Forwarded-For; trust it only from nginx itself,
     # so the per-address rate limit sees people, not 127.0.0.1.
     # The nightly update serves the release's layer copy (nightly.py); a new release
