@@ -164,9 +164,16 @@ export function modelLabel(backbone: string, method: string): { name: string; ho
   return { name: modelName(backbone), how: METHOD_LABEL[method] ?? method };
 }
 
+/** An API refusal, with its HTTP status (401: sign in). */
+export class ApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(await errorText(res));
+  if (!res.ok) throw new ApiError(res.status, await errorText(res));
   return res.json() as Promise<T>;
 }
 
@@ -227,7 +234,7 @@ export const api = {
     if (where.observedOn) form.append("observed_on", where.observedOn);
     const res = await sendWaitingInLine(
       () => fetch("/api/identify", { method: "POST", body: form }), onWait);
-    if (!res.ok) throw new Error(await errorText(res));
+    if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();
   },
 };

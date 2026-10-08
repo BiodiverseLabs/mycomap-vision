@@ -8,6 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/Layout";
 import {
   api,
+  ApiError,
+  signInUrl,
   modelKey,
   modelLabel,
   num,
@@ -23,7 +25,7 @@ import {
   type Specimen,
 } from "@/lib/api";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
-import { modelName } from "@/lib/publicView";
+import { identifyGate, modelName } from "@/lib/publicView";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -37,6 +39,8 @@ export function IdentifyPage() {
   const [where, setWhere] = useState<Where>({});
   const [found, setFound] = useState<Map<File, PhotoPlaceDate>>(new Map());
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, staleTime: 60_000 });
+  const gate = identifyGate(me.data, me.isError);
 
   // Read each new photo's place and date, then fill the fields once every photo is read.
   const reading = useRef(new Set<File>());
@@ -78,13 +82,19 @@ export function IdentifyPage() {
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 grid gap-8 lg:grid-cols-[360px_1fr]">
         <div className="space-y-6">
+          {gate === "sign-in" && <SignInFirst />}
           <PhotoPicker files={files} setFiles={setFiles} />
           <WhereWhen where={where} setWhere={setWhere} />
           <ModelPicker models={models} onChange={setChosen} />
+          {gate === "sign-in" ? (
+            <Button asChild size="lg" className="w-full" data-testid="button-signin-to-identify">
+              <a href={signInUrl()}>Sign in to identify</a>
+            </Button>
+          ) : (
           <Button
             size="lg"
             className="w-full"
-            disabled={!files.length || !chosen.length || run.isPending}
+            disabled={!files.length || !chosen.length || run.isPending || gate === "checking"}
             onClick={() => run.mutate({ where, files })}
           >
             {run.isPending ? <Loader2 className="animate-spin" /> : <Microscope />}
@@ -92,13 +102,21 @@ export function IdentifyPage() {
               ? waiting ? "Busy: waiting in line…" : "Identifying…"
               : `Identify from ${files.length || "your"} photo${files.length === 1 ? "" : "s"}`}
           </Button>
+          )}
           {waiting != null && (
             <p className="text-sm text-muted-foreground" data-testid="text-waiting">
               Others are identifying right now. Your photos are next in line; trying again in{" "}
               {waiting} s.
             </p>
           )}
-          {run.isError && <p className="text-sm text-destructive">{(run.error as Error).message}</p>}
+          {run.isError && (
+            <p className="text-sm text-destructive">
+              {(run.error as Error).message}
+              {run.error instanceof ApiError && run.error.status === 401 && (
+                <> <a className="underline font-medium" href={signInUrl()}>Sign in</a></>
+              )}
+            </p>
+          )}
         </div>
 
         <div className="min-w-0 scroll-mt-20" ref={results}>
@@ -400,6 +418,24 @@ function ModelPicker({ models, onChange }: {
             )}
           </details>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Shown before anything else when identifying needs a mycomap.org account. */
+function SignInFirst() {
+  return (
+    <Card className="border-myco-green/40 bg-myco-green/5" data-testid="card-signin-first">
+      <CardContent className="pt-5 space-y-3 text-sm text-[#5c4a3a]">
+        <p className="font-semibold text-[#4a3728] text-base">Sign in to identify</p>
+        <p>
+          Identifying uses your free mycomap.org account. Sign in first: you come straight back
+          here to add your photos.
+        </p>
+        <Button asChild className="w-full">
+          <a href={signInUrl()}>Sign in with mycomap.org</a>
+        </Button>
       </CardContent>
     </Card>
   );
