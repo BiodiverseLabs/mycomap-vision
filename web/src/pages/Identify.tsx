@@ -386,7 +386,7 @@ function ModelPicker({ models, onChange }: {
 function EmptyState() {
   return (
     <div className="rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-8 text-[#5c4a3a]">
-      <h2 className="font-display text-2xl text-[#4a3728]">What you'll get</h2>
+      <h2 className="font-display font-semibold text-2xl text-[#4a3728]">What you'll get</h2>
       <ul className="mt-4 space-y-2 text-sm list-disc pl-5">
         <li>An answer at every rank (family, genus, species), each with its own confidence.</li>
         <li>The closest DNA-verified specimens, with their photos, so you can compare by eye.</li>

@@ -157,7 +157,7 @@ export function PageHeader({ title, children }: { title: string; children?: Reac
   return (
     <div className="bg-[#f8f5f0] border-b border-[#A87146]/10">
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <h1 className="font-display text-3xl md:text-4xl text-[#4a3728]">{title}</h1>
+        <h1 className="font-display font-semibold text-3xl md:text-4xl text-[#4a3728]">{title}</h1>
         {children && <div className="mt-2 text-[#5c4a3a] max-w-3xl">{children}</div>}
       </div>
     </div>

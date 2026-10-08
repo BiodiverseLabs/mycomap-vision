@@ -10,7 +10,7 @@ export default {
     extend: {
       fontFamily: {
         species: ['"Source Sans 3"', "system-ui", "sans-serif"],
-        display: ['"Fraunces"', "Georgia", "serif"],
+        display: ['"Libre Franklin"', "ui-sans-serif", "system-ui", "sans-serif"],
       },
       borderRadius: {
         lg: "var(--radius)",

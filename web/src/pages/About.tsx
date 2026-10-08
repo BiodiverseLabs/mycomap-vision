@@ -47,7 +47,7 @@ export function AboutPage() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
-      <h2 className="font-display text-2xl text-[#4a3728] mb-2">{title}</h2>
+      <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-2">{title}</h2>
       <p>{children}</p>
     </section>
   );

@@ -27,7 +27,7 @@ export function ModelsPage() {
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         <section>
-          <h2 className="font-display text-2xl text-[#4a3728] mb-3">Scoreboard</h2>
+          <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Scoreboard</h2>
           {board.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
           {board.data && !board.data.runs.length && (
             <p className="text-sm text-muted-foreground">
@@ -80,7 +80,7 @@ export function ModelsPage() {
         <Prospective />
 
         <section>
-          <h2 className="font-display text-2xl text-[#4a3728] mb-3">Backbones</h2>
+          <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Backbones</h2>
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {models.data?.backbones.map((b) => (
               <Card key={b.backbone}>
@@ -112,7 +112,7 @@ function Prospective() {
   const rows = q.data?.models ?? [];
   return (
     <section>
-      <h2 className="font-display text-2xl text-[#4a3728] mb-1">Advance predictions</h2>
+      <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-1">Advance predictions</h2>
       <p className="text-sm text-muted-foreground mb-3 max-w-3xl">
         Records with a sequence but no validation yet are identified now; when they turn green,
         the saved answer is checked against the DNA name. Only predictions made before the
