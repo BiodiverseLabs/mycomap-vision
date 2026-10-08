@@ -143,7 +143,9 @@ def fetch(base_url: str, key: str, session: requests.Session | None = None,
     if resp.status_code == 401:
         raise PermissionSyncError("mycomap.org refused the key (401): check MV_ORG_VISION_KEY")
     if resp.status_code == 503:
-        raise PermissionSyncError("mycomap.org has no VISION_API_KEY set (503)")
+        from .nightly import org_says_no_key
+        raise PermissionSyncError("mycomap.org has no VISION_API_KEY set (503)"
+                                  if org_says_no_key(resp) else "mycomap.org answered 503")
     if resp.status_code != 200:
         raise PermissionSyncError(f"mycomap.org answered {resp.status_code}")
     try:

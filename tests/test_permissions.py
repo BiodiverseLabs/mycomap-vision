@@ -64,7 +64,8 @@ def test_fetch_asks_the_vision_endpoint_with_the_bearer_key():
 
 @pytest.mark.parametrize("response, reason", [
     (FakeResponse(401), "refused the key"),
-    (FakeResponse(503), "no VISION_API_KEY"),
+    (FakeResponse(503, {"code": "not_configured", "message": "VISION_API_KEY is not set on this deployment."}), "no VISION_API_KEY"),
+    (FakeResponse(503), "answered 503"),          # a 503 from anything else on the way
     (FakeResponse(500), "answered 500"),
     (FakeResponse(200, None), "not JSON"),
     (OSError("boom " + KEY), "could not reach"),
