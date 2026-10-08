@@ -79,8 +79,9 @@ fi
 # Not a failure if it takes longer: identifications wait for it. Just report it.
 echo "==> waiting for the model to load (MV_PRELOAD)"
 for i in $(seq 1 180); do
+  # The preload block's own state: health has other "state" fields (the nightly update's).
   state="$(curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
-           | grep -o '"state":"[a-z]*"' | cut -d'"' -f4)"
+           | grep -o '"preload":{"state":"[a-z]*"' | cut -d'"' -f6)"
   case "$state" in
     ready)  echo "    ready after ${i} s"; break ;;
     off)    echo "    no preload configured; the first identification loads it"; break ;;
