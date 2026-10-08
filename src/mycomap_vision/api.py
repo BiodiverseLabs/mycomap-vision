@@ -77,6 +77,87 @@ def start_background(name: str, every_seconds: float, work: Callable[[], None],
 WEB_DIST = config.REPO_ROOT / "web" / "dist"
 
 
+def reference_stats(conn: sqlite3.Connection, served: set[str]) -> dict:
+    """What the Data page shows about the reference set. `served`: the backbones the site
+    offers (only their photo counts are shown; the manifest also lists test backbones)."""
+    one = lambda sql: conn.execute(sql).fetchone()[0]  # noqa: E731
+    labels = names.manifest_labels(conn)
+    # Spellings of one name count as one name (names.py).
+    name_counts = Counter()
+    for name, n in conn.execute("select scientific_name, count(*) from records "
+                                "where north_america = 1 and label_conflict = 0 "
+                                "and coalesce(scientific_name, '') <> '' group by scientific_name"):
+        name_counts[labels.get(name, name).strip()] += n
+    buckets = {label: 0 for _, _, label in NAME_BUCKETS}
+    for n in name_counts.values():
+        for lo, hi, label in NAME_BUCKETS:
+            if lo <= n <= hi:
+                buckets[label] += 1
+    conn.executescript(EMBED_SCHEMA)
+    embedded = {b: n for b, n in conn.execute(
+        "select backbone, count(*) from embeddings group by 1") if b in served}
+    return {
+        "records": one("select count(*) from records"),
+        "records_north_america": one("select count(*) from records where north_america = 1"),
+        "label_conflicts": one("select count(*) from records where label_conflict = 1"),
+        "inat_ok": one("select count(*) from inat_observations where status = 'ok'"),
+        "inat_missing": one("select count(*) from inat_observations where status = 'missing'"),
+        "photos": one("select count(*) from photos"),
+        "photos_by_license": dict(conn.execute(
+            "select license_class, count(*) from photos group by 1").fetchall()),
+        "contributors_arr": one("select count(distinct owner_login) from photos "
+                                "where license_class = 'arr'"),
+        "embedded": embedded,
+        "names": len(name_counts),
+        "names_by_records": buckets,
+    }
+
+
+class Cached:
+    """A value that is slow to compute and changes slowly (the Data page's statistics: 14 s
+    over the full reference set). Answered from memory; once older than `max_age` it is
+    recomputed on a background thread while the old value keeps being answered. Only the
+    first caller ever waits, and a failed refresh keeps the old value."""
+
+    def __init__(self, compute: Callable[[], dict], max_age: float,
+                 clock: Callable[[], float] = time.monotonic, note=print):
+        self.compute, self.max_age, self.clock, self.note = compute, max_age, clock, note
+        self._lock = threading.Lock()          # guards the fields below
+        self._computing = threading.Lock()     # one computation at a time
+        self._value: dict | None = None
+        self._at = 0.0
+        self._refreshing = False
+
+    def get(self) -> dict:
+        with self._lock:
+            if self._value is not None:
+                if self.clock() - self._at >= self.max_age and not self._refreshing:
+                    self._refreshing = True
+                    threading.Thread(target=self._refresh, name="cached refresh",
+                                     daemon=True).start()
+                return self._value
+        with self._computing:                  # the first caller computes; others wait for it
+            with self._lock:
+                if self._value is not None:
+                    return self._value
+            value = self.compute()
+            with self._lock:
+                self._value, self._at = value, self.clock()
+            return value
+
+    def _refresh(self) -> None:
+        try:
+            with self._computing:
+                value = self.compute()
+            with self._lock:
+                self._value, self._at = value, self.clock()
+        except Exception as e:  # noqa: BLE001 - the old value keeps being answered
+            self.note(f"[stats] refresh failed, keeping the last figures: {type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                self._refreshing = False
+
+
 def preload_specs(value: str | None) -> list[str]:
     """MV_PRELOAD: comma list of backbone/method to load at startup; "default" is the
     model an identification uses when none is named. Unset or "off": none."""
@@ -373,41 +454,26 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "max_models": limits.max_models,
                 "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
 
+    def compute_stats() -> dict:
+        """On a connection of its own, never the shared one: over the full set this takes
+        ~14 s, and on the shared connection it held db_lock that long, so every
+        identification waited behind anyone looking at the Data page (which also asked
+        again every 30 s)."""
+        own = sqlite3.connect(manifest_path, timeout=30)
+        try:
+            return reference_stats(own, set(limits.allowed_backbones))
+        finally:
+            own.close()
+
+    stats_cache = Cached(compute_stats, _setting_number("MV_STATS_SECONDS") or 3600, note=note)
+    app.state.stats_cache = stats_cache
+    if background:          # counted once at startup, so the first visitor doesn't wait
+        threading.Thread(target=stats_cache.get, name="stats", daemon=True).start()
+
     @app.get("/api/stats")
     def stats():
-        one = lambda sql: q(sql)[0][0]  # noqa: E731
-        with db_lock:
-            labels = names.manifest_labels(conn)
-        # Spellings of one name count as one name (names.py).
-        name_counts = Counter()
-        for name, n in q("select scientific_name, count(*) from records where north_america = 1 "
-                         "and label_conflict = 0 and coalesce(scientific_name, '') <> '' "
-                         "group by scientific_name"):
-            name_counts[labels.get(name, name).strip()] += n
-        buckets = {label: 0 for _, _, label in NAME_BUCKETS}
-        for n in name_counts.values():
-            for lo, hi, label in NAME_BUCKETS:
-                if lo <= n <= hi:
-                    buckets[label] += 1
-        return {
-            "records": one("select count(*) from records"),
-            "records_north_america": one("select count(*) from records where north_america = 1"),
-            "label_conflicts": one("select count(*) from records where label_conflict = 1"),
-            "inat_ok": one("select count(*) from inat_observations where status = 'ok'"),
-            "inat_missing": one("select count(*) from inat_observations where status = 'missing'"),
-            "photos": one("select count(*) from photos"),
-            "photos_by_status": dict(q("select status, count(*) from photos group by 1")),
-            "photos_by_license": dict(q("select license_class, count(*) from photos group by 1")),
-            "photos_by_size": dict(q("select size || case when store like 's3://%' "
-                                     "then ' (S3)' else '' end, count(*) from photo_copies "
-                                     "group by 1")),
-            "contributors_arr": one("select count(distinct owner_login) from photos "
-                                    "where license_class = 'arr'"),
-            "embedded": embedded_counts(),
-            "permissions": permission_status(),
-            "names": len(name_counts),
-            "names_by_records": buckets,
-        }
+        # Photographers' answers are cheap and change any minute: always the current ones.
+        return {**stats_cache.get(), "permissions": permission_status()}
 
     @app.get("/api/scoreboard")
     def scoreboard():

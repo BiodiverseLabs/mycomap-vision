@@ -23,6 +23,7 @@ import {
   type Specimen,
 } from "@/lib/api";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
+import { modelName } from "@/lib/publicView";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -51,10 +52,23 @@ export function IdentifyPage() {
 
   // The photos go with the request, so results keep pointing at the photos they scored
   // even if the picker changes afterwards.
+  // A busy server answers "wait": the photos wait in line and the button says so.
+  const [waiting, setWaiting] = useState<number | null>(null);
   const run = useMutation({
-    mutationFn: (sent: { where: Where; files: File[] }) => api.identify(sent.files, chosen, sent.where),
+    mutationFn: (sent: { where: Where; files: File[] }) =>
+      api.identify(sent.files, chosen, sent.where, (_attempt, seconds) => setWaiting(seconds)),
+    onSettled: () => setWaiting(null),
   });
   const sentUrls = useObjectUrls(run.variables?.files ?? NO_FILES);
+
+  // On a phone the answer appears below the form: bring it into view.
+  const results = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = results.current;
+    if (run.data && el && el.getBoundingClientRect().top > window.innerHeight * 0.6) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [run.data]);
 
   return (
     <>
@@ -74,12 +88,20 @@ export function IdentifyPage() {
             onClick={() => run.mutate({ where, files })}
           >
             {run.isPending ? <Loader2 className="animate-spin" /> : <Microscope />}
-            {run.isPending ? "Identifying…" : `Identify from ${files.length || "your"} photo${files.length === 1 ? "" : "s"}`}
+            {run.isPending
+              ? waiting ? "Busy: waiting in line…" : "Identifying…"
+              : `Identify from ${files.length || "your"} photo${files.length === 1 ? "" : "s"}`}
           </Button>
+          {waiting != null && (
+            <p className="text-sm text-muted-foreground" data-testid="text-waiting">
+              Others are identifying right now. Your photos are next in line; trying again in{" "}
+              {waiting} s.
+            </p>
+          )}
           {run.isError && <p className="text-sm text-destructive">{(run.error as Error).message}</p>}
         </div>
 
-        <div className="min-w-0">
+        <div className="min-w-0 scroll-mt-20" ref={results}>
           {!run.data && !run.isPending && <EmptyState />}
           {run.data && <ContextLine used={run.data.context_used} sent={run.variables?.where} />}
           {run.data && (
@@ -313,12 +335,12 @@ function ModelPicker({ models, onChange }: {
         {models.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
         {models.isError && (
           <p className="text-sm text-destructive">
-            The API isn't answering. Start it with <code>mv serve</code>.
+            The identifier isn't answering. Please try again in a minute.
           </p>
         )}
         {models.data && (!ready.length || !bases.length) && (
           <p className="text-sm text-muted-foreground">
-            No model has embedded photos yet. Run <code>mv embed</code> first.
+            No model is ready yet. Please try again in a minute.
           </p>
         )}
         {choice && ready.length > 0 && (
@@ -326,7 +348,7 @@ function ModelPicker({ models, onChange }: {
             {ready.length > 1 && (
               <select className={selectClass} value={backbone ?? ""} onChange={(e) => setBackbone(e.target.value)}
                 aria-label="Backbone" data-testid="select-backbone">
-                {ready.map((b) => <option key={b} value={b}>{b}</option>)}
+                {ready.map((b) => <option key={b} value={b}>{modelName(b)}</option>)}
               </select>
             )}
             <select className={selectClass} value={choice.base} aria-label="Model"
@@ -348,8 +370,8 @@ function ModelPicker({ models, onChange }: {
               </label>
             )}
             {info && (
-              <p className="text-xs text-muted-foreground">
-                {num(info.embedded_photos)} reference photos · {backbone && method ? modelLabel(backbone, method).how : ""}
+              <p className="text-xs text-muted-foreground" title={info.backbone}>
+                {modelName(info.backbone)} · {num(info.embedded_photos)} reference photos
               </p>
             )}
           </fieldset>
@@ -364,7 +386,7 @@ function ModelPicker({ models, onChange }: {
                 {ready.length > 1 && (
                   <select className={selectClass} value={second.backbone} aria-label="Second model backbone"
                     onChange={(e) => setSecond({ ...second, backbone: e.target.value })} data-testid="select-second-backbone">
-                    {ready.map((b) => <option key={b} value={b}>{b}</option>)}
+                    {ready.map((b) => <option key={b} value={b}>{modelName(b)}</option>)}
                   </select>
                 )}
                 <select className={selectClass} value={second.method} aria-label="Second model"
@@ -395,8 +417,9 @@ function EmptyState() {
         <li>Optionally a second model side by side, to see where they agree.</li>
       </ul>
       <p className="mt-4 text-xs">
-        Early development: the reference set grows as photos are downloaded, and confidence is
-        not yet calibrated.
+        A preview. Every answer comes from DNA-verified MycoMap records, and its confidence is
+        calibrated on the newest ones; see <a className="underline" href="/about">how it works and
+        how good it is</a>.
       </p>
     </div>
   );
@@ -412,8 +435,8 @@ function ResultCard({ r, urls }: { r: IdentifyResult; urls: string[] }) {
     <Card className="overflow-hidden">
       <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <CardTitle className="text-base text-[#4a3728]">
-            {r.model.backbone}{" "}
+          <CardTitle className="text-base text-[#4a3728]" title={r.model.backbone}>
+            {modelName(r.model.backbone)}{" "}
             <span className="font-normal text-muted-foreground">
               · {modelLabel(r.model.backbone, r.model.method).how}
             </span>
