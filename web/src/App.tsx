@@ -4,6 +4,7 @@ import { IdentifyPage } from "@/pages/Identify";
 import { ModelsPage } from "@/pages/Models";
 import { DataPage } from "@/pages/Data";
 import { AboutPage } from "@/pages/About";
+import { PaperPage } from "@/pages/Paper";
 
 export function App() {
   return (
@@ -13,6 +14,7 @@ export function App() {
         <Route path="/models" component={ModelsPage} />
         <Route path="/data" component={DataPage} />
         <Route path="/about" component={AboutPage} />
+        <Route path="/paper" component={PaperPage} />
         <Route>
           <PageHeader title="Page not found" />
         </Route>

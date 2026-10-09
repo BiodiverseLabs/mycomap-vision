@@ -1,7 +1,9 @@
 import { Link, useLocation } from "wouter";
 import { useEffect, useState } from "react";
 import { ArrowUpRight, Menu, X } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { api, signInUrl, type Me } from "@/lib/api";
+import { showsPaper } from "@/lib/publicView";
 
 // Header and footer follow mycomap.org's PublicLayout and MainNavigation so the
 // two sites read as one: sticky white header, logo + "MycoMap" in brown, grey
@@ -13,6 +15,7 @@ const NAV = [
   { href: "/data", label: "Data" },
   { href: "/about", label: "How it works" },
 ];
+const PAPER = { href: "/paper", label: "Paper in Progress" };
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -27,6 +30,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
 function Header() {
   const [location] = useLocation();
   const [open, setOpen] = useState(false);
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
+  const nav = showsPaper(me.data) ? [...NAV, PAPER] : NAV;
   const isActive = (href: string) => (href === "/" ? location === "/" : location.startsWith(href));
   const cls = (href: string) =>
     `px-3 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -47,7 +52,7 @@ function Header() {
               </span>
             </Link>
             <nav className="hidden lg:flex items-center gap-1">
-              {NAV.map((n) => (
+              {nav.map((n) => (
                 <Link key={n.href} href={n.href} className={cls(n.href)}>
                   {n.label}
                 </Link>
@@ -73,7 +78,7 @@ function Header() {
         </div>
         {open && (
           <nav className="lg:hidden pb-3 flex flex-col gap-1" onClick={() => setOpen(false)}>
-            {NAV.map((n) => (
+            {nav.map((n) => (
               <Link key={n.href} href={n.href} className={cls(n.href)}>
                 {n.label}
               </Link>

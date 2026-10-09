@@ -41,6 +41,9 @@ from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConf
 
 log = logging.getLogger("mycomap_vision.api")
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
+# The working draft of the Vision paper (Paper in Progress page), served to signed-in
+# members only (signin.MEMBERS_ONLY). It ships with the code, never in the public web bundle.
+PAPER_FILE = config.REPO_ROOT / "docs" / "paper" / "draft.md"
 
 
 def open_manifest(path: Path) -> sqlite3.Connection:
@@ -221,7 +224,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                nightly_fetch: Callable[[], tuple[list[dict], str]] | None = None,
                nightly_steps: "nightly.Steps | None" = None,
                nightly_fetch_pending: Callable[[], tuple[list[dict], str]] | None = None,
-               photo_fetcher: Callable[[], object] | None = None) -> FastAPI:
+               photo_fetcher: Callable[[], object] | None = None,
+               paper_file: Path = PAPER_FILE) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -487,6 +491,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         from . import prospective
         with db_lock:
             return {"models": prospective.report(conn)}
+
+    @app.get("/api/paper")
+    def paper():
+        """The paper draft as Markdown. Never cached on the way (an unreviewed draft)."""
+        try:
+            text = paper_file.read_text(encoding="utf-8")
+        except OSError:
+            raise HTTPException(404, "no paper draft on this server")
+        return JSONResponse({"markdown": text}, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/scoreboard/{run_id}")
     def scoreboard_run(run_id: int):

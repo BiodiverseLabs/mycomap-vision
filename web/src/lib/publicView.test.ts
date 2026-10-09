@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, identifyGate, LIKELY_COPY, modelName, sendWaitingInLine } from "./publicView";
+import { coverageWords, headline, identifyGate, LIKELY_COPY, modelName, sendWaitingInLine, showsPaper } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -89,4 +89,15 @@ test("the line is given up after its tries, and the busy answer is shown then", 
     3, async () => {});
   assert.equal(sent, 3);
   assert.equal(res.status, 503);
+});
+
+test("the Paper in Progress tab shows only to signed-in members", () => {
+  const me = (signin: Me["signin"], user: Me["user"]): Me => ({ signin, user });
+  const someone = { id: "7", name: "Ann" };
+  assert.equal(showsPaper(me("identify", null)), false, "open site, signed out");
+  assert.equal(showsPaper(me("all", null)), false);
+  assert.equal(showsPaper(me("identify", someone)), true);
+  assert.equal(showsPaper(me("all", someone)), true);
+  assert.equal(showsPaper(me("off", null)), true, "local site without sign-in");
+  assert.equal(showsPaper(undefined), false, "not known yet");
 });

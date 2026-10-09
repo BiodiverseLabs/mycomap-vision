@@ -229,6 +229,8 @@ export const api = {
     return typeof body.next === "string" ? body.next : "/";
   },
   prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
+  /** The paper draft (Markdown), for signed-in members only. */
+  paper: () => getJson<{ markdown: string }>("/api/paper"),
   models: () => getJson<ModelsInfo>("/api/models"),
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
