@@ -674,6 +674,9 @@ Code, sources, deviations and commands in one place:
 `src/mycomap_vision/replications/fungitastic/`, tests under
 `tests/replications/fungitastic/`; the old module paths still resolve).
 
+**Exploratory (Steve, 2026-10-09):** every result here so far is exploratory. It will be
+re-run on the immutable Dataset release v1 before any of it counts.
+
 Steve: "replicate their model with our data". Lukas Picek's group (BVRA; a PI of the EU
 FunDive project, whose model goes into PlutoF GO) built the Atlas of Danish Fungi's
 FungiVision (DF20) and FungiTastic. Trained on exactly Vision's training records, their
@@ -1057,6 +1060,9 @@ Code, sources, deviations and commands in one place:
 [replications/fungitastic/](../replications/fungitastic/README.md) (modules under
 `src/mycomap_vision/replications/fungitastic/`, tests under
 `tests/replications/fungitastic/`; the old module paths still resolve).
+
+**Exploratory (Steve, 2026-10-09):** every result here so far is exploratory. It will be
+re-run on the immutable Dataset release v1 before any of it counts.
 
 Steve (2026-10-09): the Picek group's published classifiers go beside iNat's computer
 vision as outside, zero-retraining baselines in the paper. `replications/fungitastic/`

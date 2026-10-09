@@ -207,6 +207,8 @@ the rest are provisional species or formal names their models never saw.
 
 ## Status
 
+- All results so far are exploratory, including the development numbers. They will be
+  re-run on the immutable Dataset release v1.
 - Published checkpoints: built and run on the development split. The paper's numbers
   come later, on a sealed test set.
 - Retrain: prepared and dry-run tested, not yet run. It waits for Vision's labels to be
