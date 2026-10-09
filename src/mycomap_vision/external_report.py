@@ -256,6 +256,31 @@ def per_image(results: dict, ids: set[str], truths: dict, labeller) -> dict | No
     return rate(k, n) if n else None
 
 
+def macro_f1(results: dict, ids: set[str], truths: dict, scorer) -> dict | None:
+    """Species macro-F1 of the top-1 answers on `ids`, averaged over the true species there
+    (each judged by `scorer`, so with the crosswalk synonyms are one class). A record's
+    answer is a false positive for every class it names that is not its own."""
+    use = [o for o in ids if o in results and truths.get(o) and truths[o].species]
+    if not use:
+        return None
+    classes: list[str] = []
+    for o in use:
+        t = truths[o].species
+        if not any(scorer.same(t, c) for c in classes):
+            classes.append(t)
+    f1s = []
+    for c in classes:
+        tp = fp = fn = 0
+        for o in use:
+            top = (results[o].get("species") or [{}])[0].get("name")
+            mine, said = scorer.same(truths[o].species, c), bool(top) and scorer.same(top, c)
+            tp += mine and said
+            fp += said and not mine
+            fn += mine and not said
+        f1s.append(2 * tp / (2 * tp + fp + fn) if tp else 0.0)
+    return {"n": len(use), "classes": len(classes), "macro_f1": round(sum(f1s) / len(f1s), 4)}
+
+
 def pick(rows: dict, keys: tuple) -> dict:
     return {k: rows[k] for k in keys if k in rows}
 
@@ -438,11 +463,13 @@ def tables(ctx: dict, scorer: Scorer, backbone: str | None, ref_truths: list,
         m["coverage"]["north_american_records"] = coverage(ref_truths, vocab)
     same = m["same_vocabulary"]["models"]
     same[backbone] = {**ladder(results, in_vocab, truths, scorer, False, eq),
-                      "per_image_top1": per_image(results, in_vocab, truths, scorer)}
+                      "per_image_top1": per_image(results, in_vocab, truths, scorer),
+                      "macro_f1": macro_f1(results, in_vocab, truths, scorer)}
     for key, vres in vision.items():
         name = heldout_report.model_name(key)
         both = in_vocab & set(vres)
-        same[name] = ladder(vres, both, truths, scorer, False, eq)
+        same[name] = {**ladder(vres, both, truths, scorer, False, eq),
+                      "macro_f1": macro_f1(vres, both, truths, scorer)}
         restricted, short = {}, Counter()
         for oid in both:
             restricted[oid], left = restrict(vres[oid], vocab)
@@ -451,6 +478,7 @@ def tables(ctx: dict, scorer: Scorer, backbone: str | None, ref_truths: list,
         table = ladder(restricted, both, truths, scorer, False, eq)
         table["rows"] = pick(table["rows"], SPECIES_ROWS)
         table["fewer_names_than_k_after_restricting"] = {f"top{k}": short[k] for k in KS}
+        table["macro_f1"] = macro_f1(restricted, both, truths, scorer)
         same[f"{name} restricted to {model.short}"] = table
     return m
 
@@ -586,6 +614,10 @@ def format_report(r: dict) -> str:
             for name, table in sv["models"].items():
                 lines.append(f"    {name}  (n = {table['records']:,})")
                 _rows(lines, table["rows"], indent="      ")
+                f1 = table.get("macro_f1")
+                if f1:
+                    lines.append(f"      species macro-F1 (top 1) {100 * f1['macro_f1']:.1f}% "
+                                 f"over {f1['classes']:,} species, n = {f1['n']:,}")
                 short = table.get("fewer_names_than_k_after_restricting")
                 if short and any(short.values()):
                     lines.append("      restricted list shorter than k (top k a lower bound) "

@@ -342,6 +342,23 @@ def test_the_protocol_report_never_scores_a_sealed_test_split(conn, tmp_path, mo
         external_report.report(conn, NAME, split="test", vision_backbone="toy")
 
 
+def test_macro_f1_averages_each_true_species_and_counts_a_wrong_answer_against_the_named_one():
+    t = {o: heldout.Truth(n, n.split()[0], "F", n, False, None)
+         for o, n in (("1", "A a"), ("2", "A a"), ("3", "B b"))}
+    res = {"1": {"species": [{"name": "A a"}]}, "2": {"species": [{"name": "B b"}]},
+           "3": {"species": [{"name": "B b"}]}}
+
+    class Same:
+        crosswalk = None
+
+        @staticmethod
+        def same(a, b):
+            return a == b
+    got = external_report.macro_f1(res, {"1", "2", "3"}, t, Same())
+    # A a: tp 1, fn 1 -> 2/3. B b: tp 1, fp 1 -> 2/3.
+    assert got == {"n": 3, "classes": 2, "macro_f1": round(2 / 3, 4)}
+
+
 # --- the GBIF crosswalk (scoring only) -----------------------------------------------------------
 
 def test_a_name_s_key_is_its_accepted_usage_on_an_exact_species_match_only():
