@@ -466,10 +466,12 @@ def fit_prior(ref: Reference):
     return prior
 
 
-def with_prior(nearest: np.ndarray, prior, context) -> np.ndarray:
-    """nearest+prior's score: nearest as log-probabilities plus the range-and-season score."""
-    from .methods import log_softmax
-    return log_softmax(nearest / PRIOR_TEMPERATURE) + prior.log_prior(context)
+def with_prior(nearest: np.ndarray, log_prior: np.ndarray) -> np.ndarray:
+    """nearest+prior's score: nearest as log-probabilities (methods.log_softmax, done in
+    torch here) plus the record's range-and-season score (prior.log_prior)."""
+    torch = _torch()
+    z = torch.from_numpy(np.asarray(nearest, dtype=np.float64)) / PRIOR_TEMPERATURE
+    return torch.log_softmax(z, dim=0).numpy() + log_prior
 
 
 def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone: str = BACKBONE,
@@ -480,10 +482,13 @@ def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone:
     ref = load_reference(conn, backbone, exclude)
     log(f"  reference: {ref.records:,} records, {len(ref.photo_ids):,} photos, "
         f"{len(ref.index.species):,} groups ({time.time() - t0:.0f} s)")
-    engine = SetEngine(ref)
-    prior = fit_prior(ref)
     queries = benchmark_queries(conn, name, split, ref)[:limit]
     log(f"  {split}: {len(queries):,} records to answer")
+    # Every record's range-and-season score first: in this venv numpy's trigonometry
+    # (prior.haversine_km) can crash the process once torch is loaded (OpenBLAS with torch).
+    prior = fit_prior(ref)
+    priors = [prior.log_prior(heldout.context_for(rec, "org")) for rec, _ in queries]
+    engine = SetEngine(ref)
     results: dict[tuple, dict[str, dict]] = {}
 
     def put(method, oid, scores):
@@ -493,7 +498,7 @@ def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone:
         for m, v in s.items():
             put(m, rec.observation_id, v)
         results.setdefault(model_key("nearest+prior", backbone, "org"), {})[rec.observation_id] = \
-            ranked(with_prior(s["nearest"], prior, heldout.context_for(rec, "org")), ref.index)
+            ranked(with_prior(s["nearest"], priors[i]), ref.index)
         for m in STEP1[2:]:
             for w in weights:
                 put(f"blend:{m}@{w}", rec.observation_id, blend(s["nearest+mean"], s[m], w))
@@ -602,7 +607,6 @@ def run_all(manifest: Path, name: str = "heldout-2026-10-08", split: str = "dev"
     Writes obsets-all-<split>[-clean].json beside the per-step reports: every number with the
     manifest's sha256, the reference hash, the code commit and the excluded list's sha256."""
     from . import config, obsets_head
-    torch = _torch()
     manifest = Path(manifest)
     conn = read_only(manifest)
     exclude = read_id_list(exclude_file) if exclude_file else None
@@ -624,7 +628,7 @@ def run_all(manifest: Path, name: str = "heldout-2026-10-08", split: str = "dev"
                    exclude=exclude, log=log)
     out["step1"] = {"file": s1["file"], "reference": s1["reference"], "seconds": s1["seconds"]}
     del s1
-    torch.cuda.empty_cache()
+    _torch().cuda.empty_cache()
     for label, project in (("step2", True), ("step2-attnonly", False)):
         log(f"== {label} ({time.time() - t0:.0f} s)")
         s2 = obsets_head.run_step2(conn, name, split,
@@ -635,7 +639,7 @@ def run_all(manifest: Path, name: str = "heldout-2026-10-08", split: str = "dev"
                       "training": {k: v for k, v in s2["training"].items() if k != "history"},
                       "seconds": s2["seconds"]}
         del s2
-        torch.cuda.empty_cache()
+        _torch().cuda.empty_cache()
     log(f"== time slice ({time.time() - t0:.0f} s)")
     ref = load_reference(conn, BACKBONE, exclude)
     out["time_slice"] = time_slice_check(ref, "2026-09-07")

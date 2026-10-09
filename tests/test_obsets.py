@@ -277,7 +277,7 @@ def test_nearest_plus_prior_here_is_the_served_nearest_plus_prior():
     q = unit(rng.normal(size=(2, 8))).astype(np.float16)
     ctx = Context(40.0, -100.0, "2025-06-10")
     nearest = obsets.SetEngine(ref, device="cpu").scores(q)["nearest"]
-    got = obsets.with_prior(nearest, obsets.fit_prior(ref), ctx)
+    got = obsets.with_prior(nearest, obsets.fit_prior(ref).log_prior(ctx))
     served = WithPrior(partial(AsLogProb, NearestSpecimen))
     served.fit(vecs, ref.index, recs)
     served.base.base.scorer.torch = None
