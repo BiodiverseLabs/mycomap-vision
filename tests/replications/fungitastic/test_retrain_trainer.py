@@ -67,7 +67,9 @@ def fake_picek_trainer(conn, spec, name, models_dir):
 
 def test_the_run_trains_uploads_and_scores_the_replication_with_its_own_methods(
         conn, tmp_path, monkeypatch):
+    from test_record_sources import record_sources_as
     store = seed_two_species(conn, tmp_path)
+    record_sources_as(conn, monkeypatch)                   # every record from iNat
     data_dir = tmp_path / "inst"
     monkeypatch.setattr(config, "DATA_DIR", data_dir)      # as on the instance
     uploads = {}

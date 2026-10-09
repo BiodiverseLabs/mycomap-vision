@@ -409,6 +409,14 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     # The laptop refuses to ship such a manifest (aws.check_trainer_request); this is the
     # instance's own check, before anything is embedded or trained.
     holdouts.check_clean(conn, "the trainer run")
+    if picek:
+        # The same rule as at launch (aws.picek_launch_labels), on the manifest shipped here:
+        # every record the Picek run trains or validates on is an iNaturalist observation.
+        from .replications.fungitastic import retrain
+        sources = retrain.run_sources(conn, store.location, size, test_days, picek_exclude,
+                                      picek_ids_file)
+        log("record sources: " + retrain.format_sources(sources))
+        retrain.require_inat_only(sources, log=log)
     cleared = clear_embeddings(conn)
     log(f"cleared {cleared:,} embedding rows brought from the laptop")
     kept = None

@@ -210,7 +210,10 @@ the rest are provisional species or formal names their models never saw.
 - Published checkpoints: built and run on the development split. The paper's numbers
   come later, on a sealed test set.
 - Retrain: prepared and dry-run tested, not yet run. It waits for Vision's labels to be
-  final, so both models train on the same labels.
+  final, so both models train on the same labels, and for a snapshot that records every
+  record's source: some records from other sites were fetched as iNaturalist ids and
+  carry the wrong photos. The launch is refused until every training and validation
+  record is recorded as an iNaturalist observation.
 
 ## The code
 

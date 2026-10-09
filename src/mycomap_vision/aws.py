@@ -387,10 +387,12 @@ PICEK_LABELS_KEY = "picek-labels.json"
 
 
 def picek_launch_labels(conn, store_location: str, size: str, test_days: int, exclude: str,
-                        log=print) -> tuple[dict, set[str] | None]:
+                        log=print, dry_run: bool = False) -> tuple[dict, set[str] | None]:
     """The labels a Picek run will train on, read now from this manifest (launch time),
     printed with the known label problems the manifest carries, and the ids to ship when
-    every benchmark is excluded. The instance checks it trains on the same (labels_hash)."""
+    every benchmark is excluded. The instance checks it trains on the same (labels_hash).
+    A launch is refused unless every training and validation record is recorded as an
+    iNaturalist observation (retrain.require_inat_only; a dry run only warns)."""
     from .replications.fungitastic import retrain as picek
     if exclude not in picek.EXCLUDE_MODES:
         raise ValueError(f"--picek-exclude-benchmarks is one of "
@@ -405,6 +407,7 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
         log("WARNING: the manifest still carries known label problems (above). They are "
             "Vision's labels too, so both models see the same; launch only once the "
             "labelling is final (docs/PLAN.md, Picek replication, launch day).")
+    picek.require_inat_only(snap["record_sources"], dry_run=dry_run, log=log)
     return snap, ids
 
 
@@ -658,7 +661,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
     labels, exclude_ids = (picek_launch_labels(conn, f"s3://{b}/", size, test_days,
-                                               picek_exclude, log)
+                                               picek_exclude, log, dry_run=dry_run)
                            if picek else (None, None))
     labels_hash = labels["labels_hash"] if labels else None
     sha = release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)

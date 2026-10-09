@@ -272,7 +272,93 @@ def label_snapshot(conn, data: PicekData, exclude_mode: str = "match") -> dict:
             "names_left_for_a_person": spell["left_for_a_person"],
         },
         "manifest_newest_export": newest,
+        "record_sources": source_check(conn, data),
     }
+
+
+# --- where the records come from -----------------------------------------------------------
+# Training photos are fetched from iNat by the record's id. A record that is not an iNat
+# observation (Mushroom Observer, MyCoPortal, .com sequences) fetched AS an iNat id carries
+# some other observation's photos (mammals, birds, plants). A fix that records each
+# record's source in the manifest is pending; until a snapshot carries it, no launch can
+# prove its records are iNat only, so a real launch is refused (the dry run only warns).
+#
+# TODO(record source fix): set SOURCE_COLUMN to the records column the fix adds, and
+# INAT_SOURCE to its value for iNaturalist; that is the whole change. Not records.source:
+# it says 'inat' for any numeric id, an id pattern, which is how those records got in.
+SOURCE_COLUMN: str | None = None
+INAT_SOURCE = "inat"
+
+
+class RecordSourceError(ValueError):
+    """A Picek run's records are not proven to be iNaturalist observations only."""
+
+
+def record_sources(conn, record_ids) -> dict[str, int] | None:
+    """Records per recorded source among `record_ids`, or None when the manifest records
+    no source (SOURCE_COLUMN unset, or not a column of this manifest's records table)."""
+    if not SOURCE_COLUMN:
+        return None
+    cols = {r[1] for r in conn.execute("pragma table_info(records)")}
+    if SOURCE_COLUMN not in cols:
+        return None
+    ids = sorted({str(i) for i in record_ids})
+    counts: dict[str, int] = {}
+    for at in range(0, len(ids), 500):          # reads only: the manifest may be read-only
+        part = ids[at:at + 500]
+        for s, n in conn.execute(f'select coalesce("{SOURCE_COLUMN}", \'(none)\'), count(*) '
+                                 f"from records where observation_id in "
+                                 f"({','.join('?' * len(part))}) group by 1", part):
+            counts[str(s)] = counts.get(str(s), 0) + int(n)
+    return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
+
+
+def source_check(conn, data: PicekData) -> dict:
+    """The training and validation records by recorded source (label snapshot,
+    result.json): `recorded` False when the manifest has no source; `not_inat` counts
+    the records whose source isn't iNaturalist."""
+    ids = list(data.train_records) + list(data.val_records)
+    by = record_sources(conn, ids)
+    if by is None:
+        return {"recorded": False, "column": SOURCE_COLUMN, "records": len(ids),
+                "by_source": None, "not_inat": None}
+    return {"recorded": True, "column": SOURCE_COLUMN, "records": len(ids), "by_source": by,
+            "not_inat": sum(n for s, n in by.items() if s != INAT_SOURCE)}
+
+
+def require_inat_only(check: dict, dry_run: bool = False, log=print) -> None:
+    """Refuse a run whose training or validation records aren't proven iNat only: some
+    record's source isn't iNaturalist, or the manifest records no source at all. A dry
+    run (sends nothing) goes on with a loud warning, so the runbook stays testable."""
+    if not check["recorded"]:
+        msg = (f"the manifest records no source for its records, so this run can't prove "
+               f"that its {check['records']:,} training and validation records are "
+               "iNaturalist observations (MO / MyCoPortal / .com ids fetched as iNat ids "
+               "carry other observations' photos). The launch waits for the iNat-only "
+               "snapshot (docs/PLAN.md, launch day).")
+    elif check["not_inat"]:
+        counts = ", ".join(f"{s}: {n:,}" for s, n in check["by_source"].items())
+        msg = (f"{check['not_inat']:,} of the {check['records']:,} training and validation "
+               f"records are not iNaturalist observations ({counts}); their photos were "
+               "fetched by an id that isn't an iNat id. The launch waits for the iNat-only "
+               "snapshot (docs/PLAN.md, launch day).")
+    else:
+        log(f"Record sources: all {check['records']:,} training and validation records "
+            "are iNaturalist observations.")
+        return
+    if dry_run:
+        log("WARNING (a real launch is refused): " + msg)
+        return
+    raise RecordSourceError("not launching: " + msg)
+
+
+def run_sources(conn, store_location: str, size: str, test_days: int = 28,
+                exclude: str = "match", ids_file: str | None = None) -> dict:
+    """source_check for the records a Picek run on this manifest would train and validate
+    on (the instance's own check, before its first stage)."""
+    data = build_data(conn, store_location, size, test_days, PicekConfig.val_days,
+                      exclude_ids=exclusion_ids(conn, exclude, ids_file))
+    return source_check(conn, data)
 
 
 def format_snapshot(snap: dict) -> str:
@@ -290,7 +376,14 @@ def format_snapshot(snap: dict) -> str:
         f"conflicting names (left out), {p['names_left_for_a_person']['groups']:,} names "
         f"({p['names_left_for_a_person']['records']:,} records) waiting for a person "
         "(mv name-spellings)",
+        "  record sources: " + format_sources(snap.get("record_sources")),
     ])
+
+
+def format_sources(check: dict | None) -> str:
+    if not check or not check["recorded"]:
+        return "NOT RECORDED in this manifest (can't prove the records are iNat only)"
+    return ", ".join(f"{s} {n:,}" for s, n in check["by_source"].items()) or "no records"
 
 
 # --- the photo cache --------------------------------------------------------------------
