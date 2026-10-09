@@ -199,7 +199,7 @@ class Identifier:
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
                  embeddings_root: Path | None = None, calibration: dict | None = None,
                  model_cache: Path | None = None, train: bool = True, photo_info: bool = True,
-                 layer_root: Path | None = None):
+                 layer_root: Path | None = None, release=None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         self.backbone, self.method = backbone, method
@@ -208,7 +208,7 @@ class Identifier:
             raise ValueError(f"no embeddings for {backbone!r}")
         self.embedded = len(ids)
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
-        by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()})
+        by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()}, release=release)
         records = with_rows(by_id, row_of)
         self.index = build_index(records)
         self.model = METHODS[method]()

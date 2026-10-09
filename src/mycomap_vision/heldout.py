@@ -1089,7 +1089,7 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
             ids: list[str], load_model: Callable[[], object], place: str = "inat",
             size: str = "large", batch_size: int = 32, redo: bool = False,
             make_identifier: Callable | None = None, scores_out: Path | None = None,
-            log=print) -> dict:
+            release=None, log=print) -> dict:
     """Embed the set's photos with `backbone` and identify each record with each method,
     against the manifest's reference index for that backbone (Identifier: every record
     Vision would serve). Saves the top 5 per rank and the nearest reference photo's
@@ -1097,7 +1097,9 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
     answers.sqlite. Answers are keyed by method, place (for a method that uses it),
     photo size and reference, so a run with another of these is kept beside the
     earlier one, not over it. `scores_out`: also write every answered record's photo
-    scores against the first method's index (save_scores), for tuning a place prior."""
+    scores against the first method's index (save_scores), for tuning a place prior.
+    `release`: the reference index is a dataset release's train + val records
+    (dataset_release.py) instead of the live manifest's."""
     from . import evaluate
     from .identify import Identifier
     if place not in ("inat", "org", "none"):
@@ -1118,7 +1120,7 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
     state = set_state(conn, name)
     make_identifier = make_identifier or (lambda m: Identifier(
         conn, backbone, m, calibration=evaluate.latest_calibration(conn, backbone, m),
-        photo_info=False))
+        photo_info=False, release=release))
     version = config.code_version()
     scored: list[tuple] = []
     for method in methods:
@@ -1194,6 +1196,8 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
             out["scores_out"] = {"path": str(scores_out),
                                  "records": save_scores(scores_out, scored, ident, truths, place)}
         del ident
+    if release is not None:
+        out["dataset_release"] = release.cite()
     return out
 
 

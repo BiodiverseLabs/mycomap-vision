@@ -17,6 +17,8 @@ what the site serves). A serving release says which dataset release its model ca
 - Frozen releases are `v1`, `v2`, … A correction never edits a release; it makes the next one.
 - The public variant of `vN` is `vN-cc` (§9). It is built **from** `vN`, never from the
   manifest, so it is a strict subset by construction.
+- The test set of `vN` is `vN-test` (§5): the fresh records Steve validates for testing,
+  cut later as its own release, disjoint from `vN`.
 - Anything else (`dry-20261009-1830`, …) is a **draft**: same layout, marked
   `"draft": true` in its manifest, refused by every research command unless `--allow-draft`.
 
@@ -24,15 +26,19 @@ what the site serves). A serving release says which dataset release its model ca
 
 | Command | Does |
 |---|---|
-| `mv dataset build --name v1 [--exclusions F.tsv …] [--cutoffs val=…,test=…] [--recipe long512-q90 …] [--dry-run]` | writes the snapshot from the manifest (read-only toward it) |
+| `mv dataset build --name v1 --freeze-approved "<who, when>" [--exclusions F.tsv …] [--val-weeks 8 \| --val-cutoff D] [--recipes original,long500-q90]` | writes the snapshot from a private copy of the manifest (never writes to it); without `--name` (or with `--dry-run`): a draft |
+| `mv dataset build --name v1-test --test-for v1 --ids new.csv --freeze-approved …` | the test release: only those records, all `test`; refused if any record, or any photo (by bytes), is in `v1` |
 | `mv dataset verify v1 [--photos N\|all]` | recomputes every file hash, every content hash and `release_hash`; with `--photos`, re-reads originals from the store and checks their sha256 |
-| `mv dataset derive v1 --photo <key> --recipe long512-q90 [--out F]` | regenerates one derived image from our original and checks it against the stored hash |
+| `mv dataset derive v1 --photo <key> --recipe long500-q90 [--out F]` | regenerates one derived image from our original and checks it against the stored hash |
 | `mv dataset diff v1 v2` | records/photos added, removed, relabelled, re-included, moved between splits; per-component hash changes |
 | `mv dataset public v1` | writes `v1-cc` (§9) |
 | `mv dataset show v1` | counts by source, split, inclusion reason, licence class |
 
-`--dry-run` builds into a scratch folder with id `dry-<stamp>`, prints counts and the would-be
-hashes, and labels every line "dry run, not v1".
+A frozen id (`v1`, `v1-test`, …) is refused without `--freeze-approved` (who gave the trigger,
+and when; recorded in the release) and without every derived hash (`--derive all`). A draft
+(`--dry-run`) may skip or sample derived hashes (`--derive none|N`); its output starts
+"DRY RUN, not v1". Experiments take `--release <id>` (`mv compare`, `mv heldout predict`
+today) and refuse a draft unless `--allow-draft`.
 
 ## 2. On disk
 
@@ -75,6 +81,7 @@ existing id; `verify` recomputes everything and fails on any difference.
 | `label_exported_at` | when the export read this record's name (records.exported_at) |
 | `validated_on`, `green_projects` | earliest green date; projects that marked it green |
 | `observed_on`, `country`, `state`, `north_america` | public-level place and date (no coordinates) |
+| `observer_login`, `inat_uuid` | per-observer reporting; the uuid lets occurrence priors leave the record out |
 | `included` | 1 / 0 |
 | `reason` | `ok`, or the **first** exclusion reason in §4's order |
 | `split` | §5; null when excluded |
@@ -84,17 +91,19 @@ existing id; `verify` recomputes everything and fails on any difference.
 
 | Column | Meaning |
 |---|---|
-| `photo_key` | `inat:<photo id>` or `mo:<image id>` (the manifest's internal MO offset never leaks) |
+| `photo_key` | `inat:<photo id>` or `mo:<image id>` |
+| `manifest_photo_id` | the manifest's id, to find the photo's vectors (zeroed in the public variant) |
 | `record_key`, `position` | owner record, order on the record |
 | `source`, `source_photo_id`, `source_url` | where it came from; the public URL of the photo |
-| `original_sha256`, `original_bytes`, `original_ext` | **our kept original**: the S3 `large` copy (iNat 1024 px, MO 960 px) |
+| `original_path`, `original_sha256`, `original_bytes` | **our kept original**: the `large` copy (iNat 1024 px, MO 960 px), S3 first; the store itself is named only in `private.sqlite` |
 | `license_code`, `license_class` | at the freeze (`open` / `nc` / `arr`); `license_checked_at` |
 | `owner_login`, `owner_name`, `attribution` | needed for CC attribution |
 | `included`, `reason` | `ok` or the first photo reason in §4 |
 
 `private.sqlite` holds the rest: record coordinates (needed by the location priors),
-`owner_user_id`, the photo-permission answer per ARR owner at the freeze, and review-list
-notes. It is hashed into `release_hash` (so v1 is one thing) but never published.
+owners' numeric ids, the photo-permission answer per ARR photo at the freeze
+(`granted` / `no_answer` / `withdrawn`), and the photo store each original is in. It is
+hashed into `release_hash` (so v1 is one thing) but never published.
 
 ### Other tables
 
@@ -118,8 +127,9 @@ Every candidate gets exactly one reason (the first that applies), so the counts 
 | `source_mycoportal` | MyCoPortal (Steve: rarely field images) |
 | `source_com_sequence` | .com Sequences: no photos of their own |
 | `source_genbank`, `source_unknown` | no photos of their own |
-| `wrong_source_photos` | photos were fetched for the wrong record (`source_removals`) and none of its own remain |
-| `not_north_america` | outside North America (Vision is North-American today; **Steve to confirm**) |
+| `held_out` | listed in `benchmark_holdouts` (a sealed benchmark) |
+| `missing_at_source` | the iNat or MO observation is gone, private or unread |
+| `not_north_america` | outside North America (Steve, 2026-10-09: North America only, as today) |
 | `label_conflict` | .org holds more than one name |
 | `no_label` | no usable rank ("Unknown", "Agaricales") |
 | `guest` | DNA name is a guest of the fungus in the photo (guests.py) |
@@ -128,8 +138,14 @@ Every candidate gets exactly one reason (the first that applies), so the counts 
 | `ok` | in |
 
 **Photos**, in this order: `record_excluded`, `no_original` (no kept original with a
-sha256), `permission_withdrawn` (ARR, owner withdrew on mycomap.org), `review:<list>`
-(non-fungus scan, wrong-photo lists, after a person's check), `ok`.
+sha256), `permission_withdrawn` (ARR, owner withdrew on mycomap.org; the rule of
+`evaluate.load_records`, read from permissions.py), `review:<list>` (non-fungus scan,
+wrong-photo lists, after a person's check), `ok`.
+
+Wrong-photo records need no reason of their own: a build refuses a manifest without the
+`record-sources-v1` migration, after which those photos are no longer linked to the record
+(feat/record-sources-mo); a record left with none is `no_photos`. The public variant adds
+`no_cc_photos` for a record whose only photos are all-rights-reserved.
 
 ARR photos with no answer yet stay **in** for training (Steve, 2026-09-28), counted apart.
 
@@ -139,28 +155,25 @@ copies each into `inputs/` and records its sha256; a key it cannot find fails th
 
 ## 5. Splits
 
-One split per included record, by the earliest green validation date (time-based, never
-random; CLAUDE.md):
+Steve, 2026-10-09: "I will provide a new dataset for testing of new records." So:
 
-- `train`: validated on or before `val_cutoff`; records with no validation date go here.
-- `val`: after `val_cutoff`, on or before `test_cutoff` (model selection, tuning).
-- `test`: after `test_cutoff` (reported once per experiment).
-- `sealed`: the paper's fresh ~1,000-record test set (G7), from a **sealed** heldout set.
-  Never in `train`/`val`/`test`, never in a reference index; only the paper's final run
-  reads it.
+- `vN` holds `train` and `val`, by the earliest green validation date (time-based, never
+  random; CLAUDE.md). `val` = validated after `val_cutoff` (model selection and tuning);
+  `train` = on or before it, plus records with no validation date. The cutoff is a calendar
+  date written into the release: by default the newest 8 weeks of validations are `val`
+  (`--val-weeks`), or `--val-cutoff` is chosen at the freeze.
+- `vN-test` holds `test`: Steve's fresh records, validated after `vN` was cut, frozen the same
+  way (labels, photos, hashes) as their own release. The build refuses it when any of its
+  records is in `vN`, or any of its photos is byte-identical to one in `vN`. It is never
+  trainable (`training_records()` raises `SealedLeak`).
+- The development benchmark `heldout-2026-10-08` (13,145) is dated like every other record
+  (Steve, 2026-10-09); its membership stays in `benchmark` / `benchmark_split`, so it can
+  still be reported.
+- A record held out for a sealed benchmark (`benchmark_holdouts`) is excluded (`held_out`).
 
-Default cutoffs: the build fixes calendar dates and writes them into the release; the
-proposal is `test` = the newest 8 weeks of green validations and `val` = the 8 weeks
-before (Steve to confirm; today's comparisons use 28 days).
-
-The development benchmark `heldout-2026-10-08` (13,145, released 2026-10-08) keeps its
-membership in `benchmark`/`benchmark_split`. Its role in v1 is G7 (open): either its records
-take their split by date like everyone else (current state) or they form their own split.
-The builder supports both (`--benchmark-role date|own-split`).
-
-**Guards (tests):** `training_records()` returns only `train` (and `val` when asked);
-anything `sealed` or excluded raises `SealedLeak`; `reference_records()` never returns
-`test` or `sealed`.
+**Guards (tests):** `training_records()` returns `train` (and `val` when asked) only;
+`reference_records()` is `train` + `val`; excluded records have no split; a test release is
+disjoint from its base and never trainable.
 
 ## 6. Hashes (exact definitions)
 
@@ -203,15 +216,16 @@ A recipe is immutable JSON; once a release uses it, its name is never reused for
 else:
 
 ```json
-{"name": "long512-q90", "version": 1,
- "steps": ["exif_transpose", "convert:RGB",
-           "resize_long_side:512:lanczos:no_upscale", "jpeg:quality=90:subsampling=4:2:0:baseline:no_metadata"],
+{"name": "long500-q90", "version": 1, "long_side": 500, "quality": 90,
+ "steps": ["exif_transpose", "convert:RGB", "resize_long_side:500:lanczos:no_upscale",
+           "jpeg:quality=90:subsampling=4:2:0:baseline:no_metadata"],
  "library": {"pillow": "12.3.0", "libjpeg": "<PIL.features.version('jpg')>"}}
 ```
 
-Shipped recipes: `original` (identity: the derived hash is the original's), `long512-q90`
-(public CC derivative, small), `long384-q95` (the size Picek's BEiT-B 384 reads, if Steve
-wants a pre-made cache). More can be added to a later release.
+Shipped recipes: `original` (identity: the derived hash is the original's) and
+`long500-q90` (the usual public size: iNat "medium", FungiTastic's 500p). Picek's BEiT-B 384
+reads originals and resizes in code (a pre-made cache was measured useless at 384), so it
+needs no recipe. Later releases may add recipes under new names.
 
 Two hashes per derived image: `derived_sha256` (the JPEG bytes) and `pixels_sha256` (the
 raw RGB pixels after resizing, with width and height). Same library versions → both match,
@@ -228,19 +242,31 @@ from mycomap_vision.dataset_release import load_release
 rel = load_release("v1")               # verifies MANIFEST.json + file hashes on open (fast)
 rel.id, rel.release_hash, rel.reference_hash, rel.code_commit
 rel.records(split="train")              # included records of a split
-rel.training_records(include_val=False) # raises on sealed / excluded
-rel.reference_records()                 # train + val, never test or sealed
+rel.training_records(include_val=False) # train only; a test release raises SealedLeak
+rel.reference_records()                 # train + val, never test
 rel.photos(record_key)                  # included photos with original sha256 + licence
 rel.photo_ids()                         # manifest photo ids, for embeddings lookups
-rel.derive(photo_key, "long512-q90")    # bytes, hash-checked
+rel.as_records(("train", "val"), photo_row)  # evaluate.Record objects
+rel.check_photos_match(conn)            # refuses vectors of a photo whose original changed
+rel.derive(photo_key, "long500-q90")    # bytes, hash-checked
 rel.cite()                              # the dict experiments write into their outputs
 ```
 
-Experiments take `--release v1` (`mv heldout`, `mv compare`, `mv finetune`, the Picek
-launcher): records, labels, photos and splits come from the release; embeddings and photo
-bytes from the store, checked against `original_sha256`. Outputs carry `rel.cite()`.
+Wired today: `evaluate.load_records(..., release=)` (so `Identifier`, the reference index and
+everything built on them), `evaluate.shared_records` / `mv compare --release` (reference =
+`train`, test = `val`), and `mv heldout predict --release`. Records, labels, photos and
+splits come from the release; vectors are found by photo id in the manifest, and refused
+when that photo's kept original no longer has the release's sha256. Outputs carry
+`rel.cite()`. Still to add, by their owners: `mv finetune` and the Picek launcher (whose
+guard checks `labels_hash`).
 
 ## 9. Public vs private
+
+Steve, 2026-10-09: "whatever is the standard." The standard for image datasets built from
+iNaturalist and MO (iNat open data, FungiTastic, DF20) is every CC licence, each photo with
+its licence code, attribution and source URL; resized copies are shared under the photo's own
+licence (a resize is a format change under CC, so ND photos are included as plain resizes,
+never crops). All-rights-reserved photos are never shared.
 
 | | `v1` (ours) | `v1-cc` (public) |
 |---|---|---|
@@ -254,17 +280,16 @@ bytes from the store, checked against `original_sha256`. Outputs carry `rel.cite
 Anyone can rebuild `v1-cc` from public URLs, or ask us for the on-demand CC derivatives,
 verify each against `derived_sha256`, and re-run our commands. The paper reports both.
 
-## 10. Open decisions for Steve
+## 10. Decisions (Steve, 2026-10-09) and what is still open
 
-1. North America only, as Vision is today?
-2. Split cutoffs: 8 + 8 weeks (proposed), or 28 days as in today's comparisons.
-3. Held-out dev benchmark in v1: dated like everyone else, or its own split (G7).
-4. `v1-cc` includes NC and ND photos (all CC, per "CC-licensed only"); for ND, only the
-   unmodified photo and a plain resize (no crops), which CC treats as a format change.
-5. Owners' logins in the public variant (CC-BY requires attribution) — yes, proposed.
-6. Pre-made recipes: `long512-q90` (public) and `long384-q95` (Picek), or others.
+- North America only: **yes**.
+- Testing: **Steve provides a new dataset of new records**, cut as `v1-test` (§5).
+- Held-out development benchmark: **dated like every record**, membership kept.
+- Public variant: **the standard** (§9).
+- Open: the `val` window (8 weeks by default, or a calendar cutoff chosen at the freeze).
 
 ## Not in this branch
 
-Cutting v1; uploading to S3; `--release` wiring in each experiment command (the reader is
-ready; each lane adds the flag to its command); `add-model` after the first v1 training run.
+Cutting v1 (waits for Steve's freeze trigger, relayed by the coordinator); uploading a release
+to S3; `--release` in `mv finetune` and the Picek launcher; `add-model` after the first
+training run on v1.

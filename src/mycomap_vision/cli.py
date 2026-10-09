@@ -210,12 +210,70 @@ def cmd_compare(conn, args) -> None:
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
                               max_test=args.max_test, name_scores=args.name_scores,
-                              sets=not args.no_sets, into=args.into)
+                              sets=not args.no_sets, into=args.into,
+                              release=_dataset_release(args))
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
     print_scoreboard(evaluate.scoreboard(conn, result["comparison_id"]))
     print(f"-> {path}")
+
+
+def _dataset_release(args):
+    """The dataset release named by --release (dataset_release.py), or None."""
+    if not getattr(args, "release", None):
+        return None
+    from .dataset_release import load_release
+    rel = load_release(args.release, allow_draft=args.allow_draft)
+    print(f"dataset release {rel.id} (release_hash {rel.release_hash[:12]}, "
+          f"reference_hash {rel.reference_hash[:12]})"
+          + (" DRAFT" if rel.manifest["draft"] else ""))
+    return rel
+
+
+def cmd_dataset(args) -> None:
+    """Dataset releases for research (dataset_release.py, docs/dataset-release.md). Runs
+    without opening the manifest for writing: build reads a private copy of it."""
+    from pathlib import Path
+
+    from . import dataset_release as dr
+    root = Path(args.root) if args.root else dr.ROOT
+    if args.action == "build":
+        name = args.name or dr.draft_id(suffix="-test" if args.test_for else "")
+        if args.dry_run and not dr.is_draft(name):
+            raise SystemExit("--dry-run builds a draft: leave out --name (or give dry-<stamp>)")
+        reader = dr.default_store_reader() if args.derive != "none" else None
+        print(("DRY RUN, not v1: " if dr.is_draft(name) else "") + f"building {name} ...")
+        m = dr.build(name=name, manifest_path=Path(args.manifest) if args.manifest else None,
+                     root=root, review_files=[Path(p) for p in args.exclusions],
+                     recipes=dr.parse_list(args.recipes), derive_photos=args.derive,
+                     val_cutoff=args.val_cutoff, val_weeks=args.val_weeks,
+                     north_america_only=not args.all_regions,
+                     freeze_approved=args.freeze_approved, test_for=args.test_for,
+                     test_ids=Path(args.ids) if args.ids else None, store_reader=reader)
+        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits")},
+                         indent=2))
+    elif args.action == "verify":
+        print(json.dumps(dr.verify(args.id, root, photos=args.photos), indent=2))
+    elif args.action == "derive":
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            d = rel.derive(args.photo, args.recipe)
+        finally:
+            rel.close()
+        if args.out:
+            Path(args.out).write_bytes(d.body)
+        print(json.dumps({"photo": args.photo, "recipe": args.recipe, "sha256": d.sha256,
+                          "pixels_sha256": d.pixels_sha256, "width": d.width,
+                          "height": d.height, "matches_release": True, "out": args.out},
+                         indent=2))
+    elif args.action == "diff":
+        print(json.dumps(dr.diff(args.a, args.b, root), indent=2))
+    elif args.action == "public":
+        m = dr.public_variant(args.id, root)
+        print(json.dumps({k: m[k] for k in ("id", "hashes", "counts")}, indent=2))
+    else:
+        print(json.dumps(dr.show(args.id, root), indent=2))
 
 
 def print_scoreboard(rows: list[dict]) -> None:
@@ -626,7 +684,8 @@ def cmd_heldout(conn, args) -> None:
         out = heldout.predict(conn, args.name, name, _split(args.methods), ids,
                               lambda: models.load_backbone(args.backbone), place=args.place,
                               size=args.size, batch_size=args.batch_size, redo=args.redo,
-                              scores_out=Path(args.scores_out) if args.scores_out else None)
+                              scores_out=Path(args.scores_out) if args.scores_out else None,
+                              release=_dataset_release(args))
         print(json.dumps(out, indent=2))
     elif args.action == "inat":
         from . import inat_cv
@@ -655,6 +714,14 @@ def print_heldout_report(out: dict) -> None:
     print(json.dumps(out["summary"], indent=2))
     print(f"-> {out['files']['json']}")
     print(f"-> {out['files']['csv']}")
+
+def release_options(p) -> None:
+    p.add_argument("--release", metavar="ID",
+                   help="read records, labels, photos and splits from this dataset release "
+                        "(docs/dataset-release.md), not the live manifest")
+    p.add_argument("--allow-draft", action="store_true",
+                   help="accept a draft (dry-run) release: exploratory only")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
@@ -813,6 +880,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--into", metavar="COMPARISON",
                    help="add the runs to this saved comparison (same records only; replaces "
                         "a run of the same backbone and method there)")
+    release_options(p)
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
                                       "any that fail), then compare them with the baselines")
@@ -893,6 +961,44 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--label", help="appended to the release id, e.g. bioclip2-full")
     p.add_argument("--make-current", action="store_true",
                    help="also point releases/current.json at it (the box pulls that one)")
+
+    p = sub.add_parser("dataset", help="dataset releases for research: frozen, verifiable "
+                                       "snapshots (docs/dataset-release.md)")
+    p.add_argument("--root", help="where releases live (default data/research-releases)")
+    dsub = p.add_subparsers(dest="action", required=True)
+    q = dsub.add_parser("build", help="cut a release from a private copy of the manifest")
+    q.add_argument("--name", help="v1, v2, v1-test ... (frozen; needs --freeze-approved); "
+                                  "default: a draft dry-<stamp>")
+    q.add_argument("--dry-run", action="store_true", help="a draft: counts and would-be hashes")
+    q.add_argument("--freeze-approved", help="who gave the freeze trigger, and when")
+    q.add_argument("--manifest", help="the manifest to copy (default: MV_MANIFEST_PATH)")
+    q.add_argument("--exclusions", action="append", default=[],
+                   help="a person-checked review list (TSV: kind, key, reason, note); repeat")
+    q.add_argument("--recipes", default="original,long500-q90")
+    q.add_argument("--derive", default="all",
+                   help="derived hashes for 'all' included photos, 'none', or a number (drafts)")
+    q.add_argument("--val-cutoff", help="YYYY-MM-DD: validated after it = val")
+    q.add_argument("--val-weeks", type=int, default=8,
+                   help="without --val-cutoff: the newest N weeks of validations are val")
+    q.add_argument("--all-regions", action="store_true", help="not only North America")
+    q.add_argument("--test-for", metavar="RELEASE",
+                   help="a test release for this one: only --ids, all 'test', disjoint from it")
+    q.add_argument("--ids", help="CSV with observation_id (or record_key): the test records")
+    q = dsub.add_parser("verify", help="recompute every file and content hash")
+    q.add_argument("id")
+    q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
+    q = dsub.add_parser("derive", help="make one derived image from our original, hash-checked")
+    q.add_argument("id")
+    q.add_argument("--photo", required=True, help="photo key, e.g. inat:123456")
+    q.add_argument("--recipe", required=True)
+    q.add_argument("--out", help="write the image here")
+    q = dsub.add_parser("diff", help="what changed between two releases")
+    q.add_argument("a")
+    q.add_argument("b")
+    q = dsub.add_parser("public", help="write <id>-cc: CC photos only, no coordinates")
+    q.add_argument("id")
+    q = dsub.add_parser("show", help="counts and hashes")
+    q.add_argument("id")
 
     p = sub.add_parser("pull-release", help="(server box) download a release, verify it and "
                                             "make it current; then restart the server")
@@ -1002,6 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--scores-out", help="also write each record's photo scores (.npz in "
                                         "occtune.save_scored_set's format), e.g. for "
                                         "mv tune-occurrence --scores")
+    release_options(q)
 
     q = hsub.add_parser("inat", help="iNat's computer vision on a named subsample "
                                      "(needs a 24-hour token in data/secrets/inat_jwt.txt)")
@@ -1026,6 +1133,9 @@ def main(argv: list[str] | None = None) -> int:
     occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
 
     args = parser.parse_args(argv)
+    if args.command == "dataset":             # never opens the manifest for writing
+        cmd_dataset(args)
+        return 0
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0
