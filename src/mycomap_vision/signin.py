@@ -18,7 +18,8 @@ in another browser. Sessions are our own HMAC-signed cookie; no server state.
 
 Settings (see .env.example):
     MV_SIGNIN                  off | identify | all   (default off)
-                               identify: only POST /api/identify needs a session
+                               identify: only POST /api/identify and the members'
+                               routes (MEMBERS_ONLY: the paper draft) need a session
                                all: every page and API route does, except
                                /api/health, /api/me and /auth/*
     MV_PUBLIC_ORIGIN           this site, e.g. https://vision.mycomap.org (the token's aud)
@@ -42,6 +43,9 @@ from urllib.parse import quote, urlsplit
 from . import config
 
 MODES = ("off", "identify", "all")
+# Never for signed-out visitors, even when the site is open (Steve, 2026-10-09: the paper
+# draft is for mycomap.org members only).
+MEMBERS_ONLY = ("/api/paper",)
 SESSION_COOKIE = "mv_session"
 NONCE_COOKIE = "mv_signin"
 NONCE_TTL_SECONDS = 600
@@ -218,7 +222,7 @@ class SigninConfig:
         if self.mode == "off" or path in ("/api/health", "/api/me") or path.startswith("/auth/"):
             return False
         if self.mode == "identify":
-            return method == "POST" and path == "/api/identify"
+            return (method == "POST" and path == "/api/identify") or path in MEMBERS_ONLY
         return True
 
     def authorize_url(self, nonce: str) -> str:
