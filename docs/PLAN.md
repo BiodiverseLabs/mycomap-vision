@@ -602,6 +602,18 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
   split = dev) or in a `--sealed` file. The 2026-10-08 held-out set is no longer
   sealed (Steve): tune on its dev split, check on test.
 
+### Prior tuning on nearest+mean (exp/prior-tuning, 2026-10-09)
+
+A grid of 1,824 prior settings (DNA records, iNat occurrences, both), declared before any
+result, tuned on the held-out development split with 5-fold cross-validation by observer
+(`priortune.py`, `scripts/prior_tuning/`). Chosen: the DNA-record prior with place and season
+each capped and at half weight, season kernel 10 days (`nearest+mean+prior`, confidence
+temperature 1.52). Species top-1 52.8 -> 55.1% on development (cross-validated), 54.3 -> 56.2% on
+test (confirmation only); genus +0.8 / +0.7. The iNat occurrence prior adds less (+1.2) and
+nothing on top. Cost: records whose species is known only more than 300 km away (test: 230 ->
+180 right of 1,039). Full record: docs/experiments/2026-10-09-prior-tuning.md. Pending Steve:
+whether it becomes the method when a place and date are given.
+
 ## Training on an AWS GPU instance (Steve, 2026-09-28)
 
 Embedding the full photo set and training the heads move off the laptop to a GPU
