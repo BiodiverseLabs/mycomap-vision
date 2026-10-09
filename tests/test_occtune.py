@@ -104,16 +104,31 @@ def test_the_2026_10_08_test_csv_is_no_longer_sealed_by_itself(tmp_path):
 
 
 def test_tuning_refuses_registered_benchmark_holdouts(conn):
+    # The manifest's own table (holdouts.py): every registered id is a sealed holdout.
+    conn.execute("create table if not exists benchmark_holdouts (observation_id text not null, "
+                 "benchmark text not null, added_at text not null, "
+                 "primary key (observation_id, benchmark))")
+    conn.executemany("insert into benchmark_holdouts values (?, 'paper', '2026-10-09')",
+                     [("1001",), ("1002",)])
+    check_not_sealed(["1000"], [], conn)                # an unregistered record is allowed
+    for frozen in ("1001", "1002"):
+        with pytest.raises(TuningRefused, match="frozen benchmark"):
+            check_not_sealed(["1000", frozen], [], conn)
+
+
+def test_a_holdout_table_with_a_split_column_lets_the_tuning_split_through(conn):
+    conn.execute("drop table if exists benchmark_holdouts")
     conn.execute("create table benchmark_holdouts (observation_id text, split text)")
     conn.executemany("insert into benchmark_holdouts values (?, ?)",
                      [("1000", "dev"), ("1001", "test"), ("1002", None)])
-    check_not_sealed(["1000"], [], conn)                # the tuning split is allowed
+    check_not_sealed(["1000"], [], conn)
     for frozen in ("1001", "1002"):
         with pytest.raises(TuningRefused, match="frozen benchmark"):
             check_not_sealed(["1000", frozen], [], conn)
 
 
 def test_a_holdout_table_that_cannot_be_checked_refuses_everything(conn):
+    conn.execute("drop table if exists benchmark_holdouts")
     conn.execute("create table benchmark_holdouts (inat text)")
     with pytest.raises(TuningRefused, match="no observation_id"):
         check_not_sealed(["1000"], [], conn)
