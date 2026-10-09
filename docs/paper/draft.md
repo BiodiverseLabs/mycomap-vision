@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.3, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.3.1, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -422,6 +422,62 @@ Earlier, smaller checks pointed the same way: a 100-record pilot gave species 47
 family 86.5% (`nearest`), and a 99-record audit gave 12% species accuracy for true species with
 fewer than 20 references against 63% for 20 or more.
 
+### Published Danish Fungi and FungiTastic models (development benchmark)
+
+We scored the three published models of the Danish Fungi / FungiTastic team (Picek et al. 2022a,
+2025), unchanged, on the 3,000 development records: FungiTastic BEiT-B and ViT-B (384 px) and
+DF20 ViT-L (384 px). They were trained on Danish Fungal Atlas records, so they can name only
+species on their own lists. Their names were matched to ours exactly, and through a GBIF and
+Catalogue of Life crosswalk as a check. Genus and family are scored on all records; species only
+on records whose true name is formally described, since no outside model has our provisional
+codes (A13).
+
+**Coverage.** 36.8% of the development records carry a provisional code. Of the formally named
+ones, 17.0% have a name on FungiTastic's list (19.2% through the crosswalk) and 13.8% on DF20's
+(16.1%). Across all 159,388 North American validated records the shares are 16.2% (18.3%) and
+13.1% (15.4%).
+
+**TABLE 7.** Development split, exact names. Percent right within the top 1 / 3 / 5 / 10.
+
+| Model | Genus (n 2,963) | Family (n 2,950) | Species, formal names (n 1,817) |
+|---|---|---|---|
+| FungiTastic BEiT-B | 54.6 / 68.6 / 73.8 / 78.7 | 66.8 / 81.0 / 86.1 / 91.3 | 14.0 / 20.0 / 21.7 / 23.3 |
+| FungiTastic ViT-B | 50.8 / 66.0 / 71.6 / 77.7 | 61.8 / 79.1 / 84.3 / 89.9 | 13.5 / 18.0 / 19.7 / 22.5 |
+| DF20 ViT-L | 52.4 / 65.7 / 69.2 / 73.7 | 64.7 / 80.4 / 84.6 / 89.6 | 12.6 / 17.0 / 18.1 / 19.5 |
+| Vision, nearest | 79.0 / 90.5 / 93.3 / 95.7 | 86.4 / 94.7 / 96.4 / 98.1 | 54.4 / 72.9 / 79.5 / 85.6 |
+| Vision, nearest + range and season | 79.5 / 91.1 / 93.7 / 95.8 | 86.7 / 94.8 / 96.8 / 98.2 | 57.1 / 74.2 / 80.0 / 85.6 |
+| Vision, nearest + species average | **81.7 / 92.1 / 94.7 / 96.6** | **88.7 / 95.5 / 97.1 / 98.5** | **58.0 / 75.8 / 81.8 / 87.4** |
+
+Much of the species gap is vocabulary: the published models cannot name most North American
+species. **TABLE 8** therefore compares on equal terms, on the records whose true species is on
+the published model's own list.
+
+**TABLE 8.** Same vocabulary, development split: species top-1 and macro-F1 (%).
+
+| | FungiTastic list (n 508, 252 species) | DF20 list (n 413, 197 species) |
+|---|---|---|
+| Published model | BEiT-B 50.0, F1 49.7; ViT-B 48.2, F1 45.4 | 55.5, F1 54.9 |
+| Vision, nearest | 60.4, F1 57.9 | 60.5, F1 58.7 |
+| Vision, nearest + range and season | 63.2, F1 61.2 | 63.2, F1 62.0 |
+| Vision, nearest + species average | 63.2, F1 62.5 | 63.7, F1 63.8 |
+| Vision + species average, limited to their list | 80.9, F1 78.4 | 82.8, F1 79.8 |
+
+Even on species both can name, Vision is ahead: by 5–12 points at species top-1 and 4–13 in
+macro-F1 with the nearest specimen alone, and by 8–15 and 9–17 with the species-average blend. The
+rows limited to the published model's list are a lower bound for that setting, because for about
+45% of records Vision's ten stored answers held fewer than three of those names.
+
+Through the crosswalk the published models' species top-1 on formal names rises to 14.7–15.8%.
+
+**Cautions.** (i) The crosswalk numbers need a spot-check for over-joins (for example
+*Agaricus solidipes* matched to *Panaeolus antillarum*). (ii) Species-complex scoring credits the
+published models a little more than strict on formal names (DF20 13.3% vs 12.6%); the effect is
+larger where European names are credited against North American codes split from them [to
+quantify]. (iii) Scored per image, as their own
+papers report, the published models reach 10.5, 9.8 and 9.2% species top-1 on these records.
+(iv) This compares their published models on our region; it does not test their method trained
+on our records, which is the replication A12.
+
 ### Speed and cost
 
 One identification with one photograph takes 4–10 s on the 4 GB CPU server; capacity is about
@@ -613,7 +669,7 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 | A10 | **Toxic species**: errors for *Amanita* sect. *Phalloideae*, *Galerina*, *Lepiota*, *Cortinarius* sect. *Orellani*, *Gyromitra*; explicit "not for edibility" | ⬜ | List target taxa; report predicted-as and predicted-from rates |
 | A11 | Data and code availability; split ids; REFORMS checklist as a supplement | ⬜ | Deposit at submission |
 | A12 | **Their method on our data**: the Danish Fungi / FungiTastic recipe (whole network retrained as a classifier, BEiT-B/16 at 384 px, rare-class loss, photo probabilities averaged, month prior) trained on our records and scored on the same records, to separate the method from the data | 🟡 | Being built (replication of Picek et al.); compute estimate before any GPU run |
-| A13 | **Fair comparison with models that lack provisional names**: genus and family on all records; species on formally named truths only; a same-vocabulary comparison (Vision limited to the other model's names, and unlimited); each model's share of records it cannot name at species, reported as a result; one taxonomy mapping | 🟡 | Protocol agreed; applies to iNat CV and the published Danish Fungi / FungiTastic models |
+| A13 | **Fair comparison with models that lack provisional names**: genus and family on all records; species on formally named truths only; a same-vocabulary comparison (Vision limited to the other model's names, and unlimited); each model's share of records it cannot name at species, reported as a result; one taxonomy mapping | 🟡 | Done for the published Danish Fungi / FungiTastic models on development (TABLES 7–8); iNat CV next; crosswalk spot-check |
 | A14 | **Per photograph and per find**: report both, as Picek's code keeps them separate | 🟡 | First-photo scores exist; add every-photo-alone scores |
 
 ### Commonly expected
@@ -714,6 +770,9 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.3.1 (9 Oct 2026).** Published Danish Fungi / FungiTastic models on the development split
+  (TABLES 7–8): they can name 13–19% of formally named North American records; on species both can
+  name, Vision leads by 5–12 points at species top-1 (8–15 with the species-average blend).
 - **0.3 (9 Oct 2026).** Held-out development benchmark results (TABLES 5–6): nearest + species
   average confirmed (species 48.3 → 54.2 on test); the DNA-record prior helps species by ~3 points
   on the full set but not genus; *s.l.* matching moves almost nothing. Abstract updated.

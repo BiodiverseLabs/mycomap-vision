@@ -32,7 +32,7 @@ const APPROACHES: Approach[] = [
     status: "Being built (replication of Picek et al.)" },
   { name: "Published Danish Fungi / FungiTastic models", how: "The published models, unchanged",
     trained: "Danish Fungal Atlas records (expert-checked)", names: "Mostly European species",
-    status: "Being tested on shared species" },
+    status: "Tested on held-out development records: can name 13-19% of formally named North American records; behind on the species they share" },
 ];
 
 export function CompareApproaches({ runs, served }: { runs: ScoreRun[]; served: string[] }) {
