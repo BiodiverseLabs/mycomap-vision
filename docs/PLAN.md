@@ -27,7 +27,7 @@ versioned dataset release; the live site keeps changing on its own track.
 
 | # | Condition | Owner / status |
 |---|---|---|
-| G1 | **Labels fixed**: every record's label is its observation name from the .com record title after the index rebuild, the stale-name refresh (incl. the BC02 bulk write and the *Tubariua* typo) and a FULL .com -> .org sync; the override rule (field 20259 beats 10675) fixed in .com; the title snapshot time recorded | label and sync lanes; in progress |
+| G1 | **Labels fixed by Steve's name rule (2026-10-09)**: the iNat Species Name Override beats the Provisional Species Name; the MycoBank number is looked up from that name (.com scientificnames API, cached on .org; the tie rule is being confirmed with Steve in the sync session); name and number always agree. Also: the stale-name refresh (incl. the BC02 bulk write and the *Tubariua* typo); the .com stale index-number repair (taxonomy_index.index_mycobank_number left on the old number after a rename: ~3,450 references, 87 development and 290 test answer keys; the index session is building the fix); then a full .org API sync after that deploy. The label snapshot time is recorded | label, index and sync lanes; in progress |
 | G2 | **Sources decided and carried**: the export carries `observations.source` (records.py EXPORT_SQL lacks it today). iNaturalist records in; DNA-validated Mushroom Observer records in **with their own MO photos**; MyCoPortal and .com Sequences records out (no photos of the specimen) | export fix + MO photo fetch: to build |
 | G3 | **Wrong-photo records out**: the 8,868 records whose photos came from unrelated iNat observations, and any found later | label-audit lane |
 | G4 | **Guest organisms** applied (guests.py, adopted 2026-10-07) | done |
@@ -44,8 +44,9 @@ serving releases (S3 `research-releases/v1/`), with a `RELEASE.json` of every fi
 - **records**: id, source (iNat / MO), label, label provenance (title field, override or
   provisional, refresh time), title snapshot time, validation date, validating project(s), name
   kind (formal / provisional / one-word), family and genus from the taxonomy snapshot.
-- **photos**: photo id, record, sha256 of the stored file, size, licence and licence class.
-  Owners and coordinates stay in a private companion table.
+- **photos**: photo id, record, the **original's** sha256, size, licence and licence class; the
+  derivation recipe and each derived image's sha256 (below). Owners and coordinates stay in a
+  private companion table.
 - **inclusion list**: every candidate record with in / out and a reason code (source, wrong photos,
   guest, non-fungus, no photos, label conflict, one-word without a usable rank, held out).
 - **splits**: the temporal cutoffs used for comparisons; the held-out development / test ids; the
@@ -53,6 +54,17 @@ serving releases (S3 `research-releases/v1/`), with a `RELEASE.json` of every fi
 - **reference-index hash** (records + labels), the taxonomy snapshot, the code commit that cut the
   release, and the sha256 of every model trained on it.
 - **dataset card** (datasheet): what is in it, how it was built, known gaps and biases, licences.
+
+**Images: originals kept, derived images by recipe (Steve, 2026-10-09).** No zip archives. The
+original photos (S3 `large`, ~624k photos, ~274 GB) are retained permanently. A release records
+each photo's original sha256 and a deterministic derivation recipe (resize and crop algorithm,
+size, JPEG quality, library and version) together with each derived image's sha256, so anyone can
+regenerate exactly the image a model saw, on demand, and check it. Public derivation is for
+CC-licensed photos only.
+
+**Who builds it.** A dedicated session owns the release builder (task "Prep Vision Dataset release
+v1 builder"): `mv release build / verify / derive / diff` with tests, and the release layout. This
+section is its specification input; it does not cut v1 until Steve gives the trigger.
 
 **Rules once v1 exists.** Every research command takes `--release v1` (or `--manifest <path>`) and
 writes the release id, reference hash and code commit into its outputs; registry entries after the

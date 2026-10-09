@@ -113,9 +113,11 @@ reported here stand as measured, for a reference set with this fault. The fix (a
 iNaturalist-only export, a rebuilt reference set and a retrain) will be reported as the "after"
 model. [Re-scoring without these records under way.]
 
-**Name of a record.** The label is the observation's own name on MycoMap after a refresh from the
-legacy database, not the name of a linked sequence. A record can carry several sequences,
-including non-target or discarded ones.
+**Name of a record.** The label is the observation's own name, not the name of a linked sequence
+(a record can carry several sequences, including non-target or discarded ones). Where the
+iNaturalist observation carries both a Species Name Override and a Provisional Species Name, the
+override wins; the MycoBank number is looked up from that name, so name and number always agree.
+[Tie rule for names with several MycoBank entries to be stated.]
 
 **Name cleaning.**
 - *Spellings.* The same provisional name reaches MycoMap written several ways (`Inocybe sp.
@@ -219,7 +221,7 @@ snapshot cut after the labels and the inclusion rules were fixed: iNaturalist re
 DNA-validated Mushroom Observer records with their own photos; MyCoPortal and legacy-sequence
 records, records with wrong photos, guest organisms and [non-fungus photos] left out, each with a
 recorded reason. The release holds every record's source, label and label provenance, every
-photo's checksum and licence, the inclusion list, the splits (time cutoffs, the development and
+original photo's checksum and licence, the exact recipe that derives each image a model saw from its original (with the derived image's checksum), the inclusion list, the splits (time cutoffs, the development and
 test splits, the sealed test set), the reference-index hash, the code commit and the checksums of
 every trained model. Each experiment is one command that reads the release and writes its id,
 reference hash and commit into its results. A version of the release using only openly licensed
