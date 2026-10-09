@@ -209,7 +209,7 @@ def cmd_compare(conn, args) -> None:
     backbones = [models.storage_name(b.strip()) for b in args.backbones.split(",") if b.strip()]
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
-                              max_test=args.max_test)
+                              max_test=args.max_test, name_scores=args.name_scores)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -794,6 +794,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--methods", default="nearest", help="comma-separated: nearest, species-mean")
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--max-test", type=int, help="sample this many test records")
+    p.add_argument("--name-scores", action="store_true",
+                   help="also score names s.l. and as species complexes (name_equiv.py, beta)")
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
                                       "any that fail), then compare them with the baselines")
