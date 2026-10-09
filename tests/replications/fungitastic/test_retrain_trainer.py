@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 from test_finetune import ft_loader
 from test_models_and_scoreboard import seed_two_species
-from test_picek import write_head
+from test_retrain import write_head
 
-from mycomap_vision import aws, config, evaluate, finetune, picek, trainer
+from mycomap_vision import aws, config, evaluate, finetune, trainer
+from mycomap_vision.replications.fungitastic import retrain as picek
 
 
 def test_a_replication_trains_from_photos_then_is_embedded_before_other_backbones():
@@ -167,9 +168,9 @@ def test_the_code_archive_must_carry_what_a_picek_run_needs():
     base = {n: "" for n in aws.TRAINER_NEEDS}
     base["requirements/trainer.txt"] = "timm==1.0.30 \\n    --hash=sha256:x\ntorch==2.14.0 \\n"
     assert aws.check_code_archive(archive(base))["pins"] == {"timm": "1.0.30", "torch": "2.14.0"}
-    with pytest.raises(RuntimeError, match="picek.py"):
+    with pytest.raises(RuntimeError, match="retrain.py"):
         aws.check_code_archive(archive(base), picek=["fungitastic-beit-b384"])
-    assert aws.check_code_archive(archive({**base, "src/mycomap_vision/picek.py": ""}),
+    assert aws.check_code_archive(archive({**base, **{n: "" for n in aws.PICEK_NEEDS}}),
                                   picek=["fungitastic-beit-b384"])
 
 

@@ -360,7 +360,7 @@ for _base in (NearestSpecimen, SpeciesMean):
 # The Picek group's classifier recipe, replicated on our data (picek.py): the trained
 # classifier's own head over its features, with DF20's month prior and our place prior.
 # These need a model trained by mv picek-train (evaluate.make_method binds it).
-from .picek import CLASSIFIER_METHODS  # noqa: E402
+from .replications.fungitastic.retrain import CLASSIFIER_METHODS  # noqa: E402
 
 for _cls in CLASSIFIER_METHODS:
     METHODS[_cls.name] = _cls

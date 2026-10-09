@@ -1300,7 +1300,7 @@ def import_external(conn: sqlite3.Connection, name: str, results: Path, backbone
     is the checkpoint id (external.checkpoint_id: weights and class map), so the report
     scores each checkpoint as one model. Every line must be this backbone's, of one method,
     size and checkpoint, about a record of the set, with ranks of {name, confidence}."""
-    from .external import is_external
+    from .replications.fungitastic.published import is_external
     if not is_external(backbone):
         raise ValueError(f"{backbone!r} is not an external model (external:<name>)")
     ensure_schema(conn)

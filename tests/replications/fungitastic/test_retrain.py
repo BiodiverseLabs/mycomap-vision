@@ -1,4 +1,4 @@
-"""The Picek replication (picek.py) without torch: what it trains on, the metadata prior,
+"""The Picek replication (replications/fungitastic/retrain.py) without torch: what it trains on, the metadata prior,
 the classifier as a Vision method, and the macro-F1 / per-image numbers it reports."""
 
 import json
@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 from test_models_and_scoreboard import Const, seed_two_species
 
-from mycomap_vision import config, evaluate, heldout, heldout_report, metrics, models, picek
+from mycomap_vision import config, evaluate, heldout, heldout_report, metrics, models
+from mycomap_vision.replications.fungitastic import retrain as picek
 from mycomap_vision.embed import embed_photos, normalise, photos_to_embed
 from mycomap_vision.methods import log_softmax, method_ready
 from mycomap_vision.prior import Context

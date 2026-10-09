@@ -637,7 +637,9 @@ def cmd_external(conn, args) -> None:
     """Published fungi classifiers as outside baselines (external.py, external_report.py)."""
     from pathlib import Path
 
-    from . import external, external_report, heldout
+    from . import heldout
+    from .replications.fungitastic import published as external
+    from .replications.fungitastic import published_report as external_report
     models = ([external.model_for(m) for m in _split(args.model)] if getattr(args, "model", None)
               else list(external.MODELS.values()))
     if args.action == "labels":
@@ -650,7 +652,7 @@ def cmd_external(conn, args) -> None:
                                               crosswalk=not args.no_crosswalk)
         print(json.dumps(out, indent=2))
     elif args.action == "crosswalk":
-        from . import gbif
+        from .replications.fungitastic import crosswalk as gbif
         matcher = gbif.Matcher(interval=1 / args.per_second)
         try:
             print(json.dumps(external_report.fill_crosswalk(
@@ -722,7 +724,7 @@ def cmd_picek_train(conn, args) -> None:
     on a GPU instance; here: a smoke test (--max-steps) or a short run."""
     from datetime import datetime
 
-    from . import picek
+    from .replications.fungitastic import retrain as picek
     preset = args.preset
     name = args.name or f"picek-{preset}-{datetime.now():%Y%m%d-%H%M%S}"
     cfg = picek.PicekConfig(preset=preset, epochs=args.epochs, lr=args.lr,
@@ -742,7 +744,7 @@ def cmd_picek_train(conn, args) -> None:
 
 def cmd_picek_bench(conn, args) -> None:
     """Measure the replication's speed: the data loader alone (CPU) and the GPU alone."""
-    from . import picek
+    from .replications.fungitastic import retrain as picek
     out = {}
     if not args.gpu_only:
         store = open_store(args.source, config.DATA_DIR)
@@ -919,7 +921,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-steps", type=int)
     p.add_argument("--test-days", type=int, default=28)
 
-    from .picek import PRESETS
+    from .replications.fungitastic.retrain import PRESETS
     p = sub.add_parser("picek-train", help="train the Picek group's fungi classifier recipe "
                                            "(FungiTastic / DF20) on our records (picek.py)")
     p.add_argument("--preset", default="fungitastic-beit-b384", choices=sorted(PRESETS))

@@ -109,7 +109,7 @@ class Stage:
 
 
 def picek_name(spec: str, run_id: str) -> str:
-    from .picek import parse_spec
+    from .replications.fungitastic.retrain import parse_spec
     return f"picek-{parse_spec(spec)[0]}-{run_id}"
 
 
@@ -158,9 +158,9 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
     for s in stages:
         key = s.base or s.name
         if s.kind == "picek":
-            from .picek import parse_spec
+            from .replications.fungitastic.retrain import parse_spec
             preset, n_epochs = parse_spec(s.spec)
-            from .picek import cache_of
+            from .replications.fungitastic.retrain import cache_of
             cached = cache_of(s.spec)
             rate = picek_rate(preset, bool(cached))
             hours = photos * n_epochs / (rate or UNMEASURED_FINETUNE_RATE) / 3600
@@ -597,7 +597,7 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
     def run(conn, spec, name, models_dir):
         import os
 
-        from .picek import PicekConfig, cache_of, parse_spec, train
+        from .replications.fungitastic.retrain import PicekConfig, cache_of, parse_spec, train
         preset, epochs = parse_spec(spec)
         cfg = PicekConfig(preset=preset, epochs=epochs, cache_px=cache_of(spec),
                           workers=max(2, min(6, os.cpu_count() or 4)),

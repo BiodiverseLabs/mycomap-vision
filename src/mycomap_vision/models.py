@@ -77,7 +77,7 @@ def resolve_spec(name_or_spec: str) -> str:
         return name_or_spec
     from .finetune import models_dir
     if re.fullmatch(r"[A-Za-z0-9._-]+", name_or_spec) and             (models_dir() / f"{name_or_spec}.json").is_file():
-        from .picek import is_classifier
+        from .replications.fungitastic.retrain import is_classifier
         kind = "classifier" if is_classifier(name_or_spec) else "finetuned"
         return f"{kind}:{name_or_spec}"
     raise ValueError(f"unknown backbone {name_or_spec!r}: use an alias "
@@ -258,7 +258,7 @@ class FinetunedBackbone:
 
 def _classifier_backbone(name: str, model_name: str):
     """A classifier trained by mv picek-train (picek.ClassifierBackbone)."""
-    from .picek import ClassifierBackbone
+    from .replications.fungitastic.retrain import ClassifierBackbone
     return ClassifierBackbone(name, model_name)
 
 

@@ -391,7 +391,7 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
     """The labels a Picek run will train on, read now from this manifest (launch time),
     printed with the known label problems the manifest carries, and the ids to ship when
     every benchmark is excluded. The instance checks it trains on the same (labels_hash)."""
-    from . import picek
+    from .replications.fungitastic import retrain as picek
     if exclude not in picek.EXCLUDE_MODES:
         raise ValueError(f"--picek-exclude-benchmarks is one of "
                          f"{', '.join(picek.EXCLUDE_MODES)}")
@@ -411,7 +411,7 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
 def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
     """Disk for the Picek photo caches a run asks for (preset@epochs@px): ~80 KB a photo
     at 440 px (measured: 76 KB), scaled by area for other sizes, plus 10% headroom."""
-    from .picek import cache_of
+    from .replications.fungitastic.retrain import cache_of
     total = 0.0
     for spec in picek or []:
         px = cache_of(spec)
@@ -529,7 +529,7 @@ def check_trainer_request(conn, backbones: list[str], methods: list[str], size: 
     for m in methods:
         if m not in METHODS:
             raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
-    from .picek import parse_spec
+    from .replications.fungitastic.retrain import parse_spec
     for spec in picek or []:
         parse_spec(spec)                      # a known preset, a sane epoch count
     n = conn.execute("select count(*) from photo_copies where store = ? and size = ?",
@@ -735,15 +735,18 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
 
 TRAINER_NEEDS = ("pyproject.toml", "requirements/trainer.txt", "src/mycomap_vision/cli.py",
                  "src/mycomap_vision/trainer.py")
+# A Picek run (--picek) also needs the replication's code (replications/fungitastic/README.md).
+PICEK_NEEDS = tuple(f"src/mycomap_vision/replications/fungitastic/{f}"
+                    for f in ("__init__.py", "presets.py", "retrain.py"))
 
 
 def check_code_archive(body: bytes, picek: list[str] | None = None) -> dict:
     """What the instance will unpack: refuse an archive without what the run needs (the
-    trainer, its pinned requirements, picek.py for a Picek run) and report the pins that
-    matter for a Picek run (timm, torch, torchvision)."""
+    trainer, its pinned requirements, the replication's retrain code for a Picek run) and
+    report the pins that matter for a Picek run (timm, torch, torchvision)."""
     with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as t:
         names = set(t.getnames())
-        need = list(TRAINER_NEEDS) + (["src/mycomap_vision/picek.py"] if picek else [])
+        need = list(TRAINER_NEEDS) + (list(PICEK_NEEDS) if picek else [])
         missing = [n for n in need if n not in names]
         if missing:
             raise RuntimeError(f"the code archive lacks {', '.join(missing)}: this commit can't "

@@ -7,9 +7,10 @@ import json
 import numpy as np
 import pytest
 from test_models_and_scoreboard import seed_two_species
-from test_picek import VAL_DAYS
+from test_retrain import VAL_DAYS
 
-from mycomap_vision import config, evaluate, models, picek
+from mycomap_vision import config, evaluate, models
+from mycomap_vision.replications.fungitastic import retrain as picek
 from mycomap_vision.embed import embed_photos, photos_to_embed
 
 torch = pytest.importorskip("torch")

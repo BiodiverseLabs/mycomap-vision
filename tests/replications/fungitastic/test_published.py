@@ -1,4 +1,5 @@
-"""Published fungi classifiers as outside baselines (external.py, external_report.py): the
+"""Published fungi classifiers as outside baselines (replications/fungitastic: published.py,
+published_report.py, crosswalk.py): the
 class map rebuilt from public metadata, their names read as Vision's, the authors' record
 rule, answers kept out of the manifest until imported, the scoreboard row, and the
 protocol tables (coverage, formal species, same vocabulary)."""
@@ -13,11 +14,13 @@ import pytest
 from test_heldout import (NAME, fetched, frozen, green, predicted, reference)
 from test_models_and_scoreboard import Const, seed_two_species
 
-from mycomap_vision import (cli, config, evaluate, external, external_report, gbif,
-                            heldout, heldout_report)
+from mycomap_vision import cli, config, evaluate, heldout, heldout_report
+from mycomap_vision.replications.fungitastic import crosswalk as gbif
+from mycomap_vision.replications.fungitastic import published as external
+from mycomap_vision.replications.fungitastic import published_report as external_report
 from mycomap_vision.embed import embed_photos, photos_to_embed
 from mycomap_vision.evaluate import Record
-from mycomap_vision.external import ClassLabel, ExternalModel
+from mycomap_vision.replications.fungitastic.published import ClassLabel, ExternalModel
 from mycomap_vision.records import build_records, save_records
 
 

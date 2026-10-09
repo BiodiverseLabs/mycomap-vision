@@ -266,7 +266,7 @@ def method_applies(method: str, backbone: str) -> bool:
     not such a model; every other pair applies."""
     if not hasattr(METHODS[method], "for_backbone"):
         return True
-    from .picek import is_classifier
+    from .replications.fungitastic.retrain import is_classifier
     return is_classifier(backbone)
 
 
