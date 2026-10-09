@@ -486,16 +486,22 @@ def cmd_fungus_gate(conn, args) -> None:
             print("No fungus gate saved: identifications run ungated.")
             return
         t = gate.thresholds
-        print(f"Fungus gate on {gate.base} vectors: not a fungus below p={t.not_fungus}, "
+        print(f"Fungus gate ({gate.mode}) on {gate.base} vectors: not a fungus below p={t.not_fungus}, "
               f"not sure below p={t.unsure}; {len(gate.classes)} prompts in "
               f"{len(set(gate.classes.tolist()))} classes")
         print(json.dumps(gate.provenance, indent=2))
         return
     if not 0 <= args.not_fungus <= args.unsure <= 1:
         raise SystemExit("need 0 <= --not-fungus <= --unsure <= 1")
+    probe = None
+    if args.probe:
+        import numpy as np
+        with np.load(args.probe) as f:
+            probe = (f["w"], float(f["b"]))
     gate = fungusgate.build(fungusgate.Thresholds(args.not_fungus, args.unsure),
                             provenance={"tuned_on": args.tuned_on, "note": args.note,
-                                        "built_at": datetime.now(timezone.utc).isoformat()})
+                                        "built_at": datetime.now(timezone.utc).isoformat()},
+                            probe=probe, mode=args.mode)
     print(f"saved {gate.save()}")
 
 
@@ -995,6 +1001,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="p(fungus) below this: not a fungus (no answer)")
     p.add_argument("--unsure", type=float, default=0.0,
                    help="p(fungus) below this: not sure (names, no chance)")
+    p.add_argument("--probe", default=None,
+                   help="an .npz with a linear probe's w and b on the base model's vectors "
+                        "(fungusgate.fit_logistic)")
+    p.add_argument("--mode", default="zero-shot", choices=["zero-shot", "probe", "both"],
+                   help="which scores make p(fungus); probe and both need --probe")
     p.add_argument("--tuned-on", default="", help="where the thresholds came from (provenance)")
     p.add_argument("--note", default="")
 

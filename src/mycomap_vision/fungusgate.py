@@ -37,6 +37,7 @@ import numpy as np
 from . import config
 
 FUNGUS, UNSURE, NOT_FUNGUS = "fungus", "unsure", "not_fungus"
+MODES = ("zero-shot", "probe", "both")
 GATE_NAME = "fungus-gate"
 
 # Messages the API and page show.
@@ -164,8 +165,17 @@ class FungusGate:
     thresholds: Thresholds
     base: str = "bioclip-2"       # whose frozen image vectors the text vectors match
     provenance: dict = field(default_factory=dict)
+    # A linear fungus-vs-not probe on the same frozen vectors (fit_logistic), optional.
+    probe_w: np.ndarray | None = None
+    probe_b: float = 0.0
+    # Which scores make p(fungus): "zero-shot", "probe", or "both" (their log-odds added).
+    mode: str = "zero-shot"
 
     def __post_init__(self):
+        if self.mode not in MODES:
+            raise ValueError(f"unknown gate mode {self.mode!r}")
+        if self.mode != "zero-shot" and self.probe_w is None:
+            raise ValueError(f"gate mode {self.mode!r} needs a probe")
         self.classes = np.asarray(self.classes)
         self.sides = np.asarray(self.sides)
         self._class_names = sorted(set(self.classes.tolist()))
@@ -173,9 +183,20 @@ class FungusGate:
                                        for c in self._class_names])
 
     def p_fungus(self, base_vectors: np.ndarray) -> np.ndarray:
-        """p(fungus) per photo from its frozen base vector (any scale)."""
+        """p(fungus) per photo from its frozen base vector (any scale): the zero-shot
+        chance, the probe's, or the two combined (their log-odds added), by `mode`."""
         v = np.asarray(base_vectors, dtype=np.float32)
         v = v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-12)
+        z = np.zeros(len(v))
+        if self.mode in ("zero-shot", "both"):
+            p = np.clip(self.zero_shot(v), 1e-9, 1 - 1e-9)
+            z += np.log(p / (1 - p))
+        if self.mode in ("probe", "both"):
+            z += v @ np.asarray(self.probe_w, np.float32) + self.probe_b
+        return 1 / (1 + np.exp(-z))
+
+    def zero_shot(self, v: np.ndarray) -> np.ndarray:
+        """BioCLIP 2 zero-shot p(fungus) for unit-length base vectors."""
         logits = (v @ self.vectors.T.astype(np.float32)) * self.scale
         top = logits.max(axis=1, keepdims=True)
         # A class's score: the log of its prompts' mean likelihood.
@@ -199,9 +220,12 @@ class FungusGate:
     def save(self, root: Path | None = None) -> Path:
         root = root or config.DATA_DIR / "models"
         root.mkdir(parents=True, exist_ok=True)
+        extra = ({} if self.probe_w is None else
+                 {"probe_w": np.asarray(self.probe_w, np.float32)})
         np.savez(root / f"{GATE_NAME}.npz", classes=self.classes, sides=self.sides,
-                 vectors=self.vectors.astype(np.float32))
-        meta = {"base": self.base, "scale": self.scale,
+                 vectors=self.vectors.astype(np.float32), **extra)
+        meta = {"base": self.base, "scale": self.scale, "mode": self.mode,
+                "probe_b": self.probe_b,
                 "thresholds": {"not_fungus": self.thresholds.not_fungus,
                                "unsure": self.thresholds.unsure},
                 "provenance": self.provenance}
@@ -211,8 +235,9 @@ class FungusGate:
 
     @classmethod
     def load(cls, root: Path | None = None) -> "FungusGate | None":
-        """The saved gate, or None when there is none (the identifier then runs ungated)."""
-        root = root or config.DATA_DIR / "models"
+        """The saved gate, or None when there is none (the identifier then runs ungated).
+        MV_FUNGUS_GATE_DIR points at another folder (a candidate gate, for a preview)."""
+        root = root or Path(config.setting("MV_FUNGUS_GATE_DIR") or config.DATA_DIR / "models")
         meta_path, vec_path = root / f"{GATE_NAME}.json", root / f"{GATE_NAME}.npz"
         if not (meta_path.is_file() and vec_path.is_file()):
             return None
@@ -220,7 +245,9 @@ class FungusGate:
         with np.load(vec_path) as f:
             return cls(f["classes"], f["sides"], f["vectors"], float(meta["scale"]),
                        Thresholds(**meta["thresholds"]), meta.get("base", "bioclip-2"),
-                       meta.get("provenance", {}))
+                       meta.get("provenance", {}),
+                       f["probe_w"] if "probe_w" in f.files else None,
+                       float(meta.get("probe_b", 0.0)), meta.get("mode", "zero-shot"))
 
 
 # --- choosing thresholds (on development sets only) ------------------------------------
@@ -262,8 +289,33 @@ def rates_at(threshold: float, fungus: np.ndarray, other: np.ndarray) -> dict:
             "other_passed": int((o >= threshold).sum())}
 
 
+def fit_logistic(X: np.ndarray, y: np.ndarray, l2: float = 1e-3, iters: int = 25
+                 ) -> tuple[np.ndarray, float]:
+    """A class-balanced logistic regression with an L2 penalty (bias unpenalised), by
+    Newton's method: (weights, bias). Rows of X are unit-length base vectors; y is 1 for
+    a fungus photo, 0 for not. numpy only (torch's autograd crashed under load here)."""
+    X = np.asarray(X, np.float64)
+    y = np.asarray(y, np.float64)
+    n, d = X.shape
+    A = np.hstack([X, np.ones((n, 1))])
+    sw = np.where(y == 1, 0.5 / y.mean(), 0.5 / (1 - y.mean())) / n
+    reg = np.full(d + 1, 2 * l2)
+    reg[-1] = 0.0
+    theta = np.zeros(d + 1)
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-(A @ theta)))
+        grad = A.T @ (sw * (p - y)) + reg * theta
+        hess = (A * (sw * p * (1 - p))[:, None]).T @ A + np.diag(reg)
+        step = np.linalg.solve(hess, grad)
+        theta -= step
+        if np.abs(step).max() < 1e-6:
+            break
+    return theta[:-1].astype(np.float32), float(theta[-1])
+
+
 def build(thresholds: Thresholds, base_spec: str = "hf-hub:imageomics/bioclip-2",
-          base: str = "bioclip-2", provenance: dict | None = None) -> FungusGate:
+          base: str = "bioclip-2", provenance: dict | None = None,
+          probe: tuple[np.ndarray, float] | None = None, mode: str = "zero-shot") -> FungusGate:
     """Text vectors for every prompt, from the base model's text tower (CPU is fine:
     a few seconds). Needs open_clip and the base model's weights."""
     import open_clip
@@ -276,4 +328,5 @@ def build(thresholds: Thresholds, base_spec: str = "hf-hub:imageomics/bioclip-2"
         scale = float(model.logit_scale.exp())
     v /= np.linalg.norm(v, axis=1, keepdims=True)
     return FungusGate(np.array(classes), np.array(sides), v, scale, thresholds, base,
-                      provenance or {})
+                      provenance or {}, probe[0] if probe else None,
+                      float(probe[1]) if probe else 0.0, mode)

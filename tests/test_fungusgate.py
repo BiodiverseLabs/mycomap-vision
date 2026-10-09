@@ -287,3 +287,46 @@ def test_the_gate_reads_the_base_models_vector_not_the_fine_tuned_one(tmp_path, 
     assert np.allclose(frozen, TinyClip().encode(images), atol=1e-5)  # the base model's
     assert not np.allclose(tuned, frozen, atol=1e-3)
     assert ft.base_name == "bioclip-2"
+
+
+# --- the probe and the combined score ---------------------------------------------------
+
+def test_the_logistic_probe_learns_to_separate_fungus_from_not():
+    rng = np.random.default_rng(0)
+    fungus = rng.normal([2.0, 0.0], 0.5, size=(200, 2))
+    other = rng.normal([0.0, 2.0], 0.5, size=(100, 2))
+    X = np.concatenate([fungus, other])
+    X /= np.linalg.norm(X, axis=1, keepdims=True)
+    y = np.r_[np.ones(200), np.zeros(100)]
+    w, b = fungusgate.fit_logistic(X, y, l2=1e-4)
+    z = X @ w + b
+    assert (z[:200] > 0).mean() > 0.97 and (z[200:] < 0).mean() > 0.97
+
+
+def probe_gate(mode):
+    # The probe says "fungus" along the first axis, like the text vectors do.
+    return FungusGate(**{**TEST_GATE, "thresholds": Thresholds(0.2, 0.5)},
+                      probe_w=np.array([6.0, -6.0]), probe_b=0.0, mode=mode)
+
+
+def test_the_combined_score_adds_the_zero_shot_and_probe_log_odds():
+    v = np.array([[0.8, 0.6]])
+    zs, pr, both = (probe_gate(m).p_fungus(v)[0] for m in ("zero-shot", "probe", "both"))
+    lo = lambda p: np.log(p / (1 - p))                                   # noqa: E731
+    assert lo(both) == pytest.approx(lo(zs) + lo(pr))
+    assert pr == pytest.approx(1 / (1 + np.exp(-(0.8 * 6 - 0.6 * 6))))
+
+
+def test_a_gate_with_a_probe_saves_and_loads_its_mode_and_weights(tmp_path):
+    probe_gate("both").save(tmp_path)
+    back = FungusGate.load(tmp_path)
+    assert back.mode == "both" and np.allclose(back.probe_w, [6.0, -6.0])
+    v = np.array([[0.3, 0.7], [0.9, 0.1]])
+    assert np.allclose(back.p_fungus(v), probe_gate("both").p_fungus(v))
+
+
+def test_a_probe_mode_without_a_probe_is_refused():
+    with pytest.raises(ValueError, match="needs a probe"):
+        FungusGate(**TEST_GATE, mode="probe")
+    with pytest.raises(ValueError, match="unknown gate mode"):
+        FungusGate(**TEST_GATE, mode="vibes")
