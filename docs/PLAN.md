@@ -239,14 +239,22 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
   taken back out: its observer-day goes only where no other counted observation
   shares it. `--exclude-uuids` still leaves a list out entirely
   (`mv occurrence-exclusions` writes the manifest's).
-- Names (`OccurrenceStore.resolve`): an active iNat name ("var." ignored); an
-  inactive one maps to the single active species of the same epithet in the same
-  family; a provisional or unknown name gets no species taxon, only its genus.
-  `mv occurrence-names` lists how every label maps.
+- Names (`OccurrenceStore.resolve`): the active iNat taxon of exactly that name
+  ("var." ignored); a one-word label is its genus. iNat's export records no
+  replacement for an inactive name, so an inactive, provisional or unknown name
+  gets no species taxon, only its genus. The single active species of an inactive
+  name's epithet and family is kept as a flagged guess only (it maps Morchella
+  conica to Verpa conica): never for out of range, and for place and season only
+  with `epithet_guesses` on (off by default). `mv occurrence-names`, and every
+  tuning run (`params-names.csv`), list how every label maps.
 - `OccurrencePrior` (`occprior.py`), per species: (a) out of range, a strong
   penalty (6 nats by default), only when it has at least 20 occurrences (iNat
   plus its own DNA records) and none within 1,500 km; a DNA record nearby always
-  vetoes it; the same rule at genus level (`genus_rule`, on by default; the tuning
+  vetoes it. When a species reaches the 20 only with its DNA records (too few on
+  iNat, or none: provisional names), its absence counts only where at least
+  `min_dna_effort` (500; tuned on dev) DNA records of any species lie within the
+  radius: DNA sampling is uneven (about 1,000 records within 1,500 km of Mexico
+  City, 52,700 of Seattle). The same rule at genus level (`genus_rule`, on by default; the tuning
   report shows dev with and without it); never where fewer than 50 fungi of any
   kind were observed within the radius, nor off the map. (b) density: log of the
   species' share near here (150 km kernel) over all fungi's, shrunk to genus by
@@ -264,10 +272,16 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
   only where the store exists. The store is not in releases and not on the box:
   `+occ` stays on the laptop until dev tuning shows a gain and Steve approves. The existing `+prior` methods are unchanged
   except for confidence.
-- Confidence: the log-probability methods (`+prior`, `+occ`) stated ~100% for
-  almost every answer because identify fell back to the cosine temperature
-  (0.02). They now carry their own (1.9, from comparison 4ef7b0's nearest
-  calibration, or the tuned one), and a comparison's calibration still wins.
+- Confidence: nearest+prior, species-mean+prior and their +occ versions stated
+  ~100% for almost every answer because identify fell back to the cosine
+  temperature (0.02). They now carry their own (1.9, from comparison 4ef7b0's
+  nearest calibration, or the tuned one); a comparison's calibration still wins.
+  linear and hybrid with a prior keep the old behaviour until theirs is measured.
+- Every scored record's own find must come out: `mv compare` refuses a +occ run
+  whose store counts its test records with no leave-one-out index, warns and
+  marks the result for records with no uuid, and records the prior's values and
+  their provenance in the scoreboard row; advance predictions skip a candidate
+  whose own find can't be taken out.
 - `mv tune-occurrence --records dev.csv --scores scores.npz` grid-searches
   radius, penalty, weights and photo temperature for species top-1 on a
   validation set (or `--records comparison:<id>`); the penalty grid includes
@@ -275,7 +289,9 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
   untuned default. It fits the confidence
   temperature per rank, and writes `data/occurrence/params.json` with its
   provenance. `--evaluate-only` scores another set (test.csv) with the saved
-  values; `--report-without ids.csv` also reports results without a list (the
+  values, temperatures included (nothing is refitted on it); it refuses to
+  search on a benchmark's test split (split.json beside the CSV, or overlapping
+  its test.csv) without `--allow-test`. `--report-without ids.csv` also reports results without a list (the
   repeat finds). It refuses records registered in `benchmark_holdouts` (except
   split = dev) or in a `--sealed` file. The 2026-10-08 held-out set is no longer
   sealed (Steve): tune on its dev split, check on test.

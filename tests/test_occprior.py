@@ -35,7 +35,8 @@ def g(name):
 
 
 def out_of_range(prior, lat, lon):
-    return prior.parts(Context(lat, lon, None)).out(prior.params.radius_km)
+    p = prior.params
+    return prior.parts(Context(lat, lon, None)).out(p.radius_km, p.genus_rule, p.min_dna_effort)
 
 
 # --- the wide berth ---------------------------------------------------------------------------
@@ -63,12 +64,48 @@ def test_a_dna_record_nearby_vetoes_the_penalty(store):
     assert not out_of_range(fitted(store, dna), *EAST)[g("Westia pacifica")]
 
 
+def dense_dna_east(n=500):
+    """DNA sampling in the east: n records of another species."""
+    return [rec(f"bg{i}", "Amanita orientalis", EAST[0] + 0.001 * i, EAST[1]) for i in range(n)]
+
+
 def test_a_provisional_species_uses_its_dna_records_under_the_same_rule(store):
     many = [rec(f"d{i}", "Amanita sp. 'IN01'", WEST[0], WEST[1]) for i in range(20)]
     few = many[:3]
-    assert out_of_range(fitted(store, many), *EAST)[g("Amanita sp. 'IN01'")]
-    assert not out_of_range(fitted(store, few), *EAST)[g("Amanita sp. 'IN01'")]
-    assert not out_of_range(fitted(store, many), *WEST)[g("Amanita sp. 'IN01'")]
+    bg = dense_dna_east()
+    assert out_of_range(fitted(store, many + bg), *EAST)[g("Amanita sp. 'IN01'")]
+    assert not out_of_range(fitted(store, few + bg), *EAST)[g("Amanita sp. 'IN01'")]
+    assert not out_of_range(fitted(store, many + bg), *WEST)[g("Amanita sp. 'IN01'")]
+
+
+def test_dna_only_absence_counts_only_where_dna_sampling_is_dense(store):
+    # 20 DNA records in the west, but hardly any DNA sampling of anything in the east:
+    # their absence there says little (Mexico City vs Seattle on the real data).
+    many = [rec(f"d{i}", "Amanita sp. 'IN01'", WEST[0], WEST[1]) for i in range(20)]
+    sparse = fitted(store, many + dense_dna_east(100))
+    assert not out_of_range(sparse, *EAST)[g("Amanita sp. 'IN01'")]
+    parts = sparse.parts(Context(*EAST))
+    assert parts.dna_effort[1500.0] == 100
+    assert parts.out(1500.0, min_dna_effort=100)[g("Amanita sp. 'IN01'")]
+    assert out_of_range(fitted(store, many + dense_dna_east(100), min_dna_effort=0),
+                        *EAST)[g("Amanita sp. 'IN01'")]
+    # A species iNat has enough of is judged on iNat, however thin DNA sampling is.
+    assert out_of_range(sparse, *EAST)[g("Westia pacifica")]
+
+
+def test_a_one_word_genus_label_is_judged_on_its_genus_not_its_dna_records_alone(store):
+    # 20 DNA records of "Amanita" (named only to genus), all in the west; iNat has
+    # Amanita in the east too: not out of range there.
+    groups = sorted(GROUPS + ["Amanita", "Westia"])
+    dna = [rec(f"a{i}", "Amanita", WEST[0], WEST[1]) for i in range(20)]
+    dna = [Record(r.observation_id, "", "Amanita", "F", None, "u", [], latitude=r.latitude,
+                  longitude=r.longitude, taxon="Amanita") for r in dna]
+    p = OccurrencePrior(store, OccParams(min_dna_effort=0))
+    p.fit(dna, groups)
+    east = p.parts(Context(*EAST)).out(1500.0, min_dna_effort=0)
+    assert not east[groups.index("Amanita")]
+    assert east[groups.index("Westia")]            # a genus that is only in the west
+    assert p.log_prior(Context(*EAST))[groups.index("Amanita")] > -1
 
 
 def test_a_species_whose_whole_genus_is_far_away_is_out_of_range(store):
@@ -164,7 +201,7 @@ def test_prior_methods_state_graded_confidence_instead_of_100_percent(store):
     # Two candidates 0.03 apart in cosine similarity: 1.5 nats apart as log-probabilities.
     logp = np.log(softmax_confidence(np.array([0.80, 0.77, 0.60]), 0.02))
     for model in (WithOccurrence(NearestSpecimen, True, store=store, params=OccParams()),
-                  WithPrior(NearestSpecimen)):
+                  METHODS["nearest+prior"]()):
         t = identifier_with(model).temperature("species")
         assert t == LOGPROB_CONFIDENCE_TEMPERATURE
         assert softmax_confidence(logp, t).max() < 0.75
@@ -255,3 +292,113 @@ def test_a_find_shared_with_the_same_observer_day_still_counts(tmp_path):
         obs("twin-2", 132, EAST[0] + 0.1, EAST[1], "2025-10-01", observer=5)]
     p = fitted(build_store(tmp_path, rows)[0])
     assert not p.parts(Context(*EAST, uuid="twin-1")).out(1500.0)[g("Westia pacifica")]
+
+
+
+def test_linear_and_hybrid_with_a_prior_keep_the_old_confidence_until_measured(store):
+    from mycomap_vision.methods import Hybrid, LinearHead
+    for model in (WithPrior(LinearHead), WithPrior(Hybrid),
+                  WithOccurrence(LinearHead, store=store, params=OccParams()),
+                  WithOccurrence(Hybrid, store=store, params=OccParams())):
+        assert identifier_with(model).temperature("species") == CONFIDENCE_TEMPERATURE
+
+
+def test_an_epithet_guess_never_sets_the_range(tmp_path):
+    from occurrence_fixtures import obs, standard_observations
+    # Collybia nuda: 30 finds in the west. "Lepista nuda" is an inactive name of the
+    # same epithet and family: a guess, not iNat's own record of a replacement.
+    rows = standard_observations() + [obs(f"cn{i}", 114, WEST[0], WEST[1] + 0.01 * i)
+                                      for i in range(30)]
+    store = build_store(tmp_path, rows)[0]
+    groups = ["Lepista nuda"]
+    p = OccurrencePrior(store, OccParams())
+    p.fit([], groups)
+    assert not p.parts(Context(*EAST)).out(1500.0)[0]
+    assert p.parts(Context(*EAST)).density[0] == 0          # no guess: no species evidence
+    flagged = OccurrencePrior(store, OccParams(epithet_guesses=True))
+    flagged.fit([], groups)
+    assert not flagged.parts(Context(*EAST)).out(1500.0)[0]     # still not for the range
+    assert flagged.parts(Context(*EAST)).density[0] < 0         # but place, when flagged on
+
+
+def test_a_whitespace_uuid_is_missing(store):
+    from mycomap_vision.occprior import check_store_excludes
+    assert check_store_excludes(store, ["  "], allow_missing=True)["missing_uuid"] == 1
+    assert store.own_contribution("   ") is None
+
+
+def test_evaluate_refuses_a_store_that_counts_its_test_records(tmp_path):
+    from mycomap_vision.occurrence import loo_path
+    from occurrence_fixtures import obs, standard_observations
+    import pytest as _pytest
+    from mycomap_vision.occprior import TuningRefused
+    rows = standard_observations() + [obs("t-e", 104, EAST[0] + 0.2, EAST[1])]
+    store = build_store(tmp_path, rows)[0]
+    ref = ([rec(f"e{i}", "Amanita orientalis", *EAST, rows=[i]) for i in range(3)]
+           + [rec(f"w{i}", "Amanita occidentalis", *WEST, rows=[3 + i]) for i in range(3)])
+    vecs = np.tile(np.array([[1.0, 0.0]], dtype=np.float16), (8, 1))
+    test = [rec("t-e", "Amanita orientalis", EAST[0] + 0.2, EAST[1], "2026-10-03", rows=[6],
+                vdate="2026-09-20"),
+            rec("t-n", "Amanita orientalis", EAST[0] + 0.2, EAST[1], "2026-10-03", rows=[7],
+                vdate="2026-09-20")]
+    test[0].uuid = "t-e"                    # counted in the store; t-n has no uuid
+
+    from mycomap_vision.evaluate import build_index
+    def run(st):
+        m = WithOccurrence(NearestSpecimen, True, store=st, params=OccParams())
+        index = build_index(ref)
+        m.fit(vecs, index, records=ref)
+        return evaluate(vecs, ref, test, method="nearest+occ", fitted=(index, m))
+    res = run(store)
+    assert res["occurrence_leak_check"] == {"checked": 1, "missing_uuid": 1,
+                                            "excluded_at_build": 0, "taken_out_at_scoring": 1}
+    loo_path(store.path).unlink()
+    from mycomap_vision.occurrence import OccurrenceStore
+    with _pytest.raises(TuningRefused, match="leave-one-out"):
+        run(OccurrenceStore.load(store.path))
+
+
+def test_a_scoreboard_row_says_where_the_prior_values_came_from(store):
+    m = WithOccurrence(NearestSpecimen, True, store=store,
+                       params=OccParams(provenance={"records_csv": "dev.csv"}))
+    m.prior = OccurrencePrior(store, m.params)
+    extra = m.scoreboard_extra()["range_prior"]
+    assert extra["params"]["provenance"] == {"records_csv": "dev.csv"}
+    assert extra["source"] == "inat-occurrence" and extra["store"]["leave_one_out"]
+
+
+def test_taking_out_uses_the_band_the_counts_use(tmp_path):
+    from occurrence_fixtures import obs, standard_observations
+    # 3-degree cells don't divide 10-degree bands: at 11.5 N the latitude's band (2-12)
+    # and its cell's centre's band (cell 11-14, centre 12.5: band 12-22) differ.
+    extra = obs("edge", 104, 11.5, -90.0, "2025-10-01")
+    store = build_store(tmp_path / "a", standard_observations() + [extra], cell_deg=3.0)[0]
+    c = store.own_contribution("edge")
+    assert c.band == store.grid.band_of_cells([c.cell])[0] == 1
+    never = build_store(tmp_path / "b", standard_observations(), cell_deg=3.0)[0]
+    groups = ["Amanita orientalis", "Westia pacifica"]
+    a, b = OccurrencePrior(store), OccurrencePrior(never)
+    a.fit([], groups)
+    b.fit([], groups)
+    ctx = dict(latitude=22.0, longitude=-90.0, observed_on="2025-10-01")   # bands 1-3
+    assert np.allclose(a.parts(Context(**ctx, uuid="edge")).season,
+                       b.parts(Context(**ctx)).season)
+
+
+
+def test_a_comparison_row_with_occ_records_where_its_values_came_from(default_store, conn,
+                                                                      tmp_path):
+    from mycomap_vision import evaluate as ev
+    from mycomap_vision.embed import embed_photos, photos_to_embed
+    from test_models_and_scoreboard import Const, seed_two_species
+    store = seed_two_species(conn, tmp_path)
+    bb = Const("m1")
+    root = tmp_path / "emb"
+    embed_photos(conn, store, bb, photos_to_embed(conn, bb.name, "large", store.location,
+                                                  "local"), root / bb.name, log=lambda s: None)
+    result = ev.compare(conn, ["m1"], ["nearest+occ"], test_days=28, embeddings_root=root,
+                        log=lambda s: None)
+    report = result["runs"][0]
+    assert report["range_prior"]["source"] == "inat-occurrence"
+    assert "provenance" in report["range_prior"]["params"]
+    assert report["all_photos"]["occurrence_leak_check"]["checked"] == 2

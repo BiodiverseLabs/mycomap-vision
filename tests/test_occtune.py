@@ -8,7 +8,7 @@ from mycomap_vision.occprior import (OccParams, OccurrencePrior, TuningRefused,
                                      check_store_excludes, load_params)
 from mycomap_vision.occtune import (ScoredSet, check_not_sealed, grid_search, load_scored_set,
                                     save_scored_set, tune)
-from mycomap_vision.occurrence import loo_path
+from mycomap_vision.occurrence import OccurrenceStore, loo_path
 from occurrence_fixtures import EAST, WEST, build_store, obs, standard_observations
 
 SPECIES = ["Amanita", "Amanita occidentalis", "Amanita orientalis", "Amanita rara",
@@ -124,6 +124,7 @@ def test_tuning_refuses_a_store_that_would_count_records_towards_themselves(tmp_
     assert check_store_excludes(counts_them, ["val-1000", "val-1001"])[
         "taken_out_at_scoring"] == 2                    # its leave-one-out index takes them out
     loo_path(counts_them.path).unlink()                 # without the index: refused
+    counts_them = OccurrenceStore.load(counts_them.path)
     with pytest.raises(TuningRefused, match="counts 2 of the validation"):
         check_store_excludes(counts_them, ["val-1000", "val-1001"])
     assert check_store_excludes(store, ["val-1000", "val-1001"])["excluded_at_build"] == 2
@@ -300,3 +301,108 @@ def test_dev_can_choose_outright_exclusion_over_soft_penalties(store):
     res = grid_search(prior_for(store, s), s, grid, log=lambda *a: None)
     assert res["best"]["out_of_range_penalty"] == EXCLUDE and res["best"]["exclusion"]
     assert res["best"]["species_top1"] == 0.85
+
+
+
+def write_benchmark(tmp_path, s):
+    """dev.csv, test.csv and split.json as the held-out benchmark lays them out."""
+    import hashlib
+    dev_ids, test_ids = s.observation_ids[:60], s.observation_ids[60:]
+    for name, ids in (("dev", dev_ids), ("test", test_ids)):
+        (tmp_path / f"{name}.csv").write_text("observation_id\n" + "\n".join(ids) + "\n",
+                                              encoding="utf-8")
+    split = {name: {"records": len(ids), "sha256_ids": hashlib.sha256(
+        "\n".join(sorted(ids)).encode()).hexdigest()}
+        for name, ids in (("dev", dev_ids), ("test", test_ids))}
+    (tmp_path / "split.json").write_text(json.dumps(split), encoding="utf-8")
+
+
+def test_no_search_on_the_test_split_without_allow_test(tmp_path, conn, store):
+    s = validation_set()
+    save_scored_set(tmp_path / "scores.npz", s)
+    write_benchmark(tmp_path, s)
+    kw = dict(store_path=store.path, out=tmp_path / "params.json", grid=SMALL_GRID,
+              log=lambda *a: None)
+    with pytest.raises(TuningRefused, match="test split"):
+        tune(conn, str(tmp_path / "test.csv"), tmp_path / "scores.npz", **kw)
+    # a renamed copy of the test ids is still the test split, and so is part of it
+    (tmp_path / "mine.csv").write_text((tmp_path / "test.csv").read_text(), encoding="utf-8")
+    with pytest.raises(TuningRefused, match="test split"):
+        tune(conn, str(tmp_path / "mine.csv"), tmp_path / "scores.npz", **kw)
+    part = s.observation_ids[:5] + s.observation_ids[60:65]
+    (tmp_path / "part.csv").write_text("observation_id\n" + "\n".join(part) + "\n",
+                                       encoding="utf-8")
+    with pytest.raises(TuningRefused, match="test split"):
+        tune(conn, str(tmp_path / "part.csv"), tmp_path / "scores.npz", **kw)
+    assert tune(conn, str(tmp_path / "dev.csv"), tmp_path / "scores.npz", **kw)["split"] == "dev"
+    assert tune(conn, str(tmp_path / "test.csv"), tmp_path / "scores.npz", evaluate_only=True,
+                **kw)["split"] == "test"
+    assert tune(conn, str(tmp_path / "test.csv"), tmp_path / "scores.npz", allow_test=True,
+                save=False, **kw)["split"] == "test"
+
+
+def test_evaluate_only_reports_the_saved_temperature_not_one_fitted_on_the_set(tmp_path, conn,
+                                                                              store):
+    from mycomap_vision.occprior import save_params
+    s = validation_set()
+    save_scored_set(tmp_path / "scores.npz", s)
+    (tmp_path / "set.csv").write_text("observation_id\n" + "\n".join(s.observation_ids) + "\n",
+                                      encoding="utf-8")
+    out = tmp_path / "params.json"
+    save_params(OccParams(confidence_temperature={"species": 7.0, "genus": 9.0}), out)
+    res = tune(conn, str(tmp_path / "set.csv"), tmp_path / "scores.npz", store_path=store.path,
+               out=out, evaluate_only=True, log=lambda *a: None)
+    cal = res["calibration"]
+    assert cal["species"]["temperature"] == 7.0 and cal["genus"]["temperature"] == 9.0
+    assert cal["species"]["fitted_here"] is False
+    assert res["params"]["confidence_temperature"] == {"species": 7.0, "genus": 9.0}
+
+
+def test_uuids_come_from_the_manifest_by_observation_id(tmp_path, conn):
+    from mycomap_vision.occtune import fill_from_csv
+    s = validation_set()
+    s.uuids = []
+    conn.execute("insert into inat_observations (observation_id, status, uuid, fetched_at) "
+                 "values ('1000', 'ok', ' uu-1000 ', 'now')")
+    (tmp_path / "set.csv").write_text("observation_id,uuid\n1000,\n1001,   \n", encoding="utf-8")
+    filled = fill_from_csv(s, tmp_path / "set.csv", conn)
+    assert filled.uuids == ["uu-1000", None]
+
+
+def test_the_names_list_with_its_method_is_written_beside_the_params(tmp_path, conn, store):
+    s = validation_set()
+    save_scored_set(tmp_path / "scores.npz", s)
+    (tmp_path / "set.csv").write_text("observation_id\n" + "\n".join(s.observation_ids) + "\n",
+                                      encoding="utf-8")
+    out = tmp_path / "params.json"
+    tune(conn, str(tmp_path / "set.csv"), tmp_path / "scores.npz", store_path=store.path,
+         out=out, grid=SMALL_GRID, log=lambda *a: None)
+    import csv as _csv
+    rows = list(_csv.DictReader(open(tmp_path / "params-names.csv", encoding="utf-8")))
+    assert {r["label"]: r["how"] for r in rows}["Amanita"] == "genus-label"
+    assert {r["label"]: r["how"] for r in rows}["Westia pacifica"] == "species"
+
+
+def test_dev_tunes_the_dna_effort_threshold(store):
+    from mycomap_vision.evaluate import Record
+    from mycomap_vision.occtune import DEFAULT_GRID
+    assert 500 in DEFAULT_GRID["min_dna_effort"]
+    # A provisional lookalike with 20 DNA records, all in the west, and no DNA sampling
+    # of anything in the east: only a threshold of 0 lets its absence there count.
+    groups = SPECIES + ["Amanita sp. 'IN01'"]
+    scores = np.full((1, len(groups)), 0.4, dtype=np.float32)
+    scores[0, groups.index("Amanita sp. 'IN01'")] = 0.80
+    scores[0, groups.index("Amanita orientalis")] = 0.79
+    one = ScoredSet(["x"], groups, scores, truth=["Amanita orientalis"], truth_genus=["Amanita"],
+                    latitude=[EAST[0]], longitude=[EAST[1]], observed_on=["2026-10-01"],
+                    uuids=["val-x"], group_genus=[g.split()[0] for g in groups],
+                    group_is_species=[len(g.split()) > 1 for g in groups])
+    dna = [Record(f"d{i}", "Amanita sp. 'IN01'", "Amanita", "F", None, "u", [],
+                  latitude=WEST[0], longitude=WEST[1]) for i in range(20)]
+    p = OccurrencePrior(store, OccParams())
+    p.fit(dna, groups)
+    grid = {**SMALL_GRID, "out_of_range_penalty": [6.0], "density_weight": [0.0],
+            "season_weight": [0.0], "genus_rule": [False], "min_dna_effort": [0, 500]}
+    res = grid_search(p, one, grid, log=lambda *a: None, choose_genus_rule=None)
+    right = {row["min_dna_effort"]: row["species_right"] for row in res["table"]}
+    assert right == {0: 1, 500: 0}

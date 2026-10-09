@@ -162,7 +162,7 @@ def test_a_cell_the_export_does_not_cover_is_no_information(export):
 
 
 def test_the_place_term_is_the_learned_factor_never_a_raw_rank(export):
-    assert np.all(source(export).parts(Context(*EAST)).density == 0)    # nothing learned yet
+    assert source(export).parts(Context(*EAST)).density is None       # nothing learned yet
     factor = [-1.0] * 9 + [0.5, 0.5]
     parts = source(export, rank_factor=factor).parts(Context(*EAST))
     assert parts.density[g("Amanita orientalis")] == 0.5               # rank 90 at home
@@ -223,3 +223,25 @@ def test_atlas_sources_are_registered_but_not_ready_without_an_export(monkeypatc
     assert not RANGE_SOURCES["atlas"].ready()
     with pytest.raises(FileNotFoundError, match="no Atlas export"):
         AtlasExport.load(tmp_path / "none")
+
+
+
+def test_where_atlas_says_nothing_every_component_is_inat_s(export, tmp_path):
+    store = build_store(tmp_path)[0]
+    inat = OccurrencePrior(store, OccParams(rank_factor=[0.3] * 11))
+    layered = LayeredSource(AtlasRangeSource(export, inat.params), inat)
+    layered.fit([], GROUPS)
+    for ctx in (Context(30.0, -90.0, "2026-10-01"),      # a cell Atlas has no rows for
+                Context(19.6, -155.5, "2026-10-01")):    # Hawaii: no Atlas rows either
+        both, alone = layered.parts(ctx), inat.parts(ctx)
+        assert np.array_equal(both.out(1500.0), alone.out(1500.0))
+        assert np.array_equal(both.density, alone.density)
+
+
+def test_until_the_rank_factor_is_learned_the_place_term_is_inat_s(export, tmp_path):
+    store = build_store(tmp_path)[0]
+    inat = OccurrencePrior(store, OccParams())
+    layered = LayeredSource(AtlasRangeSource(export, inat.params), inat)
+    layered.fit([], GROUPS)
+    ctx = Context(*EAST, "2026-10-01")
+    assert np.array_equal(layered.parts(ctx).density, inat.parts(ctx).density)

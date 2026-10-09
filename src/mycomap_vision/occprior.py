@@ -42,6 +42,8 @@ from .prior import LOGPROB_CONFIDENCE_TEMPERATURE, Context, haversine_km
 PARAMS_NAME = Path("occurrence") / "params.json"
 
 
+DEFAULT_MIN_DNA_EFFORT = 500
+
 # A penalty that no photo overcomes: outright exclusion, kept finite so confidence and
 # calibration still have a number for the true species.
 EXCLUDE = 50.0
@@ -54,6 +56,13 @@ class OccParams:
     min_local_effort: int = 50
     out_of_range_penalty: float = 6.0     # nats; EXCLUDE (50) is in effect exclusion
     genus_rule: bool = True               # also out of range when the whole genus is far
+    # Out of range on DNA records (a species iNat has too few of, or none: provisional
+    # names) only where DNA sampling is dense enough for absence to mean something: at
+    # least this many DNA records of any species within the radius. Tuned on dev.
+    min_dna_effort: int = DEFAULT_MIN_DNA_EFFORT
+    # Use an inactive name's epithet guess (resolve: Mapping.guess_unit) for the gentle
+    # place and season terms. Off: such guesses map Morchella conica to Verpa conica.
+    epithet_guesses: bool = False
     density_bandwidth_km: float = 150.0
     density_weight: float = 0.5
     density_cap: float = float(np.log(5.0))
@@ -107,7 +116,7 @@ def check_store_excludes(store: OccurrenceStore, uuids: list[str | None],
     """Refuse when a validation observation would count towards its own score: the
     store counts it and has no leave-one-out index to take it back out at scoring.
     Records with no known uuid can't be checked: refused unless allow_missing."""
-    known = [u for u in uuids if u]
+    known = [u.strip() for u in uuids if u and u.strip()]
     missing = len(uuids) - len(known)
     counted = [u for u, ok in zip(known, store.excludes(known)) if not ok]
     if counted and not store.has_loo:
@@ -138,10 +147,19 @@ class Parts:
     # radius_km -> (n_groups,) bool: its whole genus is beyond the radius (the genus
     # rule, OccParams.genus_rule); None for a source without one.
     genus_out_of_range: dict | None = None
+    # radius_km -> (n_groups,) bool: out of range only because its DNA records reach
+    # the bar (too few on iNat); and radius_km -> DNA records of any species within it.
+    dna_out_of_range: dict | None = None
+    dna_effort: dict | None = None
 
-    def out(self, radius: float, genus_rule: bool = True) -> np.ndarray | None:
+    def out(self, radius: float, genus_rule: bool = True,
+            min_dna_effort: float = DEFAULT_MIN_DNA_EFFORT) -> np.ndarray | None:
         oor = self.out_of_range.get(radius)
-        if oor is not None and genus_rule and self.genus_out_of_range:
+        if oor is None:
+            return None
+        if self.dna_out_of_range and (self.dna_effort or {}).get(radius, 0) >= min_dna_effort:
+            oor = oor | self.dna_out_of_range[radius]
+        if genus_rule and self.genus_out_of_range:
             g = self.genus_out_of_range.get(radius)
             if g is not None:
                 oor = oor | g
@@ -184,7 +202,7 @@ class RangeSource:
             out += p.density_weight * np.clip(parts.density, -p.density_cap, p.density_cap)
         if parts.season is not None and p.season_weight:
             out += p.season_weight * np.clip(parts.season, -p.season_cap, p.season_cap)
-        oor = parts.out(p.radius_km, p.genus_rule)
+        oor = parts.out(p.radius_km, p.genus_rule, p.min_dna_effort)
         if oor is not None:
             out -= p.out_of_range_penalty * oor
         return out
@@ -210,13 +228,19 @@ class OccurrencePrior(RangeSource):
             genus_of.setdefault(r.unit, r.genus or "")
         maps = [st.resolve(s, genus_of.get(s, "")) for s in species]
         self.mapping = maps
-        sp = np.array([m.species_unit for m in maps], dtype=np.int64)
         ge = np.array([m.genus_unit for m in maps], dtype=np.int64)
-        needed = np.unique(np.concatenate([sp[sp >= 0], ge[ge >= 0]]))
+        # A one-word label ("Amanita") is its genus: its own evidence is the genus's.
+        sp = np.array([m.genus_unit if m.how == "genus-label" else m.species_unit
+                       for m in maps], dtype=np.int64)
+        gentle = np.array([m.guess_unit if (self.params.epithet_guesses and m.guess_unit >= 0)
+                           else s_ for m, s_ in zip(maps, sp.tolist())], dtype=np.int64)
+        needed = np.unique(np.concatenate([sp[sp >= 0], ge[ge >= 0], gentle[gentle >= 0]]))
         local = {int(u): i for i, u in enumerate(needed.tolist())}
         self.local = local
         self.g_sp = np.array([local.get(int(u), -1) for u in sp], dtype=np.int64)
         self.g_ge = np.array([local.get(int(u), -1) for u in ge], dtype=np.int64)
+        # Place and season read g_gentle: the species, or a flagged epithet guess.
+        self.g_gentle = np.array([local.get(int(u), -1) for u in gentle], dtype=np.int64)
         n_local = len(needed)
         self.total = st.unit_total[needed].astype(np.float64)
         # Occupied cells and the needed units' (cell, count) pairs on them.
@@ -268,8 +292,8 @@ class OccurrencePrior(RangeSource):
         ratio = k_local / max(expected_share, 1e-12)
         r_unit_alone = (ratio + s * 1.0) / (n_local + s)                 # towards 1
         r_ge = self._unit_values(r_unit_alone, self.g_ge, 1.0)
-        k_sp = self._unit_values(ratio, self.g_sp, 0.0)
-        n_sp = self._unit_values(n_local, self.g_sp, 0.0)
+        k_sp = self._unit_values(ratio, self.g_gentle, 0.0)
+        n_sp = self._unit_values(n_local, self.g_gentle, 0.0)
         r_sp = (k_sp + s * r_ge) / (n_sp + s)
         return np.log(np.clip(r_sp, 1e-6, None))
 
@@ -277,7 +301,9 @@ class OccurrencePrior(RangeSource):
         p = self.params
         radii = radii or (p.radius_km,)
         none = Parts({r: np.zeros(self.n_groups, dtype=bool) for r in radii}, None, None,
-                     {r: np.zeros(self.n_groups, dtype=bool) for r in radii})
+                     {r: np.zeros(self.n_groups, dtype=bool) for r in radii},
+                     {r: np.zeros(self.n_groups, dtype=bool) for r in radii},
+                     {r: 0.0 for r in radii})
         if ctx is None:
             return none
         has_place = ctx.latitude is not None and ctx.longitude is not None
@@ -285,6 +311,7 @@ class OccurrencePrior(RangeSource):
             return none                 # off the map: no information, not "absent"
         out_of_range, density, season = none.out_of_range, None, None
         genus_out = none.genus_out_of_range
+        dna_out, dna_effort = none.dna_out_of_range, none.dna_effort
         # The query's own iNat observation, when the store counted it, comes back out.
         own = self.store.own_contribution(ctx.uuid)
         mine = np.array([self.local[u] for u in own.units if u in self.local]
@@ -300,23 +327,32 @@ class OccurrencePrior(RangeSource):
             d = haversine_km(ctx.latitude, ctx.longitude, self.cell_lat, self.cell_lon)
             slack = self.store.grid.cell_deg * 111.2 * 0.71      # a cell's half diagonal
             d_dna = haversine_km(ctx.latitude, ctx.longitude, self.dna_lat, self.dna_lon)
-            out_of_range, genus_out = {}, {}
+            out_of_range, genus_out, dna_out, dna_effort = {}, {}, {}, {}
             for r in radii:
                 within = d <= r + slack
                 self_near = float(within[at]) if at >= 0 else 0.0
+                dna_within = d_dna <= r
+                dna_effort[r] = float(dna_within.sum())
                 if self.cell_effort[within].sum() - self_near * own_effort < p.min_local_effort:
                     out_of_range[r] = np.zeros(self.n_groups, dtype=bool)
                     genus_out[r] = np.zeros(self.n_groups, dtype=bool)
+                    dna_out[r] = np.zeros(self.n_groups, dtype=bool)
                     continue
                 near_local = np.bincount(self.pair_local, minlength=len(self.total),
-                                         weights=self.pair_count * within[self.pair_pos])
+                                         weights=self.pair_count * within[self.pair_pos]
+                                         ).astype(np.float64)
                 near_local[mine] -= self_near
-                dna_near = np.bincount(self.dna_group, weights=(d_dna <= r).astype(float),
+                dna_near = np.bincount(self.dna_group, weights=dna_within.astype(float),
                                        minlength=self.n_groups)
-                # Species: iNat occurrences plus its own DNA records.
-                tot = self._unit_values(total, self.g_sp, 0.0) + self.dna_total
+                # Species: iNat occurrences plus its own DNA records. Enough on iNat
+                # alone: the rule stands. Enough only with its DNA records: it stands only
+                # where DNA sampling is dense (Parts.out, min_dna_effort).
+                inat_tot = self._unit_values(total, self.g_sp, 0.0)
+                tot = inat_tot + self.dna_total
                 near = self._unit_values(near_local, self.g_sp, 0.0) + dna_near
-                out_of_range[r] = (tot >= p.min_occurrences) & (near == 0)
+                absent = near == 0
+                out_of_range[r] = (inat_tot >= p.min_occurrences) & absent
+                dna_out[r] = (inat_tot < p.min_occurrences) & (tot >= p.min_occurrences) & absent
                 # Genus: none of the genus within the radius either (its DNA records too).
                 g_tot = self._unit_values(total, self.g_ge, 0.0)
                 g_near = self._unit_values(near_local, self.g_ge, 0.0) + dna_near
@@ -326,7 +362,8 @@ class OccurrencePrior(RangeSource):
             local_effort = float((k * self.cell_effort).sum()) - self_k * own_effort
             if local_effort > 0:
                 k_local = np.bincount(self.pair_local, minlength=len(self.total),
-                                      weights=self.pair_count * k[self.pair_pos])
+                                      weights=self.pair_count * k[self.pair_pos]
+                                      ).astype(np.float64)
                 k_local[mine] -= self_k
                 density = self._shrunk_log_ratio(k_local, total, local_effort / total_effort)
         week = None
@@ -352,7 +389,7 @@ class OccurrencePrior(RangeSource):
             if e_total > 0 and e_here > 0:
                 season = self._shrunk_log_ratio(sp_weeks @ kw, sp_weeks.sum(axis=1),
                                                 e_here / e_total)
-        return Parts(out_of_range, density, season, genus_out)
+        return Parts(out_of_range, density, season, genus_out, dna_out, dna_effort)
 
     def mapping_summary(self) -> dict:
         from collections import Counter
@@ -421,6 +458,7 @@ class WithOccurrence:
         self.source = source
         self.name = f"{self.base.name}+{RANGE_SOURCES[source].suffix}"
         self._store = store
+        self.similarity = similarity
 
     @staticmethod
     def ready(source: str = "inat-occurrence") -> bool:
@@ -429,7 +467,23 @@ class WithOccurrence:
 
     @property
     def confidence_temperature(self):
-        return self.params.confidence_temperature
+        """For nearest and species-mean only (AsLogProb scores), where the default (1.9)
+        and the tuned values were measured. linear+occ and hybrid+occ keep the old
+        behaviour (a comparison's calibration, else the cosine 0.02) until measured."""
+        return self.params.confidence_temperature if self.similarity else None
+
+    def leak_check(self, uuids: list[str | None], allow_missing: bool = False) -> dict:
+        """That no scored record's own iNat observation counts towards its score
+        (evaluate, prospective): raises TuningRefused when it can't be shown."""
+        return self.prior.leak_check(uuids, allow_missing)
+
+    def scoreboard_extra(self) -> dict:
+        """Where this run's prior values came from, for its scoreboard row."""
+        store = getattr(self.prior, "store", None)
+        return {"range_prior": {
+            "source": self.source, "params": self.params.to_dict(),
+            "store": ({"path": str(store.path), "built_at": store.meta.get("built_at"),
+                       "leave_one_out": store.has_loo} if store is not None else None)}}
 
     def fit(self, vectors: np.ndarray, index, records=None, state: dict | None = None) -> None:
         if hasattr(self.base, "state"):

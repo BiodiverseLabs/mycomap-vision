@@ -150,10 +150,13 @@ def test_an_active_name_maps_to_its_taxon_and_rank_words_are_ignored(store):
     assert name_key("Amanita  muscaria var. Guessowii") == "amanita muscaria guessowii"
 
 
-def test_an_inactive_name_maps_to_the_one_active_species_of_its_epithet_and_family(store):
+def test_an_inactive_name_gets_no_species_only_a_flagged_epithet_guess(store):
+    # iNat's export records no replacement for an inactive name; same epithet and
+    # family is a guess (Morchella conica -> Verpa conica), never the species.
     m = store.resolve("Lepista nuda", "Lepista")
-    assert m.how == "synonym" and store.names[m.species_unit] == "Collybia nuda"
-    assert store.names[m.genus_unit] == "Collybia"      # the taxon's own genus on iNat
+    assert m.how == "epithet-guess" and m.species_unit == -1
+    assert store.names[m.guess_unit] == "Collybia nuda"
+    assert store.names[m.genus_unit] == "Lepista"       # the label's own genus
 
 
 def test_a_provisional_name_has_no_species_taxon_only_its_genus(store):

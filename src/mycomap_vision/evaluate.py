@@ -253,6 +253,24 @@ def fit_method(vectors: np.ndarray, ref: list[Record], method: str):
     return index, model
 
 
+def occurrence_leak_check(model, test: list[Record]) -> dict | None:
+    """For a method with an occurrence prior (+occ): refuse when a test record's own iNat
+    observation would count towards its score (the store counts it and has no
+    leave-one-out index), and warn loudly, and mark the result, for records with no
+    uuid to check. None for other methods."""
+    check = getattr(model, "leak_check", None)
+    if check is None:
+        return None
+    result = check([r.uuid or None for r in test], allow_missing=True)
+    if result.get("missing_uuid"):
+        import sys
+        print(f"WARNING: {result['missing_uuid']} of {len(test)} test records have no iNat "
+              "uuid: the occurrence prior can't take their own find out of its counts, so "
+              "their scores may be inflated (marked in occurrence_leak_check)",
+              file=sys.stderr)
+    return result
+
+
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
              fitted=None) -> dict:
@@ -261,6 +279,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
+    leak = occurrence_leak_check(model, test)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
     # Calibration: summed NLL per candidate temperature, over test records whose
     # true label is in the reference set (a novel species has no probability to give).
@@ -304,6 +323,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                          f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
                      for k, c in tally[rank].items() if c["n"]}
     out["groups"] = {kind: summarise_groups(g) for kind, g in groups.items()}
+    if leak is not None:
+        out["occurrence_leak_check"] = leak
     out["calibration"] = {
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
                "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
@@ -469,9 +490,11 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         for m in methods:
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
             fitted = fit_method(vecs, ref_b, m)
+            extra = getattr(fitted[1], "scoreboard_extra", lambda: None)()
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted)
-            runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first))
+            runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first,
+                                 extra))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
             "reference_records": len(ref), "test_records": len(test),
             "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)

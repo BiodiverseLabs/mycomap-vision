@@ -276,12 +276,13 @@ class AtlasRangeSource(RangeSource):
             near += np.bincount(self.dna_group, weights=(d_dna <= max(r, 0.0)).astype(float),
                                 minlength=self.n_groups)
             out[r] = self.has_map & (near == 0)
-        place = np.zeros(self.n_groups)
         factor = self.params.rank_factor
-        if factor:
-            here = self.ranks_here(col)
-            inside = self.has_map & (here != OUTSIDE)
-            place[inside] = np.asarray(factor, dtype=float)[rank_bin(here[inside])]
+        if not factor:
+            return Parts(out, None, None)        # nothing learned yet: no information
+        place = np.zeros(self.n_groups)
+        here = self.ranks_here(col)
+        inside = self.has_map & (here != OUTSIDE)
+        place[inside] = np.asarray(factor, dtype=float)[rank_bin(here[inside])]
         return Parts(out, place, None)
 
     def mapping_summary(self) -> dict:
@@ -334,19 +335,27 @@ class LayeredSource(RangeSource):
         self.n_groups = len(species)
 
     def parts(self, ctx: Context | None, radii: tuple[float, ...] | None = None) -> Parts:
+        """Per component: Atlas's answer for the taxa it lists where it has one, iNat's
+        everywhere else. A place Atlas says nothing about (off its grid, a cell no taxon
+        has rows for) is iNat's for every taxon; so is the place term until Atlas's rank
+        factor is learned."""
         radii = radii or (self.params.radius_km,)
-        p, f = self.primary.parts(ctx, radii), self.fallback.parts(ctx, radii)
+        f = self.fallback.parts(ctx, radii)
+        if self.primary.query_column(ctx) < 0:
+            return f
+        p = self.primary.parts(ctx, radii)
         has = self.primary.has_map
         out = {r: np.where(has, p.out_of_range[r], f.out_of_range[r]) for r in radii}
         genus = ({r: ~has & f.genus_out_of_range[r] for r in radii}
                  if f.genus_out_of_range else None)
-        if p.density is None and f.density is None:
-            density = None
+        dna = ({r: ~has & f.dna_out_of_range[r] for r in radii}
+               if f.dna_out_of_range else None)
+        if p.density is None:
+            density = f.density
         else:
-            pd = p.density if p.density is not None else np.zeros(self.n_groups)
             fd = f.density if f.density is not None else np.zeros(self.n_groups)
-            density = np.where(has, pd, fd)
-        return Parts(out, density, f.season, genus)
+            density = np.where(has, p.density, fd)
+        return Parts(out, density, f.season, genus, dna, f.dna_effort)
 
     def mapping_summary(self) -> dict:
         return {**self.primary.mapping_summary(), **self.fallback.mapping_summary()}

@@ -55,6 +55,9 @@ DEFAULT_GRID = {
     # Scored both ways so the report shows dev with and without the genus rule; the
     # choice keeps it unless the search is told it may drop it (choose_genus_rule).
     "genus_rule": [True, False],
+    # DNA-only out of range only where this many DNA records of any species lie
+    # within the radius (OccParams.min_dna_effort).
+    "min_dna_effort": [0, 250, 500, 1000, 2000],
 }
 DEV_SPLITS = ("dev", "tune", "tuning", "validation")
 
@@ -139,6 +142,33 @@ def sealed_files(records: str, extra: list[Path]) -> list[Path]:
     return [Path(p) for p in extra]
 
 
+def check_split(records: str, ids: list[str], searching: bool, allow_test: bool = False) -> str | None:
+    """Which split of a benchmark (split.json beside the records CSV) these records are,
+    and a refusal to search (tune) on its test split without allow_test: the set is no
+    longer sealed (Steve, 2026-10-08), but tuning happens on dev. Records overlapping a
+    test.csv beside it count as the test split."""
+    if records.startswith("comparison:"):
+        return None
+    folder = Path(records).parent
+    split_json = folder / "split.json"
+    if not split_json.is_file():
+        return None
+    split = json.loads(split_json.read_text(encoding="utf-8"))
+    sha = ids_sha(ids)
+    which = next((name for name, v in split.items()
+                  if isinstance(v, dict) and v.get("sha256_ids") == sha), None)
+    if which is None and Path(records).stem in split:
+        which = Path(records).stem
+    test_csv = folder / "test.csv"
+    if which != "test" and test_csv.is_file() and Path(records).resolve() != test_csv.resolve():
+        if set(ids) & set(read_ids(test_csv)):
+            which = "test"
+    if which == "test" and searching and not allow_test:
+        raise TuningRefused(f"{records} is (or overlaps) the test split in {split_json}: tune "
+                            "on dev, and score test with --evaluate-only (or pass --allow-test)")
+    return which or "unknown"
+
+
 def check_not_sealed(ids: list[str], sealed: list[Path], conn: sqlite3.Connection | None) -> None:
     mine = set(ids)
     for path in sealed:
@@ -184,17 +214,22 @@ def read_records_csv(path: Path) -> dict[str, dict]:
                 if (r.get("observation_id") or "").strip()}
 
 
-def fill_from_csv(s: ScoredSet, path: Path) -> ScoredSet:
+def fill_from_csv(s: ScoredSet, path: Path, conn: sqlite3.Connection | None = None) -> ScoredSet:
     """Keep the CSV's records only, and fill what the scores file leaves blank (place,
-    date, uuid, truth) from its columns."""
+    date, uuid, truth) from its columns; a uuid still missing comes from the manifest's
+    inat_observations by observation id (the held-out fetch writes them there)."""
     rows = read_records_csv(path)
+    uuid_of = {}
+    if conn is not None:
+        uuid_of = {str(o).strip(): (u or "").strip() for o, u in conn.execute(
+            "select observation_id, uuid from inat_observations where uuid is not null")}
     keep = [i for i, oid in enumerate(s.observation_ids) if oid in rows]
     absent = set(rows) - set(s.observation_ids)
     if absent:
         print(f"  {len(absent)} records of {path.name} have no photo scores; left out")
 
     def col(v, i, *names, cast=str):
-        if v and v[i] not in (None, ""):
+        if v and v[i] is not None and str(v[i]).strip():
             return v[i]
         r = rows[s.observation_ids[i]]
         for n in names:
@@ -216,7 +251,8 @@ def fill_from_csv(s: ScoredSet, path: Path) -> ScoredSet:
         out.latitude.append(col(s.latitude, i, "lat", "latitude", cast=float))
         out.longitude.append(col(s.longitude, i, "lng", "lon", "longitude", cast=float))
         out.observed_on.append(col(s.observed_on, i, "observed_on") or None)
-        out.uuids.append(col(s.uuids, i, "uuid", "observation_uuid") or None)
+        out.uuids.append(col(s.uuids, i, "uuid", "observation_uuid")
+                         or uuid_of.get(s.observation_ids[i]) or None)
     return out
 
 
@@ -288,7 +324,7 @@ def _cand(s: ScoredSet, i: int, pos: dict[str, int], top_k: int) -> tuple[np.nda
 
 def grid_search(prior, s: ScoredSet, grid: dict | None = None,
                 top_k: int = 500, log=print, without: set[str] | None = None,
-                choose_genus_rule: bool | None = True) -> dict:
+                choose_genus_rule: bool | None = True, temperatures: dict | None = None) -> dict:
     """Score every combination of the grid on `s`; return the table and the choice.
     `prior` is any fitted occprior.RangeSource, so sources compare on the same records.
     choose_genus_rule: True keeps the genus rule in the choice, False leaves it out,
@@ -311,6 +347,8 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     Se = np.zeros((n, K))
     O = {r: np.zeros((n, K), dtype=bool) for r in radii}
     OG = {r: np.zeros((n, K), dtype=bool) for r in radii}       # the genus rule's own
+    OD = {r: np.zeros((n, K), dtype=bool) for r in radii}       # out on DNA records only
+    DE = {r: np.zeros(n) for r in radii}                        # DNA records within r
     SP = np.zeros((n, K), dtype=bool)
     GG = np.full((n, K), -2, dtype=np.int64)
     truth_at = np.full(n, -1, dtype=np.int64)
@@ -337,6 +375,9 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
             O[r][i, :m] = parts.out_of_range[r][cand]
             if parts.genus_out_of_range:
                 OG[r][i, :m] = parts.genus_out_of_range[r][cand]
+            if parts.dna_out_of_range:
+                OD[r][i, :m] = parts.dna_out_of_range[r][cand]
+                DE[r][i] = parts.dna_effort[r]
         SP[i, :m] = is_sp[cand]
         GG[i, :m] = group_gid[cand]
         if t >= 0:
@@ -344,8 +385,11 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     log(f"  {n} records: {places} with a usable place, {dates} with a date")
     rows_ = np.arange(n)
 
-    def combined(T, r, pen, wd, ws, gr=True):
-        out = O[float(r)] | OG[float(r)] if gr else O[float(r)]
+    def combined(T, r, pen, wd, ws, gr=True, nd=0):
+        r = float(r)
+        out = O[r] | (OD[r] & (DE[r] >= nd)[:, None])
+        if gr:
+            out = out | OG[r]
         return (S / T if T else S) + wd * D + ws * Se - pen * out
 
     def right(z):
@@ -360,12 +404,13 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
 
     table = []
     keys = ("photo_temperature", "radius_km", "out_of_range_penalty", "density_weight",
-            "season_weight", "genus_rule")
-    for T, r, pen, wd, ws, gr in product(*(grid[k] for k in keys)):
-        sp_right, ge_right = right(combined(T, r, pen, wd, ws, gr))
+            "season_weight", "genus_rule", "min_dna_effort")
+    for T, r, pen, wd, ws, gr, nd in product(*(grid[k] for k in keys)):
+        sp_right, ge_right = right(combined(T, r, pen, wd, ws, gr, nd))
         table.append({"photo_temperature": T, "radius_km": float(r),
                       "out_of_range_penalty": pen, "exclusion": pen >= EXCLUDE,
                       "density_weight": wd, "season_weight": ws, "genus_rule": bool(gr),
+                      "min_dna_effort": nd,
                       "species_top1": round(float(sp_right.sum() / max(has_sp.sum(), 1)), 4),
                       "genus_top1": round(float(ge_right.mean()), 4),
                       "species_right": int(sp_right.sum()), "genus_right": int(ge_right.sum())})
@@ -373,7 +418,8 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     def order(row):
         return (-row["species_right"], -row["genus_right"], row["out_of_range_penalty"],
                 row["density_weight"] + row["season_weight"], abs(row["radius_km"] - 1500.0),
-                abs((row["photo_temperature"] or 0.02) - 0.02), not row["genus_rule"])
+                abs((row["photo_temperature"] or 0.02) - 0.02), not row["genus_rule"],
+                abs(row["min_dna_effort"] - 500))
     table.sort(key=order)
     allowed = [t for t in table
                if choose_genus_rule is None or t["genus_rule"] == choose_genus_rule] or table
@@ -385,7 +431,8 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     photo_right, chosen_right = right(S), right(z)        # photo-only: no T changes its order
     photo_only = rates(*photo_right, every)
     out = {"n": n, "with_place": places, "with_date": dates, "best": best,
-           "photo_only": photo_only, "calibration": calibrate(z, SP, GG, truth_at, truth_g, has_sp),
+           "photo_only": photo_only,
+           "calibration": calibrate(z, SP, GG, truth_at, truth_g, has_sp, temperatures),
            "genus_rule": genus_rule, "table": table}
     if without:
         # e.g. repeat finds: the same taxon at the same spot as another record.
@@ -396,21 +443,37 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     return out
 
 
-def calibrate(z, SP, GG, truth_at, truth_g, has_sp) -> dict:
+def calibrate(z, SP, GG, truth_at, truth_g, has_sp, fixed: dict | None = None) -> dict:
     """Confidence temperature per rank (softmax(score / T)) by likelihood, on the chosen
-    scores; plus how often the top answer was stated at 99% or more."""
+    scores; plus how often the top answer was stated at 99% or more. With `fixed`
+    ({rank: T}, the saved values) nothing is fitted: the NLL and the rest are those of
+    the saved temperature on these records."""
     from .evaluate import T_GRID, nll_by_temperature
+    if fixed:
+        grids = {rank: np.array([float(fixed.get(rank, fixed.get("species")))])
+                 for rank in ("species", "genus")}
+    else:
+        grids = {"species": T_GRID, "genus": T_GRID}
+
+    def nll_at(scores, t, grid):
+        if not fixed:
+            return nll_by_temperature(scores, t)
+        zz = scores[None, :].astype(np.float64) / grid[:, None]
+        m = zz.max(axis=1, keepdims=True)
+        return (m + np.log(np.exp(zz - m).sum(axis=1, keepdims=True)))[:, 0] - zz[:, t]
     out = {}
+    T_GRID = grids["species"]
     nll = np.zeros(len(T_GRID))
     used = 0
     for i in range(len(z)):
         if has_sp[i] and truth_at[i] >= 0 and SP[i, truth_at[i]]:
             keep = SP[i] & np.isfinite(z[i])
             idx = np.flatnonzero(keep)
-            nll += nll_by_temperature(z[i, idx], int(np.flatnonzero(idx == truth_at[i])[0]))
+            nll += nll_at(z[i, idx], int(np.flatnonzero(idx == truth_at[i])[0]), T_GRID)
             used += 1
     if used:
         out["species"] = _fit(nll, used, T_GRID)
+    T_GRID = grids["genus"]
     nll = np.zeros(len(T_GRID))
     used = 0
     for i in range(len(z)):
@@ -420,7 +483,7 @@ def calibrate(z, SP, GG, truth_at, truth_g, has_sp) -> dict:
             continue
         best = np.full(len(gs), -np.inf)
         np.maximum.at(best, np.searchsorted(gs, GG[i, ok]), z[i, ok])
-        nll += nll_by_temperature(best, int(np.searchsorted(gs, truth_g[i])))
+        nll += nll_at(best, int(np.searchsorted(gs, truth_g[i])), T_GRID)
         used += 1
     if used:
         out["genus"] = _fit(nll, used, T_GRID)
@@ -435,6 +498,7 @@ def calibrate(z, SP, GG, truth_at, truth_g, has_sp) -> dict:
                 tops.append(float(1.0 / e.sum()))
         c["share_stated_99"] = round(float(np.mean(np.array(tops) >= 0.99)), 4) if tops else None
         c["mean_top_confidence"] = round(float(np.mean(tops)), 4) if tops else None
+        c["fitted_here"] = not fixed
     return out
 
 
@@ -453,7 +517,7 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
          base: str = "nearest", backbone: str | None = None, save: bool = True,
          source: str = "inat-occurrence", report_without: Path | None = None,
          evaluate_only: bool = False, choose_genus_rule: bool | None = True,
-         log=print) -> dict:
+         allow_test: bool = False, log=print) -> dict:
     """The whole command: build the validation set, check it, search, save."""
     if records.startswith("comparison:"):
         cid = records.split(":", 1)[1]
@@ -463,11 +527,14 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
         if scores is None:
             raise ValueError("a records CSV needs --scores (per-record photo scores, an .npz "
                              "from save_scored_set): its records are not in the index")
-        s = fill_from_csv(load_scored_set(Path(scores)), Path(records))
+        s = fill_from_csv(load_scored_set(Path(scores)), Path(records), conn)
         labels = names.manifest_labels(conn)        # .org spellings -> Vision's labels
         s.truth = [labels.get(t, t) if t else t for t in s.truth]
         ref = reference_records(conn, set(s.observation_ids))
         origin = {"records_csv": str(records), "scores": str(scores)}
+    split = check_split(records, s.observation_ids, searching=not evaluate_only,
+                        allow_test=allow_test)
+    origin["split"] = split
     sealed = sealed_files(records, list(sealed))
     check_not_sealed(s.observation_ids, sealed, conn)
     params = load_params(out)
@@ -475,20 +542,23 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
     excl = prior.leak_check(s.uuids, allow_missing_uuids)
     prior.fit(ref, s.species)
     log(f"  names: {prior.mapping_summary()}")
+    temperatures = None
     if evaluate_only:           # score with the saved values: one point, nothing saved
         grid = {k: [getattr(params, k)] for k in DEFAULT_GRID}
         choose_genus_rule = params.genus_rule
         save = False
+        t = params.confidence_temperature
+        temperatures = t if isinstance(t, dict) else {r: t for r in ("species", "genus")}
     without = set(read_ids(report_without)) if report_without else None
-    res = grid_search(prior, s, grid, top_k, log, without, choose_genus_rule)
+    res = grid_search(prior, s, grid, top_k, log, without, choose_genus_rule, temperatures)
     b = res["best"]
     chosen = OccParams.from_dict({**params.to_dict(), **{
         k: b[k] for k in ("radius_km", "out_of_range_penalty", "density_weight",
-                          "season_weight", "genus_rule")}})
+                          "season_weight", "genus_rule", "min_dna_effort")}})
     if b["photo_temperature"]:
         chosen.photo_temperature = b["photo_temperature"]
     temps = {rank: c["temperature"] for rank, c in res["calibration"].items()}
-    if temps:
+    if temps and not evaluate_only:
         temps.setdefault("family", temps.get("genus", temps.get("species")))
         chosen.confidence_temperature = temps
     chosen.provenance = {
@@ -513,8 +583,38 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
     if save:
         path = save_params(chosen, out)
         log(f"-> {path}")
-    return {"params": chosen.to_dict(), **{k: res.get(k) for k in (
+        if getattr(prior, "mapping", None) is not None:
+            names_csv = path.with_name(path.stem + "-names.csv")
+            write_names_csv(prior, s.species, names_csv)
+            log(f"-> {names_csv}")
+    return {"params": chosen.to_dict(), "split": split, **{k: res.get(k) for k in (
         "n", "best", "photo_only", "calibration", "without", "genus_rule")}}
+
+
+def write_names_csv(prior, species: list[str], path: Path,
+                    records: dict[str, int] | None = None) -> dict:
+    """Every label's mapping to iNat and how it was made (the report CSV)."""
+    from collections import Counter
+    st = prior.store
+    tally = Counter()
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["label", "records", "how", "inat_species", "inat_species_obs",
+                    "inat_genus", "inat_genus_obs", "epithet_guess", "epithet_guess_used"])
+        for label, m in zip(species, prior.mapping):
+            tally[m.how] += 1
+
+            def nm(u):
+                return st.names[u] if u >= 0 else ""
+
+            def n_obs(u):
+                return int(st.unit_total[u]) if u >= 0 else ""
+            w.writerow([label, (records or {}).get(label, ""), m.how,
+                        nm(m.species_unit), n_obs(m.species_unit),
+                        nm(m.genus_unit), n_obs(m.genus_unit), nm(m.guess_unit),
+                        "place/season only" if (m.guess_unit >= 0
+                                                and prior.params.epithet_guesses) else ""])
+    return dict(tally)
 
 
 # --- commands (wired into cli.py) ---------------------------------------------------------
@@ -543,32 +643,21 @@ def cmd_occurrence_exclusions(conn, args) -> None:
 
 
 def cmd_occurrence_names(conn, args) -> None:
-    """How every label in the manifest maps to iNat's taxa (a CSV in reports/)."""
+    """How every label in the manifest maps to iNat's taxa, and how (a CSV in reports/)."""
     from collections import Counter
 
     from .evaluate import load_records
+    from .occprior import OccurrencePrior
     store = OccurrenceStore.load(Path(args.store) if args.store else None)
     photos = {int(p): int(p) for (p,) in conn.execute("select photo_id from observation_photos")}
     recs = load_records(conn, photos)
     units = Counter(r.unit for r in recs)
-    genus = {r.unit: r.genus for r in recs}
+    prior = OccurrencePrior(store, load_params())
+    prior.fit(recs, sorted(units))
     config.ensure_dirs()
     path = config.REPORTS_DIR / "occurrence-names.csv"
-    tally, records_by = Counter(), Counter()
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["label", "records", "how", "inat_species", "inat_species_obs", "inat_genus",
-                    "inat_genus_obs"])
-        for label, n in sorted(units.items()):
-            m = store.resolve(label, genus.get(label, ""))
-            tally[m.how] += 1
-            records_by[m.how] += n
-            sp = store.names[m.species_unit] if m.species_unit >= 0 else ""
-            ge = store.names[m.genus_unit] if m.genus_unit >= 0 else ""
-            w.writerow([label, n, m.how, sp, int(store.unit_total[m.species_unit])
-                        if m.species_unit >= 0 else "", ge,
-                        int(store.unit_total[m.genus_unit]) if m.genus_unit >= 0 else ""])
-    print(json.dumps({"labels": dict(tally), "records": dict(records_by)}, indent=2))
+    tally = write_names_csv(prior, sorted(units), path, units)
+    print(json.dumps({"labels": tally}, indent=2))
     print(f"-> {path}")
 
 
@@ -586,7 +675,8 @@ def cmd_tune_occurrence(conn, args) -> None:
                args.base, args.backbone, save=not args.dry_run, source=args.source,
                report_without=Path(args.report_without) if args.report_without else None,
                evaluate_only=args.evaluate_only,
-               choose_genus_rule={"keep": True, "drop": False, "tune": None}[args.genus_rule])
+               choose_genus_rule={"keep": True, "drop": False, "tune": None}[args.genus_rule],
+               allow_test=args.allow_test)
     print(json.dumps({k: res[k] for k in ("n", "best", "photo_only", "calibration", "without",
                                           "genus_rule")}, indent=2))
 
@@ -648,6 +738,9 @@ def add_commands(sub) -> None:
     p.add_argument("--evaluate-only", action="store_true",
                    help="score the set with the saved values (e.g. test.csv after tuning on "
                         "dev.csv); nothing is searched or saved")
+    p.add_argument("--allow-test", action="store_true",
+                   help="search on a benchmark's test split (split.json); normally tune on "
+                        "dev and score test with --evaluate-only")
     p.add_argument("--genus-rule", default="keep", choices=["keep", "drop", "tune"],
                    help="the genus-level out-of-range rule in the chosen values (the report "
                         "shows dev with and without it either way)")

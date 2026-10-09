@@ -338,7 +338,7 @@ def build(observations: Path, taxa: Path, out: Path, options: BuildOptions | Non
     lookup = tax.lookup
     st = BuildStats()
     seen_excluded = 0
-    a_own, a_sp, a_ge, a_cell, a_week, a_band = (array("i") for _ in range(6))
+    a_own, a_sp, a_ge, a_cell, a_week = (array("i") for _ in range(5))
     a_hash = array("Q")             # each kept observation's uuid hash: the leave-one-out index
     a_obs, a_day = array("q"), array("i")      # observer and day (yyyymmdd, 0 = none)
     log(f"Reading observations from {observations}...")
@@ -387,7 +387,6 @@ def build(observations: Path, taxa: Path, out: Path, options: BuildOptions | Non
         a_ge.append(ge)
         a_cell.append(cell)
         a_week.append(week_of(when))
-        a_band.append(grid.band(lat))
         a_hash.append(uuid_hash(row[i_uuid]) if i_uuid >= 0 else 0)
         a_day.append(day_of(when))
         observer = row[i_obs].strip() if i_obs >= 0 else ""
@@ -420,7 +419,7 @@ def build(observations: Path, taxa: Path, out: Path, options: BuildOptions | Non
     meta["file_bytes"] = out.stat().st_size
     if i_uuid >= 0:
         meta["leave_one_out_bytes"] = _save_loo(loo_path(out), a_hash, a_own, a_ge, a_cell,
-                                                a_week, a_band, sole)
+                                                a_week, grid, sole)
     log(json.dumps(meta, indent=2))
     return meta
 
@@ -440,7 +439,7 @@ def day_of(iso: str | None) -> int:
     return int(iso[0:4]) * 10000 + int(iso[5:7]) * 100 + int(iso[8:10])
 
 
-def _save_loo(path: Path, a_hash, a_own, a_ge, a_cell, a_week, a_band, sole) -> int:
+def _save_loo(path: Path, a_hash, a_own, a_ge, a_cell, a_week, grid: Grid, sole) -> int:
     """Beside the store: every counted observation's uuid hash, what it counted for (its
     taxon's unit or genus, cell, week, band), and at which levels it was the only
     observation behind its observer-day (SOLE_* flags). A scored record takes its own
@@ -456,7 +455,9 @@ def _save_loo(path: Path, a_hash, a_own, a_ge, a_cell, a_week, a_band, sole) -> 
         genus=np.frombuffer(a_ge, dtype=np.int32)[order],
         cell=np.frombuffer(a_cell, dtype=np.int32)[order],
         week=np.frombuffer(a_week, dtype=np.int32)[order].astype(np.int8),
-        band=np.frombuffer(a_band, dtype=np.int32)[order].astype(np.int8),
+        # The cell's band, as the counts use (not the raw latitude's: they differ when
+        # the cell size doesn't divide the band).
+        band=grid.band_of_cells(np.frombuffer(a_cell, dtype=np.int32)[order]).astype(np.int8),
         sole=sole[order])
     tmp.replace(path)
     return path.stat().st_size
@@ -563,7 +564,12 @@ class Contribution:
 class Mapping:
     species_unit: int        # -1: no species-level taxon on iNat to use
     genus_unit: int          # -1: no genus on iNat either
-    how: str                 # species | synonym | genus-label | provisional | not-on-inat | none
+    how: str                 # species | genus-label | provisional | epithet-guess | ambiguous
+    #                          | not-on-inat | none
+    # epithet-guess only: the one active species of the inactive name's epithet and
+    # family. A guess (Morchella conica -> Verpa conica): never used for out of range,
+    # and for place and season only when OccParams.epithet_guesses is on.
+    guess_unit: int = -1
 
 
 class OccurrenceStore:
@@ -581,6 +587,7 @@ class OccurrenceStore:
         self._by_key: dict[str, list[int]] | None = None
         self._by_epithet: dict[tuple, list[int]] | None = None
         self._loo: dict | None = None
+        self._has_loo: bool | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "OccurrenceStore":
@@ -598,12 +605,14 @@ class OccurrenceStore:
 
     @property
     def has_loo(self) -> bool:
-        return self.path is not None and loo_path(self.path).is_file()
+        if self._has_loo is None:
+            self._has_loo = self.path is not None and loo_path(self.path).is_file()
+        return self._has_loo
 
     def own_contribution(self, uuid: str | None) -> "Contribution | None":
         """What this observation added to the counts, or None when it wasn't counted
         (excluded, filtered out, or not in the export)."""
-        if not uuid or not self.has_loo:
+        if not uuid or not uuid.strip() or not self.has_loo:
             return None
         if self._loo is None:
             with np.load(loo_path(self.path)) as z:
@@ -649,10 +658,12 @@ class OccurrenceStore:
         return with_obs[0] if len(with_obs) == 1 else -1
 
     def resolve(self, label: str, genus: str = "") -> Mapping:
-        """Vision's label -> the iNat taxa to read. Active names first; an inactive name
-        maps to the one active species of the same epithet in the same family, if there
-        is exactly one; a provisional name ("Amanita sp. 'IN01'") or a name iNat doesn't
-        know has no species taxon: only its genus is used. Never a guess beyond that."""
+        """Vision's label -> the iNat taxa to read: the active taxon of exactly that name
+        ("var." aside). iNat's export records no replacement for an inactive name, so an
+        inactive name, a provisional one ("Amanita sp. 'IN01'") or one iNat doesn't know
+        has no species taxon: only its genus is used. The one active species of an
+        inactive name's epithet and family is kept as `guess_unit`, flagged, never as
+        the species (it maps Morchella conica to Verpa conica)."""
         parts = names.parse_name(label)
         words = name_key(label).split()
         if parts.code is not None:
@@ -672,7 +683,7 @@ class OccurrenceStore:
         if hits:
             s = self._synonym(hits)
             if s >= 0:
-                return Mapping(s, self._genus_of(s, g_label), "synonym")
+                return Mapping(-1, g_label, "epithet-guess", s)
         return Mapping(-1, g_label, "not-on-inat" if g_label >= 0 else "none")
 
     def _genus_of(self, s: int, fallback: int) -> int:

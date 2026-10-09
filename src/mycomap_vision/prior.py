@@ -129,7 +129,13 @@ class RangeSeasonPrior:
 class WithPrior:
     """A log-probability method plus the range-and-season score."""
     needs_context = True
-    confidence_temperature = LOGPROB_CONFIDENCE_TEMPERATURE   # identify.temperature
+
+    @property
+    def confidence_temperature(self):
+        """identify.temperature: 1.9 for nearest+prior and species-mean+prior (AsLogProb
+        scores, where it was measured). linear+prior and hybrid+prior keep the old
+        behaviour (a comparison's calibration, else 0.02) until theirs is measured."""
+        return LOGPROB_CONFIDENCE_TEMPERATURE if hasattr(self.base, "temperature") else None
 
     def __init__(self, base_cls, weight: float = 1.0):
         self.base = base_cls()

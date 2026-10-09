@@ -127,3 +127,29 @@ def test_an_answer_that_differs_by_more_than_spelling_is_still_wrong(conn):
         ("Mycena sp. 'IN7'", "Mycena sp. 'IN07'"),                           # a person decides
         ("Craterellus neotubaeformis", "Craterellus sp. 'neotubaeformis'")])
     assert model["resolved"] == 2 and model["species_top1"] == 0.0
+
+
+
+def test_an_occurrence_prior_that_cannot_leave_the_candidates_find_out_skips_it(conn):
+    from mycomap_vision.occprior import TuningRefused
+
+    class Model:
+        def __init__(self):
+            self.asked = []
+
+        def leak_check(self, uuids, allow_missing=False):
+            self.asked.append(uuids)
+            if uuids == ["uuid-20"]:
+                raise TuningRefused("counted, and no leave-one-out index")
+            return {}
+
+    prospective.save_candidates(conn, [candidate("10"), candidate("20")], "t0")
+    ident = FakeIdentifier()
+    ident.model = Model()
+    fetcher = FakeFetcher({"10": inat_obs(10, photos=[(0, 1, "cc0", "x")]),
+                           "20": inat_obs(20, photos=[(0, 2, "cc0", "x")])})
+    stats = prospective.predict_pending(conn, ident, object(), ["10", "20"], fetcher,
+                                        log=lambda s: None)
+    assert stats == {"predicted": 1,
+                     "skipped: occurrence prior can't leave its own find out": 1}
+    assert ident.model.asked == [["uuid-10"], ["uuid-20"]]
