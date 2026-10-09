@@ -64,6 +64,14 @@ test("bars rank approaches at the chosen rank and top-k, and mark the outside ba
   assert.deepEqual(bars(runs, reports, "species", 10).map((x) => x.value), [0.7, 0.7]);
 });
 
+test("the served marker follows the server's default method", () => {
+  const runs = [run(1, "ft", "nearest"), run(2, "ft", "nearest+mean")];
+  const reports = new Map([[1, report(true, 0.34)], [2, report(true, 0.38)]]);
+  const served = (m: string) => bars(runs, reports, "species", 1, ["ft"], m).filter((b) => b.served).map((b) => b.id);
+  assert.deepEqual(served("nearest+mean"), [2]);
+  assert.deepEqual(served("nearest"), [1]);
+});
+
 test("runs saved before the standard summary still chart at top 1 and 5, never invent top 3 or 10", () => {
   const runs = [run(1, "ft", "nearest"), run(2, "ft", "species-mean")];
   const reports = new Map([[1, report(true, 0.34)], [2, report(false, 0.3)]]);

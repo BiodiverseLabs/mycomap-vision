@@ -83,6 +83,12 @@ The "before" number is recorded; nearest + species average is confirmed (depth-b
 ## Decision
 Development benchmark only (Steve, 2026-10-08).
 
+## Known data fault
+A label audit (2026-10-09) found 8,868 of 154,067 reference and training records (5.8%) whose
+photos belong to unrelated iNaturalist observations (non-iNat record ids taken for iNat ids).
+These results were measured with that reference set; the answer keys are unaffected. The rebuilt
+reference set and retrain will be the "after".
+
 ## Next
 The same records after the relabel and retrain ("after"); iNat on the subsample; seal a fresh
 paper test set.

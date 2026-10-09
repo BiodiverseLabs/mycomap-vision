@@ -96,6 +96,9 @@ class Limits:
     # False = never train a method's classifier on this machine (minutes of CPU on the
     # box; hours at the full photo set). A trained method then needs its saved training.
     fit_on_demand: bool = True
+    # The method an identification uses when none is named (MV_DEFAULT_METHOD). Steve,
+    # 2026-10-09: nearest + species average. Falls back to nearest where not offered.
+    default_method: str = "nearest+mean"
     # Most models one identification may run (None = no limit). The box: 2, so a
     # side-by-side comparison can't outlast the proxy's timeout.
     max_models: int | None = None
@@ -115,7 +118,13 @@ class Limits:
                            not in ("0", "false", "no", "off")),
             max_models=(int(config.setting("MV_MAX_MODELS")) if (config.setting("MV_MAX_MODELS") or "").isdigit()
                         else None),
+            default_method=(config.setting("MV_DEFAULT_METHOD") or "nearest+mean").strip(),
         )
 
     def method_allowed(self, method: str) -> bool:
         return self.allowed_methods is None or method in self.allowed_methods
+
+    def served_default(self, ready: "Callable[[str], bool]" = lambda m: True) -> str:
+        """The default method, if this server offers it and can answer it; else nearest."""
+        m = self.default_method
+        return m if self.method_allowed(m) and ready(m) else "nearest"

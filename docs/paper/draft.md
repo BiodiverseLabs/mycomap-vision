@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.3.1, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.3.2, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -96,6 +96,17 @@ observations and 593,224 photographs (about 3.2 photos per record; 65% of record
 more). Photographs were stored at 1024 px on the long side (593,214 retrieved; 10 had been removed
 from iNaturalist).
 
+**A data fault found and being fixed.** A label audit (9 October 2026) found that 8,868 of the
+154,067 reference and training records (5.8%; 12,480 photos) were Mushroom Observer, MyCoPortal or
+legacy-sequence records whose numeric identifiers had been taken for iNaturalist observation ids, so
+the photos fetched for them belong to unrelated iNaturalist observations. Every reference of 1,608
+species was affected in this way, and sparse species most of all (12.4% of the references of
+species with one to four records). The full-data fine-tune trained on these records. The answer
+keys of every test are unaffected (test records are iNaturalist observations), so the results
+reported here stand as measured, for a reference set with this fault. The fix (an
+iNaturalist-only export, a rebuilt reference set and a retrain) will be reported as the "after"
+model. [Re-scoring without these records under way.]
+
 **Name of a record.** The label is the observation's own name on MycoMap after a refresh from the
 legacy database, not the name of a linked sequence. A record can carry several sequences,
 including non-target or discarded ones.
@@ -153,7 +164,7 @@ For a query find with photographs *q*₁…*qₙ* and a species *s* with referen
   cos(*qᵢ*, *r*). A species known from one specimen competes on the same terms as one with a
   thousand.
 - **Species average** (`species-mean`): cosine similarity to the mean embedding of the species.
-- **Blend** (`nearest+mean`, experimental): 0.6 × (mean of each photo's two best matches) + 0.4 ×
+- **Blend** (`nearest+mean`, the identifier's default since 9 October 2026): 0.6 × (mean of each photo's two best matches) + 0.4 ×
   species average. Chosen on the evaluation set below; to be confirmed on held-out records.
 
 Genus and family scores are the best species score inside them, so every rank gets its own
@@ -401,8 +412,8 @@ Species top-1 with 95% intervals clustered by observer: 48.3 (45.7–50.6), 54.2
 species average raised species top-1 from 48.3 to 52.8 (235 records fixed, 104 broken; McNemar
 *P* < 0.001) and genus from 79.0 to 81.7, gaining in every band with references except 100+, where
 it lost 11 of 483 records (70.2 → 67.9). On the test split it gained in every band including
-100+ (898 fixed, 308 broken at species; 545 / 200 at genus; both *P* < 0.001). Whether it becomes
-the identifier's default is pending a decision.
+100+ (898 fixed, 308 broken at species; 545 / 200 at genus; both *P* < 0.001). On this evidence it
+became the identifier's default method (9 October 2026).
 
 **Accuracy is higher here than on the newest weeks (TABLE 3)** mainly because the mix of depth
 differs: 3.5% of these finds belong to species with no reference record, against 12% of the
@@ -514,8 +525,9 @@ full-precision model is served.
 5. **What photographs do not show.** Look-alikes within complexes and microscopic characters; the
    tool asks for underside and stem photographs when species are close.
 6. **Limitations.** North America only; iNaturalist photographs only; label noise (stale names on
-   the legacy database, found and being corrected); sampling bias toward projects and regions
-   that sequence; one backbone family; not for edibility.
+   the legacy database, found and being corrected); 5.8% of reference records with unrelated
+   photos until the rebuild (Methods); sampling bias toward projects and regions that sequence;
+   one backbone family; not for edibility.
 7. **Safety.** Not for edibility decisions. Report results for deadly genera (Appendix A).
 
 ---
@@ -708,7 +720,7 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 # APPENDIX B. Next tests (in order)
 
 1. ~~**"Before" number on the development records**~~ Done 9 October (TABLES 5–6):
-   `nearest+mean` confirmed on development and test; default pending a decision.
+   `nearest+mean` confirmed on development and test; adopted as the default (9 October).
 2. **Finish iNat CV on the 2,000-record subsample**, then on TABLE 3's records.
 3. **Tune the occurrence prior** on development, check on test; count how often it penalizes the
    true species.
@@ -775,6 +787,9 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.3.2 (9 Oct 2026).** Nearest + species average adopted as the default (Steve). The
+  reference-set fault found by the label audit (5.8% of records with unrelated photos) stated in
+  Methods and Limitations; numbers unchanged until the re-score.
 - **0.3.1 (9 Oct 2026).** Published Danish Fungi / FungiTastic models on the development split
   (TABLES 7–8): they can name 13–19% of formally named North American records; on species both can
   name, Vision leads by 5–12 points at species top-1 (8–15 with the species-average blend).

@@ -3,16 +3,18 @@
 // on the server box by MV_METHODS). Only offered methods are ever sent.
 //
 //   Trained classifier  linear   (+ nearest specimens: hybrid)
+//   Nearest + average   nearest+mean  (the site's default, Steve 2026-10-09)
 //   Nearest specimen    nearest
 //   Species average     species-mean
 //   ...each with "+prior" when place and date (range and season) are used.
 
-export type Base = "linear" | "nearest" | "species-mean";
+export type Base = "linear" | "nearest+mean" | "nearest" | "species-mean";
 
-export const BASES: Base[] = ["linear", "nearest", "species-mean"];
+export const BASES: Base[] = ["linear", "nearest+mean", "nearest", "species-mean"];
 
 export const BASE_LABEL: Record<Base, string> = {
   linear: "Trained classifier",
+  "nearest+mean": "Nearest + species average",
   nearest: "Nearest specimen",
   "species-mean": "Species average",
 };
@@ -32,7 +34,8 @@ export function methodFor(c: Choice): string {
 }
 
 const variants = (base: Base): string[] =>
-  base === "linear" ? ["linear", "hybrid", "linear+prior", "hybrid+prior"] : [base, `${base}+prior`];
+  base === "linear" ? ["linear", "hybrid", "linear+prior", "hybrid+prior"]
+    : base === "nearest+mean" ? ["nearest+mean"] : [base, `${base}+prior`];
 
 /** Scoring methods the server offers at least one variant of, in menu order. */
 export function offeredBases(offered: string[]): Base[] {
@@ -63,8 +66,15 @@ export function switchesFor(base: Base, offered: string[]): { weighNearest: bool
   };
 }
 
-/** The starting choice: the trained classifier with both add-ons, where offered. */
-export function defaultChoice(offered: string[]): Choice | null {
+/** The starting choice: the server's default method (GET /api/models `default_method`)
+ *  when it offers it; else the first offered scoring method with both add-ons. */
+export function defaultChoice(offered: string[], preferred?: string | null): Choice | null {
+  if (preferred && offered.includes(preferred)) {
+    const base = BASES.find((b) => variants(b).includes(preferred));
+    if (base) {
+      return { base, weighNearest: preferred.startsWith("hybrid"), usePlace: preferred.endsWith("+prior") };
+    }
+  }
   const base = offeredBases(offered)[0];
   return base ? { base, weighNearest: true, usePlace: true } : null;
 }

@@ -73,6 +73,12 @@ Fine-tuning helps at every rank; the fine-tuned model is served.
 ## Decision
 Adopted (Steve's rule, 2026-10-07); live on the site 2026-10-08.
 
+## Known data fault
+A label audit (2026-10-09) found 8,868 of 154,067 reference and training records (5.8%) whose
+photos belong to unrelated iNaturalist observations (non-iNat record ids taken for iNat ids).
+These results were measured with that reference set; the answer keys are unaffected. The rebuilt
+reference set and retrain will be the "after".
+
 ## Next
 Relabel and retrain after the legacy-name refresh and full sync; save the heads; try more
 blocks, more epochs, a metric-learning loss.

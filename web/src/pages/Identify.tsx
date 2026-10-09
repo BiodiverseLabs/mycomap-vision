@@ -328,7 +328,7 @@ function ModelPicker({ models, onChange }: {
   // Defaults once the server says what it offers.
   useEffect(() => {
     if (!backbone && ready.length) setBackbone(ready[0]);
-    if (!choice && offered.length) setChoice(defaultChoice(offered));
+    if (!choice && offered.length) setChoice(defaultChoice(offered, models.data?.default_method));
   }, [ready, offered, backbone, choice]);
 
   const method = choice ? resolveMethod(choice, offered) : null;

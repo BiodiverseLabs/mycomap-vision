@@ -105,6 +105,8 @@ export interface ModelsInfo {
   }[];
   methods: string[];
   ready: string[];
+  /** What an identification uses when no method is named (MV_DEFAULT_METHOD). */
+  default_method?: string;
   /** Most models one identification may run on this server (null: no limit). */
   max_models?: number | null;
 }
@@ -174,7 +176,7 @@ export interface RunReport {
 const METHOD_LABEL: Record<string, string> = {
   nearest: "nearest specimen",
   "species-mean": "species average",
-  "nearest+mean": "nearest + species average (experimental)",
+  "nearest+mean": "nearest + species average",
   "nearest-mix": "nearest specimen, photo votes",
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",

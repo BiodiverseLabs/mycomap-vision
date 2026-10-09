@@ -27,6 +27,17 @@ test("on a server that offers only nearest specimen, that is the default and not
   assert.deepEqual(switchesFor("nearest", box), { weighNearest: false, usePlace: false });
 });
 
+test("the server's default method is the starting choice when it offers it", () => {
+  const box = ["nearest", "nearest+mean"];
+  const c = defaultChoice(box, "nearest+mean")!;
+  assert.deepEqual(c, { base: "nearest+mean", weighNearest: false, usePlace: false });
+  assert.equal(resolveMethod(c, box), "nearest+mean");
+  assert.deepEqual(offeredBases(box), ["nearest+mean", "nearest"]);
+  assert.deepEqual(switchesFor("nearest+mean", box), { weighNearest: false, usePlace: false });
+  assert.equal(resolveMethod(defaultChoice(box, "nearest")!, box), "nearest");
+  assert.equal(defaultChoice(["nearest"], "nearest+mean")!.base, "nearest", "not offered: first offered");
+});
+
 test("switches show only when both of their sides are offered", () => {
   assert.deepEqual(switchesFor("linear", ALL), { weighNearest: true, usePlace: true });
   assert.deepEqual(switchesFor("linear", ["hybrid", "hybrid+prior"]), { weighNearest: false, usePlace: true });
