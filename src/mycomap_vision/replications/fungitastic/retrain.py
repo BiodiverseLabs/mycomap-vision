@@ -450,8 +450,9 @@ def format_snapshot(snap: dict) -> str:
 def format_sources(check: dict | None) -> str:
     if not check or not check["recorded"]:
         return (f"NOT MIGRATED (no {MIGRATION} marker in this manifest: can't prove the "
-                "records are iNat only)")
-    return ", ".join(f"{s} {n:,}" for s, n in check["by_source"].items()) or "no records"
+                "records come from the allowed sources)")
+    found = ", ".join(f"{s} {n:,}" for s, n in check["by_source"].items()) or "no records"
+    return f"{found} (allowed: {', '.join(check['allowed_sources'])})"
 
 
 # --- the photo cache --------------------------------------------------------------------
