@@ -227,6 +227,14 @@ Inputs (read-only prod queries) are in `data/benchmarks/heldout-2026-10-08/`: po
   reference depth, unseen species, photos, east/west of -100, same observer and
   day in the reference, provisional vs formal names; the label audit; JSON and a
   per-record CSV, no coordinates).
+- Standard summary (Steve, 2026-10-09; `heldout_summary.py`), printed before the JSON
+  by every `mv heldout report`: per Vision model, top 1 / 3 / 5 / 10 for species
+  strict, species s.l., species complex (beta), genus strict and genus s.l. (s.l. and
+  complex from name_equiv once feat/name-equivalence is merged), and species top 1 /
+  5 by the true species' reference records (0, 1-4, 5-19, 20-99, 100+); then iNat CV
+  and the Vision models on the records all of them answered, or "not run". Every
+  table gives its n. Predict keeps answers ten deep from now on; answers stored five
+  deep show "n.s." at top 10.
 - Before and after: each answer keeps the hash of the reference it was made against
   (its records and their labels), so a run after a relabel sits beside the run
   before it; `report --reference-hash` scores the earlier one.

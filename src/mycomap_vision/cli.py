@@ -621,28 +621,14 @@ def cmd_heldout(conn, args) -> None:
 
 
 def print_heldout_report(out: dict) -> None:
-    pct = lambda r: "   -   " if not r or r["rate"] is None else (  # noqa: E731
-        f"{100 * r['rate']:5.1f}% [{100 * r['ci95'][0]:.1f}-{100 * r['ci95'][1]:.1f}] n={r['n']}")
-    state = "sealed" if out.get("sealed") else "development (not sealed)"
-    if out.get("released_at"):
-        state += f", exclusion released {out['released_at']}"
-    print(f"{out['benchmark']} [{state}] / {out['split'] or 'all'}: {out['records']:,} records, "
-          f"{out['scored_records']:,} with an answer key "
-          f"({out['label_audit']['without_an_answer']:,} without, "
-          f"{out['guests_left_out']:,} guests left out)")
-    for model, s in out["models"].items():
-        print(f"  {model}")
-        for rank in ("species", "genus", "family"):
-            if rank in s:
-                print(f"    {rank:<8} top-1 {pct(s[rank]['top1'])}   top-5 {pct(s[rank]['top5'])}")
-    for p in out["paired"]:
-        sp = p.get("species")
-        if sp:
-            print(f"  {p['a']} vs {p['b']}: species top-1 {100 * sp['a_top1']:.1f}% vs "
-                  f"{100 * sp['b_top1']:.1f}% on {sp['n']:,} records, "
-                  f"McNemar p={sp['mcnemar_p']:.3g}")
-    print(f"-> {out['files']['json']}\n-> {out['files']['csv']}")
-
+    """The standard summary as text (every table with its n), then as JSON, then where the
+    full report (CIs, paired tests, calibration, breakdowns, label audit) was written."""
+    from .heldout_summary import format_summary
+    print(format_summary(out["summary"]))
+    print()
+    print(json.dumps(out["summary"], indent=2))
+    print(f"-> {out['files']['json']}")
+    print(f"-> {out['files']['csv']}")
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
