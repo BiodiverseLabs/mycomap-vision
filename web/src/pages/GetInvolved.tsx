@@ -10,7 +10,7 @@ const WAYS: { title: string; text: string; href: string; link: string }[] = [
     href: "https://mycomap.org/network", link: "Free sequencing on mycomap.org" },
   { title: "Let us use your photos",
     text: "If your iNaturalist photos are all rights reserved, you can allow MycoMap Vision to use them, and withdraw at any time.",
-    href: "https://mycomap.org/profile", link: "Your profile, AI photo permission" },
+    href: "https://mycomap.org/profile?tab=photo-permission", link: "Your profile, AI photo permission" },
   { title: "Help validate records",
     text: "Records become references once a MycoMap validation project accepts their DNA name.",
     href: "https://mycomap.org/projects", link: "Validation projects" },
