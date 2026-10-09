@@ -10,6 +10,7 @@ are in guards.py and set from the environment. Sign-in with a mycomap.org accoun
 from __future__ import annotations
 
 import html
+import json
 import logging
 import secrets
 import sqlite3
@@ -18,6 +19,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -100,6 +102,21 @@ def reference_stats(conn: sqlite3.Connection, served: set[str]) -> dict:
     conn.executescript(EMBED_SCHEMA)
     embedded = {b: n for b, n in conn.execute(
         "select backbone, count(*) from embeddings group by 1") if b in served}
+    # Who built the reference set: the projects that marked its records green, and the
+    # photographers of those records (North America, one name: the records Vision uses).
+    used = "r.north_america = 1 and r.label_conflict = 0"
+    projects: set[str] = set()
+    for (green,) in conn.execute(f"select green_projects from records r where {used}"):
+        projects.update(p for p in json.loads(green or "[]") if p)
+    # New DNA-verified records in the newest week of validations (the week to the newest
+    # validation date, so a late export doesn't read as a quiet week).
+    newest = one(f"select max(validated_on) from records r where {used}")
+    recent = None
+    if newest:
+        since = (date.fromisoformat(newest[:10]) - timedelta(days=6)).isoformat()
+        recent = {"records": conn.execute(f"select count(*) from records r where {used} "
+                                          "and validated_on >= ?", (since,)).fetchone()[0],
+                  "from": since, "through": newest[:10]}
     return {
         "records": one("select count(*) from records"),
         "records_north_america": one("select count(*) from records where north_america = 1"),
@@ -113,8 +130,24 @@ def reference_stats(conn: sqlite3.Connection, served: set[str]) -> dict:
                                 "where license_class = 'arr'"),
         "embedded": embedded,
         "names": len(name_counts),
+        # Temporary codes ("Russula sp. 'IN01'"): species known from DNA, not yet described.
+        "names_provisional": sum(1 for n in name_counts if names.parse_name(n).code),
         "names_by_records": buckets,
+        "projects": len(projects),
+        "photographers": one("select count(distinct p.owner_login) from photos p "
+                             "join observation_photos op using (photo_id) "
+                             f"join records r using (observation_id) where {used} "
+                             "and coalesce(p.owner_login, '') <> ''"),
+        "recent_week": recent,
     }
+
+
+def trained_through(conn: sqlite3.Connection) -> dict[str, str]:
+    """Each fine-tuned model's last training date: it learned from nothing validated later."""
+    try:
+        return dict(conn.execute("select name, trained_through from finetunes"))
+    except sqlite3.OperationalError:     # no model fine-tuned on this manifest yet
+        return {}
 
 
 class Cached:
@@ -447,14 +480,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         counts = {b: n for b, n in embedded_counts().items() if b in limits.allowed_backbones}
         with db_lock:
             speed = photos_per_second(conn)
+            through = trained_through(conn)
         out = []
         for name, alias in models.ALIASES.items():
             out.append({"backbone": name, "spec": alias.spec, "note": alias.note,
                         "embedded_photos": counts.pop(name, 0),
-                        "photos_per_second": speed.get(name)})
+                        "photos_per_second": speed.get(name),
+                        "trained_through": through.get(name)})
         for name, n in counts.items():
             out.append({"backbone": name, "spec": name, "note": "", "embedded_photos": n,
-                        "photos_per_second": speed.get(name)})
+                        "photos_per_second": speed.get(name),
+                        "trained_through": through.get(name)})
         return {"backbones": out,
                 "methods": [m for m in evaluate.METHODS
                             if limits.method_allowed(m) and method_ready(m)],

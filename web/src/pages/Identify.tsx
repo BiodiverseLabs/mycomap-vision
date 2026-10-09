@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
-import { ArrowUpRight, CalendarDays, ImagePlus, Lightbulb, Loader2, LocateFixed, MapPin,
+import { ArrowUpRight, CalendarDays, Camera, ImagePlus, Lightbulb, Loader2, LocateFixed, MapPin,
          Microscope, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -26,7 +26,10 @@ import {
   type Specimen,
 } from "@/lib/api";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
-import { identifyGate, LIKELY_COPY, modelName } from "@/lib/publicView";
+import {
+  identifyGate, LIKELY_COPY, modelName, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
+} from "@/lib/publicView";
+import { SafetyNote } from "@/components/SafetyNote";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -78,13 +81,14 @@ export function IdentifyPage() {
   return (
     <>
       <PageHeader title="Identify a fungus">
-        Add every photo you have of one find: the cap from above, the underside (gills, pores or
-        teeth), the stem and the habitat. Each photo is compared with DNA-verified MycoMap records.
+        From all your photos of one find, compared with DNA-sequenced specimens, not community
+        votes. Free, from the nonprofit MycoMap.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 grid gap-8 lg:grid-cols-[360px_1fr]">
         <div className="space-y-6">
           {gate === "sign-in" && <SignInFirst />}
           <PhotoPicker files={files} setFiles={setFiles} />
+          <PhotoChecklist />
           <WhereWhen where={where} setWhere={setWhere} />
           <ModelPicker models={models} onChange={setChosen} />
           {gate === "sign-in" ? (
@@ -123,6 +127,7 @@ export function IdentifyPage() {
         <div className="min-w-0 scroll-mt-20" ref={results}>
           {!run.data && !run.isPending && <EmptyState />}
           {run.data && <ContextLine used={run.data.context_used} sent={run.variables?.where} />}
+          {run.data && <SafetyNote className="mb-4" />}
           {run.data && (
             <div
               className={`grid gap-6 ${run.data.results.length > 1 ? "xl:grid-cols-2" : ""}`}
@@ -133,6 +138,7 @@ export function IdentifyPage() {
               ))}
             </div>
           )}
+          {run.data && <WhatNext />}
         </div>
       </div>
     </>
@@ -447,7 +453,14 @@ function EmptyState() {
     <div className="rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-8 text-[#5c4a3a]">
       <h2 className="font-display font-semibold text-2xl text-[#4a3728]">What you'll get</h2>
       <ul className="mt-4 space-y-2 text-sm list-disc pl-5">
-        <li>An answer at every rank (family, genus, species), each with its own confidence.</li>
+        <li>
+          An answer at every rank (family, genus, species), each with its own confidence. Often
+          the genus is clear when the species isn't.
+        </li>
+        <li>
+          Species known so far only from DNA, under provisional names, that identifiers trained
+          on community names can't suggest.
+        </li>
         <li>The closest DNA-verified specimens, with their photos, so you can compare by eye.</li>
         <li>How each of your photos scores on its own, to see which ones agree.</li>
         <li>Advice on what would firm up the identification.</li>
@@ -458,6 +471,53 @@ function EmptyState() {
         calibrated on the newest ones; see <a className="underline" href="/about">how it works and
         how good it is</a>.
       </p>
+      <p className="mt-2 text-xs font-semibold text-[#4a3728]">{SAFETY_LINE}</p>
+    </div>
+  );
+}
+
+function PhotoChecklist() {
+  return (
+    <div className="rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-4" data-testid="list-photo-checklist">
+      <p className="text-sm font-semibold text-[#4a3728]">What to photograph</p>
+      <ul className="mt-2 space-y-1.5 text-sm text-[#5c4a3a]">
+        {PHOTO_CHECKLIST.map((c) => (
+          <li key={c.what} className="flex gap-2">
+            <Camera className="h-4 w-4 mt-0.5 shrink-0 text-myco-brown" aria-hidden />
+            <span>
+              <span className="font-medium">{c.what}</span>
+              <span className="text-muted-foreground">: {c.why}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-xs text-muted-foreground">
+        One find per identification. Sharp, close and in daylight works best.
+      </p>
+    </div>
+  );
+}
+
+/** After an answer: how to go from a suggestion to a name you can rely on. */
+function WhatNext() {
+  return (
+    <div className="mt-6 rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-4 text-sm text-[#5c4a3a]"
+         data-testid="card-what-next">
+      <p className="font-semibold text-[#4a3728]">Suggestions, then specimens, then DNA</p>
+      <ol className="mt-2 list-decimal pl-5 space-y-1">
+        <li>Compare your find with the closest specimens above: cap, underside and stem.</li>
+        <li>
+          If the species is unclear, the genus often isn't. Go by the finest rank with a firm
+          answer.
+        </li>
+        <li>
+          DNA settles it. MycoMap offers{" "}
+          <a className="underline" href={SEQUENCING_URL} target="_blank" rel="noreferrer">
+            free DNA sequencing
+          </a>
+          ; once validated, your find joins the reference set.
+        </li>
+      </ol>
     </div>
   );
 }

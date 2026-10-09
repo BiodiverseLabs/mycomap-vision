@@ -100,6 +100,8 @@ export interface ModelsInfo {
     note: string;
     embedded_photos: number;
     photos_per_second: number | null;
+    /** A fine-tuned model learned from records validated up to this date (ISO). */
+    trained_through?: string | null;
   }[];
   methods: string[];
   ready: string[];
@@ -125,7 +127,15 @@ export interface Stats {
     fresh_for_showing: boolean;
   };
   names: number;
+  /** Names that are temporary codes: species known from DNA, not yet formally described. */
+  names_provisional?: number;
   names_by_records: Record<string, number>;
+  /** Projects that marked the reference records green. */
+  projects?: number;
+  /** People whose photos are in the reference records. */
+  photographers?: number;
+  /** Records DNA-verified in the week to the newest validation (ISO dates). */
+  recent_week?: { records: number; from: string; through: string } | null;
 }
 
 export interface ScoreRun {
