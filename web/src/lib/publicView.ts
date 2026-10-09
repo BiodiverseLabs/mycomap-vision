@@ -109,6 +109,29 @@ export const SAFETY_LINE = "Never eat a mushroom based on this identification.";
 export const SEQUENCING_URL = "https://mycomap.org/network";
 export const JOIN_URL = "https://mycomap.org/join";
 
+/** Where researchers go on this site. The Research section's routes aren't settled yet:
+ *  change this one line when they are. */
+export const RESEARCH_PATH = "/models";
+
+/** What to photograph, in the order that helps most. Underside and stem base separate many
+ *  look-alikes that the cap alone can't. */
+export const PHOTO_CHECKLIST: { what: string; why: string }[] = [
+  { what: "Cap from above", why: "colour, texture, shape" },
+  { what: "Underside", why: "gills, pores or teeth" },
+  { what: "Whole stem, with its base", why: "ring, cup or bulb" },
+  { what: "Cut in half, top to bottom", why: "flesh and any colour change" },
+  { what: "Where it grows", why: "wood, soil or moss, and nearby trees" },
+];
+
+/** The newest week's new DNA-verified records as a sentence, or null when there were none
+ *  (or the server doesn't count them): no number is better than a made-up one. */
+export function recentWeekLine(week: { records: number; through: string } | null | undefined): string | null {
+  if (!week || week.records <= 0) return null;
+  const n = week.records.toLocaleString("en-US");
+  return `${n} North American record${week.records === 1 ? " was" : "s were"} DNA-verified in the ` +
+    `week to ${longDate(week.through)}.`;
+}
+
 /** "2026-09-07" -> "7 September 2026": the date as written, with no time zone shift. */
 export function longDate(iso: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);

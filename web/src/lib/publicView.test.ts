@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, identifyGate, LIKELY_COPY, longDate, modelName, releaseNote, sendWaitingInLine, shareWords, showsPaper } from "./publicView";
+import { coverageWords, headline, identifyGate, LIKELY_COPY, longDate, modelName, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsPaper } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -124,4 +124,14 @@ test("a model's release note says what it learned from only when it was fine-tun
     "records validated up to 7 September 2026. Compares your photos with 152,915 reference photos.");
   assert.equal(releaseNote({ backbone: "bioclip-2", embedded_photos: 10, trained_through: null }),
     "BioCLIP 2. Compares your photos with 10 reference photos.");
+});
+
+test("the newest week's count is said only when there is one", () => {
+  assert.equal(recentWeekLine({ records: 286, through: "2026-10-06" }),
+    "286 North American records were DNA-verified in the week to 6 October 2026.");
+  assert.equal(recentWeekLine({ records: 1, through: "2026-10-06" }),
+    "1 North American record was DNA-verified in the week to 6 October 2026.");
+  assert.equal(recentWeekLine({ records: 0, through: "2026-10-06" }), null);
+  assert.equal(recentWeekLine(null), null);
+  assert.equal(recentWeekLine(undefined), null, "an older server sends no count");
 });

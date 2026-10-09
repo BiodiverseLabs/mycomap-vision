@@ -26,7 +26,9 @@ import {
   type Specimen,
 } from "@/lib/api";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
-import { identifyGate, LIKELY_COPY, modelName, SAFETY_LINE, SEQUENCING_URL } from "@/lib/publicView";
+import {
+  identifyGate, LIKELY_COPY, modelName, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
+} from "@/lib/publicView";
 import { SafetyNote } from "@/components/SafetyNote";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
@@ -473,16 +475,6 @@ function EmptyState() {
     </div>
   );
 }
-
-// What to photograph, in the order that helps most. Underside and stem base separate many
-// look-alikes that the cap alone can't.
-const PHOTO_CHECKLIST: { what: string; why: string }[] = [
-  { what: "Cap from above", why: "colour, texture, shape" },
-  { what: "Underside", why: "gills, pores or teeth" },
-  { what: "Whole stem, with its base", why: "ring, cup or bulb" },
-  { what: "Cut in half, top to bottom", why: "flesh and any colour change" },
-  { what: "Where it grows", why: "wood, soil or moss, and nearby trees" },
-];
 
 function PhotoChecklist() {
   return (

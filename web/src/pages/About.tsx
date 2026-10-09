@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/Layout";
 import { SafetyNote } from "@/components/SafetyNote";
 import { api, num, pct, type Stats } from "@/lib/api";
 import {
-  headline, JOIN_URL, longDate, modelName, releaseNote, SEQUENCING_URL, shareWords,
+  headline, JOIN_URL, modelName, recentWeekLine, releaseNote, SEQUENCING_URL, shareWords,
 } from "@/lib/publicView";
 
 const DANISH_STUDY_URL = "https://pmc.ncbi.nlm.nih.gov/articles/PMC8779018/";
@@ -173,17 +173,14 @@ function Contributors({ s }: { s?: Stats }) {
 }
 
 function BecomesReference({ s }: { s?: Stats }) {
-  const week = s?.recent_week;
+  const week = recentWeekLine(s?.recent_week);
   return (
     <Block title="Your sequenced find becomes a reference" testId="section-becomes-reference">
       <p>
         When a find is sequenced and its DNA name is validated in a MycoMap project, it joins
         the reference set the next night, with its photos. From then on Vision can match the
         next find like it.
-        {week && week.records > 0 && (
-          <> {num(week.records)} North American records were DNA-verified in the week to{" "}
-          {longDate(week.through)}.</>
-        )}{" "}
+        {week && ` ${week}`}{" "}
         <ExternalLink href={SEQUENCING_URL}>How to get a find sequenced</ExternalLink>.
       </p>
     </Block>
