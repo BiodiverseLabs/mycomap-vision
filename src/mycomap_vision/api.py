@@ -225,7 +225,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                nightly_steps: "nightly.Steps | None" = None,
                nightly_fetch_pending: Callable[[], tuple[list[dict], str]] | None = None,
                photo_fetcher: Callable[[], object] | None = None,
-               paper_file: Path = PAPER_FILE) -> FastAPI:
+               paper_file: Path = PAPER_FILE,
+               experiments_dir: Path | None = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -491,6 +492,34 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         from . import prospective
         with db_lock:
             return {"models": prospective.report(conn)}
+
+    @app.get("/api/benchmarks")
+    def benchmarks():
+        """Held-out benchmark results imported with mv benchmark-import (aggregates only)."""
+        from . import benchmark_io
+        with db_lock:
+            return {"benchmarks": benchmark_io.published(conn)}
+
+    @app.get("/api/experiments")
+    def experiments_list():
+        """The experiment registry (docs/experiments), front matter only. Members only."""
+        from . import experiments
+        found = experiments.load_all(experiments_dir or experiments.EXPERIMENTS_DIR)
+        return JSONResponse({"experiments": [experiments.summary(e) for e in found]},
+                            headers={"Cache-Control": "private, no-store"})
+
+    @app.get("/api/experiments/{slug}")
+    def experiment(slug: str):
+        from . import experiments
+        if not experiments.SLUG.match(slug):
+            raise HTTPException(404, "no such experiment")
+        found = {e.slug: e for e in experiments.load_all(experiments_dir
+                                                         or experiments.EXPERIMENTS_DIR)}
+        if slug not in found:
+            raise HTTPException(404, "no such experiment")
+        e = found[slug]
+        return JSONResponse({**experiments.summary(e), "markdown": e.body},
+                            headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/paper")
     def paper():

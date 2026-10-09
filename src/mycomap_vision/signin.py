@@ -44,8 +44,13 @@ from . import config
 
 MODES = ("off", "identify", "all")
 # Never for signed-out visitors, even when the site is open (Steve, 2026-10-09: the paper
-# draft is for mycomap.org members only).
-MEMBERS_ONLY = ("/api/paper",)
+# draft and the experiment registry are for mycomap.org members only). A path and everything
+# under it.
+MEMBERS_ONLY = ("/api/paper", "/api/experiments")
+
+
+def members_only(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in MEMBERS_ONLY)
 SESSION_COOKIE = "mv_session"
 NONCE_COOKIE = "mv_signin"
 NONCE_TTL_SECONDS = 600
@@ -222,7 +227,7 @@ class SigninConfig:
         if self.mode == "off" or path in ("/api/health", "/api/me") or path.startswith("/auth/"):
             return False
         if self.mode == "identify":
-            return (method == "POST" and path == "/api/identify") or path in MEMBERS_ONLY
+            return (method == "POST" and path == "/api/identify") or members_only(path)
         return True
 
     def authorize_url(self, nonce: str) -> str:

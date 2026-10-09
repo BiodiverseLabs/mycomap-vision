@@ -1,21 +1,16 @@
 import { Link, useLocation } from "wouter";
-import { useEffect, useState } from "react";
-import { ArrowUpRight, Menu, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowUpRight, ChevronDown, Menu, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { api, signInUrl, type Me } from "@/lib/api";
-import { showsPaper } from "@/lib/publicView";
+import { isResearchPath, PUBLIC_NAV, researchNav } from "@/lib/research";
 
 // Header and footer follow mycomap.org's PublicLayout and MainNavigation so the
 // two sites read as one: sticky white header, logo + "MycoMap" in brown, grey
 // links that turn myco-green, brown gradient footer.
 
-const NAV = [
-  { href: "/", label: "Identify" },
-  { href: "/models", label: "Models" },
-  { href: "/data", label: "Data" },
-  { href: "/about", label: "How it works" },
-];
-const PAPER = { href: "/paper", label: "Paper in Progress" };
+// The menu (Steve, 2026-10-09): the tool and how to help first; everything detailed under
+// Research (lib/research.ts).
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -31,7 +26,7 @@ function Header() {
   const [location] = useLocation();
   const [open, setOpen] = useState(false);
   const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
-  const nav = showsPaper(me.data) ? [...NAV, PAPER] : NAV;
+  const research = researchNav(me.data);
   const isActive = (href: string) => (href === "/" ? location === "/" : location.startsWith(href));
   const cls = (href: string) =>
     `px-3 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -52,11 +47,12 @@ function Header() {
               </span>
             </Link>
             <nav className="hidden lg:flex items-center gap-1">
-              {nav.map((n) => (
+              {PUBLIC_NAV.map((n) => (
                 <Link key={n.href} href={n.href} className={cls(n.href)}>
                   {n.label}
                 </Link>
               ))}
+              <ResearchMenu items={research} active={isResearchPath(location)} location={location} />
             </nav>
           </div>
           <div className="flex items-center gap-2">
@@ -78,8 +74,14 @@ function Header() {
         </div>
         {open && (
           <nav className="lg:hidden pb-3 flex flex-col gap-1" onClick={() => setOpen(false)}>
-            {nav.map((n) => (
+            {PUBLIC_NAV.map((n) => (
               <Link key={n.href} href={n.href} className={cls(n.href)}>
+                {n.label}
+              </Link>
+            ))}
+            <Link href="/research" className={`${cls("/research")} mt-1`}>Research</Link>
+            {research.map((n) => (
+              <Link key={n.href} href={n.href} className={`${cls(n.href)} ml-4`}>
                 {n.label}
               </Link>
             ))}
@@ -90,6 +92,45 @@ function Header() {
         )}
       </div>
     </header>
+  );
+}
+
+/** The Research dropdown: its overview first, then each part. Closes on a click outside, on
+ *  Escape and when the page changes. */
+function ResearchMenu({ items, active, location }: {
+  items: { href: string; label: string }[]; active: boolean; location: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => setOpen(false), [location]);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => { if (!box.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", away); document.removeEventListener("keydown", esc); };
+  }, [open]);
+  const item = (here: boolean) => `block px-3 py-2 rounded-md text-sm ${
+    here ? "bg-myco-green/10 text-myco-green" : "text-gray-700 hover:text-myco-green hover:bg-myco-green/5"}`;
+  return (
+    <div className="relative" ref={box}>
+      <button
+        onClick={() => setOpen(!open)} aria-expanded={open} aria-haspopup="menu"
+        className={`inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+          active ? "bg-myco-green/10 text-myco-green" : "text-gray-700 hover:text-myco-green hover:bg-myco-green/5"}`}
+      >
+        Research <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div role="menu" className="absolute left-0 top-full mt-1 w-60 rounded-lg border border-myco-brown/10 bg-white p-1 shadow-lg">
+          <Link href="/research" className={item(location === "/research")}>Overview</Link>
+          {items.map((n) => (
+            <Link key={n.href} href={n.href} className={item(location.startsWith(n.href))}>{n.label}</Link>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -141,6 +182,7 @@ function Footer() {
               ["https://mycomap.org", "MycoMap.org"],
               ["https://mycomap.org/network", "Free sequencing"],
               ["https://mycomap.org/protocols", "Participation protocols"],
+              ["https://mycomap.org/join", "Support MycoMap, a nonprofit"],
             ].map(([href, label]) => (
               <li key={href}>
                 <a href={href} className="text-white/70 hover:text-myco-green transition-colors">

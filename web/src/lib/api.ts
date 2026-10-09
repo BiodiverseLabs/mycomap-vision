@@ -1,5 +1,7 @@
 // Types and calls for the MycoMap Vision API (`mv serve`, proxied at /api).
 
+import type { PublishedBenchmark } from "./compareView";
+import type { Experiment, ExperimentSummary } from "./experiments";
 import { modelName, sendWaitingInLine } from "./publicView";
 
 export type Rank = "family" | "genus" | "species";
@@ -162,6 +164,8 @@ export interface RunReport {
 const METHOD_LABEL: Record<string, string> = {
   nearest: "nearest specimen",
   "species-mean": "species average",
+  "nearest+mean": "nearest + species average (experimental)",
+  "nearest-mix": "nearest specimen, photo votes",
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",
   linear: "trained classifier",
@@ -229,6 +233,11 @@ export const api = {
     return typeof body.next === "string" ? body.next : "/";
   },
   prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
+  /** Held-out benchmark results imported on the server (aggregates only). */
+  benchmarks: () => getJson<{ benchmarks: PublishedBenchmark[] }>("/api/benchmarks"),
+  /** The experiment registry, for signed-in members only. */
+  experiments: () => getJson<{ experiments: ExperimentSummary[] }>("/api/experiments"),
+  experiment: (slug: string) => getJson<Experiment>(`/api/experiments/${encodeURIComponent(slug)}`),
   /** The paper draft (Markdown), for signed-in members only. */
   paper: () => getJson<{ markdown: string }>("/api/paper"),
   models: () => getJson<ModelsInfo>("/api/models"),
