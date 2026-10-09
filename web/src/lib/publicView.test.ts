@@ -33,6 +33,12 @@ test("visitors read a model's name, not its file name", () => {
   assert.equal(modelName("bioclip-2-ft-sample"), "BioCLIP 2, fine-tuned on a sample (test model)");
   assert.equal(modelName("external:inat-cv"), "iNaturalist's computer vision");
   assert.equal(modelName("dinov3-l16-512"), "dinov3-l16-512");
+  assert.equal(modelName("picek-fungitastic-beit-b384-20261012-080000"),
+    "Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records");
+  assert.equal(modelName("picek-fungitastic-beit-b384-smoke"),
+    "Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records (test model)");
+  assert.equal(modelName("picek-unknown-preset-20261012-080000"),
+    "picek-unknown-preset-20261012-080000");
 });
 
 const run = (id: number, comparison_id: string, backbone: string, method: string,

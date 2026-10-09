@@ -118,11 +118,13 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         allow_dirty=args.allow_dirty,
                                         allow_unpushed=args.allow_unpushed,
                                         spot=args.spot, spot_max_price=args.spot_max_price,
-                                        resume=args.resume), indent=2))
+                                        resume=args.resume, picek=_split(args.picek)),
+                     indent=2))
 
 
 # What a resumed run takes from the run itself, not from the command line.
-RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records")
+RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records",
+                   "picek")
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -144,7 +146,7 @@ def cmd_aws_train_job(conn, args) -> None:
                           args.run_id, size=args.size, test_days=args.test_days,
                           batch_size=args.batch_size, readers=args.readers,
                           finetune=_split(args.finetune), sample_records=args.sample_records,
-                          should_stop=should_stop, interrupted=watcher,
+                          picek=_split(args.picek), should_stop=should_stop, interrupted=watcher,
                           resume=trainer.RunFiles(store.client, store.bucket)
                           if args.resume else None)
     if watcher is not None:
@@ -210,7 +212,7 @@ def cmd_compare(conn, args) -> None:
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
                               max_test=args.max_test, name_scores=args.name_scores,
-                              sets=not args.no_sets)
+                              sets=not args.no_sets, per_image=args.per_image)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -627,9 +629,73 @@ def print_heldout_report(out: dict) -> None:
     from .heldout_summary import format_summary
     print(format_summary(out["summary"]))
     print()
+    print(format_f1_and_per_image(out.get("models") or {}))
+    print()
     print(json.dumps(out["summary"], indent=2))
     print(f"-> {out['files']['json']}")
     print(f"-> {out['files']['csv']}")
+
+def format_f1_and_per_image(models: dict) -> str:
+    """Species macro-F1 and per-image vs per-record species top-1 for each model (the
+    numbers the Picek group's papers report), from the report's models section."""
+    pct = lambda v: "   -  " if v is None else f"{100 * v:5.1f}%"  # noqa: E731
+    lines = ["Species macro-F1, and species top-1 per record vs per photo:",
+             f"  {'model':<56} {'macro-F1':>8} {'top-1/record':>12} {'top-1/photo':>11} "
+             f"{'F1/photo':>8}"]
+    for name, m in models.items():
+        rec = (m.get("species") or {}).get("top1") or {}
+        img = m.get("per_image") or {}
+        lines.append(f"  {name:<56} {pct((m.get('species_macro_f1') or {}).get('macro_f1')):>8} "
+                     f"{pct(rec.get('rate')):>12} "
+                     f"{pct((img.get('species') or {}).get('rate')):>11} "
+                     f"{pct(img.get('species_macro_f1')):>8}")
+    return "\n".join(lines)
+
+
+def cmd_picek_train(conn, args) -> None:
+    """Train the Picek group's classifier recipe on our records (picek.py). Full runs belong
+    on a GPU instance; here: a smoke test (--max-steps) or a short run."""
+    from datetime import datetime
+
+    from . import picek
+    preset = args.preset
+    name = args.name or f"picek-{preset}-{datetime.now():%Y%m%d-%H%M%S}"
+    cfg = picek.PicekConfig(preset=preset, epochs=args.epochs, lr=args.lr,
+                            effective_batch=args.effective_batch, micro_batch=args.micro_batch,
+                            val_days=args.val_days, val_max_photos=args.val_max_photos,
+                            workers=args.workers, max_steps=args.max_steps,
+                            grad_checkpointing=not args.no_grad_checkpointing,
+                            seed=args.seed)
+    meta = picek.train(conn, open_store(args.source, config.DATA_DIR), args.size, name, cfg,
+                       test_days=args.test_days)
+    print(json.dumps({k: v for k, v in meta.items() if k != "history"}, indent=2))
+    print(f"next: mv embed --backbone {name} --size {args.size}, then mv compare --backbones "
+          f"{name} --methods classifier,classifier+month,classifier+month+place --per-image, "
+          f"and mv heldout predict --backbone {name} --methods classifier,classifier+month")
+
+
+def cmd_picek_bench(conn, args) -> None:
+    """Measure the replication's speed: the data loader alone (CPU) and the GPU alone."""
+    from . import picek
+    out = {}
+    if not args.gpu_only:
+        store = open_store(args.source, config.DATA_DIR)
+        items = [(int(pid), path, 0) for pid, path in conn.execute(
+            "select photo_id, path from photo_copies where store = ? and size = ? "
+            "order by photo_id limit ?", (store.location, args.size, args.photos))]
+        out["loader"] = [picek.bench_loader(store, items, args.preset, w, args.photos)
+                         for w in _split_ints(args.workers)]
+    if not args.loader_only:
+        out["gpu"] = [picek.bench_gpu(args.preset, args.classes, mb, args.steps, gc)
+                      for mb in _split_ints(args.micro_batch)
+                      for gc in ((True, False) if args.both_checkpointing
+                                 else (not args.no_grad_checkpointing,))]
+    print(json.dumps(out, indent=2))
+
+
+def _split_ints(v: str) -> list[int]:
+    return [int(x) for x in _split(v)]
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
@@ -703,6 +769,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sample-records", type=int,
                    help="rehearsal: run everything on this many random records only "
                         "(its results can't be merged home)")
+    p.add_argument("--picek", default="",
+                   help="also train the Picek group's classifier recipe (picek.py): presets "
+                        "as preset[@epochs], e.g. fungitastic-beit-b384@15; add the methods "
+                        "classifier,classifier+month to score it")
     p.add_argument("--allow-over-time", action="store_true",
                    help="launch even when the time estimate exceeds --max-hours (the run "
                         "stops at the limit and keeps the stages it finished)")
@@ -733,6 +803,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--readers", type=int, default=16, help="parallel photo reads from S3")
     p.add_argument("--finetune", default="")
+    p.add_argument("--picek", default="")
     p.add_argument("--sample-records", type=int)
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
@@ -754,6 +825,42 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--max-steps", type=int)
     p.add_argument("--test-days", type=int, default=28)
+
+    from .picek import PRESETS
+    p = sub.add_parser("picek-train", help="train the Picek group's fungi classifier recipe "
+                                           "(FungiTastic / DF20) on our records (picek.py)")
+    p.add_argument("--preset", default="fungitastic-beit-b384", choices=sorted(PRESETS))
+    p.add_argument("--name", help="default: picek-<preset>-<date-time>")
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--epochs", type=int, help="default: the preset's (50; DF20 100)")
+    p.add_argument("--lr", type=float, help="default: the preset's")
+    p.add_argument("--max-steps", type=int, help="stop after this many optimizer steps (smoke)")
+    p.add_argument("--effective-batch", type=int, default=256)
+    p.add_argument("--micro-batch", type=int, default=16)
+    p.add_argument("--val-days", type=int, default=28,
+                   help="validation slice: the last days before the comparison cutoff")
+    p.add_argument("--val-max-photos", type=int, help="cap the validation pass (smoke)")
+    p.add_argument("--workers", type=int, default=6)
+    p.add_argument("--no-grad-checkpointing", action="store_true")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--test-days", type=int, default=28)
+
+    p = sub.add_parser("picek-bench", help="the replication's speed: data loader (CPU) and "
+                                           "GPU measured apart")
+    p.add_argument("--preset", default="fungitastic-beit-b384", choices=sorted(PRESETS))
+    p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--photos", type=int, default=512)
+    p.add_argument("--workers", default="1,4", help="loader worker counts to try")
+    p.add_argument("--micro-batch", default="16", help="micro-batch sizes to try on the GPU")
+    p.add_argument("--classes", type=int, default=18000)
+    p.add_argument("--steps", type=int, default=20)
+    p.add_argument("--no-grad-checkpointing", action="store_true")
+    p.add_argument("--both-checkpointing", action="store_true",
+                   help="measure with and without gradient checkpointing")
+    p.add_argument("--loader-only", action="store_true")
+    p.add_argument("--gpu-only", action="store_true")
 
     p = sub.add_parser("aws-pull-trainer", help="bring a trainer run home (or the stages a "
                                                 "stopped one finished): its complete "
@@ -785,6 +892,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="also score names s.l. and as species complexes (name_equiv.py, beta)")
     p.add_argument("--no-sets", action="store_true",
                    help="don't fit likely sets (likely.py) into the calibration")
+    p.add_argument("--per-image", action="store_true",
+                   help="also answer every test photo on its own (top-1 per rank and species "
+                        "macro-F1 per photo, as the Picek group reports)")
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
                                       "any that fail), then compare them with the baselines")
@@ -1018,6 +1128,8 @@ def main(argv: list[str] | None = None) -> int:
         "aws-train-job": cmd_aws_train_job,
         "aws-pull-trainer": cmd_aws_pull_trainer,
         "finetune": cmd_finetune,
+        "picek-train": cmd_picek_train,
+        "picek-bench": cmd_picek_bench,
         "embed": cmd_embed,
         "archive-embeddings": cmd_archive_embeddings,
         "compare": cmd_compare,

@@ -54,6 +54,11 @@ INDEX_TABLES = ("embeddings", "embed_runs", "finetunes", "eval_runs")
 # speeds (progress.json records them per stage) after the first run.
 EMBED_RATES = {"bioclip-2": 55.0, "dinov3-l16-512": 18.8}
 FINETUNE_RATES = {"bioclip-2": 83.0}   # photos seen per second while training
+# The Picek replication (picek.py), training photos per second on the instance. NOT yet
+# measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
+# (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).
+PICEK_RATES = {"fungitastic-beit-b384": 45.0, "fungitastic-beit-b224": 55.0,
+               "vit-b384-ce": 45.0, "df20-vit-l384": 30.0}
 UNMEASURED_EMBED_RATE = 15.0           # a backbone never timed here: assume a slow one
 UNMEASURED_FINETUNE_RATE = 40.0
 L4_FACTOR = 1.5
@@ -72,15 +77,22 @@ def finetuned_name(base: str, run_id: str) -> str:
 
 @dataclass
 class Stage:
-    kind: str                 # "embed" or "finetune"
+    kind: str                 # "embed", "finetune" or "picek" (picek.train)
     name: str                 # what the stage produces (a backbone's storage name)
     spec: str                 # what the loader is given
     base: str | None = None   # for a fine-tune and its embedding: the backbone it starts from
 
 
-def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str) -> list[Stage]:
+def picek_name(spec: str, run_id: str) -> str:
+    from .picek import parse_spec
+    return f"picek-{parse_spec(spec)[0]}-{run_id}"
+
+
+def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str,
+                picek: list[str] | None = None) -> list[Stage]:
     """The order a run works in. Each backbone to fine-tune comes first, followed directly
-    by its fine-tune and the fine-tuned model's embedding; the other backbones follow. If
+    by its fine-tune and the fine-tuned model's embedding; then each Picek replication
+    (`picek`: preset[@epochs], picek.py) and its embedding; the other backbones follow. If
     time runs out, what's left undone is the extra backbones, not the fine-tune."""
     from .models import storage_name
     specs = {}
@@ -94,12 +106,18 @@ def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str) -
         if n not in ft:
             ft.append(n)
     stages = []
-    for n in ft + [n for n in specs if n not in ft]:
+    for n in ft:
         stages.append(Stage("embed", n, specs[n]))
-        if n in ft:
-            name = finetuned_name(n, run_id)
-            stages.append(Stage("finetune", name, name, base=n))
-            stages.append(Stage("embed", name, name, base=n))
+        name = finetuned_name(n, run_id)
+        stages.append(Stage("finetune", name, name, base=n))
+        stages.append(Stage("embed", name, name, base=n))
+    for spec in picek or []:
+        name = picek_name(spec, run_id)
+        stages.append(Stage("picek", name, spec))
+        stages.append(Stage("embed", name, name, base=name))
+    for n in specs:
+        if n not in ft:
+            stages.append(Stage("embed", n, specs[n]))
     return stages
 
 
@@ -114,6 +132,22 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
     rows, total = [], SETUP_HOURS + COMPARE_HOURS
     for s in stages:
         key = s.base or s.name
+        if s.kind == "picek":
+            from .picek import parse_spec
+            preset, n_epochs = parse_spec(s.spec)
+            rate = PICEK_RATES.get(preset)
+            hours = photos * n_epochs / (rate or UNMEASURED_FINETUNE_RATE) / 3600
+            total += hours
+            rows.append({"stage": f"{s.kind} {s.name} ({n_epochs} epochs)",
+                         "photos_per_second": rate or UNMEASURED_FINETUNE_RATE,
+                         "measured": False, "hours": round(hours, 1)})
+            continue
+        if s.kind == "embed" and key.startswith("picek-"):
+            hours = photos / 150.0 / 3600 * factor        # eval at 384 px, loader-bound
+            total += hours
+            rows.append({"stage": f"{s.kind} {s.name}", "photos_per_second": 150.0,
+                         "measured": False, "hours": round(hours, 1)})
+            continue
         if s.kind == "embed":
             rate = EMBED_RATES.get(key)
             work = photos
@@ -283,11 +317,11 @@ def restore_finished(conn: sqlite3.Connection, files, run_id: str, stages: list[
             prev = done.get((s.kind, s.name))
             if prev is None:
                 continue
-            if s.kind == "finetune":
+            if s.kind in ("finetune", "picek"):
                 models_dir = data_dir / "models"
                 got = all(files.fetch(f"{prefix}models/{s.name}{suffix}",
                                       models_dir / f"{s.name}{suffix}")
-                          for suffix in (".pt", ".json"))
+                          for suffix in model_files(s.kind))
                 if not got or not _remote_is_finetune(conn, s.name):
                     log(f"[{s.name}] its weights or index row are missing: fine-tuning again")
                     continue
@@ -325,7 +359,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             upload: Callable[[Path, str], None], run_id: str, size: str = "large",
             test_days: int = 28, batch_size: int = 64, readers: int = 16,
             loader=None, data_dir: Path | None = None, finetune: list[str] | None = None,
-            finetuner=None, sample_records: int | None = None,
+            finetuner=None, sample_records: int | None = None, picek: list[str] | None = None,
+            picek_trainer=None,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
@@ -340,7 +375,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
-    stages = plan_stages(backbones, finetune, run_id)
+    stages = plan_stages(backbones, finetune, run_id, picek)
     # The laptop refuses to ship such a manifest (aws.check_trainer_request); this is the
     # instance's own check, before anything is embedded or trained.
     holdouts.check_clean(conn, "the trainer run")
@@ -398,7 +433,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             continue
         # A stage whose input didn't come about: stopped with it, or failed with it.
         needs = None
-        if s.kind == "finetune" and s.base not in embedded:
+        if s.kind == "picek":
+            pass                         # trains from the photos: needs no embedding first
+        elif s.kind == "finetune" and s.base not in embedded:
             needs, why = s.base, f"{s.base} was not embedded"
         elif s.kind == "embed" and s.base and s.name not in finetuned:
             needs, why = s.name, f"{s.name} was not fine-tuned"
@@ -408,7 +445,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                 stopped.setdefault(s.name, why)
                 progress.stage(i, status="stopped", error=why)
             else:
-                if s.kind == "finetune":
+                if s.kind in ("finetune", "picek"):
                     failed[s.name] = why
                 progress.stage(i, status="skipped", error=why)
             continue
@@ -447,11 +484,16 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                 progress.stage(i, status="failed", error=failed[s.name], skipped=len(bad))
         else:
             try:
-                meta = (finetuner or _default_finetuner(store, size, test_days, log,
-                                                        stopping))(
-                    conn, s.base, s.name, root, data_dir / "models")
+                if s.kind == "picek":
+                    meta = (picek_trainer or _default_picek_trainer(store, size, test_days, log,
+                                                                    stopping))(
+                        conn, s.spec, s.name, data_dir / "models")
+                else:
+                    meta = (finetuner or _default_finetuner(store, size, test_days, log,
+                                                            stopping))(
+                        conn, s.base, s.name, root, data_dir / "models")
                 publish([(data_dir / "models" / f"{s.name}{suffix}",
-                          f"{prefix}models/{s.name}{suffix}") for suffix in (".pt", ".json")])
+                          f"{prefix}models/{s.name}{suffix}") for suffix in model_files(s.kind)])
                 finetuned[s.name] = meta
                 progress.stage(i, status="done", finished_at=_now(),
                                seconds=round(time.monotonic() - t0, 1),
@@ -505,6 +547,22 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
 
 FINETUNE_KEYS = ("base", "trained_through", "records", "photos", "species", "steps",
                  "minutes", "final_loss")
+PICEK_FILES = (".pt", ".json", ".classifier.npz", ".records.csv")
+
+
+def model_files(kind: str) -> tuple[str, ...]:
+    """The files a trained model stage leaves in models/: weights and metadata, and for a
+    Picek classifier also its head, temperature and metadata counts, and its records."""
+    return PICEK_FILES if kind == "picek" else (".pt", ".json")
+
+
+def _default_picek_trainer(store, size, test_days, log, should_stop=None):
+    def run(conn, spec, name, models_dir):
+        from .picek import PicekConfig, parse_spec, train
+        preset, epochs = parse_spec(spec)
+        return train(conn, store, size, name, PicekConfig(preset=preset, epochs=epochs),
+                     test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
+    return run
 
 
 def _default_finetuner(store, size, test_days, log, should_stop=None):
@@ -555,6 +613,7 @@ def resume_request(doc: dict) -> dict:
     spec_of = {s["name"]: s["spec"] for s in stages if s["kind"] == "embed" and not s.get("base")}
     finetune = [spec_of[s["base"]] for s in stages if s["kind"] == "finetune"]
     return {"backbones": list(spec_of.values()), "finetune": finetune,
+            "picek": [s["spec"] for s in stages if s["kind"] == "picek"],
             "methods": list(doc.get("methods") or []), "size": doc.get("size") or "large",
             "test_days": int(doc.get("test_days") or 28),
             "sample_records": doc.get("sample_records"),
@@ -619,6 +678,11 @@ def merge_results(conn: sqlite3.Connection, remote_path: Path, staged: Path, res
         if not all(p.is_file() for p in srcs):
             refused[name] = "its weights are not staged"
             continue
+        extra = [staged.parent / "models" / f"{name}{suffix}" for suffix in PICEK_FILES[2:]]
+        if name.startswith("picek-") and not all(p.is_file() for p in extra):
+            refused[name] = "its classifier head or records list is not staged"
+            continue
+        srcs += [p for p in extra if p.is_file()]
         dest = data_dir / "models"
         dest.mkdir(parents=True, exist_ok=True)
         for src in srcs:

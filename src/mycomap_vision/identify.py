@@ -27,8 +27,8 @@ import numpy as np
 from . import config, likely
 from .embed import normalise
 from .serving import map_embeddings
-from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
-                       with_rows)
+from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, make_method,
+                       rank_scores, with_rows)
 from .licenses import sized_url
 
 CONFIDENCE_TEMPERATURE = 0.02
@@ -211,7 +211,7 @@ class Identifier:
         by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()})
         records = with_rows(by_id, row_of)
         self.index = build_index(records)
-        self.model = METHODS[method]()
+        self.model = make_method(method, backbone)
         self.uses_context = getattr(self.model, "needs_context", False)
         self.loaded_from_cache = fit_cached(
             self.model, vecs, self.index, records,

@@ -319,7 +319,7 @@ MV_DATA_DIR=/opt/mv/data PYTHONPATH=/opt/mv/src PYTHONUNBUFFERED=1 timeout {job_
   .venv/bin/python -m mycomap_vision.cli aws-train-job \\
   --run-id {run_id} --backbones {backbones} --methods {methods} --size {size} \\
   --test-days {test_days} --stop-after-hours {stop_hours} \\
-  --source "s3://$BUCKET"{finetune_arg}{sample_arg}{spot_arg}{resume_arg}
+  --source "s3://$BUCKET"{finetune_arg}{picek_arg}{sample_arg}{spot_arg}{resume_arg}
 """
 
 
@@ -349,7 +349,8 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                              test_days: int = 28, finetune: list[str] | None = None,
                              sample_records: int | None = None,
                              code_version: str = "unknown", spot: bool = False,
-                             resume: bool = False, code_key: str = "code.tar.gz") -> str:
+                             resume: bool = False, code_key: str = "code.tar.gz",
+                             picek: list[str] | None = None) -> str:
     # The job is killed at max_hours, and stops itself STOP_MARGIN_HOURS before that so
     # it can upload what it finished; the backstop leaves 30 minutes on top for setup
     # and the log upload.
@@ -367,6 +368,7 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         backbones=",".join(backbones), methods=",".join(methods), size=size,
         test_days=test_days,
         finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "",
+        picek_arg=f" --picek {','.join(picek)}" if picek else "",
         sample_arg=f" --sample-records {int(sample_records)}" if sample_records else "",
         spot_arg=" --spot" if spot else "", resume_arg=" --resume" if resume else "")
 
@@ -456,7 +458,8 @@ def start_instance(ec2, args: dict, run_id: str) -> dict:
 
 
 def check_trainer_request(conn, backbones: list[str], methods: list[str], size: str,
-                          store_location: str, finetune: list[str] | None = None) -> int:
+                          store_location: str, finetune: list[str] | None = None,
+                          picek: list[str] | None = None) -> int:
     """Refuse a run that can't do anything useful, before anything is paid for. Returns
     how many photos there are to embed. A manifest whose records hold a benchmark's
     held-out record (holdouts.py) is never shipped to a trainer."""
@@ -477,6 +480,9 @@ def check_trainer_request(conn, backbones: list[str], methods: list[str], size: 
     for m in methods:
         if m not in METHODS:
             raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
+    from .picek import parse_spec
+    for spec in picek or []:
+        parse_spec(spec)                      # a known preset, a sane epoch count
     n = conn.execute("select count(*) from photo_copies where store = ? and size = ?",
                      (store_location, size)).fetchone()[0]
     if not n:
@@ -542,7 +548,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                    sample_records: int | None = None, allow_over_time: bool = False,
                    allow_dirty: bool = False, allow_unpushed: bool = False,
                    spot: bool = False, spot_max_price: float | None = None,
-                   resume: str | None = None, log=print) -> dict:
+                   resume: str | None = None, picek: list[str] | None = None,
+                   log=print) -> dict:
     """Check the request, the time it needs and the commit it ships, all before anything
     is paid for; then upload the code and the manifest and start the instance.
 
@@ -568,16 +575,18 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             raise ValueError(f"run {resume} is complete: nothing to resume")
         req = trainer.resume_request(prev)
         backbones, finetune, methods = req["backbones"], req["finetune"], req["methods"]
+        picek = req.get("picek") or []
         size, test_days, sample_records, done = (req["size"], req["test_days"],
                                                  req["sample_records"], req["done"])
         log(f"Resuming run {resume} (state {prev.get('state')}, last written "
             f"{prev.get('updated_at')}): its own backbones {', '.join(backbones)}, "
             f"fine-tune {', '.join(finetune) or 'none'}, methods {', '.join(methods)}, "
             f"{size} photos and its own manifest")
-    photos = check_trainer_request(conn, backbones, methods, size, f"s3://{b}/", finetune)
+    photos = check_trainer_request(conn, backbones, methods, size, f"s3://{b}/", finetune,
+                                   picek)
     names = [storage_name(x) for x in backbones]
     ft = [storage_name(x) for x in finetune or []]
-    plan = trainer.plan_stages(names, ft, resume or "<run>")
+    plan = trainer.plan_stages(names, ft, resume or "<run>", picek)
     left = [s for s in plan if (s.kind, s.name) not in done]
     if resume and not left:
         raise ValueError(f"every stage of run {resume} is done; only its comparison is "
@@ -630,7 +639,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                         if m.get("DeviceName") == root and "Ebs" in m), 100)
     user_data = render_trainer_user_data(run_id, names, methods, max_hours, b, size, test_days,
                                          ft, sample_records, code_version=sha, spot=spot,
-                                         resume=bool(resume), code_key=code_key)
+                                         resume=bool(resume), code_key=code_key,
+                                         picek=picek)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price),
                           run_id)
@@ -638,7 +648,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             "instance_type": instance_type, "market": "spot" if spot else "on-demand",
             "spot_max_price": spot_max_price, "resumed": bool(resume),
             "region": region(), "backbones": names,
-            "finetune": ft, "methods": methods, "sample_records": sample_records,
+            "finetune": ft, "picek": list(picek or []), "methods": methods,
+            "sample_records": sample_records,
             "code_version": sha, "max_hours": max_hours, "estimate_hours": est["total_hours"],
             "log": f"s3://{b}/runs/{run_id}/train.log",
             "progress": f"s3://{b}/runs/{run_id}/progress.json"}

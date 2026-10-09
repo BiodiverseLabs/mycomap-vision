@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config, guests, holdouts, likely, name_equiv, names, taxonomy
+from . import config, guests, holdouts, likely, metrics, name_equiv, names, taxonomy
 from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
@@ -249,10 +249,31 @@ def summarise_groups(groups: dict, largest: int = 12) -> list[dict]:
     return rows[:largest]
 
 
-def fit_method(vectors: np.ndarray, ref: list[Record], method: str):
+def make_method(method: str, backbone: str | None = None):
+    """A new instance of `method`. A method tied to its model (picek.Classifier: the
+    trained classifier's own head) is given the backbone's name to load it from."""
+    model = METHODS[method]()
+    bind = getattr(model, "for_backbone", None)
+    if bind is not None:
+        if backbone is None:
+            raise ValueError(f"method {method!r} needs the model it belongs to")
+        bind(backbone)
+    return model
+
+
+def method_applies(method: str, backbone: str) -> bool:
+    """False for a method tied to its own model (picek.Classifier) on a backbone that is
+    not such a model; every other pair applies."""
+    if not hasattr(METHODS[method], "for_backbone"):
+        return True
+    from .picek import is_classifier
+    return is_classifier(backbone)
+
+
+def fit_method(vectors: np.ndarray, ref: list[Record], method: str, backbone: str | None = None):
     """(index, fitted model) for the reference records; reusable across evaluations."""
     index = build_index(ref)
-    model = METHODS[method]()
+    model = make_method(method, backbone)
     if getattr(model, "needs_context", False):
         model.fit(vectors, index, records=ref)
     else:
@@ -280,13 +301,18 @@ def occurrence_leak_check(model, test: list[Record]) -> dict | None:
 
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
-             fitted=None, sets: bool = True, name_scores: bool = False) -> dict:
+             fitted=None, sets: bool = True, name_scores: bool = False,
+             per_image: bool = False) -> dict:
     """Score the test records. `fitted` (from fit_method) skips refitting, which matters
     for the trained methods. With `sets`, each rank's calibration also fits its likely
     set (likely.py): the probability floor for the highest useful coverage up to 90%,
     with that coverage cross-checked on held-back halves. With `name_scores`, the report
     adds `name_equivalence` (name_equiv.py, beta): top-1 species strict / s.l. / complex
-    and genus strict / s.l., next to the strict top-1 it never replaces."""
+    and genus strict / s.l., next to the strict top-1 it never replaces.
+
+    Species macro-F1 (`macro_f1`) is always reported beside top-1: the Picek group's papers
+    headline it (metrics.macro_f1). With `per_image`, `per_image` adds top-1 per rank and
+    species macro-F1 with every photo answered on its own, as their papers report it."""
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
@@ -304,6 +330,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     # Weekly batches are lumpy (one big project, one prolific observer), so results
     # are also kept per project and per observer at genus and species.
     groups = {"project": defaultdict(Counter), "observer": defaultdict(Counter)}
+    predicted: list[tuple[str, str]] = []        # species (truth, top-1), for macro-F1
     for rec in test:
         rows = rec.photo_rows[:1] if first_photo_only else rec.photo_rows
         if uses_context:
@@ -341,6 +368,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                     g = groups[kind][key]
                     g[f"{rank}_n"] += 1
                     g[f"{rank}_top1"] += top[:1] == [t]
+            if rank == "species":
+                predicted.append((t, top[0] if top else ""))
     out = {}
     for rank in RANKS:
         out[rank] = {k: {"n": c["n"], "top1": round(c["top1"] / c["n"], 4),
@@ -356,6 +385,10 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                                       for k in (("strict", "sl", "complex") if rank == "species"
                                                 else ("strict", "sl"))}}
                for rank, c in equiv.items()}}
+    out["macro_f1"] = {"species": _round(metrics.macro_f1(*zip(*predicted)) if predicted
+                                         else None), "n": len(predicted)}
+    if per_image:
+        out["per_image"] = per_image_scores(vectors, test, index, model)
     out["calibration"] = {
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
                "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
@@ -369,6 +402,37 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             if fit:
                 cal["sets"] = fit
     return out
+
+
+def _round(v):
+    return None if v is None else round(float(v), 4)
+
+
+def per_image_scores(vectors, test: list[Record], index: Index, model) -> dict:
+    """Each test photo answered on its own (the per-image numbers the Picek group reports
+    next to per-observation ones): top-1 per rank over photos, and species macro-F1."""
+    uses_context = getattr(model, "needs_context", False)
+    names = {rank: index.labels[rank] for rank in RANKS}
+    tally = Counter()
+    pairs: list[tuple[str, str]] = []
+    for rec in test:
+        for row in rec.photo_rows:
+            q = vectors[[row]]
+            scores = (model.species_scores(q, context_of(rec)) if uses_context
+                      else model.species_scores(q))
+            for rank in RANKS:
+                t = truth(rec, rank)
+                if not t:
+                    continue
+                top = top_labels(rank_scores(scores, index, rank), names[rank], 1)
+                tally[f"{rank}_n"] += 1
+                tally[f"{rank}_top1"] += top[:1] == [t]
+                if rank == "species":
+                    pairs.append((t, top[0] if top else ""))
+    return {**{rank: {"n": tally[f"{rank}_n"],
+                      "top1": _round(tally[f"{rank}_top1"] / tally[f"{rank}_n"])}
+               for rank in RANKS if tally[f"{rank}_n"]},
+            "species_macro_f1": _round(metrics.macro_f1(*zip(*pairs)) if pairs else None)}
 
 
 def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> dict | None:
@@ -509,7 +573,7 @@ def save_run(conn: sqlite3.Connection, comparison_id: str, backbone: str, method
 def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
             test_days: int = 28, max_test: int | None = None, seed: int = 0,
             embeddings_root=None, name_scores: bool = False, sets: bool = True,
-            log=print) -> dict:
+            per_image: bool = False, log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
@@ -530,11 +594,14 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
         ref_b, test_b = with_rows(ref, row_of), with_rows(test, row_of)
         for m in methods:
+            if not method_applies(m, b):
+                log(f"  {b} / {m}: skipped ({m} works only with a classifier of its own)")
+                continue
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
-            fitted = fit_method(vecs, ref_b, m)
+            fitted = fit_method(vecs, ref_b, m, backbone=b)
             extra = getattr(fitted[1], "scoreboard_extra", lambda: None)()
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted,
-                                  name_scores=name_scores, sets=sets)
+                                  name_scores=name_scores, sets=sets, per_image=per_image)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted,
                              sets=False)
             runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first,
@@ -572,7 +639,7 @@ def calibrate_sets(conn: sqlite3.Connection, comparison_id: str, backbone: str |
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
         ref_b, test_b = with_rows(shared.ref, row_of), with_rows(shared.test, row_of)
         log(f"  {b} / {m}: {len(test_b):,} test records")
-        res = evaluate(vecs, ref_b, test_b, method=m, fitted=fit_method(vecs, ref_b, m))
+        res = evaluate(vecs, ref_b, test_b, method=m, fitted=fit_method(vecs, ref_b, m, b))
         if species_top1 is not None and abs(top1(res, "species") - species_top1) > 1e-4:
             raise RuntimeError(f"{b} / {m} scores {top1(res, 'species')} at species now, "
                                f"{species_top1} when published; run mv compare again")

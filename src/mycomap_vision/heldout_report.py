@@ -61,7 +61,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Iterable
 
-from . import config, heldout, names
+from . import config, heldout, metrics, names
 from .heldout import (NO_ANSWER, RANKS, SOURCE_OTHER_GENUS, SOURCES, TRUTH_ONE_WORD,
                       TRUTH_STATUSES, Labeller, Truth)
 
@@ -484,6 +484,50 @@ def summary(judged: dict[str, dict], ids: Iterable[str] | None = None,
     return out
 
 
+def species_macro_f1(judged_m: dict, truths: dict[str, Truth], labeller: Labeller) -> dict:
+    """Species macro-F1 of a model's top-1 answers (metrics.macro_f1; the Picek group's
+    headline number) over the records with a species answer key. An answer the strict
+    judgement counts as right takes the truth's label; others their own label."""
+    pairs = []
+    for oid, ranks in judged_m.items():
+        if "species" not in ranks:
+            continue
+        hit1, _h5, name, _conf = ranks["species"]
+        want = truths[oid].species
+        pairs.append((want, want if hit1 else labeller.label(name) or ""))
+    f1 = metrics.macro_f1(*zip(*pairs)) if pairs else None
+    return {"n": len(pairs), "macro_f1": None if f1 is None else round(f1, 4)}
+
+
+def per_image(answers: dict[str, dict], truths: dict[str, Truth], labeller: Labeller) -> dict:
+    """Each photo's own answer (the identify result's per_photo), judged like the record's:
+    top-1 per rank over photos, and species macro-F1 over photos. Next to the record-level
+    numbers this is the per-image / per-observation pair the Picek group reports."""
+    tally = Counter()
+    pairs = []
+    for oid, result in answers.items():
+        truth = truths.get(oid)
+        if truth is None:
+            continue
+        for photo in result.get("per_photo") or []:
+            for rank in ("species", "genus", "family"):
+                want = getattr(truth, rank)
+                if not want:
+                    continue
+                top = (photo.get("ranks") or {}).get(rank) or []
+                name = top[0]["name"] if top else ""
+                hit = bool(name) and labeller.same(name, want)
+                tally[f"{rank}_n"] += 1
+                tally[f"{rank}_top1"] += hit
+                if rank == "species":
+                    pairs.append((want, want if hit else labeller.label(name) or ""))
+    out = {rank: rate(tally[f"{rank}_top1"], tally[f"{rank}_n"])
+           for rank in ("species", "genus", "family") if tally[f"{rank}_n"]}
+    f1 = metrics.macro_f1(*zip(*pairs)) if pairs else None
+    out["species_macro_f1"] = None if f1 is None else round(f1, 4)
+    return out
+
+
 def paired(judged: dict, a: tuple, b: tuple) -> dict:
     out = {}
     for rank in RANKS:
@@ -573,7 +617,9 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
     full: dict[tuple, dict] = {}            # the stored identify results, per Vision model
     for m in models:
         out["models"][model_name(m)] = {"records": len(judged[m]),
-                                        **summary(judged[m], observers=observers)}
+                                        **summary(judged[m], observers=observers),
+                                        "species_macro_f1": species_macro_f1(judged[m], truths,
+                                                                             labeller)}
         if len(models) > 1:
             out["on_records_every_model_answered"][model_name(m)] = summary(judged[m], common)
         out["calibration"][model_name(m)] = {
@@ -592,6 +638,7 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
         out["breakdowns"][model_name(m)] = by_dim
         if m in chosen:
             full[m] = load_answers(conn, name, m, chosen[m], set(judged[m]))
+            out["models"][model_name(m)]["per_image"] = per_image(full[m], truths, labeller)
             likely = likely_metrics(full[m], truths, labeller)
             if likely:
                 out["likely_sets"][model_name(m)] = likely

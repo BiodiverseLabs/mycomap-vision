@@ -6,11 +6,25 @@ import type { Me, ScoreRun } from "./api";
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
 const BASE_NAME: Record<string, string> = { "bioclip-2": "BioCLIP 2" };
+/** The Picek group's classifier recipe replicated on our records (picek.py), named
+ *  `picek-<preset>-<run>`: the architecture each preset trains. */
+const PICEK_NAME: Record<string, string> = {
+  "fungitastic-beit-b384": "BEiT",
+  "fungitastic-beit-b224": "BEiT at 224 px",
+  "vit-b384-ce": "ViT-B",
+  "df20-vit-l384": "ViT-L",
+};
 
 /** A model as a visitor should read it. Fine-tuned models are named `<base>-ft-<YYYYMMDD>-…`
  *  (finetune.py); the internal name stays available for a tooltip. */
 export function modelName(backbone: string): string {
   if (backbone === "external:inat-cv") return "iNaturalist's computer vision";
+  const picek = /^picek-(.+?)-(\d{8}-\d{6}|smoke)$/.exec(backbone);
+  if (picek && PICEK_NAME[picek[1]]) {
+    const test = picek[2] === "smoke" ? " (test model)" : "";
+    return `Danish Fungi method (${PICEK_NAME[picek[1]]}, Picek et al.), trained on our ` +
+      `DNA-verified records${test}`;
+  }
   const ft = /^(.+)-ft-(\d{4})(\d{2})\d{2}-\d+$/.exec(backbone);
   if (ft) {
     const base = BASE_NAME[ft[1]] ?? ft[1];

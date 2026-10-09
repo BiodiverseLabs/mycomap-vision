@@ -62,7 +62,7 @@ def storage_name(spec: str) -> str:
     """Filesystem- and URL-safe key for a backbone: its alias, or a slug of its spec."""
     if spec in ALIASES:
         return spec
-    if spec.startswith("finetuned:"):
+    if spec.startswith(("finetuned:", "classifier:")):
         return spec.partition(":")[2]
     for name, alias in ALIASES.items():
         if alias.spec == spec:
@@ -73,11 +73,13 @@ def storage_name(spec: str) -> str:
 def resolve_spec(name_or_spec: str) -> str:
     if name_or_spec in ALIASES:
         return ALIASES[name_or_spec].spec
-    if name_or_spec.startswith(("timm:", "open_clip:", "finetuned:")):
+    if name_or_spec.startswith(("timm:", "open_clip:", "finetuned:", "classifier:")):
         return name_or_spec
     from .finetune import models_dir
     if re.fullmatch(r"[A-Za-z0-9._-]+", name_or_spec) and             (models_dir() / f"{name_or_spec}.json").is_file():
-        return f"finetuned:{name_or_spec}"
+        from .picek import is_classifier
+        kind = "classifier" if is_classifier(name_or_spec) else "finetuned"
+        return f"{kind}:{name_or_spec}"
     raise ValueError(f"unknown backbone {name_or_spec!r}: use an alias "
                      f"({', '.join(ALIASES)}), a fine-tuned model in data/models, "
                      "or timm:<name> / open_clip:<name>")
@@ -254,10 +256,17 @@ class FinetunedBackbone:
         return self.base.forward_features(x)
 
 
+def _classifier_backbone(name: str, model_name: str):
+    """A classifier trained by mv picek-train (picek.ClassifierBackbone)."""
+    from .picek import ClassifierBackbone
+    return ClassifierBackbone(name, model_name)
+
+
 LOADERS: dict[str, Callable[[str, str], object]] = {
     "timm": TimmBackbone,
     "open_clip": OpenClipBackbone,
     "finetuned": FinetunedBackbone,
+    "classifier": lambda name, model_name: _classifier_backbone(name, model_name),
 }
 
 
