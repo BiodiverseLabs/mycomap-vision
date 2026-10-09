@@ -126,7 +126,10 @@ class PicekConfig:
     seesaw_q: float = 2.0
     val_days: int = 28                 # the validation slice: the last days before the cutoff
     val_max_photos: int | None = None  # cap the validation pass (smoke tests)
-    grad_checkpointing: bool = True
+    # Gradient checkpointing: None = on only when the GPU has under 12 GB (it costs ~20% of
+    # the speed: 44 vs 55 photos/s for BEiT-B 384 on the laptop's 8 GB RTX 4070, where
+    # micro-batch 16 without it peaks at 4.5 GB and 32 spills over 8 GB).
+    grad_checkpointing: bool | None = None
     amp: bool = True
     workers: int = 6
     seed: int = 0
@@ -594,7 +597,11 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = (model_factory or (lambda: create_model(preset, n_classes)))()
     model.to(device).train()
-    if cfg.grad_checkpointing and hasattr(model, "set_grad_checkpointing"):
+    checkpointing = cfg.grad_checkpointing
+    if checkpointing is None:
+        checkpointing = (device == "cuda" and torch.cuda.get_device_properties(0).total_memory
+                         < 12 * 2**30)
+    if checkpointing and hasattr(model, "set_grad_checkpointing"):
         model.set_grad_checkpointing(True)
     amp_dtype = None
     if cfg.amp and device == "cuda":
@@ -742,7 +749,7 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
             "loader_wait_share": round(wait_seconds / train_seconds, 3) if train_seconds else None,
             "stopped_at_max_steps": stopped_early, "loader_fallback": fallback["at"],
             "photo_cache": cache,
-            "config": asdict(cfg), "device": device,
+            "config": asdict(cfg), "device": device, "grad_checkpointing": bool(checkpointing),
             "minutes": round(elapsed / 60, 1),
             "code_version": __import__("mycomap_vision.config", fromlist=["x"]).code_version(),
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}

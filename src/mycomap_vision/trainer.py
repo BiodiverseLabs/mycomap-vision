@@ -57,13 +57,32 @@ FINETUNE_RATES = {"bioclip-2": 83.0}   # photos seen per second while training
 # The Picek replication (picek.py), training photos per second on the instance. NOT yet
 # measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
 # (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).
-# The loader's per-photo cost was measured on the laptop CPU (2026-10-09): the 384 px
-# recipe costs the same as the BioCLIP fine-tune's loader, which ran at 59 photos/s on
-# g6.xlarge; a 440 px cache (or the 224 px recipe) is 1.7x cheaper per photo. The L4's own
-# training speed for BEiT-B/16 384 is NOT measured yet; ~100-120/s is reasoned.
-PICEK_RATES = {"fungitastic-beit-b384": 59.0, "fungitastic-beit-b224": 100.0,
-               "vit-b384-ce": 59.0, "df20-vit-l384": 35.0}
-PICEK_CACHE_SPEEDUP = 1.7              # with a photo cache (capped by the GPU in practice)
+# Training photos per second on g6.xlarge: the slower of the data loader (4 vCPU) and the
+# L4. Loader: the 384 px recipe costs the same per photo as the BioCLIP fine-tune's loader
+# (measured on the laptop CPU, 2026-10-09), which gave 59 photos/s on g6.xlarge; a 440 px
+# photo cache or the 224 px recipe is 1.7x cheaper. GPU: measured on the laptop's RTX 4070
+# (mv picek-bench, 2026-10-09: BEiT-B 384 55/s without gradient checkpointing, 44/s with;
+# 224 px 179/s; ViT-L not measured) and scaled by L4_TRAIN_FACTOR, an ESTIMATE (the
+# BioCLIP fine-tune ran 83/s on the laptop and 106/s in its L4 rehearsal). Replace with the
+# first run's own speeds (progress.json).
+PICEK_LOADER_RATES = {"fungitastic-beit-b384": 59.0, "fungitastic-beit-b224": 100.0,
+                      "vit-b384-ce": 59.0, "df20-vit-l384": 59.0}
+L4_TRAIN_FACTOR = 1.1
+PICEK_GPU_RATES = {"fungitastic-beit-b384": 55.0 * L4_TRAIN_FACTOR,
+                   "fungitastic-beit-b224": 179.0 * L4_TRAIN_FACTOR,
+                   "vit-b384-ce": 55.0 * L4_TRAIN_FACTOR,
+                   "df20-vit-l384": 18.0 * L4_TRAIN_FACTOR}       # ViT-L: ~1/3 of ViT-B, guessed
+PICEK_CACHE_SPEEDUP = 1.7              # the loader's gain from a photo cache
+
+
+def picek_rate(preset: str, cached: bool) -> float | None:
+    """Training photos/s on the instance: the slower of loader and GPU (see above)."""
+    loader, gpu = PICEK_LOADER_RATES.get(preset), PICEK_GPU_RATES.get(preset)
+    if loader is None or gpu is None:
+        return None
+    return round(min(loader * (PICEK_CACHE_SPEEDUP if cached else 1.0), gpu), 1)
+
+
 PICEK_CACHE_BUILD_RATE = 250.0         # photos/s resizing into the cache on 4 vCPUs
 UNMEASURED_EMBED_RATE = 15.0           # a backbone never timed here: assume a slow one
 UNMEASURED_FINETUNE_RATE = 40.0
@@ -142,10 +161,8 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
             from .picek import parse_spec
             preset, n_epochs = parse_spec(s.spec)
             from .picek import cache_of
-            rate = PICEK_RATES.get(preset)
             cached = cache_of(s.spec)
-            if rate and cached:
-                rate *= PICEK_CACHE_SPEEDUP
+            rate = picek_rate(preset, bool(cached))
             hours = photos * n_epochs / (rate or UNMEASURED_FINETUNE_RATE) / 3600
             if cached:
                 hours += photos / PICEK_CACHE_BUILD_RATE / 3600

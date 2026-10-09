@@ -22,8 +22,8 @@ def test_a_replication_trains_from_photos_then_is_embedded_before_other_backbone
     est = trainer.estimate(stages[3:5], 580_000)
     row = est["stages"][0]
     assert "15 epochs" in row["stage"] and row["measured"] is False
-    assert row["hours"] == pytest.approx(580_000 * 15 / trainer.PICEK_RATES[
-        "fungitastic-beit-b384"] / 3600, abs=0.1)
+    assert row["hours"] == pytest.approx(
+        580_000 * 15 / trainer.picek_rate("fungitastic-beit-b384", False) / 3600, abs=0.1)
 
 
 def test_preset_specs_are_checked_before_anything_is_paid_for(conn, tmp_path):
@@ -92,7 +92,16 @@ def test_a_photo_cache_shortens_the_estimate_and_counts_its_own_pass():
                                                   ["fungitastic-beit-b384@15@440"])[:1],
                               580_000)["stages"][0]["hours"]
     build = 580_000 / trainer.PICEK_CACHE_BUILD_RATE / 3600
-    assert cached == pytest.approx(plain / trainer.PICEK_CACHE_SPEEDUP + build, abs=0.15)
+    rate = trainer.picek_rate("fungitastic-beit-b384", True)
+    assert cached == pytest.approx(580_000 * 15 / rate / 3600 + build, abs=0.15)
+
+
+def test_the_training_rate_is_the_slower_of_loader_and_gpu(monkeypatch):
+    monkeypatch.setitem(trainer.PICEK_LOADER_RATES, "x", 50.0)
+    monkeypatch.setitem(trainer.PICEK_GPU_RATES, "x", 60.0)
+    assert trainer.picek_rate("x", False) == 50.0                 # loader-bound
+    assert trainer.picek_rate("x", True) == 60.0                  # cache: now GPU-bound
+    assert trainer.picek_rate("unknown", False) is None
 
 
 def test_a_photo_cache_gets_its_own_disk_on_the_instance():

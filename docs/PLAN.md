@@ -747,9 +747,9 @@ every Vision model, and prints them under the standard summary. Public name:
 - Laptop smoke: `mv picek-train --max-steps 50 --effective-batch 32 --val-max-photos 300`.
 - Speed: `mv picek-bench` (the loader and the GPU measured apart).
 - Full run on AWS (not launched): `mv aws-launch-trainer --backbones none --finetune none
-  --picek fungitastic-beit-b384@15@440 --methods
+  --picek fungitastic-beit-b384@15 --methods
   classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest
-  --instance-type g6.xlarge --max-hours 30`. The instance trains, embeds every photo with
+  --instance-type g6.xlarge --max-hours 48` (or with `@440` for the cache). The instance trains, embeds every photo with
   the model and compares. Then, on the laptop: `mv aws-pull-trainer`, `mv heldout predict
   --backbone picek-... --methods classifier,classifier+month --split dev`, and
   `mv heldout report`. Dev only: test is not scored.
@@ -758,7 +758,7 @@ every Vision model, and prints them under the standard summary. Public name:
   training reads them from there. Validation reads the originals, like the embedding at
   test time. Transforms and draft decoding are unchanged (tested). It changes what the
   crop is taken from (a 440 px copy, not the 512 px draft decode), so it is Steve's call;
-  it is recommended for a 4-vCPU instance.
+  at 384 px it gains little, because the L4 is the limit there (see below).
 
 **Speed and cost.** Measured on the laptop CPU on 2026-10-09 (local large photos; GPU idle,
 but the laptop was busy with another session's job), in photos/s for one process, and
@@ -776,23 +776,57 @@ The 440 px cache files average 76 KB, against 364 KB for the originals. Building
 cache runs at 97 photos/s per thread.
 
 The 384 recipe's loader costs the same per photo as the BioCLIP fine-tune's. On g6.xlarge
-(4 vCPU, L4), the BioCLIP fine-tune's loader delivered 59 photos/s with S3 reads, so the
-replication should run at about 59/s there, and ~100/s with the cache or at 224 px. The
-GPU's own rate is still to be measured (`mv picek-bench --gpu-only`); for BEiT-B 384 with
-bf16 on an L4, ~100-120/s is reasoned. The estimates below are for ~580k training photos
-on g6.xlarge at ~$0.80/h, and they are estimates:
+(4 vCPU), the BioCLIP fine-tune's loader delivered 59 photos/s with S3 reads, so the
+replication's loader should give about 59/s there. With the 440 px cache or the 224 px
+preset it should give ~100/s.
 
-| run | photos/s | 15 epochs | 50 epochs |
+GPU, measured on the laptop's RTX 4070 (8 GB) with `mv picek-bench` (random tensors,
+18,000 classes, bf16), 2026-10-09. Training photos/s, then peak VRAM:
+
+| preset | micro-batch 16, checkpointing | 16, none | 32, checkpointing | 32, none |
+|---|---|---|---|---|
+| BEiT-B 384 | 44 (1.6 GB) | 55 (4.5 GB) | 46 (2.2 GB) | 13 (7.8 GB: spills past 8 GB) |
+| BEiT-B 224 | 142 (1.3 GB) | 179 (2.2 GB) | 146 (1.4 GB) | 183 (3.3 GB) |
+
+Evaluation (inference) runs at 211 photos/s at 384 and 640 at 224. End to end, `mv embed`
+of 3,000 large photos took 18 s (165/s, decode-bound).
+
+Gradient checkpointing now turns on only when the GPU has under 12 GB: it costs ~20%, and
+an L4 (24 GB) doesn't need it.
+
+**Smoke run (2026-10-09).** It ran against a scratch copy of the manifest, with no writes
+to the shared one:
+- `mv picek-train` for 60 steps (effective batch 32) on the laptop's 29,295 local large
+  photos: 7,727 records, 4,109 species, validation 192 records.
+- 34 photos/s end to end, with micro-batch 16, checkpointing on and 4 workers; 21% of the
+  time was spent waiting for the loader.
+- The model registered, then `mv embed`, then `mv heldout predict --split dev --limit 50`
+  with classifier and classifier+month: 49 records answered. `mv heldout report` rendered
+  the standard tables and the macro-F1 / per-photo table.
+- After 60 steps the accuracy is ~0, as expected: the smoke test proves the path, not the
+  model.
+
+**Estimates for g6.xlarge** (~$0.80/h, ~580k training photos). The L4 is taken as 1.1x
+the laptop 4070 for training: an ESTIMATE, from the BioCLIP fine-tune's 83/s on the laptop
+against 106/s in its L4 rehearsal. That puts BEiT-B 384 at ~60 photos/s on the L4. Train
+hours are the slower of loader and GPU; add ~2.6 h for the cache pass, the embedding of
+every photo, setup and the comparison.
+
+| run | photos/s (limit) | 15 epochs | 50 epochs |
 |---|---|---|---|
-| as is | ~59 (loader) | ~41 h, ~$33 | ~137 h, ~$110 |
-| 440 px cache | ~100 (loader ≈ GPU) | ~24 h, ~$20 | ~80 h, ~$65 |
-| 224 px preset | ~100 (loader) | ~24 h | ~80 h |
-| g6.4xlarge (16 vCPU), no cache | ~100-120 (GPU) | ~22 h, ~$29 | ~73 h, ~$97 |
+| BEiT-B 384, as is | ~59 (loader ≈ GPU) | ~44 h, ~$35 | ~139 h, ~$111 |
+| BEiT-B 384, 440 cache | ~60 (GPU) | ~43 h, ~$35 | ~137 h, ~$110 |
+| BEiT-B 224 | ~100 (loader) | ~27 h, ~$21 | ~83 h, ~$66 |
+| BEiT-B 224, 440 cache | ~170 (loader) | ~18 h, ~$14 | ~51 h, ~$41 |
 
-Each run adds ~1.6 h to embed every photo with the model and ~1 h for setup and the
-comparison. An L40S (g6e.xlarge) is wasted on 4 vCPUs unless decoding moves to the GPU
-(DALI). Recommendation: 15 epochs with the cache on g6.xlarge first (~27 h with
-everything, `--max-hours 30`), then decide on 50 from its validation curve.
+At 384 the L4 itself is the limit, so neither the cache nor a 16-vCPU g6.4xlarge buys
+much there. Only a faster GPU does: an L40S (g6e.xlarge, ~$1.86/h, roughly 2.5-3x an L4,
+an estimate) would be ~150-180/s on the GPU, but needs the cache and more vCPUs to feed it
+(g6e.2xlarge or larger).
+
+Recommendation: BEiT-B 384 (their best model) for 15 epochs on g6.xlarge without the cache
+(~44 h, ~$35, `--max-hours 48`), then decide on 50 from its validation curve. The 224
+preset is the cheap variant, if the paper can use it.
 
 **Open decisions (Steve):** whether to use the cache (a slight input change) or a
 16-vCPU instance; 15 vs 50 epochs; the month-prior smoothing (betas, to be tuned on dev);

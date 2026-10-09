@@ -666,7 +666,7 @@ def cmd_picek_train(conn, args) -> None:
                             effective_batch=args.effective_batch, micro_batch=args.micro_batch,
                             val_days=args.val_days, val_max_photos=args.val_max_photos,
                             workers=args.workers, max_steps=args.max_steps,
-                            grad_checkpointing=not args.no_grad_checkpointing,
+                            grad_checkpointing=False if args.no_grad_checkpointing else None,
                             seed=args.seed, cache_px=args.cache_px)
     meta = picek.train(conn, open_store(args.source, config.DATA_DIR), args.size, name, cfg,
                        test_days=args.test_days)
