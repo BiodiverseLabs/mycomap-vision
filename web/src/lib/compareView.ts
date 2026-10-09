@@ -99,3 +99,57 @@ export function heat(v: number | null): { bg: string; ink: string } {
   const i = Math.min(RAMP.length - 1, Math.max(0, Math.round(v * (RAMP.length - 1))));
   return { bg: RAMP[i], ink: i >= 7 ? "#ffffff" : "#0b0b0b" };
 }
+
+// --- held-out benchmarks (mv benchmark-export / benchmark-import, aggregates only) ----------
+
+export interface Rate { n: number; right?: number; rate: number | null; ci95?: [number, number];
+                        ci95_observer_bootstrap?: [number, number] }
+export interface PublishedBenchmark {
+  benchmark: string;
+  split: string;
+  sealed: boolean;
+  records: number;
+  scored_records: number;
+  imported_at: string;
+  models: Record<string, { records: number } & Partial<Record<Rank, Partial<Record<"top1" | "top5", Rate>>>>>;
+  species_by_reference_records: Record<string, Record<string, Partial<Record<Rank, Rate>>>>;
+  summary?: { models?: Record<string, { rows?: Record<string, Partial<Record<string, Rate | null>>> }> } | null;
+}
+
+/** A held-out model key, 'backbone/method[@place][[size]]', as backbone and method. The place
+ *  ("@org": the record's place from mycomap.org) stays on the method so labels can say so. */
+export function splitModelKey(key: string): { backbone: string; method: string } {
+  const i = key.indexOf("/");
+  return i < 0 ? { backbone: key, method: "" } : { backbone: key.slice(0, i), method: key.slice(i + 1) };
+}
+
+export interface HeldoutBar { key: string; backbone: string; method: string; value: number | null;
+                              ci: [number, number] | null; n: number | null; external: boolean }
+
+/** k values a benchmark can answer: 1/3/5/10 from the standard summary when it is there and
+ *  stored ten deep, else 1 and 5 from the plain results. */
+export function heldoutKs(b: PublishedBenchmark): number[] {
+  const rows = Object.values(b.summary?.models ?? {}).map((m) => m.rows?.["species strict"]);
+  return rows.length && rows.every((r) => r?.top10 != null) ? [...STANDARD_K] : [1, 5];
+}
+
+export function heldoutBars(b: PublishedBenchmark, rank: Rank, k: number): HeldoutBar[] {
+  return Object.entries(b.models).map(([key, m]) => {
+    const fromSummary = b.summary?.models?.[key]?.rows?.[`${rank} strict`]?.[`top${k}`] ?? null;
+    const plain = k === 1 || k === 5 ? m[rank]?.[`top${k}` as "top1" | "top5"] ?? null : null;
+    const r = fromSummary ?? plain;
+    const { backbone, method } = splitModelKey(key);
+    return { key, backbone, method, value: r?.rate ?? null,
+             ci: r?.ci95_observer_bootstrap ?? r?.ci95 ?? null, n: r?.n ?? null,
+             external: isExternal(backbone) };
+  }).sort((a, z) => (z.value ?? -1) - (a.value ?? -1));
+}
+
+/** Species top-1 by the true species' reference records, one row per model, standard bands. */
+export function heldoutDepth(b: PublishedBenchmark): { key: string; backbone: string; method: string;
+                                                        cells: (Rate | null)[] }[] {
+  return Object.entries(b.species_by_reference_records).map(([key, bands]) => ({
+    key, ...splitModelKey(key),
+    cells: STANDARD_BANDS.map((band) => bands[band]?.species ?? null),
+  }));
+}

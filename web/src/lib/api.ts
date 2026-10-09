@@ -1,5 +1,6 @@
 // Types and calls for the MycoMap Vision API (`mv serve`, proxied at /api).
 
+import type { PublishedBenchmark } from "./compareView";
 import { modelName, sendWaitingInLine } from "./publicView";
 
 export type Rank = "family" | "genus" | "species";
@@ -231,6 +232,8 @@ export const api = {
     return typeof body.next === "string" ? body.next : "/";
   },
   prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
+  /** Held-out benchmark results imported on the server (aggregates only). */
+  benchmarks: () => getJson<{ benchmarks: PublishedBenchmark[] }>("/api/benchmarks"),
   /** The paper draft (Markdown), for signed-in members only. */
   paper: () => getJson<{ markdown: string }>("/api/paper"),
   models: () => getJson<ModelsInfo>("/api/models"),

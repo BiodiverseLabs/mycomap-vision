@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bars, comparisons, defaultComparison, depthRows, heat, kChoices } from "./compareView";
+import { bars, comparisons, defaultComparison, depthRows, heat, heldoutBars, heldoutDepth, heldoutKs,
+         kChoices, splitModelKey, type PublishedBenchmark } from "./compareView";
 import type { RunReport, ScoreRun } from "./api";
 
 const run = (id: number, backbone: string, method: string, over: Partial<ScoreRun> = {}): ScoreRun => ({
@@ -76,4 +77,44 @@ test("heat shading darkens with the share and keeps its text readable", () => {
   assert.equal(heat(0).ink, "#0b0b0b");
   assert.equal(heat(1).ink, "#ffffff");
   assert.notEqual(heat(0.2).bg, heat(0.8).bg);
+});
+
+
+const bench = (withSummary: boolean): PublishedBenchmark => ({
+  benchmark: "heldout-x", split: "test", sealed: false, records: 100, scored_records: 99,
+  imported_at: "",
+  models: {
+    "ft/nearest": { records: 99, species: { top1: { n: 99, rate: 0.48, ci95: [0.47, 0.49] },
+                                            top5: { n: 99, rate: 0.73 } } },
+    "ft/nearest+prior@org": { records: 99, species: { top1: { n: 99, rate: 0.51 } } },
+  },
+  species_by_reference_records: { "ft/nearest": { "1-4": { species: { n: 10, rate: 0.14 } } } },
+  summary: withSummary ? { models: {
+    "ft/nearest": { rows: { "species strict": { top1: { n: 99, rate: 0.48 }, top3: { n: 99, rate: 0.66 },
+                                                top5: { n: 99, rate: 0.73 }, top10: { n: 99, rate: 0.8 } } } },
+    "ft/nearest+prior@org": { rows: { "species strict": { top1: { n: 99, rate: 0.51 }, top3: null,
+                                                          top5: null, top10: null } } },
+  } } : null,
+});
+
+test("held-out model keys keep their place on the method", () => {
+  assert.deepEqual(splitModelKey("ft/nearest+prior@org"), { backbone: "ft", method: "nearest+prior@org" });
+  assert.deepEqual(splitModelKey("external:inat-cv/combined-max"),
+    { backbone: "external:inat-cv", method: "combined-max" });
+});
+
+test("held-out bars rank models, carry the interval, and offer top 3/10 only when stored", () => {
+  const b = bench(false);
+  assert.deepEqual(heldoutKs(b), [1, 5]);
+  const top1 = heldoutBars(b, "species", 1);
+  assert.deepEqual(top1.map((x) => [x.key, x.value]), [["ft/nearest+prior@org", 0.51], ["ft/nearest", 0.48]]);
+  assert.deepEqual(top1[1].ci, [0.47, 0.49]);
+  assert.equal(heldoutBars(b, "species", 3)[0].value, null);
+  assert.deepEqual(heldoutKs(bench(true)), [1, 5], "one model stored only 5 deep");
+  assert.equal(heldoutBars(bench(true), "species", 3).find((x) => x.key === "ft/nearest")?.value, 0.66);
+});
+
+test("held-out depth rows use the standard bands", () => {
+  const rows = heldoutDepth(bench(false));
+  assert.deepEqual(rows[0].cells.map((c) => c?.rate ?? null), [null, 0.14, null, null, null]);
 });

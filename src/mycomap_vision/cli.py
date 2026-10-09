@@ -344,6 +344,31 @@ def cmd_scoreboard_export(conn, args) -> None:
         print(text)
 
 
+def cmd_benchmark_export(conn, args) -> None:
+    """A held-out report's aggregates as JSON, for mv benchmark-import on the server box."""
+    from pathlib import Path
+    from . import benchmark_io
+    path = Path(args.report)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    text = json.dumps(benchmark_io.export_summary(report, path.name), indent=1)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"wrote {args.out}", file=sys.stderr)
+    else:
+        print(text)
+
+
+def cmd_benchmark_import(conn, args) -> None:
+    """(server box) A benchmark export into the manifest the site serves; '-' reads stdin."""
+    from . import benchmark_io
+    text = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
+    try:
+        result = benchmark_io.import_summary(conn, json.loads(text))
+    except (benchmark_io.ImportRefused, ValueError) as e:
+        raise SystemExit(f"not imported: {e}")
+    print(json.dumps(result, indent=2))
+
+
 def cmd_scoreboard_import(conn, args) -> None:
     """Rows from mv scoreboard-export into this machine's scoreboard (on the server box: the
     manifest the site serves). `-` reads them from standard input."""
@@ -849,6 +874,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("scoreboard-import", help="(server box) add rows from scoreboard-export "
                        "to a comparison this machine has; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
+    p = sub.add_parser("benchmark-export", help="a held-out report's aggregates (no record "
+                       "ids, names, observers or places) for the server box's Models page")
+    p.add_argument("--report", required=True, help="a report-*.json from mv heldout report")
+    p.add_argument("--out", help="write to this file (default: standard output)")
+    p = sub.add_parser("benchmark-import", help="(server box) add a benchmark-export to the "
+                       "site; '-' reads standard input")
+    p.add_argument("file", help="the export, or - for standard input")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
     p = sub.add_parser("serve", help="run the API for the frontend")
@@ -1035,6 +1067,8 @@ def main(argv: list[str] | None = None) -> int:
         "scoreboard-export": cmd_scoreboard_export,
         "calibrate-sets": cmd_calibrate_sets,
         "scoreboard-import": cmd_scoreboard_import,
+        "benchmark-export": cmd_benchmark_export,
+        "benchmark-import": cmd_benchmark_import,
         "models": cmd_models,
         "serve": cmd_serve,
         "status": cmd_status,

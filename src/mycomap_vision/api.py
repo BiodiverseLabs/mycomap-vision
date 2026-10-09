@@ -492,6 +492,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             return {"models": prospective.report(conn)}
 
+    @app.get("/api/benchmarks")
+    def benchmarks():
+        """Held-out benchmark results imported with mv benchmark-import (aggregates only)."""
+        from . import benchmark_io
+        with db_lock:
+            return {"benchmarks": benchmark_io.published(conn)}
+
     @app.get("/api/paper")
     def paper():
         """The paper draft as Markdown. Never cached on the way (an unreviewed draft)."""

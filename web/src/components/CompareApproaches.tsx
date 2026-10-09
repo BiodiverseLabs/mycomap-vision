@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { api, modelLabel, num, pct, type Rank, type RunReport, type ScoreRun } from "@/lib/api";
-import { bars, comparisons, defaultComparison, depthRows, heat, kChoices, STANDARD_BANDS,
-         type Bar } from "@/lib/compareView";
+import { bars, comparisons, defaultComparison, depthRows, heat, heldoutBars, heldoutDepth,
+         heldoutKs, kChoices, STANDARD_BANDS, type Bar, type PublishedBenchmark } from "@/lib/compareView";
 
 // "Approaches compared" on the Models page (Steve, 2026-10-09): every model and method,
 // ours and outside ones, on the same records, by rank, top-k and reference depth.
@@ -58,6 +58,8 @@ export function CompareApproaches({ runs, served }: { runs: ScoreRun[]; served: 
         </p>
       </div>
       <ApproachesTable />
+      <HeldOut />
+      <h3 className="font-semibold text-lg text-[#4a3728] pt-2">Newest weeks of validations</h3>
       {group.length > 0 && (
         <>
           <ComparisonPicker groups={groups} idx={idx} onPick={setPick} />
@@ -278,5 +280,153 @@ function DepthTable({ group, reports }: { group: ScoreRun[]; reports: Map<number
         </p>
       )}
     </div>
+  );
+}
+
+/** A held-out model key's label: our wording for the method, and where the place came from. */
+function heldoutLabel(backbone: string, method: string) {
+  const [base, place] = method.split("@");
+  const label = modelLabel(backbone, base);
+  return { ...label, how: place ? `${label.how} (place from ${place === "org" ? "mycomap.org" : place})`
+                                : label.how };
+}
+
+/** Held-out benchmarks: records no model saw in training or as references. */
+function HeldOut() {
+  const q = useQuery({ queryKey: ["benchmarks"], queryFn: api.benchmarks });
+  const list = q.data?.benchmarks ?? [];
+  const [pick, setPick] = useState(0);
+  const [rank, setRank] = useState<Rank>("species");
+  const [kPick, setK] = useState(1);
+  const b: PublishedBenchmark | undefined = list[Math.min(pick, list.length - 1)];
+  return (
+    <div className="space-y-4" data-testid="chart-heldout">
+      <h3 className="font-semibold text-lg text-[#4a3728]">Held-out records</h3>
+      <p className="text-sm text-muted-foreground max-w-3xl">
+        DNA-verified records that no model here saw, in training or as a reference. Ranges in
+        brackets are 95% intervals.
+      </p>
+      {!b ? (
+        <p className="text-sm text-muted-foreground">
+          {q.isLoading ? "Loading…" : "Held-out results appear here once they are published."}
+        </p>
+      ) : (
+        <HeldOutBody b={b} list={list} pick={pick} setPick={setPick} rank={rank} setRank={setRank}
+                     kPick={kPick} setK={setK} />
+      )}
+    </div>
+  );
+}
+
+function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
+  b: PublishedBenchmark; list: PublishedBenchmark[]; pick: number; setPick: (i: number) => void;
+  rank: Rank; setRank: (r: Rank) => void; kPick: number; setK: (k: number) => void;
+}) {
+  const ks = heldoutKs(b);
+  const k = ks.includes(kPick) ? kPick : 1;
+  const rows = heldoutBars(b, rank, k);
+  const depth = heldoutDepth(b);
+  const anyOutside = rows.some((r) => r.external);
+  return (
+    <>
+      <label className="flex flex-wrap items-center gap-2 text-sm">
+        <span className="text-muted-foreground">Benchmark:</span>
+        <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1" value={pick}
+                onChange={(e) => setPick(Number(e.target.value))}>
+          {list.map((x, i) => (
+            <option key={`${x.benchmark}/${x.split}`} value={i}>
+              {x.benchmark}, {x.split} split, {num(x.scored_records)} records
+              {x.sealed ? " (sealed test)" : " (development)"}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="rounded-lg border border-[#A87146]/20 bg-white p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <h4 className="font-semibold text-[#4a3728]">
+            {RANK_LABEL[rank]} right in the top {k === 1 ? "answer" : k}
+          </h4>
+          <div className="flex flex-wrap gap-2">
+            <Toggle options={["species", "genus", "family"] as Rank[]} value={rank} onChange={setRank}
+                    label={(r) => RANK_LABEL[r]} />
+            <Toggle options={ks} value={k} onChange={setK} label={(v) => `Top ${v}`} />
+          </div>
+        </div>
+        <div className="flex gap-4 text-xs text-muted-foreground mb-2">
+          <span className="inline-flex items-center gap-1.5"><Swatch c={OURS} /> MycoMap Vision</span>
+          {anyOutside && <span className="inline-flex items-center gap-1.5"><Swatch c={OUTSIDE} /> Outside model</span>}
+        </div>
+        <div className="space-y-1.5">
+          {rows.map((r) => {
+            const label = heldoutLabel(r.backbone, r.method);
+            return (
+              <div key={r.key} className="grid grid-cols-[minmax(0,16rem)_1fr] items-center gap-3">
+                <div className="text-sm leading-tight min-w-0">
+                  <span className="font-medium text-[#4a3728]">{label.name}</span>{" "}
+                  <span className="text-muted-foreground">· {label.how}</span>
+                </div>
+                <div className="flex items-center gap-2 h-6"
+                     title={r.n != null ? `${pct(r.value, 1)} of ${num(r.n)} records` : undefined}>
+                  <div className="h-[18px] rounded-r-[4px]"
+                       style={{ width: `${r.value == null ? 0 : Math.max(0.5, 100 * r.value)}%`,
+                                background: r.external ? OUTSIDE : OURS }} />
+                  <span className="text-sm tabular-nums text-[#0b0b0b] whitespace-nowrap">
+                    {r.value == null ? "not measured" : pct(r.value, 1)}
+                    {r.ci && <span className="text-muted-foreground"> ({pct(r.ci[0], 1)}–{pct(r.ci[1], 1)})</span>}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {depth.length > 0 && (
+        <div className="rounded-lg border border-[#A87146]/20 bg-white p-4 overflow-x-auto">
+          <h4 className="font-semibold text-[#4a3728] mb-2">
+            Species right first time, by how many DNA-verified records the species has
+          </h4>
+          <table className="text-sm">
+            <thead>
+              <tr className="text-xs text-muted-foreground">
+                <th className="text-left font-medium pr-4 py-1">Approach</th>
+                {STANDARD_BANDS.map((band, i) => (
+                  <th key={band} className="font-medium px-1 text-center min-w-[4.5rem]">
+                    {band} records<br />
+                    <span className="font-normal">
+                      {depth[0].cells[i] ? `${num(depth[0].cells[i]!.n)} finds` : ""}
+                    </span>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {depth.map((row) => {
+                const label = heldoutLabel(row.backbone, row.method);
+                return (
+                  <tr key={row.key}>
+                    <td className="pr-4 py-0.5">
+                      <span className="font-medium text-[#4a3728]">{label.name}</span>{" "}
+                      <span className="text-muted-foreground">· {label.how}</span>
+                    </td>
+                    {row.cells.map((c, i) => {
+                      const h = heat(c?.rate ?? null);
+                      return (
+                        <td key={i} className="px-0.5 py-0.5">
+                          <div className="rounded px-2 py-1 text-center tabular-nums"
+                               style={{ background: h.bg, color: h.ink }}
+                               title={c ? `${pct(c.rate, 1)} of ${num(c.n)} finds` : "no finds"}>
+                            {c ? pct(c.rate, 0) : "–"}
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
