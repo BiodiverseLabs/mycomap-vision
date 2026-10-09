@@ -217,7 +217,13 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
 
     Only records of a source Vision takes photos from (sources.PHOTO_SOURCES) get
     photos, and only photos of that same source: an iNat photo linked to an MO record
-    is never downloaded. Refused on a manifest whose sources are still guessed.
+    is never downloaded. MO photos are fetched from MO one at a time, 5 s apart (MO's
+    pace). The first set came as a dump from MO's image store (mo.image_list /
+    mo.import_zip; Steve 2026-10-09: "we will want to download MO images in the future
+    but just upload dump this initial set"); like every photo, one held in the store is
+    never fetched again, so runs fetch only new MO records' photos (a new store is
+    filled from one we hold with copy_photos, never from the source). Refused
+    on a manifest whose sources are still guessed.
     """
     sources.require_migrated(conn, "downloading photos")
     holdouts.ensure_schema(conn)

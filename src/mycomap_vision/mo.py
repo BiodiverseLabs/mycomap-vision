@@ -51,14 +51,21 @@ BATCH = 40              # observations per request
 MO_PHOTO_ID_BASE = 10 ** 12
 
 # MO's licence names (lower-cased) -> a licence code (licenses.license_class reads it).
-# Anything else counts as all rights reserved until a person adds it here.
+# Anything else counts as all rights reserved until a person adds it here. Every name
+# MO gave for the DNA-validated MO records' photos on 2026-10-09 is listed.
 _LICENSES = {
     "creative commons wikipedia compatible v3.0": "cc-by-sa",
     "creative commons attribution-sharealike 3.0": "cc-by-sa",
+    "creative commons attribution sharealike v4.0 (wikipedia compatible)": "cc-by-sa",
+    "creative commons attribution v4.0 (wikipedia compatible)": "cc-by",
     "creative commons non-commercial v3.0": "cc-by-nc-sa",
     "creative commons non-commercial v2.5": "cc-by-nc-sa",
     "creative commons attribution-noncommercial-sharealike 3.0": "cc-by-nc-sa",
+    "creative commons attribution non-commercial sharealike v4.0": "cc-by-nc-sa",
+    "creative commons attribution non-commercial v4.0": "cc-by-nc",
+    "creative commons attribution non-commercial noderivs v.4.0": "cc-by-nc-nd",
     "public domain": "pd",
+    "public domain (wikipedia compatible)": "pd",
 }
 
 
@@ -66,6 +73,24 @@ def license_of(text: str | None) -> tuple[str, str]:
     """(licence code, class) for an MO licence name. Unknown or reserved: ('', 'arr')."""
     code = _LICENSES.get(" ".join((text or "").split()).lower(), "")
     return code, license_class(code)
+
+
+def relicense(conn: sqlite3.Connection, now: str | None = None) -> dict:
+    """Re-read every MO photo's licence code and class from the name MO gave
+    (license_text), after names are added to _LICENSES. A change goes to license_history."""
+    now = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    changed = 0
+    with conn:
+        for pid, text, code in conn.execute(
+                "select photo_id, license_text, license_code from photos where source = 'mo'"
+                ).fetchall():
+            new_code, new_class = license_of(text)
+            if (code or "") != new_code:
+                conn.execute("update photos set license_code = ?, license_class = ? "
+                             "where photo_id = ?", (new_code, new_class, pid))
+                conn.execute("insert into license_history values (?, ?, ?)", (pid, new_code, now))
+                changed += 1
+    return {"changed": changed}
 
 
 def photo_id_of(mo_image_id: int) -> int:
@@ -326,3 +351,95 @@ def licence_report(conn: sqlite3.Connection) -> dict:
         not_export += n if ok == 0 else 0
     return {"by_licence": dict(by_text.most_common()), "by_class": dict(by_class),
             "not_ok_for_export": not_export, "photos": sum(by_class.values())}
+
+
+# ---------------------------------------------------------------------------
+# Image files from a zip (Steve, 2026-10-09: "just give me a list and Alan can give me a
+# zip"). MO's image files come from a person with access to MO's image store, not from
+# MO's public site, so nothing is downloaded here: image_list() writes the wanted
+# images, import_zip() takes the files back by image id.
+
+IMAGE_LIST_COLUMNS = ["mo_image_id", "mo_observation_id", "license", "url_960"]
+_ZIP_NAME = re.compile(r"(?:^|/)(\d+)\.(jpe?g|png|webp)$", re.IGNORECASE)
+
+
+def image_list(conn: sqlite3.Connection, store_location: str | None = None,
+               size: str = "large", north_america_only: bool = True) -> list[dict]:
+    """The MO images Vision wants: every MO photo of an MO record that MO marks ok for
+    export, one row per image (with one of its MO observations), leaving out images
+    already held at `size` in `store_location`."""
+    na = "and r.north_america = 1" if north_america_only else ""
+    rows = conn.execute(f"""
+      select p.source_photo_id, min(r.source_id), p.license_text
+      from photos p
+      join observation_photos op on op.photo_id = p.photo_id
+      join records r on r.observation_id = op.observation_id and r.source = '{sources.MO}' {na}
+      where p.source = '{sources.MO}' and coalesce(p.ok_for_export, 0) = 1
+        and not exists (select 1 from photo_copies c where c.photo_id = p.photo_id
+                        and c.size = ? and (? is null or c.store = ?))
+      group by p.source_photo_id order by p.source_photo_id
+    """, (size, store_location, store_location)).fetchall()
+    return [{"mo_image_id": int(i), "mo_observation_id": int(o), "license": lic or "",
+             "url_960": f"https://mushroomobserver.org/images/960/{int(i)}.jpg"}
+            for i, o, lic in rows]
+
+
+def _shrink(body: bytes, max_side: int) -> bytes:
+    """A JPEG no longer than `max_side` px on its long side (EXIF rotation applied)."""
+    import io
+
+    from PIL import Image, ImageOps
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(body))).convert("RGB")
+    if max(img.size) <= max_side:
+        return body
+    img.thumbnail((max_side, max_side))
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=90)
+    return out.getvalue()
+
+
+def import_zip(conn: sqlite3.Connection, zip_path: Path, store, size: str = "large",
+               max_side: int | None = 1280, log=print) -> dict:
+    """Store the image files in a zip (named <MO image id>.jpg, any folders) as copies of
+    the MO photos the manifest already lists, with their hash. A file for an image the
+    manifest doesn't list as an MO photo of an MO record is refused, so nothing but the
+    listed images comes in. `max_side`: larger files are shrunk to it (MO's originals
+    run to 5,000+ px; the identifier works at a few hundred)."""
+    import hashlib
+    import zipfile
+
+    from .licenses import looks_like_image, photo_relpath
+    from .photos import Result, save_result
+    wanted = {int(r["mo_image_id"]) for r in image_list(conn, None, "__any__", False)}
+    stats = Counter()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            m = _ZIP_NAME.search(info.filename)
+            if not m:
+                stats["not an image name"] += 1
+                continue
+            image_id = int(m.group(1))
+            if image_id not in wanted:
+                stats["not on the list (refused)"] += 1
+                continue
+            body = zf.read(info)
+            if not looks_like_image(body[:16]):
+                stats["not an image"] += 1
+                continue
+            if max_side:
+                body = _shrink(body, max_side)
+            pid = photo_id_of(image_id)
+            rel = photo_relpath(pid, size, "jpg" if max_side else m.group(2).lower())
+            store.put(rel, body)
+            with conn:
+                save_result(conn, Result(pid, "done", rel, len(body),
+                                         hashlib.sha256(body).hexdigest()),
+                            size, now, store.location)
+            stats["imported"] += 1
+            if stats["imported"] % 2000 == 0:
+                log(f"  {stats['imported']:,} imported")
+    stats["still wanted"] = len(image_list(conn, store.location, size))
+    return dict(stats)

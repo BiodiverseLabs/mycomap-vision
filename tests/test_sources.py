@@ -457,3 +457,81 @@ def test_mos_not_found_answer_is_read_as_a_missing_observation():
     with pytest.raises(mo.MissingObservation) as e:
         mo.fetch_batch(S(), [122178, 5], mo.Pacer(0))
     assert e.value.mo_id == 122178
+
+
+def test_every_licence_name_mo_gave_is_creative_commons_or_public_domain():
+    for name in ("Creative Commons Wikipedia Compatible v3.0",
+                 "Creative Commons Attribution Non-commercial v4.0",
+                 "Creative Commons Non-commercial v3.0",
+                 "Creative Commons Attribution ShareAlike v4.0 (Wikipedia compatible)",
+                 "Creative Commons Attribution Non-commercial ShareAlike v4.0",
+                 "Creative Commons Attribution v4.0 (Wikipedia compatible)",
+                 "Creative Commons Non-commercial v2.5",
+                 "Public Domain (Wikipedia compatible)",
+                 "Creative Commons Attribution Non-commercial NoDerivs v.4.0"):
+        assert mo.license_of(name)[1] in ("open", "nc"), name
+
+
+def test_a_licence_name_added_later_reclassifies_stored_mo_photos(conn, monkeypatch):
+    mo_manifest(conn, [mo_image(610775, [236438], license="A licence nobody mapped")])
+    assert conn.execute("select license_class from photos").fetchone()[0] == "arr"
+    monkeypatch.setitem(mo._LICENSES, "a licence nobody mapped", "cc-by")
+    assert mo.relicense(conn, "t2") == {"changed": 1}
+    assert tuple(conn.execute("select license_code, license_class from photos").fetchone()) == \
+        ("cc-by", "open")
+    assert conn.execute("select count(*) from license_history").fetchone()[0] == 2
+
+
+def test_a_run_fetches_from_mo_only_the_mo_photos_the_store_lacks(conn, tmp_path):
+    mo_manifest(conn, [mo_image(610775, [236438]), mo_image(610776, [236438])])
+    store = LocalStore(tmp_path / "store")
+    mo.import_zip(conn, make_zip(tmp_path, {"610775.jpg": JPEG}), store, max_side=None,
+                  log=lambda s: None)
+    [row] = photos.pending_photos(conn, False, None, "large", store.location)
+    assert (row["photo_id"], row["source"], row["host"]) == (
+        10**12 + 610776, "mo", "mushroomobserver.org")
+
+
+def test_the_mo_image_list_has_each_wanted_image_once(conn):
+    mo_manifest(conn, [mo_image(610775, [236438]), mo_image(610776, [236438], ok_for_export=False)])
+    assert mo.image_list(conn) == [{"mo_image_id": 610775, "mo_observation_id": 236438,
+                                    "license": "Creative Commons Wikipedia Compatible v3.0",
+                                    "url_960": "https://mushroomobserver.org/images/960/610775.jpg"}]
+
+
+def make_zip(tmp_path, files):
+    import zipfile
+    z = tmp_path / "mo.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for name, body in files.items():
+            zf.writestr(name, body)
+    return z
+
+
+def test_a_zip_brings_in_only_listed_mo_images_with_their_hash(conn, tmp_path):
+    import hashlib
+    mo_manifest(conn, [mo_image(610775, [236438]), mo_image(610776, [236438], ok_for_export=False)])
+    z = make_zip(tmp_path, {"960/610775.jpg": JPEG, "960/610776.jpg": JPEG, "960/42.jpg": JPEG,
+                            "notes.txt": b"hi", "960/610777.jpg": b"<html>"})
+    store = LocalStore(tmp_path / "store")
+    out = mo.import_zip(conn, z, store, max_side=None, log=lambda s: None)
+    assert out == {"imported": 1, "not on the list (refused)": 3, "not an image name": 1,
+                   "still wanted": 0}
+    row = conn.execute("select photo_id, size, sha256, store from photo_copies").fetchone()
+    assert tuple(row) == (10**12 + 610775, "large", hashlib.sha256(JPEG).hexdigest(),
+                          store.location)
+    assert mo.image_list(conn, store.location) == []
+
+
+def test_a_large_mo_original_is_shrunk_on_import(conn, tmp_path):
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (3000, 2000), (90, 60, 30)).save(buf, "JPEG")
+    mo_manifest(conn, [mo_image(610775, [236438])])
+    store = LocalStore(tmp_path / "store")
+    mo.import_zip(conn, make_zip(tmp_path, {"610775.jpg": buf.getvalue()}), store,
+                  max_side=1280, log=lambda s: None)
+    path = conn.execute("select path from photo_copies").fetchone()[0]
+    assert max(Image.open(io.BytesIO(store.get(path))).size) == 1280

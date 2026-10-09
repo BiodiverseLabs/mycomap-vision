@@ -8,6 +8,7 @@ import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import config, inat, manifest, photos, records
 from .storage import open_store
@@ -52,8 +53,27 @@ def cmd_fetch_mo(conn, args) -> None:
     print("Fetching Mushroom Observer image lists, licences and owners (read-only, 5 s apart)...")
     stats = mo.fetch_all(conn, refresh=args.refresh, north_america_only=not args.all_regions,
                          limit=args.limit)
+    stats["relicensed"] = mo.relicense(conn)
     stats["licences"] = mo.licence_report(conn)
     print(json.dumps(stats, indent=2))
+
+
+def cmd_mo_image_list(conn, args) -> None:
+    """The MO images to ask for (a CSV for whoever makes the zip from MO's image store)."""
+    from . import mo
+    rows = mo.image_list(conn, args.store, args.size, north_america_only=not args.all_regions)
+    with open(args.out, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=mo.IMAGE_LIST_COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
+    print(json.dumps({"images": len(rows), "out": args.out}, indent=2))
+
+
+def cmd_import_mo_zip(conn, args) -> None:
+    from . import mo
+    store = open_store(args.dest, config.DATA_DIR)
+    print(json.dumps(mo.import_zip(conn, Path(args.zip), store, size=args.size,
+                                   max_side=args.max_side or None), indent=2))
 
 
 def cmd_download_photos(conn, args) -> None:
@@ -708,6 +728,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all-regions", action="store_true", help="not only North America")
     p.add_argument("--limit", type=int)
 
+    p = sub.add_parser("mo-image-list", help="CSV of the MO images wanted (for a zip made from "
+                       "MO's image store; nothing is downloaded from MO)")
+    p.add_argument("--out", required=True)
+    p.add_argument("--size", default="large")
+    p.add_argument("--store", help="leave out images this store already holds at --size")
+    p.add_argument("--all-regions", action="store_true")
+
+    p = sub.add_parser("import-mo-zip", help="store MO image files from a zip (named "
+                       "<MO image id>.jpg) as copies of the listed MO photos")
+    p.add_argument("--zip", required=True)
+    p.add_argument("--dest", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--size", default="large")
+    p.add_argument("--max-side", type=int, default=1280,
+                   help="shrink larger images to this many px (0 = keep as given)")
+
     p = sub.add_parser("fetch-inat", help="fetch iNat photo lists, licenses and owners")
     p.add_argument("--refresh", action="store_true", help="re-fetch records already fetched")
     p.add_argument("--all-regions", action="store_true", help="not only North America")
@@ -1091,6 +1126,8 @@ def main(argv: list[str] | None = None) -> int:
         "fetch-inat": cmd_fetch_inat,
         "record-sources": cmd_record_sources,
         "fetch-mo": cmd_fetch_mo,
+        "mo-image-list": cmd_mo_image_list,
+        "import-mo-zip": cmd_import_mo_zip,
         "download-photos": cmd_download_photos,
         "copy-photos": cmd_copy_photos,
         "aws-launch-downloader": cmd_aws_launch_downloader,
