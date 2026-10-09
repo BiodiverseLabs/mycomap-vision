@@ -13,8 +13,8 @@ import pytest
 from test_heldout import (NAME, fetched, frozen, green, predicted, reference)
 from test_models_and_scoreboard import Const, seed_two_species
 
-from mycomap_vision import (cli, config, evaluate, external, external_report, heldout,
-                            heldout_report)
+from mycomap_vision import (cli, config, evaluate, external, external_report, gbif,
+                            heldout, heldout_report)
 from mycomap_vision.embed import embed_photos, photos_to_embed
 from mycomap_vision.evaluate import Record
 from mycomap_vision.external import ClassLabel, ExternalModel
@@ -310,9 +310,10 @@ def test_the_protocol_report_restricts_vision_to_the_models_vocabulary(conn, tmp
     path = predicted_external(conn, tmp_path, fake_model)
     before = conn.total_changes
     out = external_report.report(conn, NAME, split="dev", results_files=[path],
-                                 vision_backbone="toy")
+                                 vision_backbone="toy", crosswalk=False)
     assert conn.total_changes == before
-    m = out["models"]["external:fake-b384"]
+    assert out["scorers"] == [external_report.EXACT]
+    m = out["models"]["external:fake-b384"][external_report.EXACT]
     # dev: 101 Russula emetica (in vocabulary), 103 'Russula' (one word), 105 Tubaria
     # hiemalis (formal, not in vocabulary).
     split = m["coverage"]["split"]["species"]
@@ -330,7 +331,7 @@ def test_the_protocol_report_restricts_vision_to_the_models_vocabulary(conn, tmp
     assert restricted["rows"]["species strict"]["top1"]["rate"] == 1.0
     assert "genus strict" not in restricted["rows"]
     assert m["formal_species"]["per_image_top1"]["n"] == 2
-    assert "toy/nearest" in out["vision_models"]
+    assert external_report.EXACT in out["vision_models"]["toy/nearest"]
     assert "(iii) same vocabulary" in external_report.format_report(out)
 
 
@@ -339,6 +340,111 @@ def test_the_protocol_report_never_scores_a_sealed_test_split(conn, tmp_path, mo
     bench_world(conn, tmp_path, monkeypatch, holdout=True)
     with pytest.raises(ValueError, match="sealed benchmark's test split"):
         external_report.report(conn, NAME, split="test", vision_backbone="toy")
+
+
+# --- the GBIF crosswalk (scoring only) -----------------------------------------------------------
+
+def test_a_name_s_key_is_its_accepted_usage_on_an_exact_species_match_only():
+    synonym = {"usageKey": 9173916, "acceptedUsageKey": 9819973, "rank": "SPECIES",
+               "status": "SYNONYM", "matchType": "EXACT"}
+    assert gbif.accepted_key("gbif", synonym) == "gbif:9819973"
+    assert gbif.accepted_key("gbif", {**synonym, "acceptedUsageKey": None}) == "gbif:9173916"
+    assert gbif.accepted_key("gbif", {"usageKey": 2527585, "rank": "GENUS",
+                                      "matchType": "HIGHERRANK"}) is None
+    assert gbif.accepted_key("gbif", {**synonym, "matchType": "FUZZY"}) is None
+    col = {"usage": {"key": "MPJ3Z", "rank": "SPECIES", "status": "SYNONYM"},
+           "acceptedUsage": {"key": "3TFST"}, "diagnostics": {"matchType": "EXACT"}}
+    assert gbif.accepted_key("col", col) == "col:3TFST"
+    assert gbif.accepted_key("col", {**col, "diagnostics": {"matchType": "HIGHERRANK"}}) is None
+
+
+class FakeGbif:
+    """GBIF's two match endpoints: Collybia nuda only in the Catalogue of Life, as a synonym
+    of Lepista nuda; a 429 first, to be waited out."""
+
+    def __init__(self):
+        self.headers, self.asked, self.throttled = {}, [], False
+
+    def get(self, url, params, timeout):
+        self.asked.append((url, dict(params)))
+
+        class R:
+            status_code = 200
+
+            def __init__(self, body, code=200):
+                self.body, self.status_code, self.text = body, code, ""
+
+            def json(self):
+                return self.body
+        if not self.throttled:
+            self.throttled = True
+            return R({}, 429)
+        name = params.get("name") or params.get("scientificName")
+        if "/v1/" in url:
+            if name == "Lepista nuda":
+                return R({"usageKey": 1, "rank": "SPECIES", "matchType": "EXACT"})
+            return R({"matchType": "HIGHERRANK", "rank": "GENUS", "usageKey": 9})
+        if name in ("Lepista nuda", "Collybia nuda"):
+            return R({"usage": {"key": "A" if name == "Lepista nuda" else "B",
+                                "rank": "SPECIES"},
+                      "acceptedUsage": {"key": "A"} if name == "Collybia nuda" else None,
+                      "diagnostics": {"matchType": "EXACT"}})
+        return R({"diagnostics": {"matchType": "NONE"}})
+
+
+def test_the_crosswalk_joins_synonyms_from_its_cache_and_asks_each_name_once(tmp_path):
+    fake = FakeGbif()
+    m = gbif.Matcher(tmp_path / "gbif.sqlite", session=fake, interval=0, sleep=lambda s: None)
+    m.fill(["Collybia nuda", "Lepista nuda", "Russula emetica"], log=lambda s: None)
+    asked = len(fake.asked)
+    assert asked == 7                         # 6 names x checklists, and the 429 once more
+    assert fake.headers["User-Agent"] == config.USER_AGENT
+    m.fill(["Collybia nuda", "Lepista nuda"], log=lambda s: None)
+    assert len(fake.asked) == asked           # cached: never asked again
+    cw = gbif.Crosswalk.from_cache(m, ["Collybia nuda", "Lepista nuda", "Russula emetica"])
+    assert cw.same("Collybia nuda", "Lepista nuda")
+    assert not cw.same("Russula emetica", "Lepista nuda")
+    assert cw.of("Lepista nuda") == {"gbif:1", "col:A"}
+    assert gbif.merged_groups(cw, ["Collybia nuda", "Lepista nuda"]) == [
+        ("Collybia nuda", "Lepista nuda")]
+    m.close()
+
+
+def test_with_the_crosswalk_a_synonym_is_right_for_vision_and_for_the_outside_model(
+        conn, tmp_path, monkeypatch, fake_model):
+    root = bench_world(conn, tmp_path, monkeypatch)
+    predicted(conn, tmp_path, root)
+    path = predicted_external(conn, tmp_path, fake_model)
+    # Record 105's true name, Tubariua hiemalis, is made a synonym of Russula emetica, which
+    # both toy Vision and the fake model answer for its red photo.
+    cw = gbif.Crosswalk({"Tubariua hiemalis": frozenset({"gbif:7"}),
+                         "Russula emetica": frozenset({"gbif:7"})})
+    out = external_report.report(conn, NAME, split="dev", results_files=[path],
+                                 vision_backbone="toy", crosswalk=cw)
+    assert out["scorers"] == [external_report.EXACT, external_report.CROSSWALK]
+    exact = out["models"]["external:fake-b384"][external_report.EXACT]
+    walked = out["models"]["external:fake-b384"][external_report.CROSSWALK]
+    sp = "species strict"
+    assert exact["formal_species"]["rows"][sp]["top1"]["rate"] == 0.5
+    assert walked["formal_species"]["rows"][sp]["top1"]["rate"] == 1.0
+    vision = out["vision_models"]["toy/nearest"]
+    assert vision[external_report.EXACT]["formal_species"]["rows"][sp]["top1"]["rate"] == 0.5
+    assert vision[external_report.CROSSWALK]["formal_species"]["rows"][sp]["top1"]["rate"] == 1.0
+    # ...and the synonym is now in the model's vocabulary.
+    assert exact["same_vocabulary"]["records"] == 1 and walked["same_vocabulary"]["records"] == 2
+    cov = walked["coverage"]["split"]["species"]
+    assert cov["formal, in vocabulary"]["records"] == 2
+    assert out["crosswalk"]["groups_joining_different_names"] == 1
+
+
+def test_the_crosswalk_never_sends_a_temporary_code_or_a_one_word_name(conn, tmp_path,
+                                                                       monkeypatch, fake_model):
+    bench_world(conn, tmp_path, monkeypatch)
+    save_records(conn, build_records([green(9, "Russula sp. 'IN07'")], "t"))
+    ctx = external_report.load(conn, NAME, "dev", vision_backbone="toy")
+    wanted = external_report.crosswalk_names(conn, ctx)
+    assert "Russula emetica" in wanted and "Tubariua hiemalis" in wanted
+    assert not any("IN07" in n for n in wanted) and "Russula" not in wanted
 
 
 # --- a saved scoreboard comparison ---------------------------------------------------------------
@@ -418,7 +524,7 @@ def test_the_baseline_refuses_a_comparison_whose_records_have_changed(conn, tmp_
 
 # --- the command line ------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("action", ["coverage", "predict", "report"])
+@pytest.mark.parametrize("action", ["coverage", "crosswalk", "predict", "report"])
 def test_reading_external_commands_open_the_manifest_read_only(tmp_path, monkeypatch, action):
     from mycomap_vision import manifest
     path = tmp_path / "manifest.sqlite"
@@ -433,6 +539,7 @@ def test_reading_external_commands_open_the_manifest_read_only(tmp_path, monkeyp
     monkeypatch.setattr(cli, "cmd_external", spy)
     argv = {"coverage": ["external", "coverage", "--name", "b"],
             "predict": ["external", "predict", "--name", "b", "--split", "dev"],
+            "crosswalk": ["external", "crosswalk", "--name", "b"],
             "report": ["external", "report", "--name", "b"]}[action]
     cli.main(argv)
     assert seen == {"ok": True}

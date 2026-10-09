@@ -795,9 +795,21 @@ vision as outside, zero-retraining baselines in the paper. `external.py`,
   classes on one Vision name are one candidate (probabilities summed); genus is the
   label's first word, family Vision's (iNat's) for the genus. FungiTastic: 1,254 classes
   are Vision names as they are, 47 by their accepted name, 1,528 are not Vision names.
-  DF20: 877, 24, 703. No synonym crosswalk beyond that (open: e.g. Danish 'Lepista nuda'
-  is our 'Collybia nuda', 194 North American records counted as outside the vocabulary).
-- **Protocol.** Photo only (their metadata prior needs Danish habitat and substrate). Each
+  DF20: 877, 24, 703.
+- **GBIF synonym crosswalk** (coordinator for Steve, 2026-10-09: yes; `gbif.py`). Scoring
+  only, never Vision's labels. Every formal species name a report compares (answer keys,
+  answers, classes; never a temporary code or a one-word name) is matched exactly, no
+  fuzzy matching, in the GBIF Backbone (`/v1/species/match`, strict) and in the Catalogue
+  of Life eXtended Release through GBIF (`/v2/species/match`, checklistKey COL XR); the
+  Backbone alone lacks recent combinations such as 'Collybia nuda' (= Danish 'Lepista
+  nuda'). Two names are one species when they share an accepted key in either. Cached in
+  `data/external/gbif/match.sqlite` (`mv external crosswalk`, 4 requests a second, the
+  project's User-Agent; no iNat call); reports read the cache only. Every table is given
+  twice, by exact names and with the crosswalk, and one judge scores every model in a
+  table, Vision included, so a synonym can make a Vision answer right too.
+- **Protocol.** Photo only: their metadata prior is Danish habitat, substrate and month
+  frequencies, and a month prior learnt from Danish records says nothing about a North
+  American season, so none is used (coordinator, 2026-10-09). Each
   photo resized to 384 x 384, no crop, mean = std = 0.5 (model cards); a record's answer is
   the softmax of its photos' mean logits (the authors' observation rule), temperature 1:
   fitting it on dev would tune a baseline on our labels. Each photo's own top-1 is kept for

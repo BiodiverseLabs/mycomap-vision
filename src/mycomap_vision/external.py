@@ -245,6 +245,7 @@ class ClassNames:
     family: list[str]
     model_names: list[str]
     how: Counter = field(default_factory=Counter)
+    accepted: list[str] = field(default_factory=list)   # GBIF's accepted name, per class
     groups: dict = field(default_factory=dict)
     of: dict = field(default_factory=dict)
 
@@ -279,7 +280,8 @@ def vision_names(labels: list[ClassLabel], labeller) -> ClassNames:
         species.append(label)
         genus.append(g)
         family.append(fam)
-    return ClassNames(species, genus, family, [c.name for c in labels], how)
+    return ClassNames(species, genus, family, [c.name for c in labels], how,
+                      [c.accepted for c in labels])
 
 
 # --- one record's answer ----------------------------------------------------------------------

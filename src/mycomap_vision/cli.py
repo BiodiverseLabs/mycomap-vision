@@ -637,8 +637,19 @@ def cmd_external(conn, args) -> None:
             print(json.dumps(external.write_labels(m), indent=2))
     elif args.action == "coverage":
         out = external_report.coverage_report(conn, args.name, args.split,
-                                              [m.short for m in models])
+                                              [m.short for m in models],
+                                              crosswalk=not args.no_crosswalk)
         print(json.dumps(out, indent=2))
+    elif args.action == "crosswalk":
+        from . import gbif
+        matcher = gbif.Matcher(interval=1 / args.per_second)
+        try:
+            print(json.dumps(external_report.fill_crosswalk(
+                conn, args.name, args.split, [Path(p) for p in args.results or []],
+                vision_backbone=args.vision, models=[m.short for m in models],
+                matcher=matcher), indent=2))
+        finally:
+            matcher.close()
     elif args.action == "predict":
         ids = _heldout_ids(conn, args)
         labeller = heldout.Labeller(conn)
@@ -661,7 +672,7 @@ def cmd_external(conn, args) -> None:
             conn, args.name, split=args.split,
             results_files=[Path(p) for p in args.results or []],
             vision_backbone=args.vision, models=_split(args.model) if args.model else None,
-            with_reference=not args.no_reference,
+            with_reference=not args.no_reference, crosswalk=not args.no_crosswalk,
             out_path=Path(args.out) if args.out else heldout.bench_dir(conn, args.name)
             / "reports" / f"external-{args.split}-{heldout.now_iso().replace(':', '')[:15]}.json")
         print(external_report.format_report(out))
@@ -1053,6 +1064,17 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--name", required=True)
     q.add_argument("--split", default="dev", choices=["dev", "test"])
     q.add_argument("--model", help=model_help)
+    q.add_argument("--no-crosswalk", action="store_true", help="exact names only")
+    q = xsub.add_parser("crosswalk", help="match every formal name a report compares in GBIF "
+                                          "(Backbone and Catalogue of Life; cached, paced; "
+                                          "scoring only)")
+    q.add_argument("--name", required=True)
+    q.add_argument("--split", default="dev", choices=["dev", "test"])
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--results", nargs="*", help="mv external predict JSONL files")
+    q.add_argument("--vision", default="bioclip-2-ft-20261007-165400")
+    q.add_argument("--per-second", type=float, default=4.0,
+                   help="GBIF requests a second, both checklists together (default 4)")
     q = xsub.add_parser("predict", help="(reads the manifest only) answer a held-out split; "
                                         "writes JSONL for mv heldout import-external")
     ids_options(q)
@@ -1077,6 +1099,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="the Vision backbone whose stored answers are compared")
     q.add_argument("--no-reference", action="store_true",
                    help="skip coverage of Vision's North American records")
+    q.add_argument("--no-crosswalk", action="store_true",
+                   help="exact names only (default: also with the GBIF crosswalk, from its "
+                        "cache)")
     q.add_argument("--out", help="where to write the JSON")
     from . import occtune
     occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
@@ -1089,7 +1114,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
     read_only = {"name-spellings": cmd_name_spellings, "fetch-taxonomy": cmd_fetch_taxonomy,
                  "taxonomy": cmd_taxonomy, "guests": cmd_guests}
-    if args.command == "external" and args.action in ("coverage", "predict", "report"):
+    if args.command == "external" and args.action in ("coverage", "crosswalk", "predict",
+                                                       "report"):
         read_only["external"] = cmd_external  # these only read the manifest
     if args.command in read_only:             # the manifest is opened as it is, read-only
         conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
