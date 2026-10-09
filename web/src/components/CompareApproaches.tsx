@@ -38,7 +38,7 @@ const APPROACHES: Approach[] = [
 export function CompareApproaches({ runs, served }: { runs: ScoreRun[]; served: string[] }) {
   const groups = useMemo(() => comparisons(runs), [runs]);
   const [pick, setPick] = useState<number | null>(null);
-  const idx = pick ?? defaultComparison(groups);
+  const idx = pick ?? defaultComparison(groups, served);
   const group = groups[idx] ?? [];
   const reportQs = useQueries({
     queries: group.map((r) => ({ queryKey: ["run", r.id], queryFn: () => api.run(r.id) })),
@@ -110,12 +110,12 @@ function ComparisonPicker({ groups, idx, onPick }: {
   return (
     <label className="flex flex-wrap items-center gap-2 text-sm">
       <span className="text-muted-foreground">Test records:</span>
-      <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1"
+      <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1 max-w-full min-w-0"
               value={idx} onChange={(e) => onPick(Number(e.target.value))}>
         {groups.map((g, i) => (
           <option key={g[0].id} value={i}>
             {num(g[0].n_test)} records validated after {g[0].cutoff} ({g.length} approach
-            {g.length === 1 ? "" : "es"}){i === 0 ? ", newest" : ""}
+            {g.length === 1 ? "" : "es"}){i === 0 ? ", most recent" : ""}
           </option>
         ))}
       </select>
@@ -168,10 +168,9 @@ function SideBySide({ group, reports, served }: {
       <div className="space-y-1.5">
         {rows.map((b) => <BarRow key={b.id} b={b} hover={hover === b.id} onHover={setHover} rank={rank} k={k} />)}
       </div>
-      {ks.length === 2 && (
+      {rows.some((r) => r.value == null) && (
         <p className="text-xs text-muted-foreground mt-3">
-          Top 3 and top 10 appear once every approach here has been rescored in the standard
-          format.
+          "Not measured": that approach was scored before top 3 and top 10 were recorded.
         </p>
       )}
     </div>
@@ -331,7 +330,7 @@ function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
     <>
       <label className="flex flex-wrap items-center gap-2 text-sm">
         <span className="text-muted-foreground">Benchmark:</span>
-        <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1" value={pick}
+        <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1 max-w-full min-w-0" value={pick}
                 onChange={(e) => setPick(Number(e.target.value))}>
           {list.map((x, i) => (
             <option key={`${x.benchmark}/${x.split}`} value={i}>

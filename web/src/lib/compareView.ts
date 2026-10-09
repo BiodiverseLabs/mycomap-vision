@@ -17,20 +17,33 @@ export function standardOf(report: RunReport | undefined): Standard | null {
   return s && s.species ? s : null;
 }
 
-/** Runs measured on one set of records, newest set first. */
+const newest = (g: ScoreRun[]) => g.reduce((m, r) => (r.created_at > m ? r.created_at : m), "");
+
+/** Runs measured on one set of records, most recently measured set first. Several comparisons
+ *  of the same records merge; each approach (backbone and method) keeps only its newest run. */
 export function comparisons(runs: ScoreRun[]): ScoreRun[][] {
-  const groups = new Map<string, ScoreRun[]>();
+  const groups = new Map<string, Map<string, ScoreRun>>();
   for (const r of runs) {
     const key = `${r.record_set}|${r.cutoff}|${r.n_test}`;
-    groups.set(key, [...(groups.get(key) ?? []), r]);
+    const g = groups.get(key) ?? new Map<string, ScoreRun>();
+    const who = `${r.backbone}/${r.method}`;
+    const had = g.get(who);
+    if (!had || r.created_at > had.created_at || (r.created_at === had.created_at && r.id > had.id)) {
+      g.set(who, r);
+    }
+    groups.set(key, g);
   }
-  return [...groups.values()].sort((a, b) => (b[0].cutoff ?? "").localeCompare(a[0].cutoff ?? "")
-    || b[0].n_test - a[0].n_test);
+  return [...groups.values()].map((g) => [...g.values()])
+    .sort((a, b) => newest(b).localeCompare(newest(a)) || b[0].n_test - a[0].n_test);
 }
 
-/** The comparison shown first: the newest one that compares at least two approaches. */
-export function defaultComparison(groups: ScoreRun[][]): number {
-  const i = groups.findIndex((g) => g.length >= 2);
+/** The comparison shown first: the most recently measured one that scores the model the site
+ *  serves next to at least one other approach; else any with two approaches; else the first. */
+export function defaultComparison(groups: ScoreRun[][], servedBackbones: string[] = []): number {
+  const serves = (g: ScoreRun[]) => g.some((r) => r.method === SERVED_METHOD
+                                              && servedBackbones.includes(r.backbone));
+  let i = groups.findIndex((g) => g.length >= 2 && serves(g));
+  if (i < 0) i = groups.findIndex((g) => g.length >= 2);
   return i < 0 ? 0 : i;
 }
 
@@ -66,10 +79,10 @@ export function bars(runs: ScoreRun[], reports: Map<number, RunReport>, rank: Ra
   }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
 }
 
-/** The k values every run in the comparison can answer. */
+/** The k values to offer: 1/3/5/10 once any run carries the standard summary (runs without
+ *  it show "not measured" at 3 and 10), else the 1 and 5 every run has. */
 export function kChoices(runs: ScoreRun[], reports: Map<number, RunReport>): number[] {
-  const allStandard = runs.every((r) => standardOf(reports.get(r.id)));
-  return allStandard ? [...STANDARD_K] : [1, 5];
+  return runs.some((r) => standardOf(reports.get(r.id))) ? [...STANDARD_K] : [1, 5];
 }
 
 export interface DepthRow { id: number; backbone: string; method: string; external: boolean;
@@ -126,11 +139,11 @@ export function splitModelKey(key: string): { backbone: string; method: string }
 export interface HeldoutBar { key: string; backbone: string; method: string; value: number | null;
                               ci: [number, number] | null; n: number | null; external: boolean }
 
-/** k values a benchmark can answer: 1/3/5/10 from the standard summary when it is there and
- *  stored ten deep, else 1 and 5 from the plain results. */
+/** k values to offer: 1/3/5/10 once any model's standard summary is stored ten deep (the
+ *  others show "not measured" there), else the 1 and 5 every model has. */
 export function heldoutKs(b: PublishedBenchmark): number[] {
   const rows = Object.values(b.summary?.models ?? {}).map((m) => m.rows?.["species strict"]);
-  return rows.length && rows.every((r) => r?.top10 != null) ? [...STANDARD_K] : [1, 5];
+  return rows.some((r) => r?.top10 != null) ? [...STANDARD_K] : [1, 5];
 }
 
 export function heldoutBars(b: PublishedBenchmark, rank: Rank, k: number): HeldoutBar[] {

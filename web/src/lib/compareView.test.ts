@@ -29,19 +29,29 @@ function report(withStandard: boolean, speciesTop1: number): RunReport {
   return { backbone: "b", method: "m", all_photos: allPhotos, first_photo_only: {} } as unknown as RunReport;
 }
 
-test("only models measured on the same records share a chart, newest records first", () => {
-  const runs = [run(1, "ft", "nearest"), run(2, "ft", "species-mean"),
-                run(3, "ft", "nearest", { record_set: "rs0", cutoff: "2026-08-01" }),
+test("only models measured on the same records share a chart, most recently measured first", () => {
+  const runs = [run(1, "ft", "nearest", { created_at: "2026-10-08" }), run(2, "ft", "species-mean"),
+                run(3, "ft", "nearest", { record_set: "rs0", cutoff: "2026-09-20", created_at: "2026-10-06" }),
                 run(4, "external:inat-cv", "combined-max", { comparison_id: "other" })];
   const groups = comparisons(runs);
   assert.deepEqual(groups.map((g) => g.map((r) => r.id)), [[1, 2, 4], [3]],
-    "an iNat row imported under its own comparison id still joins its records' chart");
+    "an iNat row imported under its own comparison id still joins its records' chart; "
+    + "a later cutoff does not outrank a more recent measurement");
 });
 
-test("the first chart is the newest one that compares two or more approaches", () => {
-  const lone = [run(9, "ft", "nearest", { record_set: "new", cutoff: "2026-10-01" })];
+test("two comparisons of the same records show each approach once, its newest run", () => {
+  const runs = [run(1, "ft", "nearest", { comparison_id: "a", created_at: "2026-10-06" }),
+                run(2, "ft", "nearest", { comparison_id: "b", created_at: "2026-10-07" }),
+                run(3, "ft", "nearest-mix", { comparison_id: "b", created_at: "2026-10-07" })];
+  assert.deepEqual(comparisons(runs)[0].map((r) => r.id), [2, 3]);
+});
+
+test("the first chart is the newest that scores the served model beside another approach", () => {
+  const lone = [run(9, "ft", "nearest", { record_set: "new" })];
+  const others = [run(5, "dino", "nearest", { record_set: "x" }), run(6, "dino", "species-mean", { record_set: "x" })];
   const pair = [run(1, "ft", "nearest"), run(2, "ft", "species-mean")];
-  assert.equal(defaultComparison([lone, pair]), 1);
+  assert.equal(defaultComparison([lone, others, pair], ["ft"]), 2);
+  assert.equal(defaultComparison([lone, others, pair]), 1, "nothing served: any pair");
   assert.equal(defaultComparison([lone]), 0);
 });
 
@@ -57,7 +67,8 @@ test("bars rank approaches at the chosen rank and top-k, and mark the outside ba
 test("runs saved before the standard summary still chart at top 1 and 5, never invent top 3 or 10", () => {
   const runs = [run(1, "ft", "nearest"), run(2, "ft", "species-mean")];
   const reports = new Map([[1, report(true, 0.34)], [2, report(false, 0.3)]]);
-  assert.deepEqual(kChoices(runs, reports), [1, 5]);
+  assert.deepEqual(kChoices(runs, reports), [1, 3, 5, 10], "offered once any run has them");
+  assert.deepEqual(kChoices(runs.slice(1), reports), [1, 5]);
   const top3 = bars(runs, reports, "species", 3);
   assert.equal(top3.find((x) => x.id === 2)?.value, null);
   assert.equal(bars(runs, reports, "species", 5).find((x) => x.id === 2)?.value, 0.5);
@@ -110,7 +121,9 @@ test("held-out bars rank models, carry the interval, and offer top 3/10 only whe
   assert.deepEqual(top1.map((x) => [x.key, x.value]), [["ft/nearest+prior@org", 0.51], ["ft/nearest", 0.48]]);
   assert.deepEqual(top1[1].ci, [0.47, 0.49]);
   assert.equal(heldoutBars(b, "species", 3)[0].value, null);
-  assert.deepEqual(heldoutKs(bench(true)), [1, 5], "one model stored only 5 deep");
+  assert.deepEqual(heldoutKs(bench(true)), [1, 3, 5, 10], "one model stored ten deep");
+  assert.equal(heldoutBars(bench(true), "species", 10).find((x) => x.key === "ft/nearest+prior@org")?.value,
+    null, "the one stored five deep is not measured at 10");
   assert.equal(heldoutBars(bench(true), "species", 3).find((x) => x.key === "ft/nearest")?.value, 0.66);
 });
 
