@@ -259,7 +259,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                nightly_fetch_pending: Callable[[], tuple[list[dict], str]] | None = None,
                photo_fetcher: Callable[[], object] | None = None,
                paper_file: Path = PAPER_FILE,
-               experiments_dir: Path | None = None) -> FastAPI:
+               experiments_dir: Path | None = None,
+               dataset_root: Path | None = None, dataset_store: str | None = None,
+               dataset_store_reader=None, dataset_allow_draft: bool = False) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -561,6 +563,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         e = found[slug]
         return JSONResponse({**experiments.summary(e), "markdown": e.body},
                             headers={"Cache-Control": "private, no-store"})
+
+    # On-demand CC images of a public dataset release (dataset_api.py).
+    from . import dataset_api
+    dataset_api.add_routes(app, root=dataset_root, store_location=dataset_store,
+                           store_reader=dataset_store_reader, allow_draft=dataset_allow_draft)
 
     @app.get("/api/paper")
     def paper():

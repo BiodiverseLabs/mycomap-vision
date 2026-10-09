@@ -180,7 +180,8 @@ def table_rows(conn: sqlite3.Connection, table: str, order_by: str, columns: lis
 COMPONENTS = ("records", "labels", "photos", "splits", "recipes", "derived", "private")
 
 
-def content_hashes(db: sqlite3.Connection, private: sqlite3.Connection) -> dict[str, str]:
+def content_hashes(db: sqlite3.Connection, private: sqlite3.Connection | None,
+                   private_hash: str | None = None) -> dict[str, str]:
     out = {
         "records": stream_hash("records", table_rows(db, "records", "record_key")),
         "labels": stream_hash("labels", table_rows(
@@ -191,14 +192,17 @@ def content_hashes(db: sqlite3.Connection, private: sqlite3.Connection) -> dict[
         "recipes": stream_hash("recipes", table_rows(db, "recipes", "name")),
         "derived": stream_hash("derived", table_rows(db, "derived", "photo_key, recipe")),
     }
-    h = hashlib.sha256(f"private:{FORMAT}\n".encode())
-    for table in sorted(r[0] for r in private.execute(
-            "select name from sqlite_master where type = 'table'")):
-        h.update(f"table:{table}\n".encode())
-        first = [r[1] for r in private.execute(f'pragma table_info("{table}")')][0]
-        for row in table_rows(private, table, f'"{first}"'):
-            h.update(canonical_line(row))
-    out["private"] = h.hexdigest()
+    if private is None:
+        out["private"] = private_hash           # not shipped: as MANIFEST.json says
+    else:
+        h = hashlib.sha256(f"private:{FORMAT}\n".encode())
+        for table in sorted(r[0] for r in private.execute(
+                "select name from sqlite_master where type = 'table'")):
+            h.update(f"table:{table}\n".encode())
+            first = [r[1] for r in private.execute(f'pragma table_info("{table}")')][0]
+            for row in table_rows(private, table, f'"{first}"'):
+                h.update(canonical_line(row))
+        out["private"] = h.hexdigest()
     out["reference"] = reference_hash(db)
     out["release"] = release_hash(out)
     return out
@@ -241,6 +245,7 @@ create table photos (
   original_path text, original_sha256 text, original_bytes integer,
   license_code text, license_class text not null, license_checked_at text,
   owner_login text, owner_name text, attribution text,
+  public_trainable integer not null,
   included integer not null, reason text not null
 );
 create index photos_record on photos(record_key);
@@ -325,6 +330,13 @@ class Built:
     stores: dict[str, int]
     photo_stores: list[dict]
     info: dict
+
+
+def public_trainable(license_class: str, answer: str | None) -> int:
+    """Steve, 2026-10-09: the final public model trains only on CC photos (NC included)
+    and photos whose photographer granted permission; internal benchmarking models may
+    use every included photo."""
+    return int(license_class in CC_CLASSES or answer == "granted")
 
 
 def _photo_key(source: str, manifest_id: int, source_photo_id) -> str:
@@ -472,6 +484,7 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             "original_bytes": copy[2] if copy else None,
             "license_code": lic or "", "license_class": lclass, "license_checked_at": checked,
             "owner_login": login, "owner_name": owner_name, "attribution": attrib,
+            "public_trainable": public_trainable(lclass, answers.get(owner_id)),
             "included": int(reason == "ok"), "reason": reason})
         owners.append({"photo_key": pkey, "owner_user_id": owner_id, "source_owner_id": soid,
                        "permission": (answers.get(owner_id, "no_answer") if lclass == "arr"
@@ -588,8 +601,9 @@ def _writable(folder: Path) -> None:
 def write_release(folder: Path, rid: str, built: Built, split_rules: dict, *,
                   recipes: list[str], derived: list[dict], inputs: dict,
                   review_files: list[Path] = (), extra_info: dict | None = None,
-                  log=print) -> dict:
-    """Write <root>/<rid>/ (through <rid>.partial), MANIFEST.json last, files read-only."""
+                  extra_writer=None, log=print) -> dict:
+    """Write <root>/<rid>/ (through <rid>.partial), MANIFEST.json last, files read-only.
+    `extra_writer(folder, info, hashes, counts)` adds files before they are listed."""
     final = folder / rid
     if final.exists():
         raise ReleaseError(f"release {rid} exists; a release is never rebuilt or edited "
@@ -639,12 +653,16 @@ def write_release(folder: Path, rid: str, built: Built, split_rules: dict, *,
         for p in review_files:
             shutil.copyfile(p, partial / "inputs" / Path(p).name)
     (partial / CARD).write_text(dataset_card(info, counts, hashes), encoding="utf-8")
+    if extra_writer is not None:
+        extra_writer(partial, info, hashes, counts)
     files = sorted(p for p in partial.rglob("*") if p.is_file())
     listed = [{"path": p.relative_to(partial).as_posix(), "bytes": p.stat().st_size,
                "sha256": sha256_file(p)} for p in files]
     (partial / SUMS).write_text("".join(f"{f['sha256']}  {f['path']}\n" for f in listed),
                                 encoding="utf-8")
-    manifest = {**info, "hashes": hashes, "counts": counts, "files": listed,
+    manifest = {**info, "dataset_release": rid, "reference_hash": hashes["reference"],
+                "release_hash": hashes["release"],
+                "hashes": hashes, "counts": counts, "files": listed,
                 "sums_sha256": sha256_file(partial / SUMS)}
     (partial / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True),
                                     encoding="utf-8")
@@ -837,7 +855,8 @@ def default_store_reader():
 
 def _ro(path: Path) -> sqlite3.Connection:
     uri = "file:" + quote(Path(path).resolve().as_posix()) + "?mode=ro&immutable=1"
-    conn = sqlite3.connect(uri, uri=True)
+    # Immutable and read-only, so one connection may serve the API's threads.
+    conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -871,7 +890,14 @@ class Release:
         return self.manifest.get("splits", {}).get("val_cutoff")
 
     @property
+    def has_private(self) -> bool:
+        return (self.folder / PRIVATE_DB).is_file()
+
+    @property
     def private(self) -> sqlite3.Connection:
+        if not self.has_private:
+            raise ReleaseError(f"{self.id} was shipped without {PRIVATE_DB} (coordinates, "
+                               "owners, stores); this needs the full release")
         if self._private is None:
             self._private = _ro(self.folder / PRIVATE_DB)
         return self._private
@@ -916,23 +942,29 @@ class Release:
         return self.db.execute("select * from photos where record_key = ? and included = 1 "
                                "order by position, photo_key", (record_key,)).fetchall()
 
-    def photo_ids(self, splits=TRAINABLE) -> list[int]:
+    def photo_ids(self, splits=TRAINABLE, public_trainable_only: bool = False) -> list[int]:
         q = ",".join("?" * len(splits))
+        pt = " and p.public_trainable = 1" if public_trainable_only else ""
         return [r[0] for r in self.db.execute(
             f"select p.manifest_photo_id from photos p join records r using (record_key) "
-            f"where p.included = 1 and r.included = 1 and r.split in ({q})", tuple(splits))]
+            f"where p.included = 1 and r.included = 1 and r.split in ({q}){pt}", tuple(splits))]
 
-    def as_records(self, splits=TRAINABLE, photo_row: dict[int, int] | None = None) -> list:
+    def as_records(self, splits=TRAINABLE, photo_row: dict[int, int] | None = None,
+                   public_trainable_only: bool = False) -> list:
         """evaluate.Record objects for these splits: labels, dates and photos from the
-        release, coordinates from private.sqlite. photo_rows hold photo_row[photo id] for
-        photos with a vector (all included photos when photo_row is None)."""
+        release, coordinates from private.sqlite (None when it was not shipped). photo_rows
+        hold photo_row[photo id] for photos with a vector (all included photos when
+        photo_row is None). public_trainable_only: the photos the final public model may
+        learn from (CC or permission granted); a record left with none is left out."""
         from .evaluate import Record, real_date
         splits = (splits,) if isinstance(splits, str) else tuple(splits)
         places = {r[0]: (r[1], r[2]) for r in self.private.execute(
-            "select record_key, lat_micro, lon_micro from record_places")}
+            "select record_key, lat_micro, lon_micro from record_places")} \
+            if self.has_private else {}
         photos: dict[str, list[int]] = defaultdict(list)
+        pt = " and public_trainable = 1" if public_trainable_only else ""
         for key, pid in self.db.execute(
-                "select record_key, manifest_photo_id from photos where included = 1 "
+                f"select record_key, manifest_photo_id from photos where included = 1{pt} "
                 "order by record_key, position, photo_key"):
             photos[key].append(pid)
         out = []
@@ -968,8 +1000,11 @@ class Release:
                                f"this manifest now (e.g. {sorted(changed)[:5]}); re-embed them "
                                "from the release's originals first")
 
-    def derive(self, photo_key: str, recipe: str, store_reader=None) -> Derived:
-        """The derived image from our original, checked against the stored hashes."""
+    def derive(self, photo_key: str, recipe: str, store_reader=None,
+               store_location: str | None = None) -> Derived:
+        """The derived image from our original, checked against the stored hashes.
+        `store_location`: where the originals are when the release has no private part
+        (a public variant on the server: MV_DATASET_PHOTO_STORE)."""
         p = self.db.execute("select * from photos where photo_key = ?", (photo_key,)).fetchone()
         if p is None:
             raise ReleaseError(f"{photo_key} is not in {self.id}")
@@ -977,12 +1012,15 @@ class Release:
         if r is None:
             raise ReleaseError(f"{self.id} has no recipe {recipe!r}")
         stored_recipe = json.loads(r[0])
-        loc = self.private.execute(
-            "select s.location from photo_stores ps join stores s using (store_id) "
-            "where ps.photo_key = ?", (photo_key,)).fetchone()
-        if loc is None:
+        loc = None
+        if store_location is None and self.has_private:
+            loc = self.private.execute(
+                "select s.location from photo_stores ps join stores s using (store_id) "
+                "where ps.photo_key = ?", (photo_key,)).fetchone()
+        location = store_location or (loc[0] if loc else None)
+        if not location or not p["original_path"] or not p["original_sha256"]:
             raise ReleaseError(f"{photo_key}: no kept original")
-        body = (store_reader or default_store_reader())(loc[0], p["original_path"])
+        body = (store_reader or default_store_reader())(location, p["original_path"])
         if sha256_bytes(body) != p["original_sha256"]:
             raise ReleaseError(f"{photo_key}: our original no longer matches its sha256")
         d = derive_bytes(body, stored_recipe)
@@ -1002,9 +1040,11 @@ class Release:
 
 
 def load_release(rid: str, root: Path | None = None, *, allow_draft: bool = False,
-                 check_files: bool = True) -> Release:
+                 check_files: bool = True, without_private: bool = False) -> Release:
     """Open a finished release read-only. Checks MANIFEST.json and (by default) every
-    file's sha256. Drafts are refused unless allow_draft."""
+    file's sha256. Drafts are refused unless allow_draft. `without_private`: a copy
+    shipped without private.sqlite (an AWS trainer needs no coordinates or owners); every
+    other file is still checked, and anything that needs the private part says so."""
     root = Path(root or ROOT)
     check_id(rid)
     folder = root / rid
@@ -1019,6 +1059,8 @@ def load_release(rid: str, root: Path | None = None, *, allow_draft: bool = Fals
                            "research results need a frozen one (--allow-draft to try)")
     if check_files:
         for f in manifest["files"]:
+            if without_private and f["path"] == PRIVATE_DB:
+                continue
             p = folder / f["path"]
             if not p.is_file() or p.stat().st_size != f["bytes"] or sha256_file(p) != f["sha256"]:
                 raise ReleaseError(f"{rid}: {f['path']} does not match {MANIFEST}")
@@ -1026,12 +1068,15 @@ def load_release(rid: str, root: Path | None = None, *, allow_draft: bool = Fals
 
 
 def verify(rid: str, root: Path | None = None, *, photos: str = "0", store_reader=None,
-           allow_draft: bool = True) -> dict:
+           allow_draft: bool = True, without_private: bool = False) -> dict:
     """Recompute every file hash and content hash; with photos (a number or 'all'),
-    re-read originals from the store and check their sha256."""
-    rel = load_release(rid, root, allow_draft=allow_draft)
+    re-read originals from the store and check their sha256. `without_private`: a copy
+    shipped without private.sqlite; its hash is taken from MANIFEST.json (unchecked)."""
+    rel = load_release(rid, root, allow_draft=allow_draft, without_private=without_private)
     try:
-        hashes = content_hashes(rel.db, rel.private)
+        hashes = content_hashes(rel.db, None if without_private else rel.private,
+                                private_hash=rel.manifest["hashes"]["private"]
+                                if without_private else None)
         bad = {k: (rel.manifest["hashes"].get(k), v) for k, v in hashes.items()
                if rel.manifest["hashes"].get(k) != v}
         if bad:
@@ -1049,7 +1094,7 @@ def verify(rid: str, root: Path | None = None, *, photos: str = "0", store_reade
                     raise ReleaseError(f"{rid}: original of {key} no longer matches its sha256")
                 checked += 1
         return {"id": rid, "release_hash": hashes["release"], "files": len(rel.manifest["files"]),
-                "originals_checked": checked, "ok": True}
+                "originals_checked": checked, "private_checked": not without_private, "ok": True}
     finally:
         rel.close()
 
@@ -1094,9 +1139,95 @@ def public_variant(rid: str, root: Path | None = None, log=print) -> dict:
                         inputs={"public_variant_of": rid}, extra_info={
                             "public_variant_of": rid, "base_release_hash": manifest["hashes"]["release"],
                             "derived_complete": manifest.get("derived_complete"),
-                            "freeze_approved": manifest.get("freeze_approved")}, log=log)
+                            "freeze_approved": manifest.get("freeze_approved")},
+                        extra_writer=write_zenodo_bundle, log=log)
     check_public(root / f"{rid}-cc")
     return out
+
+
+# --- the Zenodo bundle (Steve, 2026-10-09: public files on Zenodo with a DOI) -------------
+
+ZENODO_DIR = "zenodo"
+TABLE_LICENCE = "cc-by-4.0"          # the tables, recipes and card; photos carry their own
+CODE_REPO = "https://github.com/BiodiverseLabs/mycomap-vision"
+RECORD_CSV_COLUMNS = ("record_key", "source", "source_id", "label", "label_rank", "species",
+                      "genus", "family", "name_kind", "mycobank_number", "validated_on",
+                      "observed_on", "country", "state", "included", "reason", "split")
+PHOTO_CSV_COLUMNS = ("photo_key", "record_key", "position", "source", "source_photo_id",
+                     "source_url", "license_code", "license_class", "owner_login",
+                     "owner_name", "attribution", "original_sha256", "original_bytes",
+                     "included", "reason")
+
+
+def zenodo_metadata(info: dict, hashes: dict, counts: dict) -> dict:
+    """Zenodo's deposit metadata. Creators beyond Steve are to be confirmed (TBC)."""
+    rid = info["id"]
+    return {"metadata": {
+        "title": f"MycoMap Vision dataset release {rid}: DNA-validated fungal observations "
+                 "with CC-licensed photos",
+        "upload_type": "dataset",
+        "version": rid,
+        "description": (
+            "DNA-validated (green in a mycomap.org project) iNaturalist and Mushroom Observer "
+            "records from North America with their Creative Commons photos: record ids, "
+            "labels with provenance, splits by validation date, the inclusion list with a "
+            "reason per record and photo, photo licences and attribution, the sha256 of each "
+            "original and of each image derived by a published recipe. No all-rights-reserved "
+            "photos and no coordinates. Photos are not included as files: each row names the "
+            "photo's public URL and licence; derived images can be regenerated and checked. "
+            f"release_hash {hashes['release']}."),
+        "creators": [{"name": "Russell, Stephen"}, {"name": "MycoMap contributors (TBC)"}],
+        "keywords": ["fungi", "mycology", "DNA barcoding", "image classification",
+                     "iNaturalist", "Mushroom Observer", "MycoMap"],
+        "license": TABLE_LICENCE,
+        "related_identifiers": [{"identifier": CODE_REPO, "relation": "isSupplementedBy",
+                                 "scheme": "url"}],
+        "notes": ("Photo licences are per photo (photos.csv license_code); the record-level "
+                  f"licence ({TABLE_LICENCE}) covers the tables, recipes and dataset card. "
+                  "Zenodo lists md5; sha256 in files.json and SHA256SUMS is the release's "
+                  "primary hash."),
+    }}
+
+
+def write_zenodo_bundle(folder: Path, info: dict, hashes: dict, counts: dict) -> None:
+    """zenodo/: metadata.json (deposit schema), records.csv, photos.csv (a licence per
+    photo), recipes.json and files.json (every file of the upload with sha256, size and
+    licence). CC photos only: the public variant holds no other."""
+    z = folder / ZENODO_DIR
+    z.mkdir()
+    db = sqlite3.connect(folder / RELEASE_DB)
+    try:
+        recipes = [r[0] for r in db.execute("select name from recipes order by name")]
+        derived = defaultdict(dict)
+        for key, recipe, sha in db.execute("select photo_key, recipe, derived_sha256 from derived"):
+            derived[key][recipe] = sha
+        with open(z / "records.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(RECORD_CSV_COLUMNS)
+            w.writerows(db.execute(f"select {', '.join(RECORD_CSV_COLUMNS)} from records "
+                                   "order by record_key"))
+        with open(z / "photos.csv", "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(PHOTO_CSV_COLUMNS + tuple(f"{r}_sha256" for r in recipes))
+            for row in db.execute(f"select {', '.join(PHOTO_CSV_COLUMNS)} from photos "
+                                  "order by photo_key"):
+                w.writerow(tuple(row) + tuple(derived[row[0]].get(r, "") for r in recipes))
+        (z / "recipes.json").write_text(json.dumps(
+            [json.loads(r[0]) for r in db.execute("select recipe_json from recipes order by name")],
+            indent=2), encoding="utf-8")
+    finally:
+        db.close()
+    (z / "metadata.json").write_text(json.dumps(zenodo_metadata(info, hashes, counts), indent=2),
+                                     encoding="utf-8")
+    listed = [{"path": p.relative_to(folder).as_posix(), "bytes": p.stat().st_size,
+               "sha256": sha256_file(p),
+               "licence": ("per photo: photos.csv license_code" if p.name == "photos.csv"
+                           else TABLE_LICENCE)}
+              for p in sorted(folder.rglob("*")) if p.is_file() and p.name != PRIVATE_DB]
+    (z / "files.json").write_text(json.dumps(
+        {"note": "MANIFEST.json and SHA256SUMS are written after this list; MANIFEST.json "
+                 "lists every file including this one.", "files": listed}, indent=2),
+        encoding="utf-8")
 
 
 def check_public(folder: Path) -> None:

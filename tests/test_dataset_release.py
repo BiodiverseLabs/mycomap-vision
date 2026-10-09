@@ -620,3 +620,95 @@ def test_a_review_list_may_name_an_inat_record_as_inat_id(world, tmp_path):
     lst.write_text("kind\tkey\treason\tnote\nrecord\tinat:2\twrong photos\t\n", encoding="utf-8")
     m = build(world, review_files=[lst], recipes=["original"])
     assert reasons(world, m["id"])["2"] == ("review:label-audit", None)
+
+
+# --- what the final public model may learn from (Steve, 2026-10-09) -------------------------
+
+def test_public_trainable_is_cc_or_a_granted_permission(world):
+    c = world["conn"]
+    add_record(c, "17", "Russula emetica")
+    add_photo(c, world["store"], "17", 171, lic="", lclass="arr", owner=55)
+    c.execute("insert into photo_permissions (inat_user_id, status) values (55, 'granted')")
+    c.commit()
+    c.execute("pragma wal_checkpoint(truncate)")
+    m = build(world)
+    rel = dr.load_release(m["id"], world["root"], allow_draft=True)
+    try:
+        flag = dict(rel.db.execute("select photo_key, public_trainable from photos"))
+        assert flag["inat:11"] == 1 and flag["mo:9000000004"] == 1      # CC
+        assert flag["inat:12"] == 0 and flag["inat:31"] == 0           # ARR, no answer
+        assert flag["inat:171"] == 1                                    # ARR, granted
+        everyone = {r.observation_id: len(r.photo_rows) for r in rel.as_records()}
+        public = {r.observation_id: len(r.photo_rows)
+                  for r in rel.as_records(public_trainable_only=True)}
+        assert everyone["1"] == 2 and public["1"] == 1                 # its ARR photo dropped
+        assert "3" in everyone and "3" not in public                    # ARR-only record
+        assert "17" in public
+        assert 12 not in rel.photo_ids(public_trainable_only=True)
+    finally:
+        rel.close()
+
+
+# --- a trainer copy without private.sqlite --------------------------------------------------
+
+def test_a_release_can_be_shipped_and_verified_without_its_private_part(world, tmp_path):
+    import shutil
+    m = build(world)
+    ship = tmp_path / "ship"
+    shutil.copytree(world["root"] / m["id"], ship / m["id"],
+                    ignore=shutil.ignore_patterns(dr.PRIVATE_DB))
+    with pytest.raises(dr.ReleaseError, match="does not match"):
+        dr.load_release(m["id"], ship, allow_draft=True)
+    rel = dr.load_release(m["id"], ship, allow_draft=True, without_private=True)
+    try:
+        recs = {r.observation_id: r for r in rel.as_records()}
+        assert set(recs) == {"1", "2", "3", "mo:4"} and recs["1"].latitude is None
+        with pytest.raises(dr.ReleaseError, match="without private.sqlite"):
+            rel.private
+        assert rel.cite()["release_hash"] == m["hashes"]["release"]
+    finally:
+        rel.close()
+    out = dr.verify(m["id"], ship, without_private=True)
+    assert out["ok"] and out["private_checked"] is False
+    folder = ship / m["id"]
+    dr._writable(folder)
+    c = sqlite3.connect(folder / dr.RELEASE_DB)
+    c.execute("update records set label = 'Amanita phalloides' where record_key = '2'")
+    c.commit()
+    c.close()
+    with pytest.raises(dr.ReleaseError):
+        dr.verify(m["id"], ship, without_private=True)
+
+
+def test_the_manifest_names_what_the_registry_copies(world):
+    m = build(world)
+    man = json.loads((world["root"] / m["id"] / dr.MANIFEST).read_text(encoding="utf-8"))
+    assert man["dataset_release"] == m["id"]
+    assert man["reference_hash"] == man["hashes"]["reference"]
+    assert man["release_hash"] == man["hashes"]["release"] and man["code_commit"]
+
+
+# --- the Zenodo bundle ----------------------------------------------------------------------
+
+def test_the_zenodo_bundle_lists_cc_photos_with_their_licences_and_hashes(world):
+    import csv as csvmod
+    m = build(world)
+    pub = dr.public_variant(m["id"], world["root"], log=lambda *a: None)
+    z = world["root"] / pub["id"] / dr.ZENODO_DIR
+    meta = json.loads((z / "metadata.json").read_text(encoding="utf-8"))["metadata"]
+    assert meta["upload_type"] == "dataset" and meta["version"] == pub["id"]
+    assert meta["license"] and meta["creators"] and meta["related_identifiers"]
+    with open(z / "photos.csv", newline="", encoding="utf-8") as f:
+        photos = list(csvmod.DictReader(f))
+    assert photos and {p["license_class"] for p in photos} <= {"open", "nc"}
+    assert all(p["license_code"] for p in photos)
+    p11 = next(p for p in photos if p["photo_key"] == "inat:11")
+    assert p11["long500-q90_sha256"] and p11["original_sha256"]
+    files = json.loads((z / "files.json").read_text(encoding="utf-8"))["files"]
+    for f in files:
+        p = world["root"] / pub["id"] / f["path"]
+        assert dr.sha256_file(p) == f["sha256"] and p.stat().st_size == f["bytes"]
+        assert f["licence"]
+    assert not any(f["path"] == dr.PRIVATE_DB for f in files)
+    blob = b"".join(p.read_bytes() for p in z.iterdir())
+    assert b"45.123456" not in blob and b"45123456" not in blob

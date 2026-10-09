@@ -98,6 +98,7 @@ existing id; `verify` recomputes everything and fails on any difference.
 | `original_path`, `original_sha256`, `original_bytes` | **our kept original**: the `large` copy (iNat 1024 px, MO 960 px), S3 first; the store itself is named only in `private.sqlite` |
 | `license_code`, `license_class` | at the freeze (`open` / `nc` / `arr`); `license_checked_at` |
 | `owner_login`, `owner_name`, `attribution` | needed for CC attribution |
+| `public_trainable` | 1 when the photo is CC (NC included) or its photographer granted permission: what the final public model may learn from (Steve, 2026-10-09); internal benchmarking models may use every included photo |
 | `included`, `reason` | `ok` or the first photo reason in §4 |
 
 `private.sqlite` holds the rest: record coordinates (needed by the location priors),
@@ -201,8 +202,20 @@ the line `"<table>:<schema version>\n"`.
 
 `release_hash` depends only on content: the build time, machine and file layout do not
 enter it, so building v1 twice from the same inputs gives the same hash, and any change to a
-record, label, photo, licence, inclusion, split or recipe changes it. The registry cites
-`dataset_release: v1`, `reference_hash` (first 12 shown), `code_commit`.
+record, label, photo, licence, inclusion, split or recipe changes it. MANIFEST.json carries
+`dataset_release`, `reference_hash`, `release_hash` and `code_commit` (the commit that cut
+the release) at its top level. A registry entry copies `dataset_release` and
+`reference_hash` from `rel.cite()`, with its own `code_commit` (the experiment's code) and
+`reproduce_command`.
+
+**How a comparison's `record_set` relates.** `evaluate.record_set_hash` (sha1, 12 hex) names
+the records one comparison scored: its reference and test record ids, units and the photos
+every compared backbone embedded. It is not the release's `reference_hash`: on a release, a
+comparison's reference is `train` and its test is `val`, and photos without a vector drop out,
+so `record_set` is a function of (`reference_hash`'s records and photos, the backbones'
+vectors). Both are written: `dataset_release` + `reference_hash` say which data, `record_set`
+says which subset of it a comparison could score. `record_set_hash` is left unchanged, so
+`mv compare --into` keeps working on saved comparisons.
 
 File hashes (`SHA256SUMS`, `MANIFEST.json.files`) cover the bytes on disk; SQLite files are
 written with fixed page size and `VACUUM`ed, but the content hashes above are the contract.
@@ -247,8 +260,9 @@ rel.records(split="train")              # included records of a split
 rel.training_records(include_val=False) # train only; a test release raises SealedLeak
 rel.reference_records()                 # train + val, never test
 rel.photos(record_key)                  # included photos with original sha256 + licence
-rel.photo_ids()                         # manifest photo ids, for embeddings lookups
-rel.as_records(("train", "val"), photo_row)  # evaluate.Record objects
+rel.photo_ids(public_trainable_only=False)   # manifest photo ids, for embeddings lookups
+rel.as_records(("train", "val"), photo_row, public_trainable_only=False)  # evaluate.Records
+load_release("v1", without_private=True)     # a trainer copy shipped without private.sqlite
 rel.check_photos_match(conn)            # refuses vectors of a photo whose original changed
 rel.derive(photo_key, "long500-q90")    # bytes, hash-checked
 rel.cite()                              # the dict experiments write into their outputs
@@ -261,6 +275,34 @@ splits come from the release; vectors are found by photo id in the manifest, and
 when that photo's kept original no longer has the release's sha256. Outputs carry
 `rel.cite()`. Still to add, by their owners: `mv finetune` and the Picek launcher (whose
 guard checks `labels_hash`).
+
+**The final public model** (Steve, 2026-10-09): trains with `public_trainable_only=True`
+(CC photos, NC included, plus photos whose photographer granted permission). Internal
+benchmarking models may use every included photo.
+
+**A trainer copy** (an AWS instance) may ship `release.sqlite`, `MANIFEST.json`,
+`SHA256SUMS` and the card **without `private.sqlite`**: `load_release(id,
+without_private=True)` checks every other file; coordinates come back as None (a trainer
+needs none); anything that needs the private part (location priors, `derive` without a
+named store) says so. `verify(id, without_private=True)` recomputes every content hash but
+the private one, which it takes from MANIFEST.json.
+
+**On-demand images on the site** (`dataset_api.py`; Steve, 2026-10-09):
+
+| Request | Returns |
+|---|---|
+| `GET /api/dataset/v1-cc` | JSON: `dataset_release`, `release_hash`, `reference_hash`, `labels_hash`, recipes, counts, the photo URL pattern |
+| `GET /api/dataset/v1-cc/recipes/long500-q90` | JSON: the recipe document and its sha256 |
+| `GET /api/dataset/v1-cc/photos/inat:12345678?recipe=long500-q90` | the JPEG, made from our kept original; headers `X-Derived-SHA256`, `X-Original-SHA256`, `X-Recipe`, `X-Dataset-Release`, `X-License`, `X-Attribution` (percent-encoded), `Link: <source URL>; rel="via"`, `ETag`, `Cache-Control: public, max-age=31536000, immutable` |
+
+Only a public variant (`-cc`, and marked as one) is served, and only its CC photos (the
+licence class is checked again per request); a full release is never even opened. Rate limit
+`MV_DATASET_RATE` per address per minute (default 60); the last 256 images are kept in
+memory. Settings on the box: `MV_DATASET_ROOT` (where releases are), `MV_DATASET_PHOTO_STORE`
+(where originals are; the box's AWS user, today limited to `releases/*`, then needs read
+access to the photos' `large/` prefix: a policy change for Steve), and `MV_DATASET_PUBLIC=1`
+to serve these images without sign-in (otherwise they follow the site's sign-in rule).
+Verify: `sha256sum` of the bytes equals `X-Derived-SHA256` and the release's `derived` row.
 
 ## 9. Public vs private
 
@@ -279,19 +321,40 @@ never crops). All-rights-reserved photos are never shared.
 | coordinates | `private.sqlite` only | **never** (not even rounded) |
 | code, recipes, dataset card | yes | yes |
 
-Anyone can rebuild `v1-cc` from public URLs, or ask us for the on-demand CC derivatives,
+Anyone can rebuild `v1-cc` from public URLs, or fetch the on-demand CC derivatives (§8),
 verify each against `derived_sha256`, and re-run our commands. The paper reports both.
+
+**Zenodo** (Steve, 2026-10-09): each public variant is a Zenodo record with a DOI; a new
+release is a new version of the same concept record. `mv dataset public v1` writes a
+Zenodo-ready bundle in `v1-cc/zenodo/`:
+- `metadata.json`: Zenodo deposit metadata (title, `upload_type: dataset`, description,
+  creators: Russell, Stephen + MycoMap contributors (names TBC), `version` = release id,
+  keywords, `license` for the tables (cc-by-4.0, to confirm), related identifiers: the code
+  repository; the paper and the previous version are added at upload);
+- `records.csv` and `photos.csv` (a `license_code` per photo, attribution, source URL,
+  original sha256 and a `<recipe>_sha256` column per recipe);
+- `recipes.json`;
+- `files.json`: every file of the upload with sha256, size and licence ("per photo" for
+  `photos.csv`; the record licence for the rest). Zenodo lists md5; sha256 stays the
+  release's primary hash. CC photos only; no photo files, no ARR row, no coordinates.
 
 ## 10. Decisions (Steve, 2026-10-09) and what is still open
 
 - North America only: **yes**.
 - Testing: **Steve provides a new dataset of new records**, cut as `v1-test` (§5).
 - Held-out development benchmark: **dated like every record**, membership kept.
-- Public variant: **the standard** (§9).
-- Open: the `val` window (8 weeks by default, or a calendar cutoff chosen at the freeze).
+- Public variant: **the standard** (§9), approved as drafted (16:05 UTC).
+- The held-out 13,145 are ordinary training and reference records in v1; no held-out split.
+- Weights: internal benchmarking models may use every photo; the final public model trains on
+  `public_trainable` photos only.
+- Public files on **Zenodo** with a DOI (16:35 UTC).
+- On-demand images on the site (§8).
+- Open: the `val` window (8 weeks by default, or a calendar cutoff chosen at the freeze);
+  whether the images are public without sign-in (`MV_DATASET_PUBLIC`); the box's S3 read
+  access to the originals; the table licence and the Zenodo creators.
 
 ## Not in this branch
 
 Cutting v1 (waits for Steve's freeze trigger, relayed by the coordinator); uploading a release
-to S3; `--release` in `mv finetune` and the Picek launcher; `add-model` after the first
-training run on v1.
+to S3 or Zenodo; deploying the image endpoint (box settings + AWS policy); `--release` in
+`mv finetune` and the Picek launcher; `add-model` after the first training run on v1.
