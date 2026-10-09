@@ -26,7 +26,8 @@ export function ModelsPage() {
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         {board.data && board.data.runs.length > 0 && (
-          <CompareApproaches runs={board.data.runs} served={models.data?.ready ?? []} />
+          <CompareApproaches runs={board.data.runs} served={models.data?.ready ?? []}
+                             servedMethod={models.data?.default_method ?? "nearest"} />
         )}
         <section>
           <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Scoreboard</h2>

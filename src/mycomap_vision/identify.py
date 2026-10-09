@@ -291,6 +291,12 @@ class Identifier:
             # both come from the one similarity matrix.
             per_photo = np.maximum.reduceat(sims, self.index.starts, axis=1)
             scores = per_photo.mean(axis=0)
+        elif hasattr(self.model, "per_photo_scores") and not self.uses_context:
+            # nearest + species average (the default): its specimen half comes from the
+            # same similarities, so nothing is computed twice; the record's score is the
+            # mean of each photo's own, exactly as species_scores gives it.
+            per_photo = self.model.per_photo_scores(sims, query)
+            scores = per_photo.mean(axis=0)
         else:
             scores = self._species_scores(query, context)
             per_photo = (np.stack([self._species_scores(query[i:i + 1], context)

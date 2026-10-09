@@ -475,6 +475,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def ready_backbones() -> list[str]:
         return [b for b, n in embedded_counts().items() if n and b in limits.allowed_backbones]
 
+    def default_method() -> str:
+        """What an identification uses when no method is named (MV_DEFAULT_METHOD)."""
+        return limits.served_default(lambda m: m in evaluate.METHODS and method_ready(m))
+
     @app.get("/api/models")
     def list_models():
         counts = {b: n for b, n in embedded_counts().items() if b in limits.allowed_backbones}
@@ -495,6 +499,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "methods": [m for m in evaluate.METHODS
                             if limits.method_allowed(m) and method_ready(m)],
                 "max_models": limits.max_models,
+                "default_method": default_method(),
                 "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
 
     def compute_stats() -> dict:
@@ -615,7 +620,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if not wanted:
             if not ready:
                 raise HTTPException(503, "no model has embeddings yet")
-            wanted = [f"{ready[0]}/nearest"]
+            wanted = [f"{ready[0]}/{default_method()}"]
         if limits.max_models and len(wanted) > limits.max_models:
             raise HTTPException(400, f"compare at most {limits.max_models} models at a time here")
         view = permission_view()
@@ -626,7 +631,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         results = []
         for spec in wanted:
             backbone, _, method = spec.partition("/")
-            method = method or "nearest"
+            method = method or default_method()
             if backbone not in limits.allowed_backbones:
                 raise HTTPException(400, f"{backbone!r} is not offered here")
             if backbone not in ready:
@@ -663,9 +668,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if spec == "default":
                     if not ready:
                         raise ValueError("no model has embeddings yet")
-                    spec = f"{ready[0]}/nearest"
+                    spec = f"{ready[0]}/{default_method()}"
                 backbone, _, method = spec.partition("/")
-                method = method or "nearest"
+                method = method or default_method()
                 if backbone not in limits.allowed_backbones or backbone not in ready:
                     raise ValueError(f"{backbone!r} is not offered here or has no embeddings")
                 if (method not in evaluate.METHODS or not limits.method_allowed(method)

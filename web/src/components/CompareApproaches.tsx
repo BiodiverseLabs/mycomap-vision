@@ -15,11 +15,11 @@ interface Approach { name: string; how: string; trained: string; names: string; 
 
 /** How the approaches differ. Rows without results yet say so. */
 const APPROACHES: Approach[] = [
-  { name: "Nearest specimen", how: "Finds the most similar DNA-verified specimens; each species scored by its best match to all your photos",
-    trained: "BioCLIP 2, last 4 of 24 blocks fine-tuned on our records", names: "Any species with one DNA-verified record; new records added nightly",
-    status: "On the site" },
   { name: "Nearest + species average", how: "Blends each photo's two best specimen matches with the species' average look",
-    trained: "Same model", names: "Same as nearest specimen", status: "Tested; to confirm on held-out records" },
+    trained: "BioCLIP 2, last 4 of 24 blocks fine-tuned on our records", names: "Any species with one DNA-verified record; new records added nightly",
+    status: "On the site (the default since October 2026); confirmed on held-out records" },
+  { name: "Nearest specimen", how: "Finds the most similar DNA-verified specimens; each species scored by its best match to all your photos",
+    trained: "Same model", names: "Same as above", status: "Tested; the site's method until October 2026" },
   { name: "Species average", how: "Compares your photos with each species' average photo", trained: "Same model",
     names: "Same as nearest specimen", status: "Tested" },
   { name: "Trained classifier (small)", how: "A classifier trained on top of finished image features",
@@ -35,10 +35,12 @@ const APPROACHES: Approach[] = [
     status: "Tested on held-out development records: can name 13-19% of formally named North American records; behind on the species they share" },
 ];
 
-export function CompareApproaches({ runs, served }: { runs: ScoreRun[]; served: string[] }) {
+export function CompareApproaches({ runs, served, servedMethod = "nearest" }: {
+  runs: ScoreRun[]; served: string[]; servedMethod?: string;
+}) {
   const groups = useMemo(() => comparisons(runs), [runs]);
   const [pick, setPick] = useState<number | null>(null);
-  const idx = pick ?? defaultComparison(groups, served);
+  const idx = pick ?? defaultComparison(groups, served, servedMethod);
   const group = groups[idx] ?? [];
   const reportQs = useQueries({
     queries: group.map((r) => ({ queryKey: ["run", r.id], queryFn: () => api.run(r.id) })),
@@ -65,7 +67,7 @@ export function CompareApproaches({ runs, served }: { runs: ScoreRun[]; served: 
           <ComparisonPicker groups={groups} idx={idx} onPick={setPick} />
           {loading ? <p className="text-sm text-muted-foreground">Loading results…</p> : (
             <>
-              <SideBySide group={group} reports={reports} served={served} />
+              <SideBySide group={group} reports={reports} served={served} servedMethod={servedMethod} />
               <DepthTable group={group} reports={reports} />
             </>
           )}
@@ -139,14 +141,14 @@ function Toggle<T extends string | number>({ options, value, onChange, label }: 
   );
 }
 
-function SideBySide({ group, reports, served }: {
-  group: ScoreRun[]; reports: Map<number, RunReport>; served: string[];
+function SideBySide({ group, reports, served, servedMethod }: {
+  group: ScoreRun[]; reports: Map<number, RunReport>; served: string[]; servedMethod: string;
 }) {
   const ks = kChoices(group, reports);
   const [rank, setRank] = useState<Rank>("species");
   const [kPick, setK] = useState(1);
   const k = ks.includes(kPick) ? kPick : 1;
-  const rows = bars(group, reports, rank, k, served);
+  const rows = bars(group, reports, rank, k, served, servedMethod);
   const [hover, setHover] = useState<number | null>(null);
   const anyOutside = rows.some((r) => r.external);
   return (

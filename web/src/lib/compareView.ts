@@ -39,8 +39,9 @@ export function comparisons(runs: ScoreRun[]): ScoreRun[][] {
 
 /** The comparison shown first: the most recently measured one that scores the model the site
  *  serves next to at least one other approach; else any with two approaches; else the first. */
-export function defaultComparison(groups: ScoreRun[][], servedBackbones: string[] = []): number {
-  const serves = (g: ScoreRun[]) => g.some((r) => r.method === SERVED_METHOD
+export function defaultComparison(groups: ScoreRun[][], servedBackbones: string[] = [],
+                                  servedMethod: string = SERVED_METHOD): number {
+  const serves = (g: ScoreRun[]) => g.some((r) => r.method === servedMethod
                                               && servedBackbones.includes(r.backbone));
   let i = groups.findIndex((g) => g.length >= 2 && serves(g));
   if (i < 0) i = groups.findIndex((g) => g.length >= 2);
@@ -62,7 +63,7 @@ export interface Bar {
 /** One bar per run: its top-k at `rank` over all test records, best first. Top 1 and 5 come
  *  from every run; top 3 and 10 only from runs that carry the standard summary. */
 export function bars(runs: ScoreRun[], reports: Map<number, RunReport>, rank: Rank, k: number,
-                     servedBackbones: string[] = []): Bar[] {
+                     servedBackbones: string[] = [], servedMethod: string = SERVED_METHOD): Bar[] {
   return runs.map((r) => {
     const rep = reports.get(r.id);
     const std = standardOf(rep)?.[rank]?.all;
@@ -74,7 +75,7 @@ export function bars(runs: ScoreRun[], reports: Map<number, RunReport>, rank: Ra
     return {
       id: r.id, backbone: r.backbone, method: r.method, value,
       n: std?.n ?? old?.n ?? null, external: isExternal(r.backbone),
-      served: r.method === SERVED_METHOD && servedBackbones.includes(r.backbone),
+      served: r.method === servedMethod && servedBackbones.includes(r.backbone),
     };
   }).sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
 }
