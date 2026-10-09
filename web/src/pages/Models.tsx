@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/Layout";
 import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
 import { modelName } from "@/lib/publicView";
+import { CompareApproaches } from "@/components/CompareApproaches";
 
 const BUCKET_ORDER = ["all", "names iNat knows", "novel (0 refs)", "1 ref", "2 refs", "3-5 refs",
                       "6-30 refs", "31+ refs"];
@@ -18,12 +19,15 @@ export function ModelsPage() {
 
   return (
     <>
-      <PageHeader title="Models">
+      <PageHeader title="Results">
         Every comparison scores its models on exactly the same records: those that turned green
         in the newest weeks, identified from the older ones. Top-1 means the first answer was
         right.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+        {board.data && board.data.runs.length > 0 && (
+          <CompareApproaches runs={board.data.runs} served={models.data?.ready ?? []} />
+        )}
         <section>
           <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Scoreboard</h2>
           {board.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}

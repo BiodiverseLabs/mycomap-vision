@@ -449,18 +449,9 @@ def predict_heldout(conn: sqlite3.Connection, bench: str, model: ExternalModel,
 
 # --- a saved scoreboard comparison -----------------------------------------------------------
 
-try:                                   # feat/compare-approaches; the same bands until merged
-    from ...evaluate import STANDARD_DEPTH, STANDARD_K, standard_band
-except ImportError:
-    STANDARD_K = (1, 3, 5, 10)
-    STANDARD_DEPTH = [(0, 0, "0"), (1, 4, "1-4"), (5, 19, "5-19"), (20, 99, "20-99"),
-                      (100, 10**9, "100+")]
+# The standard summary's top-k and reference bands are evaluate's, as for every model.
+from ...evaluate import STANDARD_DEPTH, STANDARD_K, standard_band  # noqa: E402
 
-    def standard_band(n: int) -> str:
-        for lo, hi, label in STANDARD_DEPTH:
-            if lo <= n <= hi:
-                return label
-        return STANDARD_DEPTH[-1][2]
 
 PHOTO_PREFERENCE = {"large": 0, "medium": 1, "original": 2, "small": 3}
 

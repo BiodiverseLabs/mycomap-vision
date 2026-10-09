@@ -10,6 +10,11 @@ const LICENSE_LABEL: Record<string, string> = {
   arr: "All rights reserved",
 };
 
+/** Names that are temporary codes (species known from DNA, not yet described). The server
+ *  adds the count in the site-copy work (feat/site-standards-copy); until then it is absent. */
+const provisional = (s: object): number | null =>
+  (s as { names_provisional?: number }).names_provisional ?? null;
+
 export function DataPage() {
   const q = useQuery({ queryKey: ["stats"], queryFn: api.stats, refetchInterval: 30_000 });
   const s = q.data;
@@ -26,7 +31,10 @@ export function DataPage() {
             <div className="grid gap-4 grid-cols-2 lg:grid-cols-3">
               <Tile label="DNA-validated records" value={num(s.records)}
                     sub={`${num(s.records_north_america)} in North America`} />
-              <Tile label="Names" value={num(s.names)} sub="North America, no label conflicts" />
+              <Tile label="Names" value={num(s.names)}
+                    sub={provisional(s) != null
+                      ? `North America, no label conflicts; ${num(provisional(s))} provisional (not yet described)`
+                      : "North America, no label conflicts"} />
               <Tile label="Photos" value={num(s.photos)}
                     sub={`${(s.photos / Math.max(1, s.inat_ok)).toFixed(1)} per record`} />
             </div>

@@ -219,7 +219,8 @@ def cmd_compare(conn, args) -> None:
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
                               max_test=args.max_test, name_scores=args.name_scores,
-                              sets=not args.no_sets, per_image=args.per_image)
+                              sets=not args.no_sets, per_image=args.per_image,
+                              into=args.into)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -351,6 +352,31 @@ def cmd_scoreboard_export(conn, args) -> None:
         print(f"wrote {args.out}", file=sys.stderr)
     else:
         print(text)
+
+
+def cmd_benchmark_export(conn, args) -> None:
+    """A held-out report's aggregates as JSON, for mv benchmark-import on the server box."""
+    from pathlib import Path
+    from . import benchmark_io
+    path = Path(args.report)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    text = json.dumps(benchmark_io.export_summary(report, path.name), indent=1)
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"wrote {args.out}", file=sys.stderr)
+    else:
+        print(text)
+
+
+def cmd_benchmark_import(conn, args) -> None:
+    """(server box) A benchmark export into the manifest the site serves; '-' reads stdin."""
+    from . import benchmark_io
+    text = sys.stdin.read() if args.file == "-" else open(args.file, encoding="utf-8").read()
+    try:
+        result = benchmark_io.import_summary(conn, json.loads(text))
+    except (benchmark_io.ImportRefused, ValueError) as e:
+        raise SystemExit(f"not imported: {e}")
+    print(json.dumps(result, indent=2))
 
 
 def cmd_scoreboard_import(conn, args) -> None:
@@ -996,6 +1022,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--per-image", action="store_true",
                    help="also answer every test photo on its own (top-1 per rank and species "
                         "macro-F1 per photo, as the Picek group reports)")
+    p.add_argument("--into", metavar="COMPARISON",
+                   help="add the runs to this saved comparison (same records only; replaces "
+                        "a run of the same backbone and method there)")
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
                                       "any that fail), then compare them with the baselines")
@@ -1056,6 +1085,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", help="write to this file (default: standard output)")
     p = sub.add_parser("scoreboard-import", help="(server box) add rows from scoreboard-export "
                        "to a comparison this machine has; '-' reads standard input")
+    p.add_argument("file", help="the export, or - for standard input")
+    p = sub.add_parser("benchmark-export", help="a held-out report's aggregates (no record "
+                       "ids, names, observers or places) for the server box's Models page")
+    p.add_argument("--report", required=True, help="a report-*.json from mv heldout report")
+    p.add_argument("--out", help="write to this file (default: standard output)")
+    p = sub.add_parser("benchmark-import", help="(server box) add a benchmark-export to the "
+                       "site; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
@@ -1306,6 +1342,8 @@ def main(argv: list[str] | None = None) -> int:
         "scoreboard-export": cmd_scoreboard_export,
         "calibrate-sets": cmd_calibrate_sets,
         "scoreboard-import": cmd_scoreboard_import,
+        "benchmark-export": cmd_benchmark_export,
+        "benchmark-import": cmd_benchmark_import,
         "models": cmd_models,
         "serve": cmd_serve,
         "status": cmd_status,

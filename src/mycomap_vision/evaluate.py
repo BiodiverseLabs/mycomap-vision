@@ -35,6 +35,12 @@ from .permissions import ensure_schema as ensure_permissions_schema
 BUCKETS = [(0, 0, "novel (0 refs)"), (1, 1, "1 ref"), (2, 2, "2 refs"),
            (3, 5, "3-5 refs"), (6, 30, "6-30 refs"), (31, 10**9, "31+ refs")]
 RANKS = ("family", "genus", "species")
+# Steve's standard summary (2026-10-09), kept beside the older buckets: top 1/3/5/10, and
+# every rank by the TRUE species' reference records in these bands (as the held-out
+# report's DEPTH_BUCKETS), so the website can chart every model the same way.
+STANDARD_K = (1, 3, 5, 10)
+STANDARD_DEPTH = [(0, 0, "0"), (1, 4, "1-4"), (5, 19, "5-19"), (20, 99, "20-99"),
+                  (100, 10**9, "100+")]
 
 
 @dataclass
@@ -231,6 +237,13 @@ def bucket_of(n: int) -> str:
     return BUCKETS[-1][2]
 
 
+def standard_band(n: int) -> str:
+    for lo, hi, label in STANDARD_DEPTH:
+        if lo <= n <= hi:
+            return label
+    return STANDARD_DEPTH[-1][2]
+
+
 def truth(rec: Record, rank: str) -> str:
     return {"species": rec.species, "genus": rec.genus, "family": rec.family}[rank]
 
@@ -318,6 +331,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     uses_context = getattr(model, "needs_context", False)
     leak = occurrence_leak_check(model, test)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
+    standard = {rank: defaultdict(Counter) for rank in RANKS}
+    deepest = max(top_k, *STANDARD_K)
     # Calibration: summed NLL per candidate temperature, over test records whose
     # true label is in the reference set (a novel species has no probability to give).
     position = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
@@ -338,6 +353,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
         else:
             scores = model.species_scores(vectors[rows])
         b = bucket_of(index.ref_count.get(rec.unit, 0))
+        band = standard_band(index.ref_count.get(rec.unit, 0))
         for rank in RANKS:
             t = truth(rec, rank)
             if not t:          # e.g. species of a one-word name: not scored at that rank
@@ -349,7 +365,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 n_cal[rank] += 1
             if sets:
                 kept[rank].append(likely.compact(rs, position[rank].get(t), T_GRID, lse=lse))
-            top = top_labels(rs, names[rank], top_k)
+            top = top_labels(rs, names[rank], deepest)
             if name_scores and rank in ("species", "genus") and top:
                 eq = (name_equiv.species_match if rank == "species"
                       else name_equiv.genus_match)(top[0], t)
@@ -360,7 +376,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 c = tally[rank][key]
                 c["n"] += 1
                 c["top1"] += top[:1] == [t]
-                c[f"top{top_k}"] += t in top
+                c[f"top{top_k}"] += t in top[:top_k]
+            for key in ("all", band):
+                c = standard[rank][key]
+                c["n"] += 1
+                for k in STANDARD_K:
+                    c[f"top{k}"] += t in top[:k]
             if rank in ("genus", "species"):
                 keys = [("project", p) for p in (rec.projects or ("(none)",))]
                 keys.append(("observer", rec.observer or "(unknown)"))
@@ -375,6 +396,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
         out[rank] = {k: {"n": c["n"], "top1": round(c["top1"] / c["n"], 4),
                          f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
                      for k, c in tally[rank].items() if c["n"]}
+    out["standard"] = {
+        "k": list(STANDARD_K), "bands": [label for _, _, label in STANDARD_DEPTH],
+        **{rank: {key: {"n": c["n"], **{f"top{k}": round(c[f"top{k}"] / c["n"], 4)
+                                       for k in STANDARD_K}}
+                  for key, c in standard[rank].items() if c["n"]}
+           for rank in RANKS}}
     out["groups"] = {kind: summarise_groups(g) for kind, g in groups.items()}
     if leak is not None:
         out["occurrence_leak_check"] = leak
@@ -573,22 +600,45 @@ def save_run(conn: sqlite3.Connection, comparison_id: str, backbone: str, method
 def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
             test_days: int = 28, max_test: int | None = None, seed: int = 0,
             embeddings_root=None, name_scores: bool = False, sets: bool = True,
-            per_image: bool = False, log=print) -> dict:
+            per_image: bool = False, into: str | None = None, log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
     another could not see. `sets` (likely.py) are fitted on the all-photos pass only:
     nothing reads a first-photo fit.
+
+    `into`: add the runs to that saved comparison instead of starting a new one (a method
+    built after it ran, or a rerun for the standard summary), replacing any run of the same
+    backbone and method there. Refused unless today's manifest rebuilds exactly its records
+    (record set, cutoff, number of test records), so every row of a comparison stays
+    measured on the same records.
     """
     methods = methods or ["nearest"]
     for m in methods:
         if m not in METHODS:
             raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
+    if into:
+        conn.executescript(SCOREBOARD_SCHEMA)
+        saved = conn.execute("select record_set, cutoff, n_test, test_days from eval_runs "
+                             "where comparison_id = ? limit 1", (into,)).fetchone()
+        if saved is None:
+            raise ValueError(f"no comparison {into} on the scoreboard")
+        if max_test:
+            raise ValueError("--into rebuilds a saved comparison's records: no sampling")
+        test_days = saved[3]
     shared = shared_records(conn, backbones, test_days, max_test, seed, embeddings_root)
     check_not_trained_on_test(conn, list(shared.loaded), shared.cutoff)
     ref, test = shared.ref, shared.test
-    comparison_id = (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-"
-                     + shared.record_set[:6])
+    if into:
+        now = (shared.record_set, shared.cutoff, len(test))
+        if now != tuple(saved[:3]):
+            raise ValueError(f"comparison {into} was measured on other records (record set "
+                             f"{saved[0][:12]}, cutoff {saved[1]}, {saved[2]} test records; "
+                             f"today {now[0][:12]}, {now[1]}, {now[2]}): run a new comparison")
+        comparison_id = into
+    else:
+        comparison_id = (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-"
+                         + shared.record_set[:6])
     runs = []
     for b, (ids, vecs) in shared.loaded.items():
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
@@ -604,6 +654,10 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
                                   name_scores=name_scores, sets=sets, per_image=per_image)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted,
                              sets=False)
+            if into:           # replaced only once its successor is ready to be saved
+                with conn:
+                    conn.execute("delete from eval_runs where comparison_id = ? and "
+                                 "backbone = ? and method = ?", (into, b, m))
             runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first,
                                  extra))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
