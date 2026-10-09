@@ -82,7 +82,9 @@ A "model" here is a **backbone** (frozen image model -> vector per photo) plus a
   (`mv embed --backbone timm:<name>`); favourites get a short alias. Other
   sources (Hugging Face transformers, ONNX, an API) are one loader class each.
 - Methods: `evaluate.METHODS`. Now `nearest` (best-matching DNA-verified
-  specimen) and `species-mean` (species average vector); trained heads,
+  specimen) and `species-mean` (species average vector), and `nearest+mean`
+  (experimental: the two best specimen matches blended with the species average;
+  see "Is nearest biased toward species with many reference photos?"); trained heads,
   multi-photo attention and the range prior plug in the same way.
 - `mv compare --backbones a,b,c --methods nearest,species-mean` scores every
   pair on exactly the same test and reference photos (only photos every backbone
@@ -261,6 +263,139 @@ Inputs (read-only prod queries) are in `data/benchmarks/heldout-2026-10-08/`: po
   records of its comparison) beside its weights, so `mv heldout predict` can check a
   benchmark's records against what the model trained on, not only against the
   reference index it answers from.
+
+## Is nearest biased toward species with many reference photos? (2026-10-09, exp/depth-bias)
+
+Why species accuracy is ~40% on held-out records (Steve, 2026-10-09). An audit of 99
+held-out dev records (fine-tuned BioCLIP 2, `nearest`) found accuracy rising with the
+true species' reference records (0 refs 0/4; 1-4 3/16; 5-19 2/23; 20-99 22/38; 100+
+13/18), and in 37 of 55 misses the winning species had more reference records than the
+truth. The suspect: `nearest` scores a species by its best match among N photos, a
+maximum that grows with N, so deep species get more chances.
+
+Tested on comparison 20261008-012435-4ef7b0 (fine-tuned bioclip-2-ft-20261007-165400;
+newest 28 days, 1,152 test records against 152,915; record set reproduced exactly).
+Every variant re-scores the same embeddings, with no retraining. Species top-1, by
+the true species' reference records (test records 141 / 215 / 296 / 364 / 105):
+
+| scoring | species | 0 | 1-4 | 5-19 | 20-99 | 100+ | pairs vs nearest |
+|---|---|---|---|---|---|---|---|
+| nearest | 34.5 | 0 | 12.6 | 31.8 | 54.1 | 65.7 | |
+| best - 0.005 ln N photos | 33.9 | 0 | 13.0 | 33.4 | 51.9 | 61.0 | +10/-17 |
+| best - 0.01 ln N photos | 33.7 | 0 | 14.4 | 34.5 | 51.4 | 55.2 | +24/-33 |
+| best - 0.02 ln N photos | 29.1 | 0 | 16.7 | 33.8 | 41.2 | 38.1 | +39/-100 |
+| best + 0.005 ln N photos | 35.0 | 0 | 12.6 | 29.4 | 56.0 | 70.5 | +17/-12 |
+| best - expected best for other species' photos (x0.25) | 33.8 | 0 | 14.9 | 34.5 | 51.4 | 55.2 | +25/-33 |
+| per-species z-score of best | 12.1 | 0 | 18.6 | 16.9 | 11.8 | 2.9 | +35/-286 |
+| hubness (CSLS-style, top-50 x0.25) | 34.3 | 0 | 15.3 | 33.8 | 51.6 | 60.0 | +30/-33 |
+| per-depth offsets, fitted (2-fold by observer) | 33.9 | 0 | 13.5 | 34.8 | 49.2 | 65.7 | +18/-25 |
+| mean of top-2 photos | 36.0 | 0 | 10.7 | 32.8 | 56.6 | 73.3 | +36/-20 |
+| mean of top-5 photos | 35.3 | 0 | 8.8 | 29.7 | 57.1 | 77.1 | +53/-44 |
+| top-2 over distinct records | 35.6 | 0 | 9.3 | 31.8 | 57.1 | 73.3 | +43/-31 |
+| species-mean | 34.3 | 0 | 13.5 | 39.2 | 50.8 | 52.4 | +87/-89 |
+| 0.5 nearest + 0.5 species-mean | 37.9 | 0 | 14.0 | 40.9 | 57.4 | 61.9 | +70/-32 |
+| **0.6 top-2 + 0.4 species-mean (`nearest+mean`)** | **38.4** | 0 | **13.0** | **39.9** | **58.5** | **67.6** | **+76/-33** |
+
+(N is reference photos; using reference records instead gives the same picture. The
+"expected best" and z-score use each species' best match to 6,000 random reference
+photos of other species; hubness subtracts the mean of its 50 strongest such matches.)
+
+What this says:
+- **Taking depth out of the score loses.** Every penalty on depth, fixed (b ln N),
+  measured (expected best match, z-score, hubness) or fitted per depth band, trades a
+  few sparse-species records for many more deep ones, overall and in cross-validation.
+  A small depth *bonus* is neutral. Test records arrive at real frequencies, so a deep
+  species really is more likely, and nearest's implicit lean toward depth is about as
+  big as it should be. The audit's "the winner was deeper" is mostly a base rate: the
+  truths that get missed are sparse, so nearly any rival is deeper. Among records
+  nearest gets right, the runner-up is deeper than the truth only 42% of the time.
+- **Most sparse-species misses are not near misses.** For truths with 1-4 reference
+  records, nearest ranks the truth #1 for 12%, #2-5 for 14%, #6-20 for 24% and below
+  #20 for 46%. No re-scoring of the same similarities can reach those; the photos we
+  hold of those species don't look like the query (other angles, stages, observers) or
+  the names split what the photos can't (temporary codes inside one lookalike group).
+- **What helps is steadier evidence per species, not less depth.** The species average
+  and nearest fail in opposite ways: the average is good for a species known from a few
+  records (5-19 refs: 39.2% vs 31.8%) and blurred for one with hundreds (52.4% vs
+  65.7%); nearest is the reverse, and it hangs on one photo. A blend keeps each where
+  it's strong. With the mean of each photo's two best matches in place of the single
+  best, the deep species keep their lead too.
+- Combining photos is not the problem (nearest-mix gave nothing, 2026-09-29) and neither
+  is the trained-head route (balanced softmax lost badly, 2026-09-28).
+
+Depth is a moving target (Steve, 2026-10-09). Every week's green records add references
+to species already known, so species keep moving from the sparse bands into the
+well-sampled ones; fixing sparse-species accuracy is partly something time does for us,
+and the work is iterative. Species-labelled records with photos, by validation date:
+
+| reference set up to | records | species | species with 20+ records |
+|---|---|---|---|
+| 2025-03-07 | 63,796 | 12,141 | 703 (5.8%) |
+| 2025-09-07 | 84,858 | 14,056 | 1,022 (7.3%) |
+| 2026-03-07 | 108,421 | 15,653 | 1,350 (8.6%) |
+| 2026-06-07 | 139,086 | 17,013 | 1,771 (10.4%) |
+| 2026-09-07 | 151,522 | 17,935 | 1,919 (10.7%) |
+
+The well-sampled group nearly tripled in 18 months. New names keep arriving too, and the
+share of a weekly batch whose species is sparse depends on which projects reported that
+week (in the 28 days after each date above, 31%, 21%, 14%, 37% and 32% of test records
+had 0-4 references), so the shift shows in the reference set more than in any one batch.
+What follows from it:
+- Judge methods by depth band, not only overall: the overall number moves with the
+  band mix of each batch and with time. A method has to hold up in each band, so its
+  gains carry over as species move between them.
+- A depth penalty would cost more every month, since it taxes the bands that keep
+  growing. `nearest+mean` gains most in 5-19 and 20-99, the bands sparse species move
+  into next, and doesn't lose at 100+.
+- Settings fitted on one comparison (k and weight here, the per-method temperatures and
+  likely-set floors) are fitted to that comparison's depth mix. Refit them on each new
+  comparison and keep an eye on the weekly prospective tests as the mix changes.
+- The 1-4 band's ceiling isn't fixed: those species become 5-19 species as records
+  arrive, and that's where both methods do far better.
+
+`nearest+mean` (methods.NearestAndMean; k = 2 and weight 0.6 chosen on 4ef7b0, on a
+plateau: 0.5-0.65 with top-2 all give 38.2-38.4%). Through `evaluate.evaluate` on
+4ef7b0, top-1 / top-5:
+
+| | species | genus | family | first photo only, species |
+|---|---|---|---|---|
+| nearest | 34.5 / 56.8 | 71.6 / 89.2 | 79.7 / 93.6 | 28.9 |
+| nearest+mean | **38.4 / 61.2** | **74.4 / 90.8** | **81.8 / 94.6** | **35.0** |
+
+| true species' refs (n) | nearest sp / ge / fa | nearest+mean sp / ge / fa | species fixed / broken |
+|---|---|---|---|
+| 0 (141) | - / 50.3 / 66.7 | - / 51.0 / 70.3 | |
+| 1-4 (215) | 12.6 / 57.2 / 65.6 | 13.0 / 58.6 / 67.4 | +3 / -2 |
+| 5-19 (296) | 31.8 / 76.1 / 84.6 | 39.9 / 82.4 / 87.9 | +33 / -9 |
+| 20-99 (364) | 54.1 / 79.6 / 84.2 | 58.5 / 81.8 / 85.9 | +32 / -16 |
+| 100+ (105) | 65.7 / 90.5 / 96.1 | 67.6 / 91.4 / 95.1 | +8 / -6 |
+| provisional (506) | 27.9 / 70.4 / 79.2 | 32.6 / 73.3 / 81.6 | +33 / -9 |
+| formal (615) | 40.0 / 72.7 / 80.0 | 43.1 / 75.3 / 81.9 | +43 / -24 |
+
+Species pairs overall +76 / -33 (sign test p < 0.0001), genus +56 / -25. Species
+top-5 rises in every band with references. Provisional names gain most (+4.7
+points), which matters since they are about half the records. Calibration is per
+method: the species temperature stays 0.037, NLL 3.22 to 2.89; the 90% likely set
+reaches 60% coverage (55% for nearest), 69% when the true name is in the reference
+set (62%), with 4.1 names on average (3.4).
+It costs two similarity passes (photos and species averages) plus a sort per query
+photo: scoring the 1,152 records twice (all photos, first photo) took 210 s on the
+laptop against nearest's 83 s.
+
+Held-out check: the dev set's vectors aren't there yet (the benchmark wasn't frozen
+or fetched when this ran), so the confirmation is still to do: `mv heldout predict`
+on dev with `--methods nearest,nearest+mean` once dev is fetched. As a sanity check
+only, the 99 audit records (embedded from the audit's own photo copies, all manifest
+records as reference; nearest reproduced the audit's 99 answers exactly): species
+top-1 40 vs 40 (7 fixed, 7 broken), top-5 72 vs 68; 5-19 refs 5/23 vs 2/23, 100+
+10/18 vs 13/18. Too small to read either way, but deep species losing is the risk to
+watch on dev.
+
+Before it could become a default: confirm on dev; run `mv compare` with it so its
+calibration and likely sets are on the scoreboard; it has no `+prior` / `+occ`
+variant yet (its scores are cosine-like, so it would go through AsLogProb).
+`identify.py` computes the photo similarities twice for it (once for the specimens
+shown, once inside the method); share them if it goes live.
 
 ## Uninformative photos: drop or down-weight? (experiment, 2026-10-09)
 
