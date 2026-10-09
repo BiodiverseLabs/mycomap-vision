@@ -634,7 +634,7 @@ def cmd_heldout(conn, args) -> None:
 
 
 def cmd_external(conn, args) -> None:
-    """Published fungi classifiers as outside baselines (external.py, external_report.py)."""
+    """Published fungi classifiers as outside baselines (replications/fungitastic/published*.py)."""
     from pathlib import Path
 
     from . import heldout
@@ -720,7 +720,7 @@ def format_f1_and_per_image(models: dict) -> str:
 
 
 def cmd_picek_train(conn, args) -> None:
-    """Train the Picek group's classifier recipe on our records (picek.py). Full runs belong
+    """Train the Picek group's classifier recipe on our records (retrain.py). Full runs belong
     on a GPU instance; here: a smoke test (--max-steps) or a short run."""
     from datetime import datetime
 
@@ -851,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="rehearsal: run everything on this many random records only "
                         "(its results can't be merged home)")
     p.add_argument("--picek", default="",
-                   help="also train the Picek group's classifier recipe (picek.py): presets "
+                   help="also train the Picek group's classifier recipe (retrain.py): presets "
                         "as preset[@epochs[@cache_px]], e.g. fungitastic-beit-b384@15@440 "
                         "(15 epochs from a 440 px photo cache); add the methods "
                         "classifier,classifier+month to score it")
@@ -923,7 +923,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .replications.fungitastic.retrain import PRESETS
     p = sub.add_parser("picek-train", help="train the Picek group's fungi classifier recipe "
-                                           "(FungiTastic / DF20) on our records (picek.py)")
+                                           "(FungiTastic / DF20) on our records (retrain.py)")
     p.add_argument("--preset", default="fungitastic-beit-b384", choices=sorted(PRESETS))
     p.add_argument("--name", help="default: picek-<preset>-<date-time>")
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
@@ -1206,7 +1206,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--redo", action="store_true", help="replace answers stored before")
 
     p = sub.add_parser("external", help="published fungi classifiers (DF20, FungiTastic) as "
-                                        "outside baselines (external.py)")
+                                        "outside baselines (replications/fungitastic/)")
     xsub = p.add_subparsers(dest="action", required=True)
     model_help = ("comma list of models (short name, external:<name> or BVRA/<repo>); "
                   "default: all")

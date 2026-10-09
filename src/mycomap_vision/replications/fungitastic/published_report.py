@@ -1,4 +1,4 @@
-"""The agreed protocol for scoring outside models that have no temporary codes (external.py).
+"""The agreed protocol for scoring outside models that have no temporary codes (published.py).
 
 A model trained on Danish records can't name a North American provisional species, and
 many of our formal names are not in its vocabulary. So beside the standard summary
@@ -17,7 +17,7 @@ many of our formal names are not in its vocabulary. So beside the standard summa
        C's names kept, in Vision's order).
 
 Every table is given twice: by exact names (Vision's labels, writing set aside) and with
-the GBIF synonym crosswalk (gbif.py: names sharing an accepted key in the GBIF Backbone
+the GBIF synonym crosswalk (crosswalk.py: names sharing an accepted key in the GBIF Backbone
 or the Catalogue of Life count as one). One judge (Scorer) is used for every model in a
 table, Vision included, so the crosswalk can make a Vision answer right as well as a
 Danish one. Scoring only: it never touches Vision's labels.
@@ -68,7 +68,7 @@ def equiv():
 # --- one judge for every model ----------------------------------------------------------------
 
 class Scorer:
-    """Vision's labels (heldout.Labeller), and with a crosswalk (gbif.py) also GBIF's
+    """Vision's labels (heldout.Labeller), and with a crosswalk (crosswalk.py) also GBIF's
     synonymy: two names are one when their labels agree or they share an accepted key.
     The same Scorer judges Vision and the outside models in every table, so a synonym can
     make a Vision answer right as well as theirs. Scoring only: never a training label."""

@@ -6,7 +6,7 @@ import type { Me, ScoreRun } from "./api";
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
 const BASE_NAME: Record<string, string> = { "bioclip-2": "BioCLIP 2" };
-/** The Picek group's classifier recipe replicated on our records (picek.py), named
+/** The Picek group's classifier recipe replicated on our records (retrain.py), named
  *  `picek-<preset>-<run>`: the architecture each preset trains. */
 const PICEK_NAME: Record<string, string> = {
   "fungitastic-beit-b384": "BEiT",
@@ -14,7 +14,7 @@ const PICEK_NAME: Record<string, string> = {
   "vit-b384-ce": "ViT-B",
   "df20-vit-l384": "ViT-L",
 };
-/** Published classifiers run as outside baselines (external.py): the authors' models,
+/** Published classifiers run as outside baselines (published.py): the authors' models,
  *  trained on Danish records, never retrained by us. */
 const EXTERNAL_NAME: Record<string, string> = {
   "external:fungitastic-beit-b384": "FungiTastic BEiT-B (Picek et al., Danish records)",

@@ -1,4 +1,4 @@
-"""A synonym crosswalk through GBIF, for scoring outside models only (external_report.py).
+"""A synonym crosswalk through GBIF, for scoring outside models only (published_report.py).
 
 The Danish models name Danish records in the Danish checklist's names; we name North
 American records in ours. Where the two differ only by synonymy ('Lepista nuda' and

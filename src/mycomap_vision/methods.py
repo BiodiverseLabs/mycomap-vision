@@ -357,7 +357,7 @@ for _base in (NearestSpecimen, SpeciesMean):
     METHODS[f"{_base.name}+occ"] = partial(WithOccurrence, _base, True)
 
 
-# The Picek group's classifier recipe, replicated on our data (picek.py): the trained
+# The Picek group's classifier recipe, replicated on our data (retrain.py): the trained
 # classifier's own head over its features, with DF20's month prior and our place prior.
 # These need a model trained by mv picek-train (evaluate.make_method binds it).
 from .replications.fungitastic.retrain import CLASSIFIER_METHODS  # noqa: E402

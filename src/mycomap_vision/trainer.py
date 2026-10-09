@@ -54,7 +54,7 @@ INDEX_TABLES = ("embeddings", "embed_runs", "finetunes", "eval_runs")
 # speeds (progress.json records them per stage) after the first run.
 EMBED_RATES = {"bioclip-2": 55.0, "dinov3-l16-512": 18.8}
 FINETUNE_RATES = {"bioclip-2": 83.0}   # photos seen per second while training
-# The Picek replication (picek.py), training photos per second on the instance. NOT yet
+# The Picek replication (retrain.py), training photos per second on the instance. NOT yet
 # measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
 # (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).
 # Training photos per second on g6.xlarge: the slower of the data loader (4 vCPU) and the
@@ -117,7 +117,7 @@ def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str,
                 picek: list[str] | None = None) -> list[Stage]:
     """The order a run works in. Each backbone to fine-tune comes first, followed directly
     by its fine-tune and the fine-tuned model's embedding; then each Picek replication
-    (`picek`: preset[@epochs], picek.py) and its embedding; the other backbones follow. If
+    (`picek`: preset[@epochs], retrain.py) and its embedding; the other backbones follow. If
     time runs out, what's left undone is the extra backbones, not the fine-tune."""
     from .models import storage_name
     specs = {}

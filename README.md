@@ -57,6 +57,14 @@ Photographers answer on mycomap.org (its `docs/vision-photo-permissions.md`).
   `MV_LICENSE_REFRESH_HOURS=24` in `mv serve`) re-reads them from iNat, so a
   licence change there is picked up.
 
+## Replications
+
+[replications/fungitastic/](replications/fungitastic/README.md): the code we use to
+compare Vision with the Picek group's FungiTastic and Danish Fungi 2020 classifiers.
+Their published checkpoints are scored on our records, and their training recipe is
+retrained on our data. The page cites their work, lists every way we differ from them
+and why, and gives the commands to reproduce each step.
+
 ## Setup (Windows, Git Bash or PowerShell)
 
 ```bash

@@ -1290,7 +1290,7 @@ def inat_cv(conn: sqlite3.Connection, name: str, ids: list[str], client, size: s
     return {"records": len(records), "inat_calls": client.calls, **dict(stats)}
 
 
-# --- answers of an external model (external.py) ----------------------------------------------
+# --- answers of an external model (replications/fungitastic/published.py) ----------------
 
 def import_external(conn: sqlite3.Connection, name: str, results: Path, backbone: str,
                     redo: bool = False) -> dict:

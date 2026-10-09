@@ -43,7 +43,7 @@ substrate, which our records do not have in their vocabulary.
                             writes); `mv heldout import-external` stores them
     mv external baseline    a saved scoreboard comparison's test records (eval_runs rows,
                             with the standard top 1/3/5/10 block)
-    mv external report      the agreed protocol tables (external_report.py)
+    mv external report      the agreed protocol tables (published_report.py)
 """
 
 from __future__ import annotations

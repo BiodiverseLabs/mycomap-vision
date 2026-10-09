@@ -669,6 +669,11 @@ never failing the refresh; `--no-taxonomy`).
 
 ## Picek replication: their method, our data (feat/picek-replication, 2026-10-09)
 
+Code, sources, deviations and commands in one place:
+[replications/fungitastic/](../replications/fungitastic/README.md) (modules under
+`src/mycomap_vision/replications/fungitastic/`, tests under
+`tests/replications/fungitastic/`; the old module paths still resolve).
+
 Steve: "replicate their model with our data". Lukas Picek's group (BVRA; a PI of the EU
 FunDive project, whose model goes into PlutoF GO) built the Atlas of Danish Fungi's
 FungiVision (DF20) and FungiTastic. Trained on exactly Vision's training records, their
@@ -676,7 +681,8 @@ recipe is the paper's baseline. It separates method from data: if it does about 
 as Vision on the same records, the gap to the published Danish numbers is data; if it
 does better, so is the method.
 
-**Recipe** (`picek.py`, preset `fungitastic-beit-b384`; sources are the HF config of
+**Recipe** (`replications/fungitastic/retrain.py`, its constants in `presets.py`; preset
+`fungitastic-beit-b384`; sources are the HF config of
 BVRA/beit_base_patch16_384.in1k_ft_fungitastic_384, BohemianVRA/FungiTastic
 baselines/closed_set/train.py and the fgvc library):
 - timm `beit_base_patch16_384.in22k_ft_in22k_in1k`, full fine-tune, 384 x 384, a new linear
@@ -841,13 +847,15 @@ Bash**; `aws login` can run in PowerShell or Git Bash. Nothing runs on the .org 
 **Which code goes.** `mv aws-launch-trainer` ships `git archive` of the HEAD of the
 checkout whose code is running (`config.REPO_ROOT`). The installed `mv` runs the main
 checkout's code, so it ships whatever branch that checkout has checked out. A dry run
-prints the commit and checks the archive holds picek.py, the trainer and
-requirements/trainer.txt (timm 1.0.30, torch 2.14.0, torchvision 0.29.0, the same as the
-laptop). Either:
-- (a) merge feat/picek-replication to main (Steve reviews), pull main in
+prints the commit and checks the archive holds the replication's code
+(src/mycomap_vision/replications/fungitastic/: `__init__.py`, presets.py, retrain.py), the
+trainer and requirements/trainer.txt (timm 1.0.30, torch 2.14.0, torchvision 0.29.0, the
+same as the laptop). feat/replications-fungitastic carries feat/picek-replication and
+feat/external-bvra-baselines together. Either:
+- (a) merge feat/replications-fungitastic to main (Steve reviews), pull main in
   `C:\Users\info\Projects\mycomap-vision`, and use `mv` there; or
 - (b) launch from the branch worktree with
-  `cd /c/Users/info/Projects/mycomap-vision-picek && PYTHONPATH=src
+  `cd /c/Users/info/Projects/mycomap-vision-replications && PYTHONPATH=src
   ../mycomap-vision/.venv/Scripts/python -m mycomap_vision.cli ...`, after copying the
   main checkout's `.env` beside it (git-ignored) and setting
   `MV_DATA_DIR=C:/Users/info/Projects/mycomap-vision/data`.
@@ -1027,10 +1035,15 @@ Gender folding changed none of them. 42 of the 99 true names are temporary codes
 
 ## External baselines: DF20 / FungiTastic (2026-10-09, feat/external-bvra-baselines)
 
+Code, sources, deviations and commands in one place:
+[replications/fungitastic/](../replications/fungitastic/README.md) (modules under
+`src/mycomap_vision/replications/fungitastic/`, tests under
+`tests/replications/fungitastic/`; the old module paths still resolve).
+
 Steve (2026-10-09): the Picek group's published classifiers go beside iNat's computer
-vision as outside, zero-retraining baselines in the paper. `external.py`,
-`external_report.py`; `mv external labels | coverage | predict | baseline | report`,
-`mv heldout import-external`.
+vision as outside, zero-retraining baselines in the paper. `replications/fungitastic/`
+`published.py`, `published_report.py`; `mv external labels | coverage | predict |
+baseline | report`, `mv heldout import-external`.
 
 - **Models** (timm checkpoints, public Hugging Face repos, no login; weights under
   `data/external/bvra/<repo>/`, git-ignored): `external:fungitastic-beit-b384`
@@ -1065,9 +1078,9 @@ vision as outside, zero-retraining baselines in the paper. `external.py`,
   label's first word, family Vision's (iNat's) for the genus. FungiTastic: 1,254 classes
   are Vision names as they are, 47 by their accepted name, 1,528 are not Vision names.
   DF20: 877, 24, 703.
-- **GBIF synonym crosswalk** (coordinator for Steve, 2026-10-09: yes; `gbif.py`). Scoring
-  only, never Vision's labels. Every formal species name a report compares (answer keys,
-  answers, classes; never a temporary code or a one-word name) is matched exactly, no
+- **GBIF synonym crosswalk** (coordinator for Steve, 2026-10-09: yes; `crosswalk.py`).
+  Scoring only, never Vision's labels. Every formal species name a report compares (answer
+  keys, answers, classes; never a temporary code or a one-word name) is matched exactly, no
   fuzzy matching, in the GBIF Backbone (`/v1/species/match`, strict) and in the Catalogue
   of Life eXtended Release through GBIF (`/v2/species/match`, checklistKey COL XR); the
   Backbone alone lacks recent combinations such as 'Collybia nuda' (= Danish 'Lepista
