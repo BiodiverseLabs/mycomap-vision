@@ -87,6 +87,7 @@ from .dates import real_date
 from .ratelimit import MinInterval
 
 RANKS = ("family", "genus", "species")
+TOP_K = 10            # candidates kept per rank (the summary's top 10; before 10/9: 5)
 SCHEMA = """
 create table if not exists heldout_sets (
   name          text primary key,
@@ -193,8 +194,8 @@ create table if not exists heldout_predictions (
   reference_records integer,
   photos          integer,
   max_similarity  real,             -- the best cosine of a photo to any reference photo
-  result_json     text not null,    -- per rank: the top 5 with confidence (the full
-                                    -- answer is in the benchmark's answers.sqlite)
+  result_json     text not null,    -- per rank: the top 10 (5 before 10/9; top_k says)
+                                    -- with confidence; the full answer is in answers.sqlite
   primary key (benchmark, observation_id, backbone, method, place, size, reference_hash)
 );
 """
@@ -1009,10 +1010,11 @@ def reference_summary(conn: sqlite3.Connection, identifier) -> dict:
                      "observer_days": days, "calibration": identifier.calibration}}
 
 
-def summarise(ranks: dict, top: int = 5) -> dict:
-    return {rank: [{"name": c["name"], "confidence": c["confidence"], "score": c["score"],
-                    "reference_records": c["reference_records"]} for c in ranks[rank][:top]]
-            for rank in RANKS}
+def summarise(ranks: dict, top: int = TOP_K) -> dict:
+    """The top `top` candidates per rank, and how deep that is (`top_k`)."""
+    return {**{rank: [{"name": c["name"], "confidence": c["confidence"], "score": c["score"],
+                       "reference_records": c["reference_records"]} for c in ranks[rank][:top]]
+               for rank in RANKS}, "top_k": top}
 
 
 def answers_db(conn: sqlite3.Connection, name: str) -> sqlite3.Connection:
@@ -1168,7 +1170,8 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
                 if rec.observation_id in done:
                     stats["already"] += 1
                     continue
-                result = ident.identify_vectors(query, top_k=5, context=context_for(rec, where))
+                result = ident.identify_vectors(query, top_k=TOP_K,
+                                                context=context_for(rec, where))
                 rows.append((name, rec.observation_id, backbone, method, where, size,
                              ref["hash"], now_iso(), version, ident.records, len(vecs),
                              round(float(np.max(sims)), 4) if sims.size else None,
@@ -1221,15 +1224,15 @@ def shrink(body: bytes, max_side: int = 500) -> bytes:
     return buf.getvalue()
 
 
-def inat_answers(photo_scores: list[dict], score: str, top: int = 5) -> dict:
+def inat_answers(photo_scores: list[dict], score: str, top: int = TOP_K) -> dict:
     """A record's top taxa per rank, best score on any photo first (inat_cv.best_per_rank)."""
     from .inat_cv import best_per_rank
     names_of = {rank: {tid: t["name"] for s in photo_scores for tid, t in s[rank].items()}
                 for rank in RANKS}
     best = best_per_rank(photo_scores, score)
-    return {rank: [{"name": names_of[rank][tid], "taxon_id": tid,
-                    "confidence": round(s / 100, 4)} for tid, s in best[rank][:top]]
-            for rank in RANKS}
+    return {**{rank: [{"name": names_of[rank][tid], "taxon_id": tid,
+                       "confidence": round(s / 100, 4)} for tid, s in best[rank][:top]]
+               for rank in RANKS}, "top_k": top}
 
 
 def inat_cv(conn: sqlite3.Connection, name: str, ids: list[str], client, size: str = "large",

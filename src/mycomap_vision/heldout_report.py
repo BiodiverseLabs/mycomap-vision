@@ -570,6 +570,7 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
         "label_audit": label_audit(records),
         "label_hygiene": label_hygiene(records, truths, labeller),
     }
+    full: dict[tuple, dict] = {}            # the stored identify results, per Vision model
     for m in models:
         out["models"][model_name(m)] = {"records": len(judged[m]),
                                         **summary(judged[m], observers=observers)}
@@ -590,8 +591,8 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
                            for value, g in sorted(groups.items())}
         out["breakdowns"][model_name(m)] = by_dim
         if m in chosen:
-            likely = likely_metrics(load_answers(conn, name, m, chosen[m], set(judged[m])),
-                                    truths, labeller)
+            full[m] = load_answers(conn, name, m, chosen[m], set(judged[m]))
+            likely = likely_metrics(full[m], truths, labeller)
             if likely:
                 out["likely_sets"][model_name(m)] = likely
     out["on_records_every_model_answered"] = (
@@ -600,6 +601,11 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
     for a, b in itertools.combinations(models, 2):
         out["paired"].append({"a": model_name(a), "b": model_name(b), **paired(judged, a, b)})
     out["beta_name_equivalence"] = name_equivalence(judged, truths)
+    from .heldout_summary import standard_summary
+    out = {"summary": standard_summary(
+        {k: out[k] for k in ("benchmark", "split", "sealed", "released_at", "records",
+                             "scored_records")}, preds, judged, truths, feats, labeller, full),
+        **out}
 
     stamp = stamp or heldout.now_iso().replace(":", "").replace("-", "")[:15]
     out_dir = out_dir or heldout.bench_dir(conn, name) / "reports"
