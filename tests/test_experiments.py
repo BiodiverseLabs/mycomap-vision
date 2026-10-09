@@ -81,7 +81,8 @@ decision: pending
 def test_every_entry_says_how_reproducible_it_is_and_pre_freeze_ones_are_provisional(e):
     repro = e.meta["reproducibility"]
     assert repro == experiments.EXPLORATORY or experiments.REPRODUCED.match(repro)
-    if repro == experiments.EXPLORATORY and e.meta["decision"] != "pending":
+    decided = not str(e.meta["decision"]).strip().lower().startswith("pending")
+    if repro == experiments.EXPLORATORY and decided:
         assert "Provisional" in e.body and "dataset release v1" in e.body
 
 

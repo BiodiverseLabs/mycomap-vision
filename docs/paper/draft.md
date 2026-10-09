@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.4, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.4.1, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -111,7 +111,7 @@ species with one to four records). The full-data fine-tune trained on these reco
 keys of every test are unaffected (test records are iNaturalist observations), so the results
 reported here stand as measured, for a reference set with this fault. The fix (an
 iNaturalist-only export, a rebuilt reference set and a retrain) will be reported as the "after"
-model. [Re-scoring without these records under way.]
+model, measured on the new sealed test set. [Re-scoring without these records under way.]
 
 **Name of a record.** The label is the observation's own name, not the name of a linked sequence
 (a record can carry several sequences, including non-target or discarded ones). Where the
@@ -207,7 +207,10 @@ photographs per record.
 
 **Held-out benchmark.** 13,145 North American records validated on the legacy MycoMap database
 but never imported into Vision's data (a synchronization fault), so never seen in training or as
-references. Split 3,000 for development and tuning, 10,145 for testing.
+references. Split 3,000 for development and tuning, 10,145 for testing. A development benchmark
+only: these records join the training data of dataset release v1, so a later model cannot be
+scored on them; the paper's test set and every before/after comparison use a new, sealed set of
+freshly validated records.
 
 **Paper test set (planned).** About 1,000 records validated after the method is frozen, registered
 as held out before any model sees them (Appendix A).
@@ -225,7 +228,7 @@ original photo's checksum and licence, the exact recipe that derives each image 
 test splits, the sealed test set), the reference-index hash, the code commit and the checksums of
 every trained model. Each experiment is one command that reads the release and writes its id,
 reference hash and commit into its results. A version of the release using only openly licensed
-photos can be rebuilt by anyone from public sources [scope to confirm]; results on it are reported
+photos can be rebuilt by anyone from public sources; results on it are reported
 beside ours. [Release v1 not yet cut; the numbers below are development and will be replaced.]
 
 **Baseline.** iNaturalist's computer vision (score_image endpoint), given every photograph of a
@@ -556,10 +559,11 @@ full-precision model is served.
 
 *[Draft.]* Dataset release v1: record identifiers (iNaturalist and Mushroom Observer), labels and
 their provenance, photo licences and public URLs, the inclusion list with reasons, the splits, the
-dataset card and per-record predictions will be deposited [Zenodo, DOI; scope to be decided]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
-Zenodo DOI]. Photographs remain with their iNaturalist owners under their licenses; model weights
-[availability to decide: trained partly on all-rights-reserved photographs]. Coordinates are not
-released beyond iNaturalist's public precision.
+dataset card and per-record predictions will be deposited [Zenodo, DOI]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
+Zenodo DOI]. Photographs remain with their owners under their licenses; all-rights-reserved photo
+files are not redistributed. The released model is trained only on openly licensed (CC, including
+non-commercial) and permission-granted photographs, as its model card states. Coordinates are not
+released beyond the source's public precision.
 
 ## ACKNOWLEDGMENTS
 
@@ -748,8 +752,9 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 4. **Classify development misses by cause**: stale label, no reference, look-alike in a complex,
    photograph problem, guest organism.
 5. **Measure answer-key noise** after the legacy-name refresh: rescore with corrected names.
-6. **Relabel, retrain, rescore** the same development set ("after"); fine-tuning variants (more
-   blocks, more epochs, metric-learning loss) on the GPU trainer. Save the fine-tune's classifier
+6. **Relabel, retrain on dataset release v1, rescore** on the new sealed test set ("after"; the
+   13,145 held-out records are v1 training data); fine-tuning variants (more blocks, more epochs,
+   metric-learning loss, **input size 224 / 336 / 448 px**) on the GPU trainer. Save the fine-tune's classifier
    heads this time and score them as an identifier beside nearest specimen.
 6a. **Danish Fungi method on our records** (A12) and the published Danish Fungi / FungiTastic
    models (A13) on the development set, once their compute is approved.
@@ -808,6 +813,10 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.4.1 (9 Oct 2026).** Steve's decisions: the 13,145 held-out records join v1 training (a
+  development benchmark only; before/after and the paper's numbers on a new sealed set); public
+  scope approved; the public model trains only on CC and permission-granted photos; an input-size
+  arm (224 / 336 / 448 px) planned for the v1 retrain.
 - **0.4 (9 Oct 2026).** Reproducibility: the reported numbers will come from dataset release v1
   (Methods, "Reproducibility"); everything earlier is development and its decisions provisional
   (Steve). Data availability updated to the release.

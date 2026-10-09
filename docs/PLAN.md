@@ -33,7 +33,7 @@ versioned dataset release; the live site keeps changing on its own track.
 | G4 | **Guest organisms** applied (guests.py, adopted 2026-10-07) | done |
 | G5 | **Non-fungus photos**: the not-fungus gate / photo scan decision made and applied (which photos are dropped, by what rule) | gate and scan lanes; decision open |
 | G6 | **Leave-one-out scan fixes** applied (records whose photos match another species far better than their own, after a person's check) | label-audit lane |
-| G7 | **Held-out records' role** decided: the 13,145 development-benchmark records either join training (as released 2026-10-08) or stay a benchmark; the paper's fresh ~1,000-record test set validated and **sealed inside v1** before any model sees it | Steve; open |
+| G7 | **Held-out records: DECIDED (Steve, 2026-10-09)**. The 13,145 records **join v1's training and references**; they stay a pre-freeze development benchmark only ("we will generate a new dataset for experiments in the future; we can keep using them for experiments now"). v1 carries no 13,145 benchmark. A **new experiment dataset** (freshly validated records) comes later and is sealed before any model sees it. Consequence: the planned "after" score on the same 13,145 is no longer valid once v1 trains on them, so before/after comparisons need the new set | decided |
 | G8 | **Photo permissions** fixed at the freeze: which all-rights-reserved photos are used (answered yes / no answer / withdrawn), as of a recorded date | rule exists (permissions.py); snapshot at freeze |
 
 ### 2. Dataset release v1 (immutable)
@@ -44,13 +44,14 @@ serving releases (S3 `research-releases/v1/`), with a `RELEASE.json` of every fi
 - **records**: id, source (iNat / MO), label, label provenance (title field, override or
   provisional, refresh time), title snapshot time, validation date, validating project(s), name
   kind (formal / provisional / one-word), family and genus from the taxonomy snapshot.
-- **photos**: photo id, record, the **original's** sha256, size, licence and licence class; the
-  derivation recipe and each derived image's sha256 (below). Owners and coordinates stay in a
-  private companion table.
+- **photos**: photo id, record, the **original's** sha256, size, licence and licence class, and a
+  **public-trainable** flag (CC licence, NC included, or the photographer's permission granted;
+  Steve 2026-10-09); the derivation recipe and each derived image's sha256 (below). Owners and
+  coordinates stay in a private companion table.
 - **inclusion list**: every candidate record with in / out and a reason code (source, wrong photos,
   guest, non-fungus, no photos, label conflict, one-word without a usable rank, held out).
-- **splits**: the temporal cutoffs used for comparisons; the held-out development / test ids; the
-  sealed paper test ids.
+- **splits**: the temporal cutoffs used for comparisons. (The 13,145 held-out records are training
+  data in v1, not a split; the new experiment dataset gets its own sealed split when it exists.)
 - **reference-index hash** (records + labels), the taxonomy snapshot, the code commit that cut the
   release, and the sha256 of every model trained on it.
 - **dataset card** (datasheet): what is in it, how it was built, known gaps and biases, licences.
@@ -94,11 +95,13 @@ today follows them, but each decision is provisional:
 | Outside comparisons (iNat CV, published Danish models) | inat-cv-baseline, published-danish-models | reported as development |
 
 **Re-run order** (what defines the benchmarks first, then what builds on them):
-1. Scoring and benchmark definitions: name equivalence (rule check), the temporal and held-out
-   splits, the sealed paper test set, the likely-list protocol.
+1. Scoring and benchmark definitions: name equivalence (rule check), the temporal splits, the
+   likely-list protocol; the new experiment dataset and its sealed test split once validated.
 2. Backbone screen (frozen models, cheap).
 3. Full fine-tune on v1, saving its classifier heads; the heads scored; the trained-heads
-   comparison; the Picek replication on exactly v1's training records.
+   comparison; the Picek replication on exactly v1's training records. **Image-size arm**
+   (registry: image-size): BioCLIP 2 fine-tuned at 224 vs 336 vs 448 px input (it has only ever
+   run at 224; DINOv3 went 4.4 -> 16.2% species from 256 to 512 px); about 2-4x the compute.
 4. Scoring method: nearest vs nearest + species average vs species average (v1 development).
 5. Calibration and likely lists (fitted on development, checked on test).
 6. Priors: DNA-record and occurrence (tuned on development).
@@ -116,11 +119,11 @@ Their results are exploratory. Each analysis should ship as **one re-runnable co
 `--release` / `--manifest`, so the v1 re-run is mechanical. Data corrections they find (labels,
 sources, photos) are acted on now and feed the freeze gate; method decisions stay provisional.
 
-### 5. "Reproducible by anyone": what can be public (OPEN DECISION, Steve)
+### 5. "Reproducible by anyone": what is public (DECIDED, Steve 2026-10-09: approved as drafted)
 
-Proposed **public**: iNaturalist and MO record ids; labels with provenance; each photo's licence and
+**Public**: iNaturalist and MO record ids; labels with provenance; each photo's licence and
 public URL; the inclusion list with reasons; splits; the code; the dataset card and model card;
-aggregate results. Proposed **not public**: all-rights-reserved photo files (used with the
+aggregate results. **Not public**: all-rights-reserved photo files (used with the
 photographers' permission for our model, not ours to redistribute); coordinates beyond what the
 source shows publicly (obscured records stay obscured); observer contact and permission records.
 
@@ -130,9 +133,11 @@ Two variants of each release:
 - **v1-full**: everything we may use, including permitted all-rights-reserved photos. Ours only; the
   paper reports both and explains the difference.
 
-Open decisions for Steve: what is public (above); whether model weights trained on v1-full can be
-released (they learned from all-rights-reserved photos) or only v1-cc weights; where the public
-files live (Zenodo with a DOI is the usual choice for a paper).
+**Model weights (Steve, 2026-10-09).** Internal benchmarking models may train on all photos,
+all-rights-reserved included. The **final public model** trains only on public-trainable photos
+(CC, NC included, or permission granted); its model card says so and lists the photo set by its
+release hash. Still open: where the public files live (Zenodo with a DOI is the usual choice for a
+paper).
 
 ## Phase 0: data and a first honest number (in progress)
 
