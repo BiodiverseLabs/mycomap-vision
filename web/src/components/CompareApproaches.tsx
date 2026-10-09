@@ -4,7 +4,7 @@ import { api, modelLabel, num, pct, type Rank, type RunReport, type ScoreRun } f
 import { bars, comparisons, defaultComparison, depthRows, heat, heldoutBars, heldoutDepth,
          heldoutKs, kChoices, STANDARD_BANDS, type Bar, type PublishedBenchmark } from "@/lib/compareView";
 
-// "Approaches compared" on the Models page (Steve, 2026-10-09): every model and method,
+// "Approaches compared" on the Results page (Research > Results) (Steve, 2026-10-09): every model and method,
 // ours and outside ones, on the same records, by rank, top-k and reference depth.
 
 const OURS = "#2a78d6";      // validated categorical slots 1 and 2 (dataviz palette)

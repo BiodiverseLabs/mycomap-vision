@@ -19,7 +19,7 @@ export function ModelsPage() {
 
   return (
     <>
-      <PageHeader title="Models">
+      <PageHeader title="Results">
         Every comparison scores its models on exactly the same records: those that turned green
         in the newest weeks, identified from the older ones. Top-1 means the first answer was
         right.
