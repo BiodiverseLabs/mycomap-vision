@@ -9,6 +9,8 @@ photos. `index` is an evaluate.Index: reference photo rows grouped by species.
 - linear        a trained linear classifier (balanced softmax available, off by default)
 - hybrid        linear + nearest: the classifier where data is rich, the specimen
                 lookup keeping single-record species in play
+- nearest+mean  (experimental) the two best specimen matches, blended with the
+                species average
 """
 
 from __future__ import annotations
@@ -253,7 +255,67 @@ class Hybrid:
         return self.nearest.photo_sims(query)
 
 
-METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean, LinearHead, Hybrid)}
+def top_k_species_scores(sims: np.ndarray, index, k: int) -> np.ndarray:
+    """(n_species,): mean over query photos of each photo's k best matches within the
+    species (all of them when the species has fewer than k photos)."""
+    counts = photos_per_species(index)
+    group = np.repeat(np.arange(len(counts)), counts)
+    # Within each species, best first: sort on species, then on similarity (-1..1).
+    order = np.argsort(group * 4.0 - sims, axis=1, kind="stable")
+    ranked = np.take_along_axis(sims, order, axis=1)
+    total = np.zeros((len(sims), len(counts)), dtype=np.float32)
+    for j in range(k):
+        has = counts > j
+        total[:, has] += ranked[:, index.starts[has] + j]
+    return (total / np.minimum(counts, k)).mean(axis=0)
+
+
+def species_means(vectors, index, chunk: int = 2048) -> np.ndarray:
+    """(n_species, dim) unit-length average vector of each species' reference photos,
+    a block of species at a time (no float32 copy of every reference photo)."""
+    counts = photos_per_species(index)
+    out = np.empty((len(counts), vectors.shape[1]), dtype=np.float32)
+    for s in range(0, len(counts), chunk):
+        e = min(s + chunk, len(counts))
+        lo = index.starts[s]
+        hi = index.starts[e] if e < len(counts) else len(index.cols)
+        block = np.asarray(vectors[index.cols[lo:hi]], dtype=np.float32)
+        out[s:e] = np.add.reduceat(block, index.starts[s:e] - lo, axis=0)
+    return out / np.linalg.norm(out, axis=1, keepdims=True).clip(1e-12)
+
+
+class NearestAndMean:
+    """Score = weight x (mean of the two best specimen matches) + (1 - weight) x the
+    similarity to the species' average vector. Experimental (exp/depth-bias).
+
+    Nearest alone rests on one photo per species. The species average is the
+    opposite: steady for a species known from a few records (their photos averaged),
+    blurred for one with hundreds (many looks in one vector). The blend keeps each
+    where it is strong. On comparison 20261008-012435-4ef7b0 (fine-tuned BioCLIP 2,
+    1,152 test records) species top-1 went from 34.5% to 38.4% and every reference
+    depth gained (5-19 records: 31.8 to 39.9%); the numbers are in docs/PLAN.md.
+    k and weight were chosen there.
+    """
+    name = "nearest+mean"
+    k = 2
+    weight = 0.6
+
+    def fit(self, vectors: np.ndarray, index) -> None:
+        self.index = index
+        self.scorer = Scorer(reference_rows(vectors, index))
+        self.means = Scorer(species_means(vectors, index).astype(np.float16))
+
+    def species_scores(self, query: np.ndarray) -> np.ndarray:
+        nearest = top_k_species_scores(self.scorer.sims(query), self.index, self.k)
+        mean = self.means.sims(query).mean(axis=0)
+        return self.weight * nearest + (1 - self.weight) * mean
+
+    def photo_sims(self, query: np.ndarray) -> np.ndarray:
+        return self.scorer.sims(query)
+
+
+METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean, LinearHead, Hybrid,
+                               NearestAndMean)}
 
 class AsLogProb:
     """A similarity method's scores as log-probabilities (softmax at a fixed temperature),
