@@ -3,7 +3,9 @@
 For each model (a backbone and method, or iNat's computer vision) on the records of
 one split that it answered and that have an answer key:
 
-- top-1 and top-5 at species, genus and family, with Wilson 95% intervals;
+- top-1 and top-5 at species, genus and family, with Wilson 95% intervals (and for
+  top-1 a 95% interval from a bootstrap over observers, whose records are not
+  independent);
 - the same on the records every model answered, and McNemar's paired test between
   each two models on the records both answered (exact binomial up to 1,000
   discordant pairs, then the chi-square with continuity correction);
@@ -12,8 +14,11 @@ one split that it answered and that have an answer key:
 - breakdowns: how many reference records the true species and genus have (0, 1-4,
   5-19, 20-99, 100+), whether the true species is in the reference at all, how many
   photos the record has, east or west of -100 degrees longitude, whether the
-  reference holds a record by the same iNat observer on the same day, and whether
-  the true name is formal, provisional (a temporary code) or one word;
+  reference holds a record by the same iNat observer on the same day, whether the
+  true name is formal, provisional (a temporary code) or one word, whether Vision held
+  the record before the freeze (was_reference), and near-duplicates: a photo whose
+  nearest reference photo has cosine >= 0.99, or a photo file identical (sha256) to a
+  reference record's copy;
 - likely sets, when the stored identify results carry them (feat/likely-sets):
   per rank, how often the true name is in the set and the set's mean size;
 - a label audit: the answer key's categories and sources (heldout.answer_key), the
@@ -27,11 +32,15 @@ Names are judged by Vision's labels (heldout.Labeller). iNat's answers are judge
 iNat's taxonomy by taxon id where the answer key was found on iNat
 (inat_cv.resolve_truth), and by name otherwise.
 
-The dev split is for tuning and exploring. On a sealed benchmark (held out:
-heldout.sealed) a report on the test split is the paper's number: it says so loudly
-and is recorded in heldout_test_looks each time. A development benchmark's test split
-is not sealed. Each Vision model is scored on its newest reference, or on the one
-`reference_hash` names (a "before" run after a relabel).
+The dev split is for tuning and exploring. On a sealed benchmark (heldout_sets.sealed)
+a report on the test split is the paper's number: it says so loudly and is recorded in
+heldout_test_looks each time. A development benchmark's test split is not sealed.
+
+A model is a backbone, a method, the place it was given (for a method that uses one)
+and the photo size. Each Vision model is scored on its newest reference, or on the one
+`reference_hash` names (a "before" run after a relabel); when its references disagree
+and the newest covers under 90% of the records another covers, the report refuses to
+choose for you.
 
 The JSON and the per-record CSV carry no coordinates: only east or west of -100.
 """
@@ -45,6 +54,8 @@ import json
 import math
 import re
 import sqlite3
+
+import numpy as np
 from collections import Counter, defaultdict
 from fractions import Fraction
 from pathlib import Path
@@ -60,11 +71,16 @@ DEPTH_BUCKETS = [(0, 0, "0"), (1, 4, "1-4"), (5, 19, "5-19"), (20, 99, "20-99"),
 PHOTO_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 3, "3"), (4, 5, "4-5"), (6, 10**9, "6+")]
 EAST_WEST_LONGITUDE = -100.0
 CONFIDENCE_BINS = 10
+NEAR_DUPLICATE = 0.99              # cosine to the nearest reference photo
+REFERENCE_COVERAGE = 0.9           # the newest reference must cover this share of another's
+BOOTSTRAP_REPS = 1000
 EXACT_MCNEMAR_UP_TO = 1000
 EPITHET = re.compile(r"[a-z][a-z-]+\Z")
 BREAKDOWNS = ("species reference records", "genus reference records",
-              "true species in reference",
-              "photos", "east or west of -100", "same observer and day in reference", "name kind")
+              "true species in reference", "photos", "east or west of -100",
+              "same observer and day in reference", "name kind",
+              "known to Vision before the freeze", "nearest reference photo cosine >= 0.99",
+              "photo file identical to a reference copy")
 
 
 # --- statistics ------------------------------------------------------------------------
@@ -82,6 +98,25 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
 
 def rate(k: int, n: int) -> dict:
     return {"n": n, "right": k, "rate": round(k / n, 4) if n else None, "ci95": wilson(k, n)}
+
+
+def observer_bootstrap(hits: list[tuple[object, bool]], reps: int = BOOTSTRAP_REPS,
+                       seed: int = 0) -> tuple[float, float] | None:
+    """95% percentile interval of the rate, resampling observers (with all their records)
+    rather than records: one observer's records share a place, a camera and a habit."""
+    if not hits:
+        return None
+    groups: dict = defaultdict(lambda: [0, 0])
+    for who, hit in hits:
+        g = groups[who]
+        g[0] += 1
+        g[1] += bool(hit)
+    n = np.array([g[0] for g in groups.values()])
+    k = np.array([g[1] for g in groups.values()])
+    pick = np.random.default_rng(seed).integers(0, len(n), size=(reps, len(n)))
+    rates = k[pick].sum(axis=1) / n[pick].sum(axis=1)
+    lo, hi = np.percentile(rates, [2.5, 97.5])
+    return (round(float(lo), 4), round(float(hi), 4))
 
 
 def mcnemar(b: int, c: int) -> float:
@@ -153,8 +188,11 @@ def name_kind(truth_name: str, truth: Truth) -> str:
     return "provisional" if names.parse_name(truth_name).code else "formal"
 
 
-def features(rec: heldout.HeldOutRecord, truth: Truth, reference: dict | None) -> dict:
-    """The breakdowns a record falls into (BREAKDOWNS). No coordinate leaves here."""
+def features(rec: heldout.HeldOutRecord, truth: Truth, reference: dict | None,
+             nearest: float | None = None, identical: bool | None = None) -> dict:
+    """The breakdowns a record falls into (BREAKDOWNS). `nearest`: its best cosine to a
+    reference photo; `identical`: a photo file the same as a reference copy. No
+    coordinate leaves here."""
     counts = (reference or {}).get("rank_counts") or {}
     days = (reference or {}).get("observer_day_set")
     sp = counts.get("species", {}).get(truth.species, 0) if truth.species else None
@@ -177,6 +215,11 @@ def features(rec: heldout.HeldOutRecord, truth: Truth, reference: dict | None) -
                                  else "west" if lng < EAST_WEST_LONGITUDE else "east"),
         "same observer and day in reference": same,
         "name kind": name_kind(rec.truth_name or "", truth),
+        "known to Vision before the freeze": "yes" if rec.was_reference else "no",
+        "nearest reference photo cosine >= 0.99": ("unknown" if nearest is None else
+                                                   "yes" if nearest >= NEAR_DUPLICATE else "no"),
+        "photo file identical to a reference copy": ("unknown" if identical is None else
+                                                     "yes" if identical else "no"),
     }
 
 
@@ -281,36 +324,83 @@ def likely_metrics(answers: dict[str, dict], truths: dict[str, Truth],
 
 # --- the report ------------------------------------------------------------------------------
 
-def chosen_references(conn: sqlite3.Connection, name: str,
+def name_equivalence(judged: dict, truths: dict[str, Truth]) -> dict | None:
+    """BETA, beside strict and never in its place: each model's top answer judged by
+    name_equiv (feat/name-equivalence) at species (strict, s.l., complex) and genus
+    (strict, s.l.). None while that module isn't merged."""
+    try:
+        from . import name_equiv
+    except ImportError:
+        return None
+    out = {}
+    for m, recs in judged.items():
+        tally = {"species": Counter(), "genus": Counter()}
+        for oid, ranks in recs.items():
+            for rank, match in (("species", name_equiv.species_match),
+                                ("genus", name_equiv.genus_match)):
+                if rank not in ranks:
+                    continue
+                tally[rank]["n"] += 1
+                for kind, ok in match(ranks[rank][2] or "", getattr(truths[oid], rank)).items():
+                    tally[rank][kind] += bool(ok)
+        out[model_name(m)] = {rank: {kind: rate(c[kind], c["n"]) for kind in c if kind != "n"}
+                              for rank, c in tally.items() if c["n"]}
+    return out
+
+
+def chosen_references(conn: sqlite3.Connection, name: str, ids: set[str],
                       reference_hash: str | None = None) -> dict[tuple, str]:
-    """The reference each Vision model is scored on: `reference_hash` for the models that
-    ran against it, else each model's newest."""
+    """The reference each Vision model (backbone, method, place, size) is scored on:
+    `reference_hash` for the models that ran against it, else each model's newest.
+    Refuses to pick the newest when it covers under REFERENCE_COVERAGE of the records
+    another reference of the model covers (an unfinished rerun would hide the rest)."""
+    covered: dict[tuple, Counter] = defaultdict(Counter)
+    for oid, backbone, method, place, size, ref_hash in conn.execute(
+            "select observation_id, backbone, method, place, size, reference_hash "
+            "from heldout_predictions where benchmark = ? and backbone != ?", (name, INAT)):
+        if oid in ids:
+            covered[(backbone, method, place, size)][ref_hash] += 1
     chosen: dict[tuple, str] = {}
-    for backbone, method, ref_hash in conn.execute(
-            "select backbone, method, reference_hash from heldout_runs where benchmark = ? "
-            "order by created_at", (name,)):
+    for backbone, method, place, size, ref_hash in conn.execute(
+            "select backbone, method, place, size, reference_hash from heldout_runs "
+            "where benchmark = ? order by created_at", (name,)):
         if reference_hash is None or ref_hash == reference_hash:
-            chosen[(backbone, method)] = ref_hash
+            chosen[(backbone, method, place, size)] = ref_hash
+    if reference_hash is None:
+        for key, ref_hash in chosen.items():
+            mine = covered[key][ref_hash]
+            others = {h: n for h, n in covered[key].items() if h != ref_hash}
+            best = max(others.items(), key=lambda kv: kv[1], default=(None, 0))
+            if best[1] and mine < REFERENCE_COVERAGE * best[1]:
+                raise ValueError(
+                    f"{model_name(key)}: its newest reference {ref_hash} answered {mine:,} of "
+                    f"these records, reference {best[0]} answered {best[1]:,}; name the one "
+                    "to score with --reference-hash (or finish the newer run)")
     return chosen
 
 
 def load_predictions(conn: sqlite3.Connection, name: str, ids: set[str],
-                     chosen: dict[tuple, str]) -> tuple[dict, dict]:
-    """{(backbone, method): {id: result}} with each Vision model's answers from its chosen
-    reference only, and how many answers from other references were left out per model."""
+                     chosen: dict[tuple, str]) -> tuple[dict, dict, dict]:
+    """({model: {id: result}} with each Vision model's answers from its chosen reference
+    only, how many answers from other references were left out per model, and {model:
+    {id: nearest reference photo cosine}})."""
     preds: dict[tuple, dict] = defaultdict(dict)
+    nearest: dict[tuple, dict] = defaultdict(dict)
     other = Counter()
-    for oid, backbone, method, ref_hash, result in conn.execute(
-            "select observation_id, backbone, method, reference_hash, result_json "
-            "from heldout_predictions where benchmark = ?", (name,)):
+    for oid, backbone, method, place, size, ref_hash, sim, result in conn.execute(
+            "select observation_id, backbone, method, place, size, reference_hash, "
+            "max_similarity, result_json from heldout_predictions where benchmark = ?",
+            (name,)):
         if oid not in ids:
             continue
-        key = (backbone, method)
+        key = (backbone, method, place, size)
         if backbone != INAT and ref_hash != chosen.get(key):
-            other[f"{backbone}/{method}"] += 1
+            other[model_name(key)] += 1
             continue
         preds[key][oid] = json.loads(result)
-    return dict(preds), dict(other)
+        if sim is not None:
+            nearest[key][oid] = sim
+    return dict(preds), dict(other), dict(nearest)
 
 
 def load_answers(conn: sqlite3.Connection, name: str, key: tuple, ref_hash: str,
@@ -321,16 +411,29 @@ def load_answers(conn: sqlite3.Connection, name: str, key: tuple, ref_hash: str,
     try:
         return {oid: json.loads(gzip.decompress(blob)) for oid, blob in adb.execute(
             "select observation_id, result_gz from answers where backbone = ? and method = ? "
-            "and reference_hash = ?", (*key, ref_hash)) if oid in ids}
+            "and place = ? and size = ? and reference_hash = ?", (*key, ref_hash))
+            if oid in ids}
     finally:
         adb.close()
+
+
+def identical_to_reference(conn: sqlite3.Connection, name: str) -> set[str]:
+    """The set's records with a photo file identical (sha256) to a copy of a reference
+    record's photo: the same picture under another observation."""
+    reference = {r[0] for r in conn.execute(
+        "select distinct c.sha256 from photo_copies c join observation_photos op "
+        "on op.photo_id = c.photo_id join records r on r.observation_id = op.observation_id "
+        "where c.sha256 is not null")}
+    return {oid for oid, sha in conn.execute(
+        "select observation_id, sha256 from heldout_photos where benchmark = ? and "
+        "status = 'done' and sha256 is not null", (name,)) if sha in reference}
 
 
 def reference_run(conn: sqlite3.Connection, name: str, backbone: str | None,
                   chosen: dict[tuple, str]) -> dict | None:
     """The reference summary (heldout.reference_summary) the breakdowns use: of the chosen
     reference of `backbone`, or of the newest chosen run of any backbone."""
-    hashes = [h for (b, _m), h in chosen.items() if backbone is None or b == backbone]
+    hashes = [h for (b, *_k), h in chosen.items() if backbone is None or b == backbone]
     if not hashes:
         return None
     row = conn.execute(
@@ -355,10 +458,13 @@ def score(models: dict, truths: dict[str, Truth], labeller: Labeller) -> dict:
     return out
 
 
-def summary(judged: dict[str, dict], ids: Iterable[str] | None = None) -> dict:
-    """Per rank: top-1 and top-5 with Wilson intervals, on `ids` (default: all judged)."""
+def summary(judged: dict[str, dict], ids: Iterable[str] | None = None,
+            observers: dict[str, object] | None = None) -> dict:
+    """Per rank: top-1 and top-5 with Wilson intervals, on `ids` (default: all judged).
+    With `observers` ({id: observer}), top-1 also gets an observer bootstrap interval."""
     want = set(ids) if ids is not None else None
     tally = {rank: Counter() for rank in RANKS}
+    hits: dict[str, list] = defaultdict(list)
     for oid, ranks in judged.items():
         if want is not None and oid not in want:
             continue
@@ -366,8 +472,16 @@ def summary(judged: dict[str, dict], ids: Iterable[str] | None = None) -> dict:
             tally[rank]["n"] += 1
             tally[rank]["top1"] += hit1
             tally[rank]["top5"] += hit5
-    return {rank: {"top1": rate(c["top1"], c["n"]), "top5": rate(c["top5"], c["n"])}
-            for rank, c in tally.items() if c["n"]}
+            if observers is not None:
+                hits[rank].append((observers.get(oid) or f"record {oid}", hit1))
+    out = {}
+    for rank, c in tally.items():
+        if not c["n"]:
+            continue
+        out[rank] = {"top1": rate(c["top1"], c["n"]), "top5": rate(c["top5"], c["n"])}
+        if observers is not None:
+            out[rank]["top1"]["ci95_observer_bootstrap"] = observer_bootstrap(hits[rank])
+    return out
 
 
 def paired(judged: dict, a: tuple, b: tuple) -> dict:
@@ -388,7 +502,14 @@ def paired(judged: dict, a: tuple, b: tuple) -> dict:
 
 
 def model_name(key: tuple) -> str:
-    return f"{key[0]}/{key[1]}"
+    """'backbone/method', '@place' for a method given one, '[size]' unless large."""
+    backbone, method, place, size = (tuple(key) + ("", ""))[:4]
+    out = f"{backbone}/{method}"
+    if backbone != INAT and place not in ("", heldout.NO_PLACE):
+        out += f"@{place}"
+    if size not in ("", "large"):
+        out += f"[{size}]"
+    return out
 
 
 def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
@@ -407,10 +528,11 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
         split = None
     ids = heldout.benchmark_ids(conn, name, subset, split=split)
     records = heldout.load_benchmark(conn, name, ids)
-    chosen = chosen_references(conn, name, reference_hash)
+    state = heldout.set_state(conn, name)
+    chosen = chosen_references(conn, name, set(ids), reference_hash)
     if reference_hash and not chosen:
         raise ValueError(f"no run of {name} against reference {reference_hash}")
-    preds, stale = load_predictions(conn, name, set(ids), chosen)
+    preds, stale, nearest = load_predictions(conn, name, set(ids), chosen)
     extra = [r.truth_name for r in records if r.truth_name]
     extra += [c["name"] for key, by in preds.items() if key[0] != INAT
               for res in by.values() for rank in RANKS for c in res.get(rank) or []]
@@ -419,14 +541,24 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
     guests_left_out = sorted(o for o, t in truths_all.items() if t.guest)
     truths = {o: t for o, t in truths_all.items() if not t.guest}
     ref = reference_run(conn, name, reference_backbone, chosen)
-    feats = {r.observation_id: features(r, truths[r.observation_id], ref)
-             for r in records if r.observation_id in truths}
+    near: dict[str, float] = {}             # from the reference backbone's own answers
+    for key, sims in nearest.items():
+        if ref and key[0] == ref["backbone"]:
+            for oid, s in sims.items():
+                near[oid] = max(s, near.get(oid, s))
+    identical = identical_to_reference(conn, name)
+    fetched = {r.observation_id for r in records if r.photos}
+    feats = {r.observation_id: features(
+        r, truths[r.observation_id], ref, near.get(r.observation_id),
+        (r.observation_id in identical) if r.observation_id in fetched else None)
+        for r in records if r.observation_id in truths}
+    observers = {r.observation_id: r.user_id for r in records}
     judged = score(preds, truths, labeller)
     models = sorted(judged)
     common = set.intersection(*(set(judged[m]) for m in models)) if models else set()
 
     out: dict = {
-        "benchmark": name, "split": split, "records": len(records),
+        "benchmark": name, "split": split, **state, "records": len(records),
         "with_an_answer": len(truths_all), "guests_left_out": len(guests_left_out),
         "scored_records": len(truths), "code_version": config.code_version(),
         "reference": ({k: ref[k] for k in ("backbone", "hash", "records", "photos", "species")}
@@ -439,7 +571,8 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
         "label_hygiene": label_hygiene(records, truths, labeller),
     }
     for m in models:
-        out["models"][model_name(m)] = {"records": len(judged[m]), **summary(judged[m])}
+        out["models"][model_name(m)] = {"records": len(judged[m]),
+                                        **summary(judged[m], observers=observers)}
         if len(models) > 1:
             out["on_records_every_model_answered"][model_name(m)] = summary(judged[m], common)
         out["calibration"][model_name(m)] = {
@@ -466,6 +599,7 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
         if len(models) > 1 else None)
     for a, b in itertools.combinations(models, 2):
         out["paired"].append({"a": model_name(a), "b": model_name(b), **paired(judged, a, b)})
+    out["beta_name_equivalence"] = name_equivalence(judged, truths)
 
     stamp = stamp or heldout.now_iso().replace(":", "").replace("-", "")[:15]
     out_dir = out_dir or heldout.bench_dir(conn, name) / "reports"
@@ -474,7 +608,6 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
     csv_path = write_csv(out_dir / f"{base}.csv", records, truths, feats, judged)
     json_path = out_dir / f"{base}.json"
     out["files"] = {"json": str(json_path), "csv": str(csv_path)}
-    out["sealed"] = heldout.sealed(conn, name)
     if split == "test" and out["sealed"]:
         out["test_look"] = record_test_look(conn, name, models, len(truths), str(json_path))
         log(f"*** SEALED TEST SPLIT of {name}: look number {out['test_look']} at test, recorded "

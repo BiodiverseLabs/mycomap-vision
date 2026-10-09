@@ -241,9 +241,26 @@ Inputs (read-only prod queries) are in `data/benchmarks/heldout-2026-10-08/`: po
   `trainer.run_job`). The server box's nightly update leaves them out once it runs
   a release made after the freeze (the release's manifest carries the list). The
   benchmark's photo copies, vectors and answers live in its own tables and folder,
-  never in `photo_copies` or `embeddings`; `predict` refuses a reference index that
-  holds a sealed benchmark's record, and skips a record already in the reference or
-  whose photo is a reference photo.
+  never in `photo_copies` or `embeddings`, and no manifest copy that leaves the
+  laptop (a release, a trainer or downloader run) carries those tables
+  (`manifest.shippable_snapshot`); `predict` refuses a reference index that holds a
+  sealed benchmark's record, and skips a record already in the reference or whose
+  photo is a reference photo.
+- "Never seen" is checked against everything Vision holds, not only today's records:
+  freeze notes ids with iNat details, photo copies or embeddings (`was_reference`;
+  84 of heldout-2026-10-08's records were Vision records in the 9/28 export, dropped
+  by 10/6), a sealed freeze refuses them, and the report breaks scores down by it.
+- Runbook for a sealed set (Steve, 2026-10-09). The server box learns which records
+  are held out only from a release's manifest. So: deploy this code to the box, then
+  right after `mv heldout freeze --holdout` (or `mv holdout add`) cut a release
+  (`mv release ... --make-current`, then `mv pull-release` and a restart on the box).
+  Until then the box's nightly update can still add the records. Follow-up: ship the
+  list on its own (e.g. beside the release, read by the nightly update) so sealing
+  needs no release.
+- Follow-up: record each fine-tune's trained record ids (finetune.py: the reference
+  records of its comparison) beside its weights, so `mv heldout predict` can check a
+  benchmark's records against what the model trained on, not only against the
+  reference index it answers from.
 
 ## Phase 1: a better identifier
 

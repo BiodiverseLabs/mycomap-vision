@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
-from .manifest import snapshot
+from .manifest import shippable_snapshot, snapshot
 
 PROJECT_TAG = {"Key": "Project", "Value": "mycomap-vision"}
 
@@ -182,7 +182,7 @@ def launch_downloader(conn, size: str = "large", max_hours: float = 120,
     if ensure_bucket(s3, b):
         log(f"Created private bucket s3://{b} in {region()}")
     s3.put_object(Bucket=b, Key=f"runs/{run_id}/code.tar.gz", Body=code_tarball())
-    snap = snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
+    snap = shippable_snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
     s3.upload_file(str(snap), b, MANIFEST_KEY)
     log(f"Uploaded code and manifest for run {run_id}")
     ami = ssm.get_parameter(Name=AMI_PARAMETER)["Parameter"]["Value"]
@@ -616,7 +616,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         code_key = "code.tar.gz"
         s3.put_object(Bucket=b, Key=f"runs/{run_id}/{code_key}", Body=code_tarball(sha))
-        snap = snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
+        snap = shippable_snapshot(conn, config.DATA_DIR / "manifest-upload.sqlite")
         s3.upload_file(str(snap), b, f"runs/{run_id}/manifest-in.sqlite")
         log(f"Uploaded commit {sha[:10]} and the manifest for run {run_id} "
             f"({photos:,} {size} photos in S3)")

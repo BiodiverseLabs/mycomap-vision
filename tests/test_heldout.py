@@ -4,6 +4,7 @@ answers, the dev/test split and the report."""
 
 import csv
 import io
+from collections import Counter
 import json
 import re
 from pathlib import Path
@@ -259,15 +260,46 @@ def test_freeze_stores_the_answer_key_split_and_input_hashes(conn, tmp_path):
 def test_a_development_benchmark_holds_nothing_out(conn, tmp_path):
     save_records(conn, build_records([green(102, "Amanita muscaria")], "t"))
     out = frozen(conn, tmp_path)
-    assert (out["held_out"], out["held_out_added"], out["already_reference_records"]) == (
-        False, 0, 1)
+    assert (out["sealed"], out["held_out_added"], out["was_reference"]) == (
+        False, 0, {"records": 1})
     assert holdouts.held_out_ids(conn) == set() and not heldout.sealed(conn, NAME)
+
+
+def test_freeze_notes_every_record_vision_held_before_not_only_todays_records(conn, tmp_path):
+    # An older export's record leaves iNat details, photo copies and vectors behind.
+    save_batch(conn, ["102", "103", "105"],
+               [inat_obs(i, photos=[(0, i * 10, "cc0", OPEN)]) for i in (102, 103, 105)], "t")
+    conn.execute("insert into photo_copies values (1030, 's3://b/', 'large', 'p', 1, 'h', 'n')")
+    conn.executescript(EMBED_SCHEMA)
+    conn.execute("insert into embeddings values ('m', 1050, 0, 0, 'now')")
+    conn.commit()
+    out = frozen(conn, tmp_path)
+    assert out["was_reference"] == {"inat details": 1, "inat details, photo copies": 1,
+                                    "inat details, embeddings": 1}
+    stored = dict(conn.execute("select observation_id, was_reference from heldout_records "
+                               "where was_reference is not null"))
+    assert stored == {"102": "inat details", "103": "inat details, photo copies",
+                      "105": "inat details, embeddings"}
+    # fetch then writes iNat details of its own; a new snapshot keeps the first freeze's note.
+    save_batch(conn, ["101"], [inat_obs(101)], "t2")
+    refreshed = [p if p[0] != "103" else ("103", "Russula rosea", None, -80.0, "dev")
+                 for p in POOL]
+    files, splits = inputs(tmp_path, refreshed)
+    assert heldout.freeze(conn, NAME, splits=splits, **files)["was_reference"] == {
+        "inat details": 1, "inat details, photo copies": 1, "inat details, embeddings": 1}
+
+
+def test_a_sealed_benchmark_refuses_records_vision_held_before(conn, tmp_path):
+    save_batch(conn, ["105"], [inat_obs(105)], "t")
+    with pytest.raises(ValueError, match="105 \\(inat details\\)"):
+        frozen(conn, tmp_path, holdout=True)
+    assert holdouts.held_out_ids(conn) == set()
 
 
 def test_a_sealed_benchmark_refuses_records_vision_holds_and_holds_every_id_out(conn,
                                                                                tmp_path):
     save_records(conn, build_records([green(102, "Amanita muscaria")], "t"))
-    with pytest.raises(ValueError, match="already reference or training records"):
+    with pytest.raises(ValueError, match="Vision has held 1 of these records before"):
         frozen(conn, tmp_path, holdout=True)
     assert holdouts.held_out_ids(conn) == set()
     conn.execute("delete from records")
@@ -292,6 +324,54 @@ def test_freezing_a_new_snapshot_takes_the_new_names_and_logs_it(conn, tmp_path)
     files, _ = inputs(tmp_path, POOL[:3])
     with pytest.raises(ValueError, match="already frozen with other ids"):
         heldout.freeze(conn, NAME, **files)
+
+
+def test_every_changed_answer_is_logged_and_a_looked_at_sealed_test_answer_needs_force(
+        conn, tmp_path):
+    frozen(conn, tmp_path, holdout=True)
+    refreshed = [("106", "Tubariua hiemalis", "Tubaria sp. 'X01'", -80.0, "test")
+                 if p[0] == "106" else ("105", "Tubaria hiemalis", None, -80.0, "dev")
+                 if p[0] == "105" else p for p in POOL]
+    files, splits = inputs(tmp_path, refreshed)
+    conn.execute("insert into heldout_test_looks values (?, 'now', '', '[]', 3, '')", (NAME,))
+    conn.commit()
+    with pytest.raises(ValueError, match="changes 1 answers of bench-1's sealed test split"):
+        heldout.freeze(conn, NAME, splits=splits, **files)
+    assert conn.execute("select count(*) from heldout_answer_history").fetchone()[0] == 0
+    out = heldout.freeze(conn, NAME, splits=splits, force=True, **files)
+    assert (out["names_changed"], out["forced"]) == (2, 1)
+    history = {r[0]: tuple(r[1:]) for r in conn.execute(
+        "select observation_id, old_name, new_name, forced from heldout_answer_history")}
+    assert history == {"105": ("Tubariua hiemalis", "Tubaria hiemalis", 0),
+                       "106": ("Tubaria hiemalis", "Tubaria sp. 'X01'", 1)}
+
+
+def test_a_development_benchmarks_test_answers_change_without_force(conn, tmp_path):
+    frozen(conn, tmp_path)
+    conn.execute("insert into heldout_test_looks values (?, 'now', '', '[]', 3, '')", (NAME,))
+    refreshed = [("106", "Tubariua hiemalis", "Tubaria sp. 'X01'", -80.0, "test")
+                 if p[0] == "106" else p for p in POOL]
+    files, splits = inputs(tmp_path, refreshed)
+    assert heldout.freeze(conn, NAME, splits=splits, **files)["names_changed"] == 1
+
+
+def test_sealed_is_the_sets_own_state_that_holding_out_or_releasing_never_changes(conn,
+                                                                                 tmp_path):
+    frozen(conn, tmp_path)
+    holdouts.add(conn, NAME, ["101"])
+    assert heldout.set_state(conn, NAME) == {"sealed": False, "released_at": None}
+    holdouts.release(conn, NAME, at="2026-10-09T00:00:00+00:00")
+    assert heldout.set_state(conn, NAME) == {"sealed": False,
+                                             "released_at": "2026-10-09T00:00:00+00:00"}
+
+
+def test_a_released_sealed_set_stays_sealed_and_the_report_says_both(conn, tmp_path,
+                                                                    monkeypatch):
+    scored_world(conn, tmp_path, monkeypatch, holdout=True)
+    holdouts.release(conn, NAME, at="2026-10-09T00:00:00+00:00")
+    out = reported(conn, tmp_path, split="test")
+    assert (out["sealed"], out["released_at"], out["test_look"]) == (
+        True, "2026-10-09T00:00:00+00:00", 1)
 
 
 def test_freeze_refuses_ids_that_are_not_the_expected_set(conn, tmp_path):
@@ -346,6 +426,14 @@ def test_benchmark_photos_are_kept_apart_from_reference_photos(conn, tmp_path, m
                                 log=lambda s: None)["queued"] == 0
     assert conn.execute("select status from heldout_observations where observation_id = '106'"
                         ).fetchone()[0] == "missing"
+
+
+def test_an_observation_with_no_photos_left_keeps_none_of_its_photo_rows(conn, tmp_path):
+    frozen(conn, tmp_path)
+    heldout.save_details(conn, NAME, ["101"], [inat_obs(101, photos=[(0, 1011, "cc0", OPEN)])],
+                         "t")
+    heldout.save_details(conn, NAME, ["101"], [inat_obs(101, photos=[])], "t2")
+    assert conn.execute("select count(*) from heldout_photos").fetchone()[0] == 0
 
 
 def test_a_withdrawn_photographers_all_rights_reserved_photos_are_not_used(conn, tmp_path):
@@ -463,6 +551,7 @@ class LeakyIdentifier:
         self.col_photo = np.asarray(photos_)
         self.index = type("I", (), {"labels": {"species": ["A b"]}})()
         self.rank_counts = {r: {} for r in heldout.RANKS}
+        self.nearest = type("N", (), {"photo_sims": lambda s, q: np.ones((len(q), 1))})()
 
     def identify_vectors(self, q, top_k=5, context=None):
         top = [{"name": "A b", "confidence": 1.0, "score": 1.0, "reference_records": 1}]
@@ -491,6 +580,48 @@ def test_predict_skips_records_and_photos_already_in_the_reference(conn, tmp_pat
     assert out["nearest"]["photo also a reference photo (skipped)"] == 1
     answered = {r[0] for r in conn.execute("select observation_id from heldout_predictions")}
     assert answered == {"103", "104", "105"}
+
+
+def test_a_run_with_another_place_is_kept_beside_the_first_not_reported_as_done(
+        conn, tmp_path, monkeypatch):
+    root = reference(conn, tmp_path / "emb")
+    frozen(conn, tmp_path)
+    fetched(conn, tmp_path, monkeypatch)
+    first, _ = predicted(conn, tmp_path, root, methods=("nearest", "nearest+prior"))
+    other, _ = predicted(conn, tmp_path, root, methods=("nearest", "nearest+prior"),
+                         place="org")
+    assert (first["nearest+prior"]["place"], other["nearest+prior"]["place"]) == ("inat", "org")
+    assert other["nearest+prior"]["predicted"] == 5
+    assert other["nearest"].get("predicted", 0) == 0          # no place: the same answers
+    predicted(conn, tmp_path, root, methods=("nearest+prior",), place="org", redo=True)
+    places = Counter(r[0] for r in conn.execute(
+        "select place from heldout_predictions where method = 'nearest+prior'"))
+    assert places == {"inat": 5, "org": 5}
+    out = reported(conn, tmp_path)
+    assert {"toy/nearest", "toy/nearest+prior@inat", "toy/nearest+prior@org"} <= set(
+        out["models"])
+
+
+def test_benchmark_vectors_are_kept_per_photo_size(conn, tmp_path, monkeypatch):
+    root = reference(conn, tmp_path / "emb")
+    frozen(conn, tmp_path)
+    fetched(conn, tmp_path, monkeypatch)
+    predicted(conn, tmp_path, root)
+    assert len(heldout.load_vectors(conn, NAME, "toy", "large")) == 6
+    assert heldout.load_vectors(conn, NAME, "toy", "medium") == {}
+
+
+def test_scores_out_with_true_coordinates_warns(conn, tmp_path, monkeypatch):
+    root = reference(conn, tmp_path / "emb")
+    frozen(conn, tmp_path)
+    fetched(conn, tmp_path, monkeypatch)
+    said = []
+    from mycomap_vision.identify import Identifier
+    heldout.predict(conn, NAME, "toy", ["nearest"], heldout.benchmark_ids(conn, NAME), Toy,
+                    place="org", scores_out=tmp_path / "s.npz", log=said.append,
+                    make_identifier=lambda m: Identifier(conn, "toy", m, embeddings_root=root,
+                                                         photo_info=False))
+    assert any("WARNING" in s and "true coordinates" in s for s in said)
 
 
 def test_the_place_given_is_inats_public_one_unless_asked(conn, tmp_path):
@@ -656,7 +787,8 @@ def test_the_label_audit_flags_stale_names_and_index_names_in_another_genus(conn
     assert test["label_audit"]["index_name_in_another_genus"] == [
         {"observation_id": "106", "index_name": "Tubariua hiemalis", "title": "Tubaria hiemalis"}]
     assert test["label_audit"]["without_an_answer"] == 1
-    assert test["models"]["toy/nearest"]["species"]["top1"] == {
+    top1 = test["models"]["toy/nearest"]["species"]["top1"]
+    assert {k: top1[k] for k in ("n", "right", "rate", "ci95")} == {
         "n": 1, "right": 0, "rate": 0.0, "ci95": heldout_report.wilson(0, 1)}
     assert test["models"]["external:inat-cv/combined-max"]["species"]["top1"]["right"] == 1
     pair = next(p for p in test["paired"] if p["b"] == "toy/nearest")
@@ -697,18 +829,22 @@ def test_breakdowns_place_a_record_by_reference_depth_observer_day_and_side():
     t = heldout.Truth("A b", "A", "F", "A b", False, None)
     rec = heldout.HeldOutRecord("1", "A b", TRUTH_SPECIES, None, SOURCE_INDEX, 45.0, -120.0,
                                 "2025-09-01", 39.1, -86.5, 7, [(1, "s", "p"), (2, "s", "p")])
-    f = heldout_report.features(rec, t, ref)
+    f = heldout_report.features(rec, t, ref, nearest=0.995, identical=False)
     assert f == {"species reference records": "5-19", "genus reference records": "100+",
                  "true species in reference": "seen", "photos": "2",
                  "east or west of -100": "west", "same observer and day in reference": "yes",
-                 "name kind": "formal"}
+                 "name kind": "formal", "known to Vision before the freeze": "no",
+                 "nearest reference photo cosine >= 0.99": "yes",
+                 "photo file identical to a reference copy": "no"}
     other = heldout.HeldOutRecord("2", "Inocybe sp. 'X01'", TRUTH_SPECIES, None, SOURCE_INDEX,
-                                  None, None, "2025-09-02", None, -80.0, 7, [(1, "s", "p")])
+                                  None, None, "2025-09-02", None, -80.0, 7, [(1, "s", "p")],
+                                  was_reference="inat details")
     t2 = heldout.Truth("Inocybe sp. 'X01'", "Inocybe", "F", "Inocybe sp. 'X01'", False, None)
     f2 = heldout_report.features(other, t2, ref)
     assert (f2["species reference records"], f2["true species in reference"],
             f2["east or west of -100"], f2["same observer and day in reference"],
-            f2["name kind"]) == ("0", "unseen", "east", "no", "provisional")
+            f2["name kind"], f2["known to Vision before the freeze"]) == (
+        "0", "unseen", "east", "no", "provisional", "yes")
 
 
 def test_each_model_is_scored_on_one_reference_and_an_older_one_can_be_named(conn, tmp_path,
@@ -727,6 +863,115 @@ def test_each_model_is_scored_on_one_reference_and_an_older_one_can_be_named(con
     assert old["models"]["toy/nearest"]["species"]["top1"]["right"] == 1
     with pytest.raises(ValueError, match="no run"):
         reported(conn, tmp_path, reference_hash="nope")
+
+
+def test_one_word_answers_are_scored_as_genera_only_when_they_are_genera(conn):
+    save_records(conn, build_records([green(1, "Russula emetica")], "t"))
+    labeller = heldout.Labeller(conn)
+    for name, want in [("Vaginatae", ("", "", "")), ("Dermocybe", ("", "", "")),
+                       ("Russula sp.", ("", "Russula", "Russulaceae")),
+                       ("Russula", ("", "Russula", "Russulaceae")),
+                       ("Russulaceae", ("", "", "Russulaceae"))]:
+        t = labeller.truth(name)
+        assert (t.species, t.genus, t.family) == want, name
+    assert heldout.truth_status("Russula sp.") == TRUTH_ONE_WORD
+    assert heldout.truth_status("Russula sp. 'IN07'") == TRUTH_SPECIES
+    judged = heldout_report.judge({"genus": [{"name": "Amanita"}]},
+                                  labeller.truth("Vaginatae"), labeller, by_taxon_id=False)
+    assert judged == {}
+
+
+def test_the_report_breaks_scores_down_by_near_duplicate_photos(conn, tmp_path, monkeypatch):
+    scored_world(conn, tmp_path, monkeypatch)
+    # Every fake photo is the same red file: give 1011 alone the reference copy's hash.
+    conn.execute("update heldout_photos set sha256 = 'same-file' where photo_id = 1011")
+    conn.execute("insert into photo_copies values (10, 's3://b/', 'large', 'p', 1, "
+                 "'same-file', 'n')")
+    conn.commit()
+    assert conn.execute("select max_similarity from heldout_predictions where observation_id = "
+                        "'101' and backbone = 'toy'").fetchone()[0] > 0.99
+    out = reported(conn, tmp_path)
+    dims = out["breakdowns"]["toy/nearest"]
+    assert set(dims["nearest reference photo cosine >= 0.99"]) == {"yes"}
+    assert dims["photo file identical to a reference copy"]["yes"]["genus"]["n"] == 1
+    assert dims["photo file identical to a reference copy"]["no"]["genus"]["n"] == 2
+
+
+def test_the_newest_reference_is_not_scored_when_it_covers_far_fewer_records(conn, tmp_path,
+                                                                           monkeypatch):
+    scored_world(conn, tmp_path, monkeypatch)
+    old = conn.execute("select reference_hash from heldout_runs").fetchone()[0]
+    conn.execute("insert into heldout_runs select benchmark, backbone, method, place, size, "
+                 "'newer', '9999', code_version, reference_json from heldout_runs")
+    conn.execute("insert into heldout_predictions select benchmark, observation_id, backbone, "
+                 "method, place, size, 'newer', predicted_at, code_version, reference_records, "
+                 "photos, max_similarity, result_json from heldout_predictions where "
+                 "backbone = 'toy' and observation_id = '101'")
+    conn.commit()
+    with pytest.raises(ValueError, match="name the one to score with --reference-hash"):
+        reported(conn, tmp_path)
+    assert reported(conn, tmp_path, reference_hash=old)["references"]["toy/nearest"] == old
+
+
+def test_name_equivalence_is_reported_as_beta_beside_strict_only_when_it_exists(
+        conn, tmp_path, monkeypatch):
+    import sys
+    import types
+    scored_world(conn, tmp_path, monkeypatch)
+    assert reported(conn, tmp_path, stamp="none")["beta_name_equivalence"] is None
+    fake = types.ModuleType("mycomap_vision.name_equiv")
+    fake.species_match = lambda a, t: {"strict": a == t, "sl": True, "complex": True}
+    fake.genus_match = lambda a, t: {"strict": a == t, "sl": True}
+    monkeypatch.setitem(sys.modules, "mycomap_vision.name_equiv", fake)
+    out = reported(conn, tmp_path, stamp="beta")
+    beta = out["beta_name_equivalence"]["toy/nearest"]
+    assert beta["species"]["sl"]["rate"] == 1.0 and set(beta["genus"]) == {"strict", "sl"}
+    assert out["models"]["toy/nearest"]["species"]["top1"]["rate"] < 1.0      # strict stays
+
+
+def test_an_observer_bootstrap_interval_reflects_records_that_come_in_clumps():
+    clumped = [("a", True)] * 10 + [("b", False)] * 10
+    assert heldout_report.observer_bootstrap(clumped) == (0.0, 1.0)
+    spread = [(f"o{i}", i % 2 == 0) for i in range(20)]
+    lo, hi = heldout_report.observer_bootstrap(spread)
+    assert 0.2 < lo < 0.5 < hi < 0.8
+
+
+def tables_in(blob: bytes, path) -> set[str]:
+    import sqlite3
+    path.write_bytes(blob)
+    c = sqlite3.connect(path)
+    try:
+        return {r[0] for r in c.execute("select name from sqlite_master where type = 'table'")}
+    finally:
+        c.close()
+
+
+def test_a_release_ships_the_holdout_list_but_none_of_a_benchmarks_tables(conn, tmp_path):
+    from test_release import MemoryS3, publish, with_embeddings
+    frozen(conn, tmp_path, holdout=True)
+    with_embeddings(conn, tmp_path)
+    s3 = MemoryS3()
+    publish(conn, tmp_path, s3)
+    blob = next(v for k, v in s3.objects.items() if k.endswith("/manifest.sqlite"))
+    tables = tables_in(blob, tmp_path / "shipped.sqlite")
+    assert "benchmark_holdouts" in tables
+    assert not {name for name in tables if name.startswith("heldout_")}
+    assert b"Tubariua" not in blob            # vacuumed: no answer left in free pages
+    assert "heldout_records" in {r[0] for r in conn.execute(
+        "select name from sqlite_master where type = 'table'")}       # still here at home
+
+
+def test_a_trainer_run_ships_none_of_a_benchmarks_tables(conn, tmp_path, monkeypatch):
+    from test_spot_and_resume import launch_env
+
+    from mycomap_vision import aws
+    _ec2, s3 = launch_env(conn, tmp_path, monkeypatch)
+    frozen(conn, tmp_path)
+    out = aws.launch_trainer(conn, ["bioclip-2"], ["nearest"], finetune=[], log=lambda s: None)
+    blob = s3.objects[f"runs/{out['run_id']}/manifest-in.sqlite"]
+    assert not {n for n in tables_in(blob, tmp_path / "in.sqlite") if n.startswith("heldout_")}
+    assert b"Tubariua" not in blob
 
 
 def numbers(value):

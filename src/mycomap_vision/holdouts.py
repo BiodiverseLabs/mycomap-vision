@@ -113,7 +113,8 @@ def insert(conn: sqlite3.Connection, benchmark: str, ids: list[str],
 
 
 def is_held_out(conn: sqlite3.Connection, benchmark: str) -> bool:
-    """Whether the benchmark's records are held out (a sealed set) right now."""
+    """Whether the benchmark's records are held out right now (whether a frozen set is
+    sealed is its own flag: heldout.set_state)."""
     ensure_schema(conn)
     return conn.execute("select 1 from benchmark_holdouts where benchmark = ? limit 1",
                         (benchmark,)).fetchone() is not None
@@ -121,7 +122,8 @@ def is_held_out(conn: sqlite3.Connection, benchmark: str) -> bool:
 
 def release(conn: sqlite3.Connection, benchmark: str, at: str | None = None) -> dict:
     """Lift a benchmark's exclusion: its records may join training and the reference
-    index with the next export. A record another benchmark still holds out stays out."""
+    index with the next export. A record another benchmark still holds out stays out.
+    A frozen set (heldout.py) keeps its sealed state and records when it was released."""
     check_name(benchmark)
     ensure_schema(conn)
     at = at or datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -131,6 +133,10 @@ def release(conn: sqlite3.Connection, benchmark: str, at: str | None = None) -> 
         if n:
             conn.execute("insert into benchmark_holdout_releases values (?, ?, ?)",
                          (benchmark, n, at))
+            if conn.execute("select 1 from sqlite_master where type = 'table' and "
+                            "name = 'heldout_sets'").fetchone():
+                conn.execute("update heldout_sets set released_at = ? where name = ?",
+                             (at, benchmark))
     still = conn.execute("select count(*) from benchmark_holdouts").fetchone()[0]
     return {"benchmark": benchmark, "released": n, "held_out_by_other_benchmarks": still}
 

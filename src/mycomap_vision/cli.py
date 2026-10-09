@@ -562,7 +562,7 @@ def cmd_heldout(conn, args) -> None:
                              splits={"dev": Path(args.dev), "test": Path(args.test)}
                              if args.dev else None,
                              split_json=Path(args.split_json) if args.split_json else None,
-                             holdout=args.holdout)
+                             holdout=args.holdout, force=args.force)
         print(json.dumps(out, indent=2))
     elif args.action == "fetch":
         ids = _heldout_ids(conn, args)
@@ -606,7 +606,10 @@ def cmd_heldout(conn, args) -> None:
 def print_heldout_report(out: dict) -> None:
     pct = lambda r: "   -   " if not r or r["rate"] is None else (  # noqa: E731
         f"{100 * r['rate']:5.1f}% [{100 * r['ci95'][0]:.1f}-{100 * r['ci95'][1]:.1f}] n={r['n']}")
-    print(f"{out['benchmark']} / {out['split'] or 'all'}: {out['records']:,} records, "
+    state = "sealed" if out.get("sealed") else "development (not sealed)"
+    if out.get("released_at"):
+        state += f", exclusion released {out['released_at']}"
+    print(f"{out['benchmark']} [{state}] / {out['split'] or 'all'}: {out['records']:,} records, "
           f"{out['scored_records']:,} with an answer key "
           f"({out['label_audit']['without_an_answer']:,} without, "
           f"{out['guests_left_out']:,} guests left out)")
@@ -921,8 +924,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--split-json", help="split.json: counts and id hashes to check the splits")
     q.add_argument("--expect-sha", help="refuse unless the ids' sha256 starts with this")
     q.add_argument("--holdout", action="store_true",
-                   help="a sealed set (the paper's): refuse records Vision holds and hold every "
-                        "id out of training and the reference index")
+                   help="a sealed set (the paper's): refuse records Vision has held and hold "
+                        "every id out of training and the reference index")
+    q.add_argument("--force", action="store_true",
+                   help="on a sealed set whose test split was looked at: change test answers "
+                        "anyway (logged in heldout_answer_history)")
 
     q = hsub.add_parser("fetch", help="iNat details and photos (resumable, iNat's limits)")
     ids_options(q)

@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config, holdouts
-from .manifest import snapshot
+from .manifest import shippable_snapshot
 from .taxonomy import CACHE as TAXONOMY_CACHE
 
 PREFIX = "releases/"
@@ -98,7 +98,8 @@ def publish(conn, backbones: list[str], *, label: str | None = None, make_curren
     data_dir = data_dir or config.DATA_DIR
     rid = new_release_id(label)
     files = release_files(conn, backbones, data_dir)
-    snap = snapshot(conn, (work_dir or data_dir) / "manifest-release.sqlite")
+    # The benchmark tables stay home; benchmark_holdouts ships (the nightly update needs it).
+    snap = shippable_snapshot(conn, (work_dir or data_dir) / "manifest-release.sqlite")
     files = [(snap, "manifest.sqlite")] + files
     listed = []
     for path, rel in files:

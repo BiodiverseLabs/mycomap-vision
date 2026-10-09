@@ -141,6 +141,31 @@ def snapshot(conn: sqlite3.Connection, dest: Path) -> Path:
     return dest
 
 
+# A benchmark's own tables (heldout.py: its answer key, .org's true coordinates for its
+# records, its answers) stay on this machine. benchmark_holdouts is not one of them: the
+# box's nightly update needs it.
+BENCHMARK_TABLES = "heldout_%"
+
+
+def shippable_snapshot(conn: sqlite3.Connection, dest: Path) -> Path:
+    """snapshot() for a copy that leaves this machine (a release, a trainer or downloader
+    run): without the benchmark tables, vacuumed so nothing of them stays in free pages."""
+    snapshot(conn, dest)
+    out = sqlite3.connect(dest)
+    try:
+        doomed = [r[0] for r in out.execute(
+            "select name from sqlite_master where type = 'table' and name like ?",
+            (BENCHMARK_TABLES,))]
+        for name in doomed:
+            out.execute(f'drop table "{name}"')
+        out.commit()
+        if doomed:
+            out.execute("vacuum")
+    finally:
+        out.close()
+    return dest
+
+
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
     for table, cols in _LATER_COLUMNS.items():
         have = {r[1] for r in conn.execute(f"pragma table_info({table})")}
