@@ -122,3 +122,62 @@ export async function sendWaitingInLine(
 export function showsPaper(me: Me | null | undefined): boolean {
   return !!me && (me.signin === "off" || !!me.user);
 }
+
+/** Said with every answer, and on How it works: a photo match is never a reason to eat. */
+export const SAFETY_LINE = "Never eat a mushroom based on this identification.";
+
+/** mycomap.org pages (its routes): the network with its free DNA sequencing, and
+ *  membership with donations. */
+export const SEQUENCING_URL = "https://mycomap.org/network";
+export const JOIN_URL = "https://mycomap.org/join";
+
+/** Where researchers go on this site (the Research section's For researchers page):
+ *  one constant, so a route change is one line. */
+export const RESEARCH_PATH = "/research/for-researchers";
+
+/** What to photograph, in the order that helps most. Underside and stem base separate many
+ *  look-alikes that the cap alone can't. */
+export const PHOTO_CHECKLIST: { what: string; why: string }[] = [
+  { what: "Cap from above", why: "colour, texture, shape" },
+  { what: "Underside", why: "gills, pores or teeth" },
+  { what: "Whole stem, with its base", why: "ring, cup or bulb" },
+  { what: "Cut in half, top to bottom", why: "flesh and any colour change" },
+  { what: "Where it grows", why: "wood, soil or moss, and nearby trees" },
+];
+
+/** The newest week's new DNA-verified records as a sentence, or null when there were none
+ *  (or the server doesn't count them): no number is better than a made-up one. */
+export function recentWeekLine(week: { records: number; through: string } | null | undefined): string | null {
+  if (!week || week.records <= 0) return null;
+  const n = week.records.toLocaleString("en-US");
+  return `${n} North American record${week.records === 1 ? " was" : "s were"} DNA-verified in the ` +
+    `week to ${longDate(week.through)}.`;
+}
+
+/** "2026-09-07" -> "7 September 2026": the date as written, with no time zone shift. */
+export function longDate(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}`;
+}
+
+/** A share of a whole, said plainly ("More than half"), for a heading. */
+export function shareWords(part: number, total: number): string {
+  if (total <= 0) return "None";
+  const s = part / total;
+  if (s >= 0.53) return s >= 0.97 ? "Nearly all" : "More than half";
+  if (s > 0.47) return "About half";
+  return `About ${Math.max(1, Math.round(s * 100))}%`;
+}
+
+/** What a served model is, for visitors: its name, the newest records it learned from, and
+ *  how many reference photos it compares with. */
+export function releaseNote(b: { backbone: string; embedded_photos: number;
+                                 trained_through?: string | null }): string {
+  const parts = [`${modelName(b.backbone)}.`];
+  if (b.trained_through) {
+    parts.push(`Trained on DNA-verified records validated up to ${longDate(b.trained_through)}.`);
+  }
+  parts.push(`Compares your photos with ${b.embedded_photos.toLocaleString("en-US")} reference photos.`);
+  return parts.join(" ");
+}
