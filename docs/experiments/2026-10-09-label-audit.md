@@ -6,7 +6,8 @@ status: done
 question: Which labelling problems in the reference set, the training labels and the held-out answer key
   change Vision's measured accuracy systematically, by how much, and where does each fix belong?
 branch: exp/label-audit
-commits: []
+commits:
+- db5231a
 benchmark: heldout-2026-10-08 (development split for re-scores; label-only counts on both splits)
 split: dev
 model: bioclip-2-ft-20261007-165400
