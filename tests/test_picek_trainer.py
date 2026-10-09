@@ -93,3 +93,12 @@ def test_a_photo_cache_shortens_the_estimate_and_counts_its_own_pass():
                               580_000)["stages"][0]["hours"]
     build = 580_000 / trainer.PICEK_CACHE_BUILD_RATE / 3600
     assert cached == pytest.approx(plain / trainer.PICEK_CACHE_SPEEDUP + build, abs=0.15)
+
+
+def test_a_photo_cache_gets_its_own_disk_on_the_instance():
+    assert aws.picek_cache_gb(["fungitastic-beit-b384@15"], 590_000) == 0
+    gb = aws.picek_cache_gb(["fungitastic-beit-b384@15@440"], 590_000)
+    assert 50 <= gb <= 55                                   # 590k x ~80 KB, +10%
+    args = aws.trainer_instance_args("r", "ami-1", "#!", "g6.xlarge", "/dev/xvda", 75,
+                                     extra_gb=gb)
+    assert args["BlockDeviceMappings"][0]["Ebs"]["VolumeSize"] == 75 + 60 + gb

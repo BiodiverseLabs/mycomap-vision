@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import re
 import sqlite3
 import subprocess
@@ -373,6 +374,18 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         spot_arg=" --spot" if spot else "", resume_arg=" --resume" if resume else "")
 
 
+def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
+    """Disk for the Picek photo caches a run asks for (preset@epochs@px): ~80 KB a photo
+    at 440 px (measured: 76 KB), scaled by area for other sizes, plus 10% headroom."""
+    from .picek import cache_of
+    total = 0.0
+    for spec in picek or []:
+        px = cache_of(spec)
+        if px:
+            total += photos * 80e3 * (px / 440) ** 2 * 1.1 / 1e9
+    return int(math.ceil(total))
+
+
 def spot_market_options(max_price: float | None = None) -> dict:
     """RunInstances' InstanceMarketOptions for a one-time Spot instance that AWS
     terminates (never stops or hibernates) when it takes the capacity back. With no
@@ -387,10 +400,11 @@ def spot_market_options(max_price: float | None = None) -> dict:
 
 def trainer_instance_args(run_id: str, ami: str, user_data: str, instance_type: str,
                           root_device: str, snapshot_gb: int, spot: bool = False,
-                          spot_max_price: float | None = None) -> dict:
+                          spot_max_price: float | None = None, extra_gb: int = 0) -> dict:
     """Like the downloader's, with a disk big enough for the image plus model weights and
-    embeddings (~1.2 GB per 1024-wide backbone). `spot`: a one-time Spot instance (its
-    Spot request carries the project tag too) instead of On-Demand."""
+    embeddings (~1.2 GB per 1024-wide backbone), plus `extra_gb` (a Picek photo cache,
+    picek_cache_gb). `spot`: a one-time Spot instance (its Spot request carries the
+    project tag too) instead of On-Demand."""
     if spot_max_price is not None and not spot:
         raise ValueError("--spot-max-price needs --spot")
     args = run_instance_args(run_id, ami, user_data, instance_type)
@@ -400,7 +414,8 @@ def trainer_instance_args(run_id: str, ami: str, user_data: str, instance_type: 
                   for t in spec["Tags"]]}
         for spec in args["TagSpecifications"]]
     args["BlockDeviceMappings"] = [{"DeviceName": root_device,
-                                    "Ebs": {"VolumeSize": max(snapshot_gb, 1) + 60,
+                                    "Ebs": {"VolumeSize": max(snapshot_gb, 1) + 60
+                                            + max(int(extra_gb), 0),
                                             "VolumeType": "gp3", "DeleteOnTermination": True}}]
     if spot:
         args["InstanceMarketOptions"] = spot_market_options(spot_max_price)
@@ -642,7 +657,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                          resume=bool(resume), code_key=code_key,
                                          picek=picek)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
-                                                     root, snapshot_gb, spot, spot_max_price),
+                                                     root, snapshot_gb, spot, spot_max_price,
+                                                     extra_gb=picek_cache_gb(picek, photos)),
                           run_id)
     return {"run_id": run_id, "instance_id": resp["Instances"][0]["InstanceId"],
             "instance_type": instance_type, "market": "spot" if spot else "on-demand",
