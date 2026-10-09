@@ -756,3 +756,76 @@ species strict 40.4%, s.l. 40.4%, complex 43.4%; genus strict 77.0%, s.l. 80.0%.
 Gender folding changed none of them. 42 of the 99 true names are temporary codes
 (13 named exactly, 31%).
 
+## External baselines: DF20 / FungiTastic (2026-10-09, feat/external-bvra-baselines)
+
+Steve (2026-10-09): the Picek group's published classifiers go beside iNat's computer
+vision as outside, zero-retraining baselines in the paper. `external.py`,
+`external_report.py`; `mv external labels | coverage | predict | baseline | report`,
+`mv heldout import-external`.
+
+- **Models** (timm checkpoints, public Hugging Face repos, no login; weights under
+  `data/external/bvra/<repo>/`, git-ignored): `external:fungitastic-beit-b384`
+  (BVRA/beit_base_patch16_384.in1k_ft_fungitastic_384, 2,829 classes; its config.yaml
+  calls the dataset DF24), `external:fungitastic-vit-b384`
+  (BVRA/vit_base_patch16_384.in1k_ft_fungitastic_384, 2,829) and `external:df20-vit-l384`
+  (BVRA/vit_large_patch16_384.ft_df20_384, DF20 "Production", 1,604). Each config.json
+  is checked against the architecture, class count and 384 px input before loading.
+- **Licence: CC BY-NC 4.0** (weights and DF20 / FungiTastic data alike): research use
+  only, never inside a commercial product. Cite Picek et al. 2022 (WACV, DF20) and
+  Picek et al. 2024 (FungiTastic, arXiv:2408.13632).
+- **Label map.** None ships with the weights. Rebuilt from the public training metadata
+  (`data/external/metadata/`, no login): FungiTastic-Train.csv `category_id` (from
+  cmp.felk.cvut.cz's FungiTastic metadata.zip, as BohemianVRA/FungiTastic dataset/fungi.py
+  reads it; 433,702 rows, 2,829 ids) and DanishFungi2024-train.csv `class_id` (266,273 rows,
+  the "DF20_FIX" set the DF20 Production model's config.yaml names; DF20-train_metadata_
+  PROD-2.csv gives the identical id -> species map). Ids are the training rows'
+  `scientificName` in alphabetical order; a class is that name without its author
+  ('Gliophorus perplexus'), GBIF's accepted name (`species`) kept beside it (248
+  FungiTastic and 147 DF20 classes differ). `build_labels` refuses anything but one name
+  per id, ids 0..N-1. **Verified** on CPU with 11 Vision reference records of common
+  species shared with Denmark (Trametes versicolor, Laetiporus sulphureus, Pleurotus
+  ostreatus, Hypholoma fasciculare, Lycoperdon perlatum, Stereum hirsutum, Schizophyllum
+  commune, Armillaria mellea, Mycena galericulata, Fomitopsis betulina, Boletus edulis):
+  top-1 right for 8 / 7 / 8 of 11 (BEiT / ViT-B / DF20), and every miss a plausible
+  confuser with the right species in the top 3 (T. versicolor -> T. hirsuta, A. mellea
+  -> A. lutea, B. edulis -> Calocybe gambosa / B. reticulatus); a shifted map would give
+  unrelated names.
+- **Names.** A class takes Vision's label of its own name when Vision knows it, else of its
+  accepted name (DF20's 'Piptoporus betulinus' -> Fomitopsis betulina), else its own name;
+  classes on one Vision name are one candidate (probabilities summed); genus is the
+  label's first word, family Vision's (iNat's) for the genus. FungiTastic: 1,254 classes
+  are Vision names as they are, 47 by their accepted name, 1,528 are not Vision names.
+  DF20: 877, 24, 703. No synonym crosswalk beyond that (open: e.g. Danish 'Lepista nuda'
+  is our 'Collybia nuda', 194 North American records counted as outside the vocabulary).
+- **Protocol.** Photo only (their metadata prior needs Danish habitat and substrate). Each
+  photo resized to 384 x 384, no crop, mean = std = 0.5 (model cards); a record's answer is
+  the softmax of its photos' mean logits (the authors' observation rule), temperature 1:
+  fitting it on dev would tune a baseline on our labels. Each photo's own top-1 is kept for
+  their per-image metric. `mv external predict` reads the manifest only and writes JSONL
+  (logits cached in the benchmark's folder); `mv heldout import-external` stores it as
+  heldout_predictions with a heldout_runs row keyed by the checkpoint id (weights + class
+  map hashes), so `mv heldout report` scores it like any model (its run is never taken as
+  the breakdowns' reference). `mv external baseline --comparison <id>` adds an eval_runs row
+  on a scoreboard comparison's test records, with the standard top 1/3/5/10 block in
+  feat/compare-approaches' shape (its constants are imported from evaluate once that
+  branch is merged). Scoring, since these models have no temporary codes: (i) genus and
+  family on all records; (ii) species on records whose true name is formal; (iii) same
+  vocabulary: on records whose true name is in model C's vocabulary, C, Vision as served
+  and Vision restricted to C's names (Vision's stored list re-ranked, never predicted
+  again; a list left shorter than k makes top-k a lower bound, and the table says on how
+  many records); (iv) coverage. `mv external report` refuses a sealed test split.
+- **Coverage (iv)**, true names read by Vision's labels (heldout-2026-10-08 dev, 3,000
+  records; and Vision's 159,388 North American records, guests left out):
+
+  | | FungiTastic (both) dev | DF20 dev | FungiTastic NA | DF20 NA |
+  |---|---|---|---|---|
+  | temporary code | 36.8% | 36.8% | 41.4% | 41.4% |
+  | formal, in vocabulary | 17.0% (509) | 13.8% (414) | 16.2% | 13.1% |
+  | formal, s.l. only | 0.0% | 0.2% | 0.0% | 0.1% |
+  | formal, not in vocabulary | 43.9% | 46.9% | 41.5% | 44.6% |
+  | one word | 2.4% | 2.4% | 0.9% | 0.9% |
+  | genus in vocabulary | 87.8% | 82.4% (+2.0% s.l.) | 91.1% | 85.4% (+1.9% s.l.) |
+
+  So at most 17% of our DNA-verified records (28% of those with a formal name) are names a
+  Danish model can say at all; distinct species in its vocabulary: 253 of 1,860 on dev and
+  1,224 of 18,600 North American (FungiTastic), 197 and 853 (DF20).

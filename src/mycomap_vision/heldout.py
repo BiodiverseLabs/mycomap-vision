@@ -1288,3 +1288,67 @@ def inat_cv(conn: sqlite3.Connection, name: str, ids: list[str], client, size: s
         if i % 10 == 0:
             log(f"  {i}/{len(records)} records, {client.calls} iNat calls")
     return {"records": len(records), "inat_calls": client.calls, **dict(stats)}
+
+
+# --- answers of an external model (external.py) ----------------------------------------------
+
+def import_external(conn: sqlite3.Connection, name: str, results: Path, backbone: str,
+                    redo: bool = False) -> dict:
+    """Store an external model's answers (`mv external predict`'s JSONL: one record a line,
+    {observation_id, backbone, method, size, reference_hash, photos, result}) as
+    heldout_predictions rows beside Vision's, with a heldout_runs row whose reference_hash
+    is the checkpoint id (external.checkpoint_id: weights and class map), so the report
+    scores each checkpoint as one model. Every line must be this backbone's, of one method,
+    size and checkpoint, about a record of the set, with ranks of {name, confidence}."""
+    from .external import is_external
+    if not is_external(backbone):
+        raise ValueError(f"{backbone!r} is not an external model (external:<name>)")
+    ensure_schema(conn)
+    members = set(benchmark_ids(conn, name))
+    rows, keys, seen = [], set(), set()
+    with open(results, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            oid = clean(r.get("observation_id"))
+            if r.get("backbone") != backbone:
+                raise ValueError(f"line {n}: backbone {r.get('backbone')!r}, not {backbone!r}")
+            if r.get("benchmark") not in (None, name):
+                raise ValueError(f"line {n}: answers for {r.get('benchmark')!r}, not {name!r}")
+            if oid not in members:
+                raise ValueError(f"line {n}: {oid!r} is not a record of {name}")
+            if oid in seen:
+                raise ValueError(f"line {n}: {oid} answered twice")
+            seen.add(oid)
+            result = r.get("result") or {}
+            for rank in RANKS:
+                cands = result.get(rank)
+                if not isinstance(cands, list) or not all(
+                        isinstance(c, dict) and isinstance(c.get("name"), str)
+                        and isinstance(c.get("confidence"), (int, float)) for c in cands):
+                    raise ValueError(f"line {n}: {rank} is not a list of name and confidence")
+            keys.add((r.get("method"), r.get("size") or "large", r.get("reference_hash")))
+            rows.append((oid, int(r.get("photos") or 0), result))
+    if len(keys) != 1:
+        raise ValueError(f"one method, size and checkpoint per file, not {sorted(map(str, keys))}")
+    method, size, ref_hash = keys.pop()
+    if not method or not ref_hash:
+        raise ValueError("every line needs its method and reference_hash (the checkpoint id)")
+    done = set() if redo else {r[0] for r in conn.execute(
+        "select observation_id from heldout_predictions where benchmark = ? and backbone = ? "
+        "and method = ? and place = ? and size = ? and reference_hash = ?",
+        (name, backbone, method, NO_PLACE, size, ref_hash))}
+    now, version = now_iso(), config.code_version()
+    new = [(name, oid, backbone, method, NO_PLACE, size, ref_hash, now, version, None, photos,
+            None, json.dumps(result)) for oid, photos, result in rows if oid not in done]
+    with conn:
+        conn.execute("insert or replace into heldout_runs values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (name, backbone, method, NO_PLACE, size, ref_hash, now, version,
+                      json.dumps({"external": True, "checkpoint": ref_hash,
+                                  "records": len(rows), "source": Path(results).name})))
+        conn.executemany("insert or replace into heldout_predictions values "
+                         "(?,?,?,?,?,?,?,?,?,?,?,?,?)", new)
+    return {"benchmark": name, "backbone": backbone, "method": method, "size": size,
+            "reference_hash": ref_hash, "lines": len(rows), "stored": len(new),
+            "already": len(rows) - len(new)}

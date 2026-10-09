@@ -32,6 +32,10 @@ test("visitors read a model's name, not its file name", () => {
   assert.equal(modelName("bioclip-2"), "BioCLIP 2");
   assert.equal(modelName("bioclip-2-ft-sample"), "BioCLIP 2, fine-tuned on a sample (test model)");
   assert.equal(modelName("external:inat-cv"), "iNaturalist's computer vision");
+  assert.equal(modelName("external:df20-vit-l384"),
+    "Danish Fungi 2020 ViT-L (Picek et al., Danish records)");
+  assert.equal(modelName("external:fungitastic-beit-b384"),
+    "FungiTastic BEiT-B (Picek et al., Danish records)");
   assert.equal(modelName("dinov3-l16-512"), "dinov3-l16-512");
 });
 

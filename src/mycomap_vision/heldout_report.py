@@ -66,6 +66,7 @@ from .heldout import (NO_ANSWER, RANKS, SOURCE_OTHER_GENUS, SOURCES, TRUTH_ONE_W
                       TRUTH_STATUSES, Labeller, Truth)
 
 INAT = "external:inat-cv"
+EXTERNAL = "external:"          # an outside model (iNat, external.py): no Vision reference
 DEPTH_BUCKETS = [(0, 0, "0"), (1, 4, "1-4"), (5, 19, "5-19"), (20, 99, "20-99"),
                  (100, 10**9, "100+")]
 PHOTO_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 3, "3"), (4, 5, "4-5"), (6, 10**9, "6+")]
@@ -433,13 +434,17 @@ def reference_run(conn: sqlite3.Connection, name: str, backbone: str | None,
                   chosen: dict[tuple, str]) -> dict | None:
     """The reference summary (heldout.reference_summary) the breakdowns use: of the chosen
     reference of `backbone`, or of the newest chosen run of any backbone."""
-    hashes = [h for (b, *_k), h in chosen.items() if backbone is None or b == backbone]
+    # An external model (external.py) answers from no reference of Vision's: its run row
+    # holds a checkpoint, never the reference counts the breakdowns need.
+    hashes = [h for (b, *_k), h in chosen.items()
+              if (backbone is None or b == backbone) and not b.startswith(EXTERNAL)]
     if not hashes:
         return None
     row = conn.execute(
         "select backbone, reference_hash, reference_json from heldout_runs where benchmark = ? "
         f"and reference_hash in ({','.join('?' * len(hashes))}) "
-        "and (? is null or backbone = ?) order by created_at desc limit 1",
+        "and (? is null or backbone = ?) and backbone not like 'external:%' "
+        "order by created_at desc limit 1",
         (name, *hashes, backbone, backbone)).fetchone()
     if not row:
         return None
