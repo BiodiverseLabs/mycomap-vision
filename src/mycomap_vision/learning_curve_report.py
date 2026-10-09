@@ -305,29 +305,50 @@ def report(results_path: Path, out_dir: Path, pool_names: dict[str, int] | None 
 
     # 5. Paired marginal gains: records whose species has >= d + k records, cut to d
     # and to d + k (nested, same seed), the change in top-1.
+    # d = 0 is "not in the index" (always wrong), so 0 -> k is the accuracy at k records.
+    # A (d, k) pair is measured only where both cuts were run (a cut not in R["caps"]
+    # holds only species with exactly that many records, so it is left out).
+    run_caps = set(R["caps"])
     gains = {}
     for m in METHODS:
         gains[m] = {}
-        for d in GAIN_DS:
+        for d in (0,) + GAIN_DS:
             for k in GAIN_KS:
-                ids = [o for o in cap_ids if info[o]["n_clean"] >= d + k]
-                per_seed, diffs = [], []
-                for s in seeds:
-                    a = hits_at[m].get((d, s), {})
-                    b = hits_at[m].get((d + k, s), {})
-                    dd = [(b[o][("species", "strict")] == 0) - (a[o][("species", "strict")] == 0)
-                          for o in ids if o in a and o in b]
-                    if dd:
-                        per_seed.append(100.0 * float(np.mean(dd)))
-                        diffs.append(np.array(dd, float))
-                if not per_seed:
+                if (d and d not in run_caps) or (d + k) not in run_caps:
                     continue
-                avg = np.mean(np.stack(diffs), axis=0) * 100 if len({len(x) for x in diffs}) == 1 else None
-                lo, hi = bootstrap_ci(avg) if avg is not None else (None, None)
-                gains[m][f"{d}+{k}"] = {"n": len(ids), "gain": float(np.mean(per_seed)),
-                                        "seed_sd": float(np.std(per_seed, ddof=1)) if len(per_seed) > 1 else 0.0,
-                                        "ci95": [lo, hi]}
+                ids = [o for o in cap_ids if info[o]["n_clean"] >= d + k]
+                rows = []
+                for s in seeds:
+                    a = hits_at[m].get((d, s), {}) if d else None
+                    b = hits_at[m].get((d + k, s), {})
+                    rows.append([(b[o][("species", "strict")] == 0)
+                                 - (bool(a) and a[o][("species", "strict")] == 0)
+                                 for o in ids if o in b and (a is None or o in a)])
+                if not rows or not rows[0] or len({len(x) for x in rows}) != 1:
+                    continue
+                per_seed = [100.0 * float(np.mean(x)) for x in rows]
+                avg = np.mean(np.array(rows, float), axis=0) * 100
+                lo, hi = bootstrap_ci(avg)
+                gains[m][f"{d}+{k}"] = {"n": len(rows[0]), "gain": float(np.mean(per_seed)),
+                                        "seed_sd": float(np.std(per_seed, ddof=1))
+                                        if len(per_seed) > 1 else 0.0, "ci95": [lo, hi]}
     out["marginal_gains"] = gains
+
+    # Is depth the cause, or are sparse species harder? Species that are deep, cut to N,
+    # against species that naturally have about N records (full depth).
+    natural = {}
+    for m in METHODS:
+        natural[m] = {}
+        for lo_, hi_, N in ((1, 1, 1), (2, 2, 2), (3, 4, 3), (5, 6, 5), (8, 12, 10), (15, 25, 20),
+                            (40, 60, 50)):
+            nat = [o for o in cap_ids if lo_ <= info[o]["n_clean"] <= hi_]
+            cut = [o for o in cap_ids if info[o]["n_clean"] >= 100]
+            natural[m][str(N)] = {
+                "natural_depth": f"{lo_}-{hi_}", "natural_n": len(nat),
+                "natural_top1": acc_at(m, nat, 10**9, seeds[0]),
+                "deep_cut_top1": spread([acc_at(m, cut, N, s) for s in seeds])["mean"],
+                "deep_n": len(cut)}
+    out["natural_vs_cut"] = natural
 
     # 6. Sequence-these-next: expected gain of five more records x how often the species
     # arrives (held-out pool) / is observed (iNat).
@@ -340,24 +361,48 @@ def report(results_path: Path, out_dir: Path, pool_names: dict[str, int] | None 
     return out
 
 
-def gain_of(depth: int, k: int, curve: dict) -> float:
-    """Expected top-1 points from k more records for a species with `depth` records, from
-    the band's fitted curve (0 records: not in the index, 0%)."""
-    band = band_of(max(depth, 1))
-    fit = curve.get(band) or curve["1-4"]
-    now = 0.0 if depth == 0 else float(saturating(depth, fit))
-    return 100.0 * (float(saturating(depth + k, fit)) - now)
+def gain_curve(gains: dict, k: int, deep_fit: dict) -> list[tuple[int, float]]:
+    """(d, measured points from k more records at depth d), d ascending, from the paired
+    within-species gains; past the deepest measured d, the deep species' fitted curve."""
+    pts = sorted((int(key.split("+")[0]), v["gain"]) for key, v in gains.items()
+                 if int(key.split("+")[1]) == k)
+    if pts:
+        last = pts[-1][0]
+        for d in (100, 200, 500, 1000):
+            if d > last:
+                pts.append((d, 100.0 * float(saturating(d + k, deep_fit) - saturating(d, deep_fit))))
+    return pts
+
+
+def gain_of(depth: int, curve: list[tuple[int, float]]) -> float:
+    """Expected top-1 points for a species with `depth` records, interpolated on log
+    depth (0 records: the measured 0 -> k gain, i.e. accuracy at k records)."""
+    if not curve:
+        return 0.0
+    if depth <= curve[0][0]:
+        return curve[0][1]
+    for (d0, g0), (d1, g1) in zip(curve, curve[1:]):
+        if depth <= d1:
+            lo, hi = math.log1p(d0), math.log1p(d1)
+            t = (math.log1p(depth) - lo) / (hi - lo)
+            return g0 + t * (g1 - g0)
+    return curve[-1][1]
 
 
 def sequence_next(R: dict, fits: dict, gains: dict, pool: dict[str, int],
                   inat: dict[str, int], method: str = "nearest+mean", k: int = 5) -> dict:
-    """Species and genera ranked by expected gain (top-1 points from k more records)
-    times how often the species arrives in MycoMap's own stream of DNA records (the
-    13,145-record held-out pool, both splits). iNat's North American observation count
-    is shown beside it, and a second ranking uses it."""
+    """Species and genera ranked by expected gain (top-1 points from k more sequenced
+    records) times how often the species arrives in MycoMap's own stream of DNA records
+    (the held-out pool, both splits). The depth used is the species' depth once the
+    pool's own records join the reference (they are released into training), so the
+    list looks past the next release. The gain is the measured within-species paired
+    gain at that depth. iNat's North American observation count is shown beside it, and
+    a second ranking uses it. Names whose genus Vision has never had are marked (usually a
+    real new genus, sometimes a misspelling on the legacy site: check the name)."""
     counts = R["unit_counts"]["full-clean"]
     units, species_of_unit = R["units"], R["species_of_unit"]
-    genus_names, genus_of_unit = R["genus_names"], R["genus_of_unit"]
+    genus_names = set(R["genus_names"])
+    curve = gain_curve(gains.get(method, {}), k, fits[method]["deep species, cut to N"])
     from .heldout import name_key
     depth = {units[u]: int(counts[u]) for u in range(len(units)) if species_of_unit[u] >= 0}
     # Arrivals and iNat counts are keyed by label; fold writing differences onto the unit.
@@ -373,32 +418,37 @@ def sequence_next(R: dict, fits: dict, gains: dict, pool: dict[str, int],
     rows = []
     for name in names:
         d = depth.get(name, 0)
-        g = gain_of(d, k, fits[method])
         arrivals = pool.get(name, 0)
-        rows.append({"species": name, "refs": d, "band": band_of(d), "gain_pts": g,
-                     "pool_arrivals": arrivals, "inat_na_obs": inat.get(name),
+        nxt = d + arrivals
+        g = gain_of(nxt, curve)
+        rows.append({"species": name, "refs": d, "refs_next": nxt, "band": band_of(nxt),
+                     "gain_pts": g, "pool_arrivals": arrivals, "inat_na_obs": inat.get(name),
+                     "unknown_genus": name.split()[0] not in genus_names,
                      "expected": g * arrivals / total_pool * 100})
-    by_pool = sorted([r for r in rows if r["pool_arrivals"] > 0],
+    ok = rows
+    by_pool = sorted([r for r in ok if r["pool_arrivals"] > 0],
                      key=lambda r: (-r["expected"], r["species"]))
     total_inat = max(sum(v for v in inat.values() if v), 1)
     for r in rows:
         r["expected_inat"] = (r["gain_pts"] * (r["inat_na_obs"] or 0) / total_inat * 100)
-    by_inat = sorted([r for r in rows if r["inat_na_obs"]], key=lambda r: -r["expected_inat"])
+    by_inat = sorted([r for r in ok if r["inat_na_obs"]], key=lambda r: -r["expected_inat"])
     genus = defaultdict(lambda: {"expected": 0.0, "pool_arrivals": 0, "species": 0,
                                  "species_under_20": 0, "refs": 0})
-    for r in rows:
-        gname = r["species"].split()[0]
-        G = genus[gname]
+    for r in ok:
+        G = genus[r["species"].split()[0]]
         G["expected"] += r["expected"]
         G["pool_arrivals"] += r["pool_arrivals"]
         G["species"] += 1
-        G["species_under_20"] += r["refs"] < 20
+        G["species_under_20"] += r["refs_next"] < 20
         G["refs"] += r["refs"]
     genera = sorted(({"genus": g, **v} for g, v in genus.items() if v["pool_arrivals"]),
                     key=lambda r: -r["expected"])
-    return {"method": method, "k": k, "pool_total": total_pool,
+    flagged = sorted(({"species": r["species"], "pool_arrivals": r["pool_arrivals"]}
+                      for r in rows if r["unknown_genus"] and r["pool_arrivals"]),
+                     key=lambda r: -r["pool_arrivals"])
+    return {"method": method, "k": k, "pool_total": total_pool, "gain_curve": curve,
             "species_by_pool": by_pool[:60], "species_by_inat": by_inat[:40],
-            "genera": genera[:30],
+            "genera": genera[:30], "flagged_unknown_genus": flagged[:20],
             "absent_species_arrivals": sum(r["pool_arrivals"] for r in rows if r["refs"] == 0),
             "share_of_expected_in_bands": {
                 b: sum(r["expected"] for r in by_pool if r["band"] == b)
@@ -479,27 +529,47 @@ def format_report(o: dict) -> str:
               "top-1 points; 95% bootstrap over records):", "",
               "| at d | +1 | +5 | +10 |", "|---|---|---|---|"]
         g = o["marginal_gains"][m]
-        for d in GAIN_DS:
+        for d in (0,) + GAIN_DS:
             cells = []
             for k in GAIN_KS:
                 v = g.get(f"{d}+{k}")
-                cells.append("–" if not v else
+                cells.append("not run" if not v else
                              f"{v['gain']:+.1f} ({_f(v['ci95'][0])}..{_f(v['ci95'][1])}; n {v['n']:,})")
             L.append(f"| {d} | " + " | ".join(cells) + " |")
+        L += ["", f"Depth or difficulty? Deep species (100+ records) cut to N against species that "
+              f"naturally have about N, {m} (top-1):", "",
+              "| N | natural depth | natural n | natural | deep cut to N |", "|---|---|---|---|---|"]
+        for N, v in o["natural_vs_cut"][m].items():
+            L.append(f"| {N} | {v['natural_depth']} | {v['natural_n']:,} | {_f(v['natural_top1'])} | "
+                     f"{_f(v['deep_cut_top1'])} |")
         L.append("")
     sn = o["sequence_next"]
-    L += [f"## Sequence these next ({sn['method']}, +{sn['k']} records; expected = gain x share of "
-          f"{sn['pool_total']:,} held-out arrivals)", "",
-          "| # | species | refs | gain (pts) | arrivals | iNat NA obs | expected |",
-          "|---|---|---|---|---|---|---|"]
+    L += [f"## Sequence these next ({sn['method']}, +{sn['k']} records; guidance, refreshed on "
+          f"Dataset release v1)", "",
+          f"Expected = measured gain at the species' depth once the held-out records join x its "
+          f"share of {sn['pool_total']:,} held-out arrivals (x100). Gain curve (depth, points from "
+          f"+{sn['k']}): " + ", ".join(f"{d}: {g:.1f}" for d, g in sn["gain_curve"]) + ".", "",
+          "| # | species | refs now | refs after held-out join | gain (pts) | arrivals | iNat NA obs | expected |",
+          "|---|---|---|---|---|---|---|---|"]
     for i, r in enumerate(sn["species_by_pool"][:40], 1):
-        L.append(f"| {i} | {r['species']} | {r['refs']} | {r['gain_pts']:.1f} | {r['pool_arrivals']} | "
-                 f"{r['inat_na_obs'] if r['inat_na_obs'] is not None else '–'} | {r['expected']:.3f} |")
-    L += ["", "| # | genus | expected | arrivals | species | of them < 20 refs |", "|---|---|---|---|---|---|"]
+        L.append(f"| {i} | {r['species']}{' †' if r['unknown_genus'] else ''} | {r['refs']} | "
+                 f"{r['refs_next']} | {r['gain_pts']:.1f} | {r['pool_arrivals']} | {r['inat_na_obs'] if r['inat_na_obs'] is not None else '–'} | "
+                 f"{r['expected']:.3f} |")
+    L += ["", "By iNat North American observations instead of arrivals:", "",
+          "| # | species | refs now | after join | gain (pts) | iNat NA obs |", "|---|---|---|---|---|---|"]
+    for i, r in enumerate(sn["species_by_inat"][:25], 1):
+        L.append(f"| {i} | {r['species']} | {r['refs']} | {r['refs_next']} | {r['gain_pts']:.1f} | "
+                 f"{r['inat_na_obs']:,} |")
+    L += ["", "| # | genus | expected | arrivals | species | of them < 20 refs after join |",
+          "|---|---|---|---|---|---|"]
     for i, r in enumerate(sn["genera"][:25], 1):
         L.append(f"| {i} | {r['genus']} | {r['expected']:.2f} | {r['pool_arrivals']} | {r['species']} | "
                  f"{r['species_under_20']} |")
-    L += ["", "Share of the expected gain by band: " + ", ".join(
+    if sn.get("flagged_unknown_genus"):
+        L += ["", "Marked † (genus new to Vision: usually a real new genus, sometimes a misspelling, "
+              "e.g. 'Tubariua' for Tubaria on the legacy site; check the name): " + ", ".join(
+            f"{r['species']} ({r['pool_arrivals']})" for r in sn["flagged_unknown_genus"])]
+    L += ["", "Share of the expected gain by band (after join): " + ", ".join(
         f"{b} {100 * v:.0f}%" for b, v in sn["share_of_expected_in_bands"].items()), ""]
     return "\n".join(L) + "\n"
 

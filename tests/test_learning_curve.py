@@ -227,3 +227,14 @@ def test_the_snapshot_copies_without_touching_the_source(tmp_path):
     d = _sqlite3.connect(tmp_path / "work" / "copy.sqlite")
     assert d.execute("select x from t").fetchall() == [(1,)]
     d.close()
+
+
+def test_the_ranking_gain_comes_from_measured_cuts_only():
+    gains = {"0+5": {"gain": 24.0}, "1+5": {"gain": 22.0}, "10+5": {"gain": 9.0},
+             "50+5": {"gain": 1.0}, "1+1": {"gain": 5.0}}
+    deep = {"ceiling": 0.75, "half_at": 20.0}
+    curve = lr.gain_curve(gains, 5, deep)
+    assert [d for d, _ in curve][:4] == [0, 1, 10, 50]       # +1 entries are not mixed in
+    assert lr.gain_of(0, curve) == 24.0 and lr.gain_of(10, curve) == 9.0
+    assert 9.0 < lr.gain_of(5, curve) < 22.0                 # between the measured depths
+    assert lr.gain_of(1000, curve) < 1.0                     # past 50: the deep species' fit

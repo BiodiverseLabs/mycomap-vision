@@ -405,6 +405,25 @@ variant yet (its scores are cosine-like, so it would go through AsLogProb).
 `identify.py` computes the photo similarities twice for it (once for the specimens
 shown, once inside the method); share them if it goes live.
 
+## Learning curve: is sequencing still the lever? (2026-10-09, exp/learning-curve)
+
+Exploratory before the Dataset release v1 freeze. Full record:
+docs/experiments/2026-10-09-learning-curve.md. Re-run: `mv learning-curve run --manifest
+<m> | --release <dir> --benchmark-db <m> --out <dir>` (`learning_curve.py`: snapshots its
+inputs, fixed seeds, parallel shards, provenance in report.json).
+
+- Cutting only the true species to N records (all others at full depth), nearest + species
+  average: species top-1 3 / 15 / 26 / 38 / 55 / 63% at 1 / 5 / 10 / 20 / 50 / 100 records,
+  68% at full. One more record is worth +5.4 points at 1, +1.8 at 10, +0.7 at 20, +0.2 at 50.
+  The knee is near 20 records.
+- At matched depth, naturally sparse species beat deep species cut down, so their low accuracy
+  is a depth effect.
+- Below about 20 records (90% of species), sequencing is the lever. Above about 50, the model
+  and labels are: the 100+ band is flat, and there the blend trails nearest.
+- Growing every species in proportion has nearly stopped paying (+0.7 points from 75% to 100%).
+  Target sparse species instead. The report ranks species and genera by expected gain × how
+  often they arrive.
+
 ## Uninformative photos: drop or down-weight? (experiment, 2026-10-09)
 
 Steve asked (after the 100-record held-out audit) whether photos dominated by a
