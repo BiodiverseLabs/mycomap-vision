@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.4.2, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.4.3, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -212,8 +212,9 @@ only: these records join the training data of dataset release v1, so a later mod
 scored on them; the paper's test set and every before/after comparison use a new, sealed set of
 freshly validated records.
 
-**Paper test set (planned).** About 1,000 records validated after the method is frozen, registered
-as held out before any model sees them (Appendix A).
+**Paper test set ("v1-test", planned).** A new set of freshly validated North American records,
+provided after the method is frozen, kept apart from the training release by record and by photo
+bytes, and never used for training (Appendix A).
 
 **Advance predictions.** Every night the identifier predicts up to 300 records still awaiting
 DNA results; predictions are scored when the records are validated. Nothing could have seen the
@@ -224,10 +225,11 @@ snapshot cut after the labels and the inclusion rules were fixed: iNaturalist re
 DNA-validated Mushroom Observer records with their own photos; MyCoPortal and legacy-sequence
 records, records with wrong photos, guest organisms and [non-fungus photos] left out, each with a
 recorded reason. The release holds every record's source, label and label provenance, every
-original photo's checksum and licence, the exact recipe that derives each image a model saw from its original (with the derived image's checksum), the inclusion list, the splits (time cutoffs, the development and
-test splits, the sealed test set), the reference-index hash, the code commit and the checksums of
+original photo's checksum and licence, the exact recipe that derives each image a model saw from its original (with the derived image's checksum), the inclusion list, the time-based training and validation split, the reference-index hash, the code commit and the checksums of
 every trained model. Each experiment is one command that reads the release and writes its id,
-reference hash and commit into its results. A version of the release using only openly licensed
+reference hash and commit into its results. The test set is separate: newly validated North
+American records ("v1-test"), disjoint from the release by record and by photo bytes, and never
+used for training. A version of the release using only openly licensed
 photos can be rebuilt by anyone from public sources; results on it are reported
 beside ours. [Release v1 not yet cut; the numbers below are development and will be replaced.]
 
@@ -813,6 +815,7 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.4.3 (9 Oct 2026).** Aligned with the release builder: train/val split by time, test set v1-test of new records.
 - **0.4.2 (9 Oct 2026).** Public files on Zenodo with a DOI (Steve).
 - **0.4.1 (9 Oct 2026).** Steve's decisions: the 13,145 held-out records join v1 training (a
   development benchmark only; before/after and the paper's numbers on a new sealed set); public

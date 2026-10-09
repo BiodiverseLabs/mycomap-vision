@@ -33,13 +33,15 @@ versioned dataset release; the live site keeps changing on its own track.
 | G4 | **Guest organisms** applied (guests.py, adopted 2026-10-07) | done |
 | G5 | **Non-fungus photos**: the not-fungus gate / photo scan decision made and applied (which photos are dropped, by what rule) | gate and scan lanes; decision open |
 | G6 | **Leave-one-out scan fixes** applied (records whose photos match another species far better than their own, after a person's check) | label-audit lane |
-| G7 | **Held-out records: DECIDED (Steve, 2026-10-09)**. The 13,145 records **join v1's training and references**; they stay a pre-freeze development benchmark only ("we will generate a new dataset for experiments in the future; we can keep using them for experiments now"). v1 carries no 13,145 benchmark. A **new experiment dataset** (freshly validated records) comes later and is sealed before any model sees it. Consequence: the planned "after" score on the same 13,145 is no longer valid once v1 trains on them, so before/after comparisons need the new set | decided |
+| G7 | **Held-out records and the test set: DECIDED (Steve, 2026-10-09)**. The 13,145 records **join v1's training and references**, dated like every record (their membership kept as columns); they stay a pre-freeze development benchmark only. Steve **provides a new dataset of new records for testing**: it becomes `v1-test`, cut later, disjoint from v1 by record and by photo bytes, and never trainable. Consequence: an "after" score on the same 13,145 is no longer valid once v1 trains on them, so before/after comparisons use `v1-test` | decided |
 | G8 | **Photo permissions** fixed at the freeze: which all-rights-reserved photos are used (answered yes / no answer / withdrawn), as of a recorded date | rule exists (permissions.py); snapshot at freeze |
 
 ### 2. Dataset release v1 (immutable)
 
-A read-only snapshot, never edited after it is cut; a correction makes v2. Stored apart from the
-serving releases (S3 `research-releases/v1/`), with a `RELEASE.json` of every file's sha256.
+A read-only snapshot, never edited after it is cut; a correction makes v2. North America only.
+Stored apart from the serving releases, in `data/research-releases/<id>/` (S3
+`research-releases/<id>/` later), with a `MANIFEST.json` and a `SHA256SUMS` of every file. The
+full specification is `docs/dataset-release.md` (release builder, feat/dataset-release).
 
 - **records**: id, source (iNat / MO), label, label provenance (title field, override or
   provisional, refresh time), title snapshot time, validation date, validating project(s), name
@@ -50,10 +52,14 @@ serving releases (S3 `research-releases/v1/`), with a `RELEASE.json` of every fi
   coordinates stay in a private companion table.
 - **inclusion list**: every candidate record with in / out and a reason code (source, wrong photos,
   guest, non-fungus, no photos, label conflict, one-word without a usable rank, held out).
-- **splits**: the temporal cutoffs used for comparisons. (The 13,145 held-out records are training
-  data in v1, not a split; the new experiment dataset gets its own sealed split when it exists.)
-- **reference-index hash** (records + labels), the taxonomy snapshot, the code commit that cut the
-  release, and the sha256 of every model trained on it.
+- **splits**: `train` and `val`, by time (val = the newest 8 weeks unless Steve sets a cutoff).
+  The test set is `v1-test`: Steve's new dataset of new records, cut later, disjoint from v1 by
+  record and by photo bytes, never trainable. (The 13,145 held-out records are ordinary training
+  records in v1; their membership is kept as columns.)
+- **hashes** (what `rel.cite()` returns, and what experiments record): `dataset_release` (the id),
+  `release_hash`, `reference_hash` (train + val: record key, label and the sorted sha256s of its
+  original photos), `labels_hash`, and `release_code_commit`; the taxonomy snapshot; the sha256 of
+  every model trained on it.
 - **dataset card** (datasheet): what is in it, how it was built, known gaps and biases, licences.
 
 **Images: originals kept, derived images by recipe (Steve, 2026-10-09).** No zip archives. The
@@ -64,11 +70,16 @@ regenerate exactly the image a model saw, on demand, and check it. Public deriva
 CC-licensed photos only.
 
 **Who builds it.** A dedicated session owns the release builder (task "Prep Vision Dataset release
-v1 builder"): `mv release build / verify / derive / diff` with tests, and the release layout. This
-section is its specification input; it does not cut v1 until Steve gives the trigger.
+v1 builder"; specification `docs/dataset-release.md` on feat/dataset-release). Its commands are
+`mv dataset build | verify | derive | diff | public | show` (`mv release` stays the serving
+publisher). A release id is only frozen with `--freeze-approved "<who, when>"` and every derived
+hash in place; research commands refuse a draft unless `--allow-draft`. It does not cut v1 until
+Steve gives the trigger.
 
 **Rules once v1 exists.** Every research command takes `--release v1` (or `--manifest <path>`) and
-writes the release id, reference hash and code commit into its outputs; registry entries after the
+writes the release's citation (`rel.cite()`: release id, release hash, reference hash, labels hash,
+release code commit) and its own code commit into its outputs (`mv compare --release v1` and
+`mv heldout predict --release v1` are wired); registry entries after the
 freeze must carry them (tests/test_experiments.py enforces it). Research never reads the live
 manifest. Live serving (nightly updates, permission syncs) keeps changing and is reported apart;
 a serving release says which research release its model came from.
@@ -96,18 +107,18 @@ today follows them, but each decision is provisional:
 
 **Re-run order** (what defines the benchmarks first, then what builds on them):
 1. Scoring and benchmark definitions: name equivalence (rule check), the temporal splits, the
-   likely-list protocol; the new experiment dataset and its sealed test split once validated.
+   likely-list protocol; `v1-test` once Steve's new records are validated and cut.
 2. Backbone screen (frozen models, cheap).
 3. Full fine-tune on v1, saving its classifier heads; the heads scored; the trained-heads
    comparison; the Picek replication on exactly v1's training records. **Image-size arm**
    (registry: image-size): BioCLIP 2 fine-tuned at 224 vs 336 vs 448 px input (it has only ever
    run at 224; DINOv3 went 4.4 -> 16.2% species from 256 to 512 px); about 2-4x the compute.
-4. Scoring method: nearest vs nearest + species average vs species average (v1 development).
-5. Calibration and likely lists (fitted on development, checked on test).
-6. Priors: DNA-record and occurrence (tuned on development).
+4. Scoring method: nearest vs nearest + species average vs species average (`val`).
+5. Calibration and likely lists (fitted on `val`, checked on `v1-test`).
+6. Priors: DNA-record and occurrence (tuned on `val`).
 7. Photo handling: per-photo votes, uninformative photos, 8-bit model.
 8. Outside comparisons: iNat CV (iNat identifications snapshotted first, model version recorded)
-   and the published Danish models, on v1's test records.
+   and the published Danish models, on `v1-test`.
 9. Descriptive analyses (genus gap, depth over time).
 
 A decision stands if its re-run agrees within its interval; otherwise it is revisited and the
@@ -121,17 +132,18 @@ sources, photos) are acted on now and feed the freeze gate; method decisions sta
 
 ### 5. "Reproducible by anyone": what is public (DECIDED, Steve 2026-10-09: approved as drafted)
 
-**Public**: iNaturalist and MO record ids; labels with provenance; each photo's licence and
-public URL; the inclusion list with reasons; splits; the code; the dataset card and model card;
-aggregate results. **Not public**: all-rights-reserved photo files (used with the
-photographers' permission for our model, not ours to redistribute); coordinates beyond what the
-source shows publicly (obscured records stay obscured); observer contact and permission records.
+**Public** ("the standard"): iNaturalist and MO record ids; labels with provenance; every
+Creative Commons licence (NC and ND photos as plain resizes only), with each photo's attribution,
+licence and public URL; the inclusion list with reasons; splits; the code; the dataset card and
+model card; aggregate results. **Not public**: all-rights-reserved photo files (used with the
+photographers' permission for our model, not ours to redistribute), never; coordinates, never;
+observer contact and permission records.
 
 Two variants of each release:
-- **v1-cc**: CC-licensed photos only. Anyone can rebuild it from public URLs and get the same
-  numbers; its results are reported next to ours.
-- **v1-full**: everything we may use, including permitted all-rights-reserved photos. Ours only; the
-  paper reports both and explains the difference.
+- **v1** (ours): everything we may use, including permitted all-rights-reserved photos.
+- **v1-cc** (public, built from v1): Creative Commons photos only. Anyone can rebuild it from
+  public URLs and get the same numbers; its results are reported next to ours, and the paper
+  explains the difference.
 
 **Model weights (Steve, 2026-10-09).** Internal benchmarking models may train on all photos,
 all-rights-reserved included. The **final public model** trains only on public-trainable photos

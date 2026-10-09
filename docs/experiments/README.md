@@ -28,11 +28,12 @@ headline: One line with the key numbers and the records they are on.
 verdict: What it showed, in one sentence.
 decision: Steve's decision, with the date, or "pending".
 related: [other-slug]
-# Required once reproducibility is reproduced-on-<release>:
+# Required once reproducibility is reproduced-on-<release> (copy them from rel.cite()):
 dataset_release: v1
-reference_hash: 4ef7b0035bc9...   # the release's reference index (records + labels)
-code_commit: abc1234
+reference_hash: 4ef7b0035bc9...   # train + val: record key, label, sorted original photo sha256s
+code_commit: abc1234              # the code that ran this experiment
 reproduce_command: mv compare --release v1 --backbones ... --methods ...
+# Optional, also from rel.cite(): release_hash, labels_hash, release_code_commit
 ---
 
 ## Question
