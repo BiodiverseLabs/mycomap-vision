@@ -19,7 +19,7 @@ from typing import Callable, Iterable, Protocol
 import numpy as np
 from PIL import Image, ImageOps
 
-from . import config
+from . import config, holdouts
 from .storage import PhotoStore
 
 SCHEMA = """
@@ -71,8 +71,10 @@ def photos_to_embed(conn: sqlite3.Connection, backbone: str, size: str, store_lo
 
     `local_location` is kept for callers; copies downloaded before stores were recorded
     were filed under the manifest's own data folder when photo_copies was created.
+    Photos of a benchmark's held-out records (holdouts.py) are never embedded here.
     """
     conn.executescript(SCHEMA)
+    holdouts.ensure_schema(conn)
     na = "and r.north_america = 1" if north_america_only else ""
     sql = f"""
       select distinct c.photo_id, c.path
@@ -81,6 +83,7 @@ def photos_to_embed(conn: sqlite3.Connection, backbone: str, size: str, store_lo
       join records r on r.observation_id = op.observation_id {na}
       left join embeddings e on e.backbone = ? and e.photo_id = c.photo_id
       where c.size = ? and c.store = ? and e.photo_id is null
+        and {holdouts.not_held_out('r.observation_id')}
       order by c.photo_id
     """
     if limit is not None:

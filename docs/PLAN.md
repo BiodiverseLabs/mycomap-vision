@@ -188,6 +188,80 @@ Small test sets (68-91 records): read as direction, not precision.
   default; retest on the full data, where iNat's own location model adds ~1.5
   points for iNat.
 
+## Held-out benchmarks (2026-10-08)
+
+`heldout-2026-10-08` is 13,145 North American iNat records that are DNA-validated
+(green) on legacy mycomap.com but that Vision never saw: a broken .com -> .org sync
+kept them out of its labels, so they are neither in the full-run fine-tune
+(`bioclip-2-ft-20261007-165400`, trained through 2026-09-07) nor in its reference
+index. Steve (2026-10-08): it is a development benchmark, not the paper's test set.
+Its records will join training and the reference index after a relabel and retrain;
+first it measures Vision as it is (the "before" number), and it is what dev tuning
+uses. The paper gets a fresh ~1,000-record set, frozen later as a sealed benchmark.
+Inputs (read-only prod queries) are in `data/benchmarks/heldout-2026-10-08/`: pool.csv
+(ids sha256 174bfabab103fe74...), the source snapshot, dev.csv / test.csv / split.json.
+
+- Answer key: the observation's name, the .com record title (field_483). pool.csv's
+  com_name is .com's index name, which lags the title on some records; a titles
+  export (record_id, index_name, title) with linked43.csv makes the title the answer
+  where they differ, and the index name stays for the audit. Names are compared by
+  Vision's labels with writing set aside (code formats, `sp-`, a missing `var.`).
+  A one-word title is scored at genus and above only and flagged in the label
+  audit as possibly stale (a .com refresh). `mv heldout freeze` runs again on a new
+  snapshot of the same ids and takes the new names (logged in `heldout_freezes`).
+- Split: dev (3,000: the 100-record pilot and 2,900 at random) for tuning and any
+  exploring; test (10,145). On a sealed benchmark (`freeze --holdout`) the test
+  split is the paper's number: `mv heldout report --split test` says so and every
+  such report is recorded (`heldout_test_looks`). On a development benchmark test
+  is not sealed.
+- Commands (`heldout.py`, `heldout_report.py`): `mv heldout freeze`; `fetch` (iNat
+  details, also into `inat_observations` with the uuid, and LARGE photos into the
+  benchmark's own folder; resumable, within iNat's limits shared with the reference
+  downloader); `predict` (embeds into the benchmark's own index, keeps every photo
+  vector, identifies each record with the served index, nearest and nearest+prior,
+  iNat's public place by default; saves the top 5 per rank and the full identify
+  result, and `--scores-out` writes photo scores in occtune's scored-set format);
+  `inat` (iNat's computer vision on the 2,000-record subsample, judged by taxon id);
+  `report` (top-1/top-5 per rank with Wilson 95% intervals, McNemar paired tests,
+  calibration, likely-set coverage when the results carry it, breakdowns by
+  reference depth, unseen species, photos, east/west of -100, same observer and
+  day in the reference, provisional vs formal names; the label audit; JSON and a
+  per-record CSV, no coordinates).
+- Before and after: each answer keeps the hash of the reference it was made against
+  (its records and their labels), so a run after a relabel sits beside the run
+  before it; `report --reference-hash` scores the earlier one.
+- Leakage guards. A sealed benchmark's freeze refuses any id the records table
+  holds and lists every id in `benchmark_holdouts` (`mv holdout add|list|release`).
+  A held-out record is never stored by an export or the nightly update
+  (`records.save_records`, `nightly.changes`), never loaded into a reference set,
+  comparison, fine-tune or served index (`evaluate.load_records`), and gets no
+  reference photo downloaded or embedded (`photos.pending_photos`,
+  `embed.photos_to_embed`); a release and a trainer run are refused while the
+  records table holds one (`release.publish`, `aws.check_trainer_request`,
+  `trainer.run_job`). The server box's nightly update leaves them out once it runs
+  a release made after the freeze (the release's manifest carries the list). The
+  benchmark's photo copies, vectors and answers live in its own tables and folder,
+  never in `photo_copies` or `embeddings`, and no manifest copy that leaves the
+  laptop (a release, a trainer or downloader run) carries those tables
+  (`manifest.shippable_snapshot`); `predict` refuses a reference index that holds a
+  sealed benchmark's record, and skips a record already in the reference or whose
+  photo is a reference photo.
+- "Never seen" is checked against everything Vision holds, not only today's records:
+  freeze notes ids with iNat details, photo copies or embeddings (`was_reference`;
+  84 of heldout-2026-10-08's records were Vision records in the 9/28 export, dropped
+  by 10/6), a sealed freeze refuses them, and the report breaks scores down by it.
+- Runbook for a sealed set (Steve, 2026-10-09). The server box learns which records
+  are held out only from a release's manifest. So: deploy this code to the box, then
+  right after `mv heldout freeze --holdout` (or `mv holdout add`) cut a release
+  (`mv release ... --make-current`, then `mv pull-release` and a restart on the box).
+  Until then the box's nightly update can still add the records. Follow-up: ship the
+  list on its own (e.g. beside the release, read by the nightly update) so sealing
+  needs no release.
+- Follow-up: record each fine-tune's trained record ids (finetune.py: the reference
+  records of its comparison) beside its weights, so `mv heldout predict` can check a
+  benchmark's records against what the model trained on, not only against the
+  reference index it answers from.
+
 ## Phase 1: a better identifier
 
 - Photo view tagging: a cheap LLM labels a seed set, a small head on the

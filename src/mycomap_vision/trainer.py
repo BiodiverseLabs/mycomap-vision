@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import config, evaluate
+from . import config, evaluate, holdouts
 from .embed import SCHEMA as EMBED_SCHEMA
 from .manifest import snapshot
 from .screening import Stopped, screen
@@ -341,6 +341,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
     stages = plan_stages(backbones, finetune, run_id)
+    # The laptop refuses to ship such a manifest (aws.check_trainer_request); this is the
+    # instance's own check, before anything is embedded or trained.
+    holdouts.check_clean(conn, "the trainer run")
     cleared = clear_embeddings(conn)
     log(f"cleared {cleared:,} embedding rows brought from the laptop")
     kept = None

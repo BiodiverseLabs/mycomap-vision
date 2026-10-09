@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config, guests, likely, names, taxonomy
+from . import config, guests, holdouts, likely, names, taxonomy
 from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
@@ -85,9 +85,14 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     cache beside the manifest answers it (taxonomy.py), else .org's. A record left
     with no label at any rank ("Unknown", "Agaricales") is left out, and so is a record
     whose DNA name is a guest of the fungus in the photo (a yeast inside a puffball;
-    guests.py)."""
+    guests.py).
+
+    A record frozen into a benchmark (holdouts.py) is never loaded here, even if the
+    records table holds it: no reference set, comparison, fine-tune or served index
+    can contain it. The benchmark loads its records itself (heldout.py)."""
     na = "and r.north_america = 1" if north_america_only else ""
     ensure_permissions_schema(conn)
+    holdouts.ensure_schema(conn)
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
              o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
@@ -96,6 +101,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
       join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
       where r.label_conflict = 0 {na} and {EXCLUDED_FROM_USE_SQL}
+        and {holdouts.not_held_out('r.observation_id')}
       order by r.observation_id, op.position
     """).fetchall()
     labels = names.manifest_labels(conn)

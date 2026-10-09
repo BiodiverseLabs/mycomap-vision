@@ -233,6 +233,16 @@ done when verify passes.
 To roll back, run `.venv/bin/mv pull-release --release <previous id>` and
 restart.
 
+### After sealing a benchmark
+
+The box learns which records are held out (`benchmark_holdouts`, holdouts.py) only
+from a release's manifest: its nightly update keeps adding a sealed benchmark's
+records until it serves a release made after the seal. So, with this code deployed to
+the box, cut and pull a release right after `mv heldout freeze --holdout` or
+`mv holdout add` on the laptop (the two commands above). The release carries the
+held-out list but none of the benchmark's own tables (`heldout_*`), which stay on the
+laptop.
+
 ## Nightly update (between releases)
 
 With `MV_NIGHTLY=1` the server keeps the reference set in step with mycomap.org

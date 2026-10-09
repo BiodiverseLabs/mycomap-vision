@@ -31,8 +31,8 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config
-from .manifest import snapshot
+from . import config, holdouts
+from .manifest import shippable_snapshot
 from .taxonomy import CACHE as TAXONOMY_CACHE
 
 PREFIX = "releases/"
@@ -86,16 +86,20 @@ def release_files(conn, backbones: list[str], data_dir: Path) -> list[tuple[Path
 def publish(conn, backbones: list[str], *, label: str | None = None, make_current: bool = False,
             s3=None, bucket: str | None = None, data_dir: Path | None = None,
             work_dir: Path | None = None, log=print) -> dict:
-    """Upload a release; with make_current, point releases/current.json at it."""
+    """Upload a release; with make_current, point releases/current.json at it.
+    Refused while the records table holds a benchmark's held-out record (holdouts.py);
+    the manifest it ships carries the held-out list to the box's nightly update."""
     if not backbones:
         raise ValueError("name at least one backbone to serve")
+    holdouts.check_clean(conn, "the release")
     from . import aws
     s3 = s3 or aws.s3_client()
     bucket = bucket or aws.bucket()
     data_dir = data_dir or config.DATA_DIR
     rid = new_release_id(label)
     files = release_files(conn, backbones, data_dir)
-    snap = snapshot(conn, (work_dir or data_dir) / "manifest-release.sqlite")
+    # The benchmark tables stay home; benchmark_holdouts ships (the nightly update needs it).
+    snap = shippable_snapshot(conn, (work_dir or data_dir) / "manifest-release.sqlite")
     files = [(snap, "manifest.sqlite")] + files
     listed = []
     for path, rel in files:

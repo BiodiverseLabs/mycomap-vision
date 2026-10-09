@@ -19,7 +19,7 @@ from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from . import config
+from . import config, holdouts
 from .dates import real_date
 
 EXPORT_SQL = """
@@ -186,7 +186,12 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
 
     Returns what changed: records new to the list (stamped first_seen_at with this
     export), records removed, and records whose name changed on .org (a new label).
+
+    A record frozen into a benchmark (holdouts.py) is never stored, so nothing that
+    reads the records table can train on it, index it or download its photos; one
+    stored by older code leaves with this export.
     """
+    records, held_out = holdouts.drop_held_out(conn, records)
     before = dict(conn.execute("select observation_id, scientific_name from records"))
     cols = ", ".join(f'"{c}"' for c in _COLUMNS) + ', "first_seen_at"'
     marks = ", ".join("?" for _ in _COLUMNS) + ", ?"
@@ -201,12 +206,15 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
         keep = {r["observation_id"] for r in records}
         stale = [oid for oid in before if oid not in keep]
         conn.executemany("delete from records where observation_id = ?", [(s,) for s in stale])
-    return {
+    out = {
         "new": sum(r["observation_id"] not in before for r in records),
         "removed": len(stale),
         "renamed": sum(r["observation_id"] in before
                        and before[r["observation_id"]] != r["scientific_name"] for r in records),
     }
+    if held_out:
+        out["held_out"] = held_out
+    return out
 
 
 def export_records(conn: sqlite3.Connection) -> dict:

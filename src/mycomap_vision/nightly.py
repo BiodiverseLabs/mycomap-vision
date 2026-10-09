@@ -58,7 +58,7 @@ from typing import Callable
 
 import requests
 
-from . import config, inat, photos, refresh, taxonomy
+from . import config, holdouts, inat, photos, refresh, taxonomy
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import embed_photos, next_shard, photos_to_embed
 from .manifest import snapshot
@@ -465,15 +465,20 @@ def fetch_pages(base_url: str, key: str, path: str, what: str,
 # What a night changes
 
 def changes(conn: sqlite3.Connection, recs: list[dict]) -> dict:
-    """What saving `recs` would do: new, removed and renamed records (with examples)."""
+    """What saving `recs` would do: new, removed and renamed records (with examples).
+    Benchmark records (holdouts.py) are never saved, so they never count as new."""
+    recs, held_out = holdouts.drop_held_out(conn, recs)
     before = dict(conn.execute("select observation_id, scientific_name from records"))
     now = {r["observation_id"]: r["scientific_name"] for r in recs}
     new = sorted(set(now) - set(before))
     removed = sorted(set(before) - set(now))
     renamed = sorted(o for o in set(now) & set(before) if now[o] != before[o])
-    return {"before": len(before), "after": len(now), "new": len(new), "removed": len(removed),
-            "renamed": len(renamed), "examples": {"new": new[:10], "removed": removed[:10],
-                                                   "renamed": renamed[:10]}}
+    out = {"before": len(before), "after": len(now), "new": len(new), "removed": len(removed),
+           "renamed": len(renamed), "examples": {"new": new[:10], "removed": removed[:10],
+                                                  "renamed": renamed[:10]}}
+    if held_out:
+        out["held_out"] = held_out
+    return out
 
 
 class Locked:
@@ -554,7 +559,7 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
             recs = build_records(rows, exported_at)
             plan = changes(conn, recs)
             report["records"] = {k: plan[k] for k in ("before", "after", "new", "removed",
-                                                      "renamed")}
+                                                      "renamed", "held_out") if k in plan}
             limit = settings.removal_limit(plan["before"])
             if plan["removed"] > limit and not accept_removals:
                 raise NightlyRefused(
