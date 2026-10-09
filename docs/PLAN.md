@@ -333,7 +333,16 @@ place. `mv compare --name-scores` (or `evaluate(..., name_scores=True)`) adds th
 a run's report as `name_equivalence`, marked `beta`.
 
 - **strict**: the same name, its spellings folded together (names.py), as Vision's labels.
-- **s.l.**: strict, or two genera of one group with the same *described* epithet. Groups
+  Strict does NOT fold gender endings: names.py mirrors .org's nameVariants.ts rule for
+  rule (one shared fixture), and strict is the scoreboard top-1 and the training label.
+  A temporary code is scored exactly like a named species (Steve, 2026-10-08: "this will
+  be half of records. Temp codes are just as good as names"): the same code in the same
+  genus is a strict match however it is written ('CA4' / 'CA04'); any other code is
+  wrong. No record is left out or downgraded for having a code as its true name.
+- **s.l.**: strict, or two genera of one group with the same *described* epithet, its
+  Latin gender ending aside (Steve, 2026-10-08: yes): -us/-a/-um and -er/-ra/-rum
+  ('rimosa' / 'rimosum', 'ruber' / 'rubrum') are one ending, -is/-e another, and the two
+  declensions never join ('acris' / 'acra'). Groups
   live in `src/mycomap_vision/genus_groups.json`, easy to extend (Steve, for genera
   recently split whose taxonomy is still fluid): Cortinarius s.l. (Calonarius,
   Phlegmacium, Thaxterogaster, Aureonarius, Cystinarius, Hygronarius, Mystinarius,
@@ -347,12 +356,14 @@ a run's report as `name_equivalence`, marked `beta`.
   described name and the provisional names split from it ('fallax' / 'fallax-PNW03'), two
   provisional names on one stem ('schweinitzii-IN01' / '-IN02'), a species and its
   subspecies or variety. The stem of a code is its lower-case start of 4+ letters
-  ('fallax-PNW03' -> fallax); a bare code ('CA04', 'PNW01') has none and never joins
-  anything. Steve: "we'll have to think about this more, but make a beta". Open
-  questions: Latin gender endings ('rimosa' / 'rimosum' are different stems today),
-  and whether complex should count when only the truth is provisional.
+  ('fallax-PNW03' -> fallax), gender-folded like a described epithet; the code letters
+  and numbers are never folded. A bare code ('CA04', 'PNW01') has no stem and never
+  joins anything. Complex counts whichever side is the code, answer or truth. Steve:
+  "we'll have to think about this more, but make a beta".
 - **genus strict / s.l.**: the same genus / genera of one group.
 
 On the benchmark session's audit (99 species-level held-out records, nearest top-1):
 species strict 40.4%, s.l. 40.4%, complex 43.4%; genus strict 77.0%, s.l. 80.0%.
+Gender folding changed none of them. 42 of the 99 true names are temporary codes
+(13 named exactly, 31%).
 

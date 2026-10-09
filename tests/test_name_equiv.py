@@ -47,6 +47,40 @@ def test_a_provisional_code_in_two_genera_of_a_group_is_not_one_species():
     assert m("Inocybe sp. 'CA01'", "Mallocybe sp. 'CA01'") == (False, False, False)
 
 
+@pytest.mark.parametrize("answer, truth", [
+    ("Inocybe rimosa", "Inosperma rimosum"),             # -a / -um
+    ("Cortinarius albus", "Calonarius alba"),            # -us / -a
+    ("Inocybe viridis", "Pseudosperma viride"),          # -is / -e
+    ("Cortinarius ruber", "Phlegmacium rubrum"),         # -er / -rum
+    ("Cortinarius niger", "Calonarius nigra"),           # -er / -ra
+    ("Inocybe rimosa", "Inocybe rimosus"),               # one genus, gender misspelt
+    ("Amanita muscaria subsp. flavivolvata", "Amanita muscarius subsp. flavivolvatus"),
+])
+def test_names_that_differ_only_by_a_gender_ending_are_one_species_sl(answer, truth):
+    assert m(answer, truth) == (False, True, True)
+    assert m(truth, answer) == (False, True, True)
+
+
+def test_gender_endings_of_different_declensions_stay_apart():
+    assert m("Lactarius acris", "Lactarius acra") == (False, False, False)
+
+
+def test_a_gender_ending_reaches_the_complex_stem_but_never_the_code():
+    assert m("Inosperma rimosum", "Inocybe sp. 'rimosa-CA01'") == (False, False, True)
+    assert m("Russula sp. 'rosea-IN01'", "Russula sp. 'roseus-IN01'") == (False, False, True)
+    # Codes are numbered within a genus: a different code is a different species.
+    assert m("Russula sp. 'rosea-IN01'", "Russula sp. 'rosea-IN02'")[:2] == (False, False)
+
+
+def test_a_temporary_code_is_scored_like_a_named_species():
+    # About half the records are temporary codes: the same code in the same genus is a
+    # strict match, however it is written; any other code is wrong.
+    assert m("Cortinarius sp. 'CA04'", "Cortinarius sp. 'CA04'") == (True, True, True)
+    assert m("Cortinarius CA4", "Cortinarius sp. 'CA04'") == (True, True, True)
+    assert m("Cortinarius sp. 'CA05'", "Cortinarius sp. 'CA04'") == (False, False, False)
+    assert m("Cortinarius pacificus", "Cortinarius sp. 'CA04'") == (False, False, False)
+
+
 def test_different_epithets_in_a_group_share_only_the_genus_sl():
     assert m("Cortinarius glaucopus", "Phlegmacium pacificus") == (False, False, False)
     assert genus_match("Phlegmacium", "Cortinarius") == {"strict": False, "sl": True}
@@ -73,7 +107,8 @@ def test_qualifiers_and_missing_answers():
 def test_each_reading_implies_the_next():
     names = ["Panus conchatus", "Panus sp. 'conchatus-OH01'", "Calonarius pacificus",
              "Thaxterogaster pacificus", "Cortinarius sp. 'CA04'", "Lactarius fallax",
-             "Russula fallax", "Amanita muscaria subsp. flavivolvata", "Amanita muscaria"]
+             "Russula fallax", "Amanita muscaria subsp. flavivolvata", "Amanita muscaria",
+             "Inocybe rimosa", "Inosperma rimosum", "Inocybe sp. 'rimosa-CA01'"]
     for a in names:
         for t in names:
             strict, sl, complex_ = m(a, t)
