@@ -667,6 +667,138 @@ account, made 2026-09-29). The downloader stays On-Demand. The weekly `mv refres
 now also asks iNat about genera new since the last taxonomy lookup (at most 20 min,
 never failing the refresh; `--no-taxonomy`).
 
+## Picek replication: their method, our data (feat/picek-replication, 2026-10-09)
+
+Steve: "replicate their model with our data". Lukas Picek's group (BVRA; a PI of the EU
+FunDive project, whose model goes into PlutoF GO) built the Atlas of Danish Fungi's
+FungiVision (DF20) and FungiTastic. Trained on exactly Vision's training records, their
+recipe is the paper's baseline. It separates method from data: if it does about as well
+as Vision on the same records, the gap to the published Danish numbers is data; if it
+does better, so is the method.
+
+**Recipe** (`picek.py`, preset `fungitastic-beit-b384`; sources are the HF config of
+BVRA/beit_base_patch16_384.in1k_ft_fungitastic_384, BohemianVRA/FungiTastic
+baselines/closed_set/train.py and the fgvc library):
+- timm `beit_base_patch16_384.in22k_ft_in22k_in1k`, full fine-tune, 384 x 384, a new linear
+  head over every species.
+- SGD with momentum 0.9 and no weight decay, learning rate 0.01, ReduceLROnPlateau on the
+  validation loss (factor 0.9, patience 1, eps 1e-6). Effective batch 256 (micro-batch 16 x
+  16 accumulation steps, bf16 autocast and gradient checkpointing, so it fits 8 GB). 50
+  epochs, keeping the epoch with the best validation macro-F1.
+- Seesaw loss (p 0.8, q 2.0) on the training set's class counts. Plain cross-entropy for
+  the ViT variants.
+- Training augmentation "vit_heavy": RandomResizedCrop(384, scale 0.8-1) then
+  RandAugment(2, 20). Evaluation: resize to 384 x 384, no crop. Mean and std 0.5.
+- A record's answer: each photo's logits divided by T (fitted on validation by NLL),
+  averaged over the photos, then softmax.
+- DF20's metadata prior (paper section 5.2): p(c|x,m) ∝ p(c|x) · p(m|c)/p(m) per field.
+  This is the paper's formula; their released code multiplies p(c|x) in twice, which is not
+  repeated here.
+- Other presets, same code: `vit-b384-ce` (their ViT-B: CE, lr 0.001), `df20-vit-l384`
+  (DF20's production ViT-L/16 384: CE, lr 0.005, light augmentation, 100 epochs) and
+  `fungitastic-beit-b224` (the 224 px BEiT).
+
+**Data and protocol.** Labels are Vision's own (evaluate.load_records: green records,
+observation names, temporary codes as species). Training uses the reference records of
+a comparison: everything validated up to the cutoff, which is 28 days before the newest
+record. The last 28 days before that cutoff are the validation slice, which is never
+trained on. It picks the epoch, drives the plateau schedule and fits T; their splits are
+by year too. `trained_through` is the cutoff, so `mv compare` refuses to score the model
+on anything it saw. Records of any held-out benchmark (heldout_records) are left out and
+counted. `<name>.records.csv` lists every record trained or validated on, which is the
+follow-up the held-out section asked for.
+
+**Deviations, and why:**
+- One-word names have no species label, so they are not trained on. Their data is
+  species-level too.
+- Seesaw is formed per batch row in log space. fgvc's C x C matrix would be 1.3 GB at
+  18k species. It is the same loss (tested against the published formula).
+- Training JPEGs decode in PIL draft mode at no less than the crop size (1024 -> 512 px before the
+  384 crop), which is cheaper and leaves the 384 input essentially unchanged. Validation decodes in full, as test-time embedding does.
+- The month prior is smoothed. DF20 uses raw counts; with 43% of species known from one
+  record, raw counts remove a species outright in any month it was not yet found. p(m|c)
+  is shrunk toward its genus (beta 10 photos) and the genus toward all fungi (beta 10).
+  `classifier+month-raw` is their unsmoothed estimate, floored at 1e-12 so scores stay
+  finite. The betas are not tuned yet: tune them on heldout dev only.
+- Habitat and substrate, DF20's other fields, don't exist in our data.
+- `classifier+month+place` adds a coarse place prior (4-degree cells, the same shrinkage).
+  It is OUR extension, not their method, and is kept as its own method so the paper can
+  report "their method" and "their method + our place prior" apart.
+- A species with no class in the classifier gets probability 1e-12 when scored against an
+  index that has it. Such species are those first validated after the cutoff, or only in
+  the validation slice. Nearest-specimen methods get those records for free; this is part
+  of the method difference, and the paper should say so.
+
+**Scoring.** The model is registered like a fine-tune (data/models/<name>.json + .pt, plus
+<name>.classifier.npz with the head, T and the month and place counts). Its embedding is
+the pre-logit feature in a length-keeping unit vector (the last dimension carries |f|), so
+the head applies exactly to the stored float16 vectors and cosine still works for
+nearest. The methods are `classifier`, `classifier+month`, `classifier+month-raw` and
+`classifier+month+place`. They work in `mv compare` (other backbones skip them) and in
+`mv heldout predict`, which writes the standard heldout_runs and heldout_predictions
+rows, so `mv heldout report` gives Steve's summary tables unchanged. They are not offered
+on the website. Every comparison now reports species macro-F1 (scikit-learn's macro over
+truth ∪ predictions, as fgvc reports it); `mv compare --per-image` adds top-1 with each
+photo answered alone. The held-out report adds species macro-F1 and per-photo top-1 for
+every Vision model, and prints them under the standard summary. Public name:
+"Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records".
+
+**How to run.**
+- Laptop smoke: `mv picek-train --max-steps 50 --effective-batch 32 --val-max-photos 300`.
+- Speed: `mv picek-bench` (the loader and the GPU measured apart).
+- Full run on AWS (not launched): `mv aws-launch-trainer --backbones none --finetune none
+  --picek fungitastic-beit-b384@15@440 --methods
+  classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest
+  --instance-type g6.xlarge --max-hours 30`. The instance trains, embeds every photo with
+  the model and compares. Then, on the laptop: `mv aws-pull-trainer`, `mv heldout predict
+  --backbone picek-... --methods classifier,classifier+month --split dev`, and
+  `mv heldout report`. Dev only: test is not scored.
+- Photo cache (`preset@epochs@440`, or `--cache-px 440`; off by default). The training
+  photos are resized once (shorter side 440, JPEG q90) onto the instance's disk, and
+  training reads them from there. Validation reads the originals, like the embedding at
+  test time. Transforms and draft decoding are unchanged (tested). It changes what the
+  crop is taken from (a 440 px copy, not the 512 px draft decode), so it is Steve's call;
+  it is recommended for a 4-vCPU instance.
+
+**Speed and cost.** Measured on the laptop CPU on 2026-10-09 (local large photos; GPU idle,
+but the laptop was busy with another session's job), in photos/s for one process, and
+for 4 workers:
+
+| loader pipeline | 1 process | 4 workers |
+|---|---|---|
+| BioCLIP fine-tune (224, light aug) | 83 | 318 |
+| Picek BEiT 384, RandAugment(2,20) | 88 | 320 |
+| Picek at 224 | 147 | 452 |
+| Picek 384 from the 440 px cache | 149 | 444 |
+| evaluation at 384 (full decode) | 87 | 310 |
+
+The 440 px cache files average 76 KB, against 364 KB for the originals. Building the
+cache runs at 97 photos/s per thread.
+
+The 384 recipe's loader costs the same per photo as the BioCLIP fine-tune's. On g6.xlarge
+(4 vCPU, L4), the BioCLIP fine-tune's loader delivered 59 photos/s with S3 reads, so the
+replication should run at about 59/s there, and ~100/s with the cache or at 224 px. The
+GPU's own rate is still to be measured (`mv picek-bench --gpu-only`); for BEiT-B 384 with
+bf16 on an L4, ~100-120/s is reasoned. The estimates below are for ~580k training photos
+on g6.xlarge at ~$0.80/h, and they are estimates:
+
+| run | photos/s | 15 epochs | 50 epochs |
+|---|---|---|---|
+| as is | ~59 (loader) | ~41 h, ~$33 | ~137 h, ~$110 |
+| 440 px cache | ~100 (loader ≈ GPU) | ~24 h, ~$20 | ~80 h, ~$65 |
+| 224 px preset | ~100 (loader) | ~24 h | ~80 h |
+| g6.4xlarge (16 vCPU), no cache | ~100-120 (GPU) | ~22 h, ~$29 | ~73 h, ~$97 |
+
+Each run adds ~1.6 h to embed every photo with the model and ~1 h for setup and the
+comparison. An L40S (g6e.xlarge) is wasted on 4 vCPUs unless decoding moves to the GPU
+(DALI). Recommendation: 15 epochs with the cache on g6.xlarge first (~27 h with
+everything, `--max-hours 30`), then decide on 50 from its validation curve.
+
+**Open decisions (Steve):** whether to use the cache (a slight input change) or a
+16-vCPU instance; 15 vs 50 epochs; the month-prior smoothing (betas, to be tuned on dev);
+and whether the paper reports `classifier+month` (smoothed) or `classifier+month-raw`
+(their estimate) as "their method".
+
 ## Phase 3: the platform
 
 - Own Lightsail instance (`vision.mycomap.org`), photos and models in S3, weekly
