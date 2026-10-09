@@ -107,6 +107,21 @@ def test_species_accuracy_is_also_given_on_names_iNat_knows():
     assert out["genus"]["all"]["top1"] == 1.0
 
 
+def test_inat_rows_carry_the_standard_summary_so_they_chart_beside_vision():
+    recs = [Record("a", "A a", "A", "F", None, None, []),
+            Record("b", "B b", "B", "F", None, None, [])]
+    # b's true species is iNat's second suggestion: wrong at top 1, right at top 3
+    scores = {"a": [parse_aggregated({"results": [result(1, "A a", "species", 90, 90)]})],
+              "b": [parse_aggregated({"results": [result(1, "A a", "species", 80, 80),
+                                                  result(2, "B b", "species", 70, 70)]})]}
+    truths = {"a": Truth(1, 10, 100, True), "b": Truth(2, 20, 100, True)}
+    out = score_records(recs, scores, truths, Counter({"A a": 3, "B b": 150}), "vision")
+    std = out["standard"]["species"]
+    assert std["all"] == {"n": 2, "top1": 0.5, "top3": 1.0, "top5": 1.0, "top10": 1.0}
+    assert std["1-4"]["top1"] == 1.0 and std["100+"] == {"n": 1, "top1": 0.0, "top3": 1.0,
+                                                          "top5": 1.0, "top10": 1.0}
+
+
 class FakeInat(FakeTaxa):
     def __init__(self, taxa, answer):
         super().__init__(taxa)

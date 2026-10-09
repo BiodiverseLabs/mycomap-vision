@@ -37,8 +37,8 @@ import requests
 
 from . import config
 from .dates import real_date
-from .evaluate import (RANKS, Record, SharedSet, bucket_of, comparison_backbones, save_run,
-                       shared_records)
+from .evaluate import (RANKS, STANDARD_DEPTH, STANDARD_K, Record, SharedSet, bucket_of,
+                       comparison_backbones, save_run, shared_records, standard_band)
 from .ratelimit import MinInterval
 
 API = "https://api.inaturalist.org/v1"
@@ -103,8 +103,11 @@ class Truth:
 def score_records(records: list[Record], photo_scores: dict[str, list[dict]],
                   truths: dict[str, Truth], ref_count: Counter, score: str,
                   first_photo_only: bool = False, top_k: int = 5) -> dict:
-    """Same shape as evaluate.evaluate(): per rank, per reference bucket, top-1 and top-5."""
+    """Same shape as evaluate.evaluate(): per rank, per reference bucket, top-1 and top-5,
+    and the standard summary (top 1/3/5/10 by the true species' reference band). iNat
+    returns its own short list, so a top-10 counts only the candidates it gave."""
     tally = {rank: defaultdict(Counter) for rank in RANKS}
+    standard = {rank: defaultdict(Counter) for rank in RANKS}
     known = Counter()
     for rec in records:
         photos = photo_scores.get(rec.observation_id) or []
@@ -113,10 +116,17 @@ def score_records(records: list[Record], photo_scores: dict[str, list[dict]],
         ranked = best_per_rank(photos, score)
         truth = truths[rec.observation_id]
         b = bucket_of(ref_count.get(rec.unit, 0))
+        band = standard_band(ref_count.get(rec.unit, 0))
         for rank in RANKS:
             if rank == "species" and not rec.species:
                 continue          # a one-word name has no species to be right about
             want = getattr(truth, rank)
+            deep = [tid for tid, _ in ranked[rank][:max(STANDARD_K)]]
+            for key in ("all", band):
+                c = standard[rank][key]
+                c["n"] += 1
+                for k in STANDARD_K:
+                    c[f"top{k}"] += want is not None and want in deep[:k]
             top = [tid for tid, _ in ranked[rank][:top_k]]
             hit1 = want is not None and top[:1] == [want]
             hit5 = want is not None and want in top
@@ -128,10 +138,17 @@ def score_records(records: list[Record], photo_scores: dict[str, list[dict]],
                 c["n"] += 1
                 c["top1"] += hit1
                 c[f"top{top_k}"] += hit5
-    return {rank: {k: {"n": c["n"], "top1": round(c["top1"] / c["n"], 4),
-                       f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
-                   for k, c in tally[rank].items() if c["n"]}
-            for rank in RANKS}
+    out = {rank: {k: {"n": c["n"], "top1": round(c["top1"] / c["n"], 4),
+                      f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
+                  for k, c in tally[rank].items() if c["n"]}
+           for rank in RANKS}
+    out["standard"] = {
+        "k": list(STANDARD_K), "bands": [label for _, _, label in STANDARD_DEPTH],
+        **{rank: {key: {"n": c["n"], **{f"top{k}": round(c[f"top{k}"] / c["n"], 4)
+                                       for k in STANDARD_K}}
+                  for key, c in standard[rank].items() if c["n"]}
+           for rank in RANKS}}
+    return out
 
 
 # --- iNat access (cached, paced) ---------------------------------------------------

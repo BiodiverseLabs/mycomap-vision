@@ -139,3 +139,53 @@ def test_comparing_a_model_with_no_embeddings_says_how_to_make_them(conn, tmp_pa
 def test_unknown_methods_are_refused(conn):
     with pytest.raises(ValueError, match="unknown method"):
         evaluate.compare(conn, ["m1"], ["magic"], log=lambda s: None)
+
+
+def embedded_comparison(conn, tmp_path):
+    store = seed_two_species(conn, tmp_path)
+    root = tmp_path / "emb"
+    todo = photos_to_embed(conn, "m1", "large", store.location, "local")
+    embed_photos(conn, store, Const("m1"), todo, root / "m1", log=lambda s: None)
+    result = evaluate.compare(conn, ["m1"], ["nearest"], test_days=28, embeddings_root=root,
+                              log=lambda s: None)
+    return root, result
+
+
+def test_every_run_reports_steves_standard_summary_top_1_3_5_10_by_reference_depth(conn,
+                                                                                    tmp_path):
+    _, result = embedded_comparison(conn, tmp_path)
+    std = result["runs"][0]["all_photos"]["standard"]
+    assert std["k"] == [1, 3, 5, 10] and std["bands"] == ["0", "1-4", "5-19", "20-99", "100+"]
+    for rank in ("species", "genus", "family"):
+        allr = std[rank]["all"]
+        assert allr["n"] == 2
+        assert allr["top1"] <= allr["top3"] <= allr["top5"] <= allr["top10"]
+        # the older top-1 agrees with the standard one
+        assert allr["top1"] == result["runs"][0]["all_photos"][rank]["all"]["top1"]
+    # each test species has 3 reference records: both test records sit in the 1-4 band
+    assert set(std["species"]) == {"all", "1-4"} and std["species"]["1-4"]["n"] == 2
+
+
+def test_a_method_can_join_a_saved_comparison_on_the_same_records(conn, tmp_path):
+    root, first = embedded_comparison(conn, tmp_path)
+    cid = first["comparison_id"]
+    again = evaluate.compare(conn, ["m1"], ["nearest", "species-mean"], embeddings_root=root,
+                             into=cid, log=lambda s: None)
+    assert again["comparison_id"] == cid
+    board = evaluate.scoreboard(conn, cid)
+    # the rerun of nearest replaced its old row; species-mean joined beside it
+    assert sorted(r["method"] for r in board) == ["nearest", "species-mean"]
+    assert len({(r["record_set"], r["cutoff"], r["n_test"]) for r in board}) == 1
+
+
+def test_joining_a_comparison_is_refused_when_its_records_have_changed(conn, tmp_path):
+    root, first = embedded_comparison(conn, tmp_path)
+    conn.execute("update eval_runs set record_set = 'other-records'")
+    conn.commit()
+    with pytest.raises(ValueError, match="measured on other records"):
+        evaluate.compare(conn, ["m1"], ["species-mean"], embeddings_root=root,
+                         into=first["comparison_id"], log=lambda s: None)
+    assert [r["method"] for r in evaluate.scoreboard(conn)] == ["nearest"]   # nothing added
+    with pytest.raises(ValueError, match="no comparison"):
+        evaluate.compare(conn, ["m1"], ["nearest"], embeddings_root=root, into="nope",
+                         log=lambda s: None)

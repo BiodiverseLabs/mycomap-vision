@@ -210,7 +210,7 @@ def cmd_compare(conn, args) -> None:
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
                               max_test=args.max_test, name_scores=args.name_scores,
-                              sets=not args.no_sets)
+                              sets=not args.no_sets, into=args.into)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -785,6 +785,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="also score names s.l. and as species complexes (name_equiv.py, beta)")
     p.add_argument("--no-sets", action="store_true",
                    help="don't fit likely sets (likely.py) into the calibration")
+    p.add_argument("--into", metavar="COMPARISON",
+                   help="add the runs to this saved comparison (same records only; replaces "
+                        "a run of the same backbone and method there)")
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
                                       "any that fail), then compare them with the baselines")

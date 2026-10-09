@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.1, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.2, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -251,9 +251,12 @@ records. Top-1 accuracy (%), all photographs of a record.
 | Fine-tuned, linear classifier | 17.7 | 55.8 | 66.4 |
 
 Top-5: nearest 56.8 / 89.2 / 93.6; nearest+mean 61.2 / 90.8 / 94.6. First photograph only, species:
-nearest 28.9, nearest+mean 35.0. Fine-tuning added 2–3 points at every rank. Trained classifiers
-lost to retrieval at every rank, as they did on the development sample: most species have too few
-records for a classifier.
+nearest 28.9, nearest+mean 35.0. Fine-tuning added 2–3 points at every rank. Small classifiers
+trained on top of the finished image features lost to retrieval at every rank, as they did on the
+development sample. This does not test a classifier trained end to end: retraining the whole
+network as a species classifier, as in Danish Fungi 2020 and FungiTastic, is being replicated on
+our records (Appendix A, A12). The fine-tune's own classifier heads were not saved and have not
+been scored as an identifier.
 
 *[To add: 95% intervals, macro (per-species) accuracy, the standard top-1/3/5/10 ×
 strict/s.l./complex table.]*
@@ -375,8 +378,11 @@ full-precision model is served.
    no scoring rule fixes them. Each sequenced record moves its species toward the bands where
    accuracy is 40–68%. Argue for targeted sequencing of sparse species, guided by the advance
    predictions.
-3. **Retrieval over classification for long-tailed fungi.** Trained heads lost; retrieval keeps
-   one-record species in play and lets the reference set grow nightly without retraining.
+3. **Retrieval over classification for long-tailed fungi.** Small classifiers on fixed features
+   lost; whether a fully trained classifier does better on well-sampled species awaits the
+   replication (A12). Retrieval keeps one-record species in play and lets the reference set grow
+   nightly without retraining; a hybrid (classifier for deep species, retrieval for the tail) is
+   the likely outcome to test.
 4. **Genus is reliable; species is a short list.** For community use, show a calibrated list
    rather than one name, especially for species complexes and provisional names within look-alike
    groups.
@@ -533,15 +539,18 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 |---|---|---|---|
 | A1 | Top-1/top-5 at species, genus, family, per find, on the temporal and held-out sets | 🟡 | Temporal done; held-out via `mv heldout report` |
 | A2 | 95% intervals, bootstrap clustered by observer; paired McNemar tests for every comparison | 🟡 | Wilson intervals and McNemar in the report; add observer-clustered bootstrap |
-| A3 | **Macro (per-species) accuracy** beside micro, overall and per depth band, with species and record counts per band | ⬜ | Add to the report; tie bands to the long-tail protocol (many / medium / few / zero) and explain why ours count records, not images |
+| A3 | **Macro (per-species) accuracy and macro-F1** beside micro, overall and per depth band, with species and record counts per band. Macro-F1 is the headline metric of DF20 and FungiTastic | ⬜ | Add to the report; tie bands to the long-tail protocol (many / medium / few / zero) and explain why ours count records, not images |
 | A4 | **Leakage control**: near-duplicate photos between test and reference, same observer and day, observer-disjoint analysis, prior's occurrence data excludes test records | 🟡 | Report has same-observer/day and identical-file breakdowns; add observer-disjoint scores and duplicate counts |
 | A5 | Paired comparison with **iNaturalist CV** on the same records, with the training-contamination caveat | 🟡 | 2,000-record subsample running; snapshot iNat IDs and model version for the paper set |
-| A6 | **Open-set / unknown species**: how finds of species with no reference behave (AUROC known vs unknown from top score; abstention rate) | ⬜ | 12% of test finds have no reference species; compute AUROC and an "unknown species" threshold |
+| A6 | **Open-set / unknown species**: how finds of species with no reference behave: AUROC (known vs unknown) and TNR at 95% TPR from the top score, as in FungiTastic; abstention rate | ⬜ | 12% of test finds have no reference species; compute both and an "unknown species" threshold |
 | A7 | **Calibration evidence**: reliability diagrams per rank, ECE and Brier on data not used to fit; likely-list coverage and size **by depth band** | 🟡 | ECE/NLL done on the fitting set; refit on development, score on test |
 | A8 | **Ablations**: frozen vs fine-tuned; nearest vs species average vs classifier heads; with/without prior; generic backbones; BioCLIP v1 | 🟡 | All but BioCLIP v1 and the prior done on the temporal set; repeat on held-out |
 | A9 | **Error analysis** by taxonomic distance; strict / *s.l.* / complex; top confused pairs with examples | 🟡 | Name-equivalence scoring merged; add confusion pairs and lowest-common-ancestor depth |
 | A10 | **Toxic species**: errors for *Amanita* sect. *Phalloideae*, *Galerina*, *Lepiota*, *Cortinarius* sect. *Orellani*, *Gyromitra*; explicit "not for edibility" | ⬜ | List target taxa; report predicted-as and predicted-from rates |
 | A11 | Data and code availability; split ids; REFORMS checklist as a supplement | ⬜ | Deposit at submission |
+| A12 | **Their method on our data**: the Danish Fungi / FungiTastic recipe (whole network retrained as a classifier, BEiT-B/16 at 384 px, rare-class loss, photo probabilities averaged, month prior) trained on our records and scored on the same records, to separate the method from the data | 🟡 | Being built (replication of Picek et al.); compute estimate before any GPU run |
+| A13 | **Fair comparison with models that lack provisional names**: genus and family on all records; species on formally named truths only; a same-vocabulary comparison (Vision limited to the other model's names, and unlimited); each model's share of records it cannot name at species, reported as a result; one taxonomy mapping | 🟡 | Protocol agreed; applies to iNat CV and the published Danish Fungi / FungiTastic models |
+| A14 | **Per photograph and per find**: report both, as Picek's code keeps them separate | 🟡 | First-photo scores exist; add every-photo-alone scores |
 
 ### Commonly expected
 
@@ -549,11 +558,12 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 |---|---|---|
 | B1 | Risk–coverage curve (accuracy when confident) and accuracy at the site's thresholds, beside iNat CV | ⬜ |
 | B2 | **External test**: FungiTastic DNA-sequenced test subset and/or DF20, species shared with our references | ⬜ |
-| B3 | Macro-F1 (comparable with FungiCLEF) | ⬜ |
+| B3 | Top-k for k = 1 to 10 (FungiCLEF 2025 reports all, top-5 primary) | 🟡 (1/3/5/10 now recorded) |
 | B4 | Location/season prior gain by region and depth; does it suppress rare or out-of-range species? | ⬜ |
 | B5 | **Label-noise audit**: share of "errors" that are label errors; results with and without provisional names | 🟡 |
 | B6 | Compute: parameters, index size, latency, training cost | 🟡 |
 | B7 | Model card and datasheet for the reference set | ⬜ |
+| B9 | Cost-weighted errors: poisonous species called edible weighted 100:1 (FungiCLEF organizers' cost) | ⬜ |
 | B8 | Accuracy by number of photographs per find | 🟡 |
 
 ### Nice to have
@@ -582,7 +592,10 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
    photograph problem, guest organism.
 5. **Measure answer-key noise** after the legacy-name refresh: rescore with corrected names.
 6. **Relabel, retrain, rescore** the same development set ("after"); fine-tuning variants (more
-   blocks, more epochs, metric-learning loss) on the GPU trainer.
+   blocks, more epochs, metric-learning loss) on the GPU trainer. Save the fine-tune's classifier
+   heads this time and score them as an identifier beside nearest specimen.
+6a. **Danish Fungi method on our records** (A12) and the published Danish Fungi / FungiTastic
+   models (A13) on the development set, once their compute is approved.
 7. **Advance predictions**: score the 7 October batch (1,000) and the nightly 300s as they
    validate.
 8. **Paper-only additions** from Appendix A: macro metrics, open-set AUROC, observer-disjoint and
@@ -638,6 +651,11 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.2 (9 Oct 2026).** Clarified that the classifiers which lost were small heads on fixed
+  features, not a fully trained classifier; added A12 (Danish Fungi method on our data), A13 (fair
+  comparison with models lacking provisional names), A14 (per photo and per find), B9 (poisonous
+  cost); macro-F1 moved to the must-haves; open-set adds TNR at 95% TPR. The website's Models
+  page now charts every approach on the same records.
 - **0.1.1 (9 Oct 2026).** Corresponding author: Stephen Russell.
 - **0.1 (9 Oct 2026).** First full draft from results through the 1,152-record temporal test,
   the depth-bias and photograph experiments, and the 100-record held-out pilot. Benchmark plan

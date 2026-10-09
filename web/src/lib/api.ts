@@ -162,6 +162,8 @@ export interface RunReport {
 const METHOD_LABEL: Record<string, string> = {
   nearest: "nearest specimen",
   "species-mean": "species average",
+  "nearest+mean": "nearest + species average (experimental)",
+  "nearest-mix": "nearest specimen, photo votes",
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",
   linear: "trained classifier",
