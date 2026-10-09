@@ -1000,3 +1000,33 @@ def test_the_report_carries_no_coordinates(conn, tmp_path, monkeypatch):
     rows = list(csv.reader(io.StringIO(read(out["files"]["csv"]))))
     assert not {c for c in rows[0] if re.search("lat|lng|lon", c)}
     assert not {str(c) for c in coords} & {v for row in rows for v in row}
+
+
+def test_an_outside_models_newer_run_never_becomes_the_reference_the_breakdowns_use(
+        conn, tmp_path, monkeypatch):
+    # 2026-10-09: the published Danish models' runs (external:*, imported after the Vision
+    # runs) record only their checkpoint, so taking the newest run crashed the report
+    # (no 'photos') and would have computed the depth bands from nothing.
+    scored_world(conn, tmp_path, monkeypatch)
+    vision = reported(conn, tmp_path)["reference"]
+    conn.execute("insert into heldout_runs select benchmark, 'external:df20-vit-l384', "
+                 "'mean-logits', place, size, 'df20:abc', '9999', code_version, "
+                 "'{\"checkpoint\": \"x\", \"external\": true, \"records\": 0}' "
+                 "from heldout_runs limit 1")
+    conn.commit()
+    out = reported(conn, tmp_path, stamp="later")
+    assert out["reference"] == vision and out["reference"]["backbone"] == "toy"
+    assert out["breakdowns"]["toy/nearest"]["species reference records"]
+
+
+def test_an_older_run_without_a_photo_count_still_reports(conn, tmp_path, monkeypatch):
+    import json as _json
+    scored_world(conn, tmp_path, monkeypatch)
+    for (raw,) in conn.execute("select reference_json from heldout_runs").fetchall():
+        ref = _json.loads(raw)
+        ref.pop("photos", None)
+        conn.execute("update heldout_runs set reference_json = ? where reference_json = ?",
+                     (_json.dumps(ref), raw))
+    conn.commit()
+    out = reported(conn, tmp_path)
+    assert out["reference"]["photos"] is None and out["reference"]["backbone"] == "toy"
