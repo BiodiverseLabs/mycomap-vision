@@ -282,6 +282,28 @@ def test_import_refuses_answers_that_are_not_this_models_on_this_set(conn, tmp_p
                         "'external:fake%'").fetchone()[0] == 0
 
 
+def test_imported_answers_cite_their_dataset_release_and_refuse_another(conn, tmp_path,
+                                                                     monkeypatch, fake_model):
+    bench_world(conn, tmp_path, monkeypatch)
+    path = predicted_external(conn, tmp_path, fake_model)
+
+    class Rel:                      # a dataset release as cli._dataset_release returns it
+        id = "dry-20261009-120000"
+
+        def cite(self):
+            return {"dataset_release": self.id, "release_hash": "r", "labels_hash": "l"}
+    heldout.import_external(conn, NAME, path, "external:fake-b384", release=Rel())
+    run = json.loads(conn.execute("select reference_json from heldout_runs where backbone = "
+                                  "'external:fake-b384'").fetchone()[0])
+    assert run["dataset_release"] == Rel().cite()
+    lines = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+    path.write_text("".join(json.dumps({**x, "dataset_release": "v9"}) + "\n" for x in lines),
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="answers on release 'v9'"):
+        heldout.import_external(conn, NAME, path, "external:fake-b384", release=Rel(),
+                                redo=True)
+
+
 def test_import_takes_only_external_backbones(conn, tmp_path, monkeypatch, fake_model):
     bench_world(conn, tmp_path, monkeypatch)
     path = predicted_external(conn, tmp_path, fake_model)

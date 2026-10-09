@@ -94,6 +94,7 @@ class PicekConfig:
     release_root: str | None = None       # its folder (default <data>/research-releases/<id>)
     allow_draft: bool = False
     expect_release_manifest: str | None = None   # sha256 of the MANIFEST.json the launch read
+    shipped_release: bool = False         # a trainer's copy: release.sqlite, MANIFEST, SHA256SUMS
 
     def resolved(self) -> "PicekConfig":
         p = PRESETS[self.preset]

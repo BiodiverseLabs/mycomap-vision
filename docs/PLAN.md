@@ -856,12 +856,15 @@ the counts by licence class. release.sqlite, MANIFEST.json and SHA256SUMS ship w
 (never private.sqlite); the instance verifies them against the launch's MANIFEST hash
 before its first stage. Training: the release's `train` split; its `val` split for the
 plateau, the best macro-F1 epoch and the temperature; month and place prior counts from
-`train` only; `test` and `sealed` never (a leak raises). Then, on the laptop:
-`mv compare --release <id> --eval test --allow-test` (the Picek model selected on val, so
-it is scored on test) and `mv external run --release <id> --eval val|test` for the
-published checkpoints. Code: replications/fungitastic/{dataset,release_eval,
-published_release}.py; dataset.py is a local adapter for the builder's reader (TODO:
-switch to mycomap_vision.dataset_release once feat/dataset-release merges).
+`train` only. v1 holds train + val only; its test set is the separate release `v1-test`
+(fresh records, disjoint by record and photo bytes), which training refuses (SealedLeak).
+Then, on the laptop: `mv compare --release v1 --test-release v1-test` (the Picek model
+selected on v1's val, so it is reported on v1-test, against v1's train + val) and
+`mv external run --release v1` / `--release v1-test` for the published checkpoints. Code:
+replications/fungitastic/{dataset,release_eval,published_release}.py, on the builder's
+reader (mycomap_vision.dataset_release, feat/dataset-release, merged into this branch);
+dataset.py only adds what the reader lacks (verifying a trainer's shipped subset, the
+MANIFEST hash, the included sources).
 
 Everything below runs on **this PC** (Steve's Windows laptop). Shell commands are **Git
 Bash**; `aws login` can run in PowerShell or Git Bash. Nothing runs on the .org boxes.

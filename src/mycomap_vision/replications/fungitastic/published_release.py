@@ -1,11 +1,11 @@
 """The published checkpoints on a dataset release, in one re-runnable command:
-`mv external run --release <id> [--allow-draft] --eval val|test|sealed`.
+`mv external run --release v1 [--allow-draft]` (its val split, against its train split)
+and `mv external run --release v1-test` (the test release, against v1's train + val).
 
-labels -> coverage -> predict -> crosswalk -> report, on the release's evaluation split
-(release_eval: val by default, test only when asked, sealed once the release has it), with
-the release's labels as the answer key and the splits before it as the reference (for the
-reference-depth breakdown and the reference coverage). Everything goes under one
-release-keyed folder, <data>/research-results/<release>/external/<split>/:
+labels -> predict -> crosswalk -> coverage -> report (release_eval.scored_split), with the
+release's labels as the answer key and the reference splits for the reference-depth
+breakdown and the reference coverage. Everything goes under one release-keyed folder,
+<data>/research-results/<release>/external/<split>/:
 
     run.json                the steps done, the release cited, the inputs' hashes
     coverage.json           (iv), per model, exact names (and with the crosswalk)
@@ -52,7 +52,7 @@ def _write_json(path: Path, doc: dict) -> None:
     tmp.replace(path)
 
 
-def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
+def run(conn, rel, eval_split: str | None = None, models=None,
         classify_for: Callable | None = None, matcher=None, fetch_crosswalk: bool = True,
         batch_size: int = 16, root: Path | None = None, out_root: Path | None = None,
         vision_results=(), log=print) -> dict:
@@ -66,17 +66,19 @@ def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
     from . import crosswalk as gbif
     from . import published as external
     from . import published_report as pr
-    release_eval.check_eval_split(rel, split, allow_test)
+    split, ref_splits = release_eval.scored_split(rel, eval_split)
+    base = release_eval.base_release(rel) if dataset.is_test_release(rel) else rel
+    cited = dataset.cite(rel)
     out = results_dir(rel, split, out_root)
     out.mkdir(parents=True, exist_ok=True)
     state_path = out / "run.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
     if state.get("dataset_release", {}).get("manifest_sha256") not in (None,
-                                                                       rel.manifest_sha256):
+                                                                       cited["manifest_sha256"]):
         raise ValueError(f"{out} holds results of another {rel.id} (MANIFEST differs): "
                          "a release never changes; remove the folder if it was a draft")
-    state.update({"dataset_release": rel.cite(), "eval_split": split,
-                  "reference_splits": list(release_eval.REFERENCE_FOR[split]),
+    state.update({"dataset_release": cited, "eval_split": split,
+                  "reference": {"release": base.id, "splits": list(ref_splits)},
                   "protocol": "photo only, temperature 1, mean of the photos' logits"})
     steps = state.setdefault("steps", {})
 
@@ -92,8 +94,8 @@ def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
             external.write_labels(m, root)
     done("labels", models={m.short: external.checkpoint_id(m, root) for m in chosen})
 
-    rows = rel.records(split)
-    ref_rows = [r for s in release_eval.REFERENCE_FOR[split] for r in rel.records(s)]
+    rows = [dict(r) for r in rel.records(split)]
+    ref_rows = [dict(r) for r in base.records(ref_splits)]
     truths = {str(r["record_key"]): truth_of(r) for r in rows}
     ref_count = Counter(r.get("species") or r.get("label") for r in ref_rows)
     ref_truths = [(truth_of(r), 1) for r in ref_rows]
@@ -109,7 +111,6 @@ def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
                         str(r["observation_id"])] = r["result"]
     extra = [t.label for t in truths.values()] + [t.label for t, _ in ref_truths]
     labeller = heldout.Labeller(conn, extra=extra)
-    photos = rel.photos(truths)
     stores: dict = {}
     ext, predicted = {}, {}
     for m in chosen:
@@ -117,7 +118,7 @@ def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
         cache = external.LogitCache(out / f"{m.short}.logits.sqlite")
         try:
             inputs = {k: external.reference_photo_inputs(
-                conn, [dataset.photo_id(p["photo_key"]) for p in photos[k]], stores)
+                conn, [int(p["manifest_photo_id"]) for p in rel.photos(k)], stores)
                 for k in truths}
             bare = [k for k, got in inputs.items() if not got]
             if len(bare) > external.MAX_WITHOUT_PHOTOS * max(1, len(truths)):
@@ -142,6 +143,7 @@ def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
                         continue
                     answers[k] = external.record_answer(np.stack(rows_), cn)
                     f.write(json.dumps({"dataset_release": rel.id, "split": split,
+                                        "release_hash": cited["release_hash"],
                                         "observation_id": k, "backbone": m.backbone,
                                         "method": external.METHOD, "photos": len(rows_),
                                         "result": answers[k]}) + "\n")
@@ -180,7 +182,7 @@ def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
             label: {"split": pr.coverage(((t, 1) for t in truths.values()), pr.Vocabulary(cn, x)),
                     "reference": pr.coverage(ref_truths, pr.Vocabulary(cn, x))}
             for label, x in ((pr.EXACT, None), (pr.CROSSWALK, cw)) if label == pr.EXACT or x}
-    _write_json(out / "coverage.json", {"dataset_release": rel.cite(), "eval_split": split,
+    _write_json(out / "coverage.json", {"dataset_release": cited, "eval_split": split,
                                         "models": coverage})
     done("coverage")
     feats = {o: {"species reference records": heldout_report.bucket(
@@ -189,8 +191,8 @@ def run(conn, rel, split: str = "val", allow_test: bool = False, models=None,
     scorers = {pr.EXACT: pr.Scorer(labeller)}
     if cw is not None:
         scorers[pr.CROSSWALK] = pr.Scorer(labeller, cw)
-    report = {"dataset_release": rel.cite(), "eval_split": split,
-              "reference_splits": list(release_eval.REFERENCE_FOR[split]),
+    report = {"dataset_release": cited, "eval_split": split,
+              "reference": {"release": base.id, "splits": list(ref_splits)},
               "records": len(rows), "scored_records": len(truths),
               "formal_species_records": sum(pr.name_kind(t) == pr.FORMAL for t in truths.values()),
               "photo_only": state["protocol"], "scorers": list(scorers), "models": {},

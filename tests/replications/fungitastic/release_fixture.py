@@ -1,83 +1,84 @@
-"""A tiny hand-built dataset release, laid out as docs/dataset-release.md (feat/dataset-release)
-specifies: release.sqlite (records, photos, splits, info), private.sqlite, MANIFEST.json
-(written last) and SHA256SUMS. It mirrors seed_two_species: records 100-107, photos
-inat:1000-1007 (their store copies' sha256 is 'h'). Not the builder's code: the builder
-isn't merged, so the replication's tests make releases by hand."""
+"""Small dataset releases for the replication's tests, made by the builder itself
+(dataset_release.build, feat/dataset-release) from a tiny migrated manifest:
 
-import hashlib
-import json
-import sqlite3
+- base release (a draft `dry-...`): train = records 1-4 and mo:9 (validated Jan 2026),
+  val = records 5-6 (after the 2026-02-01 cutoff); species "A x" (red photos) and "B y"
+  (dark photos), as the published-model tests' fake classifier reads them;
+- its test release (`dry-...-test`): records 7-8, fresh, disjoint by record and bytes.
+"""
+
+import io
 from pathlib import Path
 
-RECORDS_SQL = """create table records (
-  record_key text primary key, source text, source_id text, org_source text, org_name text,
-  mycobank_number text, label text, label_rank text, species text, genus text, family text,
-  name_kind text, label_rule text, label_exported_at text, validated_on text,
-  green_projects text, observed_on text, country text, state text, north_america integer,
-  included integer, reason text, split text, benchmark text, benchmark_split text)"""
-PHOTOS_SQL = """create table photos (
-  photo_key text primary key, record_key text, position integer, source text,
-  source_photo_id text, source_url text, original_sha256 text, original_bytes integer,
-  original_ext text, license_code text, license_class text, license_checked_at text,
-  owner_login text, owner_name text, attribution text, included integer, reason text)"""
+from PIL import Image
+from test_dataset_release import add_record, migrate
 
-# record key -> (species, validated_on, split); seed_two_species' records 100-107
-SEEDED = {"100": ("A x", "2026-01-01", "train"), "101": ("A x", "2026-01-02", "train"),
-          "102": ("A x", "2026-01-03", "val"), "103": ("B y", "2026-01-01", "train"),
-          "104": ("B y", "2026-01-02", "train"), "105": ("B y", "2026-01-03", "val"),
-          "106": ("A x", "2026-09-20", "test"), "107": ("B y", "2026-09-21", "test")}
+from mycomap_vision import config, manifest
+from mycomap_vision import dataset_release as dr
+from mycomap_vision.storage import LocalStore
 
-
-def sha(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
+BASE = "dry-20261009-120000"
+TEST = "dry-20261009-130000-test"
+VAL_CUTOFF = "2026-02-01"
+# key -> (name, validated on, red level); A x is red, B y dark (bright_is_a reads red)
+TRAIN = {"1": ("A x", "2026-01-01", 250), "2": ("A x", "2026-01-02", 240),
+         "3": ("B y", "2026-01-01", 10), "4": ("B y", "2026-01-02", 20),
+         "mo:9": ("A x", "2026-01-03", 230)}
+VAL = {"5": ("A x", "2026-03-01", 245), "6": ("B y", "2026-03-02", 15)}
+FRESH = {"7": ("A x", "2026-11-01", 248), "8": ("B y", "2026-11-02", 12)}
 
 
-def make_release(data_dir: Path, release_id: str = "dry-20261009-1830", draft: bool = True,
-                 allowed_sources=("inat", "mo"), splits: dict | None = None,
-                 sources: dict | None = None, benchmark: dict | None = None,
-                 extra_records: dict | None = None, labels_hash: str = "lab" + "0" * 61,
-                 omit=()) -> Path:
-    """Write the release under <data_dir>/research-releases/<id>/ and return its folder.
-    `splits` / `sources` / `benchmark`: per record key overrides; `extra_records`: more
-    records {key: (species, validated_on, split, source)} with no photos; `omit`: MANIFEST
-    keys to leave out (e.g. 'allowed_sources')."""
-    folder = data_dir / "research-releases" / release_id
-    folder.mkdir(parents=True)
-    db = sqlite3.connect(folder / "release.sqlite")
-    db.execute(RECORDS_SQL)
-    db.execute(PHOTOS_SQL)
-    db.execute("create table splits (split text primary key, cutoff text, records integer)")
-    db.execute("create table info (key text primary key, value text)")
-    rows = {k: (sp, d, s, "inat") for k, (sp, d, s) in SEEDED.items()}
-    rows.update(extra_records or {})
-    for key, (sp, day, split, src) in rows.items():
-        split = (splits or {}).get(key, split)
-        src = (sources or {}).get(key, src)
-        bench = (benchmark or {}).get(key)
-        db.execute("insert into records values (" + ",".join("?" * 25) + ")", (
-            key, src, key.split(":")[-1], src, sp, None, sp, "species" if sp else "genus",
-            sp, (sp or "A").split()[0], "F", "formal" if sp else "one-word", "rule", "t", day,
-            "[]", day, "US", "WA", 1, 1, "ok", split, bench, "dev" if bench else None))
-    for i in range(8):
-        key = str(100 + i)
-        db.execute("insert into photos values (" + ",".join("?" * 17) + ")", (
-            f"inat:{1000 + i}", key, 0, "inat", str(1000 + i), "u", "h", 1, "png", "cc0",
-            "open" if i % 2 else "arr", "t", "o", "O", "a", 1, "ok"))
-    db.commit()
-    db.close()
-    sqlite3.connect(folder / "private.sqlite").close()
-    files = {}
-    for f in ("release.sqlite", "private.sqlite"):
-        b = (folder / f).read_bytes()
-        files[f] = {"bytes": len(b), "sha256": sha(b)}
-    manifest = {"id": release_id, "draft": draft, "created": "t", "code_commit": "abc",
-                "allowed_sources": list(allowed_sources),
-                "hashes": {"labels_hash": labels_hash, "release_hash": "rel" + "0" * 61,
-                           "reference_hash": "ref" + "0" * 61},
-                "files": files}
-    for k in omit:
-        manifest.pop(k, None)
-    (folder / "MANIFEST.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    (folder / "SHA256SUMS").write_text(
-        "".join(f"{v['sha256']}  {k}\n" for k, v in files.items()), encoding="utf-8")
-    return folder
+def photo_id(key: str) -> int:
+    return 9_000_000_000 + int(key.split(":")[1]) if key.startswith("mo:") else 1000 + int(key)
+
+
+def add_photo(conn, store: LocalStore, key: str, red: int) -> int:
+    """One solid-colour JPEG for the record, kept as its large original."""
+    pid = photo_id(key)
+    source = "mo" if key.startswith("mo:") else "inat"
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (red, pid % 7, 0)).save(buf, "JPEG", quality=95)
+    body = buf.getvalue()
+    rel = f"photos/large/{pid % 1000:03d}/{pid}.jpg"
+    store.put(rel, body)
+    lclass = "arr" if pid % 2 else "open"
+    conn.execute(
+        "insert into photos (photo_id, source, source_photo_id, owner_user_id, owner_login, "
+        "owner_name, license_code, license_class, attribution, source_url, first_seen_at, "
+        "license_checked_at, status) values (?,?,?,?,?,?,?,?,?,?, 'now', 'now', 'done')",
+        (pid, source, pid if source == "mo" else None, 7, "alice", "Alice",
+         "" if lclass == "arr" else "cc-by", lclass, "(c) Alice", f"https://example.org/{pid}"))
+    conn.execute("insert into observation_photos values (?, ?, 1)", (key, pid))
+    conn.execute("insert into photo_copies values (?, ?, 'large', ?, ?, ?, 'now')",
+                 (pid, store.location, rel, len(body), dr.sha256_bytes(body)))
+    return pid
+
+
+def add(conn, store, records: dict) -> None:
+    for key, (name, day, red) in records.items():
+        add_record(conn, key, name, source="mo" if key.startswith("mo:") else "inat",
+                   vdate=day, lat=47.0, lon=-122.0)
+        add_photo(conn, store, key, red)
+    conn.commit()
+    conn.execute("pragma wal_checkpoint(truncate)")
+
+
+def release_world(tmp_path: Path, monkeypatch, test_release: bool = True) -> dict:
+    """The manifest (config.DATA_DIR = <tmp>/data), its store, and the releases built from
+    it under <tmp>/data/research-releases."""
+    data = tmp_path / "data"
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    path = data / "manifest.sqlite"
+    conn = manifest.connect(path)
+    migrate(conn)
+    store = LocalStore(tmp_path / "store")
+    add(conn, store, {**TRAIN, **VAL})
+    root = data / "research-releases"
+    quiet = {"log": lambda *a: None, "derive_photos": "none", "recipes": ("original",)}
+    dr.build(name=BASE, manifest_path=path, root=root, val_cutoff=VAL_CUTOFF, **quiet)
+    if test_release:
+        add(conn, store, FRESH)
+        ids = tmp_path / "test-ids.csv"
+        ids.write_text("observation_id\n" + "\n".join(FRESH) + "\n", encoding="utf-8")
+        dr.build(name=TEST, manifest_path=path, root=root, test_for=BASE, test_ids=ids, **quiet)
+    return {"conn": conn, "store": store, "root": root, "data": data, "path": path}

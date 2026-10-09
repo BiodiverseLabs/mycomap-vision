@@ -1,10 +1,13 @@
-"""Evaluating on a dataset release: which records are scored, against which reference, and
-the Picek vs Vision comparison on them (`mv compare --release <id> --eval val|test|sealed`).
+"""Which records a dataset release scores, against which reference (docs/dataset-release.md).
 
-A release fixes its own time split (docs/dataset-release.md §5; cutoffs are read from the
-release, never set here): tune on `val`, report on `test`; `sealed` (the paper's fresh set)
-only once the release has one. The reference a model answers from is every split before
-the scored one: `train` for `val`, `train` + `val` for `test` and `sealed`.
+A release holds train + val (val = its newest weeks, cutoff fixed inside it). Its test
+set is a SEPARATE release, `<id>-test` (fresh records, disjoint by record and photo bytes,
+never trainable). So:
+
+- tune on val: `mv compare --release v1` (the builder's: reference = train, scored = val)
+  and `mv external run --release v1` (scored = val, reference = train);
+- report on test: `mv compare --release v1 --test-release v1-test` (compare_on_test here:
+  reference = v1's train + val, scored = v1-test) and `mv external run --release v1-test`.
 """
 
 from __future__ import annotations
@@ -14,54 +17,25 @@ from pathlib import Path
 
 from . import dataset
 
-REFERENCE_FOR = {"val": ("train",), "test": ("train", "val"), "sealed": ("train", "val")}
+
+def scored_split(rel, eval_split: str | None = None) -> tuple[str, tuple[str, ...]]:
+    """(the split scored, the splits of the base release used as reference): val against
+    train for a release, test against its base's train + val for a test release."""
+    if dataset.is_test_release(rel):
+        split, ref = "test", ("train", "val")
+    else:
+        split, ref = "val", ("train",)
+    if eval_split not in (None, split):
+        raise ValueError(f"release {rel.id} is scored on its {split} split"
+                         + (f": its test set is a separate release ({rel.id}-test)"
+                            if split == "val" else ""))
+    return split, ref
 
 
-def check_eval_split(rel, split: str, allow_test: bool = False) -> None:
-    """`val` by default; `test` only when asked for explicitly; `sealed` only when the
-    release has it."""
-    if split not in dataset.EVAL_SPLITS:
-        raise ValueError(f"--eval is one of {', '.join(dataset.EVAL_SPLITS)}")
-    if split == "test" and not allow_test:
-        raise ValueError("the test split is reported once per experiment: pass --allow-test "
-                         "to score it (tune on val)")
-    if split not in rel.splits():
-        raise ValueError(f"release {rel.id} has no {split} split"
-                         + (" (the paper's sealed set isn't in it yet)" if split == "sealed"
-                            else ""))
-
-
-def to_record(row: dict, photo_ids: list[int], place: dict):
-    """A release record as evaluate.Record (photo_rows hold manifest photo ids)."""
-    from ...evaluate import Record
-    lat, lon = place.get(str(row["record_key"]), (None, None))
-    species = row.get("species") or ""
-    try:
-        projects = tuple(json.loads(row.get("green_projects") or "[]"))
-    except ValueError:
-        projects = ()
-    return Record(observation_id=str(row["record_key"]), species=species,
-                  genus=row.get("genus") or "", family=row.get("family") or "",
-                  validated_on=row.get("validated_on"), observer=None,
-                  photo_rows=list(photo_ids), latitude=lat, longitude=lon,
-                  observed_on=row.get("observed_on"), projects=projects,
-                  taxon="" if species else (row.get("label") or ""))
-
-
-def records_of(conn, rel, splits, keep_photo=None) -> list:
-    """The release's records of `splits` with their photos (manifest ids; only those
-    `keep_photo` accepts), records left without a photo dropped."""
-    rows = [r for s in splits for r in rel.records(s)]
-    photos = rel.photos(r["record_key"] for r in rows)
-    place = {str(o): (lat, lon) for o, lat, lon in conn.execute(
-        "select observation_id, latitude, longitude from records")}
-    out = []
-    for r in rows:
-        ids = [dataset.photo_id(p["photo_key"]) for p in photos[r["record_key"]]]
-        ids = [i for i in ids if keep_photo is None or keep_photo(i)]
-        if ids:
-            out.append(to_record(r, ids, place))
-    return out
+def base_release(rel, root: Path | None = None):
+    """The release a test release was made for (opened like it: a draft only as a draft)."""
+    return dataset.load(rel.manifest["test_for"], allow_draft=bool(rel.manifest.get("draft")),
+                        root=root)
 
 
 def model_release(name: str) -> dict | None:
@@ -70,21 +44,27 @@ def model_release(name: str) -> dict | None:
     path = Path(models_dir()) / f"{name}.json"
     if not path.is_file():
         return None
-    return (json.loads(path.read_text(encoding="utf-8")).get("dataset_release") or None)
+    return json.loads(path.read_text(encoding="utf-8")).get("dataset_release") or None
 
 
-def shared_records(conn, rel, backbones: list[str], split: str, embeddings_root=None):
-    """evaluate.SharedSet for a release: the scored split's records against the reference
-    splits before it, on the photos every backbone embedded. A model trained on another
-    release is refused; the cutoff (the newest reference validation) keeps
-    evaluate.check_not_trained_on_test's rule: a model that saw the scored split is refused."""
+def compare_on_test(conn, rel, test_rel, backbones: list[str], methods: list[str],
+                    embeddings_root=None, **kw) -> dict:
+    """The Picek vs Vision report: every backbone x method scored on the test release's
+    records against the base release's train + val (evaluate.compare with that record
+    set), rows citing both releases. A test release made for another release, or a model
+    trained on another release, is refused; so is a model that saw the test records
+    (evaluate.check_not_trained_on_test, cutoff = the newest reference validation)."""
+    from ... import evaluate
     from ...embed import load_embeddings
-    from ...evaluate import SharedSet, record_set_hash
+    if test_rel.manifest.get("test_for") != rel.id:
+        raise ValueError(f"{test_rel.id} is not a test release of {rel.id}")
     for b in backbones:
         trained = model_release(b)
         if trained and trained.get("dataset_release") != rel.id:
             raise ValueError(f"{b} was trained on release {trained.get('dataset_release')}, "
-                             f"not {rel.id}: compare models on the release they trained on")
+                             f"not {rel.id}")
+    rel.check_photos_match(conn)
+    test_rel.check_photos_match(conn)
     loaded = {}
     for b in backbones:
         root = embeddings_root / b if embeddings_root else None
@@ -93,26 +73,16 @@ def shared_records(conn, rel, backbones: list[str], split: str, embeddings_root=
             raise ValueError(f"no embeddings for {b!r}; run mv embed --backbone {b}")
         loaded[b] = (ids, vecs)
     common = set.intersection(*(set(int(i) for i in ids.tolist()) for ids, _ in loaded.values()))
-    ref = records_of(conn, rel, REFERENCE_FOR[split], common.__contains__)
-    test = records_of(conn, rel, (split,), common.__contains__)
+    same = {p: p for p in common}
+    ref = rel.as_records(("train", "val"), same)
+    test = test_rel.as_records("test", same)
     if not ref or not test:
-        raise ValueError(f"release {rel.id}: no {split} or reference records with photos "
-                         f"every backbone embedded")
+        raise ValueError("no reference or test records with photos every backbone embedded")
     cutoff = max((r.validated_on for r in ref if r.validated_on), default="")
-    record_set = record_set_hash(ref, test)
-    return SharedSet(loaded, ref, test, cutoff, record_set, len(common))
-
-
-def compare(conn, rel, backbones: list[str], methods: list[str], split: str = "val",
-            allow_test: bool = False, embeddings_root=None, **kw) -> dict:
-    """mv compare on a release's split: the same evaluate.compare (every method, the
-    standard summary, the scoreboard), its rows citing the release and the split."""
-    from ... import evaluate
-    check_eval_split(rel, split, allow_test)
-    shared = shared_records(conn, rel, backbones, split, embeddings_root)
+    shared = evaluate.SharedSet(loaded, ref, test, cutoff,
+                                evaluate.record_set_hash(ref, test), len(common))
+    cites = {"dataset_release": dataset.cite(rel), "test_release": dataset.cite(test_rel)}
     out = evaluate.compare(conn, backbones, methods, test_days=0, shared=shared,
-                           extra={"dataset_release": rel.cite(), "eval_split": split,
-                                  "reference_splits": list(REFERENCE_FOR[split])}, **kw)
-    out.update({"dataset_release": rel.cite(), "eval_split": split,
-                "reference_splits": list(REFERENCE_FOR[split])})
+                           extra=cites, **kw)
+    out.update(cites)
     return out

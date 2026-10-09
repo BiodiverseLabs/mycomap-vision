@@ -410,6 +410,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     # The laptop refuses to ship such a manifest (aws.check_trainer_request); this is the
     # instance's own check, before anything is embedded or trained.
     holdouts.check_clean(conn, "the trainer run")
+    release_cite = None
     if picek and picek_release:
         # The release shipped with the run, verified again here (its SHA256SUMS, and the
         # MANIFEST.json the launch read), then the launch's rules on it.
@@ -419,6 +420,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         retrain.check_release_exclusion(rel, picek_exclude)
         snap = retrain.release_snapshot(rel, retrain.build_data_from_release(
             conn, rel, store.location, size), picek_exclude)
+        release_cite = dataset.cite(rel)
         rel.close()
         log("record sources: " + retrain.format_sources(snap["record_sources"]))
         retrain.require_allowed_sources(snap["record_sources"], log=log)
@@ -455,8 +457,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                         methods=methods, test_days=test_days, sample_records=kept,
                         attempts=attempts, picek_exclude_benchmarks=picek_exclude,
                         picek_labels_hash=picek_labels_hash,
-                        dataset_release=picek_release,
-                        dataset_release_manifest=picek_release_manifest,
+                        dataset_release=release_cite,
                         stages=[{**restored[i], "restored": True} if i in restored
                                 else {**asdict(s), "status": "pending"}
                                 for i, s in enumerate(stages)])
@@ -628,7 +629,8 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                           workers=max(2, min(6, os.cpu_count() or 4)),
                           exclude_benchmarks=exclude, exclude_ids_file=ids_file,
                           expect_labels_hash=labels_hash, release=release,
-                          allow_draft=allow_draft, expect_release_manifest=release_manifest)
+                          allow_draft=allow_draft, expect_release_manifest=release_manifest,
+                          shipped_release=bool(release))
         return train(conn, store, size, name, cfg,
                      test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
     return run

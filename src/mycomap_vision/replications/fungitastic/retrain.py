@@ -250,9 +250,10 @@ def check_release_exclusion(rel, mode: str) -> None:
     """The release decides which records train (its splits). `match` follows it; `all`
     (leave every benchmark record out) is refused when the release trains on benchmark
     records, rather than training on other records than Vision."""
+    from . import dataset
     if mode not in EXCLUDE_MODES:
         raise ValueError(f"exclude_benchmarks is one of {', '.join(EXCLUDE_MODES)}")
-    n = rel.benchmark_records()
+    n = dataset.benchmark_records(rel)
     if mode == "all" and n:
         raise ValueError(f"release {rel.id} trains on {n:,} held-out benchmark records; "
                          "--picek-exclude-benchmarks all would train on other records than "
@@ -261,56 +262,52 @@ def check_release_exclusion(rel, mode: str) -> None:
 
 def build_data_from_release(conn, rel, store_location: str, size: str,
                             cell_degrees: float = 4.0) -> PicekData:
-    """PicekData from a dataset release: its `train` split trains, its `val` split validates
-    (the plateau schedule, the best macro-F1 epoch and the temperature), and test and
-    sealed are never read (a leak raises dataset.SealedLeak). Labels are the release's
-    (`species`; a record without one, a one-word name, isn't trained). Photo paths come from
-    the store copies in this manifest, each checked against the release's original sha256;
-    month and place prior counts come from the train split only (coordinates from this
-    manifest: private.sqlite is never read)."""
+    """PicekData from a dataset release (dataset_release.Release): its `train` split
+    trains (rel.training_records(); a test release raises SealedLeak), its `val` split
+    validates (the plateau schedule, the best macro-F1 epoch and the temperature), and
+    nothing else is read. Labels are the release's (`species`; a one-word name isn't
+    trained). Photos are the release's originals (manifest_photo_id), read from this
+    manifest's store copies (rel.check_photos_match: the same bytes); month and place prior
+    counts come from the train split only, places from this manifest (private.sqlite stays
+    on the laptop)."""
     from . import dataset
-    recs = rel.training_records(include_val=True)
-    train_keys = {r["record_key"] for r in rel.records("train")}
-    never = {r["record_key"] for s in dataset.NEVER_TRAINED for r in rel.records(s)}
-    if never & {r["record_key"] for r in recs}:
-        raise dataset.SealedLeak(f"release {rel.id}: test or sealed records in the training data")
-    copies = {int(p): (path, sha) for p, path, sha in conn.execute(
-        "select photo_id, path, sha256 from photo_copies where store = ? and size = ?",
+    train_rows = [dict(r) for r in rel.training_records()]
+    val_rows = [dict(r) for r in rel.records("val")]
+    for r in train_rows + val_rows:
+        if r["split"] not in dataset.TRAINABLE:
+            raise dataset.SealedLeak(f"{r['record_key']} ({r['split']}) is not trainable")
+    if size == "large":
+        rel.check_photos_match(conn)
+    copies = {int(p): path for p, path in conn.execute(
+        "select photo_id, path from photo_copies where store = ? and size = ?",
         (store_location, size))}
     if not copies:
         raise ValueError(f"no {size} photos in {store_location}")
     place = {str(o): (lat, lon) for o, lat, lon in conn.execute(
         "select observation_id, latitude, longitude from records")}
-    photos = rel.photos(r["record_key"] for r in recs)
-    one_word = [r for r in recs if not r.get("species")]
-    recs = [r for r in recs if r.get("species")]
-    train_recs = [r for r in recs if r["record_key"] in train_keys]
-    val_recs = [r for r in recs if r["record_key"] not in train_keys]
+    one_word = sum(not r.get("species") for r in train_rows + val_rows)
+    train_recs = [r for r in train_rows if r.get("species")]
+    val_recs = [r for r in val_rows if r.get("species")]
     if not train_recs:
         raise ValueError(f"release {rel.id} has no training records")
     classes = sorted({r["species"] for r in train_recs})
     pos = {c: i for i, c in enumerate(classes)}
     genus_of = [""] * len(classes)
-    missing, mismatched, wanted = 0, [], 0
+    missing, wanted = 0, 0
     licences, sources = {}, {}
 
     def paths_of(rec):
         nonlocal missing, wanted
         out = []
-        for p in photos.get(rec["record_key"], []):
+        for p in rel.photos(rec["record_key"]):
             wanted += 1
-            licences[p.get("license_class") or "(none)"] = \
-                licences.get(p.get("license_class") or "(none)", 0) + 1
-            pid = dataset.photo_id(p["photo_key"])
-            got = copies.get(pid)
-            if got is None:
+            lc = p["license_class"] or "(none)"
+            licences[lc] = licences.get(lc, 0) + 1
+            pid = int(p["manifest_photo_id"])
+            if pid not in copies:
                 missing += 1
                 continue
-            path, sha = got
-            if size == "large" and sha and p.get("original_sha256") and sha != p["original_sha256"]:
-                mismatched.append(p["photo_key"])
-                continue
-            out.append((pid, path))
+            out.append((pid, copies[pid]))
         return out
     train, month_counts = [], np.zeros((len(classes), 12), dtype=np.int32)
     cells: dict[int, dict[int, int]] = {}
@@ -333,9 +330,6 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
         sources[r["source"]] = sources.get(r["source"], 0) + 1
         val += [(pid, path, pos.get(r["species"], -1), r["record_key"])
                 for pid, path in paths_of(r)]
-    if mismatched:
-        raise ValueError(f"{len(mismatched):,} photos in {store_location} differ from release "
-                         f"{rel.id}'s originals (first: {', '.join(mismatched[:5])})")
     if wanted and missing > MAX_MISSING_PHOTOS * wanted:
         raise ValueError(f"{missing:,} of release {rel.id}'s {wanted:,} train/val photos have "
                          f"no {size} copy in {store_location}")
@@ -345,24 +339,25 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
     newest_train = max(dates(train_recs), default=newest_seen)
     return PicekData(classes, genus_of, train, val, class_photos, month_counts, cells,
                      newest_seen, newest_train, [r["record_key"] for r in train_recs],
-                     [r["record_key"] for r in val_recs], 0, len(one_word),
+                     [r["record_key"] for r in val_recs], 0, one_word,
                      sum(r["species"] not in pos for r in val_recs),
                      [(r["record_key"], r["species"]) for r in train_recs + val_recs],
-                     release=rel.cite(), missing_photos=missing, photo_licences=licences,
+                     release=dataset.cite(rel), missing_photos=missing, photo_licences=licences,
                      record_sources=dict(sorted(sources.items(), key=lambda kv: -kv[1])))
 
 
 def release_snapshot(rel, data: PicekData, exclude_mode: str = "match") -> dict:
     """label_snapshot for a run on a dataset release: the release's identity (its
     labels_hash is the run's labels_hash), what it trains and validates on, the photo
-    licence policy and the record sources against the release's allowed sources."""
+    licence policy and the record sources against the release's own sources."""
+    from . import dataset
     ok = allowed_sources(release=rel)
     return {
         "labels_hash": rel.labels_hash, "own_labels_hash": labels_hash(data),
-        "dataset_release": rel.cite(), "trained_through": data.trained_through,
-        "train_through": data.train_through,
+        "dataset_release": dataset.cite(rel), "trained_through": data.trained_through,
+        "train_through": data.train_through, "val_cutoff": rel.val_cutoff,
         "exclude_benchmarks": f"{exclude_mode} (the release's splits decide)",
-        "benchmark_records_trained": rel.benchmark_records(),
+        "benchmark_records_trained": dataset.benchmark_records(rel),
         "validation": "the release's val split (plateau, best macro-F1 epoch, temperature)",
         "records_train": len(data.train_records), "records_validation": len(data.val_records),
         "photos_train": len(data.train), "photos_validation": len(data.val),
@@ -460,7 +455,8 @@ def allowed_sources(allowed=None, release=None) -> tuple[str, ...]:
     DEFAULT_ALLOWED_SOURCES. Refuses an empty set and any source outside PHOTO_SOURCES
     (inat, mo), whoever names it."""
     if allowed is None and release is not None:
-        allowed = release.allowed_sources
+        from . import dataset
+        allowed = dataset.allowed_sources(release)
     chosen = tuple(sorted(set(DEFAULT_ALLOWED_SOURCES if allowed is None else allowed)))
     bad = sorted(set(chosen) - set(PHOTO_SOURCES))
     if not chosen or bad:
@@ -934,6 +930,7 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
         from . import dataset
         rel = dataset.load(cfg.release, cfg.allow_draft,
                            Path(cfg.release_root) if cfg.release_root else None,
+                           files=dataset.SHIPPED if cfg.shipped_release else None,
                            expect_manifest_sha256=cfg.expect_release_manifest)
         check_release_exclusion(rel, cfg.exclude_benchmarks)
         data = data or build_data_from_release(conn, rel, store.location, size,

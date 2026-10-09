@@ -100,12 +100,13 @@ Retraining their recipe:
   Vision's nearest-specimen methods can still name it. This is part of the method
   difference.
 - **Splits are by time.** Theirs are by year. Ours are the dataset release's own split,
-  by each record's first DNA validation, with the cutoffs fixed inside the release: the
-  `train` split trains; the release's `val` split picks the epoch (best macro-F1), drives
-  the learning-rate plateau and fits the temperature; `test` is reported once per
-  experiment; `sealed` (the paper's fresh set, once it exists) is never trained on. The
-  month and place prior counts come from `train` only. (Before releases, the last 28 days
-  before a cutoff were the validation slice; the exploratory runs used that.)
+  by each record's first DNA validation, with the cutoff fixed inside the release (`v1` =
+  `train` + `val`, `val` the newest weeks): `train` trains; `val` picks the epoch (best
+  macro-F1), drives the learning-rate plateau and fits the temperature. The test set is a
+  separate release (`v1-test`: fresh records, disjoint from v1 by record and by photo
+  bytes) that nothing trains on. The month and place prior counts come from `train` only.
+  (Before releases, the last 28 days before a cutoff were the validation slice; the
+  exploratory runs used that.)
 - **Photos of every licence, for benchmarking.** The replication is internal
   benchmarking, so it trains on every photo the release includes, all-rights-reserved
   ones too. The final public Vision model uses CC and permission-granted photos only.
@@ -130,10 +131,10 @@ says which machine it runs on: **the laptop (this PC)**, or **an AWS g6.xlarge v
 
 Every result that counts is run on a **dataset release** (`<release>`, e.g. `v1`; spec:
 `docs/dataset-release.md`): a frozen, verifiable snapshot of records, labels, splits and
-photos under `data/research-releases/<release>/`. Each command verifies the release
-first (SHA256SUMS, MANIFEST.json) and cites it in its output. A draft (`dry-<stamp>`)
-needs `--allow-draft`, and its results are not v1's. `--eval` is the scored split: `val`
-by default, `test` only with `--allow-test`, `sealed` once the release has one.
+photos under `data/research-releases/<release>/`, built with `mv dataset build`. Each
+command verifies the release first (MANIFEST.json, every file's sha256) and cites it in
+its output. A draft (`dry-<stamp>`) needs `--allow-draft`, and its results are not v1's.
+Tune on `v1`'s val split; report once on the test release `v1-test`.
 
 ### On a dataset release (the laptop (this PC) unless said)
 
@@ -142,25 +143,25 @@ by default, `test` only with `--allow-test`, `sealed` once the release has one.
    `data/research-results/<release>/external/<split>/`; a re-run reuses every cached
    logit. Download the checkpoints and metadata first (step 1 below).
    ```bash
-   mv external run --release <release> --eval val
-   mv external run --release <release> --eval test --allow-test   # once, at the end
+   mv external run --release v1          # v1's val split, against its train split
+   mv external run --release v1-test     # the test release, against v1's train + val
    ```
 2. Their recipe retrained, on an AWS g6.xlarge via `mv aws-launch-trainer`. Dry run
    first (sends nothing), then the same without `--dry-run`. Only release.sqlite,
    MANIFEST.json and SHA256SUMS ship (never private.sqlite); the instance verifies them
    again, and refuses other labels than the release's labels_hash.
    ```bash
-   mv aws-launch-trainer --release <release> --backbones none --finetune none \
+   mv aws-launch-trainer --release v1 --backbones none --finetune none \
      --picek fungitastic-beit-b384@15 \
      --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
      --instance-type g6.xlarge --max-hours 52 --dry-run
    ```
-3. Back on the laptop: pull it, embed, and compare it with Vision on the same release
-   split (a model is never scored on a split it trained or selected on, so the Picek
-   model is compared on `test`):
+3. Back on the laptop: pull it, and compare it with Vision on the test release against
+   v1's train + val (a model is never scored on records it trained or selected on, so the
+   Picek model, selected on v1's val, is reported on v1-test):
    ```bash
    mv aws-pull-trainer --run <run>
-   mv compare --release <release> --eval test --allow-test \
+   mv compare --release v1 --test-release v1-test \
      --backbones picek-fungitastic-beit-b384-<run>,<vision model> \
      --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest
    ```
@@ -258,7 +259,7 @@ the rest are provisional species or formal names their models never saw.
 - All results so far are exploratory, including the development numbers. They will be
   re-run on the immutable Dataset release v1.
 - Published checkpoints: built and run on the development split. The paper's numbers
-  come later, on a sealed test set.
+  come later, on the test release (v1-test).
 - Retrain: prepared and dry-run tested, not yet run. It waits for the Dataset release,
   and Vision and the retrain train on the same release. The rule: records from the
   release's allowed sources only (iNaturalist and Mushroom Observer, each with photos

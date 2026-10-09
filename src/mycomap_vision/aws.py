@@ -669,13 +669,16 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     rel = None
     if release:
         from .replications.fungitastic import dataset
+        if not isinstance(release, str):          # already opened (cli._dataset_release)
+            release = release.id
         if not picek:
             raise ValueError("--release applies to the Picek stage: name a --picek preset")
         if resume:
             raise ValueError("--release with --resume is not supported yet: launch a new run")
         rel = dataset.load(release, allow_draft)          # mv dataset verify, first of all
-        log(f"Dataset release {rel.id}{' (DRAFT)' if rel.draft else ''}: verified "
-            f"(MANIFEST {rel.manifest_sha256[:12]}, labels {rel.labels_hash[:12]})")
+        log(f"Dataset release {rel.id}{' (DRAFT)' if rel.manifest.get('draft') else ''}: "
+            f"verified (MANIFEST {dataset.manifest_sha256(rel)[:12]}, "
+            f"labels {rel.labels_hash[:12]})")
     b = bucket()
     done: set = set()
     prev = None
@@ -758,7 +761,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     if rel is not None:
         from .replications.fungitastic import dataset
         for f in dataset.SHIPPED:
-            s3.upload_file(str(rel.path / f), b, f"runs/{run_id}/{RELEASE_PREFIX}{rel.id}/{f}")
+            s3.upload_file(str(rel.folder / f), b, f"runs/{run_id}/{RELEASE_PREFIX}{rel.id}/{f}")
         log(f"Uploaded release {rel.id} ({', '.join(dataset.SHIPPED)}; not private.sqlite)")
     if picek:
         s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_LABELS_KEY}",
@@ -778,7 +781,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                          resume=bool(resume), code_key=code_key,
                                          picek=picek, picek_exclude=picek_exclude,
                                          picek_labels_hash=labels_hash,
-                                         release=rel.cite() if rel else None)
+                                         release=dataset.cite(rel) if rel else None)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price,
                                                      extra_gb=picek_cache_gb(picek, photos)),
@@ -790,7 +793,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             "finetune": ft, "picek": list(picek or []), "methods": methods,
             "picek_exclude_benchmarks": picek_exclude if picek else None,
             "picek_labels": labels,
-            "dataset_release": rel.cite() if rel else None,
+            "dataset_release": dataset.cite(rel) if rel else None,
             "sample_records": sample_records,
             "code_version": sha, "max_hours": max_hours, "estimate_hours": est["total_hours"],
             "log": f"s3://{b}/runs/{run_id}/train.log",
@@ -829,6 +832,7 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                    exclude_ids, photos: int, est: dict, dest: Path | None,
                    ec2_check: bool, log=print, rel=None) -> dict:
     """The rest of launch_trainer with nothing sent (see its `dry_run`)."""
+    from .replications.fungitastic import dataset
     run_id = "dry-run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dest = Path(dest or config.DATA_DIR / "aws" / run_id)
     dest.mkdir(parents=True, exist_ok=True)
@@ -839,14 +843,13 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                                          test_days, ft, sample_records, code_version=sha,
                                          spot=spot, picek=picek, picek_exclude=picek_exclude,
                                          picek_labels_hash=labels["labels_hash"] if labels
-                                         else None, release=rel.cite() if rel else None)
+                                         else None, release=dataset.cite(rel) if rel else None)
     if rel is not None:
         import shutil as _sh
-        from .replications.fungitastic import dataset
         shipped = dest / "release" / rel.id
         shipped.mkdir(parents=True, exist_ok=True)
         for f in dataset.SHIPPED:
-            _sh.copyfile(rel.path / f, shipped / f)
+            _sh.copyfile(rel.folder / f, shipped / f)
     (dest / "user-data.sh").write_text(user_data, encoding="utf-8", newline="\n")
     syntax = None
     import shutil
@@ -889,9 +892,8 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
            "instance_script": syntax, "manifest_copy_mb": round(snap.stat().st_size / 2**20),
            "picek": list(picek or []), "picek_exclude_benchmarks": picek_exclude if picek
            else None, "picek_labels": labels,
-           "dataset_release": rel.cite() if rel else None,
-           "release_shipped": [f"release/{rel.id}/{f}" for f in __import__(
-               "mycomap_vision.replications.fungitastic.dataset", fromlist=["x"]).SHIPPED]
+           "dataset_release": dataset.cite(rel) if rel else None,
+           "release_shipped": [f"release/{rel.id}/{f}" for f in dataset.SHIPPED]
            if rel else None, "estimate_hours": est["total_hours"],
            "instance_type": instance_type, "disk_gb": args["BlockDeviceMappings"][0]["Ebs"][
                "VolumeSize"], "ec2_request": str(dest / "ec2-request.json"), "ec2": ec2_result,
