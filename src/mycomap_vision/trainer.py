@@ -389,7 +389,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             test_days: int = 28, batch_size: int = 64, readers: int = 16,
             loader=None, data_dir: Path | None = None, finetune: list[str] | None = None,
             finetuner=None, sample_records: int | None = None, picek: list[str] | None = None,
-            picek_trainer=None,
+            picek_trainer=None, picek_exclude: str = "match", picek_ids_file: str | None = None,
+            picek_labels_hash: str | None = None,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
@@ -414,6 +415,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     if sample_records:
         kept = restrict_to_sample(conn, sample_records, store.location, size)
         log(f"REHEARSAL: kept {kept:,} random records; results won't be merged home")
+        if picek_labels_hash:
+            log("REHEARSAL: the launch's label hash can't hold on a sample; not checked")
+            picek_labels_hash = None
     restored: dict[int, dict] = {}
     attempts: list[dict] = []
     if resume is not None:
@@ -428,7 +432,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     progress = Progress(data_dir / PROGRESS_FILE, prefix + PROGRESS_FILE, upload,
                         run_id=run_id, code_version=config.code_version(), size=size,
                         methods=methods, test_days=test_days, sample_records=kept,
-                        attempts=attempts,
+                        attempts=attempts, picek_exclude_benchmarks=picek_exclude,
+                        picek_labels_hash=picek_labels_hash,
                         stages=[{**restored[i], "restored": True} if i in restored
                                 else {**asdict(s), "status": "pending"}
                                 for i, s in enumerate(stages)])
@@ -514,8 +519,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         else:
             try:
                 if s.kind == "picek":
-                    meta = (picek_trainer or _default_picek_trainer(store, size, test_days, log,
-                                                                    stopping))(
+                    meta = (picek_trainer or _default_picek_trainer(
+                        store, size, test_days, log, stopping, picek_exclude, picek_ids_file,
+                        picek_labels_hash))(
                         conn, s.spec, s.name, data_dir / "models")
                 else:
                     meta = (finetuner or _default_finetuner(store, size, test_days, log,
@@ -575,7 +581,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
 
 
 FINETUNE_KEYS = ("base", "trained_through", "records", "photos", "species", "steps",
-                 "minutes", "final_loss")
+                 "minutes", "final_loss", "label_snapshot")
 PICEK_FILES = (".pt", ".json", ".classifier.npz", ".records.csv")
 
 
@@ -585,11 +591,18 @@ def model_files(kind: str) -> tuple[str, ...]:
     return PICEK_FILES if kind == "picek" else (".pt", ".json")
 
 
-def _default_picek_trainer(store, size, test_days, log, should_stop=None):
+def _default_picek_trainer(store, size, test_days, log, should_stop=None,
+                           exclude: str = "match", ids_file: str | None = None,
+                           labels_hash: str | None = None):
     def run(conn, spec, name, models_dir):
+        import os
+
         from .picek import PicekConfig, cache_of, parse_spec, train
         preset, epochs = parse_spec(spec)
-        cfg = PicekConfig(preset=preset, epochs=epochs, cache_px=cache_of(spec))
+        cfg = PicekConfig(preset=preset, epochs=epochs, cache_px=cache_of(spec),
+                          workers=max(2, min(6, os.cpu_count() or 4)),
+                          exclude_benchmarks=exclude, exclude_ids_file=ids_file,
+                          expect_labels_hash=labels_hash)
         return train(conn, store, size, name, cfg,
                      test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
     return run
@@ -644,6 +657,7 @@ def resume_request(doc: dict) -> dict:
     finetune = [spec_of[s["base"]] for s in stages if s["kind"] == "finetune"]
     return {"backbones": list(spec_of.values()), "finetune": finetune,
             "picek": [s["spec"] for s in stages if s["kind"] == "picek"],
+            "picek_exclude_benchmarks": doc.get("picek_exclude_benchmarks") or "match",
             "methods": list(doc.get("methods") or []), "size": doc.get("size") or "large",
             "test_days": int(doc.get("test_days") or 28),
             "sample_records": doc.get("sample_records"),

@@ -219,3 +219,17 @@ def test_training_from_a_photo_cache_records_it(conn, tmp_path, tiny):
     assert meta["photo_cache"]["made"] == 4                           # the training photos
     assert meta["config"]["cache_px"] == 16
     assert len(list((tmp_path / "cache").rglob("*.png"))) == 4
+
+
+def test_the_instance_refuses_to_train_on_other_labels_than_the_launch_recorded(conn, tmp_path,
+                                                                               tiny):
+    from dataclasses import replace
+    store = seed_two_species(conn, tmp_path)
+    with pytest.raises(ValueError, match="not the ones the launch recorded"):
+        picek.train(conn, store, "large", "picek-tiny", replace(tiny, expect_labels_hash="0" * 16),
+                    log=lambda s: None)
+    data = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS))
+    meta = picek.train(conn, store, "large", "picek-tiny",
+                       replace(tiny, expect_labels_hash=picek.labels_hash(data)),
+                       log=lambda s: None)
+    assert meta["label_snapshot"]["labels_hash"] == picek.labels_hash(data)

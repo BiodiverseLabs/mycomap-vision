@@ -140,6 +140,12 @@ class PicekConfig:
     # always reads the originals, like the embedding at test time.
     cache_px: int | None = None
     cache_dir: str | None = None       # default: <data>/picek-cache/<px>
+    # Which benchmark records to leave out (EXCLUDE_MODES). "match": exactly what a Vision
+    # fine-tune leaves out (sealed benchmarks, evaluate.load_records), so the two train on
+    # the same records; "all": also every record of every benchmark, released or not.
+    exclude_benchmarks: str = "match"
+    exclude_ids_file: str | None = None   # "all" on a trainer instance: the ids, shipped
+    expect_labels_hash: str | None = None # refuse to train on other labels than at launch
 
     def resolved(self) -> "PicekConfig":
         p = PRESETS[self.preset]
@@ -193,6 +199,34 @@ def cell_of(lat, lon, degrees: float) -> int | None:
     return i * 1000 + j
 
 
+EXCLUDE_MODES = {
+    "match": "only sealed benchmarks (as every Vision model; evaluate.load_records)",
+    "all": "also every record of every held-out benchmark, sealed, released or not",
+}
+
+
+def exclusion_ids(conn, mode: str, ids_file: str | None = None) -> set[str] | None:
+    """The extra records to leave out for `mode`: None for "match" (load_records already
+    leaves sealed benchmarks out, as for every Vision model), every heldout_records id for
+    "all". A trainer's manifest carries no benchmark tables, so there the ids come from
+    `ids_file` (shipped by the launcher), and "all" without them is refused."""
+    if mode in ("match", "sealed"):
+        return None
+    if mode != "all":
+        raise ValueError(f"exclude_benchmarks is one of {', '.join(EXCLUDE_MODES)} (not "
+                         f"{mode!r}; sealed benchmarks are never trained on in any mode)")
+    if ids_file:
+        text = Path(ids_file).read_text(encoding="utf-8")
+        return {line.strip() for line in text.splitlines() if line.strip()}
+    ids = benchmark_record_ids(conn)
+    have = conn.execute("select 1 from sqlite_master where type = 'table' and "
+                        "name = 'heldout_records'").fetchone()
+    if not have:
+        raise ValueError("exclude_benchmarks=all, but this manifest has no benchmark tables "
+                         "(a trainer's copy) and no ids file was given")
+    return ids
+
+
 @dataclass
 class PicekData:
     classes: list[str]                       # species labels, sorted; index = class id
@@ -209,6 +243,7 @@ class PicekData:
     excluded_benchmark_records: int = 0
     one_word_records: int = 0
     val_records_unknown_species: int = 0
+    record_labels: list[tuple[str, str]] = field(repr=False, default_factory=list)
 
 
 def benchmark_record_ids(conn) -> set[str]:
@@ -222,11 +257,12 @@ def benchmark_record_ids(conn) -> set[str]:
 
 
 def build_data(conn, store_location: str, size: str, test_days: int = 28, val_days: int = 28,
-               cell_degrees: float = 4.0) -> PicekData:
+               cell_degrees: float = 4.0, exclude_ids: set[str] | None = None) -> PicekData:
     """The records a comparison would use as reference (every green record with a photo copy
     at `size` in the store, up to the cutoff newest-28-days before the newest record), split
     into training and the validation slice of the last `val_days` before the cutoff. Labels
-    are Vision's (evaluate.load_records). Records of a held-out benchmark are left out."""
+    are Vision's (evaluate.load_records, which leaves sealed benchmarks out, as for every
+    Vision model). `exclude_ids` (exclusion_ids) leaves more records out."""
     from . import evaluate
     paths = dict(conn.execute("select photo_id, path from photo_copies where store = ? and "
                               "size = ?", (store_location, size)).fetchall())
@@ -234,7 +270,7 @@ def build_data(conn, store_location: str, size: str, test_days: int = 28, val_da
         raise ValueError(f"no {size} photos in {store_location}")
     records = evaluate.load_records(conn, {int(p): int(p) for p in paths})
     ref, _test, cutoff = evaluate.split_by_time(records, test_days)
-    held = benchmark_record_ids(conn)
+    held = exclude_ids or set()
     excluded = sum(r.observation_id in held for r in ref)
     ref = [r for r in ref if r.observation_id not in held]
     one_word = sum(not r.species for r in ref)
@@ -268,7 +304,69 @@ def build_data(conn, store_location: str, size: str, test_days: int = 28, val_da
     return PicekData(classes, genus_of, train, val, class_photos, month_counts, cells, cutoff,
                      newest_train, [r.observation_id for r in train_recs],
                      [r.observation_id for r in val_recs], excluded, one_word,
-                     sum(r.species not in pos for r in val_recs))
+                     sum(r.species not in pos for r in val_recs),
+                     [(r.observation_id, r.species) for r in train_recs + val_recs])
+
+
+def labels_hash(data: PicekData) -> str:
+    """Which labelling a run trained on: the hash of every (record, species label) of its
+    training and validation records, and of the cutoff."""
+    import hashlib
+    h = hashlib.sha256(f"{data.trained_through}|{data.train_through}\n".encode())
+    h.update("\n".join(f"{o}\t{s}" for o, s in sorted(data.record_labels)).encode())
+    return h.hexdigest()[:16]
+
+
+def label_snapshot(conn, data: PicekData, exclude_mode: str = "match") -> dict:
+    """What a run's labels were, to prove later which labelling it used: counts, the
+    share of provisional names, what was left out and why, the known label problems the
+    manifest carries (label conflicts; names that wait for a person, names.py), and
+    labels_hash."""
+    from . import names
+    provisional = sum(names.parse_name(c).code is not None for c in data.classes)
+    is_code = {c: names.parse_name(c).code is not None for c in data.classes}
+    labelled = [s for _o, s in data.record_labels]
+    rows = names.name_counts(conn)
+    spell = names.summary(rows, names.group_name_variants(rows))
+    conflicts = conn.execute("select count(*) from records where label_conflict = 1"
+                             ).fetchone()[0]
+    newest = conn.execute("select max(exported_at) from records").fetchone()[0]
+    return {
+        "labels_hash": labels_hash(data), "trained_through": data.trained_through,
+        "train_through": data.train_through, "exclude_benchmarks": exclude_mode,
+        "records_train": len(data.train_records), "records_validation": len(data.val_records),
+        "photos_train": len(data.train), "photos_validation": len(data.val),
+        "species": len(data.classes),
+        "provisional_species_share": round(provisional / max(len(data.classes), 1), 4),
+        "provisional_record_share": round(sum(is_code.get(s, names.parse_name(s).code
+                                                          is not None) for s in labelled)
+                                          / max(len(labelled), 1), 4),
+        "one_word_records_left_out": data.one_word_records,
+        "excluded_benchmark_records": data.excluded_benchmark_records,
+        "known_label_problems": {
+            "label_conflict_records": conflicts,
+            "names_left_for_a_person": spell["left_for_a_person"],
+        },
+        "manifest_newest_export": newest,
+    }
+
+
+def format_snapshot(snap: dict) -> str:
+    p = snap["known_label_problems"]
+    return "\n".join([
+        f"Labels for this run (hash {snap['labels_hash']}): {snap['records_train']:,} training "
+        f"+ {snap['records_validation']:,} validation records, {snap['species']:,} species "
+        f"({100 * snap['provisional_species_share']:.1f}% provisional names, "
+        f"{100 * snap['provisional_record_share']:.1f}% of records)",
+        f"  trained through {snap['trained_through']} (gradients through "
+        f"{snap['train_through']}); benchmarks excluded: {snap['exclude_benchmarks']} "
+        f"({snap['excluded_benchmark_records']:,} records); one-word names left out: "
+        f"{snap['one_word_records_left_out']:,}; newest export {snap['manifest_newest_export']}",
+        f"  known label problems in the manifest: {p['label_conflict_records']:,} records with "
+        f"conflicting names (left out), {p['names_left_for_a_person']['groups']:,} names "
+        f"({p['names_left_for_a_person']['records']:,} records) waiting for a person "
+        "(mv name-spellings)",
+    ])
 
 
 # --- the photo cache --------------------------------------------------------------------
@@ -587,7 +685,13 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
     out_dir = out_dir or models_dir()
     started = time.monotonic()
     data = data or build_data(conn, store.location, size, test_days, cfg.val_days,
-                              cfg.cell_degrees)
+                              cfg.cell_degrees,
+                              exclusion_ids(conn, cfg.exclude_benchmarks, cfg.exclude_ids_file))
+    snapshot = label_snapshot(conn, data, cfg.exclude_benchmarks)
+    log(format_snapshot(snapshot))
+    if cfg.expect_labels_hash and snapshot["labels_hash"] != cfg.expect_labels_hash:
+        raise ValueError(f"the labels here (hash {snapshot['labels_hash']}) are not the ones "
+                         f"the launch recorded ({cfg.expect_labels_hash}): not training")
     n_classes = len(data.classes)
     log(f"[{name}] {cfg.preset}: {len(data.train):,} training photos of "
         f"{len(data.train_records):,} records, {n_classes:,} species; validation "
@@ -748,7 +852,7 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
             "train_photos_per_second": round(seen / train_seconds, 2) if train_seconds else None,
             "loader_wait_share": round(wait_seconds / train_seconds, 3) if train_seconds else None,
             "stopped_at_max_steps": stopped_early, "loader_fallback": fallback["at"],
-            "photo_cache": cache,
+            "photo_cache": cache, "label_snapshot": snapshot,
             "config": asdict(cfg), "device": device, "grad_checkpointing": bool(checkpointing),
             "minutes": round(elapsed / 60, 1),
             "code_version": __import__("mycomap_vision.config", fromlist=["x"]).code_version(),

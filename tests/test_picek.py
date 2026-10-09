@@ -39,15 +39,68 @@ def test_training_is_the_comparisons_reference_minus_a_validation_slice_never_th
     assert {i[2] for i in data.val} == {0, 1}
 
 
-def test_records_of_a_held_out_benchmark_are_never_trained_or_validated_on(conn, tmp_path):
-    store = seed_two_species(conn, tmp_path)
+def benchmark_record(conn, oid="100"):
     heldout.ensure_schema(conn)
     with conn:
         conn.execute("insert into heldout_records (benchmark, observation_id, truth_status, "
-                     "name_source, split) values ('b', '100', 'x', 'y', 'dev')")
-    data = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS))
+                     "name_source, split) values ('b', ?, 'x', 'y', 'dev')", (oid,))
+
+
+def test_by_default_it_trains_on_exactly_what_a_vision_model_trains_on(conn, tmp_path):
+    # A released (development) benchmark's records train Vision too: "match" keeps them.
+    store = seed_two_species(conn, tmp_path)
+    benchmark_record(conn)
+    ids = picek.exclusion_ids(conn, picek.PicekConfig().exclude_benchmarks)
+    data = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS), exclude_ids=ids)
+    assert 1000 in photo_ids(data.train) and data.excluded_benchmark_records == 0
+
+
+def test_all_leaves_out_every_benchmark_record_and_a_trainer_needs_the_ids_shipped(conn,
+                                                                                  tmp_path):
+    store = seed_two_species(conn, tmp_path)
+    benchmark_record(conn)
+    data = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS),
+                            exclude_ids=picek.exclusion_ids(conn, "all"))
     assert 1000 not in photo_ids(data.train + data.val)
     assert data.excluded_benchmark_records == 1
+    ids = tmp_path / "ids.txt"
+    ids.write_text("100\n101\n", encoding="utf-8")
+    assert picek.exclusion_ids(conn, "all", str(ids)) == {"100", "101"}
+    with conn:
+        conn.execute("drop table heldout_records")         # as in a shipped manifest
+    with pytest.raises(ValueError, match="no benchmark tables"):
+        picek.exclusion_ids(conn, "all")
+    with pytest.raises(ValueError, match="never trained on"):
+        picek.exclusion_ids(conn, "none")
+
+
+def test_sealed_benchmark_records_are_never_trained_on_in_any_mode(conn, tmp_path):
+    from mycomap_vision import holdouts
+    store = seed_two_species(conn, tmp_path)
+    holdouts.ensure_schema(conn)
+    with conn:
+        conn.execute("insert into benchmark_holdouts values ('100', 'paper', 't')")
+    for mode in ("match", "all"):
+        data = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS),
+                                exclude_ids=picek.exclusion_ids(conn, mode)
+                                if mode == "match" else set())
+        assert 1000 not in photo_ids(data.train + data.val), mode
+
+
+def test_the_label_snapshot_proves_which_labelling_a_run_used(conn, tmp_path):
+    store = seed_two_species(conn, tmp_path)
+    data = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS))
+    snap = picek.label_snapshot(conn, data)
+    assert (snap["records_train"], snap["records_validation"], snap["species"]) == (4, 2, 2)
+    assert snap["trained_through"] == "2026-08-24" and snap["exclude_benchmarks"] == "match"
+    assert snap["known_label_problems"]["label_conflict_records"] == 0
+    with conn:
+        conn.execute("update records set scientific_name = 'B y' where observation_id = '100'")
+    other = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS))
+    assert picek.labels_hash(other) != snap["labels_hash"]       # a relabel shows
+    assert picek.labels_hash(picek.build_data(conn, store.location, "large", 28,
+                                              int(VAL_DAYS))) == picek.labels_hash(other)
+    assert "hash" in picek.format_snapshot(snap)
 
 
 def test_a_one_word_name_trains_no_species_class(conn, tmp_path):

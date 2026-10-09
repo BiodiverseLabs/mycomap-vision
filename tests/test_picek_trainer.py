@@ -111,3 +111,79 @@ def test_a_photo_cache_gets_its_own_disk_on_the_instance():
     args = aws.trainer_instance_args("r", "ami-1", "#!", "g6.xlarge", "/dev/xvda", 75,
                                      extra_gb=gb)
     assert args["BlockDeviceMappings"][0]["Ebs"]["VolumeSize"] == 75 + 60 + gb
+
+
+# --- launch readiness ---------------------------------------------------------------------
+
+def head_sha():
+    import subprocess
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=config.REPO_ROOT,
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_a_dry_run_builds_and_checks_everything_and_sends_nothing(conn, tmp_path, monkeypatch):
+    seed_two_species(conn, tmp_path)
+    with conn:
+        conn.executemany("insert into photo_copies values (?, 's3://bkt/', 'large', ?, 1, 'h', "
+                         "'t')", [(1000 + i, f"p/{1000 + i}.png") for i in range(8)])
+    monkeypatch.setattr(aws, "bucket", lambda: "bkt")
+    monkeypatch.setattr(aws, "release_commit", lambda **k: head_sha())
+
+    def no_aws(*a, **k):
+        raise AssertionError("a dry run must not touch AWS")
+    monkeypatch.setattr(aws, "s3_client", no_aws)
+    monkeypatch.setattr(aws, "session", no_aws)
+    monkeypatch.setattr("shutil.which", lambda name: None)      # bash -n: tested elsewhere
+    out = aws.launch_trainer(conn, [], ["classifier", "classifier+month"], max_hours=48,
+                             instance_type="g6.xlarge", picek=["fungitastic-beit-b384@15"],
+                             dry_run=True, dry_run_dir=tmp_path / "dry", log=lambda s: None)
+    assert out["dry_run"] and out["sent"].startswith("nothing")
+    for f in ("code.tar.gz", "user-data.sh", "manifest-in.sqlite", "picek-labels.json",
+              "ec2-request.json"):
+        assert (tmp_path / "dry" / f).is_file(), f
+    assert out["code_archive"]["pins"]["timm"] == "1.0.30"
+    labels = out["picek_labels"]
+    assert labels["records_train"] + labels["records_validation"] == 6
+    script = (tmp_path / "dry" / "user-data.sh").read_text(encoding="utf-8")
+    assert f"--picek-labels-hash {labels['labels_hash']}" in script
+    assert "--picek-exclude-benchmarks match" in script and "picek-exclude-ids" not in script
+    request = json.loads((tmp_path / "dry" / "ec2-request.json").read_text(encoding="utf-8"))
+    assert request["InstanceType"] == "g6.xlarge"
+
+
+def test_the_code_archive_must_carry_what_a_picek_run_needs():
+    import io
+    import tarfile
+
+    def archive(files):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as t:
+            for name, text in files.items():
+                data = text.encode()
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+    base = {n: "" for n in aws.TRAINER_NEEDS}
+    base["requirements/trainer.txt"] = "timm==1.0.30 \\n    --hash=sha256:x\ntorch==2.14.0 \\n"
+    assert aws.check_code_archive(archive(base))["pins"] == {"timm": "1.0.30", "torch": "2.14.0"}
+    with pytest.raises(RuntimeError, match="picek.py"):
+        aws.check_code_archive(archive(base), picek=["fungitastic-beit-b384"])
+    assert aws.check_code_archive(archive({**base, "src/mycomap_vision/picek.py": ""}),
+                                  picek=["fungitastic-beit-b384"])
+
+
+def test_excluding_every_benchmark_ships_the_ids_to_the_instance():
+    ud = aws.render_trainer_user_data("r", [], ["classifier"], 10, "bkt",
+                                      picek=["fungitastic-beit-b384@15"], picek_exclude="all",
+                                      picek_labels_hash="abc")
+    assert 'aws s3 cp "s3://$BUCKET/$RUN/picek-exclude-ids.txt" data/picek-exclude-ids.txt' in ud
+    assert "--picek-exclude-benchmarks all --picek-exclude-ids data/picek-exclude-ids.txt" in ud
+    assert "--picek-labels-hash abc" in ud
+
+
+def test_a_resumed_run_keeps_its_benchmark_exclusion():
+    doc = {"run_id": "r", "picek_exclude_benchmarks": "all",
+           "stages": [{"kind": "picek", "name": "picek-x-r", "spec": "fungitastic-beit-b384@15",
+                       "status": "done"}]}
+    assert trainer.resume_request(doc)["picek_exclude_benchmarks"] == "all"

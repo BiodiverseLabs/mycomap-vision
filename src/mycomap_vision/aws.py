@@ -306,7 +306,7 @@ print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'GPU', ok and torc
 sys.exit(0 if ok else 1)" || {{ echo "torch cannot use the GPU (driver older than its CUDA?)"; exit 1; }}
 # The run's own copy of the manifest; the downloader's shared one is never touched.
 aws s3 cp "s3://$BUCKET/$RUN/manifest-in.sqlite" data/manifest.sqlite
-# iNat's family per genus, beside the manifest where labels look for it (taxonomy.py);
+{picek_ids_cmd}# iNat's family per genus, beside the manifest where labels look for it (taxonomy.py);
 # without it the run labels families with .org's, as the laptop would not.
 mkdir -p data/taxonomy
 aws s3 cp "s3://$BUCKET/$RUN/{taxonomy_key}" data/taxonomy/inat_genera.sqlite \\
@@ -351,7 +351,8 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                              sample_records: int | None = None,
                              code_version: str = "unknown", spot: bool = False,
                              resume: bool = False, code_key: str = "code.tar.gz",
-                             picek: list[str] | None = None) -> str:
+                             picek: list[str] | None = None, picek_exclude: str = "match",
+                             picek_labels_hash: str | None = None) -> str:
     # The job is killed at max_hours, and stops itself STOP_MARGIN_HOURS before that so
     # it can upload what it finished; the backstop leaves 30 minutes on top for setup
     # and the log upload.
@@ -369,9 +370,42 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         backbones=",".join(backbones) or "none", methods=",".join(methods), size=size,
         test_days=test_days,
         finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "",
-        picek_arg=f" --picek {','.join(picek)}" if picek else "",
+        picek_arg=(f" --picek {','.join(picek)} --picek-exclude-benchmarks {picek_exclude}"
+                   + (" --picek-exclude-ids data/picek-exclude-ids.txt"
+                      if picek_exclude == "all" else "")
+                   + (f" --picek-labels-hash {picek_labels_hash}" if picek_labels_hash else "")
+                   if picek else ""),
+        picek_ids_cmd=(f'aws s3 cp "s3://$BUCKET/$RUN/{PICEK_IDS_KEY}" '
+                       "data/picek-exclude-ids.txt || exit 1\n"
+                       if picek and picek_exclude == "all" else ""),
         sample_arg=f" --sample-records {int(sample_records)}" if sample_records else "",
         spot_arg=" --spot" if spot else "", resume_arg=" --resume" if resume else "")
+
+
+PICEK_IDS_KEY = "picek-exclude-ids.txt"
+PICEK_LABELS_KEY = "picek-labels.json"
+
+
+def picek_launch_labels(conn, store_location: str, size: str, test_days: int, exclude: str,
+                        log=print) -> tuple[dict, set[str] | None]:
+    """The labels a Picek run will train on, read now from this manifest (launch time),
+    printed with the known label problems the manifest carries, and the ids to ship when
+    every benchmark is excluded. The instance checks it trains on the same (labels_hash)."""
+    from . import picek
+    if exclude not in picek.EXCLUDE_MODES:
+        raise ValueError(f"--picek-exclude-benchmarks is one of "
+                         f"{', '.join(picek.EXCLUDE_MODES)}")
+    ids = picek.exclusion_ids(conn, exclude)
+    data = picek.build_data(conn, store_location, size, test_days,
+                            picek.PicekConfig.val_days, exclude_ids=ids)
+    snap = picek.label_snapshot(conn, data, exclude)
+    log(picek.format_snapshot(snap))
+    problems = snap["known_label_problems"]
+    if problems["label_conflict_records"] or problems["names_left_for_a_person"]["groups"]:
+        log("WARNING: the manifest still carries known label problems (above). They are "
+            "Vision's labels too, so both models see the same; launch only once the "
+            "labelling is final (docs/PLAN.md, Picek replication, launch day).")
+    return snap, ids
 
 
 def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
@@ -564,6 +598,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                    allow_dirty: bool = False, allow_unpushed: bool = False,
                    spot: bool = False, spot_max_price: float | None = None,
                    resume: str | None = None, picek: list[str] | None = None,
+                   picek_exclude: str = "match", dry_run: bool = False,
+                   dry_run_dir: Path | None = None, ec2_check: bool = False,
                    log=print) -> dict:
     """Check the request, the time it needs and the commit it ships, all before anything
     is paid for; then upload the code and the manifest and start the instance.
@@ -572,7 +608,14 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     hour; none = the On-Demand price). `resume`: continue that run instead of starting a
     new one: same run id, its own backbones, fine-tunes, methods and manifest; the
     stages it finished are restored on the instance and only the others run (and are
-    all the estimate counts)."""
+    all the estimate counts).
+
+    `dry_run`: everything a launch checks and builds, with nothing sent and no instance:
+    the code archive, the instance script, the manifest copy and the Picek label snapshot
+    go into a local folder (`dry_run_dir`), the archive is checked for what the instance
+    needs, and the EC2 request is printed. Nothing goes to S3. With `ec2_check` the request
+    is also sent to EC2 with DryRun=True (needs `aws login`; checks permissions, quota and
+    the AMI; no instance, no cost)."""
     from . import trainer
     from .models import storage_name
     if spot_max_price is not None and not spot:
@@ -591,6 +634,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         req = trainer.resume_request(prev)
         backbones, finetune, methods = req["backbones"], req["finetune"], req["methods"]
         picek = req.get("picek") or []
+        picek_exclude = req.get("picek_exclude_benchmarks") or "match"
         size, test_days, sample_records, done = (req["size"], req["test_days"],
                                                  req["sample_records"], req["done"])
         log(f"Resuming run {resume} (state {prev.get('state')}, last written "
@@ -613,7 +657,16 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                                      sample_records))
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
+    labels, exclude_ids = (picek_launch_labels(conn, f"s3://{b}/", size, test_days,
+                                               picek_exclude, log)
+                           if picek else (None, None))
+    labels_hash = labels["labels_hash"] if labels else None
     sha = release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)
+    if dry_run:
+        return dry_run_launch(conn, sha, names, methods, max_hours, b, size, test_days, ft,
+                              sample_records, spot, spot_max_price, instance_type, picek,
+                              picek_exclude, labels, exclude_ids, photos, est,
+                              dry_run_dir, ec2_check, log)
     if prev is not None and prev.get("code_version") not in (None, sha):
         log(f"Note: run {resume} ran commit {str(prev.get('code_version'))[:10]}; the rest "
             f"runs commit {sha[:10]} (both are recorded in progress.json)")
@@ -645,6 +698,12 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         log(f"Uploaded commit {sha[:10]} and the manifest for run {run_id} "
             f"({photos:,} {size} photos in S3)")
         ship_taxonomy(s3, b, run_id, log)
+    if picek:
+        s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_LABELS_KEY}",
+                      Body=json.dumps(labels, indent=2).encode())
+        if exclude_ids is not None:
+            s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_IDS_KEY}",
+                          Body="\n".join(sorted(exclude_ids)).encode())
     if spot:
         log(SPOT_NOTE.format(run=run_id))
     ami = ssm.get_parameter(Name=TRAINER_AMI_PARAMETER)["Parameter"]["Value"]
@@ -655,7 +714,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     user_data = render_trainer_user_data(run_id, names, methods, max_hours, b, size, test_days,
                                          ft, sample_records, code_version=sha, spot=spot,
                                          resume=bool(resume), code_key=code_key,
-                                         picek=picek)
+                                         picek=picek, picek_exclude=picek_exclude,
+                                         picek_labels_hash=labels_hash)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price,
                                                      extra_gb=picek_cache_gb(picek, photos)),
@@ -665,10 +725,101 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             "spot_max_price": spot_max_price, "resumed": bool(resume),
             "region": region(), "backbones": names,
             "finetune": ft, "picek": list(picek or []), "methods": methods,
+            "picek_exclude_benchmarks": picek_exclude if picek else None,
+            "picek_labels": labels,
             "sample_records": sample_records,
             "code_version": sha, "max_hours": max_hours, "estimate_hours": est["total_hours"],
             "log": f"s3://{b}/runs/{run_id}/train.log",
             "progress": f"s3://{b}/runs/{run_id}/progress.json"}
+
+
+TRAINER_NEEDS = ("pyproject.toml", "requirements/trainer.txt", "src/mycomap_vision/cli.py",
+                 "src/mycomap_vision/trainer.py")
+
+
+def check_code_archive(body: bytes, picek: list[str] | None = None) -> dict:
+    """What the instance will unpack: refuse an archive without what the run needs (the
+    trainer, its pinned requirements, picek.py for a Picek run) and report the pins that
+    matter for a Picek run (timm, torch, torchvision)."""
+    with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as t:
+        names = set(t.getnames())
+        need = list(TRAINER_NEEDS) + (["src/mycomap_vision/picek.py"] if picek else [])
+        missing = [n for n in need if n not in names]
+        if missing:
+            raise RuntimeError(f"the code archive lacks {', '.join(missing)}: this commit can't "
+                               "run that job")
+        reqs = t.extractfile("requirements/trainer.txt").read().decode("utf-8")
+    pins = dict(re.findall(r"^(timm|torch|torchvision|pillow)==([^\s\\]+)", reqs, re.M))
+    if picek and "timm" not in pins:
+        raise RuntimeError("requirements/trainer.txt pins no timm: the Picek run needs it")
+    return {"files": len(names), "pins": pins}
+
+
+def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hours: float,
+                   bucket_name: str, size: str, test_days: int, ft: list[str],
+                   sample_records, spot: bool, spot_max_price, instance_type: str,
+                   picek: list[str] | None, picek_exclude: str, labels: dict | None,
+                   exclude_ids, photos: int, est: dict, dest: Path | None,
+                   ec2_check: bool, log=print) -> dict:
+    """The rest of launch_trainer with nothing sent (see its `dry_run`)."""
+    run_id = "dry-run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest = Path(dest or config.DATA_DIR / "aws" / run_id)
+    dest.mkdir(parents=True, exist_ok=True)
+    body = code_tarball(sha)
+    (dest / "code.tar.gz").write_bytes(body)
+    archive = check_code_archive(body, picek)
+    user_data = render_trainer_user_data(run_id, names, methods, max_hours, bucket_name, size,
+                                         test_days, ft, sample_records, code_version=sha,
+                                         spot=spot, picek=picek, picek_exclude=picek_exclude,
+                                         picek_labels_hash=labels["labels_hash"] if labels
+                                         else None)
+    (dest / "user-data.sh").write_text(user_data, encoding="utf-8", newline="\n")
+    syntax = None
+    import shutil
+    if shutil.which("bash"):
+        r = subprocess.run(["bash", "-n"], input=user_data.encode(), capture_output=True,
+                           timeout=60)
+        if r.returncode:
+            raise RuntimeError("the instance script is not valid bash: "
+                               + r.stderr.decode(errors="replace"))
+        syntax = "bash -n: ok"
+    snap = shippable_snapshot(conn, dest / "manifest-in.sqlite")
+    if labels is not None:
+        (dest / PICEK_LABELS_KEY).write_text(json.dumps(labels, indent=2), encoding="utf-8")
+    if exclude_ids is not None:
+        (dest / PICEK_IDS_KEY).write_text("\n".join(sorted(exclude_ids)), encoding="utf-8")
+    ami, root, snapshot_gb, ec2 = "<looked up at launch>", "/dev/sda1", 75, None
+    if ec2_check:
+        sess = session()
+        ec2, ssm = sess.client("ec2"), sess.client("ssm")
+        ami = ssm.get_parameter(Name=TRAINER_AMI_PARAMETER)["Parameter"]["Value"]
+        image = ec2.describe_images(ImageIds=[ami])["Images"][0]
+        root = image["RootDeviceName"]
+        snapshot_gb = next((m["Ebs"]["VolumeSize"] for m in image["BlockDeviceMappings"]
+                            if m.get("DeviceName") == root and "Ebs" in m), 100)
+    args = trainer_instance_args(run_id, ami, user_data, instance_type, root, snapshot_gb, spot,
+                                 spot_max_price, extra_gb=picek_cache_gb(picek, photos))
+    shown = {**args, "UserData": f"<{len(user_data):,} characters: user-data.sh>"}
+    (dest / "ec2-request.json").write_text(json.dumps(shown, indent=2), encoding="utf-8")
+    ec2_result = "not sent (pass --ec2-check, after aws login, to ask EC2 with DryRun=True)"
+    if ec2_check:
+        from botocore.exceptions import ClientError
+        try:
+            ec2.run_instances(**args, DryRun=True)
+            ec2_result = "unexpected: EC2 accepted a DryRun request without saying so"
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            ec2_result = ("ok: EC2 would start it (DryRunOperation)" if code == "DryRunOperation"
+                          else f"REFUSED: {code}: {e.response.get('Error', {}).get('Message')}")
+    out = {"dry_run": True, "folder": str(dest), "commit": sha, "code_archive": archive,
+           "instance_script": syntax, "manifest_copy_mb": round(snap.stat().st_size / 2**20),
+           "picek": list(picek or []), "picek_exclude_benchmarks": picek_exclude if picek
+           else None, "picek_labels": labels, "estimate_hours": est["total_hours"],
+           "instance_type": instance_type, "disk_gb": args["BlockDeviceMappings"][0]["Ebs"][
+               "VolumeSize"], "ec2_request": str(dest / "ec2-request.json"), "ec2": ec2_result,
+           "sent": "nothing: no S3 upload, no instance"}
+    log(f"DRY RUN: nothing sent. Folder {dest}; EC2: {ec2_result}")
+    return out
 
 
 def pull_trainer(conn, run_id: str, log=print) -> dict:

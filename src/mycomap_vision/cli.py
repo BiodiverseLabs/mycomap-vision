@@ -119,13 +119,15 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         allow_dirty=args.allow_dirty,
                                         allow_unpushed=args.allow_unpushed,
                                         spot=args.spot, spot_max_price=args.spot_max_price,
-                                        resume=args.resume, picek=_split(args.picek)),
+                                        resume=args.resume, picek=_split(args.picek),
+                                        picek_exclude=args.picek_exclude_benchmarks,
+                                        dry_run=args.dry_run, ec2_check=args.ec2_check),
                      indent=2))
 
 
 # What a resumed run takes from the run itself, not from the command line.
 RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records",
-                   "picek")
+                   "picek", "picek_exclude_benchmarks")
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -148,7 +150,10 @@ def cmd_aws_train_job(conn, args) -> None:
                           args.run_id, size=args.size, test_days=args.test_days,
                           batch_size=args.batch_size, readers=args.readers,
                           finetune=_split(args.finetune), sample_records=args.sample_records,
-                          picek=_split(args.picek), should_stop=should_stop, interrupted=watcher,
+                          picek=_split(args.picek), should_stop=should_stop,
+                          picek_exclude=args.picek_exclude_benchmarks,
+                          picek_ids_file=args.picek_exclude_ids,
+                          picek_labels_hash=args.picek_labels_hash, interrupted=watcher,
                           resume=trainer.RunFiles(store.client, store.bucket)
                           if args.resume else None)
     if watcher is not None:
@@ -667,7 +672,8 @@ def cmd_picek_train(conn, args) -> None:
                             val_days=args.val_days, val_max_photos=args.val_max_photos,
                             workers=args.workers, max_steps=args.max_steps,
                             grad_checkpointing=False if args.no_grad_checkpointing else None,
-                            seed=args.seed, cache_px=args.cache_px)
+                            seed=args.seed, cache_px=args.cache_px,
+                            exclude_benchmarks=args.exclude_benchmarks)
     meta = picek.train(conn, open_store(args.source, config.DATA_DIR), args.size, name, cfg,
                        test_days=args.test_days)
     print(json.dumps({k: v for k, v in meta.items() if k != "history"}, indent=2))
@@ -789,6 +795,16 @@ def main(argv: list[str] | None = None) -> int:
                         "as preset[@epochs[@cache_px]], e.g. fungitastic-beit-b384@15@440 "
                         "(15 epochs from a 440 px photo cache); add the methods "
                         "classifier,classifier+month to score it")
+    p.add_argument("--picek-exclude-benchmarks", default="match", choices=["match", "all"],
+                   help="benchmark records the replication leaves out: match (default) = "
+                        "exactly what the Vision models leave out (sealed benchmarks), so "
+                        "both train on the same records; all = every benchmark's records")
+    p.add_argument("--dry-run", action="store_true",
+                   help="check and build everything locally (code archive, instance script, "
+                        "manifest copy, label snapshot, EC2 request) and send nothing")
+    p.add_argument("--ec2-check", action="store_true",
+                   help="with --dry-run: also ask EC2 with DryRun=True (needs aws login; no "
+                        "instance, no cost)")
     p.add_argument("--allow-over-time", action="store_true",
                    help="launch even when the time estimate exceeds --max-hours (the run "
                         "stops at the limit and keeps the stages it finished)")
@@ -820,6 +836,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--readers", type=int, default=16, help="parallel photo reads from S3")
     p.add_argument("--finetune", default="")
     p.add_argument("--picek", default="")
+    p.add_argument("--picek-exclude-benchmarks", default="match", choices=["match", "all"])
+    p.add_argument("--picek-exclude-ids", help="the ids to leave out with 'all' (shipped)")
+    p.add_argument("--picek-labels-hash", help="refuse to train on other labels than these")
     p.add_argument("--sample-records", type=int)
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
@@ -859,6 +878,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--val-max-photos", type=int, help="cap the validation pass (smoke)")
     p.add_argument("--workers", type=int, default=6)
     p.add_argument("--no-grad-checkpointing", action="store_true")
+    p.add_argument("--exclude-benchmarks", default="match", choices=["match", "all"],
+                   help="match (default): leave out what the Vision models leave out "
+                        "(sealed benchmarks); all: every benchmark's records")
     p.add_argument("--cache-px", type=int,
                    help="resize the training photos once to this shorter side on local disk "
                         "(e.g. 440) and train from those; off by default")
