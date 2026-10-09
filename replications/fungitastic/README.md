@@ -1,7 +1,7 @@
 # Replicating FungiTastic and Danish Fungi 2020
 
 This folder is the starting point for the code we use to compare MycoMap Vision with
-the fungi classifiers of Lukas Picek's group (BVRA, University of West Bohemia). It
+the fungi classifiers of Lukáš Picek's group (BVRA, University of West Bohemia). It
 says what we ran, how we changed their method and why, and how to run it again.
 
 ## Their work
@@ -17,7 +17,7 @@ says what we ran, how we changed their method and why, and how to run it again.
   arXiv:2408.13632.
 - **Their code.** [BohemianVRA/FungiTastic](https://github.com/BohemianVRA/FungiTastic)
   (`baselines/closed_set/train.py`), which trains with the `fgvc` library
-  ([BohemianVRA/FGVC-Tools](https://github.com/BohemianVRA/FGVC-Tools)).
+  ([BohemianVRA/FGVC](https://github.com/BohemianVRA/FGVC)).
 - **Their published checkpoints**, on Hugging Face, licence **CC BY-NC 4.0**:
   - `BVRA/beit_base_patch16_384.in1k_ft_fungitastic_384`: FungiTastic, BEiT-B/16, 2,829 classes
   - `BVRA/vit_base_patch16_384.in1k_ft_fungitastic_384`: FungiTastic, ViT-B/16, 2,829 classes
