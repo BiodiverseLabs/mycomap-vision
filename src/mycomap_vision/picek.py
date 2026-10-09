@@ -44,9 +44,10 @@ What we must do differently, and why (also in docs/PLAN.md, "Picek replication")
   and is not trained on; their data has species labels only, too.
 - Seesaw's pairwise matrix is C x C in fgvc; with ~18,000 species that is 1.3 GB, so the
   same factors are formed per batch row (B x C), in log space. Same loss.
-- JPEG decoding uses PIL's draft mode (DCT scaling to the smallest size still at least
-  the crop), which leaves what the network sees at 384 px essentially unchanged and
-  roughly halves decode time on our 1024 px photos.
+- Training photos are decoded in PIL's draft mode (DCT scaling to the smallest size still
+  at least the crop: 1024 -> 512 px), which leaves what the network sees at 384 px
+  essentially unchanged and makes decoding cheaper. Validation decodes in full, exactly as
+  the embedding at test time does.
 - The metadata prior: month only (we have no habitat or substrate), smoothed (see
   MetadataPrior), and an optional coarse place prior that is OUR extension, kept as its
   own method so the paper can report their method and ours separately.
@@ -329,7 +330,8 @@ def make_datasets(train_location: str, val_location: str, data: "PicekData", pre
     size_px = preset.image_size
     return (Photos(train_location, data.train, train_transform(preset.augment, size_px),
                    draft=size_px),
-            Photos(val_location, val_items, eval_transform(size_px), draft=size_px))
+            # Full decode, exactly as the embedding at test time (embed.decode) reads it.
+            Photos(val_location, val_items, eval_transform(size_px), draft=None))
 
 
 # --- the loss -----------------------------------------------------------------------------
