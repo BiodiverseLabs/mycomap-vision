@@ -215,6 +215,7 @@ def train_head(ref: Reference, split: Split, cfg: TrainConfig | None = None,
     cfg = cfg or TrainConfig()
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
+    torch.cuda.manual_seed_all(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
     batcher = Batcher(ref, device)
     dim = batcher.vecs.shape[1]
@@ -331,7 +332,9 @@ def run_step2(conn, name: str, split_name: str = "dev", cfg: TrainConfig | None 
             results[(b, method, place, size)] = by
     out = judge_all(conn, name, [r for r, _ in queries], results,
                     baseline=model_key("nearest+mean"), ref=ref)
+    from .obsets import reference_hash
     out["reference"] = {"records": ref.records, "photos": int(len(ref.photo_ids)),
+                        "species": len(ref.index.species), "hash": reference_hash(ref),
                         "excluded_ids": len(exclude or ())}
     out["training"] = notes
     out["attention"] = attention
@@ -339,7 +342,8 @@ def run_step2(conn, name: str, split_name: str = "dev", cfg: TrainConfig | None 
     if out_dir is not None:
         stem = stem or f"obsets-step2-{split_name}"
         out["file"] = str(write_report(out, out_dir, stem,
-                                       {"training": notes, "seconds": out["seconds"]}))
+                                       {"training": notes, "seconds": out["seconds"],
+                                        "reference": out["reference"]}))
     return out
 
 

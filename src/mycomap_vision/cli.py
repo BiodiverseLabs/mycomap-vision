@@ -628,8 +628,19 @@ def cmd_obsets(conn, args) -> None:
 
     from . import heldout, obsets, obsets_head
     from .heldout_summary import format_summary
-    out_dir = heldout.bench_dir(conn, args.name) / "reports"
     log = lambda s: print(s, file=sys.stderr)  # noqa: E731
+    if args.action == "snapshot":
+        print(json.dumps(obsets.snapshot_manifest(config.MANIFEST_PATH, Path(args.to)), indent=2))
+        return
+    if args.action == "all":
+        out = obsets.run_all(Path(args.manifest), args.name, args.split,
+                             Path(args.exclude) if args.exclude else None, log=log)
+        print(json.dumps({k: v for k, v in out.items() if k != "time_slice"}, indent=2))
+        print(json.dumps(out["time_slice"], indent=2))
+        return
+    if getattr(args, "manifest", None):
+        conn = obsets.read_only(Path(args.manifest))
+    out_dir = heldout.bench_dir(conn, args.name) / "reports"
     exclude = obsets.read_id_list(Path(args.exclude)) if args.exclude else None
     tag = "-clean" if exclude else ""
     if args.action == "time-slice":
@@ -959,9 +970,21 @@ def main(argv: list[str] | None = None) -> int:
                                            "records against the older ones")
     q.add_argument("--name", default="heldout-2026-10-08")
     q.add_argument("--until", default="2026-09-07")
+    q = osub.add_parser("all", help="the whole experiment in one run (step1, step2 both "
+                                    "ways, time slice), with provenance: for a re-run on a "
+                                    "release")
+    q.add_argument("--name", default="heldout-2026-10-08")
+    q.add_argument("--split", choices=["dev", "test"], default="dev")
     for q in osub.choices.values():
         q.add_argument("--exclude", help="a file of observation ids (one per line) to leave "
                                          "out of the reference and the head's training data")
+        q.add_argument("--manifest", required=q.prog.endswith(" all"),
+                       help="the manifest to read (a stated snapshot or a release's), "
+                            "read-only; default: the configured one")
+    q = osub.add_parser("snapshot", help="copy the configured manifest (read-only, SQLite "
+                                         "backup) to a new file beside it, for a stated run")
+    q.add_argument("--to", required=True, help="the new file (never overwritten); keep it in "
+                                               "the manifest's folder")
 
     p = sub.add_parser("heldout", help="held-out benchmarks: freeze, fetch, predict, inat, "
                                        "report (heldout.py)")

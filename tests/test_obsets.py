@@ -236,3 +236,51 @@ def test_the_head_blend_check_scores_newer_records_against_older_ones_only():
     out = obsets_head.head_time_slice_check(ref, split, head, cfg, weights=(0.5,))
     assert out["records"] == len(split.val)
     assert set(out["methods"]) == {"nearest+mean", "set-head-top2", "blend:set-head-top2@0.5"}
+
+
+# --- reproducibility -----------------------------------------------------------------------
+
+def test_the_reference_hash_names_the_records_and_their_labels_not_their_order():
+    specs = [("1", "A a", "2026-01-01", [e(0)]), ("2", "B b", "2026-01-01", [e(1)])]
+    one, *_ = toy_reference(specs)
+    two, *_ = toy_reference(list(reversed(specs)))
+    relabelled, *_ = toy_reference([("1", "A c", "2026-01-01", [e(0)]), specs[1]])
+    assert obsets.reference_hash(one) == obsets.reference_hash(two)
+    assert obsets.reference_hash(one) != obsets.reference_hash(relabelled)
+
+
+def test_a_manifest_snapshot_is_a_full_copy_and_never_overwrites(tmp_path):
+    src = tmp_path / "manifest.sqlite"
+    c = sqlite3.connect(src)
+    c.execute("create table t (x)")
+    c.executemany("insert into t values (?)", [(i,) for i in range(5)])
+    c.commit()
+    c.close()
+    out = obsets.snapshot_manifest(src, tmp_path / "snap.sqlite")
+    assert sqlite3.connect(tmp_path / "snap.sqlite").execute("select count(*) from t").fetchone()[0] == 5
+    assert out["sha256"] == obsets.file_sha256(tmp_path / "snap.sqlite")
+    with pytest.raises(FileExistsError):
+        obsets.snapshot_manifest(src, tmp_path / "snap.sqlite")
+
+
+def test_nearest_plus_prior_here_is_the_served_nearest_plus_prior():
+    from functools import partial
+
+    from mycomap_vision.methods import AsLogProb, NearestSpecimen
+    from mycomap_vision.prior import Context, WithPrior
+    rng = np.random.default_rng(6)
+    ref, vecs, recs = _random_reference()
+    for r in recs:
+        r.latitude, r.longitude = float(rng.uniform(30, 50)), float(rng.uniform(-120, -70))
+        r.observed_on = f"2025-{rng.integers(1, 13):02d}-10"
+    ref = obsets.build_reference("toy", np.arange(len(vecs)), vecs, recs)
+    q = unit(rng.normal(size=(2, 8))).astype(np.float16)
+    ctx = Context(40.0, -100.0, "2025-06-10")
+    nearest = obsets.SetEngine(ref, device="cpu").scores(q)["nearest"]
+    got = obsets.with_prior(nearest, obsets.fit_prior(ref), ctx)
+    served = WithPrior(partial(AsLogProb, NearestSpecimen))
+    served.fit(vecs, ref.index, recs)
+    served.base.base.scorer.torch = None
+    served.base.base.scorer.ref = np.asarray(vecs[ref.index.cols], dtype=np.float16)
+    assert np.allclose(got, served.species_scores(q, ctx), atol=0.1)
+    assert np.argmax(got) == np.argmax(served.species_scores(q, ctx))

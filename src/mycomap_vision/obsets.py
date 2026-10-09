@@ -68,6 +68,7 @@ class Reference:
     rec_obs: np.ndarray        # (R,) iNat observation id
     rec_validated: np.ndarray  # (R,) validation date ('' when unknown)
     rec_observer: np.ndarray   # (R,)
+    source_records: list | None = None   # the evaluate.Records, in index order (for +prior)
 
     @property
     def records(self) -> int:
@@ -94,7 +95,7 @@ def build_reference(backbone: str, ids: np.ndarray, vecs: np.ndarray,
         col_rec, np.array([unit_of[r.unit] for r in recs], dtype=np.int64),
         np.array([r.observation_id for r in recs]),
         np.array([r.validated_on or "" for r in recs]),
-        np.array([r.observer or "" for r in recs]))
+        np.array([r.observer or "" for r in recs]), recs)
 
 
 def load_reference(conn: sqlite3.Connection, backbone: str = BACKBONE,
@@ -116,6 +117,50 @@ def read_id_list(path: Path) -> set[str]:
     """One observation id per line (blank lines and '#' comments ignored)."""
     return {line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.startswith("#")}
+
+
+def reference_hash(ref: Reference) -> str:
+    """The reference's identity by heldout.reference_summary's rule: sha1 of the backbone and
+    each record's observation id with its species, genus and family labels, sorted. Two runs
+    with the same hash answered from the same records under the same labels."""
+    import hashlib
+    idx = ref.index
+
+    def lab(rank, u):
+        i = idx.label_of[rank][u]
+        return idx.labels[rank][i] if i >= 0 else ""
+    lines = sorted(f"{o}\t{lab('species', u)}\t{lab('genus', u)}\t{lab('family', u)}"
+                   for o, u in zip(ref.rec_obs.tolist(), ref.rec_unit.tolist()))
+    h = hashlib.sha1(f"{ref.backbone}|".encode())
+    h.update("\n".join(lines).encode())
+    return h.hexdigest()[:12]
+
+
+def file_sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def snapshot_manifest(src: Path, dest: Path) -> dict:
+    """A consistent copy of a (live) manifest, read through a read-only connection with
+    SQLite's backup API. Put it in the same folder as the source: the taxonomy cache and the
+    benchmark folders are found beside the manifest."""
+    dest = Path(dest)
+    if dest.exists():
+        raise FileExistsError(f"{dest} exists: a snapshot is never overwritten")
+    s = read_only(src)
+    d = sqlite3.connect(dest)
+    try:
+        s.backup(d)
+    finally:
+        d.close()
+        s.close()
+    return {"source": str(src), "snapshot": str(dest), "taken_at": heldout.now_iso(),
+            "sha256": file_sha256(dest), "bytes": dest.stat().st_size}
 
 
 # --- set scores (torch, on the GPU when there is one) -------------------------------------
@@ -410,6 +455,23 @@ def write_report(out: dict, out_dir: Path, stem: str, extra: dict | None = None)
 
 # --- Step 1 run ------------------------------------------------------------------------
 
+PRIOR_TEMPERATURE = 0.02      # methods.AsLogProb's default, as METHODS["nearest+prior"]
+
+
+def fit_prior(ref: Reference):
+    """The range-and-season prior of `nearest+prior` (prior.RangeSeasonPrior) on `ref`."""
+    from .prior import RangeSeasonPrior
+    prior = RangeSeasonPrior()
+    prior.fit(ref.source_records or [], ref.index.species)
+    return prior
+
+
+def with_prior(nearest: np.ndarray, prior, context) -> np.ndarray:
+    """nearest+prior's score: nearest as log-probabilities plus the range-and-season score."""
+    from .methods import log_softmax
+    return log_softmax(nearest / PRIOR_TEMPERATURE) + prior.log_prior(context)
+
+
 def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone: str = BACKBONE,
               out_dir: Path | None = None, stem: str | None = None,
               weights=BLEND_WEIGHTS, limit: int | None = None,
@@ -419,6 +481,7 @@ def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone:
     log(f"  reference: {ref.records:,} records, {len(ref.photo_ids):,} photos, "
         f"{len(ref.index.species):,} groups ({time.time() - t0:.0f} s)")
     engine = SetEngine(ref)
+    prior = fit_prior(ref)
     queries = benchmark_queries(conn, name, split, ref)[:limit]
     log(f"  {split}: {len(queries):,} records to answer")
     results: dict[tuple, dict[str, dict]] = {}
@@ -429,6 +492,8 @@ def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone:
         s = engine.scores(q)
         for m, v in s.items():
             put(m, rec.observation_id, v)
+        results.setdefault(model_key("nearest+prior", backbone, "org"), {})[rec.observation_id] = \
+            ranked(with_prior(s["nearest"], prior, heldout.context_for(rec, "org")), ref.index)
         for m in STEP1[2:]:
             for w in weights:
                 put(f"blend:{m}@{w}", rec.observation_id, blend(s["nearest+mean"], s[m], w))
@@ -443,11 +508,13 @@ def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone:
     out = judge_all(conn, name, [r for r, _ in queries], results,
                     baseline=model_key("nearest+mean", backbone), ref=ref)
     out["reference"] = {"records": ref.records, "photos": int(len(ref.photo_ids)),
+                        "species": len(ref.index.species), "hash": reference_hash(ref),
                         "excluded_ids": len(exclude or ())}
     out["seconds"] = round(time.time() - t0, 1)
     if out_dir is not None:
         stem = stem or f"obsets-step1-{split}-{heldout.now_iso().replace(':', '').replace('-', '')[:15]}"
-        out["file"] = str(write_report(out, out_dir, stem, {"seconds": out["seconds"]}))
+        out["file"] = str(write_report(out, out_dir, stem, {"seconds": out["seconds"],
+                                                            "reference": out["reference"]}))
     return out
 
 
@@ -518,4 +585,64 @@ def time_slice_check(ref: Reference, until: str, weights=(0.5, 0.75, 0.9), log=p
                          for _l, _h, b in heldout_report.DEPTH_BUCKETS
                          if (np.array(depth) == b).any()}}
     out["depth_n"] = {b: int((np.array(depth) == b).sum()) for _l, _h, b in heldout_report.DEPTH_BUCKETS}
+    return out
+
+
+# --- the whole experiment as one command ---------------------------------------------------
+
+REPRODUCIBILITY = "exploratory-pre-freeze"
+
+
+def run_all(manifest: Path, name: str = "heldout-2026-10-08", split: str = "dev",
+            exclude_file: Path | None = None, out_dir: Path | None = None,
+            log=print) -> dict:
+    """Step 1, Step 2 (with the projection, and attention only) and the time-slice check
+    on one manifest (a stated snapshot or a release's), with the grid fixed in code
+    (BLEND_WEIGHTS, obsets_head.TrainConfig, time_slice_check's weights) and fixed seeds.
+    Writes obsets-all-<split>[-clean].json beside the per-step reports: every number with the
+    manifest's sha256, the reference hash, the code commit and the excluded list's sha256."""
+    from . import config, obsets_head
+    torch = _torch()
+    manifest = Path(manifest)
+    conn = read_only(manifest)
+    exclude = read_id_list(exclude_file) if exclude_file else None
+    tag = "-clean" if exclude else ""
+    out_dir = Path(out_dir) if out_dir else heldout.bench_dir(conn, name) / "reports"
+    t0 = time.time()
+    prov = {"reproducibility": REPRODUCIBILITY, "code_commit": config.code_version(),
+            "manifest": str(manifest), "manifest_sha256": file_sha256(manifest),
+            "benchmark": name, "split": split,
+            "exclude_file": str(exclude_file) if exclude_file else None,
+            "exclude_sha256": file_sha256(Path(exclude_file)) if exclude_file else None,
+            "excluded_ids": len(exclude or ()), "blend_weights": list(BLEND_WEIGHTS),
+            "head_config": obsets_head.TrainConfig().__dict__,
+            "command": (f"mv obsets all --manifest {manifest} --name {name} --split {split}"
+                        + (f" --exclude {exclude_file}" if exclude_file else ""))}
+    out = {"provenance": prov}
+    log(f"== step1 ({time.time() - t0:.0f} s)")
+    s1 = run_step1(conn, name, split, out_dir=out_dir, stem=f"obsets-step1-{split}{tag}",
+                   exclude=exclude, log=log)
+    out["step1"] = {"file": s1["file"], "reference": s1["reference"], "seconds": s1["seconds"]}
+    del s1
+    torch.cuda.empty_cache()
+    for label, project in (("step2", True), ("step2-attnonly", False)):
+        log(f"== {label} ({time.time() - t0:.0f} s)")
+        s2 = obsets_head.run_step2(conn, name, split,
+                                   cfg=obsets_head.TrainConfig(project=project),
+                                   out_dir=out_dir, stem=f"obsets-{label}-{split}{tag}",
+                                   exclude=exclude, log=log)
+        out[label] = {"file": s2["file"], "reference": s2["reference"],
+                      "training": {k: v for k, v in s2["training"].items() if k != "history"},
+                      "seconds": s2["seconds"]}
+        del s2
+        torch.cuda.empty_cache()
+    log(f"== time slice ({time.time() - t0:.0f} s)")
+    ref = load_reference(conn, BACKBONE, exclude)
+    out["time_slice"] = time_slice_check(ref, "2026-09-07")
+    out["time_slice"]["reference_hash"] = reference_hash(ref)
+    del ref
+    out["seconds"] = round(time.time() - t0, 1)
+    path = out_dir / f"obsets-all-{split}{tag}.json"
+    path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    out["file"] = str(path)
     return out
