@@ -411,3 +411,14 @@ def test_an_mo_record_mo_no_longer_answers_for_is_not_used(conn):
     mo_manifest(conn, [mo_image(610775, [236438])])
     conn.execute("update mo_observations set status = 'missing'")
     assert load_records(conn, {10**12 + 610775: 0}) == []
+
+
+def test_a_photo_another_record_still_uses_keeps_its_vectors(conn):
+    legacy_manifest(conn)
+    conn.execute("insert into observation_photos values ('456', 31, 1)")   # 31 is also 456's
+    out = export(conn, [org_row("123", "MO Observations"), org_row("456", "iNaturalist")])
+    assert out["source_migration"]["embeddings_removed"] == 1               # only 32's
+    assert {r[0] for r in conn.execute("select photo_id from embeddings")} == {31, 41, 51}
+    kept = conn.execute("select embeddings_json from source_removals where photo_id = 31"
+                        ).fetchone()[0]
+    assert json.loads(kept) == []

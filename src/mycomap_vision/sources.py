@@ -201,6 +201,10 @@ def migrate_legacy(conn: sqlite3.Connection, records: list[dict], code_version: 
     written to source_removals first (photos row, copies, embeddings as they were).
     The photos and photo_copies rows stay (they say what files we hold and under which
     licence) but nothing links to them, so nothing downloads, embeds or uses them.
+
+    Set-based: observation_photos and embeddings are keyed for lookups by record and by
+    backbone, not by photo, so each is read once against temp tables (a full manifest
+    has ~650k links and ~1.5M vectors).
     """
     ensure_schema(conn)
     if migrated(conn):
@@ -208,44 +212,77 @@ def migrate_legacy(conn: sqlite3.Connection, records: list[dict], code_version: 
     now = now or _now()
     plan = plan_legacy(conn, records)
     wrong = plan["wrong_records"]
-    removed_photos = 0
-    removed_vectors = 0
+    conn.execute("create temp table if not exists mig_keys "
+                 "(observation_id text primary key, org_source text, new_key text)")
+    conn.execute("create temp table if not exists mig_links "
+                 "(observation_id text, photo_id integer, position integer)")
+    conn.execute("delete from mig_keys")
+    conn.execute("delete from mig_links")
+    conn.executemany("insert into mig_keys values (?, ?, ?)",
+                     [(k, r["org_source"], r["observation_id"]) for k, r in wrong.items()])
+    conn.execute("insert into mig_links select op.observation_id, op.photo_id, op.position "
+                 "from observation_photos op join mig_keys k on k.observation_id = op.observation_id")
+    conn.execute("create index if not exists temp.mig_links_photo on mig_links(photo_id)")
+    # Photos also linked to a record that keeps them: their vectors stay.
+    shared = {pid for (pid,) in conn.execute(
+        "select distinct op.photo_id from observation_photos op join mig_links w "
+        "on w.photo_id = op.photo_id where op.observation_id not in "
+        "(select observation_id from mig_keys)")}
+
+    def grouped(sql: str) -> dict[int, list[dict]]:
+        out: dict[int, list[dict]] = {}
+        for row in _rows(conn, sql, ()):
+            out.setdefault(row["photo_id"], []).append(row)
+        return out
+
+    photo_rows = grouped("select p.* from photos p where p.photo_id in "
+                         "(select photo_id from mig_links)")
+    copies = grouped("select c.* from photo_copies c where c.photo_id in "
+                     "(select photo_id from mig_links)")
+    vectors = (grouped("select e.* from embeddings e join (select distinct photo_id from "
+                       "mig_links) w on w.photo_id = e.photo_id")
+               if _has_table(conn, "embeddings") else {})
+    links: dict[str, list[int]] = {}
+    for key, pid in conn.execute("select observation_id, photo_id from mig_links "
+                                 "order by observation_id, position"):
+        links.setdefault(key, []).append(pid)
+
+    audit = []
+    drop_vectors = set()
     for key, live in sorted(wrong.items()):
-        links = [pid for (pid,) in conn.execute(
-            "select photo_id from observation_photos where observation_id = ? order by position",
-            (key,))]
         reason = (f"org source {live['org_source']!r}: photos were iNat observation "
                   f"{key}'s, not this record's")
-        if not links:
-            conn.execute(
-                "insert into source_removals (observation_id, photo_id, org_source, new_key, "
-                "reason, removed_at, migration) values (?, null, ?, ?, ?, ?, ?)",
-                (key, live["org_source"], live["observation_id"], reason, now, MIGRATION))
-        for pid in links:
-            others = conn.execute(
-                "select count(*) from observation_photos where photo_id = ? and observation_id != ?",
-                (pid, key)).fetchone()[0]
-            photo = _rows(conn, "select * from photos where photo_id = ?", (pid,))
-            copies = _rows(conn, "select * from photo_copies where photo_id = ?", (pid,))
-            vectors = (_rows(conn, "select * from embeddings where photo_id = ?", (pid,))
-                       if not others and _has_table(conn, "embeddings") else [])
-            conn.execute(
-                "insert into source_removals (observation_id, photo_id, org_source, new_key, "
-                "reason, photo_json, copies_json, embeddings_json, removed_at, migration) "
-                "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (key, pid, live["org_source"], live["observation_id"], reason,
-                 json.dumps(photo[0] if photo else None), json.dumps(copies),
-                 json.dumps(vectors), now, MIGRATION))
-            if vectors:
-                conn.execute("delete from embeddings where photo_id = ?", (pid,))
-                removed_vectors += len(vectors)
-            removed_photos += 1
-        conn.execute("delete from observation_photos where observation_id = ?", (key,))
-        conn.execute("delete from inat_observations where observation_id = ?", (key,))
+        if not links.get(key):
+            audit.append((key, None, live["org_source"], live["observation_id"], reason,
+                          None, None, None, now, MIGRATION))
+        for pid in links.get(key, []):
+            kept = pid in shared
+            photo = photo_rows.get(pid, [None])[0]
+            audit.append((key, pid, live["org_source"], live["observation_id"], reason,
+                          json.dumps(photo), json.dumps(copies.get(pid, [])),
+                          json.dumps([] if kept else vectors.get(pid, [])), now, MIGRATION))
+            if not kept:
+                drop_vectors.add(pid)
+    conn.executemany(
+        "insert into source_removals (observation_id, photo_id, org_source, new_key, reason, "
+        "photo_json, copies_json, embeddings_json, removed_at, migration) "
+        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", audit)
+    removed_vectors = sum(len(vectors.get(p, [])) for p in drop_vectors)
+    if drop_vectors and _has_table(conn, "embeddings"):
+        conn.execute("delete from embeddings where photo_id in (select photo_id from mig_links) "
+                     "and photo_id in (select value from json_each(?))",
+                     (json.dumps(sorted(drop_vectors)),))
+    conn.execute("delete from observation_photos where observation_id in "
+                 "(select observation_id from mig_keys)")
+    conn.execute("delete from inat_observations where observation_id in "
+                 "(select observation_id from mig_keys)")
     detail = {"wrong_records": len(wrong), "by_source": plan["by_source"],
-              "photos_unlinked": removed_photos, "embeddings_removed": removed_vectors}
+              "photos_unlinked": sum(1 for a in audit if a[1] is not None),
+              "embeddings_removed": removed_vectors}
     conn.execute("insert into manifest_migrations (name, applied_at, code_version, detail) "
                  "values (?, ?, ?, ?)", (MIGRATION, now, code_version, json.dumps(detail)))
+    conn.execute("drop table mig_links")
+    conn.execute("drop table mig_keys")
     return detail
 
 
