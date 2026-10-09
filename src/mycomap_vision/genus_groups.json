@@ -1,0 +1,8 @@
+{
+  "about": "Genus groups for scoring only (name_equiv.py), never for training labels: genera recently split whose taxonomy is still fluid. A name in any genus of a group counts as that group's genus 's.l.' (sensu lato), and the same epithet under two of its genera as the same species. Add a group or a genus here; the tests read this file.",
+  "groups": {
+    "Cortinarius s.l.": ["Cortinarius", "Calonarius", "Phlegmacium", "Thaxterogaster", "Aureonarius",
+                         "Cystinarius", "Hygronarius", "Mystinarius", "Volvanarius"],
+    "Inocybe s.l.": ["Inocybe", "Inosperma", "Pseudosperma", "Mallocybe", "Nothocybe"]
+  }
+}

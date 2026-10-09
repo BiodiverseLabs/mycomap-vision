@@ -323,3 +323,36 @@ a non-burstable compute instance.
   were taken while throttled and don't count).
 - [ ] When traffic justifies it: answering on a non-burstable compute instance
   (e.g. c7i with AMX), or a GPU, for well under a second a photo.
+
+## Name equivalence for scoring (beta, 2026-10-09)
+
+Scoring only, never training labels. `name_equiv.py` gives every scorer the same three
+readings of "the species answer was right" and two of "the genus was right"; strict is
+the scoreboard's own top-1, and the others are extra columns beside it, never in its
+place. `mv compare --name-scores` (or `evaluate(..., name_scores=True)`) adds them to
+a run's report as `name_equivalence`, marked `beta`.
+
+- **strict**: the same name, its spellings folded together (names.py), as Vision's labels.
+- **s.l.**: strict, or two genera of one group with the same *described* epithet. Groups
+  live in `src/mycomap_vision/genus_groups.json`, easy to extend (Steve, for genera
+  recently split whose taxonomy is still fluid): Cortinarius s.l. (Calonarius,
+  Phlegmacium, Thaxterogaster, Aureonarius, Cystinarius, Hygronarius, Mystinarius,
+  Volvanarius) and Inocybe s.l. (Inosperma, Pseudosperma, Mallocybe, Nothocybe). A
+  provisional code is not joined across genera: codes are numbered within a genus, so
+  Calonarius sp. 'IN06' and Cortinarius sp. 'IN06' are usually two taxa. In the North
+  American reference set 46 described epithets appear under 2+ Cortinarius-group genera
+  and 1 (unicolor) under 2+ Inocybe-group genera; counted over all records the
+  benchmark session found 49 and 6.
+- **complex (beta)**: s.l., or genera of one group with the same epithet stem: a
+  described name and the provisional names split from it ('fallax' / 'fallax-PNW03'), two
+  provisional names on one stem ('schweinitzii-IN01' / '-IN02'), a species and its
+  subspecies or variety. The stem of a code is its lower-case start of 4+ letters
+  ('fallax-PNW03' -> fallax); a bare code ('CA04', 'PNW01') has none and never joins
+  anything. Steve: "we'll have to think about this more, but make a beta". Open
+  questions: Latin gender endings ('rimosa' / 'rimosum' are different stems today),
+  and whether complex should count when only the truth is provisional.
+- **genus strict / s.l.**: the same genus / genera of one group.
+
+On the benchmark session's audit (99 species-level held-out records, nearest top-1):
+species strict 40.4%, s.l. 40.4%, complex 43.4%; genus strict 77.0%, s.l. 80.0%.
+

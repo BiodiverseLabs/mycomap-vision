@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config, guests, likely, names, taxonomy
+from . import config, guests, likely, name_equiv, names, taxonomy
 from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
@@ -253,11 +253,13 @@ def fit_method(vectors: np.ndarray, ref: list[Record], method: str):
 
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
-             fitted=None, sets: bool = True) -> dict:
+             fitted=None, sets: bool = True, name_scores: bool = False) -> dict:
     """Score the test records. `fitted` (from fit_method) skips refitting, which matters
     for the trained methods. With `sets`, each rank's calibration also fits its likely
     set (likely.py): the probability floor for the highest useful coverage up to 90%,
-    with that coverage cross-checked on held-back halves."""
+    with that coverage cross-checked on held-back halves. With `name_scores`, the report
+    adds `name_equivalence` (name_equiv.py, beta): top-1 species strict / s.l. / complex
+    and genus strict / s.l., next to the strict top-1 it never replaces."""
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
@@ -270,6 +272,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     # Likely sets (likely.py) are fitted after the temperature: every scored record's rank
     # scores and true position (None: a name the reference set lacks, never listable).
     kept = {rank: [] for rank in RANKS}
+    equiv = {"species": Counter(), "genus": Counter()}
     # Weekly batches are lumpy (one big project, one prolific observer), so results
     # are also kept per project and per observer at genus and species.
     groups = {"project": defaultdict(Counter), "observer": defaultdict(Counter)}
@@ -291,6 +294,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             if sets:
                 kept[rank].append((rs.astype(np.float32), position[rank].get(t)))
             top = top_labels(rs, names[rank], top_k)
+            if name_scores and rank in ("species", "genus") and top:
+                eq = (name_equiv.species_match if rank == "species"
+                      else name_equiv.genus_match)(top[0], t)
+                equiv[rank]["n"] += 1
+                for k, v in eq.items():
+                    equiv[rank][k] += v
             for key in ("all", b):
                 c = tally[rank][key]
                 c["n"] += 1
@@ -309,6 +318,13 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                          f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
                      for k, c in tally[rank].items() if c["n"]}
     out["groups"] = {kind: summarise_groups(g) for kind, g in groups.items()}
+    if name_scores:
+        out["name_equivalence"] = {
+            "beta": True,
+            **{rank: {"n": c["n"], **{k: round(c[k] / c["n"], 4) if c["n"] else None
+                                      for k in (("strict", "sl", "complex") if rank == "species"
+                                                else ("strict", "sl"))}}
+               for rank, c in equiv.items()}}
     out["calibration"] = {
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
                "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
@@ -459,7 +475,7 @@ def save_run(conn: sqlite3.Connection, comparison_id: str, backbone: str, method
 
 def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
             test_days: int = 28, max_test: int | None = None, seed: int = 0,
-            embeddings_root=None, log=print) -> dict:
+            embeddings_root=None, name_scores: bool = False, log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
@@ -481,7 +497,8 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         for m in methods:
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
             fitted = fit_method(vecs, ref_b, m)
-            all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted)
+            all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted,
+                                  name_scores=name_scores)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted)
             runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
