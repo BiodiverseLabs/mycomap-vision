@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.2, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.3, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -11,10 +11,10 @@ a result comes from a small or interim test, the text says so.
 **Running head:** DNA-verified photo identification of fungi
 
 > **Where things stand.** Solid: the data pipeline, the full-data fine-tuned model, the
-> evaluation on the newest four weeks of validations (1,152 records), the reference-depth
-> analysis and the method comparisons. Still to do: the 13,145-record held-out benchmark with
-> the standard report, iNaturalist's computer vision on the same records, the location and
-> season prior, per-species (macro) metrics, open-set analysis, leakage checks, and the
+> evaluation on the newest four weeks of validations (1,152 records), the 13,145-record
+> held-out development benchmark (TABLES 5–6), the reference-depth analysis and the method
+> comparisons. Still to do: iNaturalist's computer vision on the same records, the iNat
+> occurrence prior, per-species (macro) metrics, open-set analysis, leakage checks, and the
 > separately validated ~1,000-record paper test set. See Appendix A (benchmark plan) and
 > Appendix B (next tests).
 
@@ -36,8 +36,10 @@ training cutoff, the identifier named the species correctly for [34.5–38.4]% o
 for [71.6–74.4]% and the family for [79.7–81.8]%. Accuracy depended chiefly on how many
 DNA-verified records the true species had: [13]% for species with one to four references against
 [66–68]% for species with more than 100. Reference depth, not the method, set most of the
-remaining error. [Comparison with iNaturalist's computer vision on the same records, held-out
-results and the effect of a location prior to be added.] Because reference depth grows weekly as
+remaining error. On 10,143 DNA-verified records that no model had seen (a development
+benchmark), species top-1 was [48.3]% with the nearest specimen and [54.2]% with the nearest
+specimen blended with the species average, and genus top-1 [80.1–83.5]%. [Comparison with
+iNaturalist's computer vision on the same records to be added.] Because reference depth grows weekly as
 records are sequenced, the identifier is updated nightly and its accuracy is reported by depth.
 
 **KEY WORDS:** barcoding; BioCLIP; citizen science; computer vision; deep learning; iNaturalist;
@@ -316,10 +318,14 @@ combination, so a perfect photo picker could gain about five points, but no sign
 
 ### Location and season
 
-A prior built from DNA-verified records alone did not help (development sample: species 24.2% with
-no prior, 22.0–23.1% with weights 0.1–1; held-out pilot: 45 to 47 of 95). In 22 of 95 pilot records
-the true species had no DNA-verified record within 300 km: verified records are too sparse to
-draw ranges. *[Occurrence-based prior: results on the development split to come.]*
+A prior built from DNA-verified records alone did not help on the small development sample
+(species 24.2% with no prior, 22.0–23.1% with weights 0.1–1), where in 22 of 95 pilot records the
+true species had no DNA-verified record within 300 km. On the full held-out benchmark it raised
+species top-1 from 48.3 to 51.2 (test split; 744 records fixed, 454 broken, *P* < 0.001) but
+left genus and family unchanged, and it lost to the blend of nearest specimen and species average
+(54.2; TABLE 5). It helped most for species with 5–19 references (32.0 → 39.4) and slightly hurt
+those with 100+ (71.3 → 69.7). *[iNat occurrence prior: tuning on the development split to
+come.]*
 
 ### Comparison with iNaturalist's computer vision
 
@@ -350,13 +356,71 @@ or beyond the 15-name cut). With `nearest+mean` the species list covers 60% (69%
 has references) with 4.1 names. *[To add: reliability diagrams, risk–coverage curves, coverage by
 depth band.]*
 
-### Held-out records
+### Held-out records (development benchmark, not the paper's test set)
 
-*[Pending: all 3,000 development and 10,145 test records with the standard report.]* A 100-record
-pilot (answer key = observation name): species 47.4%, genus 78.6%, family 86.5% (`nearest`). In a
-99-record audit, species accuracy was 12% for true species with fewer than 20 references and 63%
-for 20 or more. *Sensu lato* matching changed nothing at species (40.4%); species-complex matching
-gave 43.4%; genus *s.l.* gave 80% against 77% strict.
+13,145 DNA-verified records that no model had seen, in training or as references (Methods).
+Development split 3,000 records, test split 10,145; the test split was scored only to confirm
+choices made on development. These records are a development benchmark: the paper's own test set
+will be a fresh ~1,000 records sealed before any model sees them. Results are for the served
+fine-tuned model; iNaturalist's computer vision on these records is still running.
+
+**TABLE 5.** Test split (10,143 records with an answer key; 9,867 scored at species, 10,002 at
+genus). Percent right within the top 1 / 3 / 5 / 10 answers.
+
+| Method | | top 1 | top 3 | top 5 | top 10 |
+|---|---|---|---|---|---|
+| Nearest specimen | species strict | 48.3 | 67.0 | 73.6 | 80.5 |
+| | species *s.l.* | 48.3 | 67.0 | 73.6 | 80.6 |
+| | species complex (beta) | 51.3 | 69.2 | 75.4 | 81.8 |
+| | genus strict | 80.1 | 91.0 | 93.7 | 95.8 |
+| | genus *s.l.* | 80.8 | 91.2 | 93.8 | 95.9 |
+| Nearest + species average | species strict | **54.2** | **72.0** | **77.4** | **83.4** |
+| | species *s.l.* | 54.2 | 72.0 | 77.4 | 83.4 |
+| | species complex (beta) | 57.2 | 73.9 | 79.0 | 84.4 |
+| | genus strict | **83.5** | **92.8** | **94.7** | **96.3** |
+| | genus *s.l.* | 84.1 | 92.9 | 94.7 | 96.3 |
+| Nearest + DNA-record range and season | species strict | 51.2 | 69.3 | 75.8 | 82.1 |
+| | species complex (beta) | 53.7 | 71.2 | 77.4 | 83.3 |
+| | genus strict | 80.1 | 90.9 | 93.6 | 95.8 |
+
+Family top-1: 86.8 (nearest), 89.5 (nearest + species average), 86.5 (with range and season).
+Species top-1 with 95% intervals clustered by observer: 48.3 (45.7–50.6), 54.2 (51.6–56.7),
+51.2 (48.6–53.6).
+
+**TABLE 6.** Species top-1 (top-5) by the true species' reference records, test split.
+
+| Reference records (finds) | Nearest | Nearest + species average | Nearest + range and season |
+|---|---|---|---|
+| 0 (344) | 0.3 (0.3) | 0.3 (0.3) | 0.3 (0.3) |
+| 1–4 (1,075) | 14.5 (33.5) | 19.2 (39.6) | 17.6 (39.4) |
+| 5–19 (2,241) | 32.0 (64.9) | 40.9 (73.7) | 39.4 (69.2) |
+| 20–99 (4,512) | 59.4 (86.2) | 66.2 (88.8) | 62.0 (87.3) |
+| 100+ (1,695) | 71.3 (92.0) | 73.2 (91.6) | 69.7 (92.4) |
+
+**The blend holds up on records it was not chosen on.** On the development split, nearest +
+species average raised species top-1 from 48.3 to 52.8 (235 records fixed, 104 broken; McNemar
+*P* < 0.001) and genus from 79.0 to 81.7, gaining in every band with references except 100+, where
+it lost 11 of 483 records (70.2 → 67.9). On the test split it gained in every band including
+100+ (898 fixed, 308 broken at species; 545 / 200 at genus; both *P* < 0.001). Whether it becomes
+the identifier's default is pending a decision.
+
+**Accuracy is higher here than on the newest weeks (TABLE 3)** mainly because the mix of depth
+differs: 3.5% of these finds belong to species with no reference record, against 12% of the
+newest weeks', and 17% to species with 100+ records against 9%. Within each band the two tests
+are similar (for example 1–4 references: 14.5 vs 12.6; 20–99: 59.4 vs 54.1).
+
+**Name matching.** *Sensu lato* matching (recent genus splits, gender endings) changed species
+accuracy by at most 0.1 point in any cell, so folding gender endings moved almost no records;
+genus *s.l.* adds 0.6–0.7 points. Species-complex matching adds about 3 points at top 1, the
+share of answers that are near misses within a complex.
+
+**Likely-name lists** on the test split: family 95% coverage with 1.7
+names (nearest) or 1.4 (blend); genus 94% with 3.5 or 2.5; species 70% with 3.4 (nearest) and
+77% with 4.0 (blend).
+
+Earlier, smaller checks pointed the same way: a 100-record pilot gave species 47.4%, genus 78.6%,
+family 86.5% (`nearest`), and a 99-record audit gave 12% species accuracy for true species with
+fewer than 20 references against 63% for 20 or more.
 
 ### Speed and cost
 
@@ -537,8 +601,8 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 
 | # | Benchmark | Status | Plan |
 |---|---|---|---|
-| A1 | Top-1/top-5 at species, genus, family, per find, on the temporal and held-out sets | 🟡 | Temporal done; held-out via `mv heldout report` |
-| A2 | 95% intervals, bootstrap clustered by observer; paired McNemar tests for every comparison | 🟡 | Wilson intervals and McNemar in the report; add observer-clustered bootstrap |
+| A1 | Top-1/top-5 at species, genus, family, per find, on the temporal and held-out sets | ✅ | Temporal (TABLE 3) and held-out development benchmark (TABLES 5–6); paper test set later |
+| A2 | 95% intervals, bootstrap clustered by observer; paired McNemar tests for every comparison | 🟡 | Done for the held-out benchmark; add to the temporal comparisons |
 | A3 | **Macro (per-species) accuracy and macro-F1** beside micro, overall and per depth band, with species and record counts per band. Macro-F1 is the headline metric of DF20 and FungiTastic | ⬜ | Add to the report; tie bands to the long-tail protocol (many / medium / few / zero) and explain why ours count records, not images |
 | A4 | **Leakage control**: near-duplicate photos between test and reference, same observer and day, observer-disjoint analysis, prior's occurrence data excludes test records | 🟡 | Report has same-observer/day and identical-file breakdowns; add observer-disjoint scores and duplicate counts |
 | A5 | Paired comparison with **iNaturalist CV** on the same records, with the training-contamination caveat | 🟡 | 2,000-record subsample running; snapshot iNat IDs and model version for the paper set |
@@ -582,9 +646,8 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 
 # APPENDIX B. Next tests (in order)
 
-1. **"Before" number on the 3,000 development records** with the served model: nearest,
-   nearest+mean and nearest+prior, in the standard summary (top 1/3/5/10 × strict/*s.l.*/complex;
-   species by depth band; iNat on the same records). Confirms or rejects `nearest+mean`.
+1. ~~**"Before" number on the development records**~~ Done 9 October (TABLES 5–6):
+   `nearest+mean` confirmed on development and test; default pending a decision.
 2. **Finish iNat CV on the 2,000-record subsample**, then on TABLE 3's records.
 3. **Tune the occurrence prior** on development, check on test; count how often it penalizes the
    true species.
@@ -651,6 +714,9 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.3 (9 Oct 2026).** Held-out development benchmark results (TABLES 5–6): nearest + species
+  average confirmed (species 48.3 → 54.2 on test); the DNA-record prior helps species by ~3 points
+  on the full set but not genus; *s.l.* matching moves almost nothing. Abstract updated.
 - **0.2 (9 Oct 2026).** Clarified that the classifiers which lost were small heads on fixed
   features, not a fully trained classifier; added A12 (Danish Fungi method on our data), A13 (fair
   comparison with models lacking provisional names), A14 (per photo and per find), B9 (poisonous
