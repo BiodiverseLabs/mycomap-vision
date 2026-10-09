@@ -470,10 +470,15 @@ rows limited to the published model's list are a lower bound for that setting, b
 Through the crosswalk the published models' species top-1 on formal names rises to 14.7–15.8%.
 
 **Cautions.** (i) The crosswalk numbers need a spot-check for over-joins (for example
-*Agaricus solidipes* matched to *Panaeolus antillarum*). (ii) Species-complex scoring credits the
-published models a little more than strict on formal names (DF20 13.3% vs 12.6%); the effect is
-larger where European names are credited against North American codes split from them [to
-quantify]. (iii) Scored per image, as their own
+*Agaricus solidipes* matched to *Panaeolus antillarum*). (ii) Species-complex scoring flatters a model
+without provisional names. On formal names it adds little (DF20 12.6% strict, 13.3% complex), but
+on all development records with a species-level truth (n 2,918, provisional codes included) DF20
+goes from 7.8% strict to 12.7% complex (95% intervals 6.9–8.9 and 11.5–13.9). The extra credit
+comes from European names matched by epithet stem against North American codes split from them
+(a "fallax" answer against a fallax-like provisional code), so it partly rewards naming the parent
+of a provisional split. For outside models we therefore report complex scores on formal names
+only. On the same 2,918 records Vision scores 48.3% (nearest) and 52.8% (with the species
+average) strict. (iii) Scored per image, as their own
 papers report, the published models reach 10.5, 9.8 and 9.2% species top-1 on these records.
 (iv) This compares their published models on our region; it does not test their method trained
 on our records, which is the replication A12.
