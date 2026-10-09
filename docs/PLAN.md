@@ -262,6 +262,95 @@ Inputs (read-only prod queries) are in `data/benchmarks/heldout-2026-10-08/`: po
   benchmark's records against what the model trained on, not only against the
   reference index it answers from.
 
+## Uninformative photos: drop or down-weight? (experiment, 2026-10-09)
+
+Steve asked (after the 100-record held-out audit) whether photos dominated by a
+voucher slip, a basket of several fungi or habitat should be dropped or weighted
+down when `nearest` averages a record's photos. Answer: **no rule earns a change.**
+Every rule moves a handful of records each way, and even perfect hand labels gain
+nothing. What marks these records is low confidence, and the confidence is
+already honest about it. This repeats the 2026-09-29 finding on the 8,000-record
+sample (about 1 point at most), now on the full-run model.
+
+**Setup.** Model bioclip-2-ft-20261007-165400, method `nearest`, two sets:
+comparison 20261008-012435-4ef7b0 (rebuilt exactly, record set 4ef7b0035bc9: 1,152
+test records validated after 2026-09-07, 152,915 reference records, 3.6 photos per
+record) and the 100 held-out dev records of the 2026-10-09 audit (re-embedded from
+the saved large photos, scored against the whole manifest like the Identify page;
+top species matched the audit for 100 of 100). Each test photo's best similarity to
+every species was stored once (float32, CPU, as the server scores). A rule only
+changes how much each photo counts in the mean. Settings were chosen on 4ef7b0 (by
+net records fixed over the three ranks) and then scored on the audit. Paired counts
+are vs today's plain mean: +fixed / -broken, \* = sign test p < 0.05. Calibration is
+species NLL and ECE (10 bins) at each rule's own fitted temperature. Base on 4ef7b0:
+34.3 / 71.6 / 79.5 species / genus / family, NLL 3.219, ECE 0.064 (published
+34.5 / 71.6 / 79.7; the laptop's vectors were pulled 19 minutes after 4ef7b0 ran,
+so they differ by 2 species records. Temperatures and NLL match to 4 decimals). Base
+on the audit: 40.4 / 77.8 / 90.6.
+
+| rule (best setting on 4ef7b0) | 4ef7b0 species | genus | family | sp NLL | audit species / genus / family |
+|---|---|---|---|---|---|
+| (a) drop a photo whose best match to any reference photo is < 0.52 | 34.3 (+2/-3) | 71.4 (+1/-3) | 79.7 (+3/-1) | 3.209 | no change |
+| (a) same, stricter floor 0.65 | 33.5 (+13/-22) | 70.7 (+16/-26) | 78.9 (+14/-21) | 3.266 | - |
+| (a') drop a photo > 0.15 below the record's best photo | 34.3 (+11/-11) | 71.3 (+7/-10) | 79.3 (+6/-8) | 3.299 | -1 / 0 / 0 |
+| (b) weight by the photo's own confidence^0.25 | 34.7 (+6/-2) | 71.3 (+5/-8) | 79.6 (+7/-6) | 3.195 | +1 / +1 / +1 |
+| (b) weight by peak-to-second margin^0.25 | 34.7 (+9/-5) | 71.6 (+13/-13) | 79.9 (+14/-9) | 3.209 | 0 / -2 / -1 |
+| (b) weight exp(best match / 0.1) | 34.0 (+18/-22) | 70.9 (+18/-25) | 79.8 (+19/-15) | 3.272 | -2 / -1 / 0 |
+| (c) 3+ photos: drop a photo whose top genus no other photo shares | 33.5 (+11/-20) | 71.0 (+14/-20) | 79.0 (+13/-19) | 3.246 | 0 / 0 / 0 |
+| (c) same at species | 34.0 (+15/-19) | 70.9 (+10/-18) | 78.5 (+5/-16\*) | 3.274 | - |
+| (d) few-shot slip detector: drop slip photos | 34.5 (+7/-5) | 71.7 (+6/-4) | 79.8 (+6/-3) | 3.181 | (trained on the audit) |
+| (d) few-shot: drop slip + habitat photos | 34.6 (+10/-7) | 71.6 (+9/-8) | 79.8 (+10/-6) | 3.179 | - |
+
+Stronger versions of every rule lose, often significantly: margin^2 32.3 (+26/-49\*),
+exp(best / 0.01) 30.7 (+32/-73\*), keeping only photos within 0.03 of the record's best
+31.2 (+25/-60\*). (d): BioCLIP 2's own text tower (prompts on the stored base vectors)
+called no photo a slip or basket, and its habitat tag hurt (drop: 33.3, +2/-14\*). So
+the detector is a 5-nearest-neighbour vote over the hand labels below (16 of its 21
+slip calls on the audit right, leave-one-record-out). It flags 222 of 4,165 4ef7b0
+photos as slips. Its small gains, like those of confidence^0.25, are spread over
+projects and observers. None reaches significance.
+
+**Hand labels (the 369 audit photos).** 28 are slip-dominated (24 with the specimen
+on or beside the slip, 4 without), 2 show a basket of several fungi (both in
+Volvopluteus 334798553), 19 are habitat (specimen tiny or out of view), and 4 are a
+spore print or microscope screen. 36 of the 100 records have at least one. Each
+photo alone, species / genus right: specimen photos 28% / 67%, slip with specimen
+12% / 42%, habitat 0% / 11%, slip-only, basket and microscope 0% / 0%. Mean best match
+to any reference photo: specimen 0.715, slip 0.59-0.64, habitat 0.639, basket 0.592,
+microscope 0.824 (the reference set holds microscope photos too, so a similarity
+floor cannot catch them, and it would drop slip photos that still carry the
+specimen). **Oracle: dropping exactly the hand-labelled photos**, all kinds: species
+40.4 (+2/-2), genus 76.8 (+2/-3), family 89.6 (+1/-2). Slip photos only: species
++1/-1, genus +1/-3. Habitat only: species 0/-1, genus +1/0. Microscope only: species
++1/0. Even a perfect detector would not move the numbers.
+
+**What the audit's "every photo points elsewhere" records are.** 36 records by this
+count (35 in the audit's name matching), 102 photos: 88 are ordinary specimen photos,
+10 slip-with-specimen, 1 slip-only, 1 habitat, 2 basket. Only 11 of the 36 have any
+non-specimen photo. These are look-alikes the model is unsure of (in 6 of them every
+photo agrees on the genus), not records spoiled by slips. In Volvopluteus 334798553
+the specimen is in all three photos, next to the slip and a yellow neighbour from
+the basket. A slip filter would drop every photo there, and the rule falls back to
+all of them. On 4ef7b0 such records (362 of 1,121) have mean confidence 0.18 and are
+right 22.7% of the time; the rest 0.35 and 39.9%. On the audit: 0.29 and 25.7% vs
+0.45 and 48.4%. The confidence already says "unsure" for them, at about the right
+rate.
+
+**Headroom.** Some single photo's top species is right in 40.9% of 4ef7b0 records
+(combined: 34.3%) and in 45.5% of the audit (40.4%). So a perfect photo picker
+could add ~5 points, but no signal tried here (similarity, margin, confidence,
+agreement between photos, photo kind) finds that photo better than the plain mean.
+
+**Decision for Steve.** Recommend no change to `nearest`. If one rule is ever
+wanted, the least risky are dropping detected slip photos (net +2 / +2 / +3 on
+4ef7b0, with no independent check because the detector learned from the audit) or a
+mild confidence^0.25 weight (+4 species but -3 genus on 4ef7b0, +1 at each rank on
+the audit). Both are within noise. Better levers for these records: the page's
+existing hint asking for clear underside and stem photos when two species are
+close, the species-complex score for look-alikes, and more references for sparse
+species. Scripts and hand labels live in this session's
+scratchpad, not the repo (the labels point at private audit photos).
+
 ## Phase 1: a better identifier
 
 - Photo view tagging: a cheap LLM labels a seed set, a small head on the
