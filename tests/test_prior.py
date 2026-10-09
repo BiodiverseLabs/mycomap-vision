@@ -128,3 +128,44 @@ def test_similarity_methods_also_come_with_the_prior_on_a_log_probability_scale(
     test = [rec("t-w", "Lookus occidentalis", 40.2, -120.1, "2026-04-18", rows=[len(ref)],
                 vdate="2026-09-20")]
     assert evaluate(vecs, ref, test, method="nearest+prior")["species"]["all"]["top1"] == 1.0
+
+
+def test_untuned_prior_still_sums_place_and_season_and_caps_them_together():
+    here_and_now = Context(40.3, -80.2, "2025-10-01")
+    p = fitted()
+    place, season = p.terms(here_and_now)
+    assert np.allclose(p.log_prior(here_and_now), np.clip(place + season, -p.cap, p.cap))
+
+
+def test_tuned_prior_caps_place_and_season_each_then_weights_them():
+    # exp/prior-tuning: each term capped on its own, then weighted (0.5 each by default).
+    here_and_now = Context(40.3, -80.2, "2025-10-01")
+    p = RangeSeasonPrior(place_weight=0.5, season_weight=0.25, cap=0.3)
+    p.fit(EAST + WEST, SPECIES)
+    place, season = p.terms(here_and_now)
+    want = 0.5 * np.clip(place, -0.3, 0.3) + 0.25 * np.clip(season, -0.3, 0.3)
+    assert np.allclose(p.log_prior(here_and_now), want)
+    assert not np.allclose(want, np.clip(place + season, -0.3, 0.3))
+
+
+def test_an_unknown_prior_setting_is_refused():
+    import pytest
+    with pytest.raises(TypeError):
+        RangeSeasonPrior(place_wieght=0.5)
+
+
+def test_nearest_mean_prior_uses_the_settings_tuned_on_development():
+    from mycomap_vision.priortune import CHOSEN_CONFIDENCE_TEMPERATURE, CHOSEN_DNA_PRIOR
+    m = METHODS["nearest+mean+prior"]()
+    assert m.name == "nearest+mean+prior" and m.needs_context
+    assert m.prior_settings == CHOSEN_DNA_PRIOR
+    # Its own confidence temperature, never the cosine 0.02 that stated ~100% for all.
+    assert m.confidence_temperature == CHOSEN_CONFIDENCE_TEMPERATURE > 1.0
+    ref = [rec(r.observation_id, r.species, r.latitude, r.longitude, r.observed_on,
+               rows=[i]) for i, r in enumerate(EAST + WEST)]
+    vecs = np.tile(np.array([[1.0, 0.0]], dtype=np.float16), (len(ref) + 2, 1))
+    test = [rec("t-e", "Lookus orientalis", 40.2, -80.1, "2026-10-03", rows=[len(ref)],
+                vdate="2026-09-20"),
+            rec("t-w", "Lookus occidentalis", 40.2, -120.1, "2026-04-18", rows=[len(ref) + 1],
+                vdate="2026-09-20")]
+    assert evaluate(vecs, ref, test, method="nearest+mean+prior")["species"]["all"]["top1"] == 1.0

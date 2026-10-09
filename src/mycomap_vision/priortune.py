@@ -66,6 +66,15 @@ COMBINED_FIXED = {"radius_km": 1500.0, "genus_rule": True, "density_km": 150.0,
 # at log 20, weight 1. Scored as the reference, never chosen.
 AS_SHIPPED = {"family": "dna-as-shipped"}
 
+# What the declared procedure chose on all of heldout-2026-10-08's development split
+# (2,986 records; the whole grid, family included), as RangeSeasonPrior settings for
+# methods' `nearest+mean+prior`. Cross-validated estimate of that procedure: species
+# top-1 55.1% vs 52.8% for nearest+mean (docs/experiments/2026-10-09-prior-tuning.md).
+CHOSEN_DNA_PRIOR = {"bandwidth_km": 150.0, "bandwidth_days": 10.0, "cap": LOG20,
+                    "place_weight": 0.5, "season_weight": 0.5}
+# Its confidence temperature on the log-probability scale, fitted on the same records.
+CHOSEN_CONFIDENCE_TEMPERATURE = 1.52
+
 RADII = tuple(OCC_GRID["radius_km"])
 PLACE_KM = tuple(DNA_GRID["place_km"])
 SEASON_DAYS = tuple(DNA_GRID["season_days"])
@@ -290,9 +299,10 @@ def fit_temperature(c: Components, z: np.ndarray, rows: np.ndarray) -> float:
     return float(T_GRID[int(np.argmin(total))]) if used else 1.0
 
 
-def top_confidence(c: Components, z: np.ndarray, T: float) -> np.ndarray:
-    """(n,) stated confidence of the top species at temperature T."""
-    zz = _species_logits(c, z) / T
+def top_confidence(c: Components, z: np.ndarray, T) -> np.ndarray:
+    """(n,) stated confidence of the top species at temperature T (one, or one per row)."""
+    T = np.asarray(T, dtype=np.float64)
+    zz = _species_logits(c, z) / (T[:, None] if T.ndim == 1 else T)
     m = np.max(zz, axis=1, keepdims=True)
     e = np.exp(zz - m)
     return 1.0 / e.sum(axis=1)

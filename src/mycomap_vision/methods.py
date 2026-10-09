@@ -347,6 +347,15 @@ for _base in (LinearHead, Hybrid):
 for _base in (NearestSpecimen, SpeciesMean):
     METHODS[f"{_base.name}+prior"] = partial(WithPrior, partial(AsLogProb, _base))
 
+# nearest+mean with the DNA-record prior at the settings tuned on the held-out
+# development split (exp/prior-tuning: place and season each capped, weight 0.5 each,
+# season kernel 10 days). Experimental, like nearest+mean.
+from .priortune import CHOSEN_CONFIDENCE_TEMPERATURE, CHOSEN_DNA_PRIOR  # noqa: E402
+
+METHODS["nearest+mean+prior"] = partial(
+    WithPrior, partial(AsLogProb, NearestAndMean), prior_settings=CHOSEN_DNA_PRIOR,
+    confidence_temperature=CHOSEN_CONFIDENCE_TEMPERATURE)
+
 # And with the iNat occurrence prior (occprior.py): a wide berth for out of range,
 # gentle place and season. Needs an occurrence store (mv build-occurrence).
 from .occprior import WithOccurrence  # noqa: E402
