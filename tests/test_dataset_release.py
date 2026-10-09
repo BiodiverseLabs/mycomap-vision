@@ -595,3 +595,15 @@ def test_verify_recomputes_the_content_not_only_the_file_hashes(world):
     (folder / dr.MANIFEST).write_text(json.dumps(man), encoding="utf-8")
     with pytest.raises(dr.ReleaseError, match="content hashes differ"):
         dr.verify(m["id"], world["root"])
+
+
+def test_the_taxonomy_snapshot_is_an_input_of_the_release(world):
+    """iNat's families per genus shape labels: the build reads the cache beside the
+    manifest and records its hash, so a changed taxonomy shows in the release."""
+    from mycomap_vision import taxonomy
+    m = build(world)
+    assert m["inputs"]["manifest"]["taxonomy_sha256"] is None
+    cache = world["path"].parent / taxonomy.CACHE
+    taxonomy.open_cache(cache).close()
+    m2 = build(world)
+    assert m2["inputs"]["manifest"]["taxonomy_sha256"] == dr.sha256_file(cache)

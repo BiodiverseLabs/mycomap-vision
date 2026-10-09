@@ -709,6 +709,15 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
         shutil.rmtree(work)
     try:
         snap = snapshot_manifest(manifest_path, work / "manifest.sqlite")
+        # iNat's families per genus (taxonomy.py) shape the labels: copied beside the copy,
+        # so taxonomy.for_manifest reads it, and its hash recorded as an input.
+        from .taxonomy import CACHE as TAXONOMY_CACHE
+        tax_src = manifest_path.parent / TAXONOMY_CACHE
+        snap["taxonomy_sha256"] = None
+        if tax_src.is_file():
+            (work / TAXONOMY_CACHE).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(tax_src, work / TAXONOMY_CACHE)
+            snap["taxonomy_sha256"] = sha256_file(work / TAXONOMY_CACHE)
         conn = sqlite3.connect(work / "manifest.sqlite")
         try:
             check_migrated(conn)
