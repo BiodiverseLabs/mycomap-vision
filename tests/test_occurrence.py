@@ -179,3 +179,61 @@ def test_a_one_word_label_maps_to_its_genus(store):
 def test_a_missing_store_says_how_to_build_one(tmp_path):
     with pytest.raises(FileNotFoundError, match="mv build-occurrence"):
         OccurrenceStore.load(tmp_path / "none.npz")
+
+
+# --- observer-days, not observations ----------------------------------------------------------
+
+def test_one_observer_on_one_day_in_one_cell_counts_once(tmp_path):
+    rows = [obs(f"d{i}", 104, EAST[0] + 0.01 * i, EAST[1], "2025-10-01", observer=7)
+            for i in range(5)]
+    store, meta = build_store(tmp_path, rows)
+    assert meta["stats"]["kept"] == 5 and meta["observer_days"] == 1
+    assert total(store, "Amanita orientalis") == 1 and total(store, "Amanita") == 1
+    assert int(store.effort_cell.sum()) == 1 and int(store.effort_band_week.sum()) == 1
+    u = unit(store, "Amanita orientalis")
+    assert store.week_count[store.week_unit == u].sum() == 1
+
+
+def test_another_day_observer_or_cell_is_another_find(tmp_path):
+    rows = [obs("a", 104, *EAST, "2025-10-01", observer=7),
+            obs("b", 104, *EAST, "2025-10-02", observer=7),      # another day
+            obs("c", 104, *EAST, "2025-10-01", observer=8),      # another observer
+            obs("d", 104, EAST[0] + 2, EAST[1], "2025-10-01", observer=7)]   # another cell
+    store, _ = build_store(tmp_path, rows)
+    assert total(store, "Amanita orientalis") == 4 and int(store.effort_cell.sum()) == 4
+
+
+def test_each_level_is_deduplicated_on_its_own(tmp_path):
+    # One observer-day: the variety, its species and another Amanita.
+    rows = [obs("v", 103, *EAST, observer=7), obs("s", 102, *EAST, observer=7),
+            obs("o", 104, *EAST, observer=7)]
+    store, _ = build_store(tmp_path, rows)
+    assert total(store, "Amanita muscaria guessowii") == 1
+    assert total(store, "Amanita muscaria") == 1          # the variety and the species: once
+    assert total(store, "Amanita orientalis") == 1
+    assert total(store, "Amanita") == 1 and int(store.effort_cell.sum()) == 1
+
+
+def test_observations_without_an_observer_each_count(tmp_path):
+    taxa = write_taxa(tmp_path / "taxa.csv.gz")
+    header = [h for h in HEADER if h != "observer_id"]
+    rows = [[r for k, r in zip(HEADER, obs(f"n{i}", 104, *EAST)) if k != "observer_id"]
+            for i in range(3)]
+    observations = write_observations(tmp_path / "o.csv.gz", rows, header)
+    meta = build(observations, taxa, tmp_path / "s.npz", BuildOptions(), log=lambda *a: None)
+    assert meta["observer_days"] == 3
+
+
+def test_taking_an_observation_out_removes_its_observer_day_only_when_it_alone_made_it(tmp_path):
+    rows = [obs("a", 104, *EAST, observer=7), obs("b", 104, *EAST, observer=7),   # shared
+            obs("c", 132, *EAST, observer=7),        # its own Westia, a shared observer-day
+            obs("d", 104, *WEST, observer=9)]        # alone in everything
+    store, _ = build_store(tmp_path, rows)
+    a = store.own_contribution("a")
+    assert a.units == () and not a.effort                       # "b" keeps the same find
+    c = store.own_contribution("c")
+    assert sorted(store.names[u] for u in c.units) == ["Westia", "Westia pacifica"]
+    assert not c.effort                                         # the day's effort stays
+    d = store.own_contribution("d")
+    assert sorted(store.names[u] for u in d.units) == ["Amanita", "Amanita orientalis"]
+    assert d.effort

@@ -46,8 +46,12 @@ EAST = (40.0, -80.0)
 WEST = (40.0, -120.0)        # ~3,400 km west of EAST
 
 
-def obs(uuid, taxon, lat, lon, date="2025-10-01", grade="research", acc="10"):
-    return [uuid, "7", str(lat), str(lon), acc, str(taxon), grade, date, "0.1"]
+def obs(uuid, taxon, lat, lon, date="2025-10-01", grade="research", acc="10", observer=None):
+    """One row. Each observation has its own observer unless one is given, so it is
+    its own observer-day."""
+    if observer is None:
+        observer = str(1000 + sum(ord(c) * 31 ** i for i, c in enumerate(uuid)) % 10**9)
+    return [uuid, str(observer), str(lat), str(lon), acc, str(taxon), grade, date, "0.1"]
 
 
 def standard_observations() -> list[list[str]]:

@@ -35,7 +35,7 @@ def g(name):
 
 
 def out_of_range(prior, lat, lon):
-    return prior.parts(Context(lat, lon, None)).out_of_range[prior.params.radius_km]
+    return prior.parts(Context(lat, lon, None)).out(prior.params.radius_km)
 
 
 # --- the wide berth ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ def test_a_species_is_out_of_range_only_beyond_the_radius(store):
     assert out_of_range(p, *EAST)[g("Westia pacifica")]           # ~3,400 km from all 30
     assert not out_of_range(p, 40.0, -108.0)[g("Westia pacifica")]  # ~1,000 km away
     assert not out_of_range(p, *WEST)[g("Westia pacifica")]
-    assert not fitted(store, radius_km=4000.0).parts(Context(*EAST)).out_of_range[4000.0][
+    assert not fitted(store, radius_km=4000.0).parts(Context(*EAST)).out(4000.0)[
         g("Westia pacifica")]
     lp = p.log_prior(Context(*EAST))
     assert lp[g("Westia pacifica")] <= -p.params.out_of_range_penalty + 2 * np.log(5)
@@ -193,15 +193,15 @@ def test_a_scored_record_never_finds_its_own_observation(tmp_path):
     westia = g("Westia pacifica")
     seen_by_others = p.parts(Context(*EAST, "2025-10-01"))
     itself = p.parts(Context(*EAST, "2025-10-01", uuid="self-1"))
-    assert not seen_by_others.out_of_range[1500.0][westia]       # someone else's find
-    assert itself.out_of_range[1500.0][westia]                    # its own find: taken out
+    assert not seen_by_others.out(1500.0)[westia]       # someone else's find
+    assert itself.out(1500.0)[westia]                    # its own find: taken out
     assert itself.density[westia] < seen_by_others.density[westia]
     assert itself.season[westia] < seen_by_others.season[westia]
     # Taking it out matches never having counted it.
     never = fitted(build_store(tmp_path / "x", standard_observations())[0])
     ref = never.parts(Context(*EAST, "2025-10-01"))
     assert np.allclose(itself.density, ref.density) and np.allclose(itself.season, ref.season)
-    assert np.array_equal(itself.out_of_range[1500.0], ref.out_of_range[1500.0])
+    assert np.array_equal(itself.out(1500.0), ref.out(1500.0))
 
 
 def test_the_build_records_what_each_observation_added(tmp_path):
@@ -225,3 +225,33 @@ def test_comparisons_score_each_record_without_its_own_observation(conn, tmp_pat
     recs = load_records(conn, photos)
     assert recs and all(r.uuid == f"uuid-{r.observation_id}" for r in recs)
     assert context_of(recs[0]).uuid == recs[0].uuid
+
+
+def test_taking_a_record_out_matches_never_counting_it_under_observer_days(tmp_path):
+    from occurrence_fixtures import obs, standard_observations
+    extra = {"same-day-1": obs("same-day-1", 132, *EAST, "2025-10-01", observer=5),
+             "same-day-2": obs("same-day-2", 132, EAST[0] + 0.1, EAST[1], "2025-10-01",
+                               observer=5),
+             "other-taxon": obs("other-taxon", 104, *EAST, "2025-10-01", observer=5),
+             "alone": obs("alone", 132, EAST[0] + 3, EAST[1], "2025-10-08", observer=6)}
+    base = standard_observations()
+    full = fitted(build_store(tmp_path / "full", base + list(extra.values()))[0])
+    for i, uuid in enumerate(extra):
+        without = fitted(build_store(tmp_path / f"w{i}",
+                                     base + [r for k, r in extra.items() if k != uuid])[0])
+        for lat, lon, when in ((*EAST, "2025-10-01"), (EAST[0] + 3, EAST[1], "2025-10-08")):
+            got = full.parts(Context(lat, lon, when, uuid=uuid))
+            want = without.parts(Context(lat, lon, when))
+            assert np.array_equal(got.out(1500.0), want.out(1500.0)), uuid
+            assert np.allclose(got.density, want.density), uuid
+            assert np.allclose(got.season, want.season), uuid
+
+
+def test_a_find_shared_with_the_same_observer_day_still_counts(tmp_path):
+    from occurrence_fixtures import obs, standard_observations
+    # The only eastern Westia: two observations by one person on one day.
+    rows = standard_observations() + [
+        obs("twin-1", 132, *EAST, "2025-10-01", observer=5),
+        obs("twin-2", 132, EAST[0] + 0.1, EAST[1], "2025-10-01", observer=5)]
+    p = fitted(build_store(tmp_path, rows)[0])
+    assert not p.parts(Context(*EAST, uuid="twin-1")).out(1500.0)[g("Westia pacifica")]

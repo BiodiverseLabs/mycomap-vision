@@ -40,16 +40,21 @@ from pathlib import Path
 import numpy as np
 
 from . import config, names
-from .occprior import RANGE_SOURCES, OccParams, TuningRefused, load_params, save_params
+from .occprior import (EXCLUDE, RANGE_SOURCES, OccParams, TuningRefused, load_params,
+                       save_params)
 from .occurrence import OccurrenceStore  # noqa: F401
 from .prior import Context
 
 DEFAULT_GRID = {
     "radius_km": [1000.0, 1500.0, 2000.0, 3000.0],
-    "out_of_range_penalty": [0.0, 2.0, 4.0, 6.0, 10.0, 50.0],
+    # Soft penalties and outright exclusion (EXCLUDE): dev picks (Steve, 2026-10-08).
+    "out_of_range_penalty": [0.0, 2.0, 4.0, 6.0, 10.0, EXCLUDE],
     "density_weight": [0.0, 0.25, 0.5, 1.0],
     "season_weight": [0.0, 0.25, 0.5, 1.0],
     "photo_temperature": [0.015, 0.02, 0.03],
+    # Scored both ways so the report shows dev with and without the genus rule; the
+    # choice keeps it unless the search is told it may drop it (choose_genus_rule).
+    "genus_rule": [True, False],
 }
 DEV_SPLITS = ("dev", "tune", "tuning", "validation")
 
@@ -282,9 +287,12 @@ def _cand(s: ScoredSet, i: int, pos: dict[str, int], top_k: int) -> tuple[np.nda
 
 
 def grid_search(prior, s: ScoredSet, grid: dict | None = None,
-                top_k: int = 500, log=print, without: set[str] | None = None) -> dict:
+                top_k: int = 500, log=print, without: set[str] | None = None,
+                choose_genus_rule: bool | None = True) -> dict:
     """Score every combination of the grid on `s`; return the table and the choice.
-    `prior` is any fitted occprior.RangeSource, so sources compare on the same records."""
+    `prior` is any fitted occprior.RangeSource, so sources compare on the same records.
+    choose_genus_rule: True keeps the genus rule in the choice, False leaves it out,
+    None lets the search pick; the report shows the best with and without either way."""
     grid = {**DEFAULT_GRID, **(grid or {})}
     if s.kind != "similarity":
         grid["photo_temperature"] = [None]
@@ -302,6 +310,7 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     D = np.zeros((n, K))
     Se = np.zeros((n, K))
     O = {r: np.zeros((n, K), dtype=bool) for r in radii}
+    OG = {r: np.zeros((n, K), dtype=bool) for r in radii}       # the genus rule's own
     SP = np.zeros((n, K), dtype=bool)
     GG = np.full((n, K), -2, dtype=np.int64)
     truth_at = np.full(n, -1, dtype=np.int64)
@@ -326,6 +335,8 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
             Se[i, :m] = np.clip(parts.season[cand], -p0.season_cap, p0.season_cap)
         for r in radii:
             O[r][i, :m] = parts.out_of_range[r][cand]
+            if parts.genus_out_of_range:
+                OG[r][i, :m] = parts.genus_out_of_range[r][cand]
         SP[i, :m] = is_sp[cand]
         GG[i, :m] = group_gid[cand]
         if t >= 0:
@@ -333,8 +344,9 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     log(f"  {n} records: {places} with a usable place, {dates} with a date")
     rows_ = np.arange(n)
 
-    def combined(T, r, pen, wd, ws):
-        return (S / T if T else S) + wd * D + ws * Se - pen * O[float(r)]
+    def combined(T, r, pen, wd, ws, gr=True):
+        out = O[float(r)] | OG[float(r)] if gr else O[float(r)]
+        return (S / T if T else S) + wd * D + ws * Se - pen * out
 
     def right(z):
         sp_best = np.argmax(np.where(SP, z, -np.inf), axis=1)
@@ -348,11 +360,12 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
 
     table = []
     keys = ("photo_temperature", "radius_km", "out_of_range_penalty", "density_weight",
-            "season_weight")
-    for T, r, pen, wd, ws in product(*(grid[k] for k in keys)):
-        sp_right, ge_right = right(combined(T, r, pen, wd, ws))
+            "season_weight", "genus_rule")
+    for T, r, pen, wd, ws, gr in product(*(grid[k] for k in keys)):
+        sp_right, ge_right = right(combined(T, r, pen, wd, ws, gr))
         table.append({"photo_temperature": T, "radius_km": float(r),
-                      "out_of_range_penalty": pen, "density_weight": wd, "season_weight": ws,
+                      "out_of_range_penalty": pen, "exclusion": pen >= EXCLUDE,
+                      "density_weight": wd, "season_weight": ws, "genus_rule": bool(gr),
                       "species_top1": round(float(sp_right.sum() / max(has_sp.sum(), 1)), 4),
                       "genus_top1": round(float(ge_right.mean()), 4),
                       "species_right": int(sp_right.sum()), "genus_right": int(ge_right.sum())})
@@ -360,16 +373,20 @@ def grid_search(prior, s: ScoredSet, grid: dict | None = None,
     def order(row):
         return (-row["species_right"], -row["genus_right"], row["out_of_range_penalty"],
                 row["density_weight"] + row["season_weight"], abs(row["radius_km"] - 1500.0),
-                abs((row["photo_temperature"] or 0.02) - 0.02))
+                abs((row["photo_temperature"] or 0.02) - 0.02), not row["genus_rule"])
     table.sort(key=order)
-    best = table[0]
+    allowed = [t for t in table
+               if choose_genus_rule is None or t["genus_rule"] == choose_genus_rule] or table
+    best = allowed[0]
+    genus_rule = {label: next((t for t in table if t["genus_rule"] == flag), None)
+                  for label, flag in (("with", True), ("without", False))}
     z = combined(*(best[k] for k in keys))
     every = np.ones(n, dtype=bool)
     photo_right, chosen_right = right(S), right(z)        # photo-only: no T changes its order
     photo_only = rates(*photo_right, every)
     out = {"n": n, "with_place": places, "with_date": dates, "best": best,
            "photo_only": photo_only, "calibration": calibrate(z, SP, GG, truth_at, truth_g, has_sp),
-           "table": table}
+           "genus_rule": genus_rule, "table": table}
     if without:
         # e.g. repeat finds: the same taxon at the same spot as another record.
         keep = np.array([oid not in without for oid in s.observation_ids])
@@ -435,7 +452,8 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
          grid: dict | None = None, top_k: int = 500, allow_missing_uuids: bool = False,
          base: str = "nearest", backbone: str | None = None, save: bool = True,
          source: str = "inat-occurrence", report_without: Path | None = None,
-         evaluate_only: bool = False, log=print) -> dict:
+         evaluate_only: bool = False, choose_genus_rule: bool | None = True,
+         log=print) -> dict:
     """The whole command: build the validation set, check it, search, save."""
     if records.startswith("comparison:"):
         cid = records.split(":", 1)[1]
@@ -459,13 +477,14 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
     log(f"  names: {prior.mapping_summary()}")
     if evaluate_only:           # score with the saved values: one point, nothing saved
         grid = {k: [getattr(params, k)] for k in DEFAULT_GRID}
+        choose_genus_rule = params.genus_rule
         save = False
     without = set(read_ids(report_without)) if report_without else None
-    res = grid_search(prior, s, grid, top_k, log, without)
+    res = grid_search(prior, s, grid, top_k, log, without, choose_genus_rule)
     b = res["best"]
     chosen = OccParams.from_dict({**params.to_dict(), **{
         k: b[k] for k in ("radius_km", "out_of_range_penalty", "density_weight",
-                          "season_weight") }})
+                          "season_weight", "genus_rule")}})
     if b["photo_temperature"]:
         chosen.photo_temperature = b["photo_temperature"]
     temps = {rank: c["temperature"] for rank, c in res["calibration"].items()}
@@ -485,6 +504,7 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
         "photo_only": {k: res["photo_only"][k] for k in ("species_top1", "genus_top1")},
         "calibration": res["calibration"],
         "without": res.get("without"),
+        "genus_rule": res["genus_rule"],
         "grid": {**DEFAULT_GRID, **(grid or {})},
         "top": res["table"][:15],
         "code_version": config.code_version(),
@@ -494,7 +514,7 @@ def tune(conn: sqlite3.Connection, records: str, scores: Path | None = None,
         path = save_params(chosen, out)
         log(f"-> {path}")
     return {"params": chosen.to_dict(), **{k: res.get(k) for k in (
-        "n", "best", "photo_only", "calibration", "without")}}
+        "n", "best", "photo_only", "calibration", "without", "genus_rule")}}
 
 
 # --- commands (wired into cli.py) ---------------------------------------------------------
@@ -565,9 +585,10 @@ def cmd_tune_occurrence(conn, args) -> None:
                Path(args.out) if args.out else None, grid, args.top_k, args.allow_missing_uuids,
                args.base, args.backbone, save=not args.dry_run, source=args.source,
                report_without=Path(args.report_without) if args.report_without else None,
-               evaluate_only=args.evaluate_only)
-    print(json.dumps({k: res[k] for k in ("n", "best", "photo_only", "calibration", "without")},
-                     indent=2))
+               evaluate_only=args.evaluate_only,
+               choose_genus_rule={"keep": True, "drop": False, "tune": None}[args.genus_rule])
+    print(json.dumps({k: res[k] for k in ("n", "best", "photo_only", "calibration", "without",
+                                          "genus_rule")}, indent=2))
 
 
 def add_commands(sub) -> None:
@@ -627,6 +648,9 @@ def add_commands(sub) -> None:
     p.add_argument("--evaluate-only", action="store_true",
                    help="score the set with the saved values (e.g. test.csv after tuning on "
                         "dev.csv); nothing is searched or saved")
+    p.add_argument("--genus-rule", default="keep", choices=["keep", "drop", "tune"],
+                   help="the genus-level out-of-range rule in the chosen values (the report "
+                        "shows dev with and without it either way)")
     p.add_argument("--report-without",
                    help="CSV of ids (e.g. repeat finds) to also report the results without")
     p.set_defaults(occ_handler=cmd_tune_occurrence)

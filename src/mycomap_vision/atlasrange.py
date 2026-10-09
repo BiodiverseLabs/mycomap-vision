@@ -338,13 +338,15 @@ class LayeredSource(RangeSource):
         p, f = self.primary.parts(ctx, radii), self.fallback.parts(ctx, radii)
         has = self.primary.has_map
         out = {r: np.where(has, p.out_of_range[r], f.out_of_range[r]) for r in radii}
+        genus = ({r: ~has & f.genus_out_of_range[r] for r in radii}
+                 if f.genus_out_of_range else None)
         if p.density is None and f.density is None:
             density = None
         else:
             pd = p.density if p.density is not None else np.zeros(self.n_groups)
             fd = f.density if f.density is not None else np.zeros(self.n_groups)
             density = np.where(has, pd, fd)
-        return Parts(out, density, f.season)
+        return Parts(out, density, f.season, genus)
 
     def mapping_summary(self) -> dict:
         return {**self.primary.mapping_summary(), **self.fallback.mapping_summary()}

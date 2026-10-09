@@ -203,7 +203,7 @@ def test_atlas_first_inat_elsewhere_and_the_season_stays_vision_s_own(export, tm
     ctx = Context(*EAST, "2026-10-01")
     both, alone, atlas = layered.parts(ctx), inat.parts(ctx), layered.primary.parts(ctx)
     rara, westia = g("Amanita rara"), g("Westia pacifica")
-    assert both.out_of_range[1500.0][rara] == alone.out_of_range[1500.0][rara]   # iNat's
+    assert both.out(1500.0)[rara] == alone.out(1500.0)[rara]                     # iNat's
     assert both.density[rara] == alone.density[rara]
     assert both.density[westia] == atlas.density[westia]                          # Atlas's
     assert np.array_equal(both.season, alone.season)

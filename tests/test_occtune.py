@@ -253,3 +253,50 @@ def test_tuning_takes_each_record_s_own_observation_back_out(tmp_path):
     assert taken_out["best"]["species_right"] == 0       # out of range once its own find is gone
     counted = grid_search(prior_for(store, lone(None)), lone(None), grid, log=lambda *a: None)
     assert counted["best"]["species_right"] == 1         # what the leak would have shown
+
+
+def test_the_report_shows_dev_with_and_without_the_genus_rule(store):
+    s = validation_set()
+    res = grid_search(prior_for(store, s), s, SMALL_GRID, log=lambda *a: None)
+    assert res["genus_rule"]["with"]["genus_rule"] is True
+    assert res["genus_rule"]["without"]["genus_rule"] is False
+    assert res["best"]["genus_rule"] is True                 # kept unless told otherwise
+    dropped = grid_search(prior_for(store, s), s, SMALL_GRID, log=lambda *a: None,
+                          choose_genus_rule=False)
+    assert dropped["best"]["genus_rule"] is False
+    assert {row["genus_rule"] for row in res["table"]} == {True, False}
+
+
+def test_the_genus_rule_counts_where_only_the_genus_is_far(store):
+    # Westia inventa: not on iNat, no DNA records, the whole genus 3,400 km west.
+    groups = SPECIES + ["Westia inventa"]
+    scores = np.full((1, len(groups)), 0.4, dtype=np.float32)
+    scores[0, groups.index("Westia inventa")] = 0.80
+    scores[0, groups.index("Amanita orientalis")] = 0.79
+    one = ScoredSet(["x"], groups, scores, truth=["Amanita orientalis"], truth_genus=["Amanita"],
+                    latitude=[EAST[0]], longitude=[EAST[1]], observed_on=["2026-10-01"],
+                    uuids=["val-x"], group_genus=[x.split()[0] for x in groups],
+                    group_is_species=[True] * len(groups))
+    p = OccurrencePrior(store, OccParams())
+    p.fit([], groups)
+    grid = {**SMALL_GRID, "out_of_range_penalty": [6.0], "density_weight": [0.0],
+            "season_weight": [0.0]}
+    res = grid_search(p, one, grid, log=lambda *a: None)
+    assert res["genus_rule"]["with"]["species_right"] == 1
+    assert res["genus_rule"]["without"]["species_right"] == 0
+
+
+def test_dev_can_choose_outright_exclusion_over_soft_penalties(store):
+    from mycomap_vision.occprior import EXCLUDE
+    from mycomap_vision.occtune import DEFAULT_GRID
+    assert EXCLUDE in DEFAULT_GRID["out_of_range_penalty"]
+    assert OccParams().out_of_range_penalty == 6.0            # the untuned default
+    # The far lookalike now looks much better (0.15 in cosine: 7.5 nats at 0.02).
+    s = validation_set()
+    east = [i for i, t in enumerate(s.truth) if t == "Amanita orientalis"]
+    s.scores[east, SPECIES.index("Amanita orientalis")] = 0.65
+    grid = {**SMALL_GRID, "out_of_range_penalty": [0.0, 2.0, 6.0, EXCLUDE],
+            "density_weight": [0.0], "season_weight": [0.0]}
+    res = grid_search(prior_for(store, s), s, grid, log=lambda *a: None)
+    assert res["best"]["out_of_range_penalty"] == EXCLUDE and res["best"]["exclusion"]
+    assert res["best"]["species_top1"] == 0.85

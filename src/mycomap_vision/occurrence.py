@@ -11,11 +11,14 @@ taxa.csv.gz, tab-separated despite the name) from local files and keeps:
   benchmark records are themselves iNat observations: counting them would put
   the answer at the very spot being tested.
 
-For every species-or-lower taxon and every genus it stores the number of
-observations in each grid cell (0.5 degrees by default) and per latitude band
-and week of the year; for all fungi together, the same per cell and per band and
-week (sampling effort). An observation of a variety also counts for its species,
-and every observation counts for its genus.
+What it counts is observer-days, not observations (Steve, 2026-10-08): one person
+photographing a species ten times on one walk is one find. For every
+species-or-lower taxon and every genus it stores the number of distinct
+(observer, day) pairs in each grid cell (0.5 degrees by default), and per latitude
+band and week of the year; for all fungi together, the same (sampling effort). An
+observation of a variety also counts for its species, and every observation
+counts for its genus, each deduplicated at that level. An observation with no date
+shares its observer's undated day in that cell; one with no observer is its own.
 
 The store holds counts per cell of public iNat data only, never a Vision record's
 coordinates (CLAUDE.md: never expose coordinates). Reading it is `OccurrenceStore`.
@@ -329,13 +332,15 @@ def build(observations: Path, taxa: Path, out: Path, options: BuildOptions | Non
     i_acc = column(header, "positional_accuracy", "coordinateuncertaintyinmeters",
                    required=False)
     i_date = column(header, "observed_on", "eventdate", required=False)
-    width = max(i_uuid, i_lat, i_lon, i_taxon, i_grade, i_acc, i_date) + 1
+    i_obs = column(header, "observer_id", "user_id", "recordedby", required=False)
+    width = max(i_uuid, i_lat, i_lon, i_taxon, i_grade, i_acc, i_date, i_obs) + 1
     grades = set(o.grades)
     lookup = tax.lookup
     st = BuildStats()
     seen_excluded = 0
     a_own, a_sp, a_ge, a_cell, a_week, a_band = (array("i") for _ in range(6))
     a_hash = array("Q")             # each kept observation's uuid hash: the leave-one-out index
+    a_obs, a_day = array("q"), array("i")      # observer and day (yyyymmdd, 0 = none)
     log(f"Reading observations from {observations}...")
     for row in rows:
         st.rows += 1
@@ -384,7 +389,10 @@ def build(observations: Path, taxa: Path, out: Path, options: BuildOptions | Non
         a_week.append(week_of(when))
         a_band.append(grid.band(lat))
         a_hash.append(uuid_hash(row[i_uuid]) if i_uuid >= 0 else 0)
-    store = _aggregate(grid, tax, a_own, a_sp, a_ge, a_cell, a_week, a_band)
+        a_day.append(day_of(when))
+        observer = row[i_obs].strip() if i_obs >= 0 else ""
+        a_obs.append(int(observer) if observer.isdigit() else -st.kept)   # none: its own
+    store, sole = _aggregate(grid, tax, a_own, a_sp, a_ge, a_cell, a_week, a_obs, a_day)
     meta = {
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "code_version": config.code_version(),
@@ -399,6 +407,7 @@ def build(observations: Path, taxa: Path, out: Path, options: BuildOptions | Non
         "units": int(len(tax.ids)),
         "units_with_observations": int((store["unit_total"] > 0).sum()),
         "pairs": int(len(store["pair_cell"])),
+        "observer_days": int(store["effort_cell"].sum()),
     }
     excl = np.array(sorted(uuid_hash(u) for u in excluded), dtype=np.uint64)
     out = Path(out)
@@ -411,7 +420,7 @@ def build(observations: Path, taxa: Path, out: Path, options: BuildOptions | Non
     meta["file_bytes"] = out.stat().st_size
     if i_uuid >= 0:
         meta["leave_one_out_bytes"] = _save_loo(loo_path(out), a_hash, a_own, a_ge, a_cell,
-                                                a_week, a_band)
+                                                a_week, a_band, sole)
     log(json.dumps(meta, indent=2))
     return meta
 
@@ -420,11 +429,24 @@ def loo_path(store: Path) -> Path:
     return Path(store).with_name(Path(store).stem + ".loo.npz")
 
 
-def _save_loo(path: Path, a_hash, a_own, a_ge, a_cell, a_week, a_band) -> int:
-    """Beside the store: every counted observation's uuid hash and what it added (its
-    taxon's unit or genus, cell, week, band), so a scored record can take its own
-    observation back out (OccurrenceStore.own_contribution). Evaluation and tuning
-    need it; serving photos with no iNat observation doesn't."""
+# Leave-one-out flags: the observation is the only one behind its observer-day for ...
+SOLE_OWN, SOLE_SPECIES, SOLE_GENUS, SOLE_EFFORT = 1, 2, 4, 8
+
+
+def day_of(iso: str | None) -> int:
+    """yyyymmdd as an int, or 0 for no usable date (1970-01-01 included)."""
+    if week_of(iso) < 0:
+        return 0
+    return int(iso[0:4]) * 10000 + int(iso[5:7]) * 100 + int(iso[8:10])
+
+
+def _save_loo(path: Path, a_hash, a_own, a_ge, a_cell, a_week, a_band, sole) -> int:
+    """Beside the store: every counted observation's uuid hash, what it counted for (its
+    taxon's unit or genus, cell, week, band), and at which levels it was the only
+    observation behind its observer-day (SOLE_* flags). A scored record takes its own
+    observation back out (OccurrenceStore.own_contribution): an observer-day goes only
+    if nothing else counted shares it. Evaluation and tuning need this; serving photos
+    with no iNat observation doesn't."""
     h = np.frombuffer(a_hash, dtype=np.uint64)
     order = np.argsort(h, kind="stable")
     tmp = path.with_name(path.stem + ".tmp.npz")
@@ -434,30 +456,57 @@ def _save_loo(path: Path, a_hash, a_own, a_ge, a_cell, a_week, a_band) -> int:
         genus=np.frombuffer(a_ge, dtype=np.int32)[order],
         cell=np.frombuffer(a_cell, dtype=np.int32)[order],
         week=np.frombuffer(a_week, dtype=np.int32)[order].astype(np.int8),
-        band=np.frombuffer(a_band, dtype=np.int32)[order].astype(np.int8))
+        band=np.frombuffer(a_band, dtype=np.int32)[order].astype(np.int8),
+        sole=sole[order])
     tmp.replace(path)
     return path.stat().st_size
 
 
-def _aggregate(grid: Grid, tax: TaxaTable, a_own, a_sp, a_ge, a_cell, a_week, a_band) -> dict:
+def _aggregate(grid: Grid, tax: TaxaTable, a_own, a_sp, a_ge, a_cell, a_week, a_obs,
+               a_day) -> tuple[dict, np.ndarray]:
+    """Counts of distinct observer-days, and per observation its SOLE_* flags."""
     n_units, C, B = len(tax.ids), grid.n_cells, grid.n_bands
+    n = len(a_cell)
     cell = np.frombuffer(a_cell, dtype=np.int32).astype(np.int64)
     week = np.frombuffer(a_week, dtype=np.int32).astype(np.int64)
-    band = np.frombuffer(a_band, dtype=np.int32).astype(np.int64)
-    dated = week >= 0
-    effort_cell = np.bincount(cell, minlength=C).astype(np.int64)
-    effort_bw = np.bincount(band[dated] * WEEKS + week[dated],
+    observer = np.frombuffer(a_obs, dtype=np.int64)
+    day = np.frombuffer(a_day, dtype=np.int32).astype(np.int64)
+    # Observer-days per cell: od[i] numbers observation i's (cell, observer, day).
+    order = np.lexsort((day, observer, cell))
+    new = np.ones(n, dtype=bool)
+    if n:
+        new[1:] = ((np.diff(cell[order]) != 0) | (np.diff(observer[order]) != 0)
+                   | (np.diff(day[order]) != 0))
+    od = np.empty(n, dtype=np.int64)
+    od[order] = np.cumsum(new) - 1
+    n_od = int(new.sum())
+    od_cell = np.zeros(n_od, dtype=np.int64)
+    od_week = np.zeros(n_od, dtype=np.int64)
+    od_cell[od] = cell
+    od_week[od] = week                     # one day: one week
+    od_band = grid.band_of_cells(od_cell) if n_od else np.zeros(0, np.int64)
+    od_count = np.bincount(od, minlength=n_od)
+    effort_cell = np.bincount(od_cell, minlength=C).astype(np.int64)
+    dated = od_week >= 0
+    effort_bw = np.bincount(od_band[dated] * WEEKS + od_week[dated],
                             minlength=B * WEEKS).reshape(B, WEEKS).astype(np.int64)
-    units, cells, weeks, bands = [], [], [], []
-    for a in (a_own, a_sp, a_ge):
-        u = np.frombuffer(a, dtype=np.int32).astype(np.int64)
-        keep = u >= 0
-        units.append(u[keep])
-        cells.append(cell[keep])
-        weeks.append(week[keep])
-        bands.append(band[keep])
-    u, c, w, b = (np.concatenate(x) if x else np.zeros(0, np.int64)
-                  for x in (units, cells, weeks, bands))
+    sole = np.where(od_count[od] == 1, SOLE_EFFORT, 0).astype(np.int8)
+    # Distinct (unit, observer-day), over an observation's own taxon, species and genus
+    # together: a variety and its species seen on one observer-day count once.
+    roles = [np.frombuffer(a, dtype=np.int32).astype(np.int64) for a in (a_own, a_sp, a_ge)]
+    idx = np.concatenate([np.flatnonzero(r >= 0) for r in roles]) if n else np.zeros(0, np.int64)
+    role = np.concatenate([np.full(int((r >= 0).sum()), k) for k, r in enumerate(roles)]) \
+        if n else np.zeros(0, np.int64)
+    u_all = np.concatenate([r[r >= 0] for r in roles]) if n else np.zeros(0, np.int64)
+    keys, inverse, counts = np.unique(u_all * max(n_od, 1) + od[idx], return_inverse=True,
+                                      return_counts=True)
+    alone = counts[inverse] == 1
+    for k, flag in enumerate((SOLE_OWN, SOLE_SPECIES, SOLE_GENUS)):
+        hit = idx[(role == k) & alone]
+        sole[hit] |= flag
+    u = keys // max(n_od, 1)
+    o = keys % max(n_od, 1)
+    c, w, b = od_cell[o], od_week[o], od_band[o]
     unit_total = np.bincount(u, minlength=n_units).astype(np.int64)
     keys, counts = np.unique(u * C + c, return_counts=True)
     pair_unit = keys // C
@@ -482,7 +531,7 @@ def _aggregate(grid: Grid, tax: TaxaTable, a_own, a_sp, a_ge, a_cell, a_week, a_
         "week_count": wcounts.astype(np.int32),
         "effort_cell": effort_cell,
         "effort_band_week": effort_bw,
-    }
+    }, sole
 
 
 # --- reading the store --------------------------------------------------------------------
@@ -500,11 +549,14 @@ def name_key(name: str) -> str:
 
 @dataclass(frozen=True)
 class Contribution:
-    """One counted observation: the units it counted for, its cell, week (-1: none), band."""
+    """What taking one counted observation out removes: the units whose observer-day it
+    alone made (others on that day keep it counted), its cell, week (-1: none), band,
+    and whether the all-fungi observer-day goes too."""
     units: tuple[int, ...]
     cell: int
     week: int
     band: int
+    effort: bool = True
 
 
 @dataclass(frozen=True)
@@ -563,8 +615,11 @@ class OccurrenceStore:
             return None
         own, ge = int(lo["own"][i]), int(lo["genus"][i])
         sp = int(self.unit_species[own]) if own >= 0 else -1
-        units = tuple(u for u in (own, sp, ge) if u >= 0)
-        return Contribution(units, int(lo["cell"][i]), int(lo["week"][i]), int(lo["band"][i]))
+        flags = int(lo["sole"][i]) if "sole" in lo else 15
+        units = tuple(u for u, f in ((own, SOLE_OWN), (sp, SOLE_SPECIES), (ge, SOLE_GENUS))
+                      if u >= 0 and flags & f)
+        return Contribution(units, int(lo["cell"][i]), int(lo["week"][i]), int(lo["band"][i]),
+                            bool(flags & SOLE_EFFORT))
 
     def excludes(self, uuids: Iterable[str]) -> list[bool]:
         """Whether each uuid was in the build's exclusion list."""

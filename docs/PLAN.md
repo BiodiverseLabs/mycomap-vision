@@ -224,16 +224,20 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
   (local files; `occurrence.py`) keeps Kingdom Fungi by ancestry (lichens
   included; slime molds with `--with-slime-molds`), research and needs-ID
   grades, coordinates inside North America plus 5 degrees, accuracy no worse
-  than 25 km. It stores counts per 0.5-degree cell per species (a variety also
-  counts for its species) and per genus, all-fungi counts per cell (effort), and
-  counts per 10-degree latitude band and week (season). On the 2026-09-27 export:
-  283M rows read, 9.07M North American fungal observations kept, 21,710 taxa
-  with observations, a 5.9 MB store, 11 minutes on the laptop.
+  than 25 km. It counts observer-days, not observations (Steve, 2026-10-08: ten
+  photos of one species on one walk are one find): distinct (observer, day) per
+  0.5-degree cell, per species (a variety also counts for its species) and per
+  genus, each deduplicated at its own level, for all fungi together (effort), and
+  per 10-degree latitude band and week (season). On the 2026-09-27 export: 283M
+  rows read, 9.07M North American fungal observations kept, 21,710 taxa with
+  observations, about 12 minutes on the laptop.
 - A record is never scored with its own iNat observation counted. The build
   writes a leave-one-out index beside the store (every counted observation's
-  uuid hash and what it added), and a record scored with its uuid
+  uuid hash, what it counted for, and at which levels it alone made its
+  observer-day), and a record scored with its uuid
   (`Context.uuid`: comparisons, tuning, advance predictions) has its own find
-  taken back out. `--exclude-uuids` still leaves a list out entirely
+  taken back out: its observer-day goes only where no other counted observation
+  shares it. `--exclude-uuids` still leaves a list out entirely
   (`mv occurrence-exclusions` writes the manifest's).
 - Names (`OccurrenceStore.resolve`): an active iNat name ("var." ignored); an
   inactive one maps to the single active species of the same epithet in the same
@@ -242,7 +246,8 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
 - `OccurrencePrior` (`occprior.py`), per species: (a) out of range, a strong
   penalty (6 nats by default), only when it has at least 20 occurrences (iNat
   plus its own DNA records) and none within 1,500 km; a DNA record nearby always
-  vetoes it; the same rule at genus level; never where fewer than 50 fungi of any
+  vetoes it; the same rule at genus level (`genus_rule`, on by default; the tuning
+  report shows dev with and without it); never where fewer than 50 fungi of any
   kind were observed within the radius, nor off the map. (b) density: log of the
   species' share near here (150 km kernel) over all fungi's, shrunk to genus by
   20 observations, capped at log 5, weight 0.5. (c) season: the same by week
@@ -256,7 +261,8 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
   taxa neutral; iNat for the rest and for season). Not tuned or evaluated until
   Atlas's rebuilt release exists and says what its maps were trained on.
 - Methods `nearest+occ`, `species-mean+occ`, `linear+occ`, `hybrid+occ`, offered
-  only where the store exists. The existing `+prior` methods are unchanged
+  only where the store exists. The store is not in releases and not on the box:
+  `+occ` stays on the laptop until dev tuning shows a gain and Steve approves. The existing `+prior` methods are unchanged
   except for confidence.
 - Confidence: the log-probability methods (`+prior`, `+occ`) stated ~100% for
   almost every answer because identify fell back to the cosine temperature
@@ -264,7 +270,9 @@ counts (open data; GBIF later), and treat "out of range" as a wide berth only.
   calibration, or the tuned one), and a comparison's calibration still wins.
 - `mv tune-occurrence --records dev.csv --scores scores.npz` grid-searches
   radius, penalty, weights and photo temperature for species top-1 on a
-  validation set (or `--records comparison:<id>`), fits the confidence
+  validation set (or `--records comparison:<id>`); the penalty grid includes
+  outright exclusion (50 nats) next to the soft values, and 6 nats stays the
+  untuned default. It fits the confidence
   temperature per rank, and writes `data/occurrence/params.json` with its
   provenance. `--evaluate-only` scores another set (test.csv) with the saved
   values; `--report-without ids.csv` also reports results without a list (the

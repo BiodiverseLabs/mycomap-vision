@@ -42,12 +42,18 @@ from .prior import LOGPROB_CONFIDENCE_TEMPERATURE, Context, haversine_km
 PARAMS_NAME = Path("occurrence") / "params.json"
 
 
+# A penalty that no photo overcomes: outright exclusion, kept finite so confidence and
+# calibration still have a number for the true species.
+EXCLUDE = 50.0
+
+
 @dataclass
 class OccParams:
     radius_km: float = 1500.0
     min_occurrences: int = 20
     min_local_effort: int = 50
-    out_of_range_penalty: float = 6.0     # nats; 50 is in effect exclusion
+    out_of_range_penalty: float = 6.0     # nats; EXCLUDE (50) is in effect exclusion
+    genus_rule: bool = True               # also out of range when the whole genus is far
     density_bandwidth_km: float = 150.0
     density_weight: float = 0.5
     density_cap: float = float(np.log(5.0))
@@ -126,9 +132,20 @@ def gaussian(d: np.ndarray, bandwidth: float) -> np.ndarray:
 @dataclass
 class Parts:
     """A place and date's components, before weights and caps (for tuning)."""
-    out_of_range: dict           # radius_km -> (n_groups,) bool
+    out_of_range: dict           # radius_km -> (n_groups,) bool: the species' own evidence
     density: np.ndarray | None   # (n_groups,) log-ratio, uncapped; None = no place
     season: np.ndarray | None    # (n_groups,) log-ratio, uncapped; None = no date
+    # radius_km -> (n_groups,) bool: its whole genus is beyond the radius (the genus
+    # rule, OccParams.genus_rule); None for a source without one.
+    genus_out_of_range: dict | None = None
+
+    def out(self, radius: float, genus_rule: bool = True) -> np.ndarray | None:
+        oor = self.out_of_range.get(radius)
+        if oor is not None and genus_rule and self.genus_out_of_range:
+            g = self.genus_out_of_range.get(radius)
+            if g is not None:
+                oor = oor | g
+        return oor
 
 
 class RangeSource:
@@ -167,7 +184,7 @@ class RangeSource:
             out += p.density_weight * np.clip(parts.density, -p.density_cap, p.density_cap)
         if parts.season is not None and p.season_weight:
             out += p.season_weight * np.clip(parts.season, -p.season_cap, p.season_cap)
-        oor = parts.out_of_range.get(p.radius_km)
+        oor = parts.out(p.radius_km, p.genus_rule)
         if oor is not None:
             out -= p.out_of_range_penalty * oor
         return out
@@ -259,33 +276,37 @@ class OccurrencePrior(RangeSource):
     def parts(self, ctx: Context | None, radii: tuple[float, ...] | None = None) -> Parts:
         p = self.params
         radii = radii or (p.radius_km,)
-        none = Parts({r: np.zeros(self.n_groups, dtype=bool) for r in radii}, None, None)
+        none = Parts({r: np.zeros(self.n_groups, dtype=bool) for r in radii}, None, None,
+                     {r: np.zeros(self.n_groups, dtype=bool) for r in radii})
         if ctx is None:
             return none
         has_place = ctx.latitude is not None and ctx.longitude is not None
         if has_place and not self.store.grid.contains(ctx.latitude, ctx.longitude):
             return none                 # off the map: no information, not "absent"
         out_of_range, density, season = none.out_of_range, None, None
+        genus_out = none.genus_out_of_range
         # The query's own iNat observation, when the store counted it, comes back out.
         own = self.store.own_contribution(ctx.uuid)
         mine = np.array([self.local[u] for u in own.units if u in self.local]
                         if own else [], dtype=np.int64)
         at = int(self.pos_of_cell[own.cell]) if own else -1
         total, total_effort = self.total, self.total_effort
+        own_effort = 1.0 if own and own.effort else 0.0
         if own:
             total = total.copy()
             total[mine] -= 1
-            total_effort -= 1
+            total_effort -= own_effort
         if has_place:
             d = haversine_km(ctx.latitude, ctx.longitude, self.cell_lat, self.cell_lon)
             slack = self.store.grid.cell_deg * 111.2 * 0.71      # a cell's half diagonal
             d_dna = haversine_km(ctx.latitude, ctx.longitude, self.dna_lat, self.dna_lon)
-            out_of_range = {}
+            out_of_range, genus_out = {}, {}
             for r in radii:
                 within = d <= r + slack
                 self_near = float(within[at]) if at >= 0 else 0.0
-                if self.cell_effort[within].sum() - self_near < p.min_local_effort:
+                if self.cell_effort[within].sum() - self_near * own_effort < p.min_local_effort:
                     out_of_range[r] = np.zeros(self.n_groups, dtype=bool)
+                    genus_out[r] = np.zeros(self.n_groups, dtype=bool)
                     continue
                 near_local = np.bincount(self.pair_local, minlength=len(self.total),
                                          weights=self.pair_count * within[self.pair_pos])
@@ -295,15 +316,14 @@ class OccurrencePrior(RangeSource):
                 # Species: iNat occurrences plus its own DNA records.
                 tot = self._unit_values(total, self.g_sp, 0.0) + self.dna_total
                 near = self._unit_values(near_local, self.g_sp, 0.0) + dna_near
-                out = (tot >= p.min_occurrences) & (near == 0)
+                out_of_range[r] = (tot >= p.min_occurrences) & (near == 0)
                 # Genus: none of the genus within the radius either (its DNA records too).
                 g_tot = self._unit_values(total, self.g_ge, 0.0)
                 g_near = self._unit_values(near_local, self.g_ge, 0.0) + dna_near
-                out |= (self.g_ge >= 0) & (g_tot >= p.min_occurrences) & (g_near == 0)
-                out_of_range[r] = out
+                genus_out[r] = (self.g_ge >= 0) & (g_tot >= p.min_occurrences) & (g_near == 0)
             k = gaussian(d, p.density_bandwidth_km)
             self_k = float(k[at]) if at >= 0 else 0.0
-            local_effort = float((k * self.cell_effort).sum()) - self_k
+            local_effort = float((k * self.cell_effort).sum()) - self_k * own_effort
             if local_effort > 0:
                 k_local = np.bincount(self.pair_local, minlength=len(self.total),
                                       weights=self.pair_count * k[self.pair_pos])
@@ -324,7 +344,7 @@ class OccurrencePrior(RangeSource):
             all_weeks = self.effort_weeks[bands, :].sum(axis=0)
             if own and own.week >= 0 and bands.start <= own.band < bands.stop:
                 sp_weeks[mine, own.week] -= 1
-                all_weeks[own.week] -= 1
+                all_weeks[own.week] -= own_effort
             dist = np.abs(np.arange(WEEKS) - week)
             kw = gaussian(np.minimum(dist, WEEKS - dist), p.season_bandwidth_weeks)
             e_total = all_weeks.sum()
@@ -332,7 +352,7 @@ class OccurrencePrior(RangeSource):
             if e_total > 0 and e_here > 0:
                 season = self._shrunk_log_ratio(sp_weeks @ kw, sp_weeks.sum(axis=1),
                                                 e_here / e_total)
-        return Parts(out_of_range, density, season)
+        return Parts(out_of_range, density, season, genus_out)
 
     def mapping_summary(self) -> dict:
         from collections import Counter
