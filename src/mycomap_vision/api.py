@@ -28,8 +28,8 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from PIL import Image
 
-from . import (config, evaluate, inat, manifest, models, names, nightly, permissions, serving,
-               uploads)
+from . import (config, evaluate, fungusgate, inat, manifest, models, names, nightly, permissions,
+               serving, uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
@@ -260,7 +260,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                nightly_fetch_pending: Callable[[], tuple[list[dict], str]] | None = None,
                photo_fetcher: Callable[[], object] | None = None,
                paper_file: Path = PAPER_FILE,
-               experiments_dir: Path | None = None) -> FastAPI:
+               experiments_dir: Path | None = None,
+               fungus_gate: "fungusgate.FungusGate | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -275,9 +276,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `preload` (default: MV_PRELOAD) names models to load and index on a background
     thread at startup, so the first person to identify doesn't wait for it (about
     30-45 s on the server box). The server answers meanwhile; an identification that
-    arrives first waits for the load and then uses it."""
+    arrives first waits for the load and then uses it.
+
+    `fungus_gate`: the not-a-fungus gate every identification passes (fungusgate.py).
+    True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
+    gate); a FungusGate uses that one; None or False runs ungated."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     limits = limits or Limits.from_settings()
+    if fungus_gate is True:
+        fungus_gate = (fungusgate.FungusGate.load()
+                       if config.setting("MV_FUNGUS_GATE", "1") != "0" else None)
+    fungus_gate = fungus_gate or None
     signin = signin or SigninConfig.from_settings()
     rate = RateLimiter(*limits.rate)
     in_flight = Gate(limits.max_in_flight)
@@ -433,7 +442,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         try:
             ident = Identifier(own, backbone, method, root, calibration=cal,
                                train=limits.fit_on_demand, photo_info=False,
-                               layer_root=layer.embeddings if layer else None)
+                               layer_root=layer.embeddings if layer else None,
+                               gate=fungus_gate)
         finally:
             own.close()
         ident.warm()

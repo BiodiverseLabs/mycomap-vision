@@ -218,6 +218,55 @@ class OpenClipBackbone(TimmBackbone):
         return self.model
 
 
+def fork_point(base, meta: dict) -> int | None:
+    """The first block fine-tuning trained, when `base` is an open_clip ViT whose earlier
+    blocks are untouched (so its vectors and the base's share them); else None."""
+    tower = getattr(base, "model", None)
+    blocks = getattr(getattr(tower, "transformer", None), "resblocks", None)
+    if blocks is None or not all(hasattr(tower, a) for a in ("_embeds", "_pool", "ln_post")):
+        return None
+    n_trained = int(meta.get("blocks_trained") or 0)
+    if not 0 < n_trained <= len(blocks):
+        return None
+    return len(blocks) - n_trained
+
+
+def run_tail(blocks, tower, ln_post, proj, h):
+    """The blocks after the fork, then the tower's pooling with this norm and projection."""
+    for block in blocks:
+        h = block(h)
+    if not tower.transformer.batch_first:
+        h = h.transpose(0, 1)
+    saved = tower.ln_post
+    tower.ln_post = ln_post             # _pool applies ln_post (open_clip's final_ln_after_pool)
+    try:
+        pooled, _ = tower._pool(h)
+    finally:
+        tower.ln_post = saved
+    return pooled @ proj if proj is not None else pooled
+
+
+class BaseTail:
+    """The base model's own last blocks, final norm and projection, copied before the
+    fine-tuned weights go in. Only parameters fine-tuning trained can differ, so a copy
+    is made only when every trained parameter lies in this tail."""
+
+    def __init__(self, tower, start: int, trained: dict):
+        import copy
+        inside = (tuple(f"transformer.resblocks.{i}." for i in range(start, len(tower.transformer.resblocks)))
+                  + ("ln_post.", "proj"))
+        outside = [n for n in trained if not n.startswith(inside)]
+        if outside:
+            raise ValueError(f"trained parameters before the fork point: {outside[:3]}")
+        self.start = start
+        self.blocks = copy.deepcopy(tower.transformer.resblocks[start:])
+        self.ln_post = copy.deepcopy(tower.ln_post)
+        self.proj = tower.proj.detach().clone() if tower.proj is not None else None
+
+    def __call__(self, tower, h):
+        return run_tail(self.blocks, tower, self.ln_post, self.proj, h)
+
+
 class FinetunedBackbone:
     """A base backbone with the weights fine-tuning trained put back in (finetune.py)."""
 
@@ -235,17 +284,44 @@ class FinetunedBackbone:
         if unknown:
             raise ValueError(f"{model_name}: weights for parameters {base.name} doesn't have: "
                              f"{unknown[:3]}")
+        # A copy of the base model's own last blocks, pooling norm and projection, kept so
+        # the base vector (fungusgate.py) comes from the same pass: the shared blocks run
+        # once, then the last blocks run twice, trained and as they were.
+        start = fork_point(base, meta)
+        self._base_tail = (BaseTail(base.model, start, trained) if start is not None else None)
         with torch.no_grad():
             for n, value in trained.items():
                 own[n].copy_(value.to(own[n].device, own[n].dtype))
         self.base, self.meta, self.name = base, meta, name
         self.dim, self.device, self.transform = base.dim, base.device, base.transform
+        self.base_name = meta.get("base")
 
     def prepare(self, image):
         return self.base.prepare(image)
 
     def encode(self, items):
         return self.base.encode(items)
+
+    def encode_with_base(self, items):
+        """(fine-tuned vectors, the base model's vectors) for the same photos in one pass,
+        or None when the base isn't an open_clip ViT this can fork."""
+        if self._base_tail is None:
+            return None
+        torch = self.base.torch
+        tower, start = self.base.model, self._base_tail.start
+        x = torch.stack([i if isinstance(i, torch.Tensor) else self.transform(i)
+                         for i in items]).to(self.device, non_blocking=True)
+        with torch.inference_mode(), torch.autocast(self.device, dtype=torch.float16,
+                                                    enabled=self.device == "cuda"):
+            h = tower._embeds(x)
+            if not tower.transformer.batch_first:
+                h = h.transpose(0, 1).contiguous()
+            for block in tower.transformer.resblocks[:start]:
+                h = block(h)
+            tuned = run_tail(tower.transformer.resblocks[start:], tower, tower.ln_post,
+                             tower.proj, h)
+            base = self._base_tail(tower, h)
+        return tuned.float().cpu().numpy(), base.float().cpu().numpy()
 
     def image_module(self):
         return self.base.image_module()

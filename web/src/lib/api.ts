@@ -10,7 +10,8 @@ export const RANKS: Rank[] = ["family", "genus", "species"];
 export interface Candidate {
   name: string;
   score: number;
-  confidence: number;
+  /** null when the chance is withheld: the photos may not show a fungus (the gate). */
+  confidence: number | null;
   reference_records: number;
 }
 
@@ -45,7 +46,25 @@ export interface OverallPlace {
   name: string;
   /** 1 = this photo alone agrees with the overall answer. */
   position: number;
-  confidence: number;
+  confidence: number | null;
+}
+
+/** The not-a-fungus gate: whether a photo, or the whole find, looks like a fungus. */
+export type GateVerdict = "fungus" | "unsure" | "not_fungus";
+
+export interface PhotoGate {
+  verdict: GateVerdict;
+  /** BioCLIP 2's zero-shot chance that the photo shows a fungus. */
+  p_fungus: number;
+  message: string | null;
+}
+
+export interface FindGate {
+  verdict: GateVerdict;
+  message: string | null;
+  /** Photos (0-based) left out of the answer because they don't look like a fungus. */
+  left_out: number[];
+  photos: PhotoGate[];
 }
 
 /** What the model says from one of your photos on its own. */
@@ -55,6 +74,8 @@ export interface PhotoResult {
   ranks: Record<Rank, Candidate[]>;
   overall_top: Record<Rank, OverallPlace | null>;
   specimens: Specimen[];
+  /** Missing when the gate didn't run. */
+  gate?: PhotoGate;
 }
 
 /** The names worth considering at one rank, and how often such a list held the right
@@ -81,6 +102,10 @@ export interface IdentifyResult {
   hints: string[];
   species_url: string | null;
   confidence_note: string;
+  /** null when the gate didn't run (a backbone it can't read, or no gate saved). */
+  gate?: FindGate | null;
+  /** True when no chance is stated anywhere: the gate isn't sure this is a fungus. */
+  confidence_withheld?: boolean;
 }
 
 export interface Where {
