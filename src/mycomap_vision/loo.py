@@ -353,3 +353,57 @@ def photo_strength(rec: dict, rules: Rules) -> float:
     if dup >= rules.duplicate:
         return float(dup)
     return float(max(0.0, 1.0 - rec["best_match"]))
+
+
+# --- exclusion lists for the dataset release ---------------------------------------------
+
+DECISIONS = {"exclude-record": "record", "exclude-photo": "photo"}
+
+
+def release_key(record_key: str, manifest_keys: set[str]) -> str | None:
+    """The manifest's own key for a review list's record_key ('<source>:<id>'): a bare
+    iNat id, or a namespaced one ('mo:<n>') once the manifest has record sources. A
+    non-iNat record maps to its bare id only in a manifest with no namespaced keys at all
+    (before record-sources-v1). None when the manifest doesn't hold it."""
+    source, _, ident = record_key.partition(":")
+    if not ident:
+        return None
+    if source == "inat":
+        return ident if ident in manifest_keys else None
+    if record_key in manifest_keys:
+        return record_key
+    namespaced = any(":" in k for k in manifest_keys)
+    return ident if not namespaced and ident in manifest_keys else None
+
+
+def exclusion_rows(reviewed: list[dict], manifest_keys: set[str], photo_ids: set[int],
+                   reason_note: str = "") -> tuple[list[dict], list[str]]:
+    """(rows of the release builder's TSV, problems) from review rows a PERSON decided
+    (`decision` exclude-record / exclude-photo; `checked_by` filled). Rows without a person
+    or with another decision are left out; a key the manifest doesn't hold is a problem,
+    never a silent skip."""
+    out, problems = [], []
+    for r in reviewed:
+        kind = DECISIONS.get((r.get("decision") or "").strip())
+        if kind is None:
+            continue
+        if not (r.get("checked_by") or "").strip():
+            problems.append(f"{r.get('record_key')}: decision without checked_by")
+            continue
+        note = "; ".join(x for x in ((r.get("note") or "").strip(), reason_note,
+                                     f"checked by {r['checked_by'].strip()}") if x)
+        if kind == "record":
+            key = release_key(r["record_key"], manifest_keys)
+            if key is None:
+                problems.append(f"{r['record_key']}: not in this manifest")
+                continue
+            out.append({"kind": "record", "key": key, "reason": r.get("category", ""),
+                        "note": note})
+        else:
+            pid = str(r.get("photo_id") or "").strip()
+            if not pid.isdigit() or int(pid) not in photo_ids:
+                problems.append(f"{r['record_key']}: photo {pid or '?'} not in this manifest")
+                continue
+            out.append({"kind": "photo", "key": f"inat:{pid}", "reason": r.get("category", ""),
+                        "note": note})
+    return out, problems

@@ -227,3 +227,28 @@ def test_a_photo_that_is_another_genus_records_picture_is_a_wrong_photo():
 def test_a_record_the_model_agrees_with_has_no_mislabel_strength():
     assert loo.strength(rec(pred=0), {}, {0: 0.9}) == 0.0
     assert loo.strength(rec(), {}, {0: 0.9}) > 0.5
+
+
+def test_a_review_key_maps_to_the_manifests_own_key():
+    old = {"123", "456"}
+    new = {"123", "mo:456"}
+    assert loo.release_key("inat:123", old) == "123"
+    assert loo.release_key("mo:456", old) == "456"         # before record sources
+    assert loo.release_key("mo:456", new) == "mo:456"
+    assert loo.release_key("mo:123", new) is None          # never the iNat record by mistake
+    assert loo.release_key("inat:999", old) is None
+
+
+def test_only_person_checked_exclusions_reach_the_release_list_and_missing_keys_fail():
+    reviewed = [
+        {"record_key": "inat:1", "decision": "exclude-record", "checked_by": "Steve",
+         "category": "c"},
+        {"record_key": "inat:2", "decision": "exclude-record", "checked_by": "", "category": "c"},
+        {"record_key": "inat:3", "decision": "relabel-on-.com", "checked_by": "Steve"},
+        {"record_key": "inat:9", "decision": "exclude-record", "checked_by": "Steve"},
+        {"record_key": "inat:1", "decision": "exclude-photo", "photo_id": "77",
+         "checked_by": "Steve", "category": "c"},
+    ]
+    rows, problems = loo.exclusion_rows(reviewed, {"1", "2", "3"}, {77})
+    assert [(r["kind"], r["key"]) for r in rows] == [("record", "1"), ("photo", "inat:77")]
+    assert any("inat:2" in p for p in problems) and any("inat:9" in p for p in problems)
