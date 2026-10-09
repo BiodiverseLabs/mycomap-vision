@@ -4,7 +4,7 @@
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
-**Authors:** Steve [surname to add]¹ (corresponding author), MycoMap contributors [to be confirmed]
+**Authors:** Stephen Russell¹ (corresponding author), MycoMap contributors [to be confirmed]
 
 ¹ MycoMap.org
 
@@ -638,6 +638,7 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.1.1 (9 Oct 2026).** Corresponding author: Stephen Russell.
 - **0.1 (9 Oct 2026).** First full draft from results through the 1,152-record temporal test,
   the depth-bias and photograph experiments, and the 100-record held-out pilot. Benchmark plan
   and Mycologia notes added.
