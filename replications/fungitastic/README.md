@@ -99,9 +99,17 @@ Retraining their recipe:
   validated after its training cutoff, so such a species gets probability 1e-12.
   Vision's nearest-specimen methods can still name it. This is part of the method
   difference.
-- **Splits are by time.** Theirs are by year. Ours: everything validated up to a
-  cutoff trains; the last 28 days before the cutoff are the validation slice, never
-  trained on.
+- **Splits are by time.** Theirs are by year. Ours are the dataset release's own split,
+  by each record's first DNA validation, with the cutoffs fixed inside the release: the
+  `train` split trains; the release's `val` split picks the epoch (best macro-F1), drives
+  the learning-rate plateau and fits the temperature; `test` is reported once per
+  experiment; `sealed` (the paper's fresh set, once it exists) is never trained on. The
+  month and place prior counts come from `train` only. (Before releases, the last 28 days
+  before a cutoff were the validation slice; the exploratory runs used that.)
+- **Photos of every licence, for benchmarking.** The replication is internal
+  benchmarking, so it trains on every photo the release includes, all-rights-reserved
+  ones too. The final public Vision model uses CC and permission-granted photos only.
+  Each run records this policy and its photo counts by licence class.
 
 Running their published checkpoints:
 
@@ -118,10 +126,50 @@ Running their published checkpoints:
 Install the repository as in the [top-level README](../../README.md) (Setup), with the
 `embed` extras and a CUDA build of PyTorch. Commands are for **Git Bash**. Each step
 says which machine it runs on: **the laptop (this PC)**, or **an AWS g6.xlarge via
-`mv aws-launch-trainer`**. `<benchmark>` is a held-out benchmark frozen with
-`mv heldout freeze`.
+`mv aws-launch-trainer`**.
 
-### Published checkpoints (all on the laptop (this PC), GPU)
+Every result that counts is run on a **dataset release** (`<release>`, e.g. `v1`; spec:
+`docs/dataset-release.md`): a frozen, verifiable snapshot of records, labels, splits and
+photos under `data/research-releases/<release>/`. Each command verifies the release
+first (SHA256SUMS, MANIFEST.json) and cites it in its output. A draft (`dry-<stamp>`)
+needs `--allow-draft`, and its results are not v1's. `--eval` is the scored split: `val`
+by default, `test` only with `--allow-test`, `sealed` once the release has one.
+
+### On a dataset release (the laptop (this PC) unless said)
+
+1. The published checkpoints, the whole protocol in one re-runnable command (labels,
+   coverage, predict, crosswalk, report). Results go to
+   `data/research-results/<release>/external/<split>/`; a re-run reuses every cached
+   logit. Download the checkpoints and metadata first (step 1 below).
+   ```bash
+   mv external run --release <release> --eval val
+   mv external run --release <release> --eval test --allow-test   # once, at the end
+   ```
+2. Their recipe retrained, on an AWS g6.xlarge via `mv aws-launch-trainer`. Dry run
+   first (sends nothing), then the same without `--dry-run`. Only release.sqlite,
+   MANIFEST.json and SHA256SUMS ship (never private.sqlite); the instance verifies them
+   again, and refuses other labels than the release's labels_hash.
+   ```bash
+   mv aws-launch-trainer --release <release> --backbones none --finetune none \
+     --picek fungitastic-beit-b384@15 \
+     --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
+     --instance-type g6.xlarge --max-hours 52 --dry-run
+   ```
+3. Back on the laptop: pull it, embed, and compare it with Vision on the same release
+   split (a model is never scored on a split it trained or selected on, so the Picek
+   model is compared on `test`):
+   ```bash
+   mv aws-pull-trainer --run <run>
+   mv compare --release <release> --eval test --allow-test \
+     --backbones picek-fungitastic-beit-b384-<run>,<vision model> \
+     --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest
+   ```
+
+### Exploratory runs on the live manifest (before releases)
+
+`<benchmark>` is a held-out benchmark frozen with `mv heldout freeze`.
+
+#### Published checkpoints (all on the laptop (this PC), GPU)
 
 1. Download each checkpoint's `pytorch_model.bin` and `config.json` from Hugging Face
    into `data/external/bvra/<repo name>/`. Put the public training metadata in
@@ -154,7 +202,7 @@ says which machine it runs on: **the laptop (this PC)**, or **an AWS g6.xlarge v
    `mv external baseline --comparison <id>` adds the checkpoints to a saved scoreboard
    comparison instead.
 
-### Retraining their recipe
+#### Retraining their recipe
 
 - Smoke test, on the laptop (this PC):
   ```bash
@@ -230,6 +278,9 @@ All under [`src/mycomap_vision/replications/fungitastic/`](../../src/mycomap_vis
 | `published.py` | running their checkpoints: the class map, the observation rule, answers on a benchmark or a comparison |
 | `published_report.py` | the comparison protocol: coverage, genus and family, formal species, same vocabulary |
 | `crosswalk.py` | the GBIF Backbone + Catalogue of Life synonym crosswalk |
+| `dataset.py` | reading a dataset release: verified, read-only, never private.sqlite |
+| `release_eval.py` | which split a release scores, against which reference; `mv compare --release` |
+| `published_release.py` | `mv external run --release`: the published checkpoints' protocol in one command |
 
 Tests: [`tests/replications/fungitastic/`](../../tests/replications/fungitastic/). The
 commands (`mv picek-train`, `mv picek-bench`, `mv aws-launch-trainer --picek`,

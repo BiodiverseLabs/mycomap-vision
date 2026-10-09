@@ -844,6 +844,25 @@ Prepare everything, but launch only once Vision's internal labelling is fixed an
 
 ### Launch day (runbook)
 
+**On a dataset release (2026-10-09, replaces the label-hash checks below).** The launch
+takes `--release <id> [--allow-draft]`: it verifies the release first (SHA256SUMS and
+MANIFEST.json, `mv dataset verify` semantics), and the release is the source of truth for
+records, labels, splits, photos, allowed sources and benchmark exclusion (v1 trains on the
+held-out 13,145, so `--picek-exclude-benchmarks all` is refused when the release trains on
+benchmark records). The release's `labels_hash` replaces our own as the identity check;
+the release id, MANIFEST hash and labels_hash go into the label snapshot and result.json,
+with the photo-licence policy (internal benchmarking: every included photo, ARR too) and
+the counts by licence class. release.sqlite, MANIFEST.json and SHA256SUMS ship with the run
+(never private.sqlite); the instance verifies them against the launch's MANIFEST hash
+before its first stage. Training: the release's `train` split; its `val` split for the
+plateau, the best macro-F1 epoch and the temperature; month and place prior counts from
+`train` only; `test` and `sealed` never (a leak raises). Then, on the laptop:
+`mv compare --release <id> --eval test --allow-test` (the Picek model selected on val, so
+it is scored on test) and `mv external run --release <id> --eval val|test` for the
+published checkpoints. Code: replications/fungitastic/{dataset,release_eval,
+published_release}.py; dataset.py is a local adapter for the builder's reader (TODO:
+switch to mycomap_vision.dataset_release once feat/dataset-release merges).
+
 Everything below runs on **this PC** (Steve's Windows laptop). Shell commands are **Git
 Bash**; `aws login` can run in PowerShell or Git Bash. Nothing runs on the .org boxes.
 

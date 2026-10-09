@@ -352,8 +352,10 @@ def crosswalk_names(conn: sqlite3.Connection, ctx: dict, with_reference: bool = 
     label, own name and GBIF's accepted name). Temporary codes are never sent."""
     lab = ctx["labeller"]
     out = {t.label for t in ctx["truths"].values() if formal_label(lab, t.label)}
-    if with_reference:
-        out |= {t.label for t, _n in reference_truths(conn, lab) if formal_label(lab, t.label)}
+    if with_reference:            # a release's reference splits, else Vision's NA records
+        ref = ctx.get("ref_truths")
+        ref = reference_truths(conn, lab) if ref is None else ref
+        out |= {t.label for t, _n in ref if formal_label(lab, t.label)}
     for by in [*ctx["vision"].values(), *ctx["ext"].values()]:
         for res in by.values():
             for c in res.get("species") or []:

@@ -369,7 +369,8 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         rid, sha = release["dataset_release"], release["manifest_sha256"]
         if not re.fullmatch(r"[A-Za-z0-9._-]+", rid) or not re.fullmatch(r"[0-9a-f]{64}", sha):
             raise ValueError(f"not a release id / manifest hash: {rid!r} {sha!r}")
-        release_cmd = (f"# The dataset release the Picek run trains on (never private.sqlite).\n"
+        release_cmd = ("# The dataset release the Picek run trains on (its public tables "
+                       "only; no coordinates).\n"
                        f"mkdir -p data/{dataset.RELEASES_DIR}/{rid}\n" + "".join(
                            f'aws s3 cp "s3://$BUCKET/$RUN/{RELEASE_PREFIX}{rid}/{f}" '
                            f"data/{dataset.RELEASES_DIR}/{rid}/{f} || exit 1\n"

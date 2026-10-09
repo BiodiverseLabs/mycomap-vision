@@ -600,7 +600,9 @@ def save_run(conn: sqlite3.Connection, comparison_id: str, backbone: str, method
 def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
             test_days: int = 28, max_test: int | None = None, seed: int = 0,
             embeddings_root=None, name_scores: bool = False, sets: bool = True,
-            per_image: bool = False, into: str | None = None, log=print) -> dict:
+            per_image: bool = False, into: str | None = None,
+            shared: "SharedSet | None" = None, extra: dict | None = None,
+            log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
@@ -612,6 +614,10 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
     backbone and method there. Refused unless today's manifest rebuilds exactly its records
     (record set, cutoff, number of test records), so every row of a comparison stays
     measured on the same records.
+
+    `shared`: the records and photos to use, built elsewhere (a dataset release's splits:
+    replications/fungitastic/release_eval.py) instead of the newest-weeks split; `extra`
+    is added to every row's report (e.g. the release cited).
     """
     methods = methods or ["nearest"]
     for m in methods:
@@ -626,7 +632,10 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         if max_test:
             raise ValueError("--into rebuilds a saved comparison's records: no sampling")
         test_days = saved[3]
-    shared = shared_records(conn, backbones, test_days, max_test, seed, embeddings_root)
+    if shared is not None and into:
+        raise ValueError("--into rebuilds a newest-weeks comparison, not a release's")
+    shared = shared or shared_records(conn, backbones, test_days, max_test, seed,
+                                      embeddings_root)
     check_not_trained_on_test(conn, list(shared.loaded), shared.cutoff)
     ref, test = shared.ref, shared.test
     if into:
@@ -649,7 +658,8 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
                 continue
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
             fitted = fit_method(vecs, ref_b, m, backbone=b)
-            extra = getattr(fitted[1], "scoreboard_extra", lambda: None)()
+            row_extra = {**(extra or {}),
+                         **(getattr(fitted[1], "scoreboard_extra", lambda: None)() or {})}
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted,
                                   name_scores=name_scores, sets=sets, per_image=per_image)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted,
@@ -659,7 +669,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
                     conn.execute("delete from eval_runs where comparison_id = ? and "
                                  "backbone = ? and method = ?", (into, b, m))
             runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first,
-                                 extra))
+                                 row_extra or None))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
             "reference_records": len(ref), "test_records": len(test),
             "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)

@@ -33,7 +33,8 @@ def test_the_readme_names_every_recipe_preset_and_classifier_method(text):
 
 def test_the_readme_code_table_matches_the_subpackage(text):
     modules = sorted(p.name for p in PACKAGE.glob("*.py") if p.name != "__init__.py")
-    assert modules == ["crosswalk.py", "presets.py", "published.py", "published_report.py",
+    assert modules == ["crosswalk.py", "dataset.py", "presets.py", "published.py",
+                       "published_release.py", "published_report.py", "release_eval.py",
                        "retrain.py"]
     for name in modules:
         assert f"| `{name}` |" in text

@@ -221,10 +221,21 @@ def cmd_compare(conn, args) -> None:
     from . import evaluate, models
     backbones = [models.storage_name(b.strip()) for b in args.backbones.split(",") if b.strip()]
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
-                              max_test=args.max_test, name_scores=args.name_scores,
-                              sets=not args.no_sets, per_image=args.per_image,
-                              into=args.into)
+    if args.release:
+        # A dataset release's own split: its records, labels and photos (release_eval.py).
+        from .replications.fungitastic import dataset, release_eval
+        if args.into or args.max_test:
+            raise SystemExit("--release scores the release's whole split: no --into, "
+                             "no --max-test")
+        rel = dataset.load(args.release, args.allow_draft)
+        result = release_eval.compare(conn, rel, backbones, methods, args.eval,
+                                      args.allow_test, name_scores=args.name_scores,
+                                      sets=not args.no_sets, per_image=args.per_image)
+    else:
+        result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
+                                  max_test=args.max_test, name_scores=args.name_scores,
+                                  sets=not args.no_sets, per_image=args.per_image,
+                                  into=args.into)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -672,6 +683,14 @@ def cmd_external(conn, args) -> None:
     from .replications.fungitastic import published_report as external_report
     models = ([external.model_for(m) for m in _split(args.model)] if getattr(args, "model", None)
               else list(external.MODELS.values()))
+    if args.action == "run":
+        from .replications.fungitastic import dataset, published_release
+        rel = dataset.load(args.release, args.allow_draft)
+        print(json.dumps(published_release.run(
+            conn, rel, args.eval, args.allow_test, [m.short for m in models],
+            fetch_crosswalk=not args.no_fetch, batch_size=args.batch_size,
+            vision_results=[Path(p) for p in args.vision_results or []]), indent=2))
+        return
     if args.action == "labels":
         for m in models:
             external.check_config(m)
@@ -1037,6 +1056,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--per-image", action="store_true",
                    help="also answer every test photo on its own (top-1 per rank and species "
                         "macro-F1 per photo, as the Picek group reports)")
+    p.add_argument("--release", help="score a dataset release's own split instead of the "
+                                     "newest weeks (docs/dataset-release.md)")
+    p.add_argument("--allow-draft", action="store_true", help="allow a draft release")
+    p.add_argument("--eval", default="val", choices=["val", "test", "sealed"],
+                   help="with --release: the split scored (val by default; reference = the "
+                        "splits before it)")
+    p.add_argument("--allow-test", action="store_true",
+                   help="with --release --eval test: score the test split (once per experiment)")
     p.add_argument("--into", metavar="COMPARISON",
                    help="add the runs to this saved comparison (same records only; replaces "
                         "a run of the same backbone and method there)")
@@ -1261,6 +1288,19 @@ def main(argv: list[str] | None = None) -> int:
     xsub = p.add_subparsers(dest="action", required=True)
     model_help = ("comma list of models (short name, external:<name> or BVRA/<repo>); "
                   "default: all")
+    q = xsub.add_parser("run", help="the whole protocol on a dataset release's split, one "
+                                    "re-runnable command: labels, coverage, predict, crosswalk, "
+                                    "report (under research-results/<release>/external/<split>)")
+    q.add_argument("--release", required=True)
+    q.add_argument("--allow-draft", action="store_true")
+    q.add_argument("--eval", default="val", choices=["val", "test", "sealed"])
+    q.add_argument("--allow-test", action="store_true", help="score the test split")
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--batch-size", type=int, default=16)
+    q.add_argument("--no-fetch", action="store_true",
+                   help="crosswalk from the GBIF cache only (no requests)")
+    q.add_argument("--vision-results", nargs="*",
+                   help="JSONL of Vision's answers on the same records (same-vocabulary tables)")
     q = xsub.add_parser("labels", help="rebuild each class map from the dataset's metadata CSV")
     q.add_argument("--model", help=model_help)
     q = xsub.add_parser("coverage", help="(read-only) how much of a split and of Vision's North "
@@ -1318,7 +1358,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
     read_only = {"name-spellings": cmd_name_spellings, "fetch-taxonomy": cmd_fetch_taxonomy,
                  "taxonomy": cmd_taxonomy, "guests": cmd_guests}
-    if args.command == "external" and args.action in ("coverage", "crosswalk", "predict",
+    if args.command == "external" and args.action in ("coverage", "crosswalk", "predict", "run",
                                                        "report"):
         read_only["external"] = cmd_external  # these only read the manifest
     if args.command in read_only:             # the manifest is opened as it is, read-only
