@@ -128,8 +128,9 @@ Every candidate gets exactly one reason (the first that applies), so the counts 
 | `source_com_sequence` | .com Sequences: no photos of their own |
 | `source_genbank`, `source_unknown` | no photos of their own |
 | `held_out` | listed in `benchmark_holdouts` (a sealed benchmark) |
-| `missing_at_source` | the iNat or MO observation is gone, private or unread |
-| `not_north_america` | outside North America (Steve, 2026-10-09: North America only, as today) |
+| `not_north_america` | outside North America (Steve, 2026-10-09: North America only, as today; fetch-inat and fetch-mo read North America only, so these were never fetched) |
+| `not_fetched` | no iNat / MO details read for it yet |
+| `missing_at_source` | the iNat or MO observation is gone, private or not returned (status `missing`) |
 | `label_conflict` | .org holds more than one name |
 | `no_label` | no usable rank ("Unknown", "Agaricales") |
 | `guest` | DNA name is a guest of the fungus in the photo (guests.py) |
@@ -143,8 +144,9 @@ sha256), `permission_withdrawn` (ARR, owner withdrew on mycomap.org; the rule of
 wrong-photo lists, after a person's check), `ok`.
 
 Wrong-photo records need no reason of their own: a build refuses a manifest without the
-`record-sources-v1` migration, after which those photos are no longer linked to the record
-(feat/record-sources-mo); a record left with none is `no_photos`. The public variant adds
+`record-sources-v1` migration, which deleted each wrongly keyed record (an MO number taken for
+an iNat id) and brought it back under its own key (`mo:123`, `mycoportal:…`) without the
+unrelated iNat photos; the trail stays in the manifest's `source_removals`. The public variant adds
 `no_cc_photos` for a record whose only photos are all-rights-reserved.
 
 ARR photos with no answer yet stay **in** for training (Steve, 2026-09-28), counted apart.
