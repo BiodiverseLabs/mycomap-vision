@@ -49,9 +49,8 @@ export function AboutPage() {
         <HowGood />
         <Section title="Measured on the newest weeks">
           Each model is tested on the records that turned green most recently, identified using
-          only the records verified before them, the way it meets a new find. The{" "}
-          <a className="underline" href="/models">Models page</a> shows every test, broken down
-          by how many reference records each species has.
+          only the records verified before them, the way it meets a new find. The Results page under Research
+          shows every test, broken down by how many reference records each species has.
         </Section>
         <Standards />
         <Contributors s={s} />
@@ -199,10 +198,12 @@ function Openness() {
         </li>
         <li>
           Photo licences, and which photographers have given permission, are on the{" "}
-          <a className="underline" href="/data">Data page</a>.
+          <a className="underline" href="/research/data">Reference data page</a>.
         </li>
         <li>
-          Every test of every model is on the <a className="underline" href="/models">Models page</a>.
+          Every test of every model is on the{" "}
+          <a className="underline" href="/research/results">Results page</a>, and how we test is
+          in the <a className="underline" href="/research/protocols">evaluation protocols</a>.
         </li>
         {served.map((b) => (
           <li key={b.backbone} title={b.backbone} data-testid="text-release-note">

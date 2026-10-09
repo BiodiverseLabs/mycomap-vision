@@ -109,9 +109,9 @@ export const SAFETY_LINE = "Never eat a mushroom based on this identification.";
 export const SEQUENCING_URL = "https://mycomap.org/network";
 export const JOIN_URL = "https://mycomap.org/join";
 
-/** Where researchers go on this site. The Research section's routes aren't settled yet:
- *  change this one line when they are. */
-export const RESEARCH_PATH = "/models";
+/** Where researchers go on this site (the Research section's For researchers page):
+ *  one constant, so a route change is one line. */
+export const RESEARCH_PATH = "/research/for-researchers";
 
 /** What to photograph, in the order that helps most. Underside and stem base separate many
  *  look-alikes that the cap alone can't. */

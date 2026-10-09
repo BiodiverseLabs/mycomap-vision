@@ -62,8 +62,9 @@ export function GetInvolvedSections() {
             <> {num(s.contributors_arr)} photographers have all-rights-reserved photos in the
             reference set.</>
           )}
-          {" "}If you are one of them, you can <Out href={`${ORG}/photo-permission`}>give
-          permission on mycomap.org</Out>, and change your mind at any time.
+          {" "}If MycoMap has asked about yours, answer on the{" "}
+          <Out href={`${ORG}/profile?tab=photo-permission`}>AI photo permission tab</Out> of your
+          mycomap.org profile. You can change your answer at any time.
         </p>
       </Way>
 
