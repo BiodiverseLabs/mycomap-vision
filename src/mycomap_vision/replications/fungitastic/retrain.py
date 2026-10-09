@@ -168,6 +168,10 @@ class PicekData:
     one_word_records: int = 0
     val_records_unknown_species: int = 0
     record_labels: list[tuple[str, str]] = field(repr=False, default_factory=list)
+    release: dict | None = None              # the dataset release's cite(), when from one
+    missing_photos: int = 0                  # release photos with no copy in the store
+    photo_licences: dict = field(default_factory=dict)   # train + val photos by licence class
+    record_sources: dict = field(default_factory=dict)    # train + val records by source
 
 
 def benchmark_record_ids(conn) -> set[str]:
@@ -230,6 +234,149 @@ def build_data(conn, store_location: str, size: str, test_days: int = 28, val_da
                      [r.observation_id for r in val_recs], excluded, one_word,
                      sum(r.species not in pos for r in val_recs),
                      [(r.observation_id, r.species) for r in train_recs + val_recs])
+
+
+# --- the training data from a dataset release -------------------------------------------------
+
+# Internal benchmarking uses every photo the release includes, all-rights-reserved ones too
+# (Steve, 2026-10-09); only the final public model is CC + permission-granted. Recorded in
+# every snapshot made from a release.
+PHOTO_LICENCE_POLICY = ("internal benchmarking: every photo the release includes (open, nc "
+                        "and arr, ARR with no answer yet included); not for a public model")
+MAX_MISSING_PHOTOS = 0.01
+
+
+def check_release_exclusion(rel, mode: str) -> None:
+    """The release decides which records train (its splits). `match` follows it; `all`
+    (leave every benchmark record out) is refused when the release trains on benchmark
+    records, rather than training on other records than Vision."""
+    if mode not in EXCLUDE_MODES:
+        raise ValueError(f"exclude_benchmarks is one of {', '.join(EXCLUDE_MODES)}")
+    n = rel.benchmark_records()
+    if mode == "all" and n:
+        raise ValueError(f"release {rel.id} trains on {n:,} held-out benchmark records; "
+                         "--picek-exclude-benchmarks all would train on other records than "
+                         "the release (and Vision). Use match: the release's splits decide.")
+
+
+def build_data_from_release(conn, rel, store_location: str, size: str,
+                            cell_degrees: float = 4.0) -> PicekData:
+    """PicekData from a dataset release: its `train` split trains, its `val` split validates
+    (the plateau schedule, the best macro-F1 epoch and the temperature), and test and
+    sealed are never read (a leak raises dataset.SealedLeak). Labels are the release's
+    (`species`; a record without one, a one-word name, isn't trained). Photo paths come from
+    the store copies in this manifest, each checked against the release's original sha256;
+    month and place prior counts come from the train split only (coordinates from this
+    manifest: private.sqlite is never read)."""
+    from . import dataset
+    recs = rel.training_records(include_val=True)
+    train_keys = {r["record_key"] for r in rel.records("train")}
+    never = {r["record_key"] for s in dataset.NEVER_TRAINED for r in rel.records(s)}
+    if never & {r["record_key"] for r in recs}:
+        raise dataset.SealedLeak(f"release {rel.id}: test or sealed records in the training data")
+    copies = {int(p): (path, sha) for p, path, sha in conn.execute(
+        "select photo_id, path, sha256 from photo_copies where store = ? and size = ?",
+        (store_location, size))}
+    if not copies:
+        raise ValueError(f"no {size} photos in {store_location}")
+    place = {str(o): (lat, lon) for o, lat, lon in conn.execute(
+        "select observation_id, latitude, longitude from records")}
+    photos = rel.photos(r["record_key"] for r in recs)
+    one_word = [r for r in recs if not r.get("species")]
+    recs = [r for r in recs if r.get("species")]
+    train_recs = [r for r in recs if r["record_key"] in train_keys]
+    val_recs = [r for r in recs if r["record_key"] not in train_keys]
+    if not train_recs:
+        raise ValueError(f"release {rel.id} has no training records")
+    classes = sorted({r["species"] for r in train_recs})
+    pos = {c: i for i, c in enumerate(classes)}
+    genus_of = [""] * len(classes)
+    missing, mismatched, wanted = 0, [], 0
+    licences, sources = {}, {}
+
+    def paths_of(rec):
+        nonlocal missing, wanted
+        out = []
+        for p in photos.get(rec["record_key"], []):
+            wanted += 1
+            licences[p.get("license_class") or "(none)"] = \
+                licences.get(p.get("license_class") or "(none)", 0) + 1
+            pid = dataset.photo_id(p["photo_key"])
+            got = copies.get(pid)
+            if got is None:
+                missing += 1
+                continue
+            path, sha = got
+            if size == "large" and sha and p.get("original_sha256") and sha != p["original_sha256"]:
+                mismatched.append(p["photo_key"])
+                continue
+            out.append((pid, path))
+        return out
+    train, month_counts = [], np.zeros((len(classes), 12), dtype=np.int32)
+    cells: dict[int, dict[int, int]] = {}
+    for r in train_recs:
+        sources[r["source"]] = sources.get(r["source"], 0) + 1
+        k = pos[r["species"]]
+        genus_of[k] = genus_of[k] or (r.get("genus") or "")
+        m = month_of(r.get("observed_on"))
+        lat, lon = place.get(str(r["record_key"]), (None, None))
+        cell = cell_of(lat, lon, cell_degrees)
+        for pid, path in paths_of(r):
+            train.append((pid, path, k))
+            if m is not None:
+                month_counts[k, m] += 1
+            if cell is not None:
+                row = cells.setdefault(cell, {})
+                row[k] = row.get(k, 0) + 1
+    val = []
+    for r in val_recs:
+        sources[r["source"]] = sources.get(r["source"], 0) + 1
+        val += [(pid, path, pos.get(r["species"], -1), r["record_key"])
+                for pid, path in paths_of(r)]
+    if mismatched:
+        raise ValueError(f"{len(mismatched):,} photos in {store_location} differ from release "
+                         f"{rel.id}'s originals (first: {', '.join(mismatched[:5])})")
+    if wanted and missing > MAX_MISSING_PHOTOS * wanted:
+        raise ValueError(f"{missing:,} of release {rel.id}'s {wanted:,} train/val photos have "
+                         f"no {size} copy in {store_location}")
+    class_photos = np.bincount([k for _, _, k in train], minlength=len(classes)).astype(np.int64)
+    dates = lambda rs: [r["validated_on"] for r in rs if r.get("validated_on")]  # noqa: E731
+    newest_seen = max(dates(train_recs + val_recs), default="")
+    newest_train = max(dates(train_recs), default=newest_seen)
+    return PicekData(classes, genus_of, train, val, class_photos, month_counts, cells,
+                     newest_seen, newest_train, [r["record_key"] for r in train_recs],
+                     [r["record_key"] for r in val_recs], 0, len(one_word),
+                     sum(r["species"] not in pos for r in val_recs),
+                     [(r["record_key"], r["species"]) for r in train_recs + val_recs],
+                     release=rel.cite(), missing_photos=missing, photo_licences=licences,
+                     record_sources=dict(sorted(sources.items(), key=lambda kv: -kv[1])))
+
+
+def release_snapshot(rel, data: PicekData, exclude_mode: str = "match") -> dict:
+    """label_snapshot for a run on a dataset release: the release's identity (its
+    labels_hash is the run's labels_hash), what it trains and validates on, the photo
+    licence policy and the record sources against the release's allowed sources."""
+    ok = allowed_sources(release=rel)
+    return {
+        "labels_hash": rel.labels_hash, "own_labels_hash": labels_hash(data),
+        "dataset_release": rel.cite(), "trained_through": data.trained_through,
+        "train_through": data.train_through,
+        "exclude_benchmarks": f"{exclude_mode} (the release's splits decide)",
+        "benchmark_records_trained": rel.benchmark_records(),
+        "validation": "the release's val split (plateau, best macro-F1 epoch, temperature)",
+        "records_train": len(data.train_records), "records_validation": len(data.val_records),
+        "photos_train": len(data.train), "photos_validation": len(data.val),
+        "photos_missing_in_store": data.missing_photos, "species": len(data.classes),
+        "one_word_records_left_out": data.one_word_records,
+        "photo_licence_policy": PHOTO_LICENCE_POLICY, "photo_licences": data.photo_licences,
+        "allowed_sources": list(ok),
+        "record_sources": {"recorded": True, "migration": "dataset release",
+                           "allowed_sources": list(ok),
+                           "records": len(data.train_records) + len(data.val_records),
+                           "by_source": data.record_sources,
+                           "not_allowed": sum(n for s, n in data.record_sources.items()
+                                              if s not in ok)},
+    }
 
 
 def labels_hash(data: PicekData) -> str:
@@ -308,11 +455,10 @@ class RecordSourceError(ValueError):
 
 
 def allowed_sources(allowed=None, release=None) -> tuple[str, ...]:
-    """The sources a run may train on: `allowed` if given, else the release's, else
-    DEFAULT_ALLOWED_SOURCES. Refuses an empty set and any source outside
-    PHOTO_SOURCES (inat, mo).
-    TODO(release builder): once a Dataset release exists, pass it here as `release` (its
-    release.allowed_sources), so Vision and the replication train on the same release."""
+    """The sources a run may train on: `allowed` if given, else the release's own
+    `allowed_sources` (a release without it is refused: dataset.Release), else
+    DEFAULT_ALLOWED_SOURCES. Refuses an empty set and any source outside PHOTO_SOURCES
+    (inat, mo), whoever names it."""
     if allowed is None and release is not None:
         allowed = release.allowed_sources
     chosen = tuple(sorted(set(DEFAULT_ALLOWED_SOURCES if allowed is None else allowed)))
@@ -429,6 +575,22 @@ def run_sources(conn, store_location: str, size: str, test_days: int = 28,
 
 
 def format_snapshot(snap: dict) -> str:
+    if snap.get("dataset_release"):
+        rel = snap["dataset_release"]
+        return "\n".join([
+            f"Labels for this run: dataset release {rel['dataset_release']}"
+            f"{' (DRAFT)' if rel.get('draft') else ''}, labels hash {snap['labels_hash']}, "
+            f"MANIFEST {rel['manifest_sha256'][:12]}: {snap['records_train']:,} train + "
+            f"{snap['records_validation']:,} val records ({snap['photos_train']:,} + "
+            f"{snap['photos_validation']:,} photos), {snap['species']:,} species; "
+            f"validation is the release's val split",
+            f"  one-word names left out: {snap['one_word_records_left_out']:,}; photos missing "
+            f"in the store: {snap['photos_missing_in_store']:,}; benchmark records trained: "
+            f"{snap['benchmark_records_trained']:,}",
+            f"  photo licences: {', '.join(f'{k} {v:,}' for k, v in snap['photo_licences'].items())}"
+            f" ({snap['photo_licence_policy']})",
+            "  record sources: " + format_sources(snap.get("record_sources")),
+        ])
     p = snap["known_label_problems"]
     return "\n".join([
         f"Labels for this run (hash {snap['labels_hash']}): {snap['records_train']:,} training "
@@ -767,14 +929,28 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
     preset = PRESETS[cfg.preset]
     out_dir = out_dir or models_dir()
     started = time.monotonic()
-    data = data or build_data(conn, store.location, size, test_days, cfg.val_days,
-                              cfg.cell_degrees,
-                              exclusion_ids(conn, cfg.exclude_benchmarks, cfg.exclude_ids_file))
-    snapshot = label_snapshot(conn, data, cfg.exclude_benchmarks)
+    rel = None
+    if cfg.release:
+        from . import dataset
+        rel = dataset.load(cfg.release, cfg.allow_draft,
+                           Path(cfg.release_root) if cfg.release_root else None,
+                           expect_manifest_sha256=cfg.expect_release_manifest)
+        check_release_exclusion(rel, cfg.exclude_benchmarks)
+        data = data or build_data_from_release(conn, rel, store.location, size,
+                                               cfg.cell_degrees)
+        snapshot = release_snapshot(rel, data, cfg.exclude_benchmarks)
+    else:
+        data = data or build_data(conn, store.location, size, test_days, cfg.val_days,
+                                  cfg.cell_degrees,
+                                  exclusion_ids(conn, cfg.exclude_benchmarks,
+                                                cfg.exclude_ids_file))
+        snapshot = label_snapshot(conn, data, cfg.exclude_benchmarks)
     log(format_snapshot(snapshot))
     if cfg.expect_labels_hash and snapshot["labels_hash"] != cfg.expect_labels_hash:
         raise ValueError(f"the labels here (hash {snapshot['labels_hash']}) are not the ones "
                          f"the launch recorded ({cfg.expect_labels_hash}): not training")
+    if rel is not None:
+        require_allowed_sources(snapshot["record_sources"], log=log)
     n_classes = len(data.classes)
     log(f"[{name}] {cfg.preset}: {len(data.train):,} training photos of "
         f"{len(data.train_records):,} records, {n_classes:,} species; validation "
@@ -922,7 +1098,11 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
             "classifier": f"{name}.classifier.npz", "records_file": f"{name}.records.csv",
             "image_size": size_px, "feature_dim": int(head.weight.shape[1]),
             "trained_through": data.trained_through, "train_through": data.train_through,
-            "validation": {"days": cfg.val_days, "records": len(data.val_records),
+            "dataset_release": data.release,
+            "trained_splits": ["train"] if data.release else None,
+            "validation": {"days": None if data.release else cfg.val_days,
+                           "split": "val (the release's)" if data.release else None,
+                           "records": len(data.val_records),
                            "photos": len(data.val), "photos_scored": len(val_items),
                            "records_of_species_not_trained": data.val_records_unknown_species},
             "test_days": test_days, "records": len(data.train_records),

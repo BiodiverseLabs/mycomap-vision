@@ -390,7 +390,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             loader=None, data_dir: Path | None = None, finetune: list[str] | None = None,
             finetuner=None, sample_records: int | None = None, picek: list[str] | None = None,
             picek_trainer=None, picek_exclude: str = "match", picek_ids_file: str | None = None,
-            picek_labels_hash: str | None = None,
+            picek_labels_hash: str | None = None, picek_release: str | None = None,
+            picek_release_manifest: str | None = None, picek_allow_draft: bool = False,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
@@ -409,7 +410,19 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     # The laptop refuses to ship such a manifest (aws.check_trainer_request); this is the
     # instance's own check, before anything is embedded or trained.
     holdouts.check_clean(conn, "the trainer run")
-    if picek:
+    if picek and picek_release:
+        # The release shipped with the run, verified again here (its SHA256SUMS, and the
+        # MANIFEST.json the launch read), then the launch's rules on it.
+        from .replications.fungitastic import dataset, retrain
+        rel = dataset.load(picek_release, picek_allow_draft, files=dataset.SHIPPED,
+                           expect_manifest_sha256=picek_release_manifest)
+        retrain.check_release_exclusion(rel, picek_exclude)
+        snap = retrain.release_snapshot(rel, retrain.build_data_from_release(
+            conn, rel, store.location, size), picek_exclude)
+        rel.close()
+        log("record sources: " + retrain.format_sources(snap["record_sources"]))
+        retrain.require_allowed_sources(snap["record_sources"], log=log)
+    elif picek:
         # The same rule as at launch (aws.picek_launch_labels), on the manifest shipped here:
         # every record the Picek run trains or validates on is from its allowed sources.
         from .replications.fungitastic import retrain
@@ -442,6 +455,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                         methods=methods, test_days=test_days, sample_records=kept,
                         attempts=attempts, picek_exclude_benchmarks=picek_exclude,
                         picek_labels_hash=picek_labels_hash,
+                        dataset_release=picek_release,
+                        dataset_release_manifest=picek_release_manifest,
                         stages=[{**restored[i], "restored": True} if i in restored
                                 else {**asdict(s), "status": "pending"}
                                 for i, s in enumerate(stages)])
@@ -529,7 +544,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                 if s.kind == "picek":
                     meta = (picek_trainer or _default_picek_trainer(
                         store, size, test_days, log, stopping, picek_exclude, picek_ids_file,
-                        picek_labels_hash))(
+                        picek_labels_hash, picek_release, picek_release_manifest,
+                        picek_allow_draft))(
                         conn, s.spec, s.name, data_dir / "models")
                 else:
                     meta = (finetuner or _default_finetuner(store, size, test_days, log,
@@ -601,7 +617,8 @@ def model_files(kind: str) -> tuple[str, ...]:
 
 def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                            exclude: str = "match", ids_file: str | None = None,
-                           labels_hash: str | None = None):
+                           labels_hash: str | None = None, release: str | None = None,
+                           release_manifest: str | None = None, allow_draft: bool = False):
     def run(conn, spec, name, models_dir):
         import os
 
@@ -610,7 +627,8 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
         cfg = PicekConfig(preset=preset, epochs=epochs, cache_px=cache_of(spec),
                           workers=max(2, min(6, os.cpu_count() or 4)),
                           exclude_benchmarks=exclude, exclude_ids_file=ids_file,
-                          expect_labels_hash=labels_hash)
+                          expect_labels_hash=labels_hash, release=release,
+                          allow_draft=allow_draft, expect_release_manifest=release_manifest)
         return train(conn, store, size, name, cfg,
                      test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
     return run

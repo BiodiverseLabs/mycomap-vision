@@ -121,7 +121,8 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         spot=args.spot, spot_max_price=args.spot_max_price,
                                         resume=args.resume, picek=_split(args.picek),
                                         picek_exclude=args.picek_exclude_benchmarks,
-                                        dry_run=args.dry_run, ec2_check=args.ec2_check),
+                                        dry_run=args.dry_run, ec2_check=args.ec2_check,
+                                        release=args.release, allow_draft=args.allow_draft),
                      indent=2))
 
 
@@ -154,6 +155,9 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_exclude=args.picek_exclude_benchmarks,
                           picek_ids_file=args.picek_exclude_ids,
                           picek_labels_hash=args.picek_labels_hash, interrupted=watcher,
+                          picek_release=args.picek_release,
+                          picek_release_manifest=args.picek_release_manifest,
+                          picek_allow_draft=args.picek_allow_draft,
                           resume=trainer.RunFiles(store.client, store.bucket)
                           if args.resume else None)
     if watcher is not None:
@@ -759,7 +763,8 @@ def cmd_picek_train(conn, args) -> None:
                             workers=args.workers, max_steps=args.max_steps,
                             grad_checkpointing=False if args.no_grad_checkpointing else None,
                             seed=args.seed, cache_px=args.cache_px,
-                            exclude_benchmarks=args.exclude_benchmarks)
+                            exclude_benchmarks=args.exclude_benchmarks,
+                            release=args.release, allow_draft=args.allow_draft)
     meta = picek.train(conn, open_store(args.source, config.DATA_DIR), args.size, name, cfg,
                        test_days=args.test_days)
     print(json.dumps({k: v for k, v in meta.items() if k != "history"}, indent=2))
@@ -884,7 +889,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--picek-exclude-benchmarks", default="match", choices=["match", "all"],
                    help="benchmark records the replication leaves out: match (default) = "
                         "exactly what the Vision models leave out (sealed benchmarks), so "
-                        "both train on the same records; all = every benchmark's records")
+                        "both train on the same records; all = every benchmark's records. "
+                        "With --release the release's splits decide, and a mismatch is refused")
+    p.add_argument("--release", help="the Picek stage trains on this dataset release "
+                                     "(verified first; shipped without private.sqlite)")
+    p.add_argument("--allow-draft", action="store_true",
+                   help="allow a draft release (dry-<stamp>); its results are not v1's")
     p.add_argument("--dry-run", action="store_true",
                    help="check and build everything locally (code archive, instance script, "
                         "manifest copy, label snapshot, EC2 request) and send nothing")
@@ -925,6 +935,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--picek-exclude-benchmarks", default="match", choices=["match", "all"])
     p.add_argument("--picek-exclude-ids", help="the ids to leave out with 'all' (shipped)")
     p.add_argument("--picek-labels-hash", help="refuse to train on other labels than these")
+    p.add_argument("--picek-release", help="the shipped dataset release the Picek stage uses")
+    p.add_argument("--picek-release-manifest", help="sha256 of its MANIFEST.json at launch")
+    p.add_argument("--picek-allow-draft", action="store_true")
     p.add_argument("--sample-records", type=int)
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
@@ -967,6 +980,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude-benchmarks", default="match", choices=["match", "all"],
                    help="match (default): leave out what the Vision models leave out "
                         "(sealed benchmarks); all: every benchmark's records")
+    p.add_argument("--release", help="a dataset release id (docs/dataset-release.md): records, labels, splits and photos come from it, not the live manifest")
+    p.add_argument("--allow-draft", action="store_true", help="allow a draft release")
     p.add_argument("--cache-px", type=int,
                    help="resize the training photos once to this shorter side on local disk "
                         "(e.g. 440) and train from those; off by default")

@@ -306,7 +306,7 @@ print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'GPU', ok and torc
 sys.exit(0 if ok else 1)" || {{ echo "torch cannot use the GPU (driver older than its CUDA?)"; exit 1; }}
 # The run's own copy of the manifest; the downloader's shared one is never touched.
 aws s3 cp "s3://$BUCKET/$RUN/manifest-in.sqlite" data/manifest.sqlite
-{picek_ids_cmd}# iNat's family per genus, beside the manifest where labels look for it (taxonomy.py);
+{picek_ids_cmd}{release_cmd}# iNat's family per genus, beside the manifest where labels look for it (taxonomy.py);
 # without it the run labels families with .org's, as the laptop would not.
 mkdir -p data/taxonomy
 aws s3 cp "s3://$BUCKET/$RUN/{taxonomy_key}" data/taxonomy/inat_genera.sqlite \\
@@ -352,7 +352,8 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                              code_version: str = "unknown", spot: bool = False,
                              resume: bool = False, code_key: str = "code.tar.gz",
                              picek: list[str] | None = None, picek_exclude: str = "match",
-                             picek_labels_hash: str | None = None) -> str:
+                             picek_labels_hash: str | None = None,
+                             release: dict | None = None) -> str:
     # The job is killed at max_hours, and stops itself STOP_MARGIN_HOURS before that so
     # it can upload what it finished; the backstop leaves 30 minutes on top for setup
     # and the log upload.
@@ -362,6 +363,19 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
     if not re.fullmatch(r"[A-Za-z0-9._-]+\.tar\.gz", code_key):
         raise ValueError(f"not a code archive name: {code_key!r}")
     stop = max(max_hours - STOP_MARGIN_HOURS, max_hours / 2)
+    release_cmd, release_arg = "", ""
+    if release:
+        from .replications.fungitastic import dataset
+        rid, sha = release["dataset_release"], release["manifest_sha256"]
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", rid) or not re.fullmatch(r"[0-9a-f]{64}", sha):
+            raise ValueError(f"not a release id / manifest hash: {rid!r} {sha!r}")
+        release_cmd = (f"# The dataset release the Picek run trains on (never private.sqlite).\n"
+                       f"mkdir -p data/{dataset.RELEASES_DIR}/{rid}\n" + "".join(
+                           f'aws s3 cp "s3://$BUCKET/$RUN/{RELEASE_PREFIX}{rid}/{f}" '
+                           f"data/{dataset.RELEASES_DIR}/{rid}/{f} || exit 1\n"
+                           for f in dataset.SHIPPED))
+        release_arg = (f" --picek-release {rid} --picek-release-manifest {sha}"
+                       + (" --picek-allow-draft" if release.get("draft") else ""))
     return TRAINER_USER_DATA.format(
         bucket=bucket_name, run_id=run_id, region=config.setting("MV_AWS_REGION", "us-east-2"),
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
@@ -374,7 +388,9 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                    + (" --picek-exclude-ids data/picek-exclude-ids.txt"
                       if picek_exclude == "all" else "")
                    + (f" --picek-labels-hash {picek_labels_hash}" if picek_labels_hash else "")
+                   + release_arg
                    if picek else ""),
+        release_cmd=release_cmd if picek else "",
         picek_ids_cmd=(f'aws s3 cp "s3://$BUCKET/$RUN/{PICEK_IDS_KEY}" '
                        "data/picek-exclude-ids.txt || exit 1\n"
                        if picek and picek_exclude == "all" else ""),
@@ -383,18 +399,27 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
 
 
 PICEK_IDS_KEY = "picek-exclude-ids.txt"
+RELEASE_PREFIX = "release/"            # runs/<run>/release/<id>/<file>: what training needs
 PICEK_LABELS_KEY = "picek-labels.json"
 
 
 def picek_launch_labels(conn, store_location: str, size: str, test_days: int, exclude: str,
-                        log=print, dry_run: bool = False,
-                        allowed_sources=None) -> tuple[dict, set[str] | None]:
+                        log=print, dry_run: bool = False, allowed_sources=None,
+                        release=None) -> tuple[dict, set[str] | None]:
     """The labels a Picek run will train on, read now from this manifest (launch time),
     printed with the known label problems the manifest carries, and the ids to ship when
     every benchmark is excluded. The instance checks it trains on the same (labels_hash).
     A launch is refused unless every training and validation record comes from the run's
     allowed sources (retrain.require_allowed_sources; a dry run only warns)."""
     from .replications.fungitastic import retrain as picek
+    if release is not None:
+        # The release is the source of truth: its records, labels, splits and sources.
+        picek.check_release_exclusion(release, exclude)
+        data = picek.build_data_from_release(conn, release, store_location, size)
+        snap = picek.release_snapshot(release, data, exclude)
+        log(picek.format_snapshot(snap))
+        picek.require_allowed_sources(snap["record_sources"], dry_run=dry_run, log=log)
+        return snap, None
     if exclude not in picek.EXCLUDE_MODES:
         raise ValueError(f"--picek-exclude-benchmarks is one of "
                          f"{', '.join(picek.EXCLUDE_MODES)}")
@@ -613,9 +638,16 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                    resume: str | None = None, picek: list[str] | None = None,
                    picek_exclude: str = "match", dry_run: bool = False,
                    dry_run_dir: Path | None = None, ec2_check: bool = False,
+                   release: str | None = None, allow_draft: bool = False,
                    log=print) -> dict:
     """Check the request, the time it needs and the commit it ships, all before anything
     is paid for; then upload the code and the manifest and start the instance.
+
+    `release`: the Picek stage trains on that dataset release (docs/dataset-release.md),
+    verified (SHA256SUMS, MANIFEST.json) before anything else; a draft needs
+    `allow_draft`. Its labels_hash is the run's labels identity, its MANIFEST hash is
+    recorded, and release.sqlite + MANIFEST.json + SHA256SUMS ship with the run (never
+    private.sqlite); the instance verifies them again before its first stage.
 
     `spot`: a one-time Spot instance instead of On-Demand (`spot_max_price` in dollars an
     hour; none = the On-Demand price). `resume`: continue that run instead of starting a
@@ -633,6 +665,16 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     from .models import storage_name
     if spot_max_price is not None and not spot:
         raise ValueError("--spot-max-price needs --spot")
+    rel = None
+    if release:
+        from .replications.fungitastic import dataset
+        if not picek:
+            raise ValueError("--release applies to the Picek stage: name a --picek preset")
+        if resume:
+            raise ValueError("--release with --resume is not supported yet: launch a new run")
+        rel = dataset.load(release, allow_draft)          # mv dataset verify, first of all
+        log(f"Dataset release {rel.id}{' (DRAFT)' if rel.draft else ''}: verified "
+            f"(MANIFEST {rel.manifest_sha256[:12]}, labels {rel.labels_hash[:12]})")
     b = bucket()
     done: set = set()
     prev = None
@@ -671,7 +713,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
     labels, exclude_ids = (picek_launch_labels(conn, f"s3://{b}/", size, test_days,
-                                               picek_exclude, log, dry_run=dry_run)
+                                               picek_exclude, log, dry_run=dry_run,
+                                               release=rel)
                            if picek else (None, None))
     labels_hash = labels["labels_hash"] if labels else None
     sha = release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)
@@ -679,7 +722,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         return dry_run_launch(conn, sha, names, methods, max_hours, b, size, test_days, ft,
                               sample_records, spot, spot_max_price, instance_type, picek,
                               picek_exclude, labels, exclude_ids, photos, est,
-                              dry_run_dir, ec2_check, log)
+                              dry_run_dir, ec2_check, log, rel)
     if prev is not None and prev.get("code_version") not in (None, sha):
         log(f"Note: run {resume} ran commit {str(prev.get('code_version'))[:10]}; the rest "
             f"runs commit {sha[:10]} (both are recorded in progress.json)")
@@ -711,6 +754,11 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         log(f"Uploaded commit {sha[:10]} and the manifest for run {run_id} "
             f"({photos:,} {size} photos in S3)")
         ship_taxonomy(s3, b, run_id, log)
+    if rel is not None:
+        from .replications.fungitastic import dataset
+        for f in dataset.SHIPPED:
+            s3.upload_file(str(rel.path / f), b, f"runs/{run_id}/{RELEASE_PREFIX}{rel.id}/{f}")
+        log(f"Uploaded release {rel.id} ({', '.join(dataset.SHIPPED)}; not private.sqlite)")
     if picek:
         s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_LABELS_KEY}",
                       Body=json.dumps(labels, indent=2).encode())
@@ -728,7 +776,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                          ft, sample_records, code_version=sha, spot=spot,
                                          resume=bool(resume), code_key=code_key,
                                          picek=picek, picek_exclude=picek_exclude,
-                                         picek_labels_hash=labels_hash)
+                                         picek_labels_hash=labels_hash,
+                                         release=rel.cite() if rel else None)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price,
                                                      extra_gb=picek_cache_gb(picek, photos)),
@@ -740,6 +789,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             "finetune": ft, "picek": list(picek or []), "methods": methods,
             "picek_exclude_benchmarks": picek_exclude if picek else None,
             "picek_labels": labels,
+            "dataset_release": rel.cite() if rel else None,
             "sample_records": sample_records,
             "code_version": sha, "max_hours": max_hours, "estimate_hours": est["total_hours"],
             "log": f"s3://{b}/runs/{run_id}/train.log",
@@ -750,7 +800,7 @@ TRAINER_NEEDS = ("pyproject.toml", "requirements/trainer.txt", "src/mycomap_visi
                  "src/mycomap_vision/trainer.py")
 # A Picek run (--picek) also needs the replication's code (replications/fungitastic/README.md).
 PICEK_NEEDS = tuple(f"src/mycomap_vision/replications/fungitastic/{f}"
-                    for f in ("__init__.py", "presets.py", "retrain.py"))
+                    for f in ("__init__.py", "presets.py", "retrain.py", "dataset.py"))
 
 
 def check_code_archive(body: bytes, picek: list[str] | None = None) -> dict:
@@ -776,7 +826,7 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                    sample_records, spot: bool, spot_max_price, instance_type: str,
                    picek: list[str] | None, picek_exclude: str, labels: dict | None,
                    exclude_ids, photos: int, est: dict, dest: Path | None,
-                   ec2_check: bool, log=print) -> dict:
+                   ec2_check: bool, log=print, rel=None) -> dict:
     """The rest of launch_trainer with nothing sent (see its `dry_run`)."""
     run_id = "dry-run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     dest = Path(dest or config.DATA_DIR / "aws" / run_id)
@@ -788,7 +838,14 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                                          test_days, ft, sample_records, code_version=sha,
                                          spot=spot, picek=picek, picek_exclude=picek_exclude,
                                          picek_labels_hash=labels["labels_hash"] if labels
-                                         else None)
+                                         else None, release=rel.cite() if rel else None)
+    if rel is not None:
+        import shutil as _sh
+        from .replications.fungitastic import dataset
+        shipped = dest / "release" / rel.id
+        shipped.mkdir(parents=True, exist_ok=True)
+        for f in dataset.SHIPPED:
+            _sh.copyfile(rel.path / f, shipped / f)
     (dest / "user-data.sh").write_text(user_data, encoding="utf-8", newline="\n")
     syntax = None
     import shutil
@@ -830,7 +887,11 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
     out = {"dry_run": True, "folder": str(dest), "commit": sha, "code_archive": archive,
            "instance_script": syntax, "manifest_copy_mb": round(snap.stat().st_size / 2**20),
            "picek": list(picek or []), "picek_exclude_benchmarks": picek_exclude if picek
-           else None, "picek_labels": labels, "estimate_hours": est["total_hours"],
+           else None, "picek_labels": labels,
+           "dataset_release": rel.cite() if rel else None,
+           "release_shipped": [f"release/{rel.id}/{f}" for f in __import__(
+               "mycomap_vision.replications.fungitastic.dataset", fromlist=["x"]).SHIPPED]
+           if rel else None, "estimate_hours": est["total_hours"],
            "instance_type": instance_type, "disk_gb": args["BlockDeviceMappings"][0]["Ebs"][
                "VolumeSize"], "ec2_request": str(dest / "ec2-request.json"), "ec2": ec2_result,
            "sent": "nothing: no S3 upload, no instance"}

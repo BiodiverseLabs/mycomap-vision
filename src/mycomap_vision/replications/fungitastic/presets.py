@@ -87,6 +87,13 @@ class PicekConfig:
     exclude_benchmarks: str = "match"
     exclude_ids_file: str | None = None   # "all" on a trainer instance: the ids, shipped
     expect_labels_hash: str | None = None # refuse to train on other labels than at launch
+    # A dataset release (docs/dataset-release.md): records, labels, splits and photos come
+    # from it, not the live manifest; its train split trains, its val split validates, and
+    # expect_labels_hash is then the release's labels_hash.
+    release: str | None = None
+    release_root: str | None = None       # its folder (default <data>/research-releases/<id>)
+    allow_draft: bool = False
+    expect_release_manifest: str | None = None   # sha256 of the MANIFEST.json the launch read
 
     def resolved(self) -> "PicekConfig":
         p = PRESETS[self.preset]
