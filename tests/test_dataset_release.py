@@ -77,6 +77,8 @@ def add_record(conn, key, name, *, source="inat", vdate="2026-01-01", na=1, conf
         "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (key, source, source, key.split(":")[-1], name, genus, "Fam" if genus else "", lat, lon, "2025-09-01",
          "US" if na else "FR", na, '["p1"]', vdate, conflict, "2026-10-09T12:00:00"))
+    if status is None:
+        return
     if source == "inat":
         conn.execute("insert into inat_observations (observation_id, status, uuid, user_login, "
                      "fetched_at) values (?,?,?,?, 'now')", (key, status, f"uuid-{key}", "alice"))
@@ -135,6 +137,8 @@ def world(tmp_path):
     holdouts.add(conn, "paper", ["12"])                               # sealed benchmark
     add_record(conn, "13", "Russula emetica", status="missing")
     add_photo(conn, store, "13", 131)
+    add_record(conn, "mo:15", "Russula emetica", source="mo", status=None)   # not fetched yet
+    add_record(conn, "mo:16", "Russula emetica", source="mo", na=0, status=None)  # outside NA
     conn.commit()
     conn.execute("pragma wal_checkpoint(truncate)")
     yield {"conn": conn, "path": path, "root": tmp_path / "releases", "store": store,
@@ -169,8 +173,9 @@ def test_every_candidate_record_gets_exactly_one_reason(world):
         "com_sequence:6": ("source_com_sequence", None),
         "7": ("not_north_america", None), "8": ("label_conflict", None),
         "9": ("no_label", None), "10": ("no_photos", None), "11": ("no_photos", None),
-        "12": ("held_out", None), "13": ("missing_at_source", None)}
-    assert m["counts"]["records"] == 13 and m["counts"]["records_included"] == 4
+        "12": ("held_out", None), "13": ("missing_at_source", None),
+        "mo:15": ("not_fetched", None), "mo:16": ("not_north_america", None)}
+    assert m["counts"]["records"] == 15 and m["counts"]["records_included"] == 4
 
 
 def test_photo_reasons_follow_the_permission_and_original_rules(world):

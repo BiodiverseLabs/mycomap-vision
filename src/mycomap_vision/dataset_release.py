@@ -53,7 +53,8 @@ DEFAULT_VAL_WEEKS = 8
 
 # The order reasons are tried in: a record or photo gets the first that applies.
 RECORD_REASONS = ("source_mycoportal", "source_com_sequence", "source_genbank",
-                  "source_unknown", "held_out", "missing_at_source", "not_north_america",
+                  "source_unknown", "held_out", "not_north_america", "not_fetched",
+                  "missing_at_source",
                   "label_conflict", "no_label", "guest", "review", "no_photos", "ok")
 PHOTO_REASONS = ("record_excluded", "no_original", "permission_withdrawn", "review", "ok")
 
@@ -387,10 +388,12 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
                 else "source_unknown"
         elif key in held:
             reason = "held_out"
-        elif status != "ok":
-            reason = "missing_at_source"
         elif north_america_only and not na:
-            reason = "not_north_america"
+            reason = "not_north_america"        # never fetched: fetch-inat/fetch-mo read NA only
+        elif status is None:
+            reason = "not_fetched"              # no iNat/MO details read for it yet
+        elif status != "ok":
+            reason = "missing_at_source"        # deleted, private or not returned at the source
         elif conflict:
             reason = "label_conflict"
         elif not rank:
