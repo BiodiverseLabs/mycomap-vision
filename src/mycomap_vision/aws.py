@@ -365,7 +365,7 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
         stop_hours=round(stop, 2), code_version=code_version, code_key=code_key,
         taxonomy_key=TAXONOMY_KEY,
-        backbones=",".join(backbones), methods=",".join(methods), size=size,
+        backbones=",".join(backbones) or "none", methods=",".join(methods), size=size,
         test_days=test_days,
         finetune_arg=f" --finetune {','.join(finetune)}" if finetune else "",
         picek_arg=f" --picek {','.join(picek)}" if picek else "",
@@ -466,8 +466,8 @@ def check_trainer_request(conn, backbones: list[str], methods: list[str], size: 
     from . import holdouts, models
     holdouts.check_clean(conn, "the trainer run")
     from .evaluate import METHODS
-    if not backbones:
-        raise ValueError("name at least one backbone")
+    if not backbones and not picek:
+        raise ValueError("name at least one backbone (or a --picek preset)")
     for b in backbones:
         models.resolve_spec(b)
     if not methods:

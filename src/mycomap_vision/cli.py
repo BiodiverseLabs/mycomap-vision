@@ -109,7 +109,8 @@ def cmd_aws_launch_trainer(conn, args) -> None:
         if chosen:
             print(f"--resume keeps the run's own settings; ignoring {', '.join(chosen)}",
                   file=sys.stderr)
-    print(json.dumps(aws.launch_trainer(conn, _split(args.backbones), _split(args.methods),
+    backbones = [] if args.backbones.strip().lower() == "none" else _split(args.backbones)
+    print(json.dumps(aws.launch_trainer(conn, backbones, _split(args.methods),
                                         size=args.size, max_hours=args.max_hours,
                                         instance_type=args.instance_type,
                                         test_days=args.test_days, finetune=finetune,
@@ -142,7 +143,8 @@ def cmd_aws_train_job(conn, args) -> None:
 
     def upload(path, key):
         store.client.upload_file(str(path), store.bucket, key)
-    out = trainer.run_job(conn, store, _split(args.backbones), _split(args.methods), upload,
+    backbones = [] if args.backbones.strip().lower() == "none" else _split(args.backbones)
+    out = trainer.run_job(conn, store, backbones, _split(args.methods), upload,
                           args.run_id, size=args.size, test_days=args.test_days,
                           batch_size=args.batch_size, readers=args.readers,
                           finetune=_split(args.finetune), sample_records=args.sample_records,
@@ -756,7 +758,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("aws-launch-trainer",
                        help="embed the S3 photos and compare on a self-terminating GPU instance")
     p.add_argument("--backbones", default="bioclip-2",
-                   help="comma-separated aliases or specs (default: bioclip-2)")
+                   help="comma-separated aliases or specs (default: bioclip-2; 'none' with "
+                        "--picek to train only the replication)")
     p.add_argument("--methods", default="nearest,species-mean,linear,hybrid")
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
     p.add_argument("--max-hours", type=float, default=24,

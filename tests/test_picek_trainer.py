@@ -37,9 +37,17 @@ def test_preset_specs_are_checked_before_anything_is_paid_for(conn, tmp_path):
     with pytest.raises(ValueError, match="unknown Picek preset"):
         aws.check_trainer_request(conn, ["bioclip-2"], ["nearest"], "large", "s3://b/",
                                   picek=["beit-huge"])
+    # A run may train only the replication (its own model is then the only backbone).
+    assert aws.check_trainer_request(conn, [], ["classifier"], "large", "s3://b/",
+                                     picek=["fungitastic-beit-b384"]) == 1
+    with pytest.raises(ValueError, match="at least one backbone"):
+        aws.check_trainer_request(conn, [], ["nearest"], "large", "s3://b/")
     ud = aws.render_trainer_user_data("r", ["bioclip-2"], ["nearest", "classifier"], 10, "bkt",
                                       picek=["fungitastic-beit-b384@15"])
     assert "--picek fungitastic-beit-b384@15" in ud
+    alone = aws.render_trainer_user_data("r", [], ["classifier"], 10, "bkt",
+                                         picek=["fungitastic-beit-b384"])
+    assert "--backbones none --methods classifier" in alone
     assert "--picek" not in aws.render_trainer_user_data("r", ["bioclip-2"], ["nearest"], 10,
                                                          "bkt")
 
