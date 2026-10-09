@@ -688,10 +688,22 @@ def cmd_picek_bench(conn, args) -> None:
         out["loader"] = [picek.bench_loader(store, items, args.preset, w, args.photos)
                          for w in _split_ints(args.workers)]
     if not args.loader_only:
-        out["gpu"] = [picek.bench_gpu(args.preset, args.classes, mb, args.steps, gc)
-                      for mb in _split_ints(args.micro_batch)
-                      for gc in ((True, False) if args.both_checkpointing
-                                 else (not args.no_grad_checkpointing,))]
+        out["gpu"] = []
+        for mb in _split_ints(args.micro_batch):
+            for gc in ((True, False) if args.both_checkpointing
+                       else (not args.no_grad_checkpointing,)):
+                try:
+                    out["gpu"].append(picek.bench_gpu(args.preset, args.classes, mb,
+                                                      args.steps, gc))
+                except RuntimeError as e:          # e.g. CUDA out of memory: say so, go on
+                    out["gpu"].append({"micro_batch": mb, "grad_checkpointing": gc,
+                                       "error": str(e).splitlines()[0][:200]})
+                finally:
+                    import gc as _gc
+
+                    import torch
+                    _gc.collect()
+                    torch.cuda.empty_cache()
     print(json.dumps(out, indent=2))
 
 
