@@ -1,5 +1,5 @@
 """The .org source of every green record (iNaturalist, MO Observations, MycoPortal, ...),
-from a read-only export: observation_id <TAB> source per line."""
+from a read-only export: observation_id <TAB> source [<TAB> more columns] per line."""
 from collections import defaultdict
 
 

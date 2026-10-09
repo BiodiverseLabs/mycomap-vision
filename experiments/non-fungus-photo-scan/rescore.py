@@ -9,6 +9,12 @@ evaluate.load_records returns, exactly where the served index gets its records.
 Output (private): data/audits/non-fungus-scan/rescore-dev.json and .txt.
 Usage: python rescore.py <scratch manifest copy> [method ...]
 """
+import sys
+
+# CPU only, always: with torch importable, methods.Scorer puts the reference vectors on
+# the GPU whenever CUDA is visible (an empty CUDA_VISIBLE_DEVICES does not reach a Windows
+# child), and numpy + torch in one process can crash on large CPU matmuls.
+sys.modules["torch"] = None
 import json
 import pickle
 import sqlite3
@@ -46,11 +52,17 @@ def bench_vectors() -> dict[int, np.ndarray]:
     return out
 
 
+SHARED_LIST = OUT.parent / "non-inat-reference-records-2026-10-09.tsv"
+
+
 def mislinked() -> set[str]:
-    """The agreed list of reference records that are not iNat records (Mushroom Observer,
+    """The list of reference records that are not iNat records (Mushroom Observer,
     MyCoPortal, .com Sequences: their numeric id was fetched from iNat as if it were an
-    iNat id), shared with the label audit and the record-sources fix."""
-    lines = (OUT.parent / "non-inat-reference-records-2026-10-09.tsv").read_text(
+    iNat id). Default: the list shared with the label audit and the record-sources fix;
+    MV_NONINAT_LIST names another (run_all.py passes the one its rule built)."""
+    import os
+    path = Path(os.environ.get("MV_NONINAT_LIST") or SHARED_LIST)
+    lines = path.read_text(
         encoding="utf-8").splitlines()[1:]
     return {line.split()[0] for line in lines if line.strip()}
 
@@ -78,28 +90,51 @@ BASE_OF = {"zero-shot flagged photos out": "current", "non-iNat records out": "c
            "non-iNat records out + flagged photos out": "non-iNat records out"}
 
 
-def fast_scores(ident, query: np.ndarray) -> np.ndarray:
-    """The species scores identify_vectors ranks, without the per-photo and specimen work.
-    nearest: mean over photos of each photo's best match in the species. nearest+mean: the
-    same blend as methods.NearestAndMean (k = 2), with the two best matches per species from
-    two reduceat passes instead of a full sort (equal on ties: a species with two photos at
-    the best score gets that score twice, as the sort gives)."""
-    starts = ident.index.starts
-    sims = ident.nearest.photo_sims(query).astype(np.float32)
-    best = np.maximum.reduceat(sims, starts, axis=1)
-    if ident.method == "nearest":
+class Prepared:
+    """What scoring an index needs, made once per index: its species starts, each reference
+    column's species, the species with two or more photos, and the species means widened to
+    float32 (methods.Scorer would widen all 18,000 of them again on every call)."""
+
+    def __init__(self, ident):
+        self.ident = ident
+        self.starts = ident.index.starts
+        counts = np.diff(np.append(self.starts, len(ident.index.cols)))
+        self.group = np.repeat(np.arange(len(counts)), counts)
+        self.two = counts >= 2
+        self.means = np.asarray(ident.model.means.ref, dtype=np.float32)
+        self.k, self.weight = ident.model.k, ident.model.weight
+        assert self.k == 2
+
+
+def scores_from_sims(prep: Prepared, sims: np.ndarray, query: np.ndarray, method: str) -> np.ndarray:
+    """The species scores identify_vectors ranks, from the query's similarities to the
+    index's reference photos (columns in ident.index.cols order), without the per-photo
+    and specimen work. nearest: mean over photos of each photo's best match in the
+    species. nearest+mean: methods.NearestAndMean (k = 2) with the two best matches per
+    species from two reduceat passes instead of a full sort (equal on ties: a species with
+    two photos at the best score gets that score twice, as the sort gives)."""
+    best = np.maximum.reduceat(sims, prep.starts, axis=1)
+    if method == "nearest":
         return best.mean(axis=0)
-    model = ident.model
-    assert ident.method == "nearest+mean" and model.k == 2
-    counts = np.diff(np.append(starts, sims.shape[1]))
-    group = np.repeat(np.arange(len(counts)), counts)
-    at_best = sims == best[:, group]
-    n_best = np.add.reduceat(at_best, starts, axis=1)
-    second = np.maximum.reduceat(np.where(at_best, -np.inf, sims), starts, axis=1)
+    assert method == "nearest+mean"
+    at_best = sims == best[:, prep.group]
+    n_best = np.add.reduceat(at_best, prep.starts, axis=1, dtype=np.int32)   # bool would OR
+    second = np.maximum.reduceat(np.where(at_best, -np.inf, sims), prep.starts, axis=1)
     second = np.where(n_best >= 2, best, second)
-    top2 = np.where(counts >= 2, (best + second) / 2, best).mean(axis=0)
-    mean = model.means.sims(query).mean(axis=0)
-    return model.weight * top2 + (1 - model.weight) * mean
+    top2 = np.where(prep.two, (best + second) / 2, best).mean(axis=0)
+    mean = (query @ prep.means.T).mean(axis=0)
+    return prep.weight * top2 + (1 - prep.weight) * mean
+
+
+def all_sims(query: np.ndarray, mapped, chunk: int = 65_536) -> np.ndarray:
+    """(photos, every stored vector) float32 similarities, widening the memory-mapped float16
+    vectors a block at a time (as serving.MappedSelection does), so no float32 copy of the
+    whole reference is held."""
+    out = np.empty((len(query), mapped.shape[0]), dtype=np.float32)
+    for s in range(0, mapped.shape[0], chunk):
+        rows = np.arange(s, min(s + chunk, mapped.shape[0]))
+        out[:, rows[0]:rows[-1] + 1] = query @ np.asarray(mapped[rows], dtype=np.float32).T
+    return out
 
 
 def use_filter(photos_out: set[int], records_out: set[str]) -> None:
@@ -120,34 +155,65 @@ def main() -> None:
     truths = {r.observation_id: labeller.truth(r.truth_name) for r in records if r.truth_name}
     truths = {o: t for o, t in truths.items() if not t.guest}
     cache = OUT / "model-cache"
-    preds, judged, refinfo, feats = {}, {}, {}, None
+    # Every variant's index is a subset of the same stored vectors (map_embeddings order), so
+    # each batch of dev photos is scored against all of them once, in float32 like
+    # serving.MappedSelection, and each variant takes its own columns.
+    from mycomap_vision.serving import map_embeddings
+    _ids, mapped = map_embeddings(conn, BB)
+    idents, refinfo, feats = {}, {}, None
     for vname, (p_out, r_out) in variants().items():
         use_filter(p_out, r_out)
-        for method in methods:
-            ident = identify.Identifier(conn, BB, method, photo_info=False, model_cache=cache)
-            key = (BB, f"{method} | {vname}", "", "large")
-            refinfo[f"{method} | {vname}"] = {"records": ident.records,
-                                              "photos": int(len(ident.col_photo)),
-                                              "species": len(ident.index.species),
-                                              "reference_hash":
-                                                  heldout.reference_summary(conn, ident)["hash"]}
-            if feats is None:     # depth buckets from today's full index, the same for all
-                ref = {"rank_counts": {k: dict(v) for k, v in ident.rank_counts.items()}}
-                feats = {r.observation_id: features(r, truths[r.observation_id], ref)
-                         for r in records if r.observation_id in truths}
-            by = {}
-            for rec in records:
-                vecs = [vectors[p] for p, _s, _p in rec.photos if p in vectors]
-                if not vecs or rec.observation_id in r_out:
-                    continue
-                ranks = ident._ranks(fast_scores(ident, np.stack(vecs)), 10)
-                by[rec.observation_id] = heldout.summarise(ranks, top=10)
-            preds[key] = by
-            judged[key] = {o: judge(res, truths[o], labeller, False)
-                           for o, res in by.items() if o in truths}
-            print(f"{key[1]}: {len(by):,} answered, index {refinfo[key[1]]}", flush=True)
-            del ident
+        ident = identify.Identifier(conn, BB, "nearest+mean", photo_info=False, model_cache=cache)
+        idents[vname] = (Prepared(ident), r_out)
+        refinfo[vname] = {"records": ident.records, "photos": int(len(ident.col_photo)),
+                          "species": len(ident.index.species),
+                          "reference_hash": heldout.reference_summary(conn, ident)["hash"]}
+        print(f"index {vname}: {refinfo[vname]}", flush=True)
+        if feats is None:     # depth buckets from today's full index, the same for all
+            rc = {"rank_counts": {k: dict(v) for k, v in ident.rank_counts.items()}}
+            feats = {r.observation_id: features(r, truths[r.observation_id], rc)
+                     for r in records if r.observation_id in truths}
     identify.load_records = ORIG_LOAD
+    todo = [(r, np.stack([vectors[p] for p, _s, _p in r.photos if p in vectors]).astype(np.float32))
+            for r in records if any(p in vectors for p, _s, _p in r.photos)]
+    preds = {(BB, f"{m} | {v}", "", "large"): {} for v in idents for m in methods}
+    def score_index(vname, prep, r_out, batch, S):
+        """One index's answers for one batch (numpy releases the GIL, so the four indexes
+        run side by side)."""
+        ident = prep.ident
+        Sv = S[:, ident.index.cols]
+        at, out = 0, []
+        for rec, q in batch:
+            sims = Sv[at:at + len(q)]
+            at += len(q)
+            if rec.observation_id in r_out:
+                continue
+            for m in methods:
+                ranks = ident._ranks(scores_from_sims(prep, sims, q, m), 10)
+                out.append(((BB, f"{m} | {vname}", "", "large"), rec.observation_id,
+                            heldout.summarise(ranks, top=10)))
+        return out
+
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(len(idents))
+    for b0 in range(0, len(todo), 32):
+        batch = todo[b0:b0 + 32]
+        Q = np.concatenate([q for _r, q in batch])
+        S = all_sims(Q, mapped)
+        if b0 == 0:   # the widened means score as the served scorer does
+            q0 = batch[0][1]
+            for prep, _r in idents.values():
+                assert np.allclose(q0 @ prep.means.T, prep.ident.model.means.sims(q0), atol=1e-5)
+        for out in pool.map(lambda kv: score_index(kv[0], kv[1][0], kv[1][1], batch, S),
+                            list(idents.items())):
+            for key, oid, res in out:
+                preds[key][oid] = res
+        del S
+        if (b0 // 32) % 5 == 4 or b0 + 32 >= len(todo):
+            print(f"  {min(b0 + 32, len(todo)):,}/{len(todo):,} records", flush=True)
+    pool.shutdown()
+    judged = {key: {o: judge(res, truths[o], labeller, False) for o, res in by.items()
+                    if o in truths} for key, by in preds.items()}
     head = {"benchmark": BENCH, "split": "dev", "sealed": False, "released_at": None,
             "records": len(ids), "scored_records": len(truths)}
     s = standard_summary(head, preds, judged, truths, feats, labeller)

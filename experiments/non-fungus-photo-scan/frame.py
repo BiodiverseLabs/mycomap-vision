@@ -20,7 +20,8 @@ from zs_score import OUT
 
 def main() -> None:
     conn = sqlite3.connect(Path(sys.argv[1]))   # a scratch copy: load_records may create tables
-    zs = {bb: np.load(OUT / f"zs-{bb}.npz") for bb in ("bioclip-2", "bioclip-2-ft-20261007-165400")}
+    zs = {bb: np.load(OUT / f"zs-{bb}.npz") for bb in ("bioclip-2", "bioclip-2-ft-20261007-165400")
+          if (OUT / f"zs-{bb}.npz").exists()}       # the ft scores are kept only for comparison
     base = zs["bioclip-2"]
     ids = base["photo_id"]
     recs = load_records(conn, {int(p): int(p) for p in ids.tolist()})

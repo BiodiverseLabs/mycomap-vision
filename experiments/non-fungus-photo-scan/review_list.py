@@ -3,12 +3,15 @@ kept class: slip, microscope, habitat), with its record, label, score, the recor
 .org source and whether it is the record's only photo. A list for people to review, not a
 filter. Written to data/audits/non-fungus-scan/ (private, never committed); prints the
 counts the experiment entry reports.
+Usage: python review_list.py [manifest] [org-sources.tsv]
 """
 import csv
 import json
 import pickle
 import sqlite3
+import sys
 from collections import Counter, defaultdict
+from pathlib import Path
 
 import numpy as np
 
@@ -30,9 +33,9 @@ def main() -> None:
     top = P.argmax(1)
     pj = P[:, J].sum(1)
     flagged = np.isin(top, J)
-    src = load_sources(OUT / "org-green-source.tsv")
-    conn = sqlite3.connect((config.DATA_DIR / "manifest.sqlite").resolve().as_uri() + "?mode=ro",
-                           uri=True)
+    manifest = sys.argv[1] if len(sys.argv) > 1 else config.DATA_DIR / "manifest.sqlite"
+    src = load_sources(sys.argv[2] if len(sys.argv) > 2 else OUT / "org-green-source.tsv")
+    conn = sqlite3.connect(Path(manifest).resolve().as_uri() + "?mode=ro", uri=True)
     kingdom = {}
     for oid, anc, tid in conn.execute("select observation_id, taxon_ancestor_ids, taxon_id "
                                       "from inat_observations where status = 'ok'"):
