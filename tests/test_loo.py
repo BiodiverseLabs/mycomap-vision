@@ -113,7 +113,7 @@ def test_two_equal_best_photos_both_count_in_the_top_two():
 
 def rec(**kw):
     base = {"label": 0, "pred": 1, "conf": 0.9, "margin": 0.05, "nb_pred": 8,
-            "best_match": 0.8, "photo_genera": 1}
+            "best_match": 0.8, "dup_other_genus": 0.0}
     return {**base, **kw}
 
 
@@ -214,3 +214,16 @@ def test_a_removal_set_prepared_once_scores_like_one_hidden_per_query():
     pre = loo.score_queries(q, np.zeros(4, dtype=int), [hidden], ref, layout, s2, m2,
                             adjust_means=False)
     assert np.allclose(once.unit, pre.unit, atol=1e-4)
+
+
+def test_a_photo_that_is_another_genus_records_picture_is_a_wrong_photo():
+    self_rate = {0: 0.8, 1: 0.8}
+    assert loo.classify(rec(dup_other_genus=0.97), RULES, {}, {}, self_rate, SUPPORT, "") == "c"
+    # A close look-alike in another genus is not a duplicate.
+    assert loo.classify(rec(pred=0, dup_other_genus=0.9), RULES, {}, {}, self_rate, SUPPORT,
+                        "") == ""
+
+
+def test_a_record_the_model_agrees_with_has_no_mislabel_strength():
+    assert loo.strength(rec(pred=0), {}, {0: 0.9}) == 0.0
+    assert loo.strength(rec(), {}, {0: 0.9}) > 0.5

@@ -18,8 +18,10 @@ The flagging rules (`classify`) work on per-record summaries only:
 - (b) the same species under two names: the pair's names are related (a writing variant,
   a provisional code beside a formal name in one genus, the s.l./complex rules of
   name_equiv) or the two labels' records are predicted as each other most of the time;
-- (c) wrong photos: the record matches nothing well, or its photos disagree with each
-  other about the genus;
+- (c) wrong photos: the record matches nothing well, or one of its photos is (near enough)
+  the same picture as a photo of a record in another genus. (The first rule, photos that
+  point to different genera, flagged ~20% of records: single photos of one record often
+  disagree. Dropped after a partial scan, before any dev scoring; see the experiment.)
 - (d) hard look-alikes: both names well supported and confused in both directions,
   while each keeps most of its own records. Not mislabels.
 """
@@ -253,6 +255,7 @@ class Rules:
     same_cluster: float = 0.5     # both directions at least this share: one species (b)
     pair_records: int = 3         # a loosely related pair is systematic from this many records
     no_match: float = 0.55        # best photo match to any other record below this: (c)
+    duplicate: float = 0.95       # a photo this close to another genus's record: (c)
 
 
 STRONG_RELATIONS = ("same name, other writing", "same species s.l.")
@@ -299,15 +302,15 @@ def classify(rec: dict, rules: Rules, rates: dict, counts: dict, self_rate: dict
     rec: label (unit index, -1 for a one-word name), pred (top-1 species unit), conf (its
     calibrated confidence), margin (pred score minus label score; inf when the label has
     nothing left), nb_pred (of its 10 nearest records, how many carry pred), best_match
-    (its photos' best match to any other record, mean over photos), photo_genera (distinct
-    genera its photos point to at top-1, among photos that match well), label_left (the
+    (its photos' best match to any other record, mean over photos), dup_other_genus (the
+    best match of any of its photos whose best record is in another genus), label_left (the
     label's records outside its observer-day group; default support - 1).
     rates, counts: pair_rates; self_rate[u]: share of u's records top-1 u; support[u]: u's
     records; relation: related_names of the two labels. A writing variant or an s.l. match
     is (b) at once; a looser relation only when the pair is systematic."""
     if rec["best_match"] < rules.no_match:
         return "c"
-    if rec.get("photo_genera", 1) > 1 and rec["pred"] != rec["label"]:
+    if rec.get("dup_other_genus", 0.0) >= rules.duplicate:
         return "c"
     a, b = rec["label"], rec["pred"]
     if a < 0 or b < 0 or a == b:
@@ -337,5 +340,16 @@ def strength(rec: dict, rates: dict, self_rate: dict) -> float:
     confidence, the share of nearest records carrying it, how well the label's species is
     recognised elsewhere, and how rarely the other species is taken for the label."""
     a, b = rec["label"], rec["pred"]
+    if a == b or a < 0 or b < 0:
+        return 0.0
     return float(rec["conf"] * (rec["nb_pred"] / 10) * self_rate.get(a, 0.0)
                  * (1 - rates.get((b, a), 0.0)))
+
+
+def photo_strength(rec: dict, rules: Rules) -> float:
+    """Evidence for (c), 0-1: how close a photo is to another genus's record (a duplicate),
+    or how far the record is from everything."""
+    dup = rec.get("dup_other_genus", 0.0)
+    if dup >= rules.duplicate:
+        return float(dup)
+    return float(max(0.0, 1.0 - rec["best_match"]))

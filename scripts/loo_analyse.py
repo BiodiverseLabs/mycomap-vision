@@ -32,7 +32,7 @@ from mycomap_vision.heldout import name_key
 KS = {"top1pct": 0.01, "top2pct": 0.02}
 
 
-def load_scan(scan: Path):
+def load_scan(scan: Path, partial: bool = False):
     with open(scan / "layout.pkl", "rb") as f:
         state = pickle.load(f)
     parts = defaultdict(list)
@@ -43,9 +43,20 @@ def load_scan(scan: Path):
     arr = {k: np.concatenate(v) for k, v in parts.items()}
     n = state["layout"].n_records
     order = np.argsort(arr["rec"])
-    if len(order) != n or not np.array_equal(arr["rec"][order], np.arange(n)):
+    complete = len(order) == n and np.array_equal(arr["rec"][order], np.arange(n))
+    if not complete and not partial:
         raise SystemExit(f"scan incomplete: {len(order):,} of {n:,} records")
-    rec = {k: v[order] for k, v in arr.items() if not k.startswith("photo_")}
+    rec = {}
+    for k, v in arr.items():
+        if k.startswith("photo_"):
+            continue
+        full = np.zeros((n,) + v.shape[1:], dtype=v.dtype)
+        if k in ("top_unit", "nb_rec", "gen_top"):
+            full[:] = 0
+        full[arr["rec"]] = v
+        rec[k] = full
+    rec["scored"] = np.zeros(n, dtype=bool)
+    rec["scored"][arr["rec"]] = True
     photo = {k[6:]: v for k, v in arr.items() if k.startswith("photo_")}
     return state, rec, photo
 
@@ -102,8 +113,10 @@ def main() -> None:
     ap.add_argument("--scan", type=Path, required=True)
     ap.add_argument("--audits", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--partial", action="store_true", help="smoke test on the chunks so far")
     a = ap.parse_args()
-    state, R, P = load_scan(a.scan)
+    state, R, P = load_scan(a.scan, a.partial)
+    scored = R["scored"]
     layout, recs, labels, meta = state["layout"], state["records"], state["labels"], state["meta"]
     rules = loo.Rules()
     N = layout.n_records
@@ -113,8 +126,8 @@ def main() -> None:
     genera = labels["genus"]
     oid = recs["observation_id"]
     lab_unit = layout.rec_unit
-    label = np.where(unit_species[lab_unit] >= 0, lab_unit, -1)
-    pred = R["top_unit"][:, 0]
+    label = np.where((unit_species[lab_unit] >= 0) & scored, lab_unit, -1)
+    pred = np.where(scored, R["top_unit"][:, 0], -1)
     # Records per unit, and per record the label's records outside its observer-day group.
     support = Counter(lab_unit.tolist())
     in_group = Counter(zip(layout.rec_group.tolist(), lab_unit.tolist()))
@@ -122,13 +135,15 @@ def main() -> None:
                              for g, u in zip(layout.rec_group.tolist(), lab_unit.tolist())])
     rates, counts = loo.pair_rates(label, pred)
     sp = label >= 0
-    self_rate = {u: c / support[u] for u, c in Counter(label[sp & (pred == label)].tolist()).items()}
+    n_scored = Counter(label[sp].tolist())
+    self_rate = {u: c / n_scored[u] for u, c in Counter(label[sp & (pred == label)].tolist()).items()}
     for u in set(label[sp].tolist()) - set(self_rate):
         self_rate[u] = 0.0
     nb_units = lab_unit[R["nb_rec"]]                          # (N, 10)
     nb_pred = (nb_units == pred[:, None]).sum(axis=1)
     nb_label = (nb_units == lab_unit[:, None]).sum(axis=1)
-    # Photos: distinct top genera among photos that match something well.
+    # Photos: distinct top genera among photos that match something well (descriptive), and
+    # the best match of any photo whose best record is in another genus (rule c).
     photo_genera = np.zeros(N, dtype=int)
     good = P["best_sim"] >= rules.no_match
     seen = defaultdict(set)
@@ -138,6 +153,16 @@ def main() -> None:
     for r, s in seen.items():
         photo_genera[r] = len(s)
     photo_genera = np.maximum(photo_genera, 1)
+    rec_genus = unit_genus[lab_unit]
+    pg_label, pg_best = rec_genus[P["rec"]], rec_genus[P["best_rec"]]
+    other = (pg_label >= 0) & (pg_best >= 0) & (pg_label != pg_best)
+    dup_other = np.zeros(N)
+    np.maximum.at(dup_other, P["rec"][other], P["best_sim"][other])
+    dup_with = {}
+    for r, b, sim in zip(P["rec"][other].tolist(), P["best_rec"][other].tolist(),
+                         P["best_sim"][other].tolist()):
+        if sim >= rules.duplicate and sim >= dup_other[r] - 1e-6:
+            dup_with[r] = units[lab_unit[b]]
     tags, live, audit_pairs = tags_from(a.audits)
     relation_cache: dict[tuple, str] = {}
 
@@ -150,20 +175,20 @@ def main() -> None:
     rows = []
     cat = np.full(N, "", dtype=object)
     stren = np.zeros(N)
-    for i in range(N):
+    for i in np.flatnonzero(scored).tolist():
         u, v = int(label[i]), int(pred[i])
         margin = (float(R["top_score"][i, 0] - R["own_score"][i])
                   if np.isfinite(R["own_score"][i]) else float("inf"))
         rd = {"label": u, "pred": v, "conf": float(R["top_conf"][i, 0]), "margin": margin,
               "nb_pred": int(nb_pred[i]), "best_match": float(R["best_match"][i]),
-              "photo_genera": int(photo_genera[i]), "label_left": int(label_left[i])}
+              "dup_other_genus": float(dup_other[i]), "label_left": int(label_left[i])}
         rel = relation(u, v) if u >= 0 and v >= 0 and u != v else ""
         c = loo.classify(rd, rules, rates, counts, self_rate, support, rel)
         cat[i] = c
-        if c in ("a", "c") and u >= 0 and v >= 0:
+        if c == "a":
             stren[i] = loo.strength(rd, rates, self_rate)
         elif c == "c":
-            stren[i] = float(R["top_conf"][i, 0]) * (1 - float(R["best_match"][i]))
+            stren[i] = loo.photo_strength(rd, rules)
         lab_name = units[lab_unit[i]]
         sug = units[v] if v >= 0 else ""
         lt = live.get(oid[i], "")
@@ -189,6 +214,11 @@ def main() -> None:
             "best_match": round(float(R["best_match"][i]), 4),
             "worst_photo_match": round(float(R["worst_match"][i]), 4),
             "photos": int(R["n_photos"][i]), "photo_genera": int(photo_genera[i]),
+            "photo_duplicate_in_other_genus": round(float(dup_other[i]), 4)
+            if dup_other[i] >= rules.duplicate else "",
+            "duplicate_of_record_named": dup_with.get(i, ""),
+            "wrong_photo_reason": ("" if c != "c" else "duplicate photo in another genus"
+                                   if dup_other[i] >= rules.duplicate else "matches nothing"),
             "label_genus_rank": int(R["own_gen_rank"][i]),
             "top_genus": genera[R["gen_top"][i, 0]],
             "alternatives": "; ".join(f"{units[x]} {R['top_conf'][i, j]:.2f}"
@@ -263,7 +293,7 @@ def main() -> None:
         return dict(c.most_common())
     summary = {
         "meta": meta, "rules": loo.Rules().__dict__,
-        "records": N, "species_labelled": int(sp.sum()),
+        "records": N, "scored": int(scored.sum()), "species_labelled": int(sp.sum()),
         "loo_species_top1_agrees": int((sp & (pred == label)).sum()),
         "categories": {c: len(by[c]) for c in "abcd"},
         "category_tags": {c: tag_counts(by[c]) for c in "abcd"},
