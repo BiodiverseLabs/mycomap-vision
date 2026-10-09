@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 import sqlite3
 import time
 from collections import Counter
@@ -199,6 +200,17 @@ def pending(conn: sqlite3.Connection, refresh: bool = False,
     return out
 
 
+class MissingObservation(LookupError):
+    """MO says one of the requested observations doesn't exist (deleted, or merged away)."""
+
+    def __init__(self, mo_id: int):
+        super().__init__(f"MO has no observation {mo_id}")
+        self.mo_id = mo_id
+
+
+_NOT_FOUND = re.compile(r"Observation #(\d+) does not exist")
+
+
 class Pacer:
     """MO's pace: at least MIN_INTERVAL between requests, and at least the last answer's
     run_time (README_API)."""
@@ -238,6 +250,10 @@ def fetch_batch(session: requests.Session, mo_ids: list[int], pacer: Pacer) -> l
             raise RuntimeError("MO kept failing; stopped. Re-run to resume.")
         body = resp.json()
         pacer.ran(body.get("run_time"))
+        for err in body.get("errors") or []:
+            m = _NOT_FOUND.search(str(err.get("details") or ""))
+            if err.get("code") == "API2::ObjectNotFoundByID" and m:
+                raise MissingObservation(int(m.group(1)))
         if body.get("errors"):
             raise RuntimeError(f"MO answered errors: {json.dumps(body['errors'])[:300]}")
         out.extend(body.get("results") or [])
@@ -265,8 +281,20 @@ def fetch_all(conn: sqlite3.Connection, refresh: bool = False, north_america_onl
     totals = {"requested": len(ids), "ok": 0, "missing": 0, "photos_new": 0,
               "license_changes": 0, "photos": 0, "batches": 0}
     started = time.monotonic()
+    totals["gone_on_mo"] = 0
     for batch in chunks(ids, BATCH):
-        images = fetch(session, batch, pacer)
+        # MO refuses a whole request for one observation it no longer has: that one is
+        # left out (it gets no photos, status 'missing') and the rest asked again.
+        ask = list(batch)
+        while True:
+            try:
+                images = fetch(session, ask, pacer) if ask else []
+                break
+            except MissingObservation as e:
+                if e.mo_id not in ask:
+                    raise
+                ask.remove(e.mo_id)
+                totals["gone_on_mo"] += 1
         fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         with gzip.open(raw_dir / f"images-{batch[0]}-{fetched_at[:10]}.json.gz", "wt",
                        encoding="utf-8") as f:

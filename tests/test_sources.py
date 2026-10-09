@@ -422,3 +422,38 @@ def test_a_photo_another_record_still_uses_keeps_its_vectors(conn):
     kept = conn.execute("select embeddings_json from source_removals where photo_id = 31"
                         ).fetchone()[0]
     assert json.loads(kept) == []
+
+
+def test_an_observation_mo_no_longer_has_gets_no_photos_and_the_rest_are_read(conn, tmp_path):
+    export(conn, [org_row(n, "MO Observations") for n in (1, 2, 3)])
+    asked = []
+
+    def fake(session, ids, pacer):
+        asked.append(list(ids))
+        if 2 in ids:
+            raise mo.MissingObservation(2)
+        return [mo_image(100 + i, [i]) for i in ids]
+
+    out = mo.fetch_all(conn, raw_dir=tmp_path, session=object(), pacer=mo.Pacer(0), fetch=fake,
+                       log=lambda s: None)
+    assert asked == [[1, 2, 3], [1, 3]]
+    assert (out["ok"], out["missing"], out["gone_on_mo"]) == (2, 1, 1)
+    assert conn.execute("select status from mo_observations where mo_id = 2").fetchone()[0] == "missing"
+
+
+def test_mos_not_found_answer_is_read_as_a_missing_observation():
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"errors": [{"code": "API2::ObjectNotFoundByID", "fatal": "true",
+                                "details": "Observation #122178 does not exist, or someone "
+                                           "has deleted it."}]}
+
+    class S:
+        def get(self, url, params, timeout):
+            return R()
+
+    with pytest.raises(mo.MissingObservation) as e:
+        mo.fetch_batch(S(), [122178, 5], mo.Pacer(0))
+    assert e.value.mo_id == 122178
