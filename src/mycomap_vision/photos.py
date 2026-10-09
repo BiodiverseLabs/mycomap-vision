@@ -20,7 +20,7 @@ from typing import Callable
 
 import requests
 
-from . import config
+from . import config, holdouts
 from .licenses import (OPEN_DATA_HOST, STATIC_HOST, looks_like_image, photo_relpath, sized_url,
                        taken_down, url_extension)
 from .ratelimit import ByteBudget, MinInterval
@@ -77,19 +77,24 @@ class HostGate:
 def seed_budgets(conn: sqlite3.Connection, policies: dict[str, HostPolicy],
                  now: datetime | None = None) -> dict[str, int]:
     """Count each host's downloads still inside its budget windows (from any earlier run,
-    any store): a restarted downloader must not get a fresh day's budget. Returns the
-    bytes counted per host."""
+    any store, and a benchmark's own photos, heldout.py): a restarted downloader must not
+    get a fresh day's budget, and two downloaders share one. Returns the bytes counted
+    per host."""
     now = now or datetime.now(timezone.utc)
+    sources = ["select c.downloaded_at, c.bytes from photo_copies c join photos p on "
+               "p.photo_id = c.photo_id where p.host = ? and c.downloaded_at is not null "
+               "and c.bytes is not null"]
+    if conn.execute("select 1 from sqlite_master where type = 'table' "
+                    "and name = 'heldout_photos'").fetchone():
+        sources.append("select downloaded_at, bytes from heldout_photos where host = ? "
+                       "and downloaded_at is not null and bytes is not null")
     counted = {}
     for host, policy in policies.items():
         if not policy.budgets:
             continue
         longest = max(b.window for b in policy.budgets)
         total = 0
-        for when, n in conn.execute(
-                "select c.downloaded_at, c.bytes from photo_copies c join photos p on "
-                "p.photo_id = c.photo_id where p.host = ? and c.downloaded_at is not null "
-                "and c.bytes is not null", (host,)):
+        for when, n in conn.execute(" union all ".join(sources), (host,) * len(sources)):
             try:
                 t = datetime.fromisoformat(when)
             except ValueError:
@@ -169,7 +174,11 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
 
     `unembedded_for` keeps only photos with no vector yet from that backbone (the
     nightly update: the release's photos are embedded but not held on the box).
+
+    A benchmark's held-out records (holdouts.py) get no reference photos; the
+    benchmark keeps its own (heldout.py).
     """
+    holdouts.ensure_schema(conn)
     na = "and r.north_america = 1" if north_america_only else ""
     params: list = []
     if first_seen_since:
@@ -198,6 +207,7 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
       join observation_photos op on op.photo_id = p.photo_id
       join records r on r.observation_id = op.observation_id {na}
       where p.status != 'missing' and p.attempts < {MAX_ATTEMPTS}
+        and {holdouts.not_held_out('r.observation_id')}
         and not exists (select 1 from photo_copies c where c.photo_id = p.photo_id
                         and c.size = ? and (? is null or c.store = ?)){extra}
       order by {"random()" if random_order else "p.attempts, p.photo_id"}
@@ -299,6 +309,21 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
     config.ensure_dirs()
     rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
                           record_sample, first_seen_since, held_at, hosts, unembedded_for)
+    return run_downloads(conn, rows, store, size,
+                         lambda r, now: save_result(conn, r, size, now, store.location),
+                         policies=policies, max_hours=max_hours, checkpoint=checkpoint,
+                         checkpoint_every=checkpoint_every, poll=poll, log=log)
+
+
+def run_downloads(conn: sqlite3.Connection, rows, store: PhotoStore, size: str,
+                  save: Callable[[Result, str], None],
+                  policies: dict[str, HostPolicy] | None = None,
+                  max_hours: float | None = None,
+                  checkpoint: Callable[[], None] | None = None,
+                  checkpoint_every: float = 600, poll: float = 30, log=print) -> dict:
+    """Download `rows` (photo_id, source_url, host) into `store` at `size`, each host in
+    its own lane within its limits; `save(result, now)` records each one (inside a
+    transaction on `conn`). Shared by download_all and the benchmark (heldout.py)."""
     policies = policies or default_policies()
     seeded = seed_budgets(conn, policies)
     for host, n in seeded.items():
@@ -350,7 +375,7 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                     for fut in done:
                         in_flight[pending.pop(fut)] -= 1
                         r = fut.result()
-                        save_result(conn, r, size, now, store.location)
+                        save(r, now)
                         if r.error == "stopped":
                             continue
                         totals[r.status] += 1

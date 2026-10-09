@@ -523,6 +523,107 @@ def cmd_contributors(conn, args) -> None:
     print(f"{len(rows):,} contributors -> {path}")
 
 
+def cmd_holdout(conn, args) -> None:
+    """Records no training, reference index, release or nightly update may take (holdouts.py)."""
+    from pathlib import Path
+
+    from . import holdouts
+    if args.action == "add":
+        print(json.dumps(holdouts.add(conn, args.benchmark, holdouts.read_ids_csv(Path(args.csv))),
+                         indent=2))
+    elif args.action == "release":
+        print(json.dumps(holdouts.release(conn, args.benchmark), indent=2))
+    else:
+        print(json.dumps(holdouts.summary(conn), indent=2))
+
+
+def _heldout_ids(conn, args) -> list[str]:
+    from pathlib import Path
+
+    from . import heldout, holdouts
+    subset = holdouts.read_ids_csv(Path(args.subset)) if getattr(args, "subset", None) else None
+    return heldout.benchmark_ids(conn, args.name, subset, getattr(args, "limit", None),
+                                 split=getattr(args, "split", None))
+
+
+def cmd_heldout(conn, args) -> None:
+    """The frozen held-out benchmark (heldout.py, heldout_report.py)."""
+    from pathlib import Path
+
+    from . import heldout
+    if args.action == "freeze":
+        if bool(args.dev) != bool(args.test):
+            raise SystemExit("give both --dev and --test, or neither")
+        out = heldout.freeze(conn, args.name, Path(args.csv),
+                             titles_tsv=Path(args.titles) if args.titles else None,
+                             links_csv=Path(args.links) if args.links else None,
+                             snapshot_csv=Path(args.snapshot) if args.snapshot else None,
+                             expect_sha=args.expect_sha,
+                             splits={"dev": Path(args.dev), "test": Path(args.test)}
+                             if args.dev else None,
+                             split_json=Path(args.split_json) if args.split_json else None,
+                             holdout=args.holdout)
+        print(json.dumps(out, indent=2))
+    elif args.action == "fetch":
+        ids = _heldout_ids(conn, args)
+        print(f"iNat details for {len(ids):,} records of {args.name} (1 request/s)...")
+        out = {"details": heldout.fetch_details(conn, args.name, ids, refresh=args.refresh)}
+        if not args.details_only:
+            store = open_store(args.dest, heldout.bench_dir(conn, args.name))
+            out["photos"] = heldout.fetch_photos(
+                conn, args.name, ids, store, size=args.size, max_hours=args.max_hours,
+                policies=photos.default_policies(args.static_day_gb))
+            out["photos"]["gb"] = round(out["photos"]["bytes"] / photos.GB, 2)
+        print(json.dumps(out, indent=2))
+    elif args.action == "predict":
+        from . import models
+        ids = _heldout_ids(conn, args)
+        name = models.storage_name(args.backbone)
+        models.resolve_spec(args.backbone)          # fail early on an unknown backbone
+        out = heldout.predict(conn, args.name, name, _split(args.methods), ids,
+                              lambda: models.load_backbone(args.backbone), place=args.place,
+                              size=args.size, batch_size=args.batch_size, redo=args.redo,
+                              scores_out=Path(args.scores_out) if args.scores_out else None)
+        print(json.dumps(out, indent=2))
+    elif args.action == "inat":
+        from . import inat_cv
+        ids = _heldout_ids(conn, args)
+        cache = Path(args.cache) if args.cache else config.DATA_DIR / "inat_cv_cache"
+        client = inat_cv.InatClient(inat_cv.read_jwt(), cache)
+        print(f"iNat computer vision on {len(ids):,} records of {args.name} (1 request/s)...")
+        print(json.dumps(heldout.inat_cv(conn, args.name, ids, client, size=args.size,
+                                         redo=args.redo), indent=2))
+    else:
+        from . import heldout_report, holdouts
+        subset = holdouts.read_ids_csv(Path(args.subset)) if args.subset else None
+        out = heldout_report.report(conn, args.name, split=args.split, subset=subset,
+                                    reference_backbone=args.reference_backbone,
+                                    reference_hash=args.reference_hash,
+                                    log=lambda s: print(s, file=sys.stderr))
+        print_heldout_report(out)
+
+
+def print_heldout_report(out: dict) -> None:
+    pct = lambda r: "   -   " if not r or r["rate"] is None else (  # noqa: E731
+        f"{100 * r['rate']:5.1f}% [{100 * r['ci95'][0]:.1f}-{100 * r['ci95'][1]:.1f}] n={r['n']}")
+    print(f"{out['benchmark']} / {out['split'] or 'all'}: {out['records']:,} records, "
+          f"{out['scored_records']:,} with an answer key "
+          f"({out['label_audit']['without_an_answer']:,} without, "
+          f"{out['guests_left_out']:,} guests left out)")
+    for model, s in out["models"].items():
+        print(f"  {model}")
+        for rank in ("species", "genus", "family"):
+            if rank in s:
+                print(f"    {rank:<8} top-1 {pct(s[rank]['top1'])}   top-5 {pct(s[rank]['top5'])}")
+    for p in out["paired"]:
+        sp = p.get("species")
+        if sp:
+            print(f"  {p['a']} vs {p['b']}: species top-1 {100 * sp['a_top1']:.1f}% vs "
+                  f"{100 * sp['b_top1']:.1f}% on {sp['n']:,} records, "
+                  f"McNemar p={sp['mcnemar_p']:.3g}")
+    print(f"-> {out['files']['json']}\n-> {out['files']['csv']}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -783,6 +884,91 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--arr-only", action="store_true",
                    help="only people with all-rights-reserved photos")
 
+    p = sub.add_parser("holdout", help="records held out for a benchmark: never trained on, "
+                                       "indexed, released or added at night (holdouts.py)")
+    hsub = p.add_subparsers(dest="action", required=True)
+    q = hsub.add_parser("add", help="hold out the ids in a CSV's observation_id column")
+    q.add_argument("--benchmark", required=True, help="the frozen set they belong to")
+    q.add_argument("--csv", required=True)
+    q = hsub.add_parser("release", help="lift a benchmark's exclusion: its records may join "
+                                        "training and the reference index (logged)")
+    q.add_argument("--benchmark", required=True)
+    hsub.add_parser("list", help="held-out records per benchmark, and any the records "
+                                 "table holds (should be 0)")
+
+    p = sub.add_parser("heldout", help="held-out benchmarks: freeze, fetch, predict, inat, "
+                                       "report (heldout.py)")
+    hsub = p.add_subparsers(dest="action", required=True)
+
+    def ids_options(q, subset_help="only the ids in this CSV's observation_id column"):
+        q.add_argument("--name", required=True, help="the benchmark, e.g. heldout-2026-10-08")
+        q.add_argument("--subset", help=subset_help)
+        q.add_argument("--split", choices=["dev", "test"], help="only this split")
+        q.add_argument("--limit", type=int, help="at most this many records (in id order)")
+
+    q = hsub.add_parser("freeze", help="store a set, its answer key and split (again on a "
+                                       "new snapshot of the same ids: takes the new names)")
+    q.add_argument("--name", required=True)
+    q.add_argument("--csv", required=True,
+                   help="pool.csv (observation_id, com_name = .com's index name, lat, lng, ...)")
+    q.add_argument("--titles", help="the .com record titles where they differ from the index "
+                                    "name (TSV: record_id, index_name, title): the answer")
+    q.add_argument("--links", help="with --titles: linked43.csv (record_id, external_id = the "
+                                   "iNat id)")
+    q.add_argument("--snapshot", help="the source snapshot CSV, to record its hash")
+    q.add_argument("--dev", help="dev.csv: the split to tune and explore on")
+    q.add_argument("--test", help="test.csv: the other split (sealed with --holdout)")
+    q.add_argument("--split-json", help="split.json: counts and id hashes to check the splits")
+    q.add_argument("--expect-sha", help="refuse unless the ids' sha256 starts with this")
+    q.add_argument("--holdout", action="store_true",
+                   help="a sealed set (the paper's): refuse records Vision holds and hold every "
+                        "id out of training and the reference index")
+
+    q = hsub.add_parser("fetch", help="iNat details and photos (resumable, iNat's limits)")
+    ids_options(q)
+    q.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    q.add_argument("--dest", help="folder or s3://bucket/prefix (default: the benchmark's "
+                                  "folder beside the manifest)")
+    q.add_argument("--details-only", action="store_true", help="no photos")
+    q.add_argument("--refresh", action="store_true", help="read iNat's details again")
+    q.add_argument("--max-hours", type=float)
+    q.add_argument("--static-day-gb", type=float, default=20,
+                   help="day cap for all-rights-reserved photos (see download-photos)")
+
+    q = hsub.add_parser("predict", help="embed the photos and answer with Vision's index")
+    ids_options(q)
+    q.add_argument("--backbone", required=True, help="e.g. bioclip-2-ft-20261007-165400")
+    q.add_argument("--methods", default="nearest,nearest+prior")
+    q.add_argument("--place", default="inat", choices=["inat", "org", "none"],
+                   help="place given to +prior methods: iNat's public one (default), "
+                        ".org's true one, or none")
+    q.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    q.add_argument("--batch-size", type=int, default=32)
+    q.add_argument("--redo", action="store_true", help="answer records answered before")
+    q.add_argument("--scores-out", help="also write each record's photo scores (.npz in "
+                                        "occtune.save_scored_set's format), e.g. for "
+                                        "mv tune-occurrence --scores")
+
+    q = hsub.add_parser("inat", help="iNat's computer vision on a named subsample "
+                                     "(needs a 24-hour token in data/secrets/inat_jwt.txt)")
+    ids_options(q, subset_help="the subsample CSV, e.g. inat-subsample-2000.csv")
+    q.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    q.add_argument("--cache", help="answer cache folder (default: data/inat_cv_cache)")
+    q.add_argument("--redo", action="store_true")
+
+    q = hsub.add_parser("report", help="scores with CIs, paired tests, calibration, "
+                                       "breakdowns and the label audit (JSON + CSV)")
+    q.add_argument("--name", required=True)
+    q.add_argument("--split", default="dev", choices=["dev", "test"],
+                   help="dev (default) to tune and explore; on a sealed benchmark test is the "
+                        "paper number and every look at it is recorded")
+    q.add_argument("--subset", help="only the ids in this CSV")
+    q.add_argument("--reference-backbone",
+                   help="whose reference index the breakdowns use (default: the newest)")
+    q.add_argument("--reference-hash",
+                   help="score the answers made against this reference (e.g. the run before "
+                        "a relabel; default: each model's newest)")
+
     args = parser.parse_args(argv)
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
@@ -831,6 +1017,8 @@ def main(argv: list[str] | None = None) -> int:
         "permissions": cmd_permissions,
         "refresh-licenses": cmd_refresh_licenses,
         "contributors": cmd_contributors,
+        "holdout": cmd_holdout,
+        "heldout": cmd_heldout,
     }[args.command]
     handler(conn, args)
     return 0

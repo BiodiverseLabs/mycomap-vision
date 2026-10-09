@@ -458,8 +458,10 @@ def start_instance(ec2, args: dict, run_id: str) -> dict:
 def check_trainer_request(conn, backbones: list[str], methods: list[str], size: str,
                           store_location: str, finetune: list[str] | None = None) -> int:
     """Refuse a run that can't do anything useful, before anything is paid for. Returns
-    how many photos there are to embed."""
-    from . import models
+    how many photos there are to embed. A manifest whose records hold a benchmark's
+    held-out record (holdouts.py) is never shipped to a trainer."""
+    from . import holdouts, models
+    holdouts.check_clean(conn, "the trainer run")
     from .evaluate import METHODS
     if not backbones:
         raise ValueError("name at least one backbone")

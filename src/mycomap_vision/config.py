@@ -57,7 +57,9 @@ def release_data_dir(root: Path) -> Path:
 RELEASE_ROOT = Path(setting("MV_RELEASE_ROOT")) if setting("MV_RELEASE_ROOT") else None
 DATA_DIR = Path(setting("MV_DATA_DIR")
                 or (release_data_dir(RELEASE_ROOT) if RELEASE_ROOT else REPO_ROOT / "data"))
-MANIFEST_PATH = DATA_DIR / "manifest.sqlite"
+# MV_MANIFEST_PATH: another manifest than <data>/manifest.sqlite, e.g. a copy to try a
+# command on while embeddings and models are read from the data folder.
+MANIFEST_PATH = Path(setting("MV_MANIFEST_PATH") or DATA_DIR / "manifest.sqlite")
 RAW_DIR = DATA_DIR / "raw"
 PHOTOS_DIR = DATA_DIR / "photos"
 REPORTS_DIR = DATA_DIR / "reports"

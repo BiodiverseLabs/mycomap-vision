@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from .holdouts import SCHEMA as HOLDOUTS_SCHEMA
 from .permissions import SCHEMA as PERMISSIONS_SCHEMA
 
 SCHEMA = """
@@ -92,7 +93,7 @@ create table if not exists license_history (
   license_code     text,
   seen_at          text not null
 );
-""" + PERMISSIONS_SCHEMA
+""" + PERMISSIONS_SCHEMA + HOLDOUTS_SCHEMA
 
 
 def connect(path: Path) -> sqlite3.Connection:
