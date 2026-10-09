@@ -278,15 +278,17 @@ def label_snapshot(conn, data: PicekData, exclude_mode: str = "match") -> dict:
 
 # --- where the records come from -----------------------------------------------------------
 # Training photos are fetched from iNat by the record's id. A record that is not an iNat
-# observation (Mushroom Observer, MyCoPortal, .com sequences) fetched AS an iNat id carries
-# some other observation's photos (mammals, birds, plants). A fix that records each
-# record's source in the manifest is pending; until a snapshot carries it, no launch can
-# prove its records are iNat only, so a real launch is refused (the dry run only warns).
-#
-# TODO(record source fix): set SOURCE_COLUMN to the records column the fix adds, and
-# INAT_SOURCE to its value for iNaturalist; that is the whole change. Not records.source:
-# it says 'inat' for any numeric id, an id pattern, which is how those records got in.
-SOURCE_COLUMN: str | None = None
+# observation (Mushroom Observer, MyCoPortal, .com sequences, GenBank) fetched AS an iNat id
+# carries some other observation's photos (mammals, birds, plants). The record-sources fix
+# (feat/record-sources-mo) normalises records.source to inat | mo | mycoportal |
+# com_sequence | genbank | unknown, from .org's own field, and marks a migrated manifest
+# with a manifest_migrations row. BEFORE that migration records.source holds the old
+# guess ('inat' for any numeric id), so it says nothing until the marker is there; a
+# manifest that isn't migrated can't prove its records are iNat only, and a real launch
+# is refused (the dry run only warns). A record is iNat only when records.source = 'inat';
+# never decided by the shape of its id.
+MIGRATION = "record-sources-v1"     # the fix's marker row (its sources.MIGRATION)
+SOURCE_COLUMN = "source"
 INAT_SOURCE = "inat"
 
 
@@ -294,19 +296,27 @@ class RecordSourceError(ValueError):
     """A Picek run's records are not proven to be iNaturalist observations only."""
 
 
+def sources_migrated(conn) -> bool:
+    """Whether this manifest's records.source is the record-sources fix's (its migration
+    marker row is there). A missing manifest_migrations table = not migrated. Reads only:
+    never creates the table.
+    TODO(feat/record-sources-mo): once it merges, return sources.migrated(conn)."""
+    has_table = conn.execute("select 1 from sqlite_master where type = 'table' and "
+                             "name = 'manifest_migrations'").fetchone()
+    return bool(has_table) and conn.execute(
+        "select 1 from manifest_migrations where name = ?", (MIGRATION,)).fetchone() is not None
+
+
 def record_sources(conn, record_ids) -> dict[str, int] | None:
-    """Records per recorded source among `record_ids`, or None when the manifest records
-    no source (SOURCE_COLUMN unset, or not a column of this manifest's records table)."""
-    if not SOURCE_COLUMN:
-        return None
-    cols = {r[1] for r in conn.execute("pragma table_info(records)")}
-    if SOURCE_COLUMN not in cols:
+    """Records per source among `record_ids`, or None when the manifest's sources are not
+    the migrated ones (sources_migrated)."""
+    if not sources_migrated(conn):
         return None
     ids = sorted({str(i) for i in record_ids})
     counts: dict[str, int] = {}
     for at in range(0, len(ids), 500):          # reads only: the manifest may be read-only
         part = ids[at:at + 500]
-        for s, n in conn.execute(f'select coalesce("{SOURCE_COLUMN}", \'(none)\'), count(*) '
+        for s, n in conn.execute(f"select coalesce({SOURCE_COLUMN}, '(none)'), count(*) "
                                  f"from records where observation_id in "
                                  f"({','.join('?' * len(part))}) group by 1", part):
             counts[str(s)] = counts.get(str(s), 0) + int(n)
@@ -320,9 +330,9 @@ def source_check(conn, data: PicekData) -> dict:
     ids = list(data.train_records) + list(data.val_records)
     by = record_sources(conn, ids)
     if by is None:
-        return {"recorded": False, "column": SOURCE_COLUMN, "records": len(ids),
+        return {"recorded": False, "migration": MIGRATION, "records": len(ids),
                 "by_source": None, "not_inat": None}
-    return {"recorded": True, "column": SOURCE_COLUMN, "records": len(ids), "by_source": by,
+    return {"recorded": True, "migration": MIGRATION, "records": len(ids), "by_source": by,
             "not_inat": sum(n for s, n in by.items() if s != INAT_SOURCE)}
 
 
@@ -331,11 +341,11 @@ def require_inat_only(check: dict, dry_run: bool = False, log=print) -> None:
     record's source isn't iNaturalist, or the manifest records no source at all. A dry
     run (sends nothing) goes on with a loud warning, so the runbook stays testable."""
     if not check["recorded"]:
-        msg = (f"the manifest records no source for its records, so this run can't prove "
-               f"that its {check['records']:,} training and validation records are "
-               "iNaturalist observations (MO / MyCoPortal / .com ids fetched as iNat ids "
-               "carry other observations' photos). The launch waits for the iNat-only "
-               "snapshot (docs/PLAN.md, launch day).")
+        msg = (f"the manifest's record sources are not migrated (no {MIGRATION} marker), "
+               f"so this run can't prove that its {check['records']:,} training and "
+               "validation records are iNaturalist observations (MO / MyCoPortal / .com ids "
+               "fetched as iNat ids carry other observations' photos). The launch waits for "
+               "the iNat-only snapshot (docs/PLAN.md, launch day).")
     elif check["not_inat"]:
         counts = ", ".join(f"{s}: {n:,}" for s, n in check["by_source"].items())
         msg = (f"{check['not_inat']:,} of the {check['records']:,} training and validation "
@@ -350,6 +360,33 @@ def require_inat_only(check: dict, dry_run: bool = False, log=print) -> None:
         log("WARNING (a real launch is refused): " + msg)
         return
     raise RecordSourceError("not launching: " + msg)
+
+
+# The coordinator's 2026-10-09 audit: .org's live source per record (observation_id, source
+# as .org spells it). Laptop only, informational for a dry run; never shipped.
+AUDIT_TSV = Path("audits") / "record-sources-2026-10-09" / "org-sources-live.tsv"
+AUDIT_INAT = "iNaturalist"
+
+
+def audit_not_inat(path: Path, record_ids) -> dict | None:
+    """How many of `record_ids` the audit file lists with a source other than iNaturalist,
+    by its source, or None without the file."""
+    if not path.is_file():
+        return None
+    ids = {str(i) for i in record_ids}
+    listed: dict[str, str] = {}
+    with open(path, encoding="utf-8", newline="") as fh:
+        for row in csv.DictReader(fh, delimiter="	"):
+            oid = (row.get("observation_id") or "").strip()
+            if oid in ids:
+                listed[oid] = (row.get("source") or "").strip() or "(none)"
+    by: dict[str, int] = {}
+    for src in listed.values():
+        if src != AUDIT_INAT:
+            by[src] = by.get(src, 0) + 1
+    return {"file": str(path), "records": len(ids), "listed": len(listed),
+            "not_inat": sum(by.values()),
+            "by_source": dict(sorted(by.items(), key=lambda kv: -kv[1]))}
 
 
 def run_sources(conn, store_location: str, size: str, test_days: int = 28,
@@ -382,7 +419,8 @@ def format_snapshot(snap: dict) -> str:
 
 def format_sources(check: dict | None) -> str:
     if not check or not check["recorded"]:
-        return "NOT RECORDED in this manifest (can't prove the records are iNat only)"
+        return (f"NOT MIGRATED (no {MIGRATION} marker in this manifest: can't prove the "
+                "records are iNat only)")
     return ", ".join(f"{s} {n:,}" for s, n in check["by_source"].items()) or "no records"
 
 

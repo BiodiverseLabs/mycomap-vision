@@ -407,6 +407,15 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
         log("WARNING: the manifest still carries known label problems (above). They are "
             "Vision's labels too, so both models see the same; launch only once the "
             "labelling is final (docs/PLAN.md, Picek replication, launch day).")
+    if dry_run:                 # informational, laptop only: the audit file never ships
+        audit = picek.audit_not_inat(config.DATA_DIR / picek.AUDIT_TSV,
+                                     list(data.train_records) + list(data.val_records))
+        if audit:
+            log(f"Audit file ({picek.AUDIT_TSV.as_posix()}): {audit['not_inat']:,} of the "
+                f"{audit['records']:,} training and validation records are listed with a "
+                f"source other than iNaturalist ("
+                + ", ".join(f"{s} {n:,}" for s, n in audit["by_source"].items())
+                + f"); {audit['records'] - audit['listed']:,} not listed. Informational.")
     picek.require_inat_only(snap["record_sources"], dry_run=dry_run, log=log)
     return snap, ids
 

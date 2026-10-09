@@ -876,15 +876,21 @@ embeddings, plus the manifest.
    - **iNat-only snapshot (launch guard, 2026-10-09).** The label audit found 8,868 Vision
      reference/training records (5.8%) that are Mushroom Observer, MyCoPortal or .com
      sequence ids fetched AS iNat ids, so they carry other observations' photos (mammals,
-     birds, plants); labels hash 27240f89 includes them. The launch waits for the fix that
-     records each record's source in the manifest, and a snapshot made with it. The guard
-     (`retrain.require_inat_only`, run by `mv aws-launch-trainer --picek` and again by the
-     instance before its first stage) refuses any training or validation record whose
-     recorded source isn't iNaturalist, printing the count by source; while the manifest
-     records no source it refuses a real launch outright (the dry run only warns). The
-     source breakdown goes into the label snapshot (`record_sources`, picek-labels.json
-     and result.json). When the fix lands, set `SOURCE_COLUMN` (and `INAT_SOURCE`) in
-     retrain.py to its column; `records.source` is not it (an id pattern).
+     birds, plants); labels hash 27240f89 includes them. The launch waits for the
+     record-sources fix (feat/record-sources-mo: `records.source` normalised to inat | mo |
+     mycoportal | com_sequence | genbank | unknown) and a snapshot migrated by it. The
+     guard (`retrain.require_inat_only`, run by `mv aws-launch-trainer --picek` and again
+     by the instance before its first stage) first asks whether the manifest is migrated:
+     the `record-sources-v1` row in `manifest_migrations` (`retrain.sources_migrated`;
+     TODO: the fix's `sources.migrated` once merged). Before that row, `records.source` is
+     the old guess ('inat' for any numeric id) and proves nothing, so a real launch is
+     refused (the dry run only warns). Once migrated, a record is iNat only when
+     `records.source = 'inat'`; any other training or validation record refuses the
+     launch, with the count by source. The breakdown goes into the label snapshot
+     (`record_sources`: picek-labels.json and result.json). A dry run also reports, for
+     information, how many training records the laptop's audit file
+     (`data/audits/record-sources-2026-10-09/org-sources-live.tsv`) lists as non-iNat;
+     that file never ships.
 2. The Vision model the replication is compared against is trained on the same manifest
    state. Same `trained_through` (the cutoff 28 days before the newest record) and same
    benchmark exclusion.
