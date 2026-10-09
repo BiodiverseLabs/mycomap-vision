@@ -37,7 +37,7 @@ export function AboutPage() {
         <HowGood />
         <Section title="Measured on the newest weeks">
           Each model is tested on the records that turned green most recently, identified using
-          only the records verified before them, the way it meets a new find. The Results page under Research
+          only the records verified before them, the way it meets a new find. The Models page
           shows every test, broken down by how many reference records each species has.
         </Section>
         <Section title="What's still to come">
