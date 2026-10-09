@@ -57,8 +57,14 @@ FINETUNE_RATES = {"bioclip-2": 83.0}   # photos seen per second while training
 # The Picek replication (picek.py), training photos per second on the instance. NOT yet
 # measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
 # (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).
-PICEK_RATES = {"fungitastic-beit-b384": 45.0, "fungitastic-beit-b224": 55.0,
-               "vit-b384-ce": 45.0, "df20-vit-l384": 30.0}
+# The loader's per-photo cost was measured on the laptop CPU (2026-10-09): the 384 px
+# recipe costs the same as the BioCLIP fine-tune's loader, which ran at 59 photos/s on
+# g6.xlarge; a 440 px cache (or the 224 px recipe) is 1.7x cheaper per photo. The L4's own
+# training speed for BEiT-B/16 384 is NOT measured yet; ~100-120/s is reasoned.
+PICEK_RATES = {"fungitastic-beit-b384": 59.0, "fungitastic-beit-b224": 100.0,
+               "vit-b384-ce": 59.0, "df20-vit-l384": 35.0}
+PICEK_CACHE_SPEEDUP = 1.7              # with a photo cache (capped by the GPU in practice)
+PICEK_CACHE_BUILD_RATE = 250.0         # photos/s resizing into the cache on 4 vCPUs
 UNMEASURED_EMBED_RATE = 15.0           # a backbone never timed here: assume a slow one
 UNMEASURED_FINETUNE_RATE = 40.0
 L4_FACTOR = 1.5
@@ -135,8 +141,14 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
         if s.kind == "picek":
             from .picek import parse_spec
             preset, n_epochs = parse_spec(s.spec)
+            from .picek import cache_of
             rate = PICEK_RATES.get(preset)
+            cached = cache_of(s.spec)
+            if rate and cached:
+                rate *= PICEK_CACHE_SPEEDUP
             hours = photos * n_epochs / (rate or UNMEASURED_FINETUNE_RATE) / 3600
+            if cached:
+                hours += photos / PICEK_CACHE_BUILD_RATE / 3600
             total += hours
             rows.append({"stage": f"{s.kind} {s.name} ({n_epochs} epochs)",
                          "photos_per_second": rate or UNMEASURED_FINETUNE_RATE,
@@ -558,9 +570,10 @@ def model_files(kind: str) -> tuple[str, ...]:
 
 def _default_picek_trainer(store, size, test_days, log, should_stop=None):
     def run(conn, spec, name, models_dir):
-        from .picek import PicekConfig, parse_spec, train
+        from .picek import PicekConfig, cache_of, parse_spec, train
         preset, epochs = parse_spec(spec)
-        return train(conn, store, size, name, PicekConfig(preset=preset, epochs=epochs),
+        cfg = PicekConfig(preset=preset, epochs=epochs, cache_px=cache_of(spec))
+        return train(conn, store, size, name, cfg,
                      test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
     return run
 

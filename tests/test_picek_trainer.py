@@ -83,3 +83,13 @@ def test_the_run_trains_uploads_and_scores_the_replication_with_its_own_methods(
     assert {(r["backbone"], r["method"]) for r in board} == {
         (name, "nearest"), (name, "classifier"), ("timm_a", "nearest")}
     assert trainer.resume_request(out)["picek"] == ["fungitastic-beit-b384@2"]
+
+
+def test_a_photo_cache_shortens_the_estimate_and_counts_its_own_pass():
+    plain = trainer.estimate(trainer.plan_stages([], None, "r", ["fungitastic-beit-b384@15"])[:1],
+                             580_000)["stages"][0]["hours"]
+    cached = trainer.estimate(trainer.plan_stages([], None, "r",
+                                                  ["fungitastic-beit-b384@15@440"])[:1],
+                              580_000)["stages"][0]["hours"]
+    build = 580_000 / trainer.PICEK_CACHE_BUILD_RATE / 3600
+    assert cached == pytest.approx(plain / trainer.PICEK_CACHE_SPEEDUP + build, abs=0.15)

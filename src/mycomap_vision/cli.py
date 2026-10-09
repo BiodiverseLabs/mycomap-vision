@@ -667,7 +667,7 @@ def cmd_picek_train(conn, args) -> None:
                             val_days=args.val_days, val_max_photos=args.val_max_photos,
                             workers=args.workers, max_steps=args.max_steps,
                             grad_checkpointing=not args.no_grad_checkpointing,
-                            seed=args.seed)
+                            seed=args.seed, cache_px=args.cache_px)
     meta = picek.train(conn, open_store(args.source, config.DATA_DIR), args.size, name, cfg,
                        test_days=args.test_days)
     print(json.dumps({k: v for k, v in meta.items() if k != "history"}, indent=2))
@@ -786,7 +786,8 @@ def main(argv: list[str] | None = None) -> int:
                         "(its results can't be merged home)")
     p.add_argument("--picek", default="",
                    help="also train the Picek group's classifier recipe (picek.py): presets "
-                        "as preset[@epochs], e.g. fungitastic-beit-b384@15; add the methods "
+                        "as preset[@epochs[@cache_px]], e.g. fungitastic-beit-b384@15@440 "
+                        "(15 epochs from a 440 px photo cache); add the methods "
                         "classifier,classifier+month to score it")
     p.add_argument("--allow-over-time", action="store_true",
                    help="launch even when the time estimate exceeds --max-hours (the run "
@@ -858,6 +859,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--val-max-photos", type=int, help="cap the validation pass (smoke)")
     p.add_argument("--workers", type=int, default=6)
     p.add_argument("--no-grad-checkpointing", action="store_true")
+    p.add_argument("--cache-px", type=int,
+                   help="resize the training photos once to this shorter side on local disk "
+                        "(e.g. 440) and train from those; off by default")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--test-days", type=int, default=28)
 

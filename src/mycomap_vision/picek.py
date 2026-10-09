@@ -131,6 +131,11 @@ class PicekConfig:
     seed: int = 0
     max_steps: int | None = None       # cap on optimizer steps (smoke tests)
     cell_degrees: float = 4.0          # the place prior's grid (our extension)
+    # Training photos pre-resized once to this shorter side on local disk (cache_photos),
+    # so 4 vCPUs can keep the GPU fed; None (the default) reads the originals. Validation
+    # always reads the originals, like the embedding at test time.
+    cache_px: int | None = None
+    cache_dir: str | None = None       # default: <data>/picek-cache/<px>
 
     def resolved(self) -> "PicekConfig":
         p = PRESETS[self.preset]
@@ -138,13 +143,25 @@ class PicekConfig:
 
 
 def parse_spec(spec: str) -> tuple[str, int]:
-    """'fungitastic-beit-b384@15' -> (preset, 15 epochs); no '@': the preset's epochs."""
-    preset, _, epochs = spec.partition("@")
+    """'fungitastic-beit-b384@15' -> (preset, 15 epochs); no '@': the preset's epochs.
+    A third part, 'preset@15@440', is the photo cache (cache_of)."""
+    preset, _, rest = spec.partition("@")
+    epochs, _, cache = rest.partition("@")
     if preset not in PRESETS:
         raise ValueError(f"unknown Picek preset {preset!r}: {', '.join(sorted(PRESETS))}")
     if epochs and not (epochs.isdigit() and int(epochs) > 0):
         raise ValueError(f"bad epoch count in {spec!r}: use preset@epochs, e.g. {preset}@15")
+    if cache and not (cache.isdigit() and int(cache) >= PRESETS[preset].image_size):
+        raise ValueError(f"bad photo cache size in {spec!r}: preset@epochs@px, px at least "
+                         f"the input size ({PRESETS[preset].image_size}), e.g. {preset}@15@440")
     return preset, int(epochs) if epochs else PRESETS[preset].epochs
+
+
+def cache_of(spec: str) -> int | None:
+    """The photo cache's shorter side a spec asks for ('preset@15@440' -> 440), else None."""
+    parse_spec(spec)
+    parts = spec.split("@")
+    return int(parts[2]) if len(parts) > 2 and parts[2] else None
 
 
 # --- the training data --------------------------------------------------------------------
@@ -248,6 +265,71 @@ def build_data(conn, store_location: str, size: str, test_days: int = 28, val_da
                      newest_train, [r.observation_id for r in train_recs],
                      [r.observation_id for r in val_recs], excluded, one_word,
                      sum(r.species not in pos for r in val_recs))
+
+
+# --- the photo cache --------------------------------------------------------------------
+
+def resize_short_side(img, px: int):
+    """The image with its shorter side at most `px` (aspect kept; never enlarged)."""
+    from PIL import Image
+    w, h = img.size
+    scale = px / min(w, h)
+    if scale >= 1:
+        return img
+    return img.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.BICUBIC)
+
+
+def cache_photos(store, items, dest: Path, px: int, threads: int = 8, log=print) -> dict:
+    """Copy each training photo once, shorter side `px`, JPEG quality 90, to `dest` under its
+    own relative path, so training reads small local files instead of 1024 px photos from
+    S3: the data loader, not the GPU, sets the pace on a 4-vCPU instance (docs/PLAN.md).
+    The network then sees a RandomResizedCrop of the 440 px copy instead of the original
+    (decoded at 512 px in draft mode); everything after the read is unchanged. Resumable:
+    a file already there is kept. Returns counts and the time taken."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from PIL import Image, ImageOps
+    dest = Path(dest)
+    started = time.monotonic()
+
+    def one(item):
+        rel = item[1]
+        out = dest / rel
+        if out.is_file() and out.stat().st_size:
+            return "kept"
+        try:
+            img = Image.open(io.BytesIO(store.get(rel)))
+            if img.format == "JPEG":
+                img.draft("RGB", (px, px))
+            img = resize_short_side(ImageOps.exif_transpose(img).convert("RGB"), px)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(out.suffix + ".part")
+            img.save(tmp, "JPEG", quality=90)
+            tmp.replace(out)
+            return "made"
+        except Exception:
+            return "failed"         # the loader skips it as it would an unreadable original
+    counts = {"made": 0, "kept": 0, "failed": 0}
+    unique = list({rel: (pid, rel) for pid, rel, *_ in items}.values())
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        for i, r in enumerate(pool.map(one, unique), 1):
+            counts[r] += 1
+            if i % 20000 == 0:
+                log(f"  photo cache: {i:,}/{len(unique):,}")
+    secs = time.monotonic() - started
+    return {"short_side": px, "location": str(dest), "photos": len(unique), **counts,
+            "seconds": round(secs, 1),
+            "photos_per_second": round(len(unique) / secs, 1) if secs else None}
+
+
+def make_datasets(train_location: str, val_location: str, data: "PicekData", preset: Preset,
+                  val_items) -> tuple["Photos", "Photos"]:
+    """The training and validation datasets. With a photo cache only train_location
+    changes: transforms, draft decoding and items are the same either way."""
+    size_px = preset.image_size
+    return (Photos(train_location, data.train, train_transform(preset.augment, size_px),
+                   draft=size_px),
+            Photos(val_location, val_items, eval_transform(size_px), draft=size_px))
 
 
 # --- the loss -----------------------------------------------------------------------------
@@ -524,16 +606,25 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
     loss_fn = make_loss(preset.loss, data.class_photos, cfg)
     accum = max(1, cfg.effective_batch // cfg.micro_batch)
     size_px = preset.image_size
-    train_set = Photos(store.location, data.train, train_transform(preset.augment, size_px),
-                       draft=size_px)
     val_items = data.val
     if cfg.val_max_photos and len(val_items) > cfg.val_max_photos:
         keep = np.random.default_rng(cfg.seed).choice(len(val_items), cfg.val_max_photos,
                                                       replace=False)
         val_items = [val_items[i] for i in sorted(keep)]
+    cache = None
+    train_location = store.location
+    if cfg.cache_px:
+        from . import config as _config
+        where = Path(cfg.cache_dir) if cfg.cache_dir else (_config.DATA_DIR / "picek-cache"
+                                                           / str(cfg.cache_px))
+        log(f"[{name}] caching {len(data.train):,} training photos at {cfg.cache_px} px "
+            f"in {where}")
+        cache = cache_photos(store, data.train, where, cfg.cache_px, log=log)
+        log(f"[{name}] photo cache: {json.dumps(cache)}")
+        train_location = str(where)
+    train_set, val_set = make_datasets(train_location, store.location, data, preset, val_items)
     val_loader = torch.utils.data.DataLoader(
-        Photos(store.location, val_items, eval_transform(size_px), draft=size_px),
-        batch_size=cfg.micro_batch * 2, num_workers=cfg.workers, collate_fn=collate,
+        val_set, batch_size=cfg.micro_batch * 2, num_workers=cfg.workers, collate_fn=collate,
         pin_memory=device == "cuda")
     micro_per_epoch = len(data.train) // cfg.micro_batch
     steps_per_epoch = max(1, micro_per_epoch // accum)
@@ -648,6 +739,7 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
             "train_photos_per_second": round(seen / train_seconds, 2) if train_seconds else None,
             "loader_wait_share": round(wait_seconds / train_seconds, 3) if train_seconds else None,
             "stopped_at_max_steps": stopped_early, "loader_fallback": fallback["at"],
+            "photo_cache": cache,
             "config": asdict(cfg), "device": device,
             "minutes": round(elapsed / 60, 1),
             "code_version": __import__("mycomap_vision.config", fromlist=["x"]).code_version(),

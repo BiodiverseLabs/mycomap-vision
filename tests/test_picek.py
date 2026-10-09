@@ -286,3 +286,35 @@ def test_the_report_prints_macro_f1_and_per_photo_beside_per_record():
         "species": {"top1": {"rate": 0.5}}, "species_macro_f1": {"macro_f1": 0.25},
         "per_image": {"species": {"rate": 0.4}, "species_macro_f1": 0.2}}})
     assert "m/classifier" in text and "25.0%" in text and "40.0%" in text
+
+
+# --- the photo cache (an option for 4-vCPU instances) -----------------------------------
+
+def test_the_photo_cache_shrinks_each_training_photo_once_and_keeps_its_path(tmp_path):
+    from PIL import Image
+
+    from mycomap_vision.storage import LocalStore
+    src = LocalStore(tmp_path / "src")
+    for rel, size in (("a/1.jpg", (1024, 768)), ("b/2.jpg", (300, 500))):
+        buf = __import__("io").BytesIO()
+        Image.new("RGB", size, (200, 10, 10)).save(buf, "JPEG")
+        src.put(rel, buf.getvalue())
+    src.put("c/3.jpg", b"not a photo")
+    items = [(1, "a/1.jpg", 0), (2, "b/2.jpg", 1), (3, "c/3.jpg", 1), (1, "a/1.jpg", 0)]
+    out = picek.cache_photos(src, items, tmp_path / "cache", 440, threads=2,
+                             log=lambda s: None)
+    assert (out["photos"], out["made"], out["failed"]) == (3, 2, 1)
+    assert Image.open(tmp_path / "cache" / "a/1.jpg").size == (587, 440)     # aspect kept
+    assert Image.open(tmp_path / "cache" / "b/2.jpg").size == (300, 500)     # never enlarged
+    again = picek.cache_photos(src, items, tmp_path / "cache", 440, threads=2,
+                               log=lambda s: None)
+    assert again["kept"] == 2 and again["made"] == 0
+
+
+def test_a_cache_is_asked_for_in_the_spec_and_never_below_the_input_size():
+    assert picek.cache_of("fungitastic-beit-b384@15@440") == 440
+    assert picek.cache_of("fungitastic-beit-b384@15") is None
+    assert picek.parse_spec("fungitastic-beit-b384@15@440") == ("fungitastic-beit-b384", 15)
+    with pytest.raises(ValueError, match="cache size"):
+        picek.parse_spec("fungitastic-beit-b384@15@300")
+    assert picek.PicekConfig().cache_px is None                  # off unless asked for

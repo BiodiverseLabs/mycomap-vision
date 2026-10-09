@@ -193,3 +193,29 @@ def test_max_steps_caps_a_smoke_run(conn, tmp_path, tiny):
     meta = picek.train(conn, store, "large", "picek-tiny", replace(tiny, max_steps=1),
                        log=lambda s: None)
     assert meta["steps"] == 1 and meta["stopped_at_max_steps"] and meta["epochs_run"] == 1
+
+
+def test_with_a_photo_cache_only_where_training_photos_are_read_changes(conn, tmp_path, tiny):
+    store = seed_two_species(conn, tmp_path)
+    data = picek.build_data(conn, store.location, "large", 28, int(VAL_DAYS))
+    preset = picek.PRESETS["fungitastic-beit-b384"]
+    plain = picek.make_datasets(store.location, store.location, data, preset, data.val)
+    cached = picek.make_datasets(str(tmp_path / "cache"), store.location, data, preset,
+                                 data.val)
+    for a, b in zip(plain, cached):
+        assert repr(a.transform) == repr(b.transform)
+        assert (a.items, a.draft) == (b.items, b.draft)
+    assert cached[0].location == str(tmp_path / "cache")
+    assert cached[1].location == plain[1].location == store.location   # validation: originals
+
+
+def test_training_from_a_photo_cache_records_it(conn, tmp_path, tiny):
+    from dataclasses import replace
+    store = seed_two_species(conn, tmp_path)
+    meta = picek.train(conn, store, "large", "picek-tiny",
+                       replace(tiny, cache_px=16, cache_dir=str(tmp_path / "cache")),
+                       log=lambda s: None)
+    assert meta["photo_cache"]["short_side"] == 16
+    assert meta["photo_cache"]["made"] == 4                           # the training photos
+    assert meta["config"]["cache_px"] == 16
+    assert len(list((tmp_path / "cache").rglob("*.png"))) == 4
