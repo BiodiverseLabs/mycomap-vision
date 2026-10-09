@@ -2,7 +2,7 @@
 title: Is nearest biased toward well-sampled species? (nearest + species average)
 slug: depth-bias
 date: '2026-10-09'
-status: done
+status: adopted
 question: Does scoring a species by its single best-matching photo favour species with many reference
   photos, and what scoring fixes it?
 branch: exp/depth-bias (merged fb396f0)
@@ -25,8 +25,8 @@ headline: 'Nearest + species average (0.6 x mean of top-2 matches + 0.4 x specie
   species on 1,152 records; confirmed on held-out test 48.3 -> 54.2% (898 fixed, 308 broken).'
 verdict: Taking depth out of the score loses; blending each species' best matches with its average photo
   wins in every band with references.
-decision: 'pending: whether nearest + species average becomes the site''s default (the coordinator recommends
-  it; about 2.5x the scoring time).'
+decision: 'Steve 2026-10-09: nearest + species average is the default photos-only method (MV_DEFAULT_METHOD,
+  feat/nearest-mean-default); live once deployed and its calibration is on the box.'
 related:
 - full-run-finetune
 - heldout-benchmark
@@ -93,7 +93,8 @@ per species: the average photo is good for species with a few records, the best 
 species with many, and the blend keeps both.
 
 ## Decision
-pending (default on the site).
+Adopted (Steve, 2026-10-09): the default photos-only method on the site. Identification shares
+the photo similarities with the specimens it shows, so the blend no longer computes them twice.
 
 ## Next
 A `+prior` / `+occ` version of the blend; share the photo similarities in identify.py (computed

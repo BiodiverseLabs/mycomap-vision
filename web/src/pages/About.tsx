@@ -239,7 +239,7 @@ function HowGood() {
   const board = useQuery({ queryKey: ["scoreboard"], queryFn: api.scoreboard });
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const ahead = useQuery({ queryKey: ["prospective"], queryFn: api.prospective });
-  const h = board.data && models.data ? headline(board.data.runs, models.data.ready) : null;
+  const h = board.data && models.data ? headline(board.data.runs, models.data.ready, models.data.default_method ?? "nearest") : null;
   const advance = h ? ahead.data?.models.find((m) => m.backbone === h.ours.backbone) : undefined;
   return (
     <section data-testid="section-how-good">

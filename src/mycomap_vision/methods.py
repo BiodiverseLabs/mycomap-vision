@@ -255,8 +255,8 @@ class Hybrid:
         return self.nearest.photo_sims(query)
 
 
-def top_k_species_scores(sims: np.ndarray, index, k: int) -> np.ndarray:
-    """(n_species,): mean over query photos of each photo's k best matches within the
+def top_k_species_scores_per_photo(sims: np.ndarray, index, k: int) -> np.ndarray:
+    """(n_query_photos, n_species): each photo's mean of its k best matches within each
     species (all of them when the species has fewer than k photos)."""
     counts = photos_per_species(index)
     group = np.repeat(np.arange(len(counts)), counts)
@@ -267,7 +267,12 @@ def top_k_species_scores(sims: np.ndarray, index, k: int) -> np.ndarray:
     for j in range(k):
         has = counts > j
         total[:, has] += ranked[:, index.starts[has] + j]
-    return (total / np.minimum(counts, k)).mean(axis=0)
+    return total / np.minimum(counts, k)
+
+
+def top_k_species_scores(sims: np.ndarray, index, k: int) -> np.ndarray:
+    """(n_species,): the per-photo scores averaged over the query photos."""
+    return top_k_species_scores_per_photo(sims, index, k).mean(axis=0)
 
 
 def species_means(vectors, index, chunk: int = 2048) -> np.ndarray:
@@ -294,7 +299,8 @@ class NearestAndMean:
     where it is strong. On comparison 20261008-012435-4ef7b0 (fine-tuned BioCLIP 2,
     1,152 test records) species top-1 went from 34.5% to 38.4% and every reference
     depth gained (5-19 records: 31.8 to 39.9%); the numbers are in docs/PLAN.md.
-    k and weight were chosen there.
+    k and weight were chosen there; confirmed on the held-out benchmark (test 48.3 to
+    54.2%). The site's default method since Steve's decision of 2026-10-09.
     """
     name = "nearest+mean"
     k = 2
@@ -305,10 +311,15 @@ class NearestAndMean:
         self.scorer = Scorer(reference_rows(vectors, index))
         self.means = Scorer(species_means(vectors, index).astype(np.float16))
 
+    def per_photo_scores(self, photo_sims: np.ndarray, query: np.ndarray) -> np.ndarray:
+        """(n_query_photos, n_species) from the photo-to-reference similarities already
+        computed (identify.py has them for the specimens it shows). The blend is linear,
+        so the record's score is exactly these averaged over its photos."""
+        nearest = top_k_species_scores_per_photo(photo_sims, self.index, self.k)
+        return self.weight * nearest + (1 - self.weight) * self.means.sims(query)
+
     def species_scores(self, query: np.ndarray) -> np.ndarray:
-        nearest = top_k_species_scores(self.scorer.sims(query), self.index, self.k)
-        mean = self.means.sims(query).mean(axis=0)
-        return self.weight * nearest + (1 - self.weight) * mean
+        return self.per_photo_scores(self.scorer.sims(query), query).mean(axis=0)
 
     def photo_sims(self, query: np.ndarray) -> np.ndarray:
         return self.scorer.sims(query)

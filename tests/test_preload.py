@@ -44,7 +44,8 @@ def settled(client, timeout=20.0) -> dict:
 def test_the_default_model_is_loaded_at_startup_and_reused_by_identifications(conn, tmp_path):
     client, loader = app(conn, tmp_path, ["default"])
     state = settled(client)
-    assert state["state"] == "ready" and state["models"] == ["m1/nearest"]
+    # The default method is nearest + species average (Steve, 2026-10-09; MV_DEFAULT_METHOD).
+    assert state["state"] == "ready" and state["models"] == ["m1/nearest+mean"]
     assert loader.loaded == ["m1"]
     assert post_photos(client, [247], "").status_code == 200
     assert post_photos(client, [247], "m1/nearest").status_code == 200
