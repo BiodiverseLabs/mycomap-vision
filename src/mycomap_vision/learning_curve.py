@@ -243,13 +243,16 @@ def genus_scores(scores: np.ndarray, lay: Layout) -> np.ndarray:
     return out
 
 
-def run(args) -> None:
-    import os
-    os.environ.setdefault("MV_MANIFEST_PATH", str(args.manifest))
+SEED_BASE = 1000              # seed s draws its record order from default_rng(SEED_BASE + s)
+
+
+def score(args) -> None:
+    """One process: score the split (or one shard of it) under every condition."""
     import sqlite3
     from . import heldout
     from .embed import load_embeddings
     from .evaluate import build_index, load_records, with_rows
+    from .config import code_version
     from .serving import map_embeddings
 
     t0 = time.time()
@@ -257,8 +260,9 @@ def run(args) -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(args.manifest)
+    bconn = sqlite3.connect(args.benchmark_db) if args.benchmark_db else conn
     bb = args.backbone
-    ids, vecs = map_embeddings(conn, bb, Path(args.data_dir) / "embeddings" / bb)
+    ids, vecs = map_embeddings(conn, bb, Path(args.embeddings_root) / bb)
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     records = with_rows(load_records(conn, {int(p): int(p) for p in ids.tolist()}), row_of)
     index = build_index(records)
@@ -267,8 +271,8 @@ def run(args) -> None:
     log(f"reference {ref_hash}: {len(records):,} records, {len(lay.cols):,} photos, "
         f"{len(lay.units):,} units")
 
-    bad_ids, both = bad_reference_ids(Path(args.sources))
-    is_bad = np.array([o in bad_ids for o in lay.rec_obs])
+    bad_ids, both = bad_reference_ids(Path(args.sources)) if args.sources else (set(), 0)
+    is_bad = np.array([o in bad_ids for o in lay.rec_obs], dtype=bool)
     log(f"non-iNat ids in .org: {len(bad_ids):,} ({both} also iNat, left in); "
         f"in this reference: {int(is_bad.sum()):,} records")
     clean = ~is_bad
@@ -293,8 +297,8 @@ def run(args) -> None:
     log("reference vectors ready")
 
     # Held-out development records.
-    split_ids = heldout.benchmark_ids(conn, args.benchmark, split=args.split)
-    hrecs = [r for r in heldout.load_benchmark(conn, args.benchmark, split_ids, "large")
+    split_ids = heldout.benchmark_ids(bconn, args.benchmark, split=args.split)
+    hrecs = [r for r in heldout.load_benchmark(bconn, args.benchmark, split_ids, "large")
              if r.photos]
     edb = sqlite3.connect(args.bench_index)
     pids, pvecs = load_embeddings(edb, bb, Path(args.bench_vectors))
@@ -344,8 +348,10 @@ def run(args) -> None:
 
     # Conditions on the whole reference.
     seeds = list(range(args.seeds))
-    keys = {s: record_order(R, 1000 + s) for s in seeds}
-    conds: dict[str, np.ndarray] = {"full-clean": clean.copy(), "full-with-bad": np.ones(R, bool)}
+    keys = {s: record_order(R, SEED_BASE + s) for s in seeds}
+    conds: dict[str, np.ndarray] = {"full-clean": clean.copy()}
+    if is_bad.any():
+        conds["full-with-bad"] = np.ones(R, bool)
     for f in args.fractions:
         for s in seeds:
             conds[f"frac{int(f * 100)}-s{s}"] = subset_mask(keys[s], clean, lay.rec_unit, S, fraction=f)
@@ -489,6 +495,7 @@ def run(args) -> None:
         "truths": {q[0]: q[2] for q in queries}, "n_photos": {q[0]: len(q[1]) for q in queries},
         "caps": args.caps, "seeds": seeds, "fractions": args.fractions,
         "global_caps": args.global_caps,
+        "provenance": {"code_version": code_version(), "seed_base": SEED_BASE},
     }
     fname = f"results-{args.shard}of{args.shards}.pkl" if args.shards > 1 else "results.pkl"
     with open(out_dir / fname, "wb") as f:
@@ -496,17 +503,199 @@ def run(args) -> None:
     log(f"wrote {out_dir / fname}")
 
 
-def main(argv=None) -> None:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--manifest", required=True, help="a COPY of the manifest")
-    p.add_argument("--data-dir", required=True)
+# --- the one command ---------------------------------------------------------------------
+
+REPRODUCIBILITY = "exploratory-pre-freeze"   # until the "Dataset release v1" freeze (Steve)
+
+
+def snapshot(src: Path, dst: Path) -> None:
+    """A consistent copy of a SQLite file (its WAL included), the source opened read-only.
+    Every run works on its own copies: the loaders add tables to the file they open, and
+    a shared manifest changes during the day."""
+    import sqlite3
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".part")
+    source = sqlite3.connect(Path(src).resolve().as_uri() + "?mode=ro", uri=True)
+    target = sqlite3.connect(tmp)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+    tmp.replace(dst)
+
+
+def frequencies(conn, bconn, benchmark: str, occurrence: Path | None) -> dict:
+    """How often each species arrives in the benchmark (all splits: MycoMap's own stream
+    of newly DNA-validated records) and, where the occurrence store knows it, how many
+    North American iNat observations it has. Keyed by Vision's species label."""
+    from . import heldout
+    recs = heldout.load_benchmark(bconn, benchmark)
+    lab = heldout.Labeller(conn, extra=[r.truth_name for r in recs if r.truth_name])
+    pool, genus_of = Counter(), {}
+    for r in recs:
+        if r.truth_name:
+            t = lab.truth(r.truth_name)
+            if t.species and not t.guest:
+                pool[t.species] += 1
+                genus_of[t.species] = t.genus
+    inat: dict[str, int] = {}
+    if occurrence is not None and Path(occurrence).is_file():
+        from .occurrence import OccurrenceStore
+        store = OccurrenceStore.load(Path(occurrence))
+        labels = set(pool)
+        for (n,) in conn.execute("select distinct scientific_name from records"):
+            if n:
+                t = lab.truth(n)
+                if t.species:
+                    labels.add(t.species)
+                    genus_of.setdefault(t.species, t.genus)
+        for name in labels:
+            m = store.resolve(name, genus_of.get(name, ""))
+            if m.species_unit >= 0:
+                inat[name] = int(store.unit_total[m.species_unit])
+    return {"pool": dict(pool), "inat": inat}
+
+
+def resolve_inputs(args) -> dict:
+    """Where a run reads from: a manifest (with the data folder's embeddings) or a pulled
+    release folder (its manifest and embeddings; the held-out tables then come from
+    --benchmark-db, since a release manifest carries none)."""
+    from . import config
+    from .taxonomy import CACHE as TAXONOMY_CACHE
+    data_dir = Path(args.data_dir) if args.data_dir else config.DATA_DIR
+    if args.release:
+        rel = Path(args.release)
+        meta = rel / "release.json"
+        if not args.benchmark_db:
+            raise SystemExit("--release needs --benchmark-db (a release manifest has no "
+                             "benchmark tables)")
+        inputs = {"manifest": rel / "manifest.sqlite", "embeddings": rel / "embeddings",
+                  "taxonomy": rel / TAXONOMY_CACHE,
+                  "release": (json.loads(meta.read_text(encoding="utf-8")).get("id")
+                              if meta.is_file() else rel.name)}
+    else:
+        manifest = Path(args.manifest)
+        inputs = {"manifest": manifest,
+                  "embeddings": (Path(args.embeddings_root) if args.embeddings_root
+                                 else data_dir / "embeddings"),
+                  "taxonomy": manifest.parent / TAXONOMY_CACHE, "release": None}
+    bench = (Path(args.benchmark_dir) if args.benchmark_dir
+             else data_dir / "benchmarks" / args.benchmark)
+    inputs.update(data_dir=data_dir, benchmark_db=Path(args.benchmark_db) if args.benchmark_db else None,
+                  bench_index=bench / "embeddings" / "large" / "index.sqlite",
+                  bench_vectors=bench / "embeddings" / "large" / args.backbone,
+                  occurrence=(Path(args.occurrence) if args.occurrence
+                              else data_dir / "occurrence" / "inat-fungi-na.npz"))
+    return inputs
+
+
+def score_command(args, work: Path, scores: Path, cache: Path, inputs: dict) -> list[str]:
+    """The `score` arguments every shard shares (fixed seeds: SEED_BASE + 0..seeds-1)."""
+    cmd = ["--manifest", str(work / "manifest.sqlite"), "--embeddings-root", str(inputs["embeddings"]),
+           "--backbone", args.backbone, "--benchmark", args.benchmark, "--split", args.split,
+           "--bench-index", str(work / "bench-index.sqlite"),
+           "--bench-vectors", str(inputs["bench_vectors"]), "--out", str(scores),
+           "--cache", str(cache), "--seeds", str(args.seeds),
+           "--batch-photos", str(args.batch_photos), "--top", str(args.top)]
+    if inputs["benchmark_db"] is not None:
+        cmd += ["--benchmark-db", str(work / "benchmark.sqlite")]
+    if args.sources:
+        cmd += ["--sources", str(args.sources)]
+    if args.limit:
+        cmd += ["--limit", str(args.limit)]
+    return cmd + ["--fractions", *map(str, args.fractions),
+                  "--global-caps", *map(str, args.global_caps), "--caps", *map(str, args.caps)]
+
+
+def run_all(args) -> None:
+    """The whole experiment, re-runnable: snapshot the inputs, build the shared reference
+    arrays, score the split in parallel shard processes (fixed seeds), write the report."""
+    import os
+    import shutil
+    import sqlite3
+    import subprocess
+    from . import config
+
+    out = Path(args.out)
+    work, scores = out / "work", out / "scores"
+    cache = Path(args.cache) if args.cache else out / "cache"
+    inputs = resolve_inputs(args)
+    man = work / "manifest.sqlite"
+    if not (args.reuse_snapshot and man.is_file()):
+        print(f"snapshot {inputs['manifest']} -> {man}", flush=True)
+        snapshot(inputs["manifest"], man)
+        if inputs["benchmark_db"] is not None:
+            snapshot(inputs["benchmark_db"], work / "benchmark.sqlite")
+        if inputs["taxonomy"].is_file():
+            tax = work / inputs["taxonomy"].relative_to(inputs["taxonomy"].parents[1])
+            tax.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(inputs["taxonomy"], tax)
+        shutil.copy2(inputs["bench_index"], work / "bench-index.sqlite")
+    snapshot_at = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(man.stat().st_mtime))
+
+    common = score_command(args, work, scores, cache, inputs)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(Path(__file__).resolve().parents[1]), env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    threads = str(max(1, (os.cpu_count() or 4) // max(args.workers, 1)))
+    env.update(OMP_NUM_THREADS=threads, OPENBLAS_NUM_THREADS=threads, MKL_NUM_THREADS=threads)
+    me = [sys.executable, "-m", "mycomap_vision.learning_curve", "score"]
+    scores.mkdir(parents=True, exist_ok=True)
+    for old in scores.glob("results*.pkl"):
+        old.unlink()
+    with open(out / "prep.log", "w", encoding="utf-8") as log:
+        if subprocess.run(me + common + ["--prep-only"], env=env, stdout=log,
+                          stderr=subprocess.STDOUT).returncode:
+            raise SystemExit(f"prep failed: see {out / 'prep.log'}")
+    procs = []
+    for i in range(args.workers):
+        log = open(out / f"score-{i}.log", "w", encoding="utf-8")
+        shard = ["--shards", str(args.workers), "--shard", str(i)] if args.workers > 1 else []
+        procs.append((subprocess.Popen(me + common + shard, env=env, stdout=log,
+                                       stderr=subprocess.STDOUT), log, i))
+    failed = []
+    for proc, log, i in procs:
+        if proc.wait():
+            failed.append(i)
+        log.close()
+    if failed:
+        raise SystemExit(f"shards {failed} failed: see {out}/score-<n>.log")
+
+    conn = sqlite3.connect(man)
+    bconn = sqlite3.connect(work / "benchmark.sqlite") if inputs["benchmark_db"] else conn
+    occ = inputs["occurrence"]
+    freq = frequencies(conn, bconn, args.benchmark, occ)
+    (work / "frequencies.json").write_text(json.dumps(freq), encoding="utf-8")
+    from .learning_curve_report import report
+    provenance = {"reproducibility": REPRODUCIBILITY, "code_version": config.code_version(),
+                  "release": inputs["release"], "snapshot_at": snapshot_at,
+                  "seed_base": SEED_BASE, "seeds": args.seeds, "workers": args.workers,
+                  "limit": args.limit or None,
+                  "occurrence_store": occ.name if occ.is_file() else None,
+                  "exclusions": Path(args.sources).name if args.sources else None}
+    report(scores, out, freq["pool"], freq["inat"], provenance=provenance)
+    print(f"report: {out / 'report.md'}", flush=True)
+
+
+def _score_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--manifest", required=True, help="a COPY of the manifest (tables are added to it)")
+    p.add_argument("--embeddings-root", required=True, help="folder holding <backbone>/shard-*.npy")
+    p.add_argument("--benchmark-db", help="where the held-out tables are (default: --manifest)")
+    p.add_argument("--bench-index", required=True, help="a copy of the benchmark's embeddings index")
+    p.add_argument("--bench-vectors", required=True)
+    p.add_argument("--sources", help=".org observation sources TSV: non-iNat ids are left out")
+    p.add_argument("--out", required=True)
+    p.add_argument("--cache", help="folder for the reference arrays shared by shard processes")
+    p.add_argument("--prep-only", action="store_true", help="build the caches and stop")
+    p.add_argument("--shards", type=int, default=1)
+    p.add_argument("--shard", type=int, default=0)
+
+
+def _shared_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--backbone", default="bioclip-2-ft-20261007-165400")
     p.add_argument("--benchmark", default="heldout-2026-10-08")
     p.add_argument("--split", default="dev")
-    p.add_argument("--bench-index", required=True, help="a copy of the benchmark's embeddings index")
-    p.add_argument("--bench-vectors", required=True)
-    p.add_argument("--sources", required=True, help=".org observation sources TSV")
-    p.add_argument("--out", required=True)
     p.add_argument("--seeds", type=int, default=5)
     p.add_argument("--fractions", type=float, nargs="*", default=[0.25, 0.5, 0.75])
     p.add_argument("--global-caps", type=int, nargs="*", default=[1, 3, 10, 30])
@@ -516,11 +705,50 @@ def main(argv=None) -> None:
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--batch-photos", type=int, default=300)
     p.add_argument("--limit", type=int, default=0, help="score only the first N records (smoke runs)")
-    p.add_argument("--cache", help="folder for the reference arrays shared by shard processes")
-    p.add_argument("--prep-only", action="store_true", help="build the caches and stop")
-    p.add_argument("--shards", type=int, default=1)
-    p.add_argument("--shard", type=int, default=0)
-    run(p.parse_args(argv))
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="mv learning-curve", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="step", required=True)
+    r = sub.add_parser("run", help="the whole experiment: snapshot, score (parallel), report")
+    src = r.add_mutually_exclusive_group(required=True)
+    src.add_argument("--manifest", help="a manifest (snapshotted, never written)")
+    src.add_argument("--release", help="a pulled release folder (manifest.sqlite + embeddings/)")
+    r.add_argument("--benchmark-db", help="manifest holding the held-out tables (needed with "
+                                          "--release; default: --manifest)")
+    r.add_argument("--benchmark-dir", help="the benchmark's folder (default: <data>/benchmarks/<name>)")
+    r.add_argument("--data-dir", help="default: MV_DATA_DIR or the repo's data folder")
+    r.add_argument("--embeddings-root", help="default: <data>/embeddings (with --manifest)")
+    r.add_argument("--sources", help=".org observation sources TSV: non-iNat ids (the wrong-photo "
+                                     "records) are left out; omit once a release has dropped them")
+    r.add_argument("--occurrence", help="iNat occurrence store (default: "
+                                        "<data>/occurrence/inat-fungi-na.npz)")
+    r.add_argument("--out", required=True)
+    r.add_argument("--cache", help="default: <out>/cache")
+    r.add_argument("--workers", type=int, default=4)
+    r.add_argument("--reuse-snapshot", action="store_true", help="keep <out>/work's snapshot")
+    _shared_args(r)
+    s = sub.add_parser("score", help="(used by run) one process: score the split or one shard")
+    _score_args(s)
+    _shared_args(s)
+    rp = sub.add_parser("report", help="write the report again from <out>/scores")
+    rp.add_argument("--out", required=True)
+    return p
+
+
+def main(argv=None) -> None:
+    a = parser().parse_args(argv)
+    if a.step == "run":
+        run_all(a)
+    elif a.step == "score":
+        score(a)
+    else:
+        from .learning_curve_report import report
+        out = Path(a.out)
+        freq = json.loads((out / "work" / "frequencies.json").read_text(encoding="utf-8"))
+        old = out / "report.json"
+        prov = json.loads(old.read_text(encoding="utf-8")).get("provenance") if old.is_file() else None
+        report(out / "scores", out, freq["pool"], freq["inat"], provenance=prov)
 
 
 if __name__ == "__main__":

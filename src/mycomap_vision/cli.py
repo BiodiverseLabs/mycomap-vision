@@ -657,9 +657,19 @@ def print_heldout_report(out: dict) -> None:
     print(f"-> {out['files']['csv']}")
 
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else list(argv)
+    if args_in[:1] == ["learning-curve"]:
+        # Its own command line (run / score / report); it never opens the shared manifest
+        # for writing: every run snapshots its inputs (learning_curve.run_all).
+        from . import learning_curve
+        learning_curve.main(args_in[1:])
+        return 0
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("learning-curve", add_help=False,
+                   help="accuracy against reference records per species (run / score / report; "
+                        "see mv learning-curve -h)")
     sub.add_parser("export-records", help="pull green records from mycomap.org (read-only)")
 
     p = sub.add_parser("fetch-inat", help="fetch iNat photo lists, licenses and owners")

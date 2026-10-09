@@ -171,7 +171,7 @@ def load_results(path: Path) -> dict:
 
 
 def report(results_path: Path, out_dir: Path, pool_names: dict[str, int] | None = None,
-           inat_counts: dict[str, int] | None = None) -> dict:
+           inat_counts: dict[str, int] | None = None, provenance: dict | None = None) -> dict:
     R = load_results(results_path)
     units, genus_names = R["units"], R["genus_names"]
     genus_of_unit = R["genus_of_unit"]
@@ -182,7 +182,9 @@ def report(results_path: Path, out_dir: Path, pool_names: dict[str, int] | None 
                  "reference_records": R["records"], "reference_photos": R["photos"],
                  "bad_in_reference": R["bad_in_reference"], "bad_ids_total": R["bad_ids_total"],
                  "bad_also_inat_left_in": R["bad_also_inat"], "skipped": R["skipped"],
-                 "scored_records": len(truths)}
+                 "scored_records": len(truths),
+                 "provenance": {**(provenance or {}), "scoring": R.get("provenance"),
+                                "reference_hash": R["reference_hash"]}}
     judged = {c: {m: judge_condition(R["results"][c][m], truths, units, genus_names)
                   for m in METHODS} for c in R["conditions"]}
     full_depth = truth_depth(truths, R["unit_counts"]["full-clean"])
@@ -191,7 +193,7 @@ def report(results_path: Path, out_dir: Path, pool_names: dict[str, int] | None 
 
     # 1. Standard tables at 100% (clean and with the wrong-photo records).
     out["standard"] = {}
-    for c in ("full-clean", "full-with-bad"):
+    for c in [c for c in ("full-clean", "full-with-bad") if c in R["conditions"]]:
         depth = truth_depth(truths, R["unit_counts"][c])
         out["standard"][c] = {m: {"ladder": ladder(judged[c][m]),
                                   "by_depth": depth_table(judged[c][m], depth)} for m in METHODS}

@@ -168,3 +168,62 @@ def test_ladder_reports_n_and_top_k_in_percent():
             "c": {("species", "strict"): None}}
     lad = lr.ladder(hits)["species strict"]
     assert lad["n"] == 3 and round(lad["top1"], 1) == 33.3 and round(lad["top5"], 1) == 66.7
+
+
+# --- the one command --------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+import sqlite3 as _sqlite3  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _args(**kw):
+    a = lc.parser().parse_args(["run", "--out", "o"] + kw.pop("argv", ["--manifest", "m.sqlite"]))
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def test_a_release_run_needs_the_benchmark_tables_named(tmp_path):
+    (tmp_path / "release.json").write_text(_json.dumps({"id": "v1"}), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        lc.resolve_inputs(_args(argv=["--release", str(tmp_path)]))
+    got = lc.resolve_inputs(_args(argv=["--release", str(tmp_path), "--benchmark-db", "b.sqlite"],
+                                  data_dir=str(tmp_path)))
+    assert got["release"] == "v1"
+    assert got["manifest"] == tmp_path / "manifest.sqlite"
+    assert got["embeddings"] == tmp_path / "embeddings"
+
+
+def test_manifest_and_release_are_alternatives():
+    with pytest.raises(SystemExit):
+        lc.parser().parse_args(["run", "--out", "o", "--manifest", "m", "--release", "r"])
+    with pytest.raises(SystemExit):
+        lc.parser().parse_args(["run", "--out", "o"])
+
+
+def test_every_shard_gets_the_same_fixed_seeds_and_settings(tmp_path):
+    a = _args(data_dir=str(tmp_path))
+    inputs = lc.resolve_inputs(a)
+    cmd = lc.score_command(a, tmp_path / "w", tmp_path / "s", tmp_path / "c", inputs)
+    assert cmd[cmd.index("--seeds") + 1] == "5"
+    assert cmd[cmd.index("--manifest") + 1] == str(tmp_path / "w" / "manifest.sqlite")
+    assert "--shard" not in cmd                      # added per process by run_all
+    assert lc.SEED_BASE == 1000                      # changing it changes every subset
+    assert np.array_equal(lc.record_order(50, lc.SEED_BASE), lc.record_order(50, lc.SEED_BASE))
+
+
+def test_the_snapshot_copies_without_touching_the_source(tmp_path):
+    src = tmp_path / "src.sqlite"
+    c = _sqlite3.connect(src)
+    c.execute("create table t (x)")
+    c.execute("insert into t values (1)")
+    c.commit()
+    c.close()
+    before = src.read_bytes()
+    lc.snapshot(src, tmp_path / "work" / "copy.sqlite")
+    assert src.read_bytes() == before
+    d = _sqlite3.connect(tmp_path / "work" / "copy.sqlite")
+    assert d.execute("select x from t").fetchall() == [(1,)]
+    d.close()
