@@ -444,11 +444,23 @@ class Identifier:
         return specimens
 
     def temperature(self, rank: str) -> float:
+        """The comparison's fitted temperature, else the method's own: a method whose
+        scores are log-probabilities (+prior, +occ) needs one near 2, where the cosine
+        default of 0.02 would state ~100% for every answer."""
         if self.calibration:
-            return self.calibration["temperatures"].get(rank, CONFIDENCE_TEMPERATURE)
-        return CONFIDENCE_TEMPERATURE
+            return self.calibration["temperatures"].get(rank, self.method_temperature(rank))
+        return self.method_temperature(rank)
+
+    def method_temperature(self, rank: str) -> float:
+        t = getattr(self.model, "confidence_temperature", None)
+        if isinstance(t, dict):
+            t = t.get(rank, t.get("species"))
+        return float(t) if t else CONFIDENCE_TEMPERATURE
 
     def confidence_note(self) -> str:
+        if not self.calibration and getattr(self.model, "confidence_temperature", None):
+            return ("Not calibrated by a comparison yet: confidence uses this method's own "
+                    "temperature. Run mv compare for this model to calibrate it.")
         if not self.calibration:
             return ("Not calibrated yet: relative confidence among candidates. Run "
                     "mv compare for this model to calibrate it.")

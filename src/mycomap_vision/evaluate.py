@@ -52,6 +52,7 @@ class Record:
     projects: tuple[str, ...] = ()      # the .org projects that marked it green
     stored_name: str = ""              # the name as .org spells it, when the label differs
     taxon: str = ""                    # a one-word name ("Russula"): species is then ''
+    uuid: str = ""                     # its iNat observation's uuid (occurrence priors leave it out)
 
     @property
     def unit(self) -> str:
@@ -61,7 +62,7 @@ class Record:
 
 def context_of(rec: "Record"):
     from .prior import Context
-    return Context(rec.latitude, rec.longitude, rec.observed_on)
+    return Context(rec.latitude, rec.longitude, rec.observed_on, rec.uuid or None)
 
 
 def clean(s: str | None) -> str:
@@ -96,7 +97,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
              o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
-             r.observed_on, o.observed_on, r.green_projects
+             r.observed_on, o.observed_on, r.green_projects, o.uuid
       from records r
       join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
@@ -109,7 +110,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     recs: dict[str, Record] = {}
     unlabelled: set[str] = set()
     for (oid, name, genus, family, vdate, login, pid, _pos, lat, lon, org_observed,
-         inat_observed, projects) in rows:
+         inat_observed, projects, uuid) in rows:
         if pid not in photo_row or not clean(name) or oid in unlabelled:
             continue
         rec = recs.get(oid)
@@ -130,7 +131,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
                                      or real_date(inat_observed),
                                      projects=tuple(json.loads(projects or "[]")),
                                      stored_name=clean(name) if respelled else "",
-                                     taxon="" if lab.species else lab.unit)
+                                     taxon="" if lab.species else lab.unit,
+                                     uuid=uuid or "")
         rec.photo_rows.append(photo_row[pid])
     return list(recs.values())
 
@@ -257,6 +259,24 @@ def fit_method(vectors: np.ndarray, ref: list[Record], method: str):
     return index, model
 
 
+def occurrence_leak_check(model, test: list[Record]) -> dict | None:
+    """For a method with an occurrence prior (+occ): refuse when a test record's own iNat
+    observation would count towards its score (the store counts it and has no
+    leave-one-out index), and warn loudly, and mark the result, for records with no
+    uuid to check. None for other methods."""
+    check = getattr(model, "leak_check", None)
+    if check is None:
+        return None
+    result = check([r.uuid or None for r in test], allow_missing=True)
+    if result.get("missing_uuid"):
+        import sys
+        print(f"WARNING: {result['missing_uuid']} of {len(test)} test records have no iNat "
+              "uuid: the occurrence prior can't take their own find out of its counts, so "
+              "their scores may be inflated (marked in occurrence_leak_check)",
+              file=sys.stderr)
+    return result
+
+
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
              fitted=None, sets: bool = True) -> dict:
@@ -267,6 +287,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
+    leak = occurrence_leak_check(model, test)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
     # Calibration: summed NLL per candidate temperature, over test records whose
     # true label is in the reference set (a novel species has no probability to give).
@@ -315,6 +336,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                          f"top{top_k}": round(c[f"top{top_k}"] / c["n"], 4)}
                      for k, c in tally[rank].items() if c["n"]}
     out["groups"] = {kind: summarise_groups(g) for kind, g in groups.items()}
+    if leak is not None:
+        out["occurrence_leak_check"] = leak
     out["calibration"] = {
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
                "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
@@ -487,9 +510,11 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         for m in methods:
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
             fitted = fit_method(vecs, ref_b, m)
+            extra = getattr(fitted[1], "scoreboard_extra", lambda: None)()
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted)
-            runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first))
+            runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first,
+                                 extra))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
             "reference_records": len(ref), "test_records": len(test),
             "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)

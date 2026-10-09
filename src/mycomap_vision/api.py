@@ -34,6 +34,7 @@ from .embed import photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge)
 from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
+from .methods import method_ready
 from .prior import Context
 from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
                      safe_return_to, verify_token)
@@ -450,7 +451,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             out.append({"backbone": name, "spec": name, "note": "", "embedded_photos": n,
                         "photos_per_second": speed.get(name)})
         return {"backbones": out,
-                "methods": [m for m in evaluate.METHODS if limits.method_allowed(m)],
+                "methods": [m for m in evaluate.METHODS
+                            if limits.method_allowed(m) and method_ready(m)],
                 "max_models": limits.max_models,
                 "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
 
@@ -553,7 +555,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise HTTPException(400, f"{backbone!r} has no embeddings")
             if method not in evaluate.METHODS:
                 raise HTTPException(400, f"unknown method {method!r}")
-            if not limits.method_allowed(method):
+            if not limits.method_allowed(method) or not method_ready(method):
                 raise HTTPException(400, f"{method!r} is not offered here")
             try:
                 ident = identifier(backbone, method, view)
@@ -588,7 +590,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 method = method or "nearest"
                 if backbone not in limits.allowed_backbones or backbone not in ready:
                     raise ValueError(f"{backbone!r} is not offered here or has no embeddings")
-                if method not in evaluate.METHODS or not limits.method_allowed(method):
+                if (method not in evaluate.METHODS or not limits.method_allowed(method)
+                        or not method_ready(method)):
                     raise ValueError(f"{method!r} is unknown or not offered here")
                 identifier(backbone, method, permission_view())
                 with gpu_lock:

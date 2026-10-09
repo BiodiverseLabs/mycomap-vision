@@ -996,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--reference-hash",
                    help="score the answers made against this reference (e.g. the run before "
                         "a relabel; default: each model's newest)")
+    from . import occtune
+    occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
 
     args = parser.parse_args(argv)
     if args.command == "pull-release":        # before any release exists: no manifest yet
@@ -1012,7 +1014,7 @@ def main(argv: list[str] | None = None) -> int:
     from . import nightly
     # On the server box with the nightly update on, its layer copy is the live manifest.
     conn = manifest.connect(nightly.served_manifest())
-    handler = {
+    handler = getattr(args, "occ_handler", None) or {
         "export-records": cmd_export_records,
         "fetch-inat": cmd_fetch_inat,
         "download-photos": cmd_download_photos,

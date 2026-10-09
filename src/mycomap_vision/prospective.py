@@ -169,7 +169,17 @@ def predict_pending(conn: sqlite3.Connection, identifier, backbone_model, ids: l
         if not images:
             stats["no usable photos"] += 1
             continue
-        ctx = Context(row["inat_latitude"], row["inat_longitude"], row["observed_on"])
+        # The candidate's own iNat observation is left out of any occurrence counts.
+        ctx = Context(row["inat_latitude"], row["inat_longitude"], row["observed_on"],
+                      row.get("uuid"))
+        check = getattr(getattr(identifier, "model", None), "leak_check", None)
+        if check is not None:
+            try:
+                check([row.get("uuid")])
+            except ValueError as e:         # occprior.TuningRefused
+                stats["skipped: occurrence prior can't leave its own find out"] += 1
+                log(f"  {oid}: skipped, {e}")
+                continue
         result = identifier.identify(backbone_model, images, context=ctx)
         with conn:
             conn.execute(
