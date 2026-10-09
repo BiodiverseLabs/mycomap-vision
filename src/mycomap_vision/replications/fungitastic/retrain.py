@@ -241,11 +241,12 @@ def labels_hash(data: PicekData) -> str:
     return h.hexdigest()[:16]
 
 
-def label_snapshot(conn, data: PicekData, exclude_mode: str = "match") -> dict:
+def label_snapshot(conn, data: PicekData, exclude_mode: str = "match",
+                   allowed: tuple[str, ...] | None = None) -> dict:
     """What a run's labels were, to prove later which labelling it used: counts, the
     share of provisional names, what was left out and why, the known label problems the
-    manifest carries (label conflicts; names that wait for a person, names.py), and
-    labels_hash."""
+    manifest carries (label conflicts; names that wait for a person, names.py), the
+    record sources the run allows and has (source_check), and labels_hash."""
     from ... import names
     provisional = sum(names.parse_name(c).code is not None for c in data.classes)
     is_code = {c: names.parse_name(c).code is not None for c in data.classes}
@@ -272,34 +273,61 @@ def label_snapshot(conn, data: PicekData, exclude_mode: str = "match") -> dict:
             "names_left_for_a_person": spell["left_for_a_person"],
         },
         "manifest_newest_export": newest,
-        "record_sources": source_check(conn, data),
+        "allowed_sources": list(allowed_sources(allowed)),
+        "record_sources": source_check(conn, data, allowed),
     }
 
 
 # --- where the records come from -----------------------------------------------------------
-# Training photos are fetched from iNat by the record's id. A record that is not an iNat
-# observation (Mushroom Observer, MyCoPortal, .com sequences, GenBank) fetched AS an iNat id
-# carries some other observation's photos (mammals, birds, plants). The record-sources fix
+# A record's photos must be its own. Records that are not iNat observations (Mushroom
+# Observer, MyCoPortal, .com sequences, GenBank) fetched AS iNat ids carried other
+# observations' photos (mammals, birds, plants). The record-sources fix
 # (feat/record-sources-mo) normalises records.source to inat | mo | mycoportal |
 # com_sequence | genbank | unknown, from .org's own field, and marks a migrated manifest
 # with a manifest_migrations row. BEFORE that migration records.source holds the old
-# guess ('inat' for any numeric id), so it says nothing until the marker is there; a
-# manifest that isn't migrated can't prove its records are iNat only, and a real launch
-# is refused (the dry run only warns). A record is iNat only when records.source = 'inat';
-# never decided by the shape of its id.
-MIGRATION = "record-sources-v1"     # the fix's marker row (its sources.MIGRATION)
+# guess ('inat' for any numeric id), so it says nothing until the marker is there; an
+# unmigrated manifest can't prove where its records come from, and a real launch is
+# refused (the dry run only warns). Never decided by the shape of an id.
+#
+# Which sources a run may train on (Steve, 2026-10-09): the Dataset release's allowed
+# sources, the same release for Vision and the replication: iNat, and DNA-validated MO
+# records with photos from MO itself. MyCoPortal, .com sequences, GenBank and unknown are
+# never allowed. Until a release exists the set is ('inat',): strict.
+# Local copies of the fix's names (feat/record-sources-mo @ 90428e1, not merged yet).
+# TODO(feat/record-sources-mo): once it merges, import MIGRATION, INAT and PHOTO_SOURCES
+# from mycomap_vision.sources instead of these copies.
+MIGRATION = "record-sources-v1"     # sources.MIGRATION
+INAT = "inat"                       # sources.INAT
+PHOTO_SOURCES = ("inat", "mo")      # sources.PHOTO_SOURCES: the most any release may allow
 SOURCE_COLUMN = "source"
-INAT_SOURCE = "inat"
+DEFAULT_ALLOWED_SOURCES = (INAT,)
 
 
 class RecordSourceError(ValueError):
-    """A Picek run's records are not proven to be iNaturalist observations only."""
+    """A Picek run's records are not proven to come from its allowed sources only."""
+
+
+def allowed_sources(allowed=None, release=None) -> tuple[str, ...]:
+    """The sources a run may train on: `allowed` if given, else the release's, else
+    DEFAULT_ALLOWED_SOURCES. Refuses an empty set and any source outside
+    PHOTO_SOURCES (inat, mo).
+    TODO(release builder): once a Dataset release exists, pass it here as `release` (its
+    release.allowed_sources), so Vision and the replication train on the same release."""
+    if allowed is None and release is not None:
+        allowed = release.allowed_sources
+    chosen = tuple(sorted(set(DEFAULT_ALLOWED_SOURCES if allowed is None else allowed)))
+    bad = sorted(set(chosen) - set(PHOTO_SOURCES))
+    if not chosen or bad:
+        raise RecordSourceError(
+            f"allowed sources must be a non-empty subset of {list(PHOTO_SOURCES)}; "
+            f"refused: {bad or 'an empty set'}")
+    return chosen
 
 
 def sources_migrated(conn) -> bool:
     """Whether this manifest's records.source is the record-sources fix's (its migration
     marker row is there). A missing manifest_migrations table = not migrated. Reads only:
-    never creates the table.
+    never creates the table. The same rule as the fix's sources.migrated(conn).
     TODO(feat/record-sources-mo): once it merges, return sources.migrated(conn)."""
     has_table = conn.execute("select 1 from sqlite_master where type = 'table' and "
                              "name = 'manifest_migrations'").fetchone()
@@ -323,38 +351,40 @@ def record_sources(conn, record_ids) -> dict[str, int] | None:
     return dict(sorted(counts.items(), key=lambda kv: -kv[1]))
 
 
-def source_check(conn, data: PicekData) -> dict:
+def source_check(conn, data: PicekData, allowed=None) -> dict:
     """The training and validation records by recorded source (label snapshot,
-    result.json): `recorded` False when the manifest has no source; `not_inat` counts
-    the records whose source isn't iNaturalist."""
+    result.json): `recorded` False when the manifest isn't migrated; `not_allowed` counts
+    the records whose source is outside the run's allowed sources."""
+    ok = allowed_sources(allowed)
     ids = list(data.train_records) + list(data.val_records)
     by = record_sources(conn, ids)
+    base = {"migration": MIGRATION, "allowed_sources": list(ok), "records": len(ids)}
     if by is None:
-        return {"recorded": False, "migration": MIGRATION, "records": len(ids),
-                "by_source": None, "not_inat": None}
-    return {"recorded": True, "migration": MIGRATION, "records": len(ids), "by_source": by,
-            "not_inat": sum(n for s, n in by.items() if s != INAT_SOURCE)}
+        return {"recorded": False, **base, "by_source": None, "not_allowed": None}
+    return {"recorded": True, **base, "by_source": by,
+            "not_allowed": sum(n for s, n in by.items() if s not in ok)}
 
 
-def require_inat_only(check: dict, dry_run: bool = False, log=print) -> None:
-    """Refuse a run whose training or validation records aren't proven iNat only: some
-    record's source isn't iNaturalist, or the manifest records no source at all. A dry
-    run (sends nothing) goes on with a loud warning, so the runbook stays testable."""
+def require_allowed_sources(check: dict, dry_run: bool = False, log=print) -> None:
+    """Refuse a run whose training or validation records aren't proven to come from its
+    allowed sources: some record's source is outside them, or the manifest isn't migrated.
+    A dry run (sends nothing) goes on with a loud warning, so the runbook stays testable."""
+    ok = ", ".join(check["allowed_sources"])
     if not check["recorded"]:
         msg = (f"the manifest's record sources are not migrated (no {MIGRATION} marker), "
                f"so this run can't prove that its {check['records']:,} training and "
-               "validation records are iNaturalist observations (MO / MyCoPortal / .com ids "
-               "fetched as iNat ids carry other observations' photos). The launch waits for "
-               "the iNat-only snapshot (docs/PLAN.md, launch day).")
-    elif check["not_inat"]:
+               f"validation records come from its allowed sources ({ok}); records fetched "
+               "by another site's id carry other observations' photos. The launch waits "
+               "for a migrated snapshot (docs/PLAN.md, launch day).")
+    elif check["not_allowed"]:
         counts = ", ".join(f"{s}: {n:,}" for s, n in check["by_source"].items())
-        msg = (f"{check['not_inat']:,} of the {check['records']:,} training and validation "
-               f"records are not iNaturalist observations ({counts}); their photos were "
-               "fetched by an id that isn't an iNat id. The launch waits for the iNat-only "
-               "snapshot (docs/PLAN.md, launch day).")
+        msg = (f"{check['not_allowed']:,} of the {check['records']:,} training and "
+               f"validation records come from sources outside this run's allowed sources "
+               f"({ok}): {counts}. The launch waits for a snapshot of allowed sources only "
+               "(docs/PLAN.md, launch day).")
     else:
         log(f"Record sources: all {check['records']:,} training and validation records "
-            "are iNaturalist observations.")
+            f"come from the allowed sources ({ok}).")
         return
     if dry_run:
         log("WARNING (a real launch is refused): " + msg)
@@ -376,7 +406,7 @@ def audit_not_inat(path: Path, record_ids) -> dict | None:
     ids = {str(i) for i in record_ids}
     listed: dict[str, str] = {}
     with open(path, encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh, delimiter="	"):
+        for row in csv.DictReader(fh, delimiter="\t"):
             oid = (row.get("observation_id") or "").strip()
             if oid in ids:
                 listed[oid] = (row.get("source") or "").strip() or "(none)"
@@ -390,12 +420,12 @@ def audit_not_inat(path: Path, record_ids) -> dict | None:
 
 
 def run_sources(conn, store_location: str, size: str, test_days: int = 28,
-                exclude: str = "match", ids_file: str | None = None) -> dict:
+                exclude: str = "match", ids_file: str | None = None, allowed=None) -> dict:
     """source_check for the records a Picek run on this manifest would train and validate
     on (the instance's own check, before its first stage)."""
     data = build_data(conn, store_location, size, test_days, PicekConfig.val_days,
                       exclude_ids=exclusion_ids(conn, exclude, ids_file))
-    return source_check(conn, data)
+    return source_check(conn, data, allowed)
 
 
 def format_snapshot(snap: dict) -> str:

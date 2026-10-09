@@ -211,11 +211,13 @@ the rest are provisional species or formal names their models never saw.
   re-run on the immutable Dataset release v1.
 - Published checkpoints: built and run on the development split. The paper's numbers
   come later, on a sealed test set.
-- Retrain: prepared and dry-run tested, not yet run. It waits for Vision's labels to be
-  final, so both models train on the same labels, and for a snapshot that records every
-  record's source: some records from other sites were fetched as iNaturalist ids and
-  carry the wrong photos. The launch is refused until every training and validation
-  record is recorded as an iNaturalist observation.
+- Retrain: prepared and dry-run tested, not yet run. It waits for the Dataset release,
+  and Vision and the retrain train on the same release. The rule: records from the
+  release's allowed sources only (iNaturalist and Mushroom Observer, each with photos
+  from its own source). MyCoPortal, .com sequences and records of unknown source are
+  excluded. Some records from other sites were fetched as iNaturalist ids and carry the
+  wrong photos, so the launch is refused until every training and validation record's
+  recorded source is allowed.
 
 ## The code
 

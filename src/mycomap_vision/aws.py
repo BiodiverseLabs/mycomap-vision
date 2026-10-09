@@ -387,12 +387,13 @@ PICEK_LABELS_KEY = "picek-labels.json"
 
 
 def picek_launch_labels(conn, store_location: str, size: str, test_days: int, exclude: str,
-                        log=print, dry_run: bool = False) -> tuple[dict, set[str] | None]:
+                        log=print, dry_run: bool = False,
+                        allowed_sources=None) -> tuple[dict, set[str] | None]:
     """The labels a Picek run will train on, read now from this manifest (launch time),
     printed with the known label problems the manifest carries, and the ids to ship when
     every benchmark is excluded. The instance checks it trains on the same (labels_hash).
-    A launch is refused unless every training and validation record is recorded as an
-    iNaturalist observation (retrain.require_inat_only; a dry run only warns)."""
+    A launch is refused unless every training and validation record comes from the run's
+    allowed sources (retrain.require_allowed_sources; a dry run only warns)."""
     from .replications.fungitastic import retrain as picek
     if exclude not in picek.EXCLUDE_MODES:
         raise ValueError(f"--picek-exclude-benchmarks is one of "
@@ -400,7 +401,7 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
     ids = picek.exclusion_ids(conn, exclude)
     data = picek.build_data(conn, store_location, size, test_days,
                             picek.PicekConfig.val_days, exclude_ids=ids)
-    snap = picek.label_snapshot(conn, data, exclude)
+    snap = picek.label_snapshot(conn, data, exclude, allowed_sources)
     log(picek.format_snapshot(snap))
     problems = snap["known_label_problems"]
     if problems["label_conflict_records"] or problems["names_left_for_a_person"]["groups"]:
@@ -416,7 +417,7 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
                 f"source other than iNaturalist ("
                 + ", ".join(f"{s} {n:,}" for s, n in audit["by_source"].items())
                 + f"); {audit['records'] - audit['listed']:,} not listed. Informational.")
-    picek.require_inat_only(snap["record_sources"], dry_run=dry_run, log=log)
+    picek.require_allowed_sources(snap["record_sources"], dry_run=dry_run, log=log)
     return snap, ids
 
 
