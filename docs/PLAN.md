@@ -841,3 +841,31 @@ vision as outside, zero-retraining baselines in the paper. `external.py`,
   So at most 17% of our DNA-verified records (28% of those with a formal name) are names a
   Danish model can say at all; distinct species in its vocabulary: 253 of 1,860 on dev and
   1,224 of 18,600 North American (FungiTastic), 197 and 853 (DF20).
+
+- **Dev results (2026-10-09, full 3,000-record dev split; 2,989 answered by the outside
+  models, 12,206 photos; GPU wall 194 / 188 / 285 s).** Photo only, temperature 1. Top 1 / 3
+  / 5 / 10 strict; "x" = with the GBIF crosswalk (8,987 of 9,730 names matched; it applies
+  to every model). Vision = bioclip-2-ft-20261007-165400 as stored (10 deep).
+
+  | | (i) genus, all (n 2,966) | (i) family | (ii) formal species (n 1,818) | (ii) x |
+  |---|---|---|---|---|
+  | FungiTastic BEiT-B | 54.6 / 68.6 / 73.8 / 78.7 | 66.8 / 81.0 / 86.1 / 91.3 | 14.0 / 20.0 / 21.7 / 23.3 | 15.8 / 22.3 / 24.4 / 26.4 |
+  | FungiTastic ViT-B | 50.8 / 66.0 / 71.6 / 77.7 | 61.8 / 79.1 / 84.3 / 89.9 | 13.5 / 18.0 / 19.7 / 22.5 | 15.3 / 20.3 / 22.2 / 25.2 |
+  | DF20 ViT-L | 52.4 / 65.7 / 69.2 / 73.7 | 64.7 / 80.4 / 84.6 / 89.6 | 12.6 / 17.0 / 18.1 / 19.5 | 14.7 / 19.9 / 21.3 / 23.0 |
+  | Vision nearest | 79.0 / 90.5 / 93.3 / 95.7 | 86.4 / 94.7 / 96.4 / 98.1 | 54.4 / 72.9 / 79.5 / 85.6 | 54.5 / 73.1 / 79.7 / 85.8 |
+  | Vision nearest+prior@org | 79.5 / 91.1 / 93.7 / 95.8 | 86.7 / 94.8 / 96.8 / 98.2 | 57.1 / 74.2 / 80.0 / 85.6 | 57.2 / 74.4 / 80.2 / 85.6 |
+
+  (iii) Same vocabulary, species top 1 / 3 / 5 / 10 and macro-F1 (exact names; with the
+  crosswalk n rises to 575 FungiTastic, 483 DF20 and the numbers move by about a point):
+
+  | | FungiTastic records (n 508) | DF20 records (n 413) |
+  |---|---|---|
+  | the outside model | BEiT 50.0 / 71.7 / 77.6 / 83.5, F1 49.7; ViT-B 48.2 / 64.4 / 70.5 / 80.5, F1 45.4 | 55.5 / 74.8 / 79.7 / 86.0, F1 54.9 |
+  | Vision nearest | 60.4 / 79.7 / 84.1 / 88.6, F1 57.9 | 60.5 / 78.7 / 83.5 / 87.4, F1 58.7 |
+  | Vision nearest+prior@org | 63.2 / 78.5 / 83.9 / 89.0, F1 61.2 | 63.2 / 78.0 / 83.8 / 88.6, F1 62.0 |
+  | Vision nearest, restricted | 77.2 / 87.8 / 88.2 / 88.6, F1 70.5 | 78.5 / 87.2 / 87.4 / 87.4, F1 72.4 |
+
+  Restricted top 3+ are lower bounds: Vision's stored list keeps under 3 of the model's
+  names on about 45% of those records (top 1 on 11-15). Per-image species top 1 (their
+  metric), formal species: BEiT 10.5%, ViT-B 9.8%, DF20 9.2% of 7,206 photos. Full tables:
+  `mv external report --name heldout-2026-10-08` (both scorers) and `mv heldout report`.
