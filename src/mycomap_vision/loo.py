@@ -124,6 +124,15 @@ def unit_sums(ref: np.ndarray, layout: Layout) -> np.ndarray:
     return out
 
 
+def without(ref: np.ndarray, layout: Layout, sums: np.ndarray, cols: np.ndarray):
+    """(sums, means) of the reference with columns `cols` left out: for score_queries with
+    adjust_means=False when one removal set serves many queries."""
+    out = sums.copy()
+    if len(cols):
+        np.subtract.at(out, layout.unit_of_col[cols], np.asarray(ref[cols], np.float32))
+    return out, as_served(out)
+
+
 def as_served(means: np.ndarray) -> np.ndarray:
     """Unit-length means as NearestAndMean scores them (stored in float16)."""
     m = means / np.linalg.norm(means, axis=-1, keepdims=True).clip(1e-12)
@@ -144,21 +153,33 @@ def score_records(ref: np.ndarray, layout: Layout, recs: list[int], sums: np.nda
     """nearest+mean scores of reference records `recs`, each against the reference with
     its left_out_cols hidden. `ref` (P, dim) holds the reference vectors in column order
     (float32), `sums` = unit_sums, `means` = as_served(sums)."""
-    if k != 2:
-        raise ValueError("the masked top-k is written for k = 2 (NearestAndMean.k)")
     q_cols = [layout.record_cols(r) for r in recs]
     owner = np.concatenate([np.full(len(c), j) for j, c in enumerate(q_cols)])
     q = np.asarray(ref[np.concatenate(q_cols)], dtype=np.float32)
-    sims = q @ np.asarray(ref, dtype=np.float32).T if ref.dtype != np.float32 else q @ ref.T
+    hidden = [left_out_cols(layout, r) for r in recs]
+    return score_queries(q, owner, hidden, ref, layout, sums, means, k=k, weight=weight)
+
+
+def score_queries(q: np.ndarray, owner: np.ndarray, hidden: list[np.ndarray],
+                  ref: np.ndarray, layout: Layout, sums: np.ndarray, means: np.ndarray,
+                  sims: np.ndarray | None = None, k: int = K, weight: float = WEIGHT,
+                  adjust_means: bool = True) -> BlockScores:
+    """nearest+mean scores of query records against the reference with some columns
+    hidden. q: (photos, dim) float32 query photos; owner: which query record each photo
+    is (0..n-1, contiguous); hidden[j]: the columns hidden from record j. `sims`: q @ ref.T
+    when already made (it is overwritten). adjust_means=False: `sums`/`means` already
+    leave the hidden columns out (one removal set for many queries)."""
+    if k != 2:
+        raise ValueError("the masked top-k is written for k = 2 (NearestAndMean.k)")
+    if sims is None:
+        sims = q @ np.asarray(ref, dtype=np.float32).T
     U = len(layout.starts)
-    available = np.tile(layout.counts, (len(recs), 1))
-    hidden = []
-    for j, r in enumerate(recs):
-        cols = left_out_cols(layout, r)
-        hidden.append(cols)
+    available = np.tile(layout.counts, (len(hidden), 1))
+    for j, cols in enumerate(hidden):
         rows = np.flatnonzero(owner == j)
-        sims[rows[0]:rows[-1] + 1, cols] = -np.inf
-        available[j] -= np.bincount(layout.unit_of_col[cols], minlength=U)
+        if len(cols):
+            sims[rows[0]:rows[-1] + 1, cols] = -np.inf
+            available[j] -= np.bincount(layout.unit_of_col[cols], minlength=U)
     record_max = np.maximum.reduceat(sims, layout.rec_starts, axis=1)
     m1 = np.maximum.reduceat(sims, layout.starts, axis=1)
     top = sims >= m1[:, layout.unit_of_col]
@@ -171,9 +192,10 @@ def score_records(ref: np.ndarray, layout: Layout, recs: list[int], sums: np.nda
     nearest = np.where(avail_p >= 2, (m1 + m2) / 2, m1)
     mean_sim = q @ means.T
     for j, cols in enumerate(hidden):
+        if not len(cols) or not adjust_means:
+            continue
         rows = np.flatnonzero(owner == j)
-        units = np.unique(layout.unit_of_col[cols])
-        for u in units.tolist():
+        for u in np.unique(layout.unit_of_col[cols]).tolist():
             if available[j, u] <= 0:
                 mean_sim[rows, u] = -np.inf
                 continue
@@ -183,7 +205,7 @@ def score_records(ref: np.ndarray, layout: Layout, recs: list[int], sums: np.nda
     nearest[gone_p] = -np.inf
     mean_sim[gone_p] = -np.inf
     photo = weight * nearest + (1 - weight) * mean_sim
-    unit = np.stack([photo[owner == j].mean(axis=0) for j in range(len(recs))])
+    unit = np.stack([photo[owner == j].mean(axis=0) for j in range(len(hidden))])
     return BlockScores(unit.astype(np.float32), photo.astype(np.float32), owner,
                        record_max, available)
 
@@ -278,7 +300,8 @@ def classify(rec: dict, rules: Rules, rates: dict, counts: dict, self_rate: dict
     calibrated confidence), margin (pred score minus label score; inf when the label has
     nothing left), nb_pred (of its 10 nearest records, how many carry pred), best_match
     (its photos' best match to any other record, mean over photos), photo_genera (distinct
-    genera its photos point to at top-1, among photos that match well).
+    genera its photos point to at top-1, among photos that match well), label_left (the
+    label's records outside its observer-day group; default support - 1).
     rates, counts: pair_rates; self_rate[u]: share of u's records top-1 u; support[u]: u's
     records; relation: related_names of the two labels. A writing variant or an s.l. match
     is (b) at once; a looser relation only when the pair is systematic."""
@@ -303,7 +326,7 @@ def classify(rec: dict, rules: Rules, rates: dict, counts: dict, self_rate: dict
         well = (support.get(a, 0) >= rules.label_records
                 and support.get(b, 0) >= rules.label_records)
         return "d" if well else ""
-    if (support.get(a, 0) - 1 >= rules.label_records
+    if (rec.get("label_left", support.get(a, 0) - 1) >= rules.label_records
             and self_rate.get(a, 0.0) >= rules.label_recognised):
         return "a"
     return ""

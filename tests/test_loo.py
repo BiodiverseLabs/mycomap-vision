@@ -172,3 +172,45 @@ def test_related_names_reads_writing_variants_and_provisional_codes():
                              name_equiv) == "provisional beside formal, one genus"
     assert loo.related_names("Russula emetica", "Lactarius deliciosus", name_key,
                              name_equiv) == ""
+
+
+def test_an_outside_query_scores_as_against_a_reference_without_the_hidden_records():
+    vecs, recs = reference(seed=3)
+    layout, ordered, ref, sums, means = scan(vecs, recs)
+    rng = np.random.default_rng(9)
+    q = rng.normal(size=(3, vecs.shape[1]))
+    q = (q / np.linalg.norm(q, axis=1, keepdims=True)).astype(np.float16).astype(np.float32)
+    drop = {"r2", "r12"}
+    hidden = np.concatenate([layout.record_cols(i) for i, r in enumerate(ordered)
+                             if r.observation_id in drop])
+    block = loo.score_queries(q, np.zeros(3, dtype=int), [hidden], ref, layout, sums, means)
+    rest = [r for r in recs if r.observation_id not in drop]
+    index = build_index(rest)
+    model = NearestAndMean()
+    model.fit(vecs, index)
+    want = dict(zip(index.species, model.species_scores(q.astype(np.float16))))
+    for u, name in enumerate(layout.units):
+        assert block.unit[0, u] == pytest.approx(want[name], abs=2e-3)
+    full = loo.score_queries(q, np.zeros(3, dtype=int), [np.zeros(0, dtype=int)], ref, layout,
+                             sums, means)
+    model.fit(vecs, build_index(recs))
+    assert full.unit[0] == pytest.approx(model.species_scores(q.astype(np.float16)), abs=2e-3)
+
+
+def test_a_label_known_only_from_the_same_collecting_day_is_not_well_supported():
+    self_rate = {0: 0.9, 1: 0.8}
+    assert loo.classify(rec(label_left=1), RULES, {}, {}, self_rate, SUPPORT, "") == ""
+    assert loo.classify(rec(label_left=5), RULES, {}, {}, self_rate, SUPPORT, "") == "a"
+
+
+def test_a_removal_set_prepared_once_scores_like_one_hidden_per_query():
+    vecs, recs = reference(seed=4)
+    layout, ordered, ref, sums, means = scan(vecs, recs)
+    q = ref[:4].copy()
+    hidden = np.concatenate([layout.record_cols(i) for i, r in enumerate(ordered)
+                             if r.observation_id in {"r5", "r13"}])
+    once = loo.score_queries(q, np.zeros(4, dtype=int), [hidden], ref, layout, sums, means)
+    s2, m2 = loo.without(ref, layout, sums, hidden)
+    pre = loo.score_queries(q, np.zeros(4, dtype=int), [hidden], ref, layout, s2, m2,
+                            adjust_means=False)
+    assert np.allclose(once.unit, pre.unit, atol=1e-4)
