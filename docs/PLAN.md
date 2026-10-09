@@ -704,8 +704,10 @@ a comparison: everything validated up to the cutoff, which is 28 days before the
 record. The last 28 days before that cutoff are the validation slice, which is never
 trained on. It picks the epoch, drives the plateau schedule and fits T; their splits are
 by year too. `trained_through` is the cutoff, so `mv compare` refuses to score the model
-on anything it saw. Records of any held-out benchmark (heldout_records) are left out and
-counted. `<name>.records.csv` lists every record trained or validated on, which is the
+on anything it saw. Benchmark records: `--picek-exclude-benchmarks match` (the default)
+leaves out exactly what every Vision model leaves out (sealed benchmarks), so the two
+train on the same records; `all` also leaves out every benchmark's records (a trainer's
+manifest carries no benchmark tables, so their ids are shipped with the run). `<name>.records.csv` lists every record trained or validated on, which is the
 follow-up the held-out section asked for.
 
 **Deviations, and why:**
@@ -749,7 +751,7 @@ every Vision model, and prints them under the standard summary. Public name:
 - Full run on AWS (not launched): `mv aws-launch-trainer --backbones none --finetune none
   --picek fungitastic-beit-b384@15 --methods
   classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest
-  --instance-type g6.xlarge --max-hours 48` (or with `@440` for the cache). The instance trains, embeds every photo with
+  --instance-type g6.xlarge --max-hours 52` (see the launch-day runbook below). The instance trains, embeds every photo with
   the model and compares. Then, on the laptop: `mv aws-pull-trainer`, `mv heldout predict
   --backbone picek-... --methods classifier,classifier+month --split dev`, and
   `mv heldout report`. Dev only: test is not scored.
@@ -825,13 +827,114 @@ an estimate) would be ~150-180/s on the GPU, but needs the cache and more vCPUs 
 (g6e.2xlarge or larger).
 
 Recommendation: BEiT-B 384 (their best model) for 15 epochs on g6.xlarge without the cache
-(~44 h, ~$35, `--max-hours 48`), then decide on 50 from its validation curve. The 224
+(~44.5 h, ~$36, `--max-hours 52`), then decide on 50 from its validation curve. The 224
 preset is the cheap variant, if the paper can use it.
 
-**Open decisions (Steve):** whether to use the cache (a slight input change) or a
-16-vCPU instance; 15 vs 50 epochs; the month-prior smoothing (betas, to be tuned on dev);
-and whether the paper reports `classifier+month` (smoothed) or `classifier+month-raw`
-(their estimate) as "their method".
+**Decided (Steve, 2026-10-09):** their recipe as published: BEiT-B/16 384, no photo cache.
+Prepare everything, but launch only once Vision's internal labelling is fixed and final.
+
+### Launch day (runbook)
+
+Everything below runs on **this PC** (Steve's Windows laptop). Shell commands are **Git
+Bash**; `aws login` can run in PowerShell or Git Bash. Nothing runs on the .org boxes.
+
+**Which code goes.** `mv aws-launch-trainer` ships `git archive` of the HEAD of the
+checkout whose code is running (`config.REPO_ROOT`). The installed `mv` runs the main
+checkout's code, so it ships whatever branch that checkout has checked out. A dry run
+prints the commit and checks the archive holds picek.py, the trainer and
+requirements/trainer.txt (timm 1.0.30, torch 2.14.0, torchvision 0.29.0, the same as the
+laptop). Either:
+- (a) merge feat/picek-replication to main (Steve reviews), pull main in
+  `C:\Users\info\Projects\mycomap-vision`, and use `mv` there; or
+- (b) launch from the branch worktree with
+  `cd /c/Users/info/Projects/mycomap-vision-picek && PYTHONPATH=src
+  ../mycomap-vision/.venv/Scripts/python -m mycomap_vision.cli ...`, after copying the
+  main checkout's `.env` beside it (git-ignored) and setting
+  `MV_DATA_DIR=C:/Users/info/Projects/mycomap-vision/data`.
+
+Launch refuses uncommitted changes and a commit that isn't pushed.
+
+**On the instance.** The pinned, hashed requirements are installed. The BEiT weights
+(`timm/beit_base_patch16_384.in22k_ft_in22k_in1k`, ~350 MB) download from the Hugging
+Face hub into /opt/mv/hf. They are public, so no token is needed (the laptop downloaded
+them without one). The disk is the AMI's root size + 60 GB: ~135 GB with the 75 GB Base
+GPU AMI. `--ec2-check` reads the real size. The run needs about 3 GB for weights and
+embeddings, plus the manifest.
+
+**Preconditions:**
+1. Labels final. The internal labelling fixes are done, and Vision's manifest is refreshed
+   with them (`mv export-records` or the weekly `mv refresh`; then `mv name-spellings`
+   and `mv taxonomy` look clean enough).
+2. The Vision model the replication is compared against is trained on the same manifest
+   state. Same `trained_through` (the cutoff 28 days before the newest record) and same
+   benchmark exclusion.
+3. Launch-day decision: `--picek-exclude-benchmarks`.
+   - `match` (the default): leave out exactly what the Vision models leave out, i.e.
+     sealed benchmarks only. The released 13,145 heldout-2026-10-08 records then train
+     both models once they are in the manifest.
+   - `all`: also leave out every benchmark's records.
+   - For a fair comparison, use what the compared Vision fine-tune used. That is `match`
+     for a fine-tune made by `mv finetune` or the trainer. The fresh ~1,000-record paper
+     set will be sealed (`mv heldout freeze --holdout`), so it is out either way.
+4. The branch is merged, or the worktree is ready (above); `git status` is clean and
+   pushed.
+5. `aws login` (profile `mycomap-vision`). The On-Demand G quota of 4 vCPU is enough for
+   g6.xlarge.
+
+**Commands:**
+```bash
+# 1. Dry run: builds and checks everything, sends nothing. Read the label snapshot it
+#    prints: records, species, provisional share, known label problems, labels hash.
+mv aws-launch-trainer --backbones none --finetune none --picek fungitastic-beit-b384@15 \
+  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
+  --instance-type g6.xlarge --max-hours 52 --dry-run [--ec2-check]
+# 2. Launch: the same without --dry-run. Note the run id and the labels hash.
+mv aws-launch-trainer --backbones none --finetune none --picek fungitastic-beit-b384@15 \
+  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
+  --instance-type g6.xlarge --max-hours 52
+# 3. Monitor: progress.json shows each epoch's validation loss, macro-F1, top-1 and
+#    learning rate. The log is uploaded every 15 min.
+aws s3 cp s3://<bucket>/runs/<run>/progress.json - --profile mycomap-vision
+aws s3 cp s3://<bucket>/runs/<run>/train.log - --profile mycomap-vision | tail -50
+# 4. Pull: weights, head, records list, embeddings, scoreboard rows.
+mv aws-pull-trainer --run <run>
+# 5. The held-out dev set (dev only; test is not scored).
+mv heldout predict --name heldout-2026-10-08 --split dev \
+  --backbone picek-fungitastic-beit-b384-<run> \
+  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place
+mv heldout report --name heldout-2026-10-08 --split dev
+```
+
+Use `--max-hours 52`, not 48. The estimate is 44.5 h, and the job stops itself 45 min
+before the limit. A Picek stage that is stopped saves nothing: the model of a cut-short
+run is not the model asked for, as with fine-tuning. The label snapshot is printed at
+launch, uploaded as `runs/<run>/picek-labels.json`, and recorded in the model's json and
+in result.json. The instance refuses to train when its labels hash differs from the
+launch's.
+
+**Expected:** ~44.5 h. That is ~42 h of training at ~59 photos/s (the L4 and the 4-vCPU
+loader are about equal) plus 1.6 h embedding plus 1 h setup and comparison, ~$36 on
+demand at $0.80/h. The speed is an estimate until progress.json shows the real
+photos/s; check it in the first hour (step 3). If it is below ~45/s, the run won't fit
+52 h: stop the instance and raise --max-hours.
+
+**Before deciding on 50 epochs** (from progress.json's per-epoch history):
+- Is validation macro-F1 still rising over the last 3-4 epochs (more than ~0.5 points an
+  epoch)? Then more epochs would pay. If it flattened by epoch ~10, 50 epochs (~$110, ~6
+  days) buys little.
+- Did the learning rate drop (ReduceLROnPlateau: x0.9 each time validation loss fails to
+  improve for 2 epochs)? A few drops by epoch 15 means it is converging; none means it is
+  still early, and a longer run would help.
+- Is the validation loss rising while macro-F1 still improves? That is overfitting in
+  confidence (the temperature fit handles calibration); is the best epoch the last one?
+- Compare with Vision on heldout dev (species top-1 and macro-F1, by reference depth)
+  before spending more.
+
+**Open launch-day decisions (Steve):** when the labelling is final (the precondition);
+`--picek-exclude-benchmarks match` or `all` (match = what the compared Vision fine-tune
+used); 15 epochs now, 50 later from the curve; the month-prior smoothing (betas, tune on dev
+only); whether the paper reports `classifier+month` (smoothed) or `classifier+month-raw`
+(their estimate) as "their method"; launch from main after review, or from the branch.
 
 ## Phase 3: the platform
 
