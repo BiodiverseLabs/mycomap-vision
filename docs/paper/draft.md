@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.3.2, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.4, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -17,6 +17,12 @@ a result comes from a small or interim test, the text says so.
 > occurrence prior, per-species (macro) metrics, open-set analysis, leakage checks, and the
 > separately validated ~1,000-record paper test set. See Appendix A (benchmark plan) and
 > Appendix B (next tests).
+>
+> **Every number in this draft is development.** The experiments so far read a live data set
+> whose records, labels and photos kept changing, so they cannot be rebuilt exactly. The numbers
+> the paper reports will come from **dataset release v1**, a frozen, versioned snapshot cut once
+> the labels and the photo inclusion rules are fixed, with every experiment re-run on it by one
+> command each (Methods, "Reproducibility"). Decisions taken so far are provisional until then.
 
 ---
 
@@ -207,6 +213,18 @@ as held out before any model sees them (Appendix A).
 **Advance predictions.** Every night the identifier predicts up to 300 records still awaiting
 DNA results; predictions are scored when the records are validated. Nothing could have seen the
 answer.
+
+**Reproducibility.** The results in this paper come from dataset release v1, an immutable
+snapshot cut after the labels and the inclusion rules were fixed: iNaturalist records and
+DNA-validated Mushroom Observer records with their own photos; MyCoPortal and legacy-sequence
+records, records with wrong photos, guest organisms and [non-fungus photos] left out, each with a
+recorded reason. The release holds every record's source, label and label provenance, every
+photo's checksum and licence, the inclusion list, the splits (time cutoffs, the development and
+test splits, the sealed test set), the reference-index hash, the code commit and the checksums of
+every trained model. Each experiment is one command that reads the release and writes its id,
+reference hash and commit into its results. A version of the release using only openly licensed
+photos can be rebuilt by anyone from public sources [scope to confirm]; results on it are reported
+beside ours. [Release v1 not yet cut; the numbers below are development and will be replaced.]
 
 **Baseline.** iNaturalist's computer vision (score_image endpoint), given every photograph of a
 record, scored photo-only and with location, taking the best score across photographs.
@@ -534,8 +552,9 @@ full-precision model is served.
 
 ## DATA AVAILABILITY STATEMENT
 
-*[Draft.]* Record identifiers, splits (test, development, held-out) and per-record predictions will
-be deposited [Zenodo/Dryad, DOI]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
+*[Draft.]* Dataset release v1: record identifiers (iNaturalist and Mushroom Observer), labels and
+their provenance, photo licences and public URLs, the inclusion list with reasons, the splits, the
+dataset card and per-record predictions will be deposited [Zenodo, DOI; scope to be decided]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
 Zenodo DOI]. Photographs remain with their iNaturalist owners under their licenses; model weights
 [availability to decide: trained partly on all-rights-reserved photographs]. Coordinates are not
 released beyond iNaturalist's public precision.
@@ -787,6 +806,9 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.4 (9 Oct 2026).** Reproducibility: the reported numbers will come from dataset release v1
+  (Methods, "Reproducibility"); everything earlier is development and its decisions provisional
+  (Steve). Data availability updated to the release.
 - **0.3.2 (9 Oct 2026).** Nearest + species average adopted as the default (Steve). The
   reference-set fault found by the label audit (5.8% of records with unrelated photos) stated in
   Methods and Limitations; numbers unchanged until the re-score.

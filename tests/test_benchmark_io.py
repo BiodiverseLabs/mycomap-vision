@@ -48,6 +48,9 @@ def test_the_export_carries_aggregates_only(tmp_path):
         MODEL: {"1-4": {"species": {"n": 300, "rate": 0.14}}}}
     assert out["models"][MODEL]["species"]["top1"]["rate"] == 0.48
     assert out["split"] == "dev" and out["report"] == "report-dev-1.json"
+    assert out["reproducibility"] == "exploratory-pre-freeze"       # until dataset release v1
+    assert benchmark_io.export_summary(report(), "r", "reproduced-on-v1")["reproducibility"] \
+        == "reproduced-on-v1"
 
 
 def test_something_that_is_not_a_heldout_report_is_not_exported():
@@ -81,7 +84,8 @@ def test_export_then_import_through_the_command_line(conn, tmp_path, capsys, mon
     src = tmp_path / "report-dev-1.json"
     src.write_text(json.dumps(report()), encoding="utf-8")
     out = tmp_path / "dev.json"
-    cli.cmd_benchmark_export(conn, type("A", (), {"report": str(src), "out": str(out)})())
+    cli.cmd_benchmark_export(conn, type("A", (), {"report": str(src), "out": str(out),
+                                                  "reproducibility": "exploratory-pre-freeze"})())
     cli.cmd_benchmark_import(conn, type("A", (), {"file": str(out)})())
     assert json.loads(capsys.readouterr().out)["benchmark"] == "heldout-x"
     bad = tmp_path / "bad.json"

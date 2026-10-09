@@ -16,6 +16,7 @@ title: Plain title
 slug: the-slug                # must match the file name
 date: 2026-10-09              # must match the file name
 status: done                  # planned | running | done | adopted | dropped
+reproducibility: exploratory-pre-freeze   # or reproduced-on-v1 (a dataset release id)
 question: One sentence.
 branch: exp/the-branch        # where the work is (or "none")
 commits: [abc1234]
@@ -27,6 +28,11 @@ headline: One line with the key numbers and the records they are on.
 verdict: What it showed, in one sentence.
 decision: Steve's decision, with the date, or "pending".
 related: [other-slug]
+# Required once reproducibility is reproduced-on-<release>:
+dataset_release: v1
+reference_hash: 4ef7b0035bc9...   # the release's reference index (records + labels)
+code_commit: abc1234
+reproduce_command: mv compare --release v1 --backbones ... --methods ...
 ---
 
 ## Question
@@ -46,6 +52,15 @@ related: [other-slug]
 - **done**: measured; no change to the identifier depends on it (or the decision is pending).
 - **adopted**: measured, and the result is now part of the identifier or the scoring.
 - **dropped**: measured and not taken up. Say whether it may come back.
+
+## Reproducibility
+
+Until dataset release v1 is frozen (docs/PLAN.md, "a reproducible dataset release"), every entry
+is `exploratory-pre-freeze`: it read the live manifest, whose records, labels and photos kept
+changing, so its numbers cannot be rebuilt exactly and every decision taken from it is
+provisional. After the freeze, an entry is `reproduced-on-<release>` and names the release, its
+reference hash, the code commit and the one command that rebuilds every number; the tests refuse
+an entry dated on or after the freeze without them.
 
 ## Rules
 
@@ -67,3 +82,5 @@ related: [other-slug]
 7. **Small sets are direction, not results**: say so when n is under a few hundred.
 8. Link the code (branch, commits) and any longer write-up (docs/PLAN.md sections, the
    replication README) rather than copying them.
+9. **After the freeze, research reads a release, never the live manifest**, and every analysis
+   ships as one re-runnable command (`--release` / `--manifest`).

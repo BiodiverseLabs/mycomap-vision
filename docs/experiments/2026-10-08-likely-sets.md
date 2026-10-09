@@ -3,6 +3,7 @@ title: Calibrated lists of likely names
 slug: likely-sets
 date: '2026-10-08'
 status: adopted
+reproducibility: exploratory-pre-freeze
 question: Can the identifier show a short list of names at each rank with a stated chance that the right
   one is on it?
 branch: feat/likely-sets (merged 5a34f2c); fix/likely-sets-memory (merged)
@@ -54,6 +55,8 @@ Adopt; coverage generalizes (held-out coverage is at or above the fitted target)
 
 ## Decision
 Adopted; live 2026-10-09.
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Coverage by reference band; refit on the development split; class-conditional lists for rare

@@ -67,6 +67,7 @@ title: T
 slug: good-one
 date: 2026-10-09
 status: done
+reproducibility: exploratory-pre-freeze
 question: Q?
 headline: H
 verdict: V
@@ -74,6 +75,41 @@ decision: pending
 ---
 ## Question
 """
+
+
+@pytest.mark.parametrize("e", ENTRIES, ids=IDS)
+def test_every_entry_says_how_reproducible_it_is_and_pre_freeze_ones_are_provisional(e):
+    repro = e.meta["reproducibility"]
+    assert repro == experiments.EXPLORATORY or experiments.REPRODUCED.match(repro)
+    if repro == experiments.EXPLORATORY and e.meta["decision"] != "pending":
+        assert "Provisional" in e.body and "dataset release v1" in e.body
+
+
+REPRODUCED = GOOD.replace("reproducibility: exploratory-pre-freeze",
+                          "reproducibility: reproduced-on-v1\ndataset_release: v1\n"
+                          "reference_hash: abc123\ncode_commit: def4567\n"
+                          "reproduce_command: mv compare --release v1")
+
+
+def test_an_entry_reproduced_on_a_release_must_say_how_to_rebuild_it(tmp_path):
+    assert experiments.load_all(write(tmp_path, "2026-10-09-good-one.md", REPRODUCED))
+    for field in experiments.REPRO_FIELDS:
+        bad = "\n".join(line for line in REPRODUCED.split("\n")
+                        if not line.startswith(field + ":"))
+        with pytest.raises(experiments.BadEntry, match=field):
+            experiments.load_all(write(tmp_path, "2026-10-09-good-one.md", bad))
+    with pytest.raises(experiments.BadEntry, match="dataset_release must be v1"):
+        experiments.load_all(write(tmp_path, "2026-10-09-good-one.md",
+                                   REPRODUCED.replace("dataset_release: v1", "dataset_release: v2")))
+
+
+def test_after_the_freeze_an_exploratory_entry_is_refused(tmp_path):
+    d = write(tmp_path, "2026-10-09-good-one.md", GOOD)
+    assert experiments.load_all(d, freeze_date="2026-11-01")          # dated before: fine
+    with pytest.raises(experiments.BadEntry, match="after the freeze"):
+        experiments.load_all(d, freeze_date="2026-10-09")
+    assert experiments.load_all(write(tmp_path, "2026-10-09-good-one.md", REPRODUCED),
+                                freeze_date="2026-10-01")
 
 
 def test_a_file_whose_name_slug_or_date_disagree_is_refused(tmp_path):
@@ -85,6 +121,8 @@ def test_a_file_whose_name_slug_or_date_disagree_is_refused(tmp_path):
 @pytest.mark.parametrize("bad, why", [
     (GOOD.replace("status: done", "status: maybe"), "status must be"),
     (GOOD.replace("verdict: V\n", ""), "missing verdict"),
+    (GOOD.replace("reproducibility: exploratory-pre-freeze\n", ""), "missing reproducibility"),
+    (GOOD.replace("exploratory-pre-freeze", "sort-of"), "reproducibility is"),
     (GOOD.replace("---\n", "", 1), "front matter"),
     (GOOD.replace("decision: pending", "decision: pending\nrelated: Not A Slug"), "related"),
 ])

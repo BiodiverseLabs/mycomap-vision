@@ -40,8 +40,10 @@ class ImportRefused(ValueError):
     """The summary was not imported; nothing was changed."""
 
 
-def export_summary(report: dict, report_name: str) -> dict:
-    """The publishable part of one `mv heldout report` JSON."""
+def export_summary(report: dict, report_name: str,
+                   reproducibility: str = "exploratory-pre-freeze") -> dict:
+    """The publishable part of one `mv heldout report` JSON. `reproducibility` says whether
+    it was measured before the dataset freeze (docs/PLAN.md) or on a named release."""
     if not isinstance(report, dict) or not report.get("benchmark") \
             or not isinstance(report.get("models"), dict) or not report["models"]:
         raise ValueError("not an mv heldout report (no benchmark or models)")
@@ -51,7 +53,8 @@ def export_summary(report: dict, report_name: str) -> dict:
             "split": report.get("split") or "all", "report": report_name,
             "models": report["models"], "species_by_reference_records": depth,
             "paired": report.get("paired") or [], "calibration": report.get("calibration") or {},
-            "likely_sets": report.get("likely_sets") or {}, "summary": report.get("summary")}
+            "likely_sets": report.get("likely_sets") or {}, "summary": report.get("summary"),
+            "reproducibility": reproducibility}
 
 
 def import_summary(conn: sqlite3.Connection, payload: dict) -> dict:

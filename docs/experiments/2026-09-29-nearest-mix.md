@@ -3,6 +3,7 @@ title: Per-photo votes instead of mean similarity (nearest-mix)
 slug: nearest-mix
 date: '2026-09-29'
 status: dropped
+reproducibility: exploratory-pre-freeze
 question: Does turning each photo's scores into probabilities and averaging those beat the plain mean
   of best matches?
 branch: feat/nearest-mix (bfbb0ac, not merged)
@@ -56,6 +57,8 @@ combining photos.
 
 ## Decision
 Dropped (held, then no gain on retest).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 None.

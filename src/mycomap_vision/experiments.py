@@ -18,8 +18,19 @@ from . import config
 
 EXPERIMENTS_DIR = config.REPO_ROOT / "docs" / "experiments"
 STATUSES = ("planned", "running", "done", "adopted", "dropped")
-REQUIRED = ("title", "slug", "date", "status", "question", "headline", "verdict", "decision")
-LISTED = REQUIRED + ("branch", "commits", "benchmark", "split", "model", "methods", "related")
+REQUIRED = ("title", "slug", "date", "status", "reproducibility", "question", "headline",
+            "verdict", "decision")
+# Reproducible on a frozen dataset release (docs/PLAN.md, "a reproducible dataset release"):
+# an entry is either exploratory (before the freeze, read the live manifest) or reproduced on a
+# named release, and then says exactly how to rebuild its numbers.
+EXPLORATORY = "exploratory-pre-freeze"
+REPRODUCED = re.compile(r"^reproduced-on-([a-z0-9][a-z0-9.-]*)$")
+REPRO_FIELDS = ("dataset_release", "reference_hash", "code_commit", "reproduce_command")
+# The day release v1 is frozen; entries dated on or after it must be reproduced on a release.
+# None until the freeze gate is passed.
+FREEZE_DATE: str | None = None
+LISTED = REQUIRED + ("branch", "commits", "benchmark", "split", "model", "methods", "related") \
+    + REPRO_FIELDS
 FILE_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$")
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -39,7 +50,7 @@ class Experiment:
         return self.meta["slug"]
 
 
-def parse(path: Path) -> Experiment:
+def parse(path: Path, freeze_date: str | None = None) -> Experiment:
     m = FILE_NAME.match(path.name)
     if not m:
         raise BadEntry(f"{path.name}: name it YYYY-MM-DD-<slug>.md")
@@ -61,6 +72,21 @@ def parse(path: Path) -> Experiment:
         raise BadEntry(f"{path.name}: date and slug must match the file name")
     if meta["status"] not in STATUSES:
         raise BadEntry(f"{path.name}: status must be one of {', '.join(STATUSES)}")
+    repro = str(meta["reproducibility"])
+    released = REPRODUCED.match(repro)
+    if repro != EXPLORATORY and not released:
+        raise BadEntry(f"{path.name}: reproducibility is {EXPLORATORY} or reproduced-on-<release>")
+    if released:
+        missing = [k for k in REPRO_FIELDS if not str(meta.get(k) or "").strip()]
+        if missing:
+            raise BadEntry(f"{path.name}: reproduced on a release, so it needs "
+                           f"{', '.join(missing)}")
+        if str(meta["dataset_release"]) != released.group(1):
+            raise BadEntry(f"{path.name}: dataset_release must be {released.group(1)}")
+    freeze = freeze_date if freeze_date is not None else FREEZE_DATE
+    if freeze and meta["date"] >= freeze and not released:
+        raise BadEntry(f"{path.name}: dated on or after the freeze ({freeze}), so it must be "
+                       "reproduced on a dataset release")
     related = meta.get("related") or []
     if not isinstance(related, list) or not all(isinstance(r, str) and SLUG.match(r)
                                                 for r in related):
@@ -68,11 +94,13 @@ def parse(path: Path) -> Experiment:
     return Experiment(meta, body.strip() + "\n", path)
 
 
-def load_all(directory: Path = EXPERIMENTS_DIR) -> list[Experiment]:
+def load_all(directory: Path = EXPERIMENTS_DIR,
+             freeze_date: str | None = None) -> list[Experiment]:
     """Every entry, newest first. A bad entry raises: the tests keep the registry clean."""
     if not directory.is_dir():
         return []
-    out = [parse(p) for p in directory.glob("*.md") if p.name.lower() != "readme.md"]
+    out = [parse(p, freeze_date) for p in directory.glob("*.md")
+           if p.name.lower() != "readme.md"]
     slugs = [e.slug for e in out]
     dup = {s for s in slugs if slugs.count(s) > 1}
     if dup:

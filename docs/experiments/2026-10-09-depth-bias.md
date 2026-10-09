@@ -3,6 +3,7 @@ title: Is nearest biased toward well-sampled species? (nearest + species average
 slug: depth-bias
 date: '2026-10-09'
 status: adopted
+reproducibility: exploratory-pre-freeze
 question: Does scoring a species by its single best-matching photo favour species with many reference
   photos, and what scoring fixes it?
 branch: exp/depth-bias (merged fb396f0)
@@ -95,6 +96,8 @@ species with many, and the blend keeps both.
 ## Decision
 Adopted (Steve, 2026-10-09): the default photos-only method on the site. Identification shares
 the photo similarities with the specimens it shows, so the blend no longer computes them twice.
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 A `+prior` / `+occ` version of the blend; share the photo similarities in identify.py (computed

@@ -3,6 +3,7 @@ title: 'Held-out benchmark: the ''before'' number'
 slug: heldout-benchmark
 date: '2026-10-08'
 status: done
+reproducibility: exploratory-pre-freeze
 question: How does the served model do on DNA-verified records that no model has seen?
 branch: feat/heldout-benchmark (merged e4a6d38); heldout-summary-format (merged)
 commits:
@@ -82,6 +83,8 @@ The "before" number is recorded; nearest + species average is confirmed (depth-b
 
 ## Decision
 Development benchmark only (Steve, 2026-10-08).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Known data fault
 A label audit (2026-10-09) found 8,868 of 154,067 reference and training records (5.8%) whose

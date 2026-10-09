@@ -350,7 +350,8 @@ def cmd_benchmark_export(conn, args) -> None:
     from . import benchmark_io
     path = Path(args.report)
     report = json.loads(path.read_text(encoding="utf-8"))
-    text = json.dumps(benchmark_io.export_summary(report, path.name), indent=1)
+    text = json.dumps(benchmark_io.export_summary(report, path.name, args.reproducibility),
+                      indent=1)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"wrote {args.out}", file=sys.stderr)
@@ -878,6 +879,8 @@ def main(argv: list[str] | None = None) -> int:
                        "ids, names, observers or places) for the server box's Models page")
     p.add_argument("--report", required=True, help="a report-*.json from mv heldout report")
     p.add_argument("--out", help="write to this file (default: standard output)")
+    p.add_argument("--reproducibility", default="exploratory-pre-freeze",
+                   help="exploratory-pre-freeze (default) or reproduced-on-<release>")
     p = sub.add_parser("benchmark-import", help="(server box) add a benchmark-export to the "
                        "site; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")

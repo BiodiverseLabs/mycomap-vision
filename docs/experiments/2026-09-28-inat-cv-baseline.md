@@ -3,6 +3,7 @@ title: iNaturalist computer vision on the same records
 slug: inat-cv-baseline
 date: '2026-09-28'
 status: running
+reproducibility: exploratory-pre-freeze
 question: How does iNaturalist's computer vision do on DNA-verified records, scored exactly like Vision?
 branch: main (inat_cv.py, mv inat-baseline; S3-photo fix 3efa072)
 commits:
@@ -65,6 +66,8 @@ Pending the full comparisons.
 
 ## Decision
 pending
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Finish the 2,000-record held-out subsample (about 18:00 UTC 2026-10-09), then rerun 4ef7b0 with a

@@ -305,7 +305,8 @@ function HeldOut() {
       <h3 className="font-semibold text-lg text-[#4a3728]">Held-out records</h3>
       <p className="text-sm text-muted-foreground max-w-3xl">
         DNA-verified records that no model here saw, in training or as a reference. Ranges in
-        brackets are 95% intervals.
+        brackets are 95% intervals. Results before the dataset freeze are exploratory: they will be
+        re-run on dataset release v1.
       </p>
       {!b ? (
         <p className="text-sm text-muted-foreground">
@@ -337,7 +338,9 @@ function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
           {list.map((x, i) => (
             <option key={`${x.benchmark}/${x.split}`} value={i}>
               {x.benchmark}, {x.split} split, {num(x.scored_records)} records
-              {x.sealed ? " (sealed test)" : " (development)"}
+              {x.sealed ? " (sealed test)" : " (development benchmark"}
+              {x.sealed ? "" : x.reproducibility?.startsWith("reproduced-on-")
+                ? `, ${x.reproducibility.replace("reproduced-on-", "release ")})` : ", exploratory, pre-freeze)"}
             </option>
           ))}
         </select>

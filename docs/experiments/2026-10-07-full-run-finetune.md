@@ -3,6 +3,7 @@ title: Full-data fine-tune on the AWS GPU
 slug: full-run-finetune
 date: '2026-10-07'
 status: adopted
+reproducibility: exploratory-pre-freeze
 question: How much does fine-tuning BioCLIP 2 on all DNA-verified records improve identification, and
   which model should the site serve?
 branch: main (finetune.py, trainer); run 20261007-165400
@@ -72,6 +73,8 @@ Fine-tuning helps at every rank; the fine-tuned model is served.
 
 ## Decision
 Adopted (Steve's rule, 2026-10-07); live on the site 2026-10-08.
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Known data fault
 A label audit (2026-10-09) found 8,868 of 154,067 reference and training records (5.8%) whose

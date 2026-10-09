@@ -3,6 +3,7 @@ title: 'Name equivalence: strict, sensu lato and species complexes'
 slug: name-equivalence
 date: '2026-10-09'
 status: adopted
+reproducibility: exploratory-pre-freeze
 question: How should a near miss be scored when the name is a matter of taxonomy (genus splits, gender
   endings, species complexes) rather than a wrong identification?
 branch: feat/name-equivalence (merged c7b70e0)
@@ -60,6 +61,8 @@ Report all three beside strict; for outside models, report complex on formal nam
 
 ## Decision
 Adopted for scoring (Steve, 2026-10-08/09).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Keep the genus groups in step with the taxonomy; review whether complex should leave beta.

@@ -4,8 +4,8 @@ import { Link } from "wouter";
 import { PageHeader } from "@/components/Layout";
 import { Markdown } from "@/components/Markdown";
 import { api, ApiError, signInUrl } from "@/lib/api";
-import { awaitsDecision, EXPERIMENT_STATUSES, filterExperiments, STATUS_WORDS, statusCounts,
-         type ExperimentStatus } from "@/lib/experiments";
+import { awaitsDecision, EXPERIMENT_STATUSES, filterExperiments, reproducibilityWords, STATUS_WORDS,
+         statusCounts, type ExperimentStatus } from "@/lib/experiments";
 
 // Research > Experiments (Steve, 2026-10-09): every experiment recorded so it can be reviewed.
 // Members only: development numbers and unpublished results (docs/experiments/README.md).
@@ -13,6 +13,17 @@ import { awaitsDecision, EXPERIMENT_STATUSES, filterExperiments, STATUS_WORDS, s
 function Status({ s }: { s: ExperimentStatus }) {
   const w = STATUS_WORDS[s];
   return <span className={`rounded px-2 py-0.5 text-xs font-medium ${w.tone}`}>{w.label}</span>;
+}
+
+function Repro({ r }: { r: string }) {
+  const w = reproducibilityWords(r);
+  return (
+    <span title={w.note}
+          className={`rounded px-2 py-0.5 text-xs ${w.provisional ? "border border-dashed border-[#A87146]/50 text-[#7a5a3a]"
+                                                               : "bg-myco-green/10 text-myco-green"}`}>
+      {w.label}
+    </span>
+  );
 }
 
 function SignInNote({ error }: { error: unknown }) {
@@ -40,7 +51,8 @@ export function ExperimentsPage() {
     <>
       <PageHeader title="Experiments">
         Every experiment on MycoMap Vision: the question, everything tried, the numbers, and what
-        was decided. Development results, for mycomap.org members.
+        was decided. Development results, for mycomap.org members. Results from before the dataset
+        freeze are exploratory; each will be re-run on dataset release v1 so anyone can rebuild it.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-4xl space-y-4">
         {q.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
@@ -62,6 +74,7 @@ export function ExperimentsPage() {
             <span className="flex flex-wrap items-center gap-2">
               <span className="font-semibold text-[#4a3728]">{e.title}</span>
               <Status s={e.status} />
+              <Repro r={e.reproducibility} />
               {awaitsDecision(e) && <span className="text-xs text-[#7a5a3a]">decision pending</span>}
               <span className="text-xs text-muted-foreground ml-auto">{e.date}</span>
             </span>
@@ -81,6 +94,8 @@ export function ExperimentPage({ slug }: { slug: string }) {
     ["Question", e.question], ["Benchmark", e.benchmark], ["Split", e.split], ["Model", e.model],
     ["Methods", e.methods?.join(", ")], ["Code", [e.branch, e.commits?.join(", ")].filter(Boolean).join(" · ")],
     ["Decision", e.decision],
+    ["Dataset release", e.dataset_release], ["Reference hash", e.reference_hash],
+    ["Code commit", e.code_commit], ["Reproduce with", e.reproduce_command],
   ] : [];
   return (
     <>
@@ -92,8 +107,10 @@ export function ExperimentPage({ slug }: { slug: string }) {
         {e && (
           <>
             <p className="flex flex-wrap items-center gap-2 text-sm">
-              <Status s={e.status} /> <span className="text-muted-foreground">{e.date}</span>
+              <Status s={e.status} /> <Repro r={e.reproducibility} />
+              <span className="text-muted-foreground">{e.date}</span>
             </p>
+            <p className="mt-2 text-sm text-muted-foreground">{reproducibilityWords(e.reproducibility).note}</p>
             <dl className="mt-4 grid grid-cols-[8rem_1fr] gap-x-4 gap-y-1 text-sm">
               {facts.filter(([, v]) => v).map(([k, v]) => (
                 <div key={k} className="contents">

@@ -3,6 +3,7 @@ title: Trained classifier heads versus nearest specimen
 slug: trained-heads
 date: '2026-09-28'
 status: dropped
+reproducibility: exploratory-pre-freeze
 question: Does a classifier trained on the image features beat looking up the nearest DNA-verified specimen?
 branch: 'main (evaluate.METHODS: linear, hybrid)'
 commits: []
@@ -66,6 +67,8 @@ scored either.
 
 ## Decision
 Dropped as a method on the site; nearest specimen is the default.
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Save the classifier heads at the next fine-tune and score them; the Picek replication.

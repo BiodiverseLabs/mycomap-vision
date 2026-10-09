@@ -3,6 +3,7 @@ title: The published Danish Fungi and FungiTastic models on our records
 slug: published-danish-models
 date: '2026-10-09'
 status: done
+reproducibility: exploratory-pre-freeze
 question: How do the Danish team's published fungal models do on North American DNA-verified records,
   compared fairly with Vision?
 branch: feat/external-bvra-baselines (e90ef4f, not merged)
@@ -80,6 +81,8 @@ Vision leads at every rank; most of the species gap is vocabulary.
 
 ## Decision
 Recorded for the paper (draft TABLES 7-8).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Spot-check the crosswalk (a suspect join: *Agaricus solidipes* to *Panaeolus antillarum*); the
