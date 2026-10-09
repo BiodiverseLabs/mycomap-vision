@@ -53,9 +53,55 @@ def probabilities(scores: np.ndarray, temperature: float) -> np.ndarray:
     return out
 
 
+# --- compact rows: what a fit needs from one record, without its full row of scores --
+#
+# A fit needs each record's calibrated probabilities only for the names a set could
+# list (the top MAX_SET, plus one to tell when a set is cut) and the true name's place
+# among them; a true name further down already counts as a miss (score). The softmax
+# normaliser at each candidate temperature keeps those probabilities exact. At species
+# that is ~110 numbers per record instead of one score per species (~18,000).
+
+KEEP = MAX_SET + 1
+PAST = -1                 # a compact row's true position when the name is known but kept out
+
+
+def logsumexp_by_temperature(scores: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    """log(sum(exp(score / T))) over the finite scores, for each T in `grid`."""
+    s = np.asarray(scores, dtype=np.float64)
+    s = s[np.isfinite(s)]
+    m = s.max()
+    return m / grid + np.log(np.exp((s[None, :] - m) / grid[:, None]).sum(axis=1))
+
+
+def compact(scores: np.ndarray, true_idx: int | None, grid: np.ndarray, keep: int = KEEP,
+            lse: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, int | None]:
+    """(the `keep` highest finite scores, highest first; the normaliser at each T in
+    `grid`, or `lse` when already made; the true name's position among them: None when
+    the reference set lacks it, PAST when it has it further down)."""
+    s = np.asarray(scores, dtype=np.float64)
+    finite = np.flatnonzero(np.isfinite(s))
+    order = finite[np.argsort(-s[finite], kind="stable")][:keep]
+    pos = None
+    if true_idx is not None and np.isfinite(s[true_idx]):
+        hit = np.flatnonzero(order == true_idx)
+        pos = int(hit[0]) if len(hit) else PAST
+    if lse is None:
+        lse = logsumexp_by_temperature(s, grid)
+    return s[order].astype(np.float32), lse, pos
+
+
+def expand(row: tuple[np.ndarray, np.ndarray, int | None], t_index: int,
+           temperature: float) -> tuple[np.ndarray, int | None]:
+    """A compact row as (probabilities of its kept names, true position) at one of the
+    grid's temperatures: what score(), likely_set() and set_metrics() take."""
+    top, lse, pos = row
+    return np.exp(top.astype(np.float64) / temperature - lse[t_index]), pos
+
+
 def score(probs: np.ndarray, true_idx: int | None, cap: int = MAX_SET) -> float:
-    """1 - the probability of the true name; +inf when no set could hold it."""
-    if true_idx is None or not np.isfinite(probs[true_idx]):
+    """1 - the probability of the true name; +inf when no set could hold it (including a
+    compact row's PAST: known, but further down than any set reaches)."""
+    if true_idx is None or true_idx < 0 or not np.isfinite(probs[true_idx]):
         return math.inf
     p = np.where(np.isfinite(probs), probs, 0.0)
     if int((p > p[true_idx]).sum()) >= cap:
@@ -98,7 +144,7 @@ def set_metrics(rows: list[tuple[np.ndarray, int | None]], floor: float,
     for probs, true_idx in rows:
         chosen, _ = likely_set(probs, floor, cap)
         sizes.append(len(chosen))
-        hits += true_idx is not None and true_idx in chosen
+        hits += true_idx is not None and true_idx >= 0 and true_idx in chosen
     n = len(rows)
     known = sum(t is not None for _, t in rows)
     return {"n": n, "coverage": round(hits / n, 4) if n else None,

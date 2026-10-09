@@ -215,12 +215,13 @@ def top_labels(scores: np.ndarray, names: list[str], k: int) -> list[str]:
 T_GRID = np.geomspace(0.001, 10.0, 90)
 
 
-def nll_by_temperature(scores: np.ndarray, true_idx: int) -> np.ndarray:
-    """Negative log-likelihood of the true label under softmax(scores / T), for each T."""
-    z = scores[None, :].astype(np.float64) / T_GRID[:, None]
-    m = z.max(axis=1, keepdims=True)
-    lse = (m + np.log(np.exp(z - m).sum(axis=1, keepdims=True)))[:, 0]
-    return lse - z[:, true_idx]
+def nll_by_temperature(scores: np.ndarray, true_idx: int,
+                       lse: np.ndarray | None = None) -> np.ndarray:
+    """Negative log-likelihood of the true label under softmax(scores / T), for each T.
+    `lse`: the normalisers likely.logsumexp_by_temperature gives, when already made."""
+    if lse is None:
+        lse = likely.logsumexp_by_temperature(scores, T_GRID)
+    return lse - float(scores[true_idx]) / T_GRID
 
 
 def bucket_of(n: int) -> str:
@@ -296,8 +297,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     position = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
     nll = {rank: np.zeros(len(T_GRID)) for rank in RANKS}
     n_cal = Counter()
-    # Likely sets (likely.py) are fitted after the temperature: every scored record's rank
-    # scores and true position (None: a name the reference set lacks, never listable).
+    # Likely sets (likely.py) are fitted after the temperature, from each scored record's
+    # compact row (its top scores, normalisers and true position; not its full row).
     kept = {rank: [] for rank in RANKS}
     equiv = {"species": Counter(), "genus": Counter()}
     # Weekly batches are lumpy (one big project, one prolific observer), so results
@@ -315,11 +316,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             if not t:          # e.g. species of a one-word name: not scored at that rank
                 continue
             rs = rank_scores(scores, index, rank)
+            lse = likely.logsumexp_by_temperature(rs, T_GRID)
             if t in position[rank]:
-                nll[rank] += nll_by_temperature(rs, position[rank][t])
+                nll[rank] += nll_by_temperature(rs, position[rank][t], lse)
                 n_cal[rank] += 1
             if sets:
-                kept[rank].append((rs.astype(np.float32), position[rank].get(t)))
+                kept[rank].append(likely.compact(rs, position[rank].get(t), T_GRID, lse=lse))
             top = top_labels(rs, names[rank], top_k)
             if name_scores and rank in ("species", "genus") and top:
                 eq = (name_equiv.species_match if rank == "species"
@@ -360,7 +362,9 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
         for rank in RANKS if n_cal[rank]}
     for rank, cal in out["calibration"].items():
         if kept[rank]:
-            rows = [(likely.probabilities(rs, cal["temperature"]), t) for rs, t in kept[rank]]
+            ti = int(np.argmin(nll[rank]))
+            rows = [likely.expand(row, ti, cal["temperature"]) for row in kept[rank]]
+            kept[rank] = []                  # freed before the next rank's rows are made
             fit = likely.fit_and_check(rows)
             if fit:
                 cal["sets"] = fit
@@ -504,11 +508,13 @@ def save_run(conn: sqlite3.Connection, comparison_id: str, backbone: str, method
 
 def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
             test_days: int = 28, max_test: int | None = None, seed: int = 0,
-            embeddings_root=None, name_scores: bool = False, log=print) -> dict:
+            embeddings_root=None, name_scores: bool = False, sets: bool = True,
+            log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
-    another could not see.
+    another could not see. `sets` (likely.py) are fitted on the all-photos pass only:
+    nothing reads a first-photo fit.
     """
     methods = methods or ["nearest"]
     for m in methods:
@@ -528,8 +534,9 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             fitted = fit_method(vecs, ref_b, m)
             extra = getattr(fitted[1], "scoreboard_extra", lambda: None)()
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted,
-                                  name_scores=name_scores)
-            first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted)
+                                  name_scores=name_scores, sets=sets)
+            first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted,
+                             sets=False)
             runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first,
                                  extra))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
