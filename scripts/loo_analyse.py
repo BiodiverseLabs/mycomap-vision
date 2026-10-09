@@ -93,6 +93,8 @@ def tags_from(audits: Path) -> tuple[dict, dict, dict]:
         tags[r["oid"]].append("label audit: DNA sequence names another genus")
     best = defaultdict(float)
     for r in read_tsv(audits / "non-fungus-scan" / "review-list-2026-10-09.csv"):
+        if r.get("mislinked_record") == "True":       # the record-source fix lane's
+            continue
         try:
             best[r["observation_id"]] = max(best[r["observation_id"]], float(r["p_not_fungus"]))
         except (KeyError, ValueError):
@@ -135,7 +137,11 @@ def record_key(oid: str) -> str:
     return f"{SOURCE_OF.get(oid, 'inat')}:{oid}"
 
 
-def owner_of(tags: list[str]) -> tuple[str, str]:
+def owner_of(tags: list[str], category: str) -> tuple[str, str]:
+    """(owner lane, the other lanes that flag it). The non-fungus scan's flags on genuine
+    iNat records are candidates (~14% hand-checked precision): that lane owns a record
+    only when this scan also calls its photos wrong (c); otherwise it is listed as a
+    candidate (agreed with that lane, 2026-10-09)."""
     lanes = []
     for t in tags:
         lane = next((lane for prefix, lane in OWNERS if t.startswith(prefix)), None)
@@ -143,7 +149,12 @@ def owner_of(tags: list[str]) -> tuple[str, str]:
             lanes.append(lane)
     order = [lane for _p, lane in OWNERS]
     lanes.sort(key=order.index)
-    return (lanes[0] if lanes else "loo scan"), "; ".join(lanes[1:] if lanes else [])
+    candidate = "non-fungus scan" in lanes and category != "c"
+    if candidate:
+        lanes.remove("non-fungus scan")
+    owner = lanes[0] if lanes else "loo scan"
+    also = lanes[1:] + (["non-fungus scan (candidate)"] if candidate else [])
+    return owner, "; ".join(also)
 
 
 def same_name(a: str, b: str) -> bool:
@@ -242,7 +253,7 @@ def main() -> None:
         pk = audit_pairs.get(frozenset((lab_name, sug)))
         if pk:
             t.append(f"label audit pair: {pk}")
-        owner, also = owner_of(t) if c else ("", "")
+        owner, also = owner_of(t, c) if c else ("", "")
         rows.append({
             "record_key": record_key(oid[i]), "observation_id": oid[i],
             "owner_lane": owner, "also_flagged_by": also, "category": c, "strength": round(stren[i], 4),
@@ -318,6 +329,22 @@ def main() -> None:
     pb, pd = pairs_of("b"), pairs_of("d")
     write("review-b-name-pairs.csv", pb, list(pb[0]) if pb else ["label_a"])
     write("review-d-look-alikes.csv", pd, list(pd[0]) if pd else ["label_a"])
+    # Photo pairs: a photo whose best match (>= rules.duplicate) is a record of another genus.
+    pos_in_rec = np.zeros(len(P["rec"]), dtype=int)
+    starts = np.r_[0, np.flatnonzero(np.diff(P["rec"])) + 1]
+    for s0, s1 in zip(starts, np.r_[starts[1:], len(P["rec"])]):
+        pos_in_rec[s0:s1] = np.arange(s1 - s0)
+    dup_rows = []
+    for k in np.flatnonzero(other & (P["best_sim"] >= rules.duplicate)).tolist():
+        r, b = int(P["rec"][k]), int(P["best_rec"][k])
+        dup_rows.append({"record_key": record_key(oid[r]),
+                         "photo_id": recs["photo_ids"][r][pos_in_rec[k]],
+                         "label": units[lab_unit[r]], "other_record_key": record_key(oid[b]),
+                         "other_label": units[lab_unit[b]],
+                         "cosine": round(float(P["best_sim"][k]), 4)})
+    dup_rows.sort(key=lambda d: -d["cosine"])
+    write("duplicate-photos-other-genus.csv", dup_rows,
+          ["record_key", "photo_id", "label", "other_record_key", "other_label", "cosine"])
     # Pre-registered removal lists: (a) + (c) by strength, top 1% / 2% of reference records.
     ranked = sorted((r for r in rows if r["category"] in ("a", "c")),
                     key=lambda r: -r["strength"])
