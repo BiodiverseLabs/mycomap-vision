@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, identifyGate, LIKELY_COPY, modelName, sendWaitingInLine, showsPaper } from "./publicView";
+import { coverageWords, headline, identifyGate, LIKELY_COPY, longDate, modelName, releaseNote, sendWaitingInLine, shareWords, showsPaper } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -100,4 +100,28 @@ test("the Paper in Progress tab shows only to signed-in members", () => {
   assert.equal(showsPaper(me("all", someone)), true);
   assert.equal(showsPaper(me("off", null)), true, "local site without sign-in");
   assert.equal(showsPaper(undefined), false, "not known yet");
+});
+
+test("dates read as written, with no time zone shift", () => {
+  assert.equal(longDate("2026-09-07"), "7 September 2026");
+  assert.equal(longDate("2026-10-06T23:30:00+00:00"), "6 October 2026");
+  assert.equal(longDate("not a date"), "not a date");
+});
+
+test("the provisional share is said from the data, never hard-coded as half", () => {
+  assert.equal(shareWords(10864, 19208), "More than half");
+  assert.equal(shareWords(50, 100), "About half");
+  assert.equal(shareWords(40, 100), "About 40%");
+  assert.equal(shareWords(99, 100), "Nearly all");
+  assert.equal(shareWords(0, 0), "None");
+});
+
+test("a model's release note says what it learned from only when it was fine-tuned", () => {
+  assert.equal(
+    releaseNote({ backbone: "bioclip-2-ft-20261007-165400", embedded_photos: 152915,
+                  trained_through: "2026-09-07" }),
+    "BioCLIP 2, fine-tuned on DNA-verified records (October 2026). Trained on DNA-verified " +
+    "records validated up to 7 September 2026. Compares your photos with 152,915 reference photos.");
+  assert.equal(releaseNote({ backbone: "bioclip-2", embedded_photos: 10, trained_through: null }),
+    "BioCLIP 2. Compares your photos with 10 reference photos.");
 });

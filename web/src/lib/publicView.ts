@@ -100,3 +100,39 @@ export async function sendWaitingInLine(
 export function showsPaper(me: Me | null | undefined): boolean {
   return !!me && (me.signin === "off" || !!me.user);
 }
+
+/** Said with every answer, and on How it works: a photo match is never a reason to eat. */
+export const SAFETY_LINE = "Never eat a mushroom based on this identification.";
+
+/** mycomap.org pages (its routes): the network with its free DNA sequencing, and
+ *  membership with donations. */
+export const SEQUENCING_URL = "https://mycomap.org/network";
+export const JOIN_URL = "https://mycomap.org/join";
+
+/** "2026-09-07" -> "7 September 2026": the date as written, with no time zone shift. */
+export function longDate(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}`;
+}
+
+/** A share of a whole, said plainly ("More than half"), for a heading. */
+export function shareWords(part: number, total: number): string {
+  if (total <= 0) return "None";
+  const s = part / total;
+  if (s >= 0.53) return s >= 0.97 ? "Nearly all" : "More than half";
+  if (s > 0.47) return "About half";
+  return `About ${Math.max(1, Math.round(s * 100))}%`;
+}
+
+/** What a served model is, for visitors: its name, the newest records it learned from, and
+ *  how many reference photos it compares with. */
+export function releaseNote(b: { backbone: string; embedded_photos: number;
+                                 trained_through?: string | null }): string {
+  const parts = [`${modelName(b.backbone)}.`];
+  if (b.trained_through) {
+    parts.push(`Trained on DNA-verified records validated up to ${longDate(b.trained_through)}.`);
+  }
+  parts.push(`Compares your photos with ${b.embedded_photos.toLocaleString("en-US")} reference photos.`);
+  return parts.join(" ");
+}

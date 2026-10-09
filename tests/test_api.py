@@ -392,3 +392,53 @@ def test_a_record_shows_its_best_matching_openly_licensed_photo():
     assert pick_shown(scores, ["arr", "nc", "open", "arr"]) == 1
     assert pick_shown(scores, ["arr", None, "arr", "arr"]) is None
     assert pick_shown(scores, ["open", "open", "open", "open"]) == 3
+
+
+def _row(oid, name, when, project="Macrofungi of Indiana", continent="North America"):
+    return {"observation_id": str(oid), "scientific_name": name, "genus": name.split()[0],
+            "family": "F", "continent": continent, "validation_status_1": "yes",
+            "validation_project_1": project, "validation_date_1": when}
+
+
+def test_stats_credit_who_built_the_reference_set_and_count_provisional_names(conn):
+    from conftest import inat_obs
+    from test_models_and_scoreboard import OPEN
+
+    from mycomap_vision.api import reference_stats
+    from mycomap_vision.inat import save_batch
+    from mycomap_vision.records import build_records, save_records
+    rows = [_row(1, "Russula emetica", "9/1/2026"),
+            _row(2, "Russula sp. 'IN01'", "9/30/2026", project="MycoMap BC"),
+            _row(3, "Cortinarius sp. 'CA02'", "10/6/2026"),
+            _row(4, "Cortinarius sp. 'CA02'", "10/5/2026"),
+            # Outside North America: not in the reference set, so not counted.
+            _row(5, "Amanita sp. 'EU01'", "10/6/2026", project="Elsewhere", continent="Europe")]
+    save_records(conn, build_records(rows, "t"))
+    save_batch(conn, [r["observation_id"] for r in rows],
+               [inat_obs(1, "ann", photos=[(0, 11, "cc0", OPEN)]),
+                inat_obs(2, "bob", photos=[(0, 12, "cc0", OPEN)]),
+                inat_obs(3, "ann", photos=[(0, 13, "cc0", OPEN)]),
+                inat_obs(4, "cy", photos=[(0, 14, "cc0", OPEN)]),
+                inat_obs(5, "dee", photos=[(0, 15, "cc0", OPEN)])], "t")
+    s = reference_stats(conn, set())
+    assert (s["names"], s["names_provisional"]) == (3, 2)
+    assert s["projects"] == 2                   # Indiana and BC; Europe's project not counted
+    assert s["photographers"] == 3              # ann, bob, cy: dee's record is in Europe
+    # The newest week runs to the newest validation (6 Oct): 30 Sep is in, 1 Sep is not.
+    assert s["recent_week"] == {"records": 3, "from": "2026-09-30", "through": "2026-10-06"}
+
+
+def test_stats_have_no_recent_week_before_any_record_is_validated(conn):
+    from mycomap_vision.api import reference_stats
+    s = reference_stats(conn, set())
+    assert s["recent_week"] is None and s["projects"] == 0 and s["photographers"] == 0
+
+
+def test_models_say_when_a_fine_tuned_model_was_trained_through(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    assert client.get("/api/models").json()["backbones"][-1]["trained_through"] is None
+    conn.executescript(evaluate.FINETUNE_SCHEMA)
+    conn.execute("insert into finetunes values ('m1', 'bioclip-2', '2026-09-07', 28, '{}', 'now')")
+    conn.commit()
+    m1 = [b for b in client.get("/api/models").json()["backbones"] if b["backbone"] == "m1"]
+    assert m1[0]["trained_through"] == "2026-09-07"

@@ -26,7 +26,10 @@ export function DataPage() {
             <div className="grid gap-4 grid-cols-2 lg:grid-cols-3">
               <Tile label="DNA-validated records" value={num(s.records)}
                     sub={`${num(s.records_north_america)} in North America`} />
-              <Tile label="Names" value={num(s.names)} sub="North America, no label conflicts" />
+              <Tile label="Names" value={num(s.names)}
+                    sub={s.names_provisional != null
+                      ? `North America, no label conflicts; ${num(s.names_provisional)} provisional (not yet described)`
+                      : "North America, no label conflicts"} />
               <Tile label="Photos" value={num(s.photos)}
                     sub={`${(s.photos / Math.max(1, s.inat_ok)).toFixed(1)} per record`} />
             </div>
