@@ -79,7 +79,7 @@ def test_the_figures_are_counted_once_an_hour_but_photographers_answers_are_curr
                                                                                       tmp_path):
     client = app_with_model(conn, tmp_path)
     first = client.get("/api/stats").json()
-    save_records(conn, build_records([{"observation_id": "999", "scientific_name": "Z z",
+    save_records(conn, build_records([{"source": "iNaturalist", "observation_id": "999", "scientific_name": "Z z",
                                        "continent": "North America",
                                        "validation_status_1": "yes"}], "t2"))
     conn.execute("insert into photo_permissions (inat_user_id, status) values (7, 'granted')")

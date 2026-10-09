@@ -29,11 +29,11 @@ from .embed import normalise
 from .serving import map_embeddings
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
                        with_rows)
-from .licenses import sized_url
+from .licenses import photo_url
+from .sources import INAT, record_url
 
 CONFIDENCE_TEMPERATURE = 0.02
 ORG_SPECIES_URL = "https://mycomap.org/species/"
-INAT_OBS_URL = "https://www.inaturalist.org/observations/"
 
 
 def softmax_confidence(scores: np.ndarray, temperature: float = CONFIDENCE_TEMPERATURE) -> np.ndarray:
@@ -135,6 +135,7 @@ class PhotoInfo:
     license_class: str
     owner_login: str | None
     owner_user_id: int | None = None
+    source: str = INAT                  # photos.source: picks the URL rule (licenses.photo_url)
 
 
 def only_open_licences(info: PhotoInfo) -> bool:
@@ -143,10 +144,12 @@ def only_open_licences(info: PhotoInfo) -> bool:
 
 
 def photo_info_rows(rows) -> dict[int, PhotoInfo]:
-    return {int(pid): PhotoInfo(url, lic, owner, uid) for pid, url, lic, owner, uid in rows}
+    return {int(pid): PhotoInfo(url, lic, owner, uid, src)
+            for pid, url, lic, owner, uid, src in rows}
 
 
-PHOTO_INFO_SQL = "select photo_id, source_url, license_class, owner_login, owner_user_id from photos"
+PHOTO_INFO_SQL = ("select photo_id, source_url, license_class, owner_login, owner_user_id, "
+                  "source from photos")
 
 
 class Specimen(NamedTuple):
@@ -155,6 +158,8 @@ class Specimen(NamedTuple):
     species: str
     genus: str
     family: str
+    source: str = INAT                   # records.source
+    source_id: str = ""                  # the id at the source
 
 
 class Specimens:
@@ -172,6 +177,9 @@ class Specimens:
         pos = {n: i for i, n in enumerate(names)}
         self.names = np.array(names or [""])
         self.obs = np.array([r.observation_id for r in records] or [""])
+        self.source = np.array([getattr(r, "source", INAT) for r in records] or [INAT])
+        self.source_id = np.array([getattr(r, "source_id", "") or r.observation_id
+                                   for r in records] or [""])
         self.taxa = np.array([(pos[r.species], pos[r.genus], pos[r.family]) for r in records],
                              dtype=np.int32).reshape(-1, 3)
 
@@ -181,7 +189,8 @@ class Specimens:
     def __getitem__(self, col: int) -> Specimen:
         r = int(self.rec[col])
         sp, ge, fa = (str(self.names[i]) for i in self.taxa[r])
-        return Specimen(str(self.obs[r]), sp, ge, fa)
+        return Specimen(str(self.obs[r]), sp, ge, fa, str(self.source[r]),
+                        str(self.source_id[r]))
 
     def starts(self) -> np.ndarray:
         """Where each record's run of columns starts (a record's photos are contiguous)."""
@@ -435,10 +444,14 @@ class Identifier:
                 "species": rec.species, "genus": rec.genus, "family": rec.family,
                 "similarity": round(score, 4),
                 "matched_query_photo": q_best,
-                "photo_url": sized_url(info.source_url, "medium") if info else None,
+                "photo_url": photo_url(info.source, info.source_url, "medium") if info else None,
                 "photo_owner": info.owner_login if info else None,
                 "photo_withheld": info is None,
-                "inat_url": INAT_OBS_URL + rec.observation_id,
+                # The record's own page at its source (iNat or Mushroom Observer).
+                "source": rec.source,
+                "source_id": rec.source_id,
+                "record_url": record_url(rec.source, rec.source_id),
+                "inat_url": record_url(INAT, rec.source_id) if rec.source == INAT else None,
                 "species_url": ORG_SPECIES_URL + quote(rec.species) if rec.species else None,
             })
         return specimens

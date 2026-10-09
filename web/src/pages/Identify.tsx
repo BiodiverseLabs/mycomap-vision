@@ -794,14 +794,18 @@ function Bar({ value, strong }: { value: number; strong?: boolean }) {
 
 function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; showMatched: boolean }) {
   const matched = showMatched && urls[s.matched_query_photo];
+  const mo = s.source === "mo";
+  const href = s.record_url ?? s.inat_url ?? undefined;
+  const site = mo ? "Mushroom Observer" : "iNaturalist";
+  const shownId = s.source_id || s.observation_id;
   return (
     <div className="rounded-md border overflow-hidden bg-white">
-      <a href={s.inat_url} target="_blank" rel="noreferrer" className="block aspect-square bg-muted">
+      <a href={href} target="_blank" rel="noreferrer" className="block aspect-square bg-muted">
         {s.photo_url ? (
           <img src={s.photo_url} alt={s.name ?? s.species} loading="lazy" className="h-full w-full object-cover" />
         ) : s.photo_withheld ? (
           <span className="flex h-full w-full items-center justify-center p-3 text-center text-xs text-muted-foreground">
-            Photo not shown here: all rights reserved, and the photographer hasn't given permission. View it on iNaturalist.
+            Photo not shown here: all rights reserved, and the photographer hasn't given permission. View it on {site}.
           </span>
         ) : null}
       </a>
@@ -823,12 +827,12 @@ function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; s
           {matched && <span>your photo {s.matched_query_photo + 1}</span>}
         </div>
         <a
-          href={s.inat_url}
+          href={href}
           target="_blank"
           rel="noreferrer"
           className="inline-flex items-center gap-0.5 text-xs text-muted-foreground hover:text-myco-green"
         >
-          iNat {s.observation_id} <ArrowUpRight className="h-3 w-3" />
+          {mo ? "MO" : "iNat"} {shownId} <ArrowUpRight className="h-3 w-3" />
         </a>
         {s.photo_owner && <p className="text-[10px] text-muted-foreground truncate">© {s.photo_owner}</p>}
       </div>

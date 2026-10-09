@@ -39,13 +39,13 @@ class FakeIdentifier:
 
 
 def candidate(oid, name="A sp. pending", continent="North America"):
-    return {"observation_id": oid, "scientific_name": name, "continent": continent}
+    return {"source": "iNaturalist", "observation_id": oid, "scientific_name": name, "continent": continent}
 
 
 def test_only_unassessed_north_american_candidates_without_a_prediction_are_queued(conn):
     prospective.save_candidates(conn, [candidate("10"), candidate("11"),
                                        candidate("12", continent="Europe")], "t0")
-    save_records(conn, build_records([{"observation_id": "11", "scientific_name": "A x",
+    save_records(conn, build_records([{"source": "iNaturalist", "observation_id": "11", "scientific_name": "A x",
                                        "continent": "North America",
                                        "validation_status_1": "yes"}], "t1"))
     assert prospective.unpredicted(conn, "m1", "hybrid") == ["10"]
@@ -76,7 +76,7 @@ def test_only_predictions_made_before_the_record_turned_green_count(conn):
                            "20": inat_obs(20, photos=[(0, 2, "cc0", "x")])})
     prospective.predict_pending(conn, ident, object(), ["10", "20"], fetcher, log=lambda s: None)
     conn.execute("update predictions set predicted_at = '2026-09-01T00:00:00+00:00'")
-    green = lambda oid, name: {"observation_id": oid, "scientific_name": name,  # noqa: E731
+    green = lambda oid, name: {"source": "iNaturalist", "observation_id": oid, "scientific_name": name,  # noqa: E731
                                "genus": name.split()[0], "family": "F",
                                "continent": "North America", "validation_status_1": "yes"}
     save_records(conn, build_records([green("10", "A x"), green("20", "A y")],
@@ -102,7 +102,7 @@ def predicted_then_validated(conn, pairs):
                      "'2026-09-01T00:00:00+00:00', 'v', 1, 1, ?)",
                      (oid, json.dumps({"species": [{"name": answer, "confidence": 0.6}],
                                        "genus": [{"name": answer.split()[0], "confidence": 0.9}]})))
-        green.append({"observation_id": oid, "scientific_name": dna_name,
+        green.append({"source": "iNaturalist", "observation_id": oid, "scientific_name": dna_name,
                       "genus": dna_name.split()[0], "family": "F",
                       "continent": "North America", "validation_status_1": "yes"})
     save_records(conn, build_records(green, "2026-09-10T00:00:00+00:00"))

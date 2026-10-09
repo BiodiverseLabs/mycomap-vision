@@ -130,7 +130,7 @@ def test_a_1970_01_01_org_date_falls_back_to_the_inat_date(conn):
     from mycomap_vision.records import build_records, save_records
 
     host = "inaturalist-open-data.s3.amazonaws.com"
-    rows = [{"observation_id": oid, "scientific_name": "Russula emetica", "genus": "Russula",
+    rows = [{"source": "iNaturalist", "observation_id": oid, "scientific_name": "Russula emetica", "genus": "Russula",
              "family": "Russulaceae", "continent": "North America", "observed_on": observed,
              "validation_status_1": "yes", "validation_date_1": "9/2/2026"}
             for oid, observed in (("1", "1970-01-01"), ("2", "2024-06-30"), ("3", "1970-01-01"))]

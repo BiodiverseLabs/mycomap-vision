@@ -1,9 +1,14 @@
-"""Download photos for the green records, within iNat's limits, with a hash for each.
+"""Download photos for the green records, within iNat's and MO's limits, with a hash for each.
 
 Hosts are limited separately:
 - the AWS Open Data bucket (CC-licensed photos) is built for bulk download;
 - iNat's static host (all-rights-reserved photos) gets iNat's media rule:
   under 5 GB an hour and 24 GB a day. We stay at 4 GB and 20 GB.
+- Mushroom Observer (mushroomobserver.org) gets MO's rule for anonymous traffic: one
+  request at a time, at least 5 seconds apart (20 a minute, README_API).
+
+Which URL a photo is fetched from depends on photos.source (licenses.photo_url), never
+on the look of its id or URL.
 """
 
 from __future__ import annotations
@@ -20,9 +25,9 @@ from typing import Callable
 
 import requests
 
-from . import config, holdouts
-from .licenses import (OPEN_DATA_HOST, STATIC_HOST, looks_like_image, photo_relpath, sized_url,
-                       taken_down, url_extension)
+from . import config, holdouts, sources
+from .licenses import (MO_HOST, OPEN_DATA_HOST, STATIC_HOST, host_of, looks_like_image,
+                       photo_extension, photo_relpath, photo_url, taken_down)
 from .ratelimit import ByteBudget, MinInterval
 from .storage import PhotoStore
 
@@ -51,7 +56,24 @@ def default_policies(static_day_gb: float = STATIC_DAY_GB) -> dict[str, HostPoli
         OPEN_DATA_HOST: HostPolicy(concurrency=8, min_interval=0.02),
         STATIC_HOST: HostPolicy(concurrency=2, min_interval=0.25, budgets=[
             ByteBudget(STATIC_HOUR_GB * GB, 3600), ByteBudget(int(static_day_gb * GB), 86400)]),
+        MO_HOST: HostPolicy(concurrency=1, min_interval=MO_MIN_INTERVAL),
     }
+
+
+# MO's README_API: anonymous traffic at most 20 requests a minute, 5 s apart on average.
+MO_MIN_INTERVAL = 5.0
+# Where an MO image URL may redirect to (once): MO's own hosts, over HTTPS.
+MO_REDIRECT_HOSTS = (MO_HOST,)
+MO_REDIRECT_SUFFIX = ".mushroomobserver.org"
+
+
+def mo_redirect_ok(location: str) -> bool:
+    """MO serves images itself or sends one redirect to its image host; anything else
+    (another site, plain http, a private address) is refused."""
+    from urllib.parse import urlparse
+    u = urlparse(location or "")
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and (host in MO_REDIRECT_HOSTS or host.endswith(MO_REDIRECT_SUFFIX))
 
 
 # Any other host gets the cautious static policy.
@@ -121,21 +143,36 @@ class Result:
 
 
 def download_one(session: requests.Session, gate: HostGate, photo_id: int, source_url: str,
-                 size: str, store: PhotoStore, stop: threading.Event) -> Result:
-    if taken_down(source_url):
+                 size: str, store: PhotoStore, stop: threading.Event,
+                 source: str = "inat") -> Result:
+    """Fetch one photo at `size`. `source` is photos.source: it picks the URL rule, and
+    an MO image may follow at most one redirect, to an MO host over HTTPS."""
+    if source == "inat" and taken_down(source_url):
         return Result(photo_id, "missing", error="taken down on iNat (copyright)")
     try:
-        url = sized_url(source_url, size)
+        url = photo_url(source, source_url, size)
     except ValueError as e:
         return Result(photo_id, "error", error=str(e))
-    rel = photo_relpath(photo_id, size, url_extension(source_url))
+    rel = photo_relpath(photo_id, size, photo_extension(source, source_url))
     with gate.sem:
         while (w := gate.budget_wait()) > 0:
             if stop.wait(min(w, 60)):
                 return Result(photo_id, "error", error="stopped")
         gate.pacer.wait()
         try:
-            resp = session.get(url, timeout=60)
+            if source == "mo":
+                resp = session.get(url, timeout=60, allow_redirects=False)
+                if resp.is_redirect:
+                    location = requests.compat.urljoin(url, resp.headers.get("location", ""))
+                    if not mo_redirect_ok(location):
+                        return Result(photo_id, "error",
+                                      error=f"redirect refused: {host_of(location) or 'no host'}")
+                    gate.pacer.wait()
+                    resp = session.get(location, timeout=60, allow_redirects=False)
+                    if resp.is_redirect:
+                        return Result(photo_id, "error", error="redirect chain refused")
+            else:
+                resp = session.get(url, timeout=60)
         except requests.RequestException as e:
             return Result(photo_id, "error", error=f"request: {e.__class__.__name__}")
         body = resp.content
@@ -177,7 +214,12 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
 
     A benchmark's held-out records (holdouts.py) get no reference photos; the
     benchmark keeps its own (heldout.py).
+
+    Only records of a source Vision takes photos from (sources.PHOTO_SOURCES) get
+    photos, and only photos of that same source: an iNat photo linked to an MO record
+    is never downloaded. Refused on a manifest whose sources are still guessed.
     """
+    sources.require_migrated(conn, "downloading photos")
     holdouts.ensure_schema(conn)
     na = "and r.north_america = 1" if north_america_only else ""
     params: list = []
@@ -202,10 +244,11 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
                   " and e.photo_id = p.photo_id)")
         tail.append(unembedded_for)
     sql = f"""
-      select distinct p.photo_id, p.source_url, p.host, p.attempts
+      select distinct p.photo_id, p.source_url, p.host, p.attempts, p.source
       from photos p
       join observation_photos op on op.photo_id = p.photo_id
       join records r on r.observation_id = op.observation_id {na}
+        and r.source in {sources.PHOTO_SOURCES_SQL} and p.source = r.source
       where p.status != 'missing' and p.attempts < {MAX_ATTEMPTS}
         and {holdouts.not_held_out('r.observation_id')}
         and not exists (select 1 from photo_copies c where c.photo_id = p.photo_id
@@ -321,7 +364,7 @@ def run_downloads(conn: sqlite3.Connection, rows, store: PhotoStore, size: str,
                   max_hours: float | None = None,
                   checkpoint: Callable[[], None] | None = None,
                   checkpoint_every: float = 600, poll: float = 30, log=print) -> dict:
-    """Download `rows` (photo_id, source_url, host) into `store` at `size`, each host in
+    """Download `rows` (photo_id, source_url, host, source) into `store` at `size`, each host in
     its own lane within its limits; `save(result, now)` records each one (inside a
     transaction on `conn`). Shared by download_all and the benchmark (heldout.py)."""
     policies = policies or default_policies()
@@ -364,7 +407,8 @@ def run_downloads(conn: sqlite3.Connection, rows, store: PhotoStore, size: str,
                     while lane and in_flight[host] < cap(host) and not stop.is_set():
                         row = lane.popleft()
                         fut = pool.submit(download_one, session, gate_for(host),
-                                          row["photo_id"], row["source_url"], size, store, stop)
+                                          row["photo_id"], row["source_url"], size, store, stop,
+                                          row["source"])
                         pending[fut] = host
                         in_flight[host] += 1
             top_up()

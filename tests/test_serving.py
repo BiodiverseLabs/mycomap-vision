@@ -42,7 +42,7 @@ def big_reference(conn, root, records=400, photos_each=8, shard_rows=1000, seed=
     for i in range(records):
         oid = 5000 + i
         sp = f"G{i % 8} s{i % 40}"
-        rows.append({"observation_id": str(oid), "scientific_name": sp, "genus": sp.split()[0],
+        rows.append({"source": "iNaturalist", "observation_id": str(oid), "scientific_name": sp, "genus": sp.split()[0],
                      "family": "F", "continent": "North America",
                      "validation_status_1": "yes", "validation_date_1": "1/1/2026"})
         pids = [oid * 100 + k for k in range(photos_each)]

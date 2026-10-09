@@ -395,7 +395,7 @@ def test_a_record_shows_its_best_matching_openly_licensed_photo():
 
 
 def _row(oid, name, when, project="Macrofungi of Indiana", continent="North America"):
-    return {"observation_id": str(oid), "scientific_name": name, "genus": name.split()[0],
+    return {"source": "iNaturalist", "observation_id": str(oid), "scientific_name": name, "genus": name.split()[0],
             "family": "F", "continent": continent, "validation_status_1": "yes",
             "validation_project_1": project, "validation_date_1": when}
 

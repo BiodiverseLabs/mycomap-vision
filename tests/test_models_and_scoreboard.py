@@ -93,7 +93,7 @@ def seed_two_species(conn, tmp_path):
         ("B y", 10, "1/1/2026"), ("B y", 20, "1/2/2026"), ("B y", 15, "1/3/2026"),
         ("A x", 248, "9/20/2026"), ("B y", 12, "9/21/2026")]):
         oid = str(100 + i)
-        rows.append({"observation_id": oid, "scientific_name": sp, "genus": sp.split()[0],
+        rows.append({"source": "iNaturalist", "observation_id": oid, "scientific_name": sp, "genus": sp.split()[0],
                      "family": "F", "continent": "North America",
                      "validation_status_1": "yes", "validation_date_1": when})
         obs.append(inat_obs(100 + i, photos=[(0, 1000 + i, "cc0", OPEN)]))

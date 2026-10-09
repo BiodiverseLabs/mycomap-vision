@@ -7,6 +7,7 @@ import csv
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 from . import config, inat, manifest, photos, records
 from .storage import open_store
@@ -21,6 +22,37 @@ def cmd_fetch_inat(conn, args) -> None:
     print("Fetching iNat metadata...")
     stats = inat.fetch_all(conn, refresh=args.refresh, north_america_only=not args.all_regions,
                            limit=args.limit)
+    print(json.dumps(stats, indent=2))
+
+
+def cmd_record_sources(conn, args) -> None:
+    """What the export would do to record sources (a dry run), or do it (--apply)."""
+    from . import sources
+    print("Reading green records and their sources from mycomap.org (read-only)...")
+    text = records.fetch_export()
+    exported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    recs = records.build_records(records.parse_export(text), exported_at)
+    by_source = {s: sum(r["source"] == s for r in recs) for s in sources.SOURCES}
+    out = {"migrated_already": sources.migrated(conn), "records_by_source": by_source,
+           "excluded_from_vision": {s: by_source[s] for s in sources.EXCLUDED}}
+    if not out["migrated_already"]:
+        plan = sources.plan_legacy(conn, recs)
+        out["wrong_sourced_records"] = len(plan["wrong_records"])
+        out["wrong_sourced_by_source"] = plan["by_source"]
+        out["wrong_photos_to_unlink"] = plan["wrong_photos"]
+    if args.apply:
+        out["export"] = records.save_records(conn, recs)
+    else:
+        out["note"] = "dry run: nothing changed. --apply exports and migrates."
+    print(json.dumps(out, indent=2))
+
+
+def cmd_fetch_mo(conn, args) -> None:
+    from . import mo
+    print("Fetching Mushroom Observer image lists, licences and owners (read-only, 5 s apart)...")
+    stats = mo.fetch_all(conn, refresh=args.refresh, north_america_only=not args.all_regions,
+                         limit=args.limit)
+    stats["licences"] = mo.licence_report(conn)
     print(json.dumps(stats, indent=2))
 
 
@@ -61,6 +93,10 @@ def status_report(conn) -> dict:
         "inat_missing": q("select count(*) from inat_observations where status = 'missing'"),
         "photos": q("select count(*) from photos"),
     }
+    out["records_by_source"] = dict(conn.execute(
+        "select source, count(*) from records group by 1").fetchall())
+    from .sources import migrated
+    out["record_sources_migrated"] = migrated(conn)
     out["photos_by_status"] = dict(conn.execute(
         "select status, count(*) from photos group by 1").fetchall())
     out["photos_by_license"] = dict(conn.execute(
@@ -662,6 +698,16 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("export-records", help="pull green records from mycomap.org (read-only)")
 
+    p = sub.add_parser("record-sources", help="record sources from mycomap.org: what an export "
+                       "would change (dry run), or --apply (exports and migrates)")
+    p.add_argument("--apply", action="store_true")
+
+    p = sub.add_parser("fetch-mo", help="fetch Mushroom Observer image lists, licences and owners "
+                       "for MO records (read-only, MO's pace)")
+    p.add_argument("--refresh", action="store_true", help="re-fetch records already fetched")
+    p.add_argument("--all-regions", action="store_true", help="not only North America")
+    p.add_argument("--limit", type=int)
+
     p = sub.add_parser("fetch-inat", help="fetch iNat photo lists, licenses and owners")
     p.add_argument("--refresh", action="store_true", help="re-fetch records already fetched")
     p.add_argument("--all-regions", action="store_true", help="not only North America")
@@ -1043,6 +1089,8 @@ def main(argv: list[str] | None = None) -> int:
     handler = getattr(args, "occ_handler", None) or {
         "export-records": cmd_export_records,
         "fetch-inat": cmd_fetch_inat,
+        "record-sources": cmd_record_sources,
+        "fetch-mo": cmd_fetch_mo,
         "download-photos": cmd_download_photos,
         "copy-photos": cmd_copy_photos,
         "aws-launch-downloader": cmd_aws_launch_downloader,

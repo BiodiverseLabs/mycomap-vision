@@ -12,6 +12,10 @@ service key), and applies two rules:
   is left out (evaluate.load_records). Owners who haven't answered stay in while
   permission is being sought (Steve, 2026-09-28).
 
+The answers are iNat accounts, so they apply to iNat photos only. A Mushroom Observer
+photo (photos.source = 'mo') has no iNat owner id: it is shown only when its licence is
+Creative Commons, and used only under MO_EXCLUDED_FROM_USE_SQL.
+
 Only a well-formed answer replaces the copy. A failed, malformed or suspicious one
 changes nothing: the last good list stays, withdrawals included, and the failure is
 recorded and logged. mycomap.org keeps one answer per person and never deletes one
@@ -342,6 +346,23 @@ class PermissionView:
 EXCLUDED_FROM_USE_SQL = """
   not exists (
     select 1 from photos xp join photo_permissions xpp on xpp.inat_user_id = xp.owner_user_id
-    where xp.photo_id = op.photo_id and xp.license_class = 'arr' and xpp.status = 'withdrawn'
+    where xp.photo_id = op.photo_id and xp.source = 'inat' and xp.license_class = 'arr'
+      and xpp.status = 'withdrawn'
+  )
+"""
+
+# Mushroom Observer photos (mo.py) left out of the reference set, comparisons and
+# training: one MO marks not ok_for_export, and an all-rights-reserved one while
+# MO_ARR_FOR_USE is off. Unlike iNat's ARR photos, nobody has been asked about these;
+# using them needs Steve's decision (asked 2026-10-09). A licence we can't read counts
+# as all rights reserved (mo.license_of).
+MO_ARR_FOR_USE = False
+
+MO_EXCLUDED_FROM_USE_SQL = f"""
+  not exists (
+    select 1 from photos xm
+    where xm.photo_id = op.photo_id and xm.source = 'mo'
+      and (coalesce(xm.ok_for_export, 0) = 0
+           {"" if MO_ARR_FOR_USE else "or xm.license_class = 'arr'"})
   )
 """

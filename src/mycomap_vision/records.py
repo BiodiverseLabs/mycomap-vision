@@ -5,7 +5,8 @@ SSH (host named by MV_ORG_SQL_SSH_HOST): it takes one SQL statement and answers 
 header line followed by rows.
 
 A record is a training candidate when any of its three flattened validation slots
-says 'yes'. Records validated in a fourth or later project and in none of the first
+says 'yes'. Its source (iNat, Mushroom Observer, MyCoPortal, ...) is .org's
+observations.source, stored explicitly (sources.py); ids are never read for it. Records validated in a fourth or later project and in none of the first
 three are missed; that gap is small and noted in the README.
 """
 
@@ -19,12 +20,12 @@ from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from . import config, holdouts
+from . import config, holdouts, sources
 from .dates import real_date
 
 EXPORT_SQL = """
 select row_to_json(t)::text from (
-  select observation_id, scientific_name, phylum, class, "order", family, genus, species,
+  select observation_id, source, scientific_name, phylum, class, "order", family, genus, species,
          infraspecies, latitude, longitude, observed_on, state, country, continent,
          sequence_id,
          validation_project_1, validation_status_1, validation_date_1,
@@ -98,21 +99,25 @@ def green_slots(row: dict) -> list[tuple[str | None, str | None]]:
 
 
 def build_records(rows: list[dict], exported_at: str) -> list[dict]:
-    """Collapse export rows to one record per observation_id.
+    """Collapse export rows to one record per (source, observation_id).
 
     .org can hold several rows for one observation (e.g. two sequences). When they
     disagree on the name the record is flagged as a label conflict and kept out of
-    training until someone resolves it.
+    training until someone resolves it. Rows of different sources are different
+    records even when their ids are equal (an iNat and an MO observation numbered
+    alike): the key is sources.record_key, `<source>:<id>` for every source but iNat.
+    A row without a source .org names is source 'unknown' and gets no photos.
     """
     by_id: dict[str, list[dict]] = defaultdict(list)
     for r in rows:
-        oid = str(r.get("observation_id") or "").strip()
-        if oid:
-            by_id[oid].append(r)
+        sid = str(r.get("observation_id") or "").strip()
+        if sid:
+            by_id[sources.record_key(sources.normalise(r.get("source")), sid)].append(r)
 
     records = []
     for oid, group in by_id.items():
         first = group[0]
+        org_source = (first.get("source") or "").strip() or None
         names = sorted({(g.get("scientific_name") or "").strip() for g in group} - {""})
         projects: list[str] = []
         dates: list[str] = []
@@ -126,7 +131,9 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
         seq = first.get("sequence_id")
         records.append({
             "observation_id": oid,
-            "source": "inat" if oid.isdigit() else "other",
+            "source": sources.normalise(org_source),
+            "org_source": org_source,
+            "source_id": str(first.get("observation_id")).strip(),
             "scientific_name": names[0] if len(names) == 1 else (first.get("scientific_name") or None),
             "phylum": first.get("phylum"), "class": first.get("class"),
             "order": first.get("order"), "family": first.get("family"),
@@ -173,7 +180,7 @@ def fetch_export(sql: str = EXPORT_SQL) -> str:
 
 
 _COLUMNS = [
-    "observation_id", "source", "scientific_name", "phylum", "class", "order", "family",
+    "observation_id", "source", "org_source", "source_id", "scientific_name", "phylum", "class", "order", "family",
     "genus", "species", "infraspecies", "latitude", "longitude", "observed_on", "state",
     "country", "continent", "north_america", "sequence_id", "green_projects", "validated_on",
     "label_conflict", "names_json", "exported_at",
@@ -190,14 +197,23 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
     A record frozen into a benchmark (holdouts.py) is never stored, so nothing that
     reads the records table can train on it, index it or download its photos; one
     stored by older code leaves with this export.
+
+    The first export into a manifest written by older code (sources guessed from the
+    id) also takes the iNat photos fetched for its non-iNat records off them, with an
+    audit trail, and marks the manifest migrated (sources.migrate_legacy), all in the
+    same transaction as the new records.
     """
     records, held_out = holdouts.drop_held_out(conn, records)
+    sources.ensure_schema(conn)
+    migration = None
     before = dict(conn.execute("select observation_id, scientific_name from records"))
     cols = ", ".join(f'"{c}"' for c in _COLUMNS) + ', "first_seen_at"'
     marks = ", ".join("?" for _ in _COLUMNS) + ", ?"
     # first_seen_at is set on insert only, never on update.
     updates = ", ".join(f'"{c}" = excluded."{c}"' for c in _COLUMNS if c != "observation_id")
     with conn:
+        if not sources.migrated(conn):
+            migration = sources.migrate_legacy(conn, records, config.code_version())
         conn.executemany(
             f"insert into records ({cols}) values ({marks}) "
             f"on conflict(observation_id) do update set {updates}",
@@ -214,6 +230,8 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
     }
     if held_out:
         out["held_out"] = held_out
+    if migration:
+        out["source_migration"] = migration
     return out
 
 
@@ -233,6 +251,7 @@ def export_records(conn: sqlite3.Connection) -> dict:
         "records": len(records),
         "north_america": sum(r["north_america"] for r in records),
         "inat": sum(r["source"] == "inat" for r in records),
+        "by_source": {s: sum(r["source"] == s for r in records) for s in sources.SOURCES},
         "label_conflicts": sum(r["label_conflict"] for r in records),
         "raw_file": str(raw_path),
     }

@@ -19,7 +19,7 @@ from typing import Callable, Iterable, Protocol
 import numpy as np
 from PIL import Image, ImageOps
 
-from . import config, holdouts
+from . import config, holdouts, sources
 from .storage import PhotoStore
 
 SCHEMA = """
@@ -71,8 +71,12 @@ def photos_to_embed(conn: sqlite3.Connection, backbone: str, size: str, store_lo
 
     `local_location` is kept for callers; copies downloaded before stores were recorded
     were filed under the manifest's own data folder when photo_copies was created.
-    Photos of a benchmark's held-out records (holdouts.py) are never embedded here.
+    Photos of a benchmark's held-out records (holdouts.py) are never embedded here, nor
+    photos of a record whose source Vision takes no photos from, nor a photo whose
+    source is not its record's (sources.py). Refused on a manifest whose sources are
+    still guessed from ids.
     """
+    sources.require_migrated(conn, "embedding photos")
     conn.executescript(SCHEMA)
     holdouts.ensure_schema(conn)
     na = "and r.north_america = 1" if north_america_only else ""
@@ -80,7 +84,9 @@ def photos_to_embed(conn: sqlite3.Connection, backbone: str, size: str, store_lo
       select distinct c.photo_id, c.path
       from photo_copies c
       join observation_photos op on op.photo_id = c.photo_id
+      join photos p on p.photo_id = c.photo_id
       join records r on r.observation_id = op.observation_id {na}
+        and r.source in {sources.PHOTO_SOURCES_SQL} and p.source = r.source
       left join embeddings e on e.backbone = ? and e.photo_id = c.photo_id
       where c.size = ? and c.store = ? and e.photo_id is null
         and {holdouts.not_held_out('r.observation_id')}

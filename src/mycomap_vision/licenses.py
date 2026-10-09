@@ -74,3 +74,39 @@ def looks_like_image(head: bytes) -> bool:
     if any(head.startswith(m) for m in _MAGIC):
         return True
     return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+
+
+# Mushroom Observer serves each image at fixed sizes under /images/<size>/<id>.<ext>.
+# Vision's size names map to MO's nearest: iNat's large is 1024 px, MO's "large" 960.
+MO_HOST = "mushroomobserver.org"
+MO_SIZES = {"square": "thumb", "thumb": "thumb", "small": "320", "medium": "640",
+            "large": "960", "original": "orig"}
+_MO_RE = re.compile(r"^https://mushroomobserver\.org/images/(thumb|320|640|960|1280|orig)/"
+                    r"(\d+)\.([A-Za-z0-9]+)(?:\?.*)?$")
+
+
+def mo_sized_url(url: str, size: str) -> str:
+    """An MO image URL at another size: .../images/thumb/12.jpg?1 -> .../images/960/12.jpg."""
+    if size not in MO_SIZES:
+        raise ValueError(f"unknown photo size {size!r}")
+    m = _MO_RE.match(url or "")
+    if not m:
+        raise ValueError(f"not a Mushroom Observer image URL: {url}")
+    return f"https://{MO_HOST}/images/{MO_SIZES[size]}/{m.group(2)}.{m.group(3).lower()}"
+
+
+def photo_url(source: str, url: str, size: str) -> str:
+    """The URL of a photo at `size`, by the photo's source (photos.source), never by the
+    look of the URL: an iNat photo through sized_url, an MO image through mo_sized_url."""
+    if source == "inat":
+        return sized_url(url, size)
+    if source == "mo":
+        return mo_sized_url(url, size)
+    raise ValueError(f"no photos are fetched from source {source!r}")
+
+
+def photo_extension(source: str, url: str) -> str:
+    if source == "mo":
+        m = _MO_RE.match(url or "")
+        return (m.group(3) if m else "jpg").lower()
+    return url_extension(url)
