@@ -92,7 +92,7 @@ a genus), unless a row says otherwise. "+a/−b" = records fixed / broken at spe
 | 2 | Reference label differs in substance from today's record title | 5,076 (3.5%) | — | 48.9 (+30/−15) | 53.6 (+42/−24) |
 | 3 | Title and the record's own MycoBank number name different taxa (the key uses the title, the references the number's name) | 3,453 (2.4%) | 87 / 290 | those 79 dev: 20.3 → 25.3 with 2 | 21.5 → 29.1 |
 | 4 | Writing variants left as separate labels | ~500 in minority spellings | — | 48.5 (+1/0) | 53.0 |
-| 5 | Hard synonyms never resolved | 1,014 (56 labels; 30 with the accepted name also in use) | 36 / 106 | 48.6 (+4/0) | not run (nearest is exact) |
+| 5 | Hard synonyms never resolved | 1,014 (56 labels; 30 with the accepted name also in use) | 36 / 106 | 48.6 (+4/0) | 53.1 (+3/0) |
 | 6 | Same epithet in a sister genus (mixed: real synonyms and different species) | 2,739 in 87 pairs | — | with 4 and 7: 48.5 | 53.0 |
 | 8 | Russulaceae: several labels in one DNA cluster | 484 (fine) / 1,209 (mid) of 12,369 | Russulaceae dev 264 | Russ. 42.4 → 45.8 (mid) | Russ. 49.2 → 53.4 (mid) |
 | 9 | Identical ITS under different same-genus labels (≥1 shared record) | 2,933 records outside the main label | — | 50.7 (+66/0) | 55.2 (+65/0) |
