@@ -25,7 +25,8 @@ headline: 'Development, cross-validated: nearest + species average 52.8 -> 55.1%
 verdict: The DNA-record prior at half weight adds about 2 points at species and 0.7 at genus to nearest
   + species average on development and test, but costs records whose species is known only far away;
   the iNat occurrence prior adds less and nothing on top of it.
-decision: pending
+decision: 'pending; the chosen setting is provisional, to confirm on Dataset release v1'
+reproducibility: exploratory-pre-freeze
 related:
 - occurrence-prior
 - dna-range-prior
@@ -44,6 +45,13 @@ sparse to draw ranges for sparse species, so the iNat occurrence prior (denser, 
 the hope for them. A prior must not bury true finds far from known records.
 
 ## Setup
+Reproducibility: exploratory-pre-freeze (Steve's rule, 2026-10-09: every experiment before the
+Dataset release v1 freeze is exploratory and re-runs on that release; decisions are provisional
+until then). Reference hash a19ddac8464a (fine-tuned BioCLIP 2 index on a 2026-10-09 manifest copy);
+code 31f6770 for the runs. Re-run with one command:
+`python scripts/prior_tuning/run_all.py --manifest <manifest> --out <private dir> [--confirm-test]`
+(or `--release <dir>`), which records the manifest, reference hash and code commit in run.json.
+
 Development split of heldout-2026-10-08: 2,986 records with photos (2,915 with a species answer,
 2,979 with a genus), scored against the fine-tuned BioCLIP 2 reference index as it stood on
 2026-10-09 (154,135 records; the benchmark's own runs used 154,067, and nearest, nearest + species
@@ -88,6 +96,21 @@ penalty and genus rule hardly matter: 228 settings within 10 records); combined:
 with penalty 0 or 2, iNat density 0.25, DNA place 0.5, DNA season 0.5 (1,620). The folds' own
 choices moved around a plateau (DNA place weight always 0.5; kernel 75-300 km and season
 10-40 days varied), which is why the cross-validated number is the one to quote.
+
+Fold spread (the whole-grid procedure; species top-1 by the search's count, nearest + species
+average -> the fold's own choice -> the final all-development setting):
+
+| fold | records (species) | nearest + species average | fold's choice | final setting | fold's choice |
+|---|---|---|---|---|---|
+| 1 | 598 (590) | 52.4 | 54.6 (+2.2) | 55.1 (+2.7) | place 0.5 at 300 km, season 1 at 20 d, cap log 5 |
+| 2 | 597 (586) | 56.7 | 57.0 (+0.3) | 57.3 (+0.7) | place 0.5 at 150 km, season 1 at 10 d, cap log 20 |
+| 3 | 597 (582) | 49.1 | 51.7 (+2.6) | 53.4 (+4.3) | place 0.5 at 300 km, season 1 at 20 d, cap log 5 |
+| 4 | 597 (577) | 50.4 | 53.2 (+2.8) | 54.9 (+4.5) | place 0.5 at 75 km, season 1 at 40 d, cap log 20 |
+| 5 | 597 (580) | 53.1 | 56.6 (+3.4) | 57.8 (+4.7) | place 0.5 at 300 km, season 1 at 20 d, cap log 5 |
+
+Out-of-fold gain: mean +2.3 points, range +0.3 to +3.4 (sd 1.2); positive in all five folds. The
+final setting's per-fold gains (+0.7 to +4.7, mean +3.4) are in-sample and overstate it. Every
+fold picked the DNA family and place weight 0.5; kernel, season and cap moved.
 
 Cross-validated species top-1 by the search's count, and in-sample (all of development) for
 the setting each family picks: DNA 54.6 (in-sample 55.7); iNat 53.6 (53.8); combined 55.0 (55.6);
@@ -148,6 +171,21 @@ The wide berth (no find within 1,500 km, enough finds elsewhere) flagged the tru
 records (14 at 1,000 km, 4 at 2,000 km); nearest + species average had 1 of the 6 right and every
 prior variant 0, the tuned DNA prior included, which has no berth: those species are far from
 every DNA record of theirs too.
+
+By distance from the record to the nearest DNA reference record of its true species (the
+coordinator's species-miss bands; search count, so about 0.5 point under the judge), species
+top-1 without -> with the prior, fixed / broken:
+
+| distance | dev, truths with 6+ refs (CV) | test, truths with 6+ refs (chosen) | test, every truth with a reference |
+|---|---|---|---|
+| < 100 km | n 1,687: 65.6 -> 69.0 (+99 / -42) | n 5,689: 66.7 -> 70.1 (+322 / -129) | n 6,113: 64.3 -> 67.9 (+354 / -134) |
+| 100-300 km | n 461: 53.4 -> 54.9 (+24 / -17) | n 1,583: 55.9 -> 58.3 (+101 / -63) | n 1,890: 50.1 -> 52.6 (+118 / -69) |
+| 300-1,500 km | n 246: 43.5 -> 42.7 (+12 / -14) | n 807: 42.8 -> 35.3 (+18 / -78) | n 1,306: 30.8 -> 25.4 (+21 / -91) |
+| > 1,500 km | n 23: 8.7 -> 4.3 (+0 / -1) | n 78: 20.5 -> 12.8 (+1 / -7) | n 215: 11.2 -> 7.4 (+1 / -9) |
+
+Accuracy falls steadily with distance well inside the 1,500 km berth, and the prior follows it:
+it ranks nearby species up (gains within 300 km) and costs records 300 km or more from their
+species' DNA records, which the berth never protects because the DNA prior has none.
 
 Confidence (species top-1, temperature fitted on the other folds; 10-bin ECE, NLL per record,
 share of answers stated at 99% or more): nearest + species average ECE 0.066, NLL 2.14, 1.2%;
@@ -210,10 +248,12 @@ nearer home. Confidence stays honest when the method carries its own temperature
 pending
 
 ## Next
+- Re-run on Dataset release v1 (`run_all.py --release`); until then the choice is provisional.
 - Steve: whether `nearest+mean+prior` becomes the method when a place and date are given
   (photos only stays `nearest+mean`).
-- Range edges: try a prior that boosts but penalises less (an asymmetric cap), tuned on
-  development, to win back the records far from known finds.
+- Range edges: a prior that ranks nearby species up but stops penalising past a distance
+  (an asymmetric cap, or no penalty beyond ~300 km of a species' known finds, with the 1,500 km
+  berth as the outer limit), declared and tuned on development, to win back the far records.
 - MycoMap Atlas's range maps as the place term (the pluggable source in `atlasrange.py`) once
   its rebuilt release exists; compare on the same records and range-edge bands.
 - iNat's public (possibly obscured) place instead of mycomap.org's for the same records.
