@@ -149,7 +149,7 @@ Wrong-photo records need no reason of their own: a build refuses a manifest with
 
 ARR photos with no answer yet stay **in** for training (Steve, 2026-09-28), counted apart.
 
-Review lists are TSV files: `kind` (`record`|`photo`), `key`, `reason`, `note`. The build
+Review lists are TSV files: `kind` (`record`|`photo`), `key`, `reason`, `note`. A record key may be written `inat:<id>` (the manifest key is the bare id) or `mo:<n>`; photo keys are `inat:<photo id>` / `mo:<image id>`. The build
 copies each into `inputs/` and records its sha256; a key it cannot find fails the build
 (a stale list must not silently exclude nothing).
 

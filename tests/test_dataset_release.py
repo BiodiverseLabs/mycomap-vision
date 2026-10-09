@@ -607,3 +607,11 @@ def test_the_taxonomy_snapshot_is_an_input_of_the_release(world):
     taxonomy.open_cache(cache).close()
     m2 = build(world)
     assert m2["inputs"]["manifest"]["taxonomy_sha256"] == dr.sha256_file(cache)
+
+
+def test_a_review_list_may_name_an_inat_record_as_inat_id(world, tmp_path):
+    """Review lanes write record keys as <source>:<id>; an iNat record's key is bare."""
+    lst = tmp_path / "label-audit.tsv"
+    lst.write_text("kind\tkey\treason\tnote\nrecord\tinat:2\twrong photos\t\n", encoding="utf-8")
+    m = build(world, review_files=[lst], recipes=["original"])
+    assert reasons(world, m["id"])["2"] == ("review:label-audit", None)

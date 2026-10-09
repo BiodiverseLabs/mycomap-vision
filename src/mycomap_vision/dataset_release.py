@@ -308,6 +308,8 @@ def read_review_lists(paths: list[Path]) -> tuple[dict, dict, list[dict]]:
             kind, key = (r.get("kind") or "").strip(), (r.get("key") or "").strip()
             if kind not in ("record", "photo") or not key:
                 raise ReleaseError(f"{p.name}: every row needs kind record|photo and a key")
+            if kind == "record" and key.startswith("inat:"):
+                key = key[5:]            # review lanes write <source>:<id>; iNat keys are bare
             (recs if kind == "record" else photos).setdefault(key, f"review:{name}")
         lists.append({"name": name, "file": p.name, "sha256": sha256_file(p), "rows": len(rows)})
     return recs, photos, lists
