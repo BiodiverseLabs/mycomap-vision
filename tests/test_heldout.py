@@ -917,12 +917,18 @@ def test_name_equivalence_is_reported_as_beta_beside_strict_only_when_it_exists(
         conn, tmp_path, monkeypatch):
     import sys
     import types
+
+    import mycomap_vision
     scored_world(conn, tmp_path, monkeypatch)
-    assert reported(conn, tmp_path, stamp="none")["beta_name_equivalence"] is None
+    with monkeypatch.context() as m:          # as if name_equiv weren't there
+        m.setitem(sys.modules, "mycomap_vision.name_equiv", None)
+        m.delattr(mycomap_vision, "name_equiv", raising=False)
+        assert reported(conn, tmp_path, stamp="none")["beta_name_equivalence"] is None
     fake = types.ModuleType("mycomap_vision.name_equiv")
     fake.species_match = lambda a, t: {"strict": a == t, "sl": True, "complex": True}
     fake.genus_match = lambda a, t: {"strict": a == t, "sl": True}
     monkeypatch.setitem(sys.modules, "mycomap_vision.name_equiv", fake)
+    monkeypatch.setattr(mycomap_vision, "name_equiv", fake, raising=False)
     out = reported(conn, tmp_path, stamp="beta")
     beta = out["beta_name_equivalence"]["toy/nearest"]
     assert beta["species"]["sl"]["rate"] == 1.0 and set(beta["genus"]) == {"strict", "sl"}

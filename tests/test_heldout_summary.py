@@ -10,6 +10,7 @@ import pytest
 from test_heldout import (NAME, FakeInat, fetched, frozen, predicted, reference, reported,
                           scored_world)
 
+import mycomap_vision
 from mycomap_vision import cli, config, heldout, heldout_summary
 
 ROWS = ["species strict", "species s.l.", "species complex (beta)", "genus strict", "genus s.l."]
@@ -29,6 +30,8 @@ def with_name_equiv(monkeypatch):
                                        "complex": a.split()[:1] == t.split()[:1]}
     fake.genus_match = lambda a, t: {"strict": a == t, "sl": a[:3] == t[:3]}
     monkeypatch.setitem(sys.modules, "mycomap_vision.name_equiv", fake)
+    # The real module is merged: the package attribute is found before sys.modules.
+    monkeypatch.setattr(mycomap_vision, "name_equiv", fake, raising=False)
     return fake
 
 
@@ -65,6 +68,8 @@ def test_each_model_gets_top_1_3_5_10_by_strict_s_l_and_complex_rows(conn, tmp_p
 
 
 def test_without_name_equiv_the_s_l_rows_say_it_is_not_merged(conn, tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "mycomap_vision.name_equiv", None)
+    monkeypatch.delattr(mycomap_vision, "name_equiv", raising=False)
     vision_only(conn, tmp_path, monkeypatch)
     rows = reported(conn, tmp_path)["summary"]["models"]["toy/nearest"]["rows"]
     assert rows["species s.l."] == {"n": 2, "note": heldout_summary.EQUIV_MISSING}
