@@ -95,8 +95,39 @@ export function DataPage() {
             </p>
           </>
         )}
+        <GetTheImages />
       </div>
     </>
+  );
+}
+
+/** How anyone gets exactly the images a model saw (Steve, 2026-10-09): originals are kept, each
+ *  model input is derived by a published recipe and checked by its hash. CC photos only. The
+ *  derive service comes with dataset release v1 (the release builder); until then this says so. */
+function GetTheImages() {
+  return (
+    <Card data-testid="card-get-images">
+      <CardHeader><CardTitle className="text-base">Get the images</CardTitle></CardHeader>
+      <CardContent className="space-y-2 text-sm text-[#5c4a3a]">
+        <p>
+          Every original photo is kept. The image a model actually saw is made from its original by
+          a fixed, published recipe: how it is resized and cropped, the size, the JPEG quality, and
+          the software and version that did it. Each dataset release lists that recipe and a
+          checksum (SHA-256) of every original and of every image made from it.
+        </p>
+        <p>
+          So anyone can regenerate exactly the images behind a published result and check them: run
+          the recipe on the original, and the checksum must match the one in the release.
+        </p>
+        <p>
+          Only openly licensed (Creative Commons) photos can be fetched this way. Photos whose
+          owners reserve all rights are used with their permission and are not redistributed.
+        </p>
+        <p className="text-muted-foreground">
+          Available with dataset release v1. The address and an example will appear here then.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 
