@@ -91,14 +91,19 @@ def likely_set(probs: np.ndarray, floor: float, cap: int = MAX_SET) -> tuple[lis
 
 def set_metrics(rows: list[tuple[np.ndarray, int | None]], floor: float,
                 cap: int = MAX_SET) -> dict:
-    """Coverage and mean size of the likely sets over (probabilities, true index) rows."""
+    """Coverage and mean size of the likely sets over (probabilities, true index) rows.
+    `coverage` counts a true name the reference set lacks as a miss (the stated figure);
+    `conditional_coverage` is over the rows whose true name it has."""
     hits, sizes = 0, []
     for probs, true_idx in rows:
         chosen, _ = likely_set(probs, floor, cap)
         sizes.append(len(chosen))
         hits += true_idx is not None and true_idx in chosen
     n = len(rows)
+    known = sum(t is not None for _, t in rows)
     return {"n": n, "coverage": round(hits / n, 4) if n else None,
+            "conditional_coverage": round(hits / known, 4) if known else None,
+            "n_known": known,
             "mean_size": round(float(np.mean(sizes)), 2) if n else None}
 
 
@@ -114,8 +119,12 @@ def crosscheck(rows: list[tuple[np.ndarray, int | None]], coverage: float,
             return None
         checks.append(set_metrics(b, floor, cap))
     n = sum(c["n"] for c in checks)
+    known = sum(c["n_known"] for c in checks)
     return {"n": n,
             "coverage": round(sum(c["coverage"] * c["n"] for c in checks) / n, 4),
+            "conditional_coverage": round(sum((c["conditional_coverage"] or 0) * c["n_known"]
+                                              for c in checks) / known, 4) if known else None,
+            "n_known": known,
             "mean_size": round(sum(c["mean_size"] * c["n"] for c in checks) / n, 2)}
 
 

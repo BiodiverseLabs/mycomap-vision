@@ -31,6 +31,14 @@ def test_the_set_is_every_name_above_the_floor_and_always_the_top_one():
     assert likely.likely_set(p, 0.01, cap=2) == ([1, 2], True)
 
 
+def test_coverage_counts_unknown_names_as_misses_and_conditional_coverage_leaves_them_out():
+    p = np.array([0.7, 0.2, 0.1])
+    rows = [(p, 0), (p, 0), (p, 2), (p, None)]       # hit, hit, miss, a name it lacks
+    m = likely.set_metrics(rows, 0.5)
+    assert m["coverage"] == 0.5 and m["conditional_coverage"] == pytest.approx(2 / 3, abs=1e-4)
+    assert m["n"] == 4 and m["n_known"] == 3
+
+
 def test_the_floor_comes_from_the_finite_sample_quantile():
     scores = [i / 20 for i in range(0, 20)]                # 0.00 .. 0.95
     assert likely.fit_floor(scores, 0.9) == pytest.approx(1 - 0.9)   # ceil(21*0.9)=19th

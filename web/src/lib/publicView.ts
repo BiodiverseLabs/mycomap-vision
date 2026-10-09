@@ -45,6 +45,17 @@ export function headline(runs: ScoreRun[], served: string[], method = "nearest")
            nReference: ours.n_reference, ours, inat };
 }
 
+/** The likely list's wording, in one place: Steve has not ruled on it yet. */
+export const LIKELY_COPY = {
+  coverage: (rank: string, coverage: number) =>
+    `The right ${rank} is in this list ${coverageWords(coverage)}, in tests on the newest ` +
+    "DNA-verified records.",
+  /** Shown under the species list: the stated coverage counts these as misses. */
+  noReference: "A species with no DNA-verified reference yet can't appear in any list.",
+  capped: "More names qualified than are shown.",
+  alsoPossible: "Also possible, less likely:",
+};
+
 /** How often a likely list held the right name, in words. */
 export function coverageWords(coverage: number): string {
   const tenths = Math.round(coverage * 10);

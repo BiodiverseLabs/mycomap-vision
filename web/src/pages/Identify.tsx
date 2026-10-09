@@ -26,7 +26,7 @@ import {
   type Specimen,
 } from "@/lib/api";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
-import { coverageWords, identifyGate, modelName } from "@/lib/publicView";
+import { identifyGate, LIKELY_COPY, modelName } from "@/lib/publicView";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -659,13 +659,13 @@ function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; ca
         ))}
       </div>
       <p className="mt-2 text-xs text-muted-foreground" data-testid={`text-coverage-${rank}`}>
-        The right {RANK_WORD[rank]} is in this list{" "}
-        {coverageWords(set.coverage)}, in tests on the newest DNA-verified records.
-        {set.capped ? " More names qualified than are shown." : ""}
+        {LIKELY_COPY.coverage(RANK_WORD[rank], set.coverage)}
+        {rank === "species" ? ` ${LIKELY_COPY.noReference}` : ""}
+        {set.capped ? ` ${LIKELY_COPY.capped}` : ""}
       </p>
       {others.length > 0 && (
         <p className="mt-1 text-xs text-muted-foreground">
-          Also possible, less likely:{" "}
+          {LIKELY_COPY.alsoPossible}{" "}
           {others.map((c, i) => (
             <span key={c.name}>
               {i > 0 && ", "}
