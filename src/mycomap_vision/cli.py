@@ -621,6 +621,36 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_obsets(conn, args) -> None:
+    """Observation-set scoring experiment (obsets.py, obsets_head.py). The manifest is open
+    read-only: answers go to a JSON / CSV under the benchmark's reports, never to tables."""
+    from pathlib import Path
+
+    from . import heldout, obsets, obsets_head
+    from .heldout_summary import format_summary
+    out_dir = heldout.bench_dir(conn, args.name) / "reports"
+    log = lambda s: print(s, file=sys.stderr)  # noqa: E731
+    exclude = obsets.read_id_list(Path(args.exclude)) if args.exclude else None
+    tag = "-clean" if exclude else ""
+    if args.action == "time-slice":
+        ref = obsets.load_reference(conn, exclude=exclude)
+        print(json.dumps(obsets.time_slice_check(ref, args.until), indent=2))
+        return
+    if args.action == "step1":
+        out = obsets.run_step1(conn, args.name, args.split, out_dir=out_dir,
+                               stem=f"obsets-step1-{args.split}{tag}", exclude=exclude, log=log)
+    else:
+        cfg = obsets_head.TrainConfig(project=not args.attention_only)
+        out = obsets_head.run_step2(conn, args.name, args.split, cfg=cfg, out_dir=out_dir,
+                                    stem=f"obsets-step2{'-attnonly' if args.attention_only else ''}-"
+                                         f"{args.split}{tag}", exclude=exclude,
+                                    log=log)
+    print(format_summary(out["summary"]))
+    print()
+    print(obsets.format_paired(out))
+    print(f"-> {out['file']}")
+
+
 def print_heldout_report(out: dict) -> None:
     """The standard summary as text (every table with its n), then as JSON, then where the
     full report (CIs, paired tests, calibration, breakdowns, label audit) was written."""
@@ -912,6 +942,27 @@ def main(argv: list[str] | None = None) -> int:
     hsub.add_parser("list", help="held-out records per benchmark, and any the records "
                                  "table holds (should be 0)")
 
+    p = sub.add_parser("obsets", help="experiment: score observations as photo sets "
+                                      "(obsets.py; read-only, writes a report file only)")
+    osub = p.add_subparsers(dest="action", required=True)
+    for action, text in (("step1", "set-to-set matching, no training"),
+                         ("step2", "train the attention set head on reference records, then "
+                                   "score")):
+        q = osub.add_parser(action, help=text)
+        q.add_argument("--name", default="heldout-2026-10-08")
+        q.add_argument("--split", choices=["dev", "test"], default="dev",
+                       help="dev to choose; test only to confirm a choice made on dev")
+        if action == "step2":
+            q.add_argument("--attention-only", action="store_true",
+                           help="no learned projection after the pooling")
+    q = osub.add_parser("time-slice", help="check Step 1 blends on the reference's newest "
+                                           "records against the older ones")
+    q.add_argument("--name", default="heldout-2026-10-08")
+    q.add_argument("--until", default="2026-09-07")
+    for q in osub.choices.values():
+        q.add_argument("--exclude", help="a file of observation ids (one per line) to leave "
+                                         "out of the reference and the head's training data")
+
     p = sub.add_parser("heldout", help="held-out benchmarks: freeze, fetch, predict, inat, "
                                        "report (heldout.py)")
     hsub = p.add_subparsers(dest="action", required=True)
@@ -997,7 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
     if config.RELEASE_ROOT and not config.DATA_DIR.is_dir():
         parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
     read_only = {"name-spellings": cmd_name_spellings, "fetch-taxonomy": cmd_fetch_taxonomy,
-                 "taxonomy": cmd_taxonomy, "guests": cmd_guests}
+                 "taxonomy": cmd_taxonomy, "guests": cmd_guests, "obsets": cmd_obsets}
     if args.command in read_only:             # the manifest is opened as it is, read-only
         conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
         read_only[args.command](conn, args)
