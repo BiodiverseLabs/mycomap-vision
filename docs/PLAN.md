@@ -323,6 +323,36 @@ What this says:
 - Combining photos is not the problem (nearest-mix gave nothing, 2026-09-29) and neither
   is the trained-head route (balanced softmax lost badly, 2026-09-28).
 
+Depth is a moving target (Steve, 2026-10-09). Every week's green records add references
+to species already known, so species keep moving from the sparse bands into the
+well-sampled ones; fixing sparse-species accuracy is partly something time does for us,
+and the work is iterative. Species-labelled records with photos, by validation date:
+
+| reference set up to | records | species | species with 20+ records |
+|---|---|---|---|
+| 2025-03-07 | 63,796 | 12,141 | 703 (5.8%) |
+| 2025-09-07 | 84,858 | 14,056 | 1,022 (7.3%) |
+| 2026-03-07 | 108,421 | 15,653 | 1,350 (8.6%) |
+| 2026-06-07 | 139,086 | 17,013 | 1,771 (10.4%) |
+| 2026-09-07 | 151,522 | 17,935 | 1,919 (10.7%) |
+
+The well-sampled group nearly tripled in 18 months. New names keep arriving too, and the
+share of a weekly batch whose species is sparse depends on which projects reported that
+week (in the 28 days after each date above, 31%, 21%, 14%, 37% and 32% of test records
+had 0-4 references), so the shift shows in the reference set more than in any one batch.
+What follows from it:
+- Judge methods by depth band, not only overall: the overall number moves with the
+  band mix of each batch and with time. A method has to hold up in each band, so its
+  gains carry over as species move between them.
+- A depth penalty would cost more every month, since it taxes the bands that keep
+  growing. `nearest+mean` gains most in 5-19 and 20-99, the bands sparse species move
+  into next, and doesn't lose at 100+.
+- Settings fitted on one comparison (k and weight here, the per-method temperatures and
+  likely-set floors) are fitted to that comparison's depth mix. Refit them on each new
+  comparison and keep an eye on the weekly prospective tests as the mix changes.
+- The 1-4 band's ceiling isn't fixed: those species become 5-19 species as records
+  arrive, and that's where both methods do far better.
+
 `nearest+mean` (methods.NearestAndMean; k = 2 and weight 0.6 chosen on 4ef7b0, on a
 plateau: 0.5-0.65 with top-2 all give 38.2-38.4%). Through `evaluate.evaluate` on
 4ef7b0, top-1 / top-5:
