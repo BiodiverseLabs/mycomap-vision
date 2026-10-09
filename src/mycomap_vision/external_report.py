@@ -195,14 +195,13 @@ def stored_answers(conn: sqlite3.Connection, bench: str, ids: set[str]) -> tuple
 
 
 def deepest(result: dict, full: dict | None) -> dict:
-    """A stored answer, with the full identify result's ranks where they go deeper."""
-    if not full:
+    """A stored answer, or the full identify result's ranks when it was kept (answers.sqlite,
+    the same reference): they were asked TOP_K deep, so a shorter list there is every
+    candidate the method had (a range prior can leave fewer), not a shallow store."""
+    ranks = (full or {}).get("ranks")
+    if not ranks:
         return result
-    ranks = full.get("ranks") or {}
-    if len(ranks.get("species") or []) > len(result.get("species") or []):
-        return {**result, **{r: ranks.get(r) or [] for r in heldout.RANKS},
-                "top_k": max(len(ranks.get("species") or []), 1)}
-    return result
+    return {**result, **{r: ranks.get(r) or [] for r in heldout.RANKS}, "top_k": heldout.TOP_K}
 
 
 def restrict(result: dict, vocab: Vocabulary, depth: int = max(KS)) -> tuple[dict, int]:

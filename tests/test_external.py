@@ -198,6 +198,15 @@ def test_restricting_vision_keeps_only_the_models_names_in_visions_order():
     assert left == 2 and got["genus"] == answer["genus"]
 
 
+def test_visions_full_answer_counts_ten_deep_even_when_the_method_had_fewer_names():
+    stored = {"species": [{"name": f"S s{i}"} for i in range(5)], "genus": [], "family": []}
+    full = {"ranks": {"species": [{"name": f"S s{i}"} for i in range(7)],
+                      "genus": [{"name": "S"}], "family": []}}
+    got = external_report.deepest(stored, full)
+    assert got["top_k"] == 10 and len(got["species"]) == 7
+    assert external_report.deepest(stored, None) is stored
+
+
 # --- a held-out split: JSONL first, then the import -----------------------------------------------
 
 def bench_world(conn, tmp_path, monkeypatch, **freeze):
