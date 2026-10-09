@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import config
+from . import config, likely
 from .embed import normalise
 from .serving import map_embeddings
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
@@ -296,6 +296,7 @@ class Identifier:
             per_photo = (np.stack([self._species_scores(query[i:i + 1], context)
                                    for i in range(n_q)]) if n_q > 1 else scores[None, :])
         ranks = self._ranks(scores, top_k)
+        likely_sets = self._likely(scores)
         # Records are ranked by the same rule as species: for each of your photos,
         # its best match among the record's photos, averaged over your photos.
         per_record = np.maximum.reduceat(sims, self.rec_starts, axis=1)   # (q, records)
@@ -321,6 +322,7 @@ class Identifier:
                           "photos": self.embedded},
             "photos": n_q,
             "ranks": ranks,
+            "likely": likely_sets,
             "specimens": self._specimens(picks, infos, may_show),
             "per_photo": photos,
             "hints": improvement_hints(n_q, ranks, self.index.ref_count.get(top_species, 0)),
@@ -357,6 +359,32 @@ class Identifier:
                            "position_of": self._position(with_position_of.get(rank), names,
                                                          rs, finite, conf)}
         return ranks
+
+    def _likely(self, scores: np.ndarray) -> dict:
+        """Each rank's likely set (likely.py): the names at or above the rank's fitted
+        probability floor (and the top one), which held the right name about `coverage` of
+        the time in this model's newest test. Ranks without a fitted set (no comparison
+        yet, or no useful target reached) are left out."""
+        fitted = (self.calibration or {}).get("sets") or {}
+        out = {}
+        for rank in RANKS:
+            fit = fitted.get(rank)
+            if not fit:
+                continue
+            names = self.index.labels[rank]
+            probs = likely.probabilities(rank_scores(scores, self.index, rank),
+                                         self.temperature(rank))
+            chosen, capped = likely.likely_set(probs, fit["floor"])
+            out[rank] = {
+                "coverage": fit["coverage"],
+                # How often such a set held the truth on records it was not fitted on.
+                "checked_coverage": (fit.get("crosscheck") or {}).get("coverage"),
+                "names": [{"name": names[i], "confidence": round(float(probs[i]), 4),
+                           "reference_records": self.rank_counts[rank][names[i]]}
+                          for i in chosen],
+                "capped": capped,
+            }
+        return out
 
     @staticmethod
     def _position(name: str | None, names: list[str], rs: np.ndarray, finite: np.ndarray,

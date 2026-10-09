@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { headline, identifyGate, modelName, sendWaitingInLine } from "./publicView";
+import { coverageWords, headline, identifyGate, modelName, sendWaitingInLine } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -12,6 +12,12 @@ test("a signed-out visitor is asked to sign in before picking photos, only when 
   assert.equal(identifyGate(me("off", null)), "ready", "an open site needs no account");
   assert.equal(identifyGate(undefined), "checking");
   assert.equal(identifyGate(undefined, true), "ready", "unknown: the server decides");
+});
+
+test("a likely list's coverage reads as a plain frequency", () => {
+  assert.equal(coverageWords(0.9), "about 9 times in 10");
+  assert.equal(coverageWords(0.5), "about half the time");
+  assert.equal(coverageWords(0.55), "about 55% of the time");
 });
 
 test("visitors read a model's name, not its file name", () => {
