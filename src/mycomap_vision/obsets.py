@@ -114,9 +114,14 @@ def load_reference(conn: sqlite3.Connection, backbone: str = BACKBONE,
 
 
 def read_id_list(path: Path) -> set[str]:
-    """One observation id per line (blank lines and '#' comments ignored)."""
-    return {line.strip() for line in Path(path).read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.startswith("#")}
+    """Observation ids, one per line: a plain list, or a TSV whose first column is the id
+    (a header row 'observation_id', blank lines and '#' comments are skipped)."""
+    out = set()
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        field = line.split("\t", 1)[0].strip()
+        if field and not field.startswith("#") and field != "observation_id":
+            out.add(field)
+    return out
 
 
 def reference_hash(ref: Reference) -> str:
@@ -466,6 +471,60 @@ def fit_prior(ref: Reference):
     return prior
 
 
+class TorchPrior:
+    """prior.RangeSeasonPrior.log_prior in torch (float64, on the GPU when there is one):
+    the same arithmetic over every reference record, ~100x faster per record than numpy
+    on the laptop, and clear of the numpy-with-torch crash in this venv."""
+
+    def __init__(self, prior, device: str | None = None):
+        torch = _torch()
+        self.torch, self.p = torch, prior
+        self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        t = lambda a: torch.from_numpy(np.asarray(a)).to(self.dev)  # noqa: E731
+        self.sp, self.ge = t(prior.sp), t(prior.ge)
+        self.lat, self.lon, self.doy = t(prior.lat), t(prior.lon), t(prior.doy)
+        self.genus_of_species = t(prior.genus_of_species)
+
+    def _log_ratio(self, weights, known):
+        torch, p = self.torch, self.p
+        w = torch.where(known, weights, torch.zeros_like(weights))
+        n_all = max(int(known.sum()), 1)
+        overall = float(w.sum()) / n_all
+        if overall <= 0:
+            return torch.zeros(p.n_species, dtype=torch.float64, device=self.dev)
+        n_sp = torch.bincount(self.sp[known], minlength=p.n_species).double()
+        k_sp = torch.bincount(self.sp, weights=w, minlength=p.n_species)
+        n_ge = torch.bincount(self.ge[known], minlength=p.n_genera).double()
+        k_ge = torch.bincount(self.ge, weights=w, minlength=p.n_genera)
+        r_ge = (k_ge / overall + p.shrink * 1.0) / (n_ge + p.shrink)
+        r_up = r_ge[self.genus_of_species]
+        r_sp = (k_sp / overall + p.shrink * r_up) / (n_sp + p.shrink)
+        return torch.log(torch.clamp(r_sp, min=1e-6))
+
+    def __call__(self, ctx) -> np.ndarray:
+        torch, p = self.torch, self.p
+        out = torch.zeros(p.n_species, dtype=torch.float64, device=self.dev)
+        if ctx is None:
+            return out.cpu().numpy()
+        if ctx.latitude is not None and ctx.longitude is not None:
+            from .prior import EARTH_KM
+            known = ~torch.isnan(self.lat)
+            lats, lons = torch.nan_to_num(self.lat), torch.nan_to_num(self.lon)
+            p1 = torch.deg2rad(torch.tensor(float(ctx.latitude), dtype=torch.float64))
+            p2 = torch.deg2rad(lats)
+            dphi, dlmb = p2 - p1, torch.deg2rad(lons - float(ctx.longitude))
+            a = torch.sin(dphi / 2) ** 2 + torch.cos(p1) * torch.cos(p2) * torch.sin(dlmb / 2) ** 2
+            d = 2 * EARTH_KM * torch.arcsin(torch.sqrt(torch.clamp(a, 0, 1)))
+            out += self._log_ratio(torch.exp(-0.5 * (d / p.bandwidth_km) ** 2), known)
+        doy = ctx.day_of_year
+        if doy is not None:
+            known = ~torch.isnan(self.doy)
+            d = torch.abs(torch.nan_to_num(self.doy) - doy)
+            d = torch.minimum(d, 365 - d)
+            out += self._log_ratio(torch.exp(-0.5 * (d / p.bandwidth_days) ** 2), known)
+        return torch.clamp(out, -p.cap, p.cap).cpu().numpy()
+
+
 def with_prior(nearest: np.ndarray, log_prior: np.ndarray) -> np.ndarray:
     """nearest+prior's score: nearest as log-probabilities (methods.log_softmax, done in
     torch here) plus the record's range-and-season score (prior.log_prior)."""
@@ -484,10 +543,8 @@ def run_step1(conn: sqlite3.Connection, name: str, split: str = "dev", backbone:
         f"{len(ref.index.species):,} groups ({time.time() - t0:.0f} s)")
     queries = benchmark_queries(conn, name, split, ref)[:limit]
     log(f"  {split}: {len(queries):,} records to answer")
-    # Every record's range-and-season score first: in this venv numpy's trigonometry
-    # (prior.haversine_km) can crash the process once torch is loaded (OpenBLAS with torch).
-    prior = fit_prior(ref)
-    priors = [prior.log_prior(heldout.context_for(rec, "org")) for rec, _ in queries]
+    prior = TorchPrior(fit_prior(ref))
+    priors = [prior(heldout.context_for(rec, "org")) for rec, _ in queries]
     engine = SetEngine(ref)
     results: dict[tuple, dict[str, dict]] = {}
 

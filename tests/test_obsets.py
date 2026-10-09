@@ -226,6 +226,10 @@ def test_an_id_list_reads_one_id_per_line(tmp_path):
     path = tmp_path / "ids.txt"
     path.write_text("# audit\n101\n\n202\n", encoding="utf-8")
     assert obsets.read_id_list(path) == {"101", "202"}
+    tsv = tmp_path / "ids.tsv"
+    tsv.write_text("observation_id\treason\n101\tnot an iNat id\n303\twrong fungus\n",
+                   encoding="utf-8")
+    assert obsets.read_id_list(tsv) == {"101", "303"}
 
 
 def test_the_head_blend_check_scores_newer_records_against_older_ones_only():
@@ -284,3 +288,19 @@ def test_nearest_plus_prior_here_is_the_served_nearest_plus_prior():
     served.base.base.scorer.ref = np.asarray(vecs[ref.index.cols], dtype=np.float16)
     assert np.allclose(got, served.species_scores(q, ctx), atol=0.1)
     assert np.argmax(got) == np.argmax(served.species_scores(q, ctx))
+
+
+def test_the_torch_range_prior_equals_the_served_one():
+    from mycomap_vision.prior import Context
+    rng = np.random.default_rng(8)
+    ref, vecs, recs = _random_reference()
+    for i, r in enumerate(recs):
+        if i % 7:                                   # some records with no place or date
+            r.latitude, r.longitude = float(rng.uniform(30, 50)), float(rng.uniform(-120, -70))
+            r.observed_on = f"2025-{rng.integers(1, 13):02d}-{rng.integers(1, 28):02d}"
+    ref = obsets.build_reference("toy", np.arange(len(vecs)), vecs, recs)
+    served = obsets.fit_prior(ref)
+    here = obsets.TorchPrior(served, device="cpu")
+    for ctx in (Context(40.0, -100.0, "2025-06-10"), Context(45.0, -75.0, None),
+                Context(None, None, "2025-01-03"), None):
+        assert np.allclose(here(ctx), served.log_prior(ctx), atol=1e-9)
