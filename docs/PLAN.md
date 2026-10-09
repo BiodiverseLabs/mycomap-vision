@@ -136,8 +136,13 @@ Two variants of each release:
 **Model weights (Steve, 2026-10-09).** Internal benchmarking models may train on all photos,
 all-rights-reserved included. The **final public model** trains only on public-trainable photos
 (CC, NC included, or permission granted); its model card says so and lists the photo set by its
-release hash. Still open: where the public files live (Zenodo with a DOI is the usual choice for a
-paper).
+release hash.
+
+**Where the public files live: Zenodo, with a DOI (DECIDED, Steve 2026-10-09).** Each public
+release (CC-only) is deposited as a Zenodo record with its own DOI; a new release is a new version
+of the same Zenodo concept record. The release builder's `mv dataset public` writes a Zenodo-ready
+bundle: the record metadata (title, creators, description, version, related identifiers such as the
+paper, keywords), the files list with checksums, and the licence of every file; CC photos only.
 
 ## Phase 0: data and a first honest number (in progress)
 

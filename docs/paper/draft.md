@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.4.1, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.4.2, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -559,7 +559,7 @@ full-precision model is served.
 
 *[Draft.]* Dataset release v1: record identifiers (iNaturalist and Mushroom Observer), labels and
 their provenance, photo licences and public URLs, the inclusion list with reasons, the splits, the
-dataset card and per-record predictions will be deposited [Zenodo, DOI]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
+dataset card and per-record predictions will be deposited on Zenodo [DOI to be issued]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
 Zenodo DOI]. Photographs remain with their owners under their licenses; all-rights-reserved photo
 files are not redistributed. The released model is trained only on openly licensed (CC, including
 non-commercial) and permission-granted photographs, as its model card states. Coordinates are not
@@ -813,6 +813,7 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.4.2 (9 Oct 2026).** Public files on Zenodo with a DOI (Steve).
 - **0.4.1 (9 Oct 2026).** Steve's decisions: the 13,145 held-out records join v1 training (a
   development benchmark only; before/after and the paper's numbers on a new sealed set); public
   scope approved; the public model trains only on CC and permission-granted photos; an input-size
