@@ -359,6 +359,23 @@ def cmd_scoreboard_import(conn, args) -> None:
     print(json.dumps(result, indent=2))
 
 
+def cmd_calibrate_sets(conn, args) -> None:
+    """Fit likely sets (likely.py) into a comparison saved before they existed."""
+    from . import evaluate
+    done = evaluate.calibrate_sets(conn, args.comparison, args.backbone, args.method)
+    for d in done:
+        print(f"{d['backbone']} / {d['method']}")
+        for rank, s in d["sets"].items():
+            if not s:
+                print(f"  {rank:8} no short enough set reaches 50%")
+                continue
+            check = s.get("crosscheck") or {}
+            print(f"  {rank:8} target {s['coverage']:.0%} (asked {s['requested']:.0%}), "
+                  f"floor {s['floor']:.4f}; on held-back halves: coverage "
+                  f"{check.get('coverage')}, mean size {check.get('mean_size')}; "
+                  f"true names no list could hold: {s['unlistable_share']:.1%} of {s['n']:,}")
+
+
 def cmd_scoreboard(conn, args) -> None:
     from . import evaluate
     print_scoreboard(evaluate.scoreboard(conn, args.comparison))
@@ -720,6 +737,11 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("scoreboard", help="saved comparison results")
     p.add_argument("--comparison", help="only this comparison id")
 
+    p = sub.add_parser("calibrate-sets", help="fit likely sets (a list holding the right name "
+                       "about 9 times in 10) into a saved comparison's own rows")
+    p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
+    p.add_argument("--backbone", help="only this backbone's rows")
+    p.add_argument("--method", help="only this method's rows")
     p = sub.add_parser("scoreboard-export", help="one model's rows of a comparison as JSON "
                        "(e.g. the iNat baseline, for the server box)")
     p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
@@ -823,6 +845,7 @@ def main(argv: list[str] | None = None) -> int:
         "nightly": cmd_nightly,
         "scoreboard": cmd_scoreboard,
         "scoreboard-export": cmd_scoreboard_export,
+        "calibrate-sets": cmd_calibrate_sets,
         "scoreboard-import": cmd_scoreboard_import,
         "models": cmd_models,
         "serve": cmd_serve,

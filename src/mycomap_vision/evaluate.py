@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config, guests, names, taxonomy
+from . import config, guests, likely, names, taxonomy
 from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
@@ -253,9 +253,11 @@ def fit_method(vectors: np.ndarray, ref: list[Record], method: str):
 
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
-             fitted=None) -> dict:
+             fitted=None, sets: bool = True) -> dict:
     """Score the test records. `fitted` (from fit_method) skips refitting, which matters
-    for the trained methods."""
+    for the trained methods. With `sets`, each rank's calibration also fits its likely
+    set (likely.py): the probability floor for the highest useful coverage up to 90%,
+    with that coverage cross-checked on held-back halves."""
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
@@ -265,6 +267,9 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     position = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
     nll = {rank: np.zeros(len(T_GRID)) for rank in RANKS}
     n_cal = Counter()
+    # Likely sets (likely.py) are fitted after the temperature: every scored record's rank
+    # scores and true position (None: a name the reference set lacks, never listable).
+    kept = {rank: [] for rank in RANKS}
     # Weekly batches are lumpy (one big project, one prolific observer), so results
     # are also kept per project and per observer at genus and species.
     groups = {"project": defaultdict(Counter), "observer": defaultdict(Counter)}
@@ -283,6 +288,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             if t in position[rank]:
                 nll[rank] += nll_by_temperature(rs, position[rank][t])
                 n_cal[rank] += 1
+            if sets:
+                kept[rank].append((rs.astype(np.float32), position[rank].get(t)))
             top = top_labels(rs, names[rank], top_k)
             for key in ("all", b):
                 c = tally[rank][key]
@@ -306,6 +313,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
                "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
         for rank in RANKS if n_cal[rank]}
+    for rank, cal in out["calibration"].items():
+        if kept[rank]:
+            rows = [(likely.probabilities(rs, cal["temperature"]), t) for rs, t in kept[rank]]
+            fit = likely.fit_and_check(rows)
+            if fit:
+                cal["sets"] = fit
     return out
 
 
@@ -322,7 +335,8 @@ def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> 
         return None
     return {"run_id": row[0], "comparison_id": row[1],
             "temperatures": {rank: c["temperature"] for rank, c in cal.items()},
-            "n": {rank: c["n"] for rank, c in cal.items()}}
+            "n": {rank: c["n"] for rank, c in cal.items()},
+            "sets": {rank: c["sets"] for rank, c in cal.items() if c.get("sets")}}
 
 
 SCOREBOARD_SCHEMA = """
@@ -476,6 +490,52 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
                                             / max(1, len(test)), 3),
             "shared_photos": shared.shared_photos, "record_set": shared.record_set,
             "backbones": list(shared.loaded), "runs": runs}
+
+
+def calibrate_sets(conn: sqlite3.Connection, comparison_id: str, backbone: str | None = None,
+                   method: str | None = None, embeddings_root=None, log=print) -> list[dict]:
+    """Add likely-set fits (likely.py) to a comparison saved before they existed, in its
+    own rows: same comparison, same records, nothing else changed. Refuses when the
+    records have changed since, or when re-scoring them does not give the published
+    accuracy and temperature (then something else changed, and mv compare should run)."""
+    conn.executescript(SCOREBOARD_SCHEMA)
+    rows = conn.execute("select id, backbone, method, test_days, record_set, species_top1, "
+                        "report_json from eval_runs where comparison_id = ? and backbone not "
+                        "like 'external:%' order by id", (comparison_id,)).fetchall()
+    rows = [r for r in rows if (backbone is None or r[1] == backbone)
+            and (method is None or r[2] == method)]
+    if not rows:
+        raise ValueError(f"no rows to calibrate in comparison {comparison_id}")
+    shared = shared_records(conn, comparison_backbones(conn, comparison_id), rows[0][3],
+                            embeddings_root=embeddings_root)
+    if shared.record_set != rows[0][4]:
+        raise RuntimeError(f"the records of comparison {comparison_id} have changed since it "
+                           "ran; run mv compare again instead")
+    done = []
+    for run_id, b, m, _days, _set, species_top1, report_json in rows:
+        ids, vecs = shared.loaded[b]
+        row_of = {int(p): i for i, p in enumerate(ids.tolist())}
+        ref_b, test_b = with_rows(shared.ref, row_of), with_rows(shared.test, row_of)
+        log(f"  {b} / {m}: {len(test_b):,} test records")
+        res = evaluate(vecs, ref_b, test_b, method=m, fitted=fit_method(vecs, ref_b, m))
+        if species_top1 is not None and abs(top1(res, "species") - species_top1) > 1e-4:
+            raise RuntimeError(f"{b} / {m} scores {top1(res, 'species')} at species now, "
+                               f"{species_top1} when published; run mv compare again")
+        report = json.loads(report_json)
+        cal = report["all_photos"].setdefault("calibration", {})
+        for rank, new in res["calibration"].items():
+            old = cal.get(rank)
+            if old and abs(old["temperature"] - new["temperature"]) > 1e-9:
+                raise RuntimeError(f"{b} / {m}: the {rank} temperature differs from the "
+                                   "published one; run mv compare again")
+            if old is not None and new.get("sets"):
+                old["sets"] = new["sets"]
+        with conn:
+            conn.execute("update eval_runs set report_json = ? where id = ?",
+                         (json.dumps(report), run_id))
+        done.append({"backbone": b, "method": m,
+                     "sets": {rank: c.get("sets") for rank, c in cal.items()}})
+    return done
 
 
 def comparison_backbones(conn: sqlite3.Connection, comparison_id: str) -> list[str]:

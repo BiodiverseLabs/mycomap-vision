@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { headline, identifyGate, modelName, sendWaitingInLine } from "./publicView";
+import { coverageWords, headline, identifyGate, LIKELY_COPY, modelName, sendWaitingInLine } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -12,6 +12,18 @@ test("a signed-out visitor is asked to sign in before picking photos, only when 
   assert.equal(identifyGate(me("off", null)), "ready", "an open site needs no account");
   assert.equal(identifyGate(undefined), "checking");
   assert.equal(identifyGate(undefined, true), "ready", "unknown: the server decides");
+});
+
+test("a likely list's coverage reads as a plain frequency", () => {
+  assert.equal(coverageWords(0.9), "about 9 times in 10");
+  assert.equal(coverageWords(0.5), "about half the time");
+  assert.equal(coverageWords(0.55), "about 55% of the time");
+});
+
+test("the list's sentence states the tested coverage for its rank", () => {
+  assert.equal(LIKELY_COPY.coverage("genus", 0.9),
+    "The right genus is in this list about 9 times in 10, in tests on the newest DNA-verified records.");
+  assert.match(LIKELY_COPY.coverage("species", 0.55), /about 55% of the time/);
 });
 
 test("visitors read a model's name, not its file name", () => {

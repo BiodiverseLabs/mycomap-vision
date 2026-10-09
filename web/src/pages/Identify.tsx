@@ -18,6 +18,7 @@ import {
   type Candidate,
   type ContextUsed,
   type IdentifyResult,
+  type LikelySet,
   type ModelsInfo,
   type PhotoResult,
   type Where,
@@ -25,7 +26,7 @@ import {
   type Specimen,
 } from "@/lib/api";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
-import { identifyGate, modelName } from "@/lib/publicView";
+import { identifyGate, LIKELY_COPY, modelName } from "@/lib/publicView";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -490,7 +491,9 @@ function ResultCard({ r, urls }: { r: IdentifyResult; urls: string[] }) {
         {photo && <PhotoVerdict p={photo} />}
         <div className="space-y-5">
           {RANKS.map((rank) => (
-            <RankBlock key={rank} rank={rank} candidates={ranks[rank]} />
+            photo == null && r.likely?.[rank]?.names.length
+              ? <LikelyBlock key={rank} rank={rank} set={r.likely[rank]!} candidates={ranks[rank]} />
+              : <RankBlock key={rank} rank={rank} candidates={ranks[rank]} />
           ))}
           <p className="text-xs text-muted-foreground">
             {r.confidence_note}
@@ -619,6 +622,57 @@ function PhotoVerdict({ p }: { p: PhotoResult }) {
           {" "}At genus level it puts <span className="sci">{genus.name}</span>{" "}
           {ordinal(genus.position)}.
         </>
+      )}
+    </div>
+  );
+}
+
+const RANK_WORD: Record<Rank, string> = { family: "family", genus: "genus", species: "species" };
+
+/** A rank's likely list first: every name worth considering with its calibrated chance,
+ *  and how often such a list held the right name in testing. */
+function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; candidates: Candidate[] }) {
+  const italic = rank !== "family";
+  const listed = new Set(set.names.map((n) => n.name));
+  const others = candidates.filter((c) => !listed.has(c.name)).slice(0, 3);
+  const plural = set.names.length > 1;
+  return (
+    <div data-testid={`likely-${rank}`}>
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-xs uppercase tracking-wider text-muted-foreground">
+          {RANK_LABEL[rank]}{plural ? ": likely names" : ""}
+        </span>
+        <span className="text-xs text-muted-foreground">calibrated chance</span>
+      </div>
+      <div className="mt-1 space-y-1.5">
+        {set.names.map((n, i) => (
+          <div key={n.name}>
+            <div className="flex items-baseline justify-between gap-3">
+              <NameLink rank={rank} name={n.name}
+                className={`${i === 0 ? "text-lg font-semibold" : "text-base font-medium"} text-[#4a3728] ${italic ? "sci" : ""}`} />
+              <span className={`${i === 0 ? "text-lg" : "text-sm"} font-semibold text-myco-green tabular-nums`}>
+                {pct(n.confidence)}
+              </span>
+            </div>
+            <Bar value={n.confidence} strong={i === 0} />
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground" data-testid={`text-coverage-${rank}`}>
+        {LIKELY_COPY.coverage(RANK_WORD[rank], set.coverage)}
+        {rank === "species" ? ` ${LIKELY_COPY.noReference}` : ""}
+        {set.capped ? ` ${LIKELY_COPY.capped}` : ""}
+      </p>
+      {others.length > 0 && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          {LIKELY_COPY.alsoPossible}{" "}
+          {others.map((c, i) => (
+            <span key={c.name}>
+              {i > 0 && ", "}
+              <span className={italic ? "sci" : ""}>{c.name}</span> {pct(c.confidence)}
+            </span>
+          ))}
+        </p>
       )}
     </div>
   );

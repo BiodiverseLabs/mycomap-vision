@@ -48,12 +48,25 @@ export interface PhotoResult {
   specimens: Specimen[];
 }
 
+/** The names worth considering at one rank, and how often such a list held the right
+ *  one in the model's newest test (likely.py). */
+export interface LikelySet {
+  coverage: number;
+  /** The same, measured on records the list was not fitted on. */
+  checked_coverage: number | null;
+  names: { name: string; confidence: number; reference_records: number }[];
+  /** True when more names qualified than are listed. */
+  capped: boolean;
+}
+
 export interface IdentifyResult {
   model: { backbone: string; method: string };
   reference: { records: number; species: number; photos: number };
   photos: number;
   /** The answer from all photos together (each photo's scores averaged). */
   ranks: Record<Rank, Candidate[]>;
+  /** Missing for a model not yet calibrated with likely sets. */
+  likely?: Partial<Record<Rank, LikelySet>>;
   specimens: Specimen[];
   per_photo: PhotoResult[];
   hints: string[];
