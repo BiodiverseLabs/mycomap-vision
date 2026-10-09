@@ -284,3 +284,22 @@ for _base in (LinearHead, Hybrid):
     METHODS[f"{_base.name}+prior"] = partial(WithPrior, _base)
 for _base in (NearestSpecimen, SpeciesMean):
     METHODS[f"{_base.name}+prior"] = partial(WithPrior, partial(AsLogProb, _base))
+
+# And with the iNat occurrence prior (occprior.py): a wide berth for out of range,
+# gentle place and season. Needs an occurrence store (mv build-occurrence).
+from .occprior import WithOccurrence  # noqa: E402
+
+for _base in (LinearHead, Hybrid):
+    METHODS[f"{_base.name}+occ"] = partial(WithOccurrence, _base)
+for _base in (NearestSpecimen, SpeciesMean):
+    METHODS[f"{_base.name}+occ"] = partial(WithOccurrence, _base, True)
+
+
+def method_ready(name: str) -> bool:
+    """False for a method whose data isn't on this machine (a +occ method without an
+    occurrence store): it is not offered, rather than failing or quietly scoring
+    without its prior."""
+    m = METHODS.get(name)
+    ready = getattr(getattr(m, "func", m), "ready", None)
+    source = {k: v for k, v in getattr(m, "keywords", {}).items() if k == "source"}
+    return m is not None and (ready is None or ready(**source))

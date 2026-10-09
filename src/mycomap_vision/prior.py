@@ -23,12 +23,22 @@ from .dates import is_placeholder_date
 
 EARTH_KM = 6371.0
 
+# Confidence for log-probability scores (a +prior or +occ method) before a comparison
+# has calibrated them. In comparison 20261008-012435-4ef7b0 the fitted species
+# temperature of nearest on the fine-tuned BioCLIP 2 was 0.037 on cosine scores: 1.9
+# on the log-probability scale AsLogProb's 0.02 puts them on. At the cosine default
+# (0.02) every answer read ~100%, right or wrong.
+LOGPROB_CONFIDENCE_TEMPERATURE = 1.9
+
 
 @dataclass
 class Context:
     latitude: float | None = None
     longitude: float | None = None
     observed_on: str | None = None       # ISO date
+    # The query's own iNat observation, when it is one: an occurrence prior takes it
+    # back out of its counts, so a record never finds itself (occprior.py).
+    uuid: str | None = None
 
     @property
     def day_of_year(self) -> int | None:
@@ -119,6 +129,7 @@ class RangeSeasonPrior:
 class WithPrior:
     """A log-probability method plus the range-and-season score."""
     needs_context = True
+    confidence_temperature = LOGPROB_CONFIDENCE_TEMPERATURE   # identify.temperature
 
     def __init__(self, base_cls, weight: float = 1.0):
         self.base = base_cls()

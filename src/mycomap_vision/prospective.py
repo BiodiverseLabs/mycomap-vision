@@ -169,7 +169,9 @@ def predict_pending(conn: sqlite3.Connection, identifier, backbone_model, ids: l
         if not images:
             stats["no usable photos"] += 1
             continue
-        ctx = Context(row["inat_latitude"], row["inat_longitude"], row["observed_on"])
+        # The candidate's own iNat observation is left out of any occurrence counts.
+        ctx = Context(row["inat_latitude"], row["inat_longitude"], row["observed_on"],
+                      row.get("uuid"))
         result = identifier.identify(backbone_model, images, context=ctx)
         with conn:
             conn.execute(

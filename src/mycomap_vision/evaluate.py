@@ -52,6 +52,7 @@ class Record:
     projects: tuple[str, ...] = ()      # the .org projects that marked it green
     stored_name: str = ""              # the name as .org spells it, when the label differs
     taxon: str = ""                    # a one-word name ("Russula"): species is then ''
+    uuid: str = ""                     # its iNat observation's uuid (occurrence priors leave it out)
 
     @property
     def unit(self) -> str:
@@ -61,7 +62,7 @@ class Record:
 
 def context_of(rec: "Record"):
     from .prior import Context
-    return Context(rec.latitude, rec.longitude, rec.observed_on)
+    return Context(rec.latitude, rec.longitude, rec.observed_on, rec.uuid or None)
 
 
 def clean(s: str | None) -> str:
@@ -91,7 +92,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
              o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
-             r.observed_on, o.observed_on, r.green_projects
+             r.observed_on, o.observed_on, r.green_projects, o.uuid
       from records r
       join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
@@ -103,7 +104,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     recs: dict[str, Record] = {}
     unlabelled: set[str] = set()
     for (oid, name, genus, family, vdate, login, pid, _pos, lat, lon, org_observed,
-         inat_observed, projects) in rows:
+         inat_observed, projects, uuid) in rows:
         if pid not in photo_row or not clean(name) or oid in unlabelled:
             continue
         rec = recs.get(oid)
@@ -124,7 +125,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
                                      or real_date(inat_observed),
                                      projects=tuple(json.loads(projects or "[]")),
                                      stored_name=clean(name) if respelled else "",
-                                     taxon="" if lab.species else lab.unit)
+                                     taxon="" if lab.species else lab.unit,
+                                     uuid=uuid or "")
         rec.photo_rows.append(photo_row[pid])
     return list(recs.values())
 
