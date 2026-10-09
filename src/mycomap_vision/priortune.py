@@ -94,11 +94,38 @@ def settings() -> list[dict]:
     return out
 
 
+# Follow-up grid (the coordinator's request, 2026-10-09, after the range-edge losses): a
+# BOOST-ONLY place term. Nearby DNA records rank a species up (the positive part of the DNA
+# place score, graded by the kernel); absence costs nothing anywhere inside the 1,500 km
+# berth. A separate arm adds a mild penalty only beyond 1,500 km (Steve's wide berth on iNat
+# occurrences + DNA records, no genus rule). Season stays two-sided (it is not about place).
+# Declared before any boost result was seen.
+BOOST_GRID = {
+    "place_km": [75.0, 150.0, 300.0],
+    "boost_weight": [0.25, 0.5, 1.0],
+    "cap": [LOG5, LOG20],
+    "season_weight": [0.0, 0.5],
+    "far_penalty": [0.0, 1.0, 2.0],      # 0 = boost only; > 0 = the boost + far-penalty arm
+}
+BOOST_FIXED = {"season_days": 10.0, "radius_km": 1500.0, "genus_rule": False}
+BOOST_DECLARED = "2026-10-09, before any boost-only result (commit 'boost-only grid')"
+
+
+def boost_settings() -> list[dict]:
+    """The follow-up grid, families "boost" (no penalty) and "boost+far"."""
+    keys = list(BOOST_GRID)
+    out = []
+    for values in product(*(BOOST_GRID[k] for k in keys)):
+        s = {**dict(zip(keys, values)), **BOOST_FIXED}
+        out.append({"family": "boost" if not s["far_penalty"] else "boost+far", **s})
+    return out
+
+
 def gentleness(s: dict) -> float:
     """Smaller is gentler: how far a setting moves the photo scores (ties go to it)."""
     w = sum(float(s.get(k, 0.0)) for k in ("place_weight", "season_weight", "density_weight",
-                                             "dna_place_weight"))
-    return w + float(s.get("penalty", 0.0)) / 6.0
+                                             "dna_place_weight", "boost_weight"))
+    return w + (float(s.get("penalty", 0.0)) + float(s.get("far_penalty", 0.0))) / 6.0
 
 
 def describe(s: dict) -> str:
@@ -110,6 +137,12 @@ def describe(s: dict) -> str:
     if fam == "dna":
         return (f"DNA place {s['place_weight']:g} @ {s['place_km']:g} km, season "
                 f"{s['season_weight']:g} @ {s['season_days']:g} d, cap log {math.exp(s['cap']):.0f}")
+    if fam in ("boost", "boost+far"):
+        far = (f", -{s['far_penalty']:g} beyond {s['radius_km']:g} km" if s["far_penalty"]
+               else ", no penalty")
+        return (f"boost {s['boost_weight']:g} @ {s['place_km']:g} km (cap log "
+                f"{math.exp(s['cap']):.0f}), season {s['season_weight']:g} @ "
+                f"{s['season_days']:g} d{far}")
     if fam == "occ":
         return (f"iNat occ: berth {s['radius_km']:g} km pen {s['penalty']:g}"
                 f"{' +genus' if s['genus_rule'] else ''}, density {s['density_weight']:g} @ "
@@ -166,6 +199,14 @@ def combine(c: Components, s: dict, T: float = PHOTO_TEMPERATURE) -> np.ndarray:
             z = z + s["place_weight"] * np.clip(c.dna_place[s["place_km"]], -cap, cap)
         if s["season_weight"]:
             z = z + s["season_weight"] * np.clip(c.dna_season[s["season_days"]], -cap, cap)
+        return z
+    if fam in ("boost", "boost+far"):
+        cap = s["cap"]
+        z = z + s["boost_weight"] * np.clip(c.dna_place[s["place_km"]], 0.0, cap)
+        if s["season_weight"]:
+            z = z + s["season_weight"] * np.clip(c.dna_season[s["season_days"]], -cap, cap)
+        if s["far_penalty"]:
+            z = z - s["far_penalty"] * out_of_range(c, s["radius_km"], s["genus_rule"])
         return z
     r = s["radius_km"]
     if s.get("density_weight"):

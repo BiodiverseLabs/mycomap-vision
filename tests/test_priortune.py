@@ -131,3 +131,40 @@ def test_range_edges_are_reported_as_bands_never_places():
     assert pt.distance_band(2400.0) == ">= 1,500 km"
     assert pt.distance_band(float("nan")) == "no known find"
     assert set(pt.DISTANCE_BANDS) >= {pt.distance_band(x) for x in (1, 200, 500, 1200, 1e4)}
+
+
+def boost_comps(place, out):
+    place = np.asarray(place, dtype=np.float64)
+    none = np.zeros(place.shape, bool)
+    return comps(np.zeros(place.shape), dna_place={150.0: place},
+                 dna_season={10.0: np.zeros(place.shape)},
+                 occ_out={1500.0: np.asarray(out, bool)}, occ_genus_out={1500.0: none},
+                 occ_dna_out={1500.0: none}, occ_dna_effort={1500.0: np.zeros(len(place))})
+
+
+def test_boost_only_never_penalises_a_species_for_absence():
+    # A species far from its DNA records (negative place score) and flagged beyond the
+    # berth keeps its photo score; one with nearby records is ranked up, capped.
+    c = boost_comps([[-3.0, 0.5, 9.0]], [[True, False, False]])
+    s = {"family": "boost", "place_km": 150.0, "boost_weight": 0.5, "cap": math.log(5.0),
+         "season_weight": 0.0, "far_penalty": 0.0, **pt.BOOST_FIXED}
+    z = pt.combine(c, s)
+    assert z[0, 0] == 0.0
+    assert z[0, 1] == pytest.approx(0.25)
+    assert z[0, 2] == pytest.approx(0.5 * math.log(5.0))
+
+
+def test_the_far_penalty_arm_touches_only_species_beyond_the_berth():
+    c = boost_comps([[-3.0, -3.0]], [[True, False]])
+    s = {"family": "boost+far", "place_km": 150.0, "boost_weight": 0.5, "cap": math.log(5.0),
+         "season_weight": 0.0, "far_penalty": 1.0, **pt.BOOST_FIXED}
+    z = pt.combine(c, s)
+    assert z[0].tolist() == [-1.0, 0.0]
+
+
+def test_the_boost_grid_is_declared_with_both_arms():
+    grid = pt.boost_settings()
+    assert len(grid) == 3 * 3 * 2 * 2 * 3
+    assert {s["family"] for s in grid} == {"boost", "boost+far"}
+    assert all((s["family"] == "boost") == (s["far_penalty"] == 0) for s in grid)
+    assert all(s["radius_km"] == 1500.0 for s in grid)
