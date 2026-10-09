@@ -147,3 +147,15 @@ def test_season_share_wraps_the_year_and_needs_dates():
     assert stress.season_share(10, np.array([-1])) is None
     assert stress.season_band(0.0).startswith("off season")
     assert stress.season_band(0.6).startswith("peak")
+
+
+def test_observer_control_takes_the_same_depth_from_each_species_but_other_records():
+    group = np.array([0, 0, 0, 0, 1, 1, 1, 2, 2])
+    same = np.array([1, 1, 0, 0, 1, 0, 0, 0, 0], dtype=bool)
+    ctrl = stress.matched_control(same, group, seed=3)
+    assert not (ctrl & same).any()
+    assert np.bincount(group[ctrl], minlength=3).tolist() == [2, 1, 0]
+    # a species with too few other records loses all of them, no more
+    small = np.array([1, 1, 0], dtype=bool)
+    assert stress.matched_control(small, np.array([0, 0, 0]), seed=1).tolist() == \
+        [False, False, True]

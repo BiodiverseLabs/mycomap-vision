@@ -227,6 +227,24 @@ def same_collection(user: int | None, lat: float | None, lon: float | None,
     return out
 
 
+def matched_control(same: np.ndarray, group: np.ndarray, seed: int) -> np.ndarray:
+    """Records (bool mask) to remove as a control for removing `same`: per group, as many
+    records as `same` removes there, drawn at random from the group's other records (all
+    of them when it has fewer). The control takes as much depth from each species as the
+    condition, so what differs between the two is only whose records went."""
+    out = np.zeros(len(same), dtype=bool)
+    k = np.bincount(group[same], minlength=int(group.max()) + 1)
+    cand = np.flatnonzero(~same & (k[group] > 0))
+    if not len(cand):
+        return out
+    key = np.random.default_rng(seed).random(len(cand))
+    c = cand[np.lexsort((key, group[cand]))]
+    g = group[c]
+    rank = np.arange(len(c)) - np.searchsorted(g, g)
+    out[c[rank < k[g]]] = True
+    return out
+
+
 # --- slices --------------------------------------------------------------------------------
 
 @dataclass(frozen=True)

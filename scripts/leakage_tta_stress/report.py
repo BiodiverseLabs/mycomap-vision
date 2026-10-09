@@ -67,7 +67,21 @@ def rate_row(vals):
     return {"n": n, "rate": round(k / n, 4) if n else None, "ci95": stress.wilson(k, n)}
 
 
-def slice_table(groups: dict, judged: dict, order=None) -> list[dict]:
+def depth_adjusted(ids, judged, band_of, weights) -> float | None:
+    """Species top-1 standardised to the whole set's depth mix: the slice's rate in each
+    reference-depth band, weighted by that band's share of all records (bands the slice
+    has no records in are left out and the weights renormalised). It says whether a
+    slice is weak beyond holding rarer species."""
+    by = defaultdict(list)
+    for o in ids:
+        if "species" in judged[o] and band_of.get(o) in weights:
+            by[band_of[o]].append(judged[o]["species"][0])
+    w = sum(weights[b] for b in by)
+    return round(sum(weights[b] * np.mean(v) for b, v in by.items()) / w, 4) if w else None
+
+
+def slice_table(groups: dict, judged: dict, order=None, band_of=None, weights=None
+                ) -> list[dict]:
     rows = []
     keys = order or sorted(groups)
     for g in keys:
@@ -81,20 +95,24 @@ def slice_table(groups: dict, judged: dict, order=None) -> list[dict]:
                      "species_top5": rate_row([h[1] for h in sp])["rate"],
                      "genus_n": len(ge),
                      "genus_top1": rate_row([h[0] for h in ge])["rate"],
-                     "genus_top5": rate_row([h[1] for h in ge])["rate"]})
+                     "genus_top5": rate_row([h[1] for h in ge])["rate"],
+                     "species_top1_depth_adjusted": depth_adjusted(ids, judged, band_of,
+                                                                   weights)
+                     if band_of else None})
     return rows
 
 
 def fmt_slice(title, rows):
     lines = [f"  {title}",
              f"    {'slice':40s} {'n sp':>6s} {'sp@1':>6s} {'95% CI':>13s} {'sp@5':>6s} "
-             f"{'n ge':>6s} {'ge@1':>6s} {'ge@5':>6s}"]
+             f"{'n ge':>6s} {'ge@1':>6s} {'ge@5':>6s} {'sp@1 depth-adj':>15s}"]
     for r in rows:
         ci = r["species_top1_ci"]
         cis = f"{100 * ci[0]:4.1f}-{100 * ci[1]:4.1f}" if ci else "-"
         lines.append(f"    {str(r['slice'])[:40]:40s} {r['species_n']:6,d} "
                      f"{pct(r['species_top1']):>6s} {cis:>13s} {pct(r['species_top5']):>6s} "
-                     f"{r['genus_n']:6,d} {pct(r['genus_top1']):>6s} {pct(r['genus_top5']):>6s}")
+                     f"{r['genus_n']:6,d} {pct(r['genus_top1']):>6s} {pct(r['genus_top5']):>6s}"
+                     f" {pct(r.get('species_top1_depth_adjusted')):>15s}")
     return lines
 
 
@@ -135,7 +153,8 @@ def main() -> None:
     ap.add_argument("--slices", action="store_true")
     ap.add_argument("--leakage", action="store_true")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--snapshot", type=Path, help="default: <data>/manifest-snapshot.sqlite")
+    ap.add_argument("--manifest", "--snapshot", dest="snapshot", type=Path,
+                    help="default: <data>/manifest-snapshot.sqlite")
     a = ap.parse_args()
     prep = pickle.load(open(a.data / "prep.pkl", "rb"))
     labels = prep["labels"]
@@ -187,7 +206,8 @@ def main() -> None:
     if a.leakage:
         text += leakage_tables(report, judged_all, fact, feats, base_oids, a.baseline_tag)
     if a.slices:
-        text += slice_tables(report, judged_all, fact, queries, base_oids, a.baseline_tag)
+        text += slice_tables(report, judged_all, fact, queries, base_oids, a.baseline_tag,
+                             feats)
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.with_suffix(".json").write_text(json.dumps(report, indent=1, default=str))
     a.out.with_suffix(".txt").write_text("\n".join(text) + "\n", encoding="utf-8")
@@ -204,7 +224,8 @@ def leakage_tables(report, judged_all, fact, feats, oids, tag):
             f" {b + ' refs':>14s}" for _l, _h, b in DEPTH_BUCKETS)
         text.append(header)
         rows = {}
-        for cond in ("base", "obs", "coll", "coll_wide", "clean", "clean+obs", "clean+coll"):
+        for cond in ("base", "obs", "obs_ctrl", "coll", "coll_wide", "clean", "clean+obs",
+                     "clean+coll"):
             jd = judged_all.get((tag, cond, method))
             if jd is None:
                 continue
@@ -258,7 +279,7 @@ def leakage_tables(report, judged_all, fact, feats, oids, tag):
     return text
 
 
-def slice_tables(report, judged_all, fact, queries, oids, tag):
+def slice_tables(report, judged_all, fact, queries, oids, tag, feats):
     text = ["== Stress slices (base reference; the newest-four-weeks cut is validation "
             f"date >= {NEWEST_FROM}) =="]
     groups = defaultdict(lambda: defaultdict(list))
@@ -305,6 +326,11 @@ def slice_tables(report, judged_all, fact, queries, oids, tag):
             list(stress.NEAREST_SAME_SPECIES_KM.labels) + ["true species ref has no place",
                                                           "no true-species ref"],
     }
+    band_of = {o: feats[o]["species reference records"] for o in oids}
+    counts = Counter(b for o, b in band_of.items() if b != "n/a")
+    weights = {b: c / sum(counts.values()) for b, c in counts.items() if b != "0"}
+    text.append("  (sp@1 depth-adj: species top-1 standardised to the whole dev set's mix of "
+                "1-4 / 5-19 / 20-99 / 100+ reference bands; 0-ref truths left out)")
     out = {}
     for method in ("nearest+mean", "nearest", "nearest+prior@org"):
         jd = judged_all.get((tag, "base", method))
@@ -314,7 +340,7 @@ def slice_tables(report, judged_all, fact, queries, oids, tag):
         out[method] = {}
         for title, g in groups.items():
             order = orders.get(title) or sorted(g, key=lambda k: -len(g[k]))
-            rows = slice_table(g, jd, [k for k in order if k in g])
+            rows = slice_table(g, jd, [k for k in order if k in g], band_of, weights)
             out[method][title] = rows
             text += fmt_slice(title, rows)
         for first in ("nearest+mean first photo", "nearest first photo"):

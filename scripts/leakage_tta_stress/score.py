@@ -33,7 +33,8 @@ from mycomap_vision import stress
 from mycomap_vision.prior import Context, haversine_km
 
 TOP = 10
-CONDITIONS = ("base", "obs", "coll", "coll_wide", "clean", "clean+obs", "clean+coll")
+CONDITIONS = ("base", "obs", "obs_ctrl", "coll", "coll_wide", "clean", "clean+obs",
+              "clean+coll")
 METHODS = ("nearest", "nearest+mean", "nearest+prior@org")
 FIRST_PHOTO = {"base", "clean"}
 
@@ -212,7 +213,10 @@ def main() -> None:
                                       <= 100).sum())
         ctx = Context(q["org_lat"], q["org_lon"], q["observed_on"])
         base_means = [qv @ unit_means.T for qv in qv_views]
-        masks = {"base": None, "obs": same_obs, "coll": coll, "coll_wide": coll_wide,
+        ctrl = (stress.matched_control(same_obs, r_group, seed=int(q["oid"]))
+                if "obs_ctrl" in conditions else None)
+        masks = {"base": None, "obs": same_obs, "obs_ctrl": ctrl, "coll": coll,
+                 "coll_wide": coll_wide,
                  "clean": non_inat, "clean+obs": non_inat | same_obs,
                  "clean+coll": non_inat | coll}
         bases = [stress.best_two(sv, starts) for sv in sims_views]

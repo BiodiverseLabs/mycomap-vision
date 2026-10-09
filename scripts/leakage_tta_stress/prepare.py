@@ -2,7 +2,7 @@
 
 Run from the repo root with PYTHONPATH=src (no torch is imported):
 
-    python scripts/leakage_tta_stress/prepare.py --snapshot data/stress/manifest-snapshot.sqlite \
+    python scripts/leakage_tta_stress/prepare.py --manifest data/stress/manifest-snapshot.sqlite \
         --embeddings <main data>/embeddings/bioclip-2-ft-20261007-165400 \
         --bench-index data/stress/bench-index.sqlite \
         --bench-vectors <main data>/benchmarks/heldout-2026-10-08/embeddings/large/bioclip-2-ft-20261007-165400 \
@@ -25,6 +25,7 @@ import hashlib
 import json
 import pickle
 import sqlite3
+import subprocess
 import time
 from collections import Counter
 from datetime import date
@@ -57,7 +58,9 @@ def doy(day: str | None) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--snapshot", required=True, type=Path)
+    ap.add_argument("--manifest", "--snapshot", dest="snapshot", required=True, type=Path,
+                    help="a manifest copy (sqlite backup of the shared one) or a release's "
+                         "manifest; never the live shared manifest, which drifts")
     ap.add_argument("--embeddings", required=True, type=Path)
     ap.add_argument("--bench-index", required=True, type=Path)
     ap.add_argument("--bench-vectors", required=True, type=Path)
@@ -187,6 +190,9 @@ def main() -> None:
         "non_inat_references": int(non_inat.sum()),
         "sources": dict(Counter(rec["source"].tolist())),
         "queries": len(queries), "skipped": dict(skipped),
+        "code_commit": subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                      capture_output=True, text=True).stdout.strip(),
+        "reproducibility": "exploratory-pre-freeze",
         "manifest_newest_export": conn.execute("select max(exported_at) from records"
                                                ).fetchone()[0]}, indent=2))
     print(f"done in {time.time() - t0:.0f} s")
