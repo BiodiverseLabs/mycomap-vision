@@ -32,19 +32,19 @@ CHUNK_BLOCKS = 40
 TOP = 10
 
 
-def prep(out: Path) -> None:
+def prep(out: Path, embeddings: Path | None = None) -> None:
     from mycomap_vision import config, evaluate, heldout, loo
     from mycomap_vision.identify import Identifier
     from mycomap_vision.serving import map_embeddings
     conn = sqlite3.connect(str(config.MANIFEST_PATH))
-    ids, vecs = map_embeddings(conn, BACKBONE)
+    ids, vecs = map_embeddings(conn, BACKBONE, embeddings)
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     records = evaluate.with_rows(evaluate.load_records(conn, {int(p): int(p) for p in
                                                               ids.tolist()}), row_of)
     index = evaluate.build_index(records)
     layout, ordered = loo.build_layout(records, index)
     # The same reference the site and the held-out benchmark use, and its hash.
-    ident = Identifier(conn, BACKBONE, "nearest", photo_info=False)
+    ident = Identifier(conn, BACKBONE, "nearest", embeddings_root=embeddings, photo_info=False)
     ref = heldout.reference_summary(conn, ident)
     if not np.array_equal(ids[ident.index.cols], ids[layout.col_rows]):
         raise SystemExit("the scan's columns differ from the Identifier's")
@@ -69,6 +69,9 @@ def prep(out: Path) -> None:
         "leave_out_groups": len(layout.group_recs),
         "rows_in_two_columns": len(layout.same_row_cols),
         "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "code_version_prep": config.code_version(),
+        "manifest": file_digest(Path(config.MANIFEST_PATH)),
+        "embeddings_root": str(embeddings or config.DATA_DIR / "embeddings" / BACKBONE),
     }
     recs = {"observation_id": [r.observation_id for r in ordered],
             "species": [r.species for r in ordered], "genus": [r.genus for r in ordered],
@@ -86,6 +89,15 @@ def prep(out: Path) -> None:
         pickle.dump({"layout": layout, "records": recs, "labels": labels, "meta": meta}, f)
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
+
+
+def file_digest(path: Path) -> dict:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return {"path": str(path), "bytes": path.stat().st_size, "sha256": h.hexdigest()}
 
 
 # --- scoring ---------------------------------------------------------------------------
@@ -203,6 +215,10 @@ def score(out: Path, workers: int, limit: int | None) -> None:
     if limit:
         chunks = chunks[:limit]
     (out / "chunks").mkdir(exist_ok=True)
+    from mycomap_vision import config
+    with open(out / "score_runs.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            "code_version": config.code_version(), "workers": workers}) + "\n")
     todo = [c for c in chunks if not (out / "chunks" / f"chunk-{c[0]:05d}.npz").exists()]
     print(f"{len(blocks):,} blocks in {len(chunks):,} chunks; {len(todo):,} to score "
           f"with {workers} workers", flush=True)
@@ -223,11 +239,13 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None, help="score only the first N chunks")
+    ap.add_argument("--embeddings", type=Path, default=None,
+                    help="the backbone's embedding shards (default: data/embeddings/<backbone>)")
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     if os.environ.get("OPENBLAS_NUM_THREADS") != "1":
         print("note: set OPENBLAS_NUM_THREADS=1 (one BLAS thread per worker)", flush=True)
-    prep(a.out) if a.step == "prep" else score(a.out, a.workers, a.limit)
+    prep(a.out, a.embeddings) if a.step == "prep" else score(a.out, a.workers, a.limit)
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mycomap_vision import loo, name_equiv
+from mycomap_vision import config, loo, name_equiv
 from mycomap_vision.heldout import name_key
 
 KS = {"top1pct": 0.01, "top2pct": 0.02}
@@ -75,11 +75,18 @@ def tags_from(audits: Path) -> tuple[dict, dict, dict]:
     tags: dict[str, list[str]] = defaultdict(list)
     for r in read_tsv(audits / "non-inat-reference-records-2026-10-09.tsv"):
         tags[r["observation_id"]].append("non-iNat id: wrong iNat photos (fix lane)")
+        SOURCE_OF[r["observation_id"]] = source_key(r.get("reason", ""))
     live = {}
     for r in read_tsv(audits / "label-audit-2026-10-09" / "ref_vs_live_title.tsv"):
         if r["category"] not in ("same", "missing on .com"):
             live[r["oid"]] = r["live_com_title"]
             tags[r["oid"]].append(f"label audit: live .com title differs ({r['category']})")
+    for r in read_tsv(audits / "label-audit-2026-10-09" / "com_title_vs_number_name.tsv"):
+        # .org lags because .com's index number didn't follow the title: fixed on .com
+        # (number follows title) and a re-pull, not by relabelling Vision (label audit).
+        if r.get("set") == "ref" and r.get("diff") not in ("", "same", None):
+            tags[r["oid"]].append("label audit: .com number names another name -> .com fix "
+                                  "+ re-pull")
     for r in read_tsv(audits / "label-audit-2026-10-09" / "identical-photo-different-label.tsv"):
         tags[r["oid"]].append("label audit: identical photo under another label")
     for r in read_tsv(audits / "label-audit-2026-10-09" / "ref_dna_genus_disagree.tsv"):
@@ -99,7 +106,44 @@ def tags_from(audits: Path) -> tuple[dict, dict, dict]:
             pairs[frozenset((a, b))] = r["kind"]
     for r in read_tsv(audits / "label-audit-2026-10-09" / "identical-its-label-pairs.tsv"):
         pairs.setdefault(frozenset((r["main_label"], r["other_label"])), "identical ITS")
+    for r in read_tsv(audits / "label-audit-2026-10-09" / "hard-synonym-labels.tsv"):
+        a = r.get("reference_label (hard synonym on .com)")
+        b = (r.get("accepted name") or "").strip('"').replace('""', '"')
+        if a and b:
+            pairs.setdefault(frozenset((a, b)), "hard synonym on .com")
     return tags, live, pairs
+
+
+SOURCE_OF: dict[str, str] = {}
+# The record-source fix lane's records.source names, from the .org source in its list.
+SOURCES = (("mo observations", "mo"), ("mycoportal", "mycoportal"), ("sequences", "com_sequence"),
+           ("genbank", "genbank"), ("inaturalist", "inat"))
+# Who fixes a record flagged on several lists (agreed across the three review lists):
+# first match wins; every list also names the others.
+OWNERS = (("non-iNat id", "record-source fix"), ("non-fungus scan", "non-fungus scan"),
+          ("label audit", "label audit"), ("STALE LABEL", "label audit"))
+
+
+def source_key(reason: str) -> str:
+    low = reason.lower()
+    return next((key for word, key in SOURCES if word in low), "unknown")
+
+
+def record_key(oid: str) -> str:
+    """'<source>:<id>' as the record-source fix lane names sources; the snapshot stores
+    every id bare and treats it as iNat."""
+    return f"{SOURCE_OF.get(oid, 'inat')}:{oid}"
+
+
+def owner_of(tags: list[str]) -> tuple[str, str]:
+    lanes = []
+    for t in tags:
+        lane = next((lane for prefix, lane in OWNERS if t.startswith(prefix)), None)
+        if lane and lane not in lanes:
+            lanes.append(lane)
+    order = [lane for _p, lane in OWNERS]
+    lanes.sort(key=order.index)
+    return (lanes[0] if lanes else "loo scan"), "; ".join(lanes[1:] if lanes else [])
 
 
 def same_name(a: str, b: str) -> bool:
@@ -198,8 +242,10 @@ def main() -> None:
         pk = audit_pairs.get(frozenset((lab_name, sug)))
         if pk:
             t.append(f"label audit pair: {pk}")
+        owner, also = owner_of(t) if c else ("", "")
         rows.append({
-            "observation_id": oid[i], "category": c, "strength": round(stren[i], 4),
+            "record_key": record_key(oid[i]), "observation_id": oid[i],
+            "owner_lane": owner, "also_flagged_by": also, "category": c, "strength": round(stren[i], 4),
             "current_label": lab_name, "suggested_name": sug,
             "confidence": round(float(R["top_conf"][i, 0]), 4),
             "margin": round(margin, 4) if np.isfinite(margin) else "label has no other records",
@@ -293,6 +339,9 @@ def main() -> None:
         return dict(c.most_common())
     summary = {
         "meta": meta, "rules": loo.Rules().__dict__,
+        "code_version_analysis": config.code_version(),
+        "reproducibility": "exploratory-pre-freeze",
+        "owners": {c: dict(Counter(r["owner_lane"] for r in by[c]).most_common()) for c in "abcd"},
         "records": N, "scored": int(scored.sum()), "species_labelled": int(sp.sum()),
         "loo_species_top1_agrees": int((sp & (pred == label)).sum()),
         "categories": {c: len(by[c]) for c in "abcd"},

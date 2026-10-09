@@ -14,6 +14,7 @@ methods: [nearest+mean]
 headline: Pre-registered; results to follow.
 verdict: Pending.
 decision: pending
+reproducibility: exploratory-pre-freeze
 related: [depth-bias, heldout-benchmark, name-equivalence, full-run-finetune]
 ---
 
@@ -30,7 +31,7 @@ species, and it pulls uploads of the species it shows towards the wrong name.
 ## Setup
 Reference snapshot a19ddac8464a (a private copy of the manifest taken 2026-10-09; 154,135
 records, 590,971 photos, 18,070 species), nearest+mean (the site default), species
-confidence temperature from comparison 20261008-012435-4ef7b0. CPU only.
+confidence temperature from comparison 20261008-012435-4ef7b0. CPU only. Reproducibility: exploratory, run before the Dataset release v1 freeze; one command (`scripts/loo_mislabel.py --manifest|--release`) re-runs it on the frozen release.
 
 Each record is scored against the reference with hidden: its own photos, every record of
 the same observer on the same day (35,640 such groups; the median group is one record, the

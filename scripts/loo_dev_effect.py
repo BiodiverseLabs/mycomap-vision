@@ -92,13 +92,15 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--remove", action="append", default=[], help="name=path of ids")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--bench", type=Path, default=None,
+                    help="the benchmark folder (default: data/benchmarks/heldout-2026-10-08)")
     a = ap.parse_args()
     import multiprocessing as mp
 
     from mycomap_vision import config, heldout, heldout_report, heldout_summary, name_equiv
     from mycomap_vision.embed import load_embeddings
     conn = sqlite3.connect(str(config.MANIFEST_PATH))
-    bench = config.DATA_DIR / "benchmarks" / BENCH
+    bench = a.bench or config.DATA_DIR / "benchmarks" / BENCH
     with open(bench / "dev.csv", encoding="utf-8") as f:
         dev_ids = [r["observation_id"] for r in csv.DictReader(f)]
     records = heldout.load_benchmark(conn, BENCH, dev_ids, "large")
@@ -163,7 +165,9 @@ def main() -> None:
                  heldout_report.bucket(sp_count.get(t.species, 0), heldout_report.DEPTH_BUCKETS)
                  if t.species else "n/a"} for o, t in truths.items()}
     report = {"benchmark": BENCH, "split": "dev", "reference_hash": meta["reference_hash"],
-              "method": "nearest+mean", "records": stats, "variants": {}}
+              "method": "nearest+mean", "records": stats, "variants": {},
+              "code_version": config.code_version(),
+              "reproducibility": "exploratory-pre-freeze"}
     judged_all = {}
     for v, res in results.items():
         judged = {o: heldout_report.judge(r, truths[o], labeller, False)
