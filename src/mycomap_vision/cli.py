@@ -476,6 +476,29 @@ def cmd_models(conn, args) -> None:
     print("Methods: " + ", ".join(evaluate.METHODS))
 
 
+def cmd_fungus_gate(conn, args) -> None:
+    from datetime import datetime, timezone
+
+    from . import fungusgate
+    if args.action == "show":
+        gate = fungusgate.FungusGate.load()
+        if gate is None:
+            print("No fungus gate saved: identifications run ungated.")
+            return
+        t = gate.thresholds
+        print(f"Fungus gate on {gate.base} vectors: not a fungus below p={t.not_fungus}, "
+              f"not sure below p={t.unsure}; {len(gate.classes)} prompts in "
+              f"{len(set(gate.classes.tolist()))} classes")
+        print(json.dumps(gate.provenance, indent=2))
+        return
+    if not 0 <= args.not_fungus <= args.unsure <= 1:
+        raise SystemExit("need 0 <= --not-fungus <= --unsure <= 1")
+    gate = fungusgate.build(fungusgate.Thresholds(args.not_fungus, args.unsure),
+                            provenance={"tuned_on": args.tuned_on, "note": args.note,
+                                        "built_at": datetime.now(timezone.utc).isoformat()})
+    print(f"saved {gate.save()}")
+
+
 def cmd_serve(conn, args) -> None:
     from .api import serve
     conn.close()
@@ -964,6 +987,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("file", help="the export, or - for standard input")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
+    p = sub.add_parser("fungus-gate", help="the not-a-fungus gate in front of Identify: build "
+                       "its BioCLIP 2 text vectors with thresholds (tune them on DEV only), or "
+                       "show the saved one")
+    p.add_argument("action", choices=["build", "show"])
+    p.add_argument("--not-fungus", type=float, default=0.0,
+                   help="p(fungus) below this: not a fungus (no answer)")
+    p.add_argument("--unsure", type=float, default=0.0,
+                   help="p(fungus) below this: not sure (names, no chance)")
+    p.add_argument("--tuned-on", default="", help="where the thresholds came from (provenance)")
+    p.add_argument("--note", default="")
+
     p = sub.add_parser("serve", help="run the API for the frontend")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8010)
@@ -1155,6 +1189,7 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark-export": cmd_benchmark_export,
         "benchmark-import": cmd_benchmark_import,
         "models": cmd_models,
+        "fungus-gate": cmd_fungus_gate,
         "serve": cmd_serve,
         "status": cmd_status,
         "release": cmd_release,
