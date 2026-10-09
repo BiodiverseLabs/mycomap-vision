@@ -8,6 +8,7 @@ import { PaperPage } from "@/pages/Paper";
 import { GetInvolvedPage } from "@/pages/GetInvolved";
 import { BenchmarkPage, BenchmarksPage, ForResearchersPage, ProtocolsPage,
          ResearchPage } from "@/pages/Research";
+import { ExperimentPage, ExperimentsPage } from "@/pages/Experiments";
 import { MOVED } from "@/lib/research";
 
 export function App() {
@@ -25,6 +26,10 @@ export function App() {
         </Route>
         <Route path="/research/protocols" component={ProtocolsPage} />
         <Route path="/research/data" component={DataPage} />
+        <Route path="/research/experiments" component={ExperimentsPage} />
+        <Route path="/research/experiments/:slug">
+          {(params) => <ExperimentPage slug={params.slug} />}
+        </Route>
         <Route path="/research/paper" component={PaperPage} />
         <Route path="/research/for-researchers" component={ForResearchersPage} />
         {Object.entries(MOVED).map(([from, to]) => (

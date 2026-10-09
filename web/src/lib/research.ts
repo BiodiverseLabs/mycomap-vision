@@ -21,6 +21,8 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
     blurb: "How every result is scored, so numbers can be compared." },
   { href: "/research/data", label: "Reference data",
     blurb: "The DNA-verified records and photos the identifier learns from." },
+  { href: "/research/experiments", label: "Experiments", members: true,
+    blurb: "Every experiment: the question, everything tried, the numbers, the decision (members)." },
   { href: "/research/paper", label: "Paper in progress", members: true,
     blurb: "The living draft of the Mycologia paper (mycomap.org members)." },
   { href: "/research/for-researchers", label: "For researchers",

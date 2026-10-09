@@ -19,6 +19,12 @@ test("the paper shows in the Research menu only to signed-in members", () => {
   assert.equal(paper(me("off", null)), true, "a local site without sign-in");
 });
 
+test("experiments, like the paper, show only to signed-in members", () => {
+  const has = (m: Me | null | undefined) => researchNav(m).some((n) => n.href === "/research/experiments");
+  assert.equal(has(me("identify", null)), false);
+  assert.equal(has(me("all", someone)), true);
+});
+
 test("pages that moved under Research keep their old addresses", () => {
   assert.deepEqual(MOVED, { "/models": "/research/results", "/data": "/research/data",
                             "/paper": "/research/paper" });
