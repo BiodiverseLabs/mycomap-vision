@@ -168,3 +168,44 @@ def test_the_boost_grid_is_declared_with_both_arms():
     assert {s["family"] for s in grid} == {"boost", "boost+far"}
     assert all((s["family"] == "boost") == (s["far_penalty"] == 0) for s in grid)
     assert all(s["radius_km"] == 1500.0 for s in grid)
+
+
+def test_photo_margin_is_best_minus_second_best_species():
+    c = comps([[0.9, 0.8, 0.5]], SP=[[False, True, True]])
+    assert pt.photo_margins(c)[0] == pytest.approx(0.3)      # the one-word group is ignored
+
+
+def test_the_gated_prior_counts_only_when_the_photos_are_unsure():
+    # Record 0: photos close (margin 0.01); record 1: photos clear (margin 0.2).
+    S = [[0.50, 0.49], [0.70, 0.50]]
+    place = np.array([[0.0, 1.0], [0.0, 1.0]])
+    c = comps(S, dna_place={150.0: place}, dna_season={10.0: np.zeros((2, 2))})
+    m = pt.photo_margins(c)
+    hard = {"family": "gate", "prior": "dna", "gate": "hard", "gate_value": 0.5,
+            "threshold": 0.05, "scale": 1.0}
+    z = pt.combine_gated(c, hard, m)
+    assert z[0, 1] - z[0, 0] == pytest.approx((0.49 - 0.50) / 0.02 + 0.5)   # prior applied
+    assert z[1, 1] - z[1, 0] == pytest.approx((0.50 - 0.70) / 0.02)         # photos alone
+    soft = {"family": "gate", "prior": "dna", "gate": "soft", "gate_value": 0.02, "scale": 1.0}
+    w = pt.gate_weights(m, soft)
+    assert 1.0 > w[0] > w[1] > 0.0
+
+
+def test_a_setting_that_loses_the_far_band_is_never_chosen_even_if_better_overall():
+    # Setting 1 gains 3 records overall but loses one in the band: the rule keeps "no
+    # prior" (setting 0), which never loses the band against itself.
+    base = np.array([1, 0, 0, 0, 1], bool)
+    sp = np.array([base, [0, 1, 1, 1, 1]], bool)
+    ge = np.zeros_like(sp)
+    band = np.array([1, 0, 0, 0, 0], bool)
+    grid = [{"family": "none"}, {"family": "gate", "scale": 1.0}]
+    assert pt.choose_within_band(sp, ge, np.arange(5), grid, band, base) == 0
+    band = np.array([0, 0, 0, 0, 1], bool)                  # the band holds: it may win
+    assert pt.choose_within_band(sp, ge, np.arange(5), grid, band, base) == 1
+
+
+def test_the_gated_grid_is_declared_with_a_no_prior_fallback_first():
+    grid = pt.gate_settings({0.25: 0.01, 0.5: 0.02, 0.75: 0.04})
+    assert grid[0] == {"family": "none"}
+    assert len(grid) == 1 + 2 * 6 * 2
+    assert all("threshold" in s for s in grid if s.get("gate") == "hard")

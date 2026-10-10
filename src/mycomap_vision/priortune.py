@@ -125,6 +125,8 @@ def gentleness(s: dict) -> float:
     """Smaller is gentler: how far a setting moves the photo scores (ties go to it)."""
     w = sum(float(s.get(k, 0.0)) for k in ("place_weight", "season_weight", "density_weight",
                                              "dna_place_weight", "boost_weight"))
+    if s.get("family") == "gate":
+        w += float(s["scale"])
     return w + (float(s.get("penalty", 0.0)) + float(s.get("far_penalty", 0.0))) / 6.0
 
 
@@ -137,6 +139,10 @@ def describe(s: dict) -> str:
     if fam == "dna":
         return (f"DNA place {s['place_weight']:g} @ {s['place_km']:g} km, season "
                 f"{s['season_weight']:g} @ {s['season_days']:g} d, cap log {math.exp(s['cap']):.0f}")
+    if fam == "gate":
+        g = (f"hard below the {s['gate_value']:g} quantile" if s["gate"] == "hard"
+             else f"soft s={s['gate_value']:g}")
+        return f"gated {s['prior']} prior x{s['scale']:g}, {g}"
     if fam in ("boost", "boost+far"):
         far = (f", -{s['far_penalty']:g} beyond {s['radius_km']:g} km" if s["far_penalty"]
                else ", no penalty")
@@ -403,3 +409,99 @@ def distance_band(km: float | None) -> str:
 
 DISTANCE_BANDS = ("< 100 km", "100-300 km", "300-1,000 km", "1,000-1,500 km", ">= 1,500 km",
                   "no known find")
+
+
+# --- follow-up 2: the prior only when the photos are unsure (Steve, 2026-10-09) -------------
+#
+# Neither the tuned prior nor the boost passed Steve's rule: best overall WITHOUT losing the
+# records 300-1,500 km from their species' nearest DNA record, against nearest+mean. Here
+# the prior (one of those two, as chosen on development earlier) is added only in proportion
+# to how unsure the photos are: the margin between the best and second-best species photo
+# score. Declared before any gated result was seen.
+GATE_PRIORS = {
+    # The first choice (CHOSEN_DNA_PRIOR as a grid setting).
+    "dna": {"family": "dna", "place_km": 150.0, "season_days": 10.0, "place_weight": 0.5,
+            "season_weight": 0.5, "cap": LOG20},
+    # The boost follow-up's choice on development.
+    "boost": {"family": "boost+far", "place_km": 75.0, "boost_weight": 1.0, "cap": LOG5,
+              "season_weight": 0.5, "far_penalty": 2.0, **BOOST_FIXED},
+}
+GATE_GRID = {
+    "prior": ["dna", "boost"],
+    # hard: the prior in full below a margin threshold (a quantile of the development
+    # records' margins, label-free, fixed in score units for test), none above it;
+    # soft: weight exp(-margin / s), s in score units.
+    "gate": [("hard", 0.25), ("hard", 0.5), ("hard", 0.75),
+             ("soft", 0.01), ("soft", 0.02), ("soft", 0.04)],
+    "scale": [0.5, 1.0],
+}
+GATE_DECLARED = "2026-10-09, before any gated result (commit 'gated prior grid')"
+# The rule: the band whose records may not lose, and the selection under it.
+GATE_BAND_KM = (300.0, 1500.0)
+GATE_RULE = ("most species right on the training folds among settings whose species right "
+             "in the 300-1,500 km band (every truth with a DNA reference) is at least "
+             "nearest+mean's; no prior when none qualifies")
+
+
+def photo_margins(c: Components) -> np.ndarray:
+    """(n,) best minus second-best species photo score: how sure the photos are."""
+    zz = np.where(c.SP, c.S, -np.inf)
+    top2 = -np.partition(-zz, 1, axis=1)[:, :2]
+    m = top2[:, 0] - top2[:, 1]
+    return np.where(np.isfinite(m), m, np.inf)
+
+
+def gate_settings(thresholds: dict[float, float]) -> list[dict]:
+    """The gated grid, with the hard gates' quantiles turned into score thresholds, and
+    the fallback "no prior" first (so it wins every tie)."""
+    out = [{"family": "none"}]
+    for prior, (kind, value), scale in product(*GATE_GRID.values()):
+        s = {"family": "gate", "prior": prior, "gate": kind, "gate_value": value,
+             "scale": scale}
+        if kind == "hard":
+            s["threshold"] = float(thresholds[value])
+        out.append(s)
+    return out
+
+
+def gate_weights(margins: np.ndarray, s: dict) -> np.ndarray:
+    if s["gate"] == "hard":
+        return (margins < s["threshold"]).astype(np.float64)
+    return np.exp(-margins / s["gate_value"])
+
+
+def combine_gated(c: Components, s: dict, margins: np.ndarray,
+                  T: float = PHOTO_TEMPERATURE) -> np.ndarray:
+    if s["family"] != "gate":
+        return combine(c, s, T)
+    z0 = c.S / T
+    with np.errstate(invalid="ignore"):          # padding columns: -inf - -inf
+        prior = combine(c, GATE_PRIORS[s["prior"]], T) - z0
+    return z0 + s["scale"] * gate_weights(margins, s)[:, None] * np.where(
+        np.isfinite(prior), prior, 0.0)
+
+
+def choose_within_band(sp: np.ndarray, ge: np.ndarray, rows: np.ndarray, grid: list[dict],
+                       band: np.ndarray, base_sp: np.ndarray) -> int:
+    """GATE_RULE on `rows`: drop settings that lose the band against nearest+mean, then
+    the usual choice (species, genus, gentler) among the rest."""
+    in_band = np.zeros(sp.shape[1], dtype=bool)
+    in_band[rows] = True
+    in_band &= band
+    floor = int(base_sp[in_band].sum())
+    allowed = sp[:, in_band].sum(axis=1) >= floor
+    return choose(sp, ge, rows, grid, allowed)
+
+
+def nested_cv_within_band(sp, ge, folds, grid, band, base_sp) -> dict:
+    n = sp.shape[1]
+    cv_sp = np.zeros(n, dtype=bool)
+    cv_ge = np.zeros(n, dtype=bool)
+    chosen = []
+    for f in range(int(folds.max()) + 1):
+        test = folds == f
+        j = choose_within_band(sp, ge, np.flatnonzero(~test), grid, band, base_sp)
+        chosen.append(j)
+        cv_sp[test] = sp[j, test]
+        cv_ge[test] = ge[j, test]
+    return {"chosen": chosen, "species_right": cv_sp, "genus_right": cv_ge}
