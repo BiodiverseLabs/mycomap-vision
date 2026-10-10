@@ -497,7 +497,10 @@ scratchpad, not the repo (the labels point at private audit photos).
 ## Observation sets: score a record's photos as a set? (experiment, 2026-10-09, exp/observation-sets)
 
 Full record: `docs/experiments/2026-10-09-observation-sets.md`. Code: `obsets.py`,
-`obsets_head.py`, `mv obsets step1|step2|time-slice` (manifest read-only, writes only a report).
+`obsets_head.py`; the whole experiment is one command, `mv obsets all --manifest <file>
+--exclude <ids>` (manifest read-only, fixed grid and seeds, writes a report with the manifest's
+sha256, the reference hash and the code commit). Exploratory, pre-freeze: re-run unchanged on
+dataset release v1, and every verdict here is provisional until then.
 
 An observation and every reference record are sets of views, so this tested scoring at set
 level on the held-out dev split (2,915 species-named records; answer key = the observation
@@ -505,20 +508,23 @@ name; test not scored until the labels are final, Steve 2026-10-09). Step 1 (no 
 per-reference-observation coverage and Chamfer matching, species by best or top-2
 observations, and blends with nearest+mean. Step 2: a gated-attention set head on the frozen
 fine-tune, proxy loss with photo dropout, trained on reference records up to 2026-09-07 with
-every benchmark id removed, answering by nearest reference observations. Main tables leave out
-the label audit's 8,868 non-iNat reference records (moves dev by at most 0.1 point).
+every benchmark id removed, answering by nearest reference observations. Run on snapshot
+manifest-obsets-20261009T1517 (reference 0b853385cc50: the 9,266 agreed wrong-photo reference
+records left out), every baseline scored on the same reference.
 
 - **No set method beats nearest+mean on its own**: per-observation matching 45.4-50.4% species
-  top-1, the trained head 53.1% (+205 / -199), nearest+mean 52.9%.
+  top-1, the trained head 52.9% (+206 / -206), nearest+mean 52.9%, nearest+prior@org 51.2%.
 - **Blends gain on dev** (0.75 nearest+mean + 0.25 Chamfer-top2: 54.5%, +79 / -34; 0.5 with the
-  head: 55.1%, +151 / -89), all of it in species with 20+ references, with small losses at 1-4.
-- **The gain does not carry over** to the reference's own newest records (1,109, the 4ef7b0
-  layout, nothing tuned there): 38.6% and 38.9% vs 38.5% (+23 / -22, +40 / -36). The 100+ band
+  head: 55.2%, +147 / -81), nearly all of it in species with 20+ references, with small losses
+  at 1-4.
+- **The gain does not carry over** to the reference's own newest records (1,107, the 4ef7b0
+  layout, nothing tuned there): 38.7% and 38.4% vs 38.6% (+23 / -22, +34 / -36). The 100+ band
   gains on both sets (direction only).
 - The head's attention finds uninformative photos without labels (slips 0.81, habitat 0.77,
   microscope 0.54 of an even share; specimens 1.04), but weights stay close to even, as the
   photo audits predicted.
-- Recommendation: keep nearest+mean; no Step 3 (end-to-end set fine-tuning) in the retrain.
+- Recommendation (provisional): keep nearest+mean; no Step 3 (end-to-end set fine-tuning) in
+  the retrain.
 
 ## Phase 1: a better identifier
 
