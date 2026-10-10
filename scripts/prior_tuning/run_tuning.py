@@ -1,7 +1,8 @@
 """The prior-tuning analysis (priortune.py) on the components build_components.py wrote.
 
-usage: python run_tuning.py <snapshot.sqlite> <sets_dir> dev
-       python run_tuning.py <snapshot.sqlite> <sets_dir> test   (confirmation only, once)
+usage: python run_tuning.py <snapshot.sqlite> <sets_dir> dev [boost]
+       python run_tuning.py <snapshot.sqlite> <sets_dir> test [boost]   (confirmation only, once)
+"boost": the follow-up grid (priortune.boost_settings), files suffixed -boost.
 Writes <sets_dir>/tuning-<split>.json and prints the tables. No coordinates anywhere.
 """
 import json
@@ -92,8 +93,43 @@ def pairs(judged_a, judged_b, rank):
             "mcnemar_p": round(mcnemar(broken, fixed), 6)}
 
 
+DNA_BANDS = [(0, 100, "< 100 km"), (100, 300, "100-300 km"), (300, 1500, "300-1,500 km"),
+             (1500, 1e9, "> 1,500 km")]
+
+
+def dna_distances(conn, sets: Path, split: str, nm,
+                  keep: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per record: km to the nearest DNA reference record of its true species (NaN: none,
+    or no place), and whether that species has 6+ reference records. Bands only leave.
+    `keep`: the records `nm` holds (guests left out), so rows line up with the scores file."""
+    from mycomap_vision.evaluate import load_records
+    from mycomap_vision.prior import haversine_km
+    z = np.load(sets / f"{split}-scores.npz")
+    species = z["species"].tolist()
+    pos = {sp: i for i, sp in enumerate(species)}
+    photos = {int(p): int(p) for (p,) in conn.execute(
+        "select photo_id from embeddings where backbone = 'bioclip-2-ft-20261007-165400'")}
+    by = {}
+    for r in load_records(conn, photos):
+        if r.unit in pos and r.latitude is not None and r.longitude is not None:
+            by.setdefault(pos[r.unit], []).append((r.latitude, r.longitude))
+    by = {k: np.array(v) for k, v in by.items()}
+    lat, lng, refs = z["org_lat"][keep], z["org_lng"][keep], z["ref_count"]
+    assert len(lat) == len(nm.S), "records and scores file out of line"
+    d = np.full(len(nm.S), np.nan)
+    deep = np.zeros(len(nm.S), bool)
+    for i in range(len(nm.S)):
+        t = int(nm.cand[i, nm.truth_at[i]]) if nm.truth_at[i] >= 0 else -1
+        if t in by and not np.isnan(lat[i]):
+            d[i] = haversine_km(lat[i], lng[i], by[t][:, 0], by[t][:, 1]).min()
+            deep[i] = refs[t] >= 6
+    return d, deep
+
+
 def main():
     snap, sets, split = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+    boost = len(sys.argv) > 4 and sys.argv[4] == "boost"
+    sfx = "-boost" if boost else ""
     t0 = time.time()
     nm, meta = load(sets, split, "nearest_mean")
     ne, _ = load(sets, split, "nearest")
@@ -105,7 +141,7 @@ def main():
     print(f"{split}: {n:,} records (guests left out: {(~keep).sum()}), "
           f"{int(meta['has_place'].sum()):,} with a place, {int(meta['has_date'].sum()):,} "
           f"with a date [{time.time() - t0:.0f}s]", flush=True)
-    grid = pt.settings()
+    grid = pt.boost_settings() if boost else pt.settings()
     fam = np.array([s["family"] for s in grid])
     folds = pt.observer_folds(meta["user_id"].tolist())
     conn = sqlite3.connect(snap)
@@ -117,21 +153,29 @@ def main():
     ids = list(truths)
     feats = {o: {"species reference records": d} for o, d in
              zip(meta["observation_id"].tolist(), meta["depth"].tolist())}
-    report = {"split": split, "records": n, "grid_size": len(grid),
-              "grid_declared": pt.GRID_DECLARED, "fold_sizes": np.bincount(folds).tolist()}
+    report = {"split": split, "records": n, "grid_size": len(grid), "grid": "boost" if boost
+              else "main", "reproducibility": "exploratory-pre-freeze",
+              "grid_declared": pt.BOOST_DECLARED if boost else pt.GRID_DECLARED, "fold_sizes": np.bincount(folds).tolist()}
 
     # The methods to report: fixed references, then the tuned prior families.
     refs = {"nearest": (ne, {"family": "none"}), "nearest+mean": (nm, {"family": "none"}),
             "nearest+prior@org (as shipped)": (ne, pt.AS_SHIPPED),
             "nearest+mean+prior@org (as shipped)": (nm, pt.AS_SHIPPED)}
+    if boost:
+        first = json.loads((sets / "chosen.json").read_text(encoding="utf-8"))["any"]
+        refs.pop("nearest+mean+prior@org (as shipped)")
+        # The first experiment's choice, fixed (on dev it is in-sample).
+        refs["nearest+mean+prior (first choice)"] = (nm, first)
     if split == "dev":
         sp, ge = pt.score_all(nm, grid)
         print(f"scored {len(grid)} settings [{time.time() - t0:.0f}s]", flush=True)
         report["every_setting"] = [
             {**{k: v for k, v in s.items()}, "species_right": int(sp[j][nm.has_sp].sum()),
              "genus_right": int(ge[j].sum())} for j, s in enumerate(grid)]
-        families = {"dna": fam == "dna", "occ": fam == "occ", "dna+occ": fam == "dna+occ",
-                    "any": np.ones(len(grid), bool)}
+        families = ({"boost": fam == "boost", "boost+far": fam == "boost+far",
+                     "any": np.ones(len(grid), bool)} if boost else
+                    {"dna": fam == "dna", "occ": fam == "occ", "dna+occ": fam == "dna+occ",
+                     "any": np.ones(len(grid), bool)})
         cv = {}
         for f, allowed in families.items():
             res = pt.nested_cv(sp, ge, folds, grid, allowed)
@@ -147,17 +191,20 @@ def main():
                   f"all-dev pick {cv[f]['chosen_on_all_dev']} "
                   f"({cv[f]['in_sample_species_top1']:.4f} in-sample)", flush=True)
         report["cv"] = cv
-        (sets / "chosen.json").write_text(json.dumps(
+        (sets / f"chosen{sfx}.json").write_text(json.dumps(
             {f: grid[v["chosen_id"]] for f, v in cv.items()}, indent=2), encoding="utf-8")
-        tuned = {f"nearest+mean+{label} (CV)": ("cv", f) for f, label in
-                 (("dna", "prior"), ("occ", "occ"), ("dna+occ", "prior+occ"), ("any", "best"))}
+        labels = ((("boost", "boost"), ("boost+far", "boost+far"), ("any", "boost-best"))
+                  if boost else (("dna", "prior"), ("occ", "occ"), ("dna+occ", "prior+occ"),
+                                 ("any", "best")))
+        tuned = {f"nearest+mean+{label} (CV)": ("cv", f) for f, label in labels}
     else:
-        chosen = json.loads((sets / "chosen.json").read_text(encoding="utf-8"))
-        temps = json.loads((sets / "temperatures-dev.json").read_text(encoding="utf-8"))
+        chosen = json.loads((sets / f"chosen{sfx}.json").read_text(encoding="utf-8"))
+        temps = json.loads((sets / f"temperatures-dev{sfx}.json").read_text(encoding="utf-8"))
         # Confirmation only: the ONE configuration the declared procedure chose on all of
         # dev (the whole grid, family included), next to the fixed references.
-        tuned = {"nearest+mean+best (chosen on dev)": ("fixed", chosen["any"])}
-        refs.pop("nearest+mean+prior@org (as shipped)")
+        name = "nearest+mean+boost-best (chosen on dev)" if boost else             "nearest+mean+best (chosen on dev)"
+        tuned = {name: ("fixed", chosen["any"])}
+        refs.pop("nearest+mean+prior@org (as shipped)", None)
 
     # Per method: combined scores per record (out of fold for CV), temperature per record.
     runs = {}
@@ -194,7 +241,7 @@ def main():
             used = [what] * n
         runs[name] = (nm, zz, T, used)
     if split == "dev":
-        (sets / "temperatures-dev.json").write_text(json.dumps(dev_temps, indent=2),
+        (sets / f"temperatures-dev{sfx}.json").write_text(json.dumps(dev_temps, indent=2),
                                                     encoding="utf-8")
     print(f"combined [{time.time() - t0:.0f}s]", flush=True)
 
@@ -248,10 +295,27 @@ def main():
                                        "species_right": int(sp_right[rows].sum())}
         edge[name] = {"by_nearest_known_find": tab, "truth_flagged_out_of_range": flagged}
     report["range_edges"] = edge
+    # By distance to the true species' nearest DNA reference record (search count).
+    dist, deep = dna_distances(conn, sets, split, nm, keep)
+    base_sp, _ = pt.top1(nm, runs["nearest+mean"][1])
+    dna_bands = {}
+    for name, (c, zz, T, used) in runs.items():
+        sp_right, _ = pt.top1(c, zz)
+        out = {}
+        for label, sel in (("6+ refs", deep), ("all", ~np.isnan(dist))):
+            for lo, hi, band in DNA_BANDS:
+                m = sel & (dist >= lo) & (dist < hi) & c.has_sp
+                out[f"{label} | {band}"] = {
+                    "n": int(m.sum()), "right": int(sp_right[m].sum()),
+                    "nearest_mean_right": int(base_sp[m].sum()),
+                    "fixed": int((sp_right & ~base_sp)[m].sum()),
+                    "broken": int((base_sp & ~sp_right)[m].sum())}
+        dna_bands[name] = out
+    report["dna_distance_bands"] = dna_bands
     report["tables"] = out_tables
     if split == "dev":
         report["selection_counts"] = {f: dict(Counter(v["fold_choices"])) for f, v in cv.items()}
-    path = sets / f"tuning-{split}.json"
+    path = sets / f"tuning-{split}{sfx}.json"
     path.write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
     print("\n\n".join(text))
     print(json.dumps({"paired": report["paired_vs_nearest_mean"]}, indent=1))

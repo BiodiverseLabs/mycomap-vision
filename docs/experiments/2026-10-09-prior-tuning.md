@@ -9,6 +9,8 @@ branch: exp/prior-tuning
 commits:
 - 89b53e9
 - 31f6770
+- d3a4e58
+- bbc06c2
 benchmark: heldout-2026-10-08 development split (tuning, 5-fold cross-validation by observer); test
   (confirmation only, once)
 split: dev
@@ -24,7 +26,8 @@ headline: 'Development, cross-validated: nearest + species average 52.8 -> 55.1%
   tuned DNA-record prior (149 fixed, 83 broken), genus 81.3 -> 82.1%; test (confirmation only) 54.3 -> 56.2% (496 fixed, 304 broken), genus 83.0 -> 83.7%.'
 verdict: The DNA-record prior at half weight adds about 2 points at species and 0.7 at genus to nearest
   + species average on development and test, but costs records whose species is known only far away;
-  the iNat occurrence prior adds less and nothing on top of it.
+  a boost-only follow-up moves that cost (none beyond 1,500 km, half at 300-1,500 km, a new one at
+  100-300 km) rather than removing it; the iNat occurrence prior adds less and nothing on top.
 decision: 'pending; the chosen setting is provisional, to confirm on Dataset release v1'
 reproducibility: exploratory-pre-freeze
 related:
@@ -231,6 +234,59 @@ prior, 4 with the chosen one, 1 with the shipped one.
 Confidence on test at the development temperature: ECE 0.051, mean stated 0.51 against 0.56
 right, 1.5% of answers at 99% or more (at the old fallback temperature: 96%).
 
+### Follow-up: boost only, no penalty for absence inside 1,500 km
+
+Asked after the range-edge losses above (the coordinator, 2026-10-09; within Steve's approval, CPU,
+chosen on development, test once). Grid declared and pushed before any result (bbc06c2, 108
+settings, `priortune.BOOST_GRID`; every one in
+`2026-10-09-prior-tuning-boost-settings.csv`): only the positive part of the DNA place score (kernel 75 / 150 /
+300 km, weight 0.25 / 0.5 / 1, cap log 5 or log 20), so a species is ranked up by nearby DNA records
+and never down for having none; season 0 or 0.5 at 10 days; and a separate arm with a penalty of 1
+or 2 nats only beyond the 1,500 km berth (iNat occurrences + DNA records, no genus rule). Same
+selection, same folds. This is the second experiment confirmed on this test split (allowed on a
+development benchmark; noted for the reader).
+
+Development, cross-validated species / genus top-1 (judge): boost only 54.8 / 81.5; boost + far
+penalty 55.0 / 81.6 (the whole-grid procedure picks this arm in every fold); the first choice above
+55.1 / 82.1. Fold choices: boost 1 at 75 km (cap log 5) in three folds, 0.5 at 150 or 300 km (cap
+log 20) in two; season 0.5 and a -2 far penalty in all five. Chosen on all of development: boost 1
+at 75 km, cap log 5, season 0.5 at 10 days, -2 beyond 1,500 km. Confidence on test at the
+development temperature: ECE 0.047, 1.5% of answers at 99% or more.
+
+Test (confirmation only), n = 10,105 (species 9,867, genus 10,066), top 1 / 3 / 5 / 10:
+
+| method | species strict | species s.l. | species complex (beta) | genus strict | genus s.l. |
+|---|---|---|---|---|---|
+| nearest + species average | 54.3 / 72.0 / 77.4 / 83.4 | 54.3 / 72.0 / 77.4 / 83.4 | 57.2 / 73.9 / 79.0 / 84.4 | 83.0 / 92.2 / 94.1 / 95.7 | 83.6 / 92.3 / 94.2 / 95.7 |
+| first choice (DNA prior, half weight) | 56.2 / 73.5 / 78.9 / 84.5 | 56.2 / 73.6 / 78.9 / 84.5 | 58.9 / 75.3 / 80.3 / 85.5 | 83.7 / 92.4 / 94.1 / 95.9 | 84.2 / 92.6 / 94.2 / 95.9 |
+| boost + far penalty (chosen) | 56.1 / 73.2 / 78.8 / 84.4 | 56.1 / 73.2 / 78.8 / 84.4 | 58.7 / 75.1 / 80.2 / 85.3 | 83.4 / 92.5 / 94.3 / 95.8 | 84.0 / 92.7 / 94.4 / 95.8 |
+
+Species top-1 (top-5) by the true species' reference records, test, boost: 0.0 (0.0) / 21.5 (44.4) /
+44.8 (76.0) / 68.9 (89.8) / 72.1 (92.2), n 343 / 1,134 / 2,250 / 4,450 / 1,690. Paired against nearest
++ species average: species 512 fixed / 328 broken (P < 0.001), genus 207 / 168 (P = 0.05).
+
+By distance to the true species' nearest DNA record, species top-1, nearest + species average ->
+the setting, fixed / broken (search count; the setting fixed, not cross-validated):
+
+| distance | test, 6+ refs: first choice | test, 6+ refs: boost | test, all: first choice | test, all: boost |
+|---|---|---|---|---|
+| < 100 km | n 5,689: 66.7 -> 70.1 (+322 / -129) | 66.7 -> 71.0 (+386 / -137) | n 6,113: 64.3 -> 67.9 (+354 / -134) | 64.3 -> 68.8 (+417 / -142) |
+| 100-300 km | n 1,583: 55.9 -> 58.3 (+101 / -63) | 55.9 -> 53.1 (+63 / -107) | n 1,890: 50.1 -> 52.6 (+118 / -69) | 50.1 -> 47.6 (+70 / -116) |
+| 300-1,500 km | n 807: 42.8 -> 35.3 (+18 / -78) | 42.8 -> 38.9 (+18 / -49) | n 1,306: 30.8 -> 25.4 (+21 / -91) | 30.8 -> 27.5 (+19 / -62) |
+| > 1,500 km | n 78: 20.5 -> 12.8 (+1 / -7) | 20.5 -> 23.1 (+5 / -3) | n 215: 11.2 -> 7.4 (+1 / -9) | 11.2 -> 10.7 (+5 / -6) |
+
+(The development counts behave the same way: boost at 300-1,500 km, 6+ refs, +7 / -14 against
++7 / -23 for the first choice.) A first pass of this table on test misaligned rows after the two
+guest records left out; it was caught, fixed in `run_tuning.py` and recomputed. Development has
+no guests and was unaffected.
+
+What it shows: the absence penalty was not the cause of the far losses. Ranking nearby species up
+is enough to push a true species whose records are far away down the list, penalty or not. The
+boost moves the cost rather than removing it: none beyond 1,500 km (the berth now protects true
+out-of-range finds), about half at 300-1,500 km, and a new loss at 100-300 km, where the sharp
+75 km kernel prefers species with records right at the spot. Overall it ties the first choice at
+species and is a little weaker at genus.
+
 ## Verdict
 A place-and-date prior helps nearest + species average: on development, cross-validated, the
 DNA-record prior adds 2.3 points at species and 0.8 at genus; test confirms 1.9 and 0.7, with
@@ -249,11 +305,12 @@ pending
 
 ## Next
 - Re-run on Dataset release v1 (`run_all.py --release`); until then the choice is provisional.
-- Steve: whether `nearest+mean+prior` becomes the method when a place and date are given
+- Steve: which trade-off, if any: the first choice (best overall and genus, worst for far
+  finds) or the boost (protects finds beyond 1,500 km, costs 100-300 km); and whether `nearest+mean+prior` becomes the method when a place and date are given
   (photos only stays `nearest+mean`).
-- Range edges: a prior that ranks nearby species up but stops penalising past a distance
-  (an asymmetric cap, or no penalty beyond ~300 km of a species' known finds, with the 1,500 km
-  berth as the outer limit), declared and tuned on development, to win back the far records.
+- Range edges: done as the boost-only follow-up above; it moves the cost, not removes it. A
+  remaining idea is to use place to reorder only when the photos are unsure (weight the prior by
+  the photo margin), or to show it as a separate "found near here" cue instead of reordering.
 - MycoMap Atlas's range maps as the place term (the pluggable source in `atlasrange.py`) once
   its rebuilt release exists; compare on the same records and range-edge bands.
 - iNat's public (possibly obscured) place instead of mycomap.org's for the same records.
