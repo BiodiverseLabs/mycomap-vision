@@ -100,7 +100,7 @@ def test_titles_come_from_the_export_through_the_links(tmp_path):
 # --- the toy world: a reference, and a frozen set -----------------------------------------
 
 def green(oid, name, vdate="1/1/2026", family="Russulaceae"):
-    return {"observation_id": str(oid), "scientific_name": name, "genus": name.split()[0],
+    return {"source": "iNaturalist", "observation_id": str(oid), "scientific_name": name, "genus": name.split()[0],
             "family": family, "continent": "North America", "latitude": 39.1,
             "longitude": -86.5, "validation_status_1": "yes", "validation_date_1": vdate}
 

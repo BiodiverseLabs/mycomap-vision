@@ -29,7 +29,14 @@ export interface Specimen {
   /** True when the record has photos but none may be shown here (all rights reserved,
    *  and the photographer hasn't given permission). */
   photo_withheld: boolean;
-  inat_url: string;
+  /** Where the record is from: "inat" or "mo" (Mushroom Observer). */
+  source?: string;
+  /** The record's id at its source (the MO observation number for "mo:<n>"). */
+  source_id?: string;
+  /** The record's page at its source (iNat or Mushroom Observer). */
+  record_url?: string | null;
+  /** The iNat page, for iNat records only (older servers send it for every record). */
+  inat_url: string | null;
   species_url: string | null;
 }
 

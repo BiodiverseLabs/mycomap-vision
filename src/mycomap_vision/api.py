@@ -53,6 +53,7 @@ def open_manifest(path: Path) -> sqlite3.Connection:
     conn.executescript(EMBED_SCHEMA)
     conn.executescript(evaluate.SCOREBOARD_SCHEMA)
     permissions.ensure_schema(conn)
+    manifest.upgrade(conn)
     return conn
 
 
