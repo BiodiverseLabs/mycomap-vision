@@ -209,3 +209,14 @@ def test_the_gated_grid_is_declared_with_a_no_prior_fallback_first():
     assert grid[0] == {"family": "none"}
     assert len(grid) == 1 + 2 * 6 * 2
     assert all("threshold" in s for s in grid if s.get("gate") == "hard")
+
+
+def test_a_boost_only_season_never_penalises_an_off_season_species():
+    place = np.zeros((1, 2))
+    c = boost_comps(place, [[False, False]])
+    c.dna_season = {10.0: np.array([[-3.0, 0.4]])}
+    s = {"family": "boost", "place_km": 150.0, "boost_weight": 1.0, "cap": math.log(5.0),
+         "season_weight": 0.5, "far_penalty": 0.0, **pt.BOOST_FIXED}
+    assert pt.combine(c, s)[0, 0] == pytest.approx(-0.5 * math.log(5.0))   # two-sided, capped
+    z = pt.combine(c, {**s, "season_boost_only": True})
+    assert z[0, 0] == 0.0 and z[0, 1] == pytest.approx(0.2)

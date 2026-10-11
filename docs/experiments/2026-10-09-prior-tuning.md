@@ -2,7 +2,7 @@
 title: Place and date prior on top of nearest + species average, tuned on development
 slug: prior-tuning
 date: '2026-10-09'
-status: dropped
+status: adopted
 question: Does a place-and-date prior (our DNA records, iNat occurrences, or both, with a season
   weight) add to nearest + species average once its settings are tuned honestly on development?
 branch: exp/prior-tuning
@@ -13,6 +13,7 @@ commits:
 - bbc06c2
 - 3f7c643
 - 6c235d7
+- 00b5a87
 benchmark: heldout-2026-10-08 development split (tuning, 5-fold cross-validation by observer); test
   (confirmation only, once)
 split: dev
@@ -24,6 +25,7 @@ methods:
 - nearest+mean+prior
 - nearest+mean+occ
 - nearest+mean+prior+occ
+- nearest+mean+place
 headline: 'Development, cross-validated: nearest + species average 52.8 -> 55.1% species top-1 with the
   tuned DNA-record prior (149 fixed, 83 broken), genus 81.3 -> 82.1%; test (confirmation only) 54.3 -> 56.2% (496 fixed, 304 broken), genus 83.0 -> 83.7%.'
 verdict: The DNA-record prior at half weight adds about 2 points at species and 0.7 at genus to nearest
@@ -31,9 +33,11 @@ verdict: The DNA-record prior at half weight adds about 2 points at species and 
   a boost-only follow-up moves that cost (none beyond 1,500 km, half at 300-1,500 km, a new one at
   100-300 km) rather than removing it, and a prior used only when the photos are unsure still
   loses the 300-1,500 km band; no variant passes Steve's rule.
-decision: 'Steve 2026-10-09: no place prior is served for now (everyone keeps nearest + species
-  average); his rule: best overall without losing the 300-1,500 km band. No variant passed (gated
-  follow-up on test, 2026-10-11). May come back with Atlas ranges or on Dataset release v1.'
+decision: 'Steve 2026-10-11: serve the boost + far-penalty setting (test 56.1%) as nearest+mean+place
+  whenever a place or date is given, with a far-find cue beside every species and genus, provisional
+  until Dataset release v1 (feat/place-date-boost-and-far-cue fc96fff, not deployed). It does not
+  meet his 10/9 rule (it loses some records 100-1,500 km from their species'' DNA records); he chose it
+  with the cue so far finds stand out. Supersedes 10/9 (no prior).'
 reproducibility: exploratory-pre-freeze
 related:
 - occurrence-prior
@@ -343,6 +347,40 @@ change their balance. Every variant tried (tuned, boost, gated; 1,956 settings i
 finds for nearer ones, because ranking species with nearby records up is what pushes a far true
 species down.
 
+### Slices from the leakage/stress lane, and a season that only boosts
+
+The stress lane (exp/leakage-tta-stress) found the tuned DNA prior worse on three weak slices.
+Same definitions (stress.py): the true species' nearest DNA reference record more than 1,000
+km away, 200-1,000 km away, and off season (none of its dated records within 30 days of the
+query's day of the year). Development, fixed settings (in-sample: chosen on development),
+species top-1 by the search's count (`scripts/prior_tuning/slices.py`):
+
+| slice (n) | nearest + species average | DNA prior, tuned | boost + far penalty | same, season boost-only |
+|---|---|---|---|---|
+| all (2,915) | 52.3 | 55.7 (+159 / -61) | 55.3 (+164 / -78) | 54.7 (+146 / -77) |
+| nearest ref > 1,000 km (122) | 13.9 | 13.1 (+1 / -2) | 12.3 (+0 / -2) | 12.3 (+0 / -2) |
+| nearest ref 200-1,000 km (532) | 37.2 | 34.4 (+14 / -29) | 33.3 (+8 / -29) | 32.5 (+5 / -30) |
+| off season (172) | 19.2 | 17.4 (+3 / -6) | 18.0 (+2 / -4) | 18.0 (+2 / -4) |
+
+A season term that only boosts (asked by the coordinator, 2026-10-11) gains nothing off season
+(18.0 either way) and costs 0.6 points overall, so the served setting keeps the tested season
+term. The stress lane's larger losses (e.g. 14.3 -> 8.4 beyond 1,000 km) were for a heavier
+prior; the settings here lose 1-2 records in that slice.
+
+### Served (Steve, 2026-10-11)
+
+`nearest+mean+place` (feat/place-date-boost-and-far-cue fc96fff, not deployed): the boost +
+far-penalty setting, added only when an identification has a place or a date; without them it
+is nearest + species average exactly, its calibration included (on test that temperature also
+fits the boosted scores best: ECE 0.020 against 0.047 at the one fitted on them). Every species
+and genus name carries a cue: distance to the nearest DNA record (to the centre of its 0.2 degree
+cell, rounded to 10 km, so no record can be placed more finely than iNat's obscured cell),
+whether the date is within 30 days of one of its records (unknown under 5 dated records), and
+"far from known records (possible range extension)" beyond 300 km, where a top answer was right
+under a third of the time (30.8% at 300-1,500 km on test, against 50.1% at 100-300 km). Where
+the place changes the top answer, the photos-only answer is returned beside it. On this PC it
+holds about 30 MB for the prior and 4 MB for the cue, and adds about 80 ms per identification.
+
 ## Verdict
 A place-and-date prior helps nearest + species average: on development, cross-validated, the
 DNA-record prior adds 2.3 points at species and 0.8 at genus; test confirms 1.9 and 0.7, with
@@ -359,7 +397,9 @@ including a boost-only one and one used only when the photos are unsure, keeps t
 band while gaining overall, so none passes Steve's rule.
 
 ## Decision
-Steve, 2026-10-09: no place prior is served for now; everyone keeps nearest + species average.
+Steve, 2026-10-11: serve the boost + far-penalty prior with the far-find cue (above),
+provisional until Dataset release v1; it does not meet his 10/9 rule, and he chose it with the
+cue so that far finds stand out rather than being buried. Earlier, 2026-10-09: no place prior is served for now; everyone keeps nearest + species average.
 Reason: far finds (range extensions, first state records, new Atlas sites) are the records MycoMap
 most wants, and every prior tried costs them; serving one would also steer submitters and
 validators toward places already sampled. Rule for serving one later: best overall without losing

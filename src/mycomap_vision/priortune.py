@@ -210,7 +210,10 @@ def combine(c: Components, s: dict, T: float = PHOTO_TEMPERATURE) -> np.ndarray:
         cap = s["cap"]
         z = z + s["boost_weight"] * np.clip(c.dna_place[s["place_km"]], 0.0, cap)
         if s["season_weight"]:
-            z = z + s["season_weight"] * np.clip(c.dna_season[s["season_days"]], -cap, cap)
+            # season_boost_only (Steve's coordinator, 2026-10-11): in season ranks a species
+            # up, off season costs nothing, like the place term.
+            low = 0.0 if s.get("season_boost_only") else -cap
+            z = z + s["season_weight"] * np.clip(c.dna_season[s["season_days"]], low, cap)
         if s["far_penalty"]:
             z = z - s["far_penalty"] * out_of_range(c, s["radius_km"], s["genus_rule"])
         return z
