@@ -1,7 +1,6 @@
 """Steve, 2026-10-11: the product says "MycoMap Vision", never the backbone underneath
 (BioCLIP 2). No v1 answer or refusal a caller sees carries a backbone or method id."""
 
-import pytest
 from fastapi.testclient import TestClient
 from test_api import open_limits, png
 from test_api_v1_identify import FakeOrg, SERVER_KEY, app_token, bearer
@@ -69,14 +68,10 @@ def test_no_v1_refusal_names_the_backbone(conn, tmp_path):
         assert res.status_code >= 400 and leaks(res.json()) == [], res.text
 
 
-@pytest.mark.parametrize("release, version", [
-    ("20261008-015746-full-bioclip2-ft-20261007", "2026-10-08"),
-    ("20261101-000000-anything", "2026-11-01"),
-    ("bioclip2-latest", None),
-    (None, None),
-])
-def test_the_public_version_is_the_release_date_only(release, version):
-    model = apiv1.public_model(release, "20261008-012435-4ef7b0")
-    assert model == {"name": "MycoMap Vision", "version": version,
-                     "calibrated_on": "2026-10-08"}
+def test_the_public_model_block_names_no_backbone():
+    card = {"version": "2026-10-06.2", "data": {"snapshot": "2026-10-06", "records": 160173,
+                                                "species": 11000, "genera": 1500}}
+    model = apiv1.public_model(card, "20261008-012435-4ef7b0")
+    assert model == {"name": "MycoMap Vision", "version": "2026-10-06.2",
+                     "data": card["data"], "calibrated_on": "2026-10-08"}
     assert leaks(model) == []

@@ -32,7 +32,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apiv1, config, evaluate, fungusgate, inat, manifest, models, names, nightly,
+from . import (apiv1, config, modelcard, evaluate, fungusgate, inat, manifest, models, names, nightly,
                permissions, serving, uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
@@ -536,12 +536,31 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     warm = Preload()
 
-    def served_release() -> str | None:
-        """The release this server answers from (its id stays internal; v1 shows its date)."""
+    def served_release_dir() -> Path | None:
+        """The folder of the release this server answers from, or None (a laptop)."""
         if layer:
-            return layer.release_id
+            return layer.release_dir
         from .release import current_release
-        return current_release(config.RELEASE_ROOT) if config.RELEASE_ROOT else None
+        rid = current_release(config.RELEASE_ROOT) if config.RELEASE_ROOT else None
+        return config.RELEASE_ROOT / "releases" / rid if rid else None
+
+    # The public model card (modelcard.py): the training-data version and its size. Read
+    # once from the release (a few seconds over the full manifest), in the background at
+    # startup, else at its first use.
+    card_lock = threading.Lock()
+    card_cache: dict = {}
+
+    def model_card() -> dict:
+        with card_lock:
+            if "card" not in card_cache:
+                try:
+                    card_cache["card"] = modelcard.card(served_release_dir(), manifest_path)
+                except Exception as e:  # noqa: BLE001 - the answer goes on without it
+                    note(f"[v1] model card: {type(e).__name__}: {e}")
+                    return modelcard.card(None, None)
+            return card_cache["card"]
+    if background:
+        threading.Thread(target=model_card, name="model card", daemon=True).start()
 
     @app.get("/api/health")
     def health():
@@ -1009,7 +1028,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             prior = result.pop("prior", None) or {}
             out = {"request_id": "r_" + secrets.token_urlsafe(12),
                    **result,
-                   "model": apiv1.public_model(served_release(),
+                   "model": apiv1.public_model(model_card(),
                                                str(cal.get("comparison_id") or "")),
                    "prior": {"applied": bool(prior.get("applied"))},
                    "context_used": used,
@@ -1048,7 +1067,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if key not in counts_cache:
                 doc = apiv1.taxon_counts(
                     ident.rank_counts, records=ident.records,
-                    model=apiv1.public_model(served_release()),
+                    model=apiv1.public_model(model_card()),
                     nightly_version=version[3] if layer else None)
                 body = apiv1.encode(doc)
                 counts_cache.clear()
