@@ -27,8 +27,8 @@ import numpy as np
 from . import config, fungusgate, likely
 from .embed import normalise
 from .serving import map_embeddings
-from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
-                       with_rows)
+from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, make_method,
+                       rank_scores, with_rows)
 from .licenses import photo_url
 from .placeprior import PlaceCue
 from .sources import INAT, record_url
@@ -224,7 +224,7 @@ class Identifier:
         by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()}, release=release)
         records = with_rows(by_id, row_of)
         self.index = build_index(records)
-        self.model = METHODS[method]()
+        self.model = make_method(method, backbone)
         self.uses_context = getattr(self.model, "needs_context", False)
         self.loaded_from_cache = fit_cached(
             self.model, vecs, self.index, records,
