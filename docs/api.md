@@ -143,8 +143,10 @@ Why sessions rather than stateless calls:
   per-photo answer, all computed once on upload. The photo itself is decoded, embedded
   and dropped in that call; **no photo bytes are kept**. Re-scoring after a new photo,
   a removed one or a place/date change runs `identify_vectors` over the stored vectors
-  and never re-embeds. With today's default method (nearest+mean), place and date don't
-  change the scores. They're echoed and used by methods with a place/date prior.
+  and never re-embeds. Place and date move the scores only with the
+  `nearest+mean+place` method (prior lane). With today's default (nearest+mean) they add
+  the per-name `place` cue and are echoed, so a `PATCH` returns a re-scored answer
+  either way.
 - **Lifetime.** 30 min after the last call, 2 h at most from creation (Steve). A
   session gone to expiry or a restart answers 404 `session_gone`. The app opens a new
   one and resends the photos it keeps locally anyway. Sessions belong to the credential's
@@ -233,15 +235,33 @@ model's result, not a `results` list.
   at genus (§8). A one-name `likely` set was tried as the rule and was right only 65% of
   the time at species, so it isn't used. The threshold may change on Vision; callers don't
   change.
-- **Place and date (reserved, from the prior lane).** Steve's place/date decision adds a
-  boost-only prior and a far-find cue per candidate: the distance to the nearest
-  DNA-validated record of that name, whether the date is in its season, a "far from
-  known records" flag, and the photo-only top name when the prior changed it. The field
-  names are reserved here: `candidate.place` (`{"nearest_record_km", "in_season",
-  "far_from_known"}`), and top-level `photo_only_top` (`{rank: name}` when it differs)
-  and `prior` (`{"applied": bool, "method"}`). The prior lane fixes the exact shape, and
-  this section is updated when it does. Distances are rounded (whole km) and never reveal
-  a record's location.
+- **Place and date** (prior lane, branch feat/place-date-boost-and-far-cue fc96fff, not
+  merged). At species and genus, wherever a name appears (`ranks`, `likely.*.names`,
+  `per_photo[].ranks`), each name carries:
+
+  ```json
+  "place": {"nearest_record_km": 120, "in_season": true, "far_from_known": false,
+            "note": null}
+  ```
+
+  - `nearest_record_km`: to the centre of the nearest DNA record's 0.2° cell (iNat's
+    obscuring grid), rounded to 10 km. No bearing, no record id, so it can't place a
+    record.
+  - `in_season`: a DNA record of it within 30 days of the date, any year.
+  - `far_from_known`: `nearest_record_km` > 300.
+  - `note`: "far from known records (possible range extension)", "outside its known
+    season", both joined by "; ", or `null`.
+  - Nulls: `place` is `null` with neither place nor date, and always at family. Without
+    a date, `in_season` is `null`; without a place, `nearest_record_km` and
+    `far_from_known` are `null`. `in_season` is also `null` for a taxon with under 5
+    dated records, and `nearest_record_km` for one with no record with coordinates.
+
+  Top level: `prior: {"applied": bool, "method": str}`, where `applied` means the place/date
+  prior moved the scores (only the `nearest+mean+place` method does, and only given a
+  place or date). Also `photo_only_top: {rank: name}`: the ranks where the prior changed
+  the top name, `{}` otherwise. All of it is computed in
+  `Identifier.identify_vectors` from vectors and context, so a session's re-scoring gets
+  it with no photos.
 - **`confidence`**: a softmax with a temperature fitted per rank on the newest weekly
   comparison (by log-likelihood). It is calibrated on average, not a promise per answer.
   `checked_coverage` says how often a likely set really held the right name on unseen
@@ -470,8 +490,9 @@ upper bound, and expect fewer `confident` answers in the field.
 
 | Flag | Vision branch | Turns on |
 |---|---|---|
-| `MV_TAXON_COUNTS=1` | `feat/api-taxon-counts` | §7 (smallest; Mobile H waits on it) |
-| `MV_API_V1=1` | `feat/api-v1-identify` | identify by photos, credentials, timing, errors, `confident`, higher ranks, the queue |
+| `MV_TAXON_COUNTS=1` | `feat/api-taxon-counts` (9755050) | §7 (smallest; Mobile H waits on it) |
+| `MV_API_V1=1` | `feat/api-v1-identify` (a794429) | identify by photos, credentials, timing, errors, `confident`/`answer`, photos-per-minute per member |
+| (same flag) | `feat/api-v1-ranks-and-queue` | order/class/phylum, the FIFO queue with batched search |
 | `MV_SESSIONS=1` | `feat/api-v1-sessions` | §3.3 |
 | `MV_API_V1_SOURCES=1` | `feat/api-v1-by-observation` | identify by iNat / MO number |
 | `MV_QUOTAS=off\|count\|enforce` | `feat/api-v1-quotas` | §6: `count` reports use without refusing, for a trial |
