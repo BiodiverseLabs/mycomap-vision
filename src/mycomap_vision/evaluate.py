@@ -302,9 +302,14 @@ def make_method(method: str, backbone: str | None = None):
 
 
 def method_applies(method: str, backbone: str) -> bool:
-    """False for a method tied to its own model (picek.Classifier) on a backbone that is
-    not such a model; every other pair applies."""
-    if not hasattr(METHODS[method], "for_backbone"):
+    """False for a method tied to its own model on a backbone that is not such a model
+    (picek.Classifier: a Picek classifier; ft-head: a fine-tune that kept its heads, which
+    says so through applies_to); every other pair applies."""
+    cls = METHODS[method]
+    applies = getattr(getattr(cls, "func", cls), "applies_to", None)
+    if applies is not None:
+        return bool(applies(backbone))
+    if not hasattr(cls, "for_backbone"):
         return True
     from .replications.fungitastic.retrain import is_classifier
     return is_classifier(backbone)

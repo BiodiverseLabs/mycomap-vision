@@ -18,7 +18,10 @@ they're rare (balanced training lost badly on the sample, see methods.LinearHead
 
 A fine-tuned model is registered as `<base>-ft-<tag>`: data/models/<name>.json
 (what it was trained on) and <name>.pt (only the trained weights; the rest are
-the base model's). models.load_backbone finds it by that name.
+the base model's). models.load_backbone finds it by that name. Since 2026-10-11
+the trained classifier itself is kept too, in <name>.heads.npz (read_heads), so the
+fine-tune's own classifier can be scored as a method (methods.FinetuneHead); models
+trained before then have no heads file and load as before.
 """
 
 from __future__ import annotations
@@ -158,6 +161,51 @@ def read_meta(name: str, root: Path | None = None) -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"no fine-tuned model {name!r} in {path.parent}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+# --- the trained classifier heads ------------------------------------------------
+
+HEADS_SUFFIX = ".heads.npz"
+# Every file a fine-tune writes, in the order they are uploaded and pulled. The heads
+# file is optional when reading: models trained before 2026-10-11 have none.
+MODEL_SUFFIXES = (".pt", ".json", HEADS_SUFFIX)
+REQUIRED_SUFFIXES = (".pt", ".json")
+
+
+def save_heads(path: Path, heads: dict[str, np.ndarray], names: dict[str, list[str]],
+               scale: float) -> Path:
+    """The cosine classifier per rank: unit-length class vectors (float16) and their
+    class names in the same order. Plain numpy (no pickle), readable without torch."""
+    arrays = {"scale": np.asarray(scale, dtype=np.float32)}
+    for rank in RANKS:
+        h = np.asarray(heads[rank], dtype=np.float32)
+        if len(h) != len(names[rank]):
+            raise ValueError(f"{rank}: {len(h)} class vectors for {len(names[rank])} names")
+        norms = np.linalg.norm(h, axis=1, keepdims=True)
+        arrays[rank] = np.where(norms > 0, h / np.maximum(norms, 1e-12), 0).astype(np.float16)
+        arrays[f"{rank}_names"] = np.asarray(names[rank], dtype=str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.savez(f, **arrays)
+    tmp.replace(path)
+    return path
+
+
+def read_heads(name: str, root: Path | None = None) -> dict:
+    """{rank: (class vectors, names)} and "scale" for a fine-tuned model. A model trained
+    before the heads were kept says so, rather than scoring with nothing."""
+    root = root or models_dir()
+    meta = read_meta(name, root)
+    file = meta.get("heads")
+    if not file or not (root / file).is_file():
+        raise FileNotFoundError(
+            f"{name!r} kept no classifier heads (trained before 2026-10-11, or its "
+            f"{HEADS_SUFFIX} file is missing): only its embeddings can be scored")
+    with np.load(root / file, allow_pickle=False) as z:
+        out = {rank: (z[rank], [str(n) for n in z[f"{rank}_names"]]) for rank in RANKS}
+        out["scale"] = float(z["scale"])
+    return out
 
 
 # --- training (needs torch) -----------------------------------------------------
@@ -351,9 +399,13 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             break
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save({n: p.detach().cpu() for n, p in tail}, out_dir / f"{name}.pt")
+    heads_file = save_heads(out_dir / f"{name}{HEADS_SUFFIX}",
+                            {rank: h.detach().float().cpu().numpy()
+                             for rank, h in zip(RANKS, heads)}, ts.names, cfg.scale)
     meta = {"name": name, "base": base,
             "base_spec": getattr(backbone, "spec", None) or models.resolve_spec(base),
-            "weights": f"{name}.pt", "trained_through": ts.trained_through,
+            "weights": f"{name}.pt", "heads": heads_file.name,
+            "trained_through": ts.trained_through,
             "test_days": test_days, "records": ts.records, "photos": len(ts.items),
             "species": len(ts.names["species"]), "steps": step, "photos_seen": seen,
             "final_loss": round(float(np.mean(losses[-100:])), 4) if losses else None,

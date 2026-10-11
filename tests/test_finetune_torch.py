@@ -75,6 +75,10 @@ def test_training_changes_only_the_tail_and_the_saved_model_reloads(conn, tmp_pa
     saved = torch.load(tmp_path / "models" / "tiny-ft.pt", weights_only=True)
     assert set(saved) == {"blocks.2.weight", "blocks.2.bias", "norm.weight", "norm.bias"}
     assert meta["trained_through"] == "2026-08-24" and meta["photos"] == 6
+    # The trained classifier is kept too, with its class names (methods.FinetuneHead).
+    heads = finetune.read_heads("tiny-ft", tmp_path / "models")
+    assert meta["heads"] == "tiny-ft.heads.npz"
+    assert heads["species"][1] == ["A x", "B y"] and heads["species"][0].shape == (2, 4)
     assert conn.execute("select base from finetunes where name = 'tiny-ft'").fetchone()[0] == "tiny"
     # Reloading = the base model with the trained weights put back.
     monkeypatch.setattr(models, "load_backbone", lambda spec: Tiny())

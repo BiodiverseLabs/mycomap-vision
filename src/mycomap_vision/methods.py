@@ -325,8 +325,79 @@ class NearestAndMean:
         return self.scorer.sims(query)
 
 
+class FinetuneHead:
+    """Score = mean over query photos of the cosine to the fine-tune's own species class
+    vector (finetune.read_heads): the classifier the fine-tune trained, scored as it
+    was trained, with no reference photos involved.
+
+    Only for a fine-tuned backbone that kept its heads (trained 2026-10-11 or later):
+    bound to it with for_backbone (evaluate.make_method does), and skipped on any other
+    backbone (applies_to, evaluate.method_applies). A group the fine-tune never saw as a
+    species (a species new since it was trained, or a one-word name) gets FLOOR, below any
+    cosine, so it can never be a top answer; `coverage()` says how many groups the head
+    knows, since that is this method's built-in blind spot.
+    """
+    name = "ft-head"
+    FLOOR = -2.0
+
+    @staticmethod
+    def ready() -> bool:
+        """Research only: never offered on the site (methods.method_ready), since most
+        backbones have no heads and it is not adopted. mv compare and mv heldout predict
+        score it on a fine-tune that kept its heads."""
+        return False
+
+    @staticmethod
+    def applies_to(backbone: str, root=None) -> bool:
+        """True for a fine-tuned model whose heads file is there."""
+        from .finetune import models_dir, read_meta
+        try:
+            meta = read_meta(backbone, root)
+        except FileNotFoundError:
+            return False
+        return bool(meta.get("heads")) and ((root or models_dir()) / meta["heads"]).is_file()
+
+    def __init__(self):
+        self.backbone, self.models_root = None, None
+
+    def for_backbone(self, backbone: str, root=None) -> None:
+        self.backbone, self.models_root = backbone, root
+
+    def fit(self, vectors: np.ndarray, index) -> None:
+        from .finetune import read_heads
+        if not self.backbone:
+            raise ValueError("ft-head scores a fine-tuned backbone's own classifier: "
+                             "bind it with for_backbone before fitting")
+        vecs, names = read_heads(self.backbone, self.models_root)["species"]
+        row = {n: i for i, n in enumerate(names)}
+        labels, lab = index.labels["species"], index.label_of["species"]
+        self.head_row = np.asarray([row.get(labels[k], -1) if k >= 0 else -1 for k in lab],
+                                   dtype=np.int64)
+        self.known = self.head_row >= 0
+        self.head = np.asarray(vecs, dtype=np.float32)[self.head_row[self.known]]
+        self.groups = len(index.species)
+
+    def coverage(self) -> dict:
+        return {"groups": self.groups, "groups_with_head": int(self.known.sum())}
+
+    def scoreboard_extra(self) -> dict:
+        return {"ft_head_coverage": self.coverage()}
+
+    def per_photo_scores(self, photo_sims, query: np.ndarray) -> np.ndarray:
+        """(n_query_photos, n_groups). `photo_sims` is unused (the head needs no
+        reference photos); taken so identify.py calls every method the same way."""
+        out = np.full((len(query), self.groups), self.FLOOR, dtype=np.float32)
+        q = query.astype(np.float32)
+        q /= np.linalg.norm(q, axis=1, keepdims=True).clip(1e-12)
+        out[:, self.known] = q @ self.head.T
+        return out
+
+    def species_scores(self, query: np.ndarray) -> np.ndarray:
+        return self.per_photo_scores(None, query).mean(axis=0)
+
+
 METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean, LinearHead, Hybrid,
-                               NearestAndMean)}
+                               NearestAndMean, FinetuneHead)}
 
 class AsLogProb:
     """A similarity method's scores as log-probabilities (softmax at a fixed temperature),

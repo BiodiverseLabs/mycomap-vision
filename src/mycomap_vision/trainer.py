@@ -39,6 +39,7 @@ from typing import Callable
 
 from . import config, evaluate, holdouts
 from .embed import SCHEMA as EMBED_SCHEMA
+from .finetune import HEADS_SUFFIX
 from .manifest import snapshot
 from .screening import Stopped, screen
 
@@ -351,6 +352,9 @@ def restore_finished(conn: sqlite3.Connection, files, run_id: str, stages: list[
                 got = all(files.fetch(f"{prefix}models/{s.name}{suffix}",
                                       models_dir / f"{s.name}{suffix}")
                           for suffix in model_files(s.kind))
+                if s.kind == "finetune":            # its heads, since 2026-10-11
+                    files.fetch(f"{prefix}models/{s.name}{HEADS_SUFFIX}",
+                                models_dir / f"{s.name}{HEADS_SUFFIX}")
                 if not got or not _remote_is_finetune(conn, s.name):
                     log(f"[{s.name}] its weights or index row are missing: fine-tuning again")
                     continue
@@ -557,7 +561,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                                                             stopping))(
                         conn, s.base, s.name, root, data_dir / "models")
                 publish([(data_dir / "models" / f"{s.name}{suffix}",
-                          f"{prefix}models/{s.name}{suffix}") for suffix in model_files(s.kind)])
+                          f"{prefix}models/{s.name}{suffix}") for suffix in model_files(s.kind)
+                         + ((HEADS_SUFFIX,) if s.kind == "finetune" and (
+                             data_dir / "models" / f"{s.name}{HEADS_SUFFIX}").is_file() else ())])
                 finetuned[s.name] = meta
                 progress.stage(i, status="done", finished_at=_now(),
                                seconds=round(time.monotonic() - t0, 1),
@@ -761,6 +767,9 @@ def merge_results(conn: sqlite3.Connection, remote_path: Path, staged: Path, res
             refused[name] = "its classifier head or records list is not staged"
             continue
         srcs += [p for p in extra if p.is_file()]
+        heads = staged.parent / "models" / f"{name}{HEADS_SUFFIX}"
+        if heads.is_file():             # fine-tunes from 2026-10-11 keep their heads
+            srcs.append(heads)
         dest = data_dir / "models"
         dest.mkdir(parents=True, exist_ok=True)
         for src in srcs:
