@@ -675,7 +675,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     is paid for; then upload the code and the manifest and start the instance.
 
     `release`: the Picek stage trains on that dataset release (docs/dataset-release.md),
-    verified (SHA256SUMS, MANIFEST.json) before anything else; a draft needs
+    verified (every file against MANIFEST.json) before anything else; a draft needs
     `allow_draft`. Its labels_hash is the run's labels identity, its MANIFEST hash is
     recorded, and every release file but private.sqlite ships with the run
     (dataset.shipped_files: release.sqlite, MANIFEST.json, SHA256SUMS, DATASET_CARD.md),
