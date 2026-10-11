@@ -200,6 +200,7 @@ const METHOD_LABEL: Record<string, string> = {
   nearest: "nearest specimen",
   "species-mean": "species average",
   "nearest+mean": "nearest + species average",
+  "nearest+mean+place": "nearest + species average + place and date",
   "nearest-mix": "nearest specimen, photo votes",
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",
