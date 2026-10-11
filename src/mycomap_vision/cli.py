@@ -165,7 +165,8 @@ def cmd_aws_launch_trainer(conn, args) -> None:
         if chosen:
             print(f"--resume keeps the run's own settings; ignoring {', '.join(chosen)}",
                   file=sys.stderr)
-    print(json.dumps(aws.launch_trainer(conn, _split(args.backbones), _split(args.methods),
+    backbones = [] if args.backbones.strip().lower() == "none" else _split(args.backbones)
+    print(json.dumps(aws.launch_trainer(conn, backbones, _split(args.methods),
                                         size=args.size, max_hours=args.max_hours,
                                         instance_type=args.instance_type,
                                         test_days=args.test_days, finetune=finetune,
@@ -174,11 +175,17 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         allow_dirty=args.allow_dirty,
                                         allow_unpushed=args.allow_unpushed,
                                         spot=args.spot, spot_max_price=args.spot_max_price,
-                                        resume=args.resume), indent=2))
+                                        resume=args.resume, picek=_split(args.picek),
+                                        picek_exclude=args.picek_exclude_benchmarks,
+                                        dry_run=args.dry_run, ec2_check=args.ec2_check,
+                                        release=_dataset_release(args),
+                                        allow_draft=args.allow_draft),
+                     indent=2))
 
 
 # What a resumed run takes from the run itself, not from the command line.
-RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records")
+RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records",
+                   "picek", "picek_exclude_benchmarks")
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -196,11 +203,20 @@ def cmd_aws_train_job(conn, args) -> None:
 
     def upload(path, key):
         store.client.upload_file(str(path), store.bucket, key)
-    out = trainer.run_job(conn, store, _split(args.backbones), _split(args.methods), upload,
+    backbones = [] if args.backbones.strip().lower() == "none" else _split(args.backbones)
+    out = trainer.run_job(conn, store, backbones, _split(args.methods), upload,
                           args.run_id, size=args.size, test_days=args.test_days,
                           batch_size=args.batch_size, readers=args.readers,
                           finetune=_split(args.finetune), sample_records=args.sample_records,
-                          should_stop=should_stop, interrupted=watcher,
+                          picek=_split(args.picek), should_stop=should_stop,
+                          picek_exclude=args.picek_exclude_benchmarks,
+                          picek_ids_file=args.picek_exclude_ids,
+                          picek_labels_hash=args.picek_labels_hash, interrupted=watcher,
+                          picek_release=args.picek_release,
+                          picek_release_manifest=args.picek_release_manifest,
+                          picek_allow_draft=args.picek_allow_draft,
+                          picek_place_cells=args.picek_place_cells,
+                          picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
                           if args.resume else None)
     if watcher is not None:
@@ -264,14 +280,86 @@ def cmd_compare(conn, args) -> None:
     from . import evaluate, models
     backbones = [models.storage_name(b.strip()) for b in args.backbones.split(",") if b.strip()]
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
-                              max_test=args.max_test, name_scores=args.name_scores,
-                              sets=not args.no_sets, into=args.into)
+    rel = _dataset_release(args)
+    if getattr(args, "test_release", None):
+        # Reference = the release's train + val, scored = its separate test release
+        # (replications/fungitastic/release_eval.py): the Picek vs Vision report.
+        from .dataset_release import load_release
+        from .replications.fungitastic import release_eval
+        if rel is None or args.into or args.max_test:
+            raise SystemExit("--test-release needs --release <its base>; no --into or "
+                             "--max-test")
+        test_rel = load_release(args.test_release, allow_draft=args.allow_draft)
+        result = release_eval.compare_on_test(conn, rel, test_rel, backbones, methods,
+                                              name_scores=args.name_scores,
+                                              sets=not args.no_sets, per_image=args.per_image)
+    else:
+        result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
+                                  max_test=args.max_test, name_scores=args.name_scores,
+                                  sets=not args.no_sets, per_image=args.per_image,
+                                  into=args.into, release=rel)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
     print_scoreboard(evaluate.scoreboard(conn, result["comparison_id"]))
     print(f"-> {path}")
+
+
+def _dataset_release(args):
+    """The dataset release named by --release (dataset_release.py), or None."""
+    if not getattr(args, "release", None):
+        return None
+    from .dataset_release import load_release
+    rel = load_release(args.release, allow_draft=args.allow_draft)
+    print(f"dataset release {rel.id} (release_hash {rel.release_hash[:12]}, "
+          f"reference_hash {rel.reference_hash[:12]})"
+          + (" DRAFT" if rel.manifest["draft"] else ""))
+    return rel
+
+
+def cmd_dataset(args) -> None:
+    """Dataset releases for research (dataset_release.py, docs/dataset-release.md). Runs
+    without opening the manifest for writing: build reads a private copy of it."""
+    from pathlib import Path
+
+    from . import dataset_release as dr
+    root = Path(args.root) if args.root else dr.ROOT
+    if args.action == "build":
+        name = args.name or dr.draft_id(suffix="-test" if args.test_for else "")
+        if args.dry_run and not dr.is_draft(name):
+            raise SystemExit("--dry-run builds a draft: leave out --name (or give dry-<stamp>)")
+        reader = dr.default_store_reader() if args.derive != "none" else None
+        print(("DRY RUN, not v1: " if dr.is_draft(name) else "") + f"building {name} ...")
+        m = dr.build(name=name, manifest_path=Path(args.manifest) if args.manifest else None,
+                     root=root, review_files=[Path(p) for p in args.exclusions],
+                     recipes=dr.parse_list(args.recipes), derive_photos=args.derive,
+                     val_cutoff=args.val_cutoff, val_weeks=args.val_weeks,
+                     north_america_only=not args.all_regions,
+                     freeze_approved=args.freeze_approved, test_for=args.test_for,
+                     test_ids=Path(args.ids) if args.ids else None, store_reader=reader)
+        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits")},
+                         indent=2))
+    elif args.action == "verify":
+        print(json.dumps(dr.verify(args.id, root, photos=args.photos), indent=2))
+    elif args.action == "derive":
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            d = rel.derive(args.photo, args.recipe)
+        finally:
+            rel.close()
+        if args.out:
+            Path(args.out).write_bytes(d.body)
+        print(json.dumps({"photo": args.photo, "recipe": args.recipe, "sha256": d.sha256,
+                          "pixels_sha256": d.pixels_sha256, "width": d.width,
+                          "height": d.height, "matches_release": True, "out": args.out},
+                         indent=2))
+    elif args.action == "diff":
+        print(json.dumps(dr.diff(args.a, args.b, root), indent=2))
+    elif args.action == "public":
+        m = dr.public_variant(args.id, root)
+        print(json.dumps({k: m[k] for k in ("id", "hashes", "counts")}, indent=2))
+    else:
+        print(json.dumps(dr.show(args.id, root), indent=2))
 
 
 def print_scoreboard(rows: list[dict]) -> None:
@@ -406,7 +494,8 @@ def cmd_benchmark_export(conn, args) -> None:
     from . import benchmark_io
     path = Path(args.report)
     report = json.loads(path.read_text(encoding="utf-8"))
-    text = json.dumps(benchmark_io.export_summary(report, path.name), indent=1)
+    text = json.dumps(benchmark_io.export_summary(report, path.name, args.reproducibility),
+                      indent=1)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"wrote {args.out}", file=sys.stderr)
@@ -474,6 +563,58 @@ def cmd_models(conn, args) -> None:
     for name, n in counts.items():
         print(f"  {name:<14} {n:>9,} photos embedded")
     print("Methods: " + ", ".join(evaluate.METHODS))
+
+
+def cmd_fungus_gate(conn, args) -> None:
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from . import fungusgate
+    if args.action in ("embed", "tune"):
+        from . import fungusgate_tune as tune
+        if not args.out:
+            raise SystemExit("--out is required")
+        if args.action == "embed":
+            if not args.list:
+                raise SystemExit("embed needs --list (key<TAB>path per line)")
+            n = tune.embed_list(args.backbone, Path(args.list), Path(args.out))
+            print(f"{n} photos embedded into {args.out}")
+            return
+        missing = [o for o in ("dev", "ood", "ood_manifest", "exclude") if not getattr(args, o)]
+        if missing:
+            raise SystemExit("tune needs " + ", ".join("--" + m.replace("_", "-") for m in missing))
+        report = tune.tune(conn, Path(args.dev), Path(args.ood), Path(args.ood_manifest),
+                           Path(args.exclude), Path(args.out), args.benchmark,
+                           Path(args.negatives) if args.negatives else None,
+                           Path(args.embeddings_root) if args.embeddings_root else None,
+                           Path(args.text_from) if args.text_from else None,
+                           args.on_served)
+        print(json.dumps(report["chosen"], indent=2))
+        print(f"gate and report.json in {args.out}; copy the gate into data/models to serve it")
+        return
+    if args.action == "show":
+        gate = fungusgate.FungusGate.load()
+        if gate is None:
+            print("No fungus gate saved: identifications run ungated.")
+            return
+        t = gate.thresholds
+        print(f"Fungus gate ({gate.mode}) on {gate.base} vectors: not a fungus below p={t.not_fungus}, "
+              f"not sure below p={t.unsure}; {len(gate.classes)} prompts in "
+              f"{len(set(gate.classes.tolist()))} classes")
+        print(json.dumps(gate.provenance, indent=2))
+        return
+    if not 0 <= args.not_fungus <= args.unsure <= 1:
+        raise SystemExit("need 0 <= --not-fungus <= --unsure <= 1")
+    probe = None
+    if args.probe:
+        import numpy as np
+        with np.load(args.probe) as f:
+            probe = (f["w"], float(f["b"]))
+    gate = fungusgate.build(fungusgate.Thresholds(args.not_fungus, args.unsure),
+                            provenance={"tuned_on": args.tuned_on, "note": args.note,
+                                        "built_at": datetime.now(timezone.utc).isoformat()},
+                            probe=probe, mode=args.mode)
+    print(f"saved {gate.save()}")
 
 
 def cmd_serve(conn, args) -> None:
@@ -682,7 +823,8 @@ def cmd_heldout(conn, args) -> None:
         out = heldout.predict(conn, args.name, name, _split(args.methods), ids,
                               lambda: models.load_backbone(args.backbone), place=args.place,
                               size=args.size, batch_size=args.batch_size, redo=args.redo,
-                              scores_out=Path(args.scores_out) if args.scores_out else None)
+                              scores_out=Path(args.scores_out) if args.scores_out else None,
+                              release=_dataset_release(args))
         print(json.dumps(out, indent=2))
     elif args.action == "inat":
         from . import inat_cv
@@ -692,6 +834,10 @@ def cmd_heldout(conn, args) -> None:
         print(f"iNat computer vision on {len(ids):,} records of {args.name} (1 request/s)...")
         print(json.dumps(heldout.inat_cv(conn, args.name, ids, client, size=args.size,
                                          redo=args.redo), indent=2))
+    elif args.action == "import-external":
+        print(json.dumps(heldout.import_external(conn, args.name, Path(args.results),
+                                                 args.backbone, redo=args.redo,
+                                                 release=_dataset_release(args)), indent=2))
     else:
         from . import heldout_report, holdouts
         subset = holdouts.read_ids_csv(Path(args.subset)) if args.subset else None
@@ -702,15 +848,168 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_external(conn, args) -> None:
+    """Published fungi classifiers as outside baselines (replications/fungitastic/published*.py)."""
+    from pathlib import Path
+
+    from . import heldout
+    from .replications.fungitastic import published as external
+    from .replications.fungitastic import published_report as external_report
+    models = ([external.model_for(m) for m in _split(args.model)] if getattr(args, "model", None)
+              else list(external.MODELS.values()))
+    if args.action == "run":
+        from .replications.fungitastic import published_release
+        rel = _dataset_release(args)
+        if rel is None:
+            raise SystemExit("mv external run needs --release (v1 for val, v1-test for test)")
+        print(json.dumps(published_release.run(
+            conn, rel, args.eval, [m.short for m in models],
+            fetch_crosswalk=not args.no_fetch, batch_size=args.batch_size,
+            vision_results=[Path(p) for p in args.vision_results or []]), indent=2))
+        return
+    if args.action == "labels":
+        for m in models:
+            external.check_config(m)
+            print(json.dumps(external.write_labels(m), indent=2))
+    elif args.action == "coverage":
+        out = external_report.coverage_report(conn, args.name, args.split,
+                                              [m.short for m in models],
+                                              crosswalk=not args.no_crosswalk)
+        print(json.dumps(out, indent=2))
+    elif args.action == "crosswalk":
+        from .replications.fungitastic import crosswalk as gbif
+        matcher = gbif.Matcher(interval=1 / args.per_second)
+        try:
+            print(json.dumps(external_report.fill_crosswalk(
+                conn, args.name, args.split, [Path(p) for p in args.results or []],
+                vision_backbone=args.vision, models=[m.short for m in models],
+                matcher=matcher), indent=2))
+        finally:
+            matcher.close()
+    elif args.action == "predict":
+        ids = _heldout_ids(conn, args)
+        labeller = heldout.Labeller(conn)
+        for m in models:
+            out_path = (Path(args.out) if args.out and len(models) == 1 else
+                        heldout.bench_dir(conn, args.name) / "external"
+                        / f"{m.short}-{args.split or 'all'}.jsonl")
+            print(f"{m.backbone} on {len(ids):,} records of {args.name} -> {out_path}")
+            print(json.dumps(external.predict_heldout(
+                conn, args.name, m, ids, out_path, labeller=labeller, size=args.size,
+                batch_size=args.batch_size), indent=2))
+    elif args.action == "baseline":
+        for m in models:
+            out = external.run_comparison(conn, args.comparison, m, batch_size=args.batch_size)
+            print(json.dumps({k: v for k, v in out.items() if k != "run"}, indent=2))
+        from . import evaluate
+        print_scoreboard(evaluate.scoreboard(conn, args.comparison))
+    else:
+        out = external_report.report(
+            conn, args.name, split=args.split,
+            results_files=[Path(p) for p in args.results or []],
+            vision_backbone=args.vision, models=_split(args.model) if args.model else None,
+            with_reference=not args.no_reference, crosswalk=not args.no_crosswalk,
+            out_path=Path(args.out) if args.out else heldout.bench_dir(conn, args.name)
+            / "reports" / f"external-{args.split}-{heldout.now_iso().replace(':', '')[:15]}.json")
+        print(external_report.format_report(out))
+        print(f"-> {out['file']}")
+
+
 def print_heldout_report(out: dict) -> None:
     """The standard summary as text (every table with its n), then as JSON, then where the
     full report (CIs, paired tests, calibration, breakdowns, label audit) was written."""
     from .heldout_summary import format_summary
     print(format_summary(out["summary"]))
     print()
+    print(format_f1_and_per_image(out.get("models") or {}))
+    print()
     print(json.dumps(out["summary"], indent=2))
     print(f"-> {out['files']['json']}")
     print(f"-> {out['files']['csv']}")
+
+def format_f1_and_per_image(models: dict) -> str:
+    """Species macro-F1 and per-image vs per-record species top-1 for each model (the
+    numbers the Picek group's papers report), from the report's models section."""
+    pct = lambda v: "   -  " if v is None else f"{100 * v:5.1f}%"  # noqa: E731
+    lines = ["Species macro-F1, and species top-1 per record vs per photo:",
+             f"  {'model':<56} {'macro-F1':>8} {'top-1/record':>12} {'top-1/photo':>11} "
+             f"{'F1/photo':>8}"]
+    for name, m in models.items():
+        rec = (m.get("species") or {}).get("top1") or {}
+        img = m.get("per_image") or {}
+        lines.append(f"  {name:<56} {pct((m.get('species_macro_f1') or {}).get('macro_f1')):>8} "
+                     f"{pct(rec.get('rate')):>12} "
+                     f"{pct((img.get('species') or {}).get('rate')):>11} "
+                     f"{pct(img.get('species_macro_f1')):>8}")
+    return "\n".join(lines)
+
+
+def cmd_picek_train(conn, args) -> None:
+    """Train the Picek group's classifier recipe on our records (retrain.py). Full runs belong
+    on a GPU instance; here: a smoke test (--max-steps) or a short run."""
+    from datetime import datetime
+
+    from .replications.fungitastic import retrain as picek
+    preset = args.preset
+    name = args.name or f"picek-{preset}-{datetime.now():%Y%m%d-%H%M%S}"
+    cfg = picek.PicekConfig(preset=preset, epochs=args.epochs, lr=args.lr,
+                            effective_batch=args.effective_batch, micro_batch=args.micro_batch,
+                            val_days=args.val_days, val_max_photos=args.val_max_photos,
+                            workers=args.workers, max_steps=args.max_steps,
+                            grad_checkpointing=False if args.no_grad_checkpointing else None,
+                            seed=args.seed, cache_px=args.cache_px,
+                            exclude_benchmarks=args.exclude_benchmarks,
+                            release=args.release, allow_draft=args.allow_draft)
+    meta = picek.train(conn, open_store(args.source, config.DATA_DIR), args.size, name, cfg,
+                       test_days=args.test_days)
+    print(json.dumps({k: v for k, v in meta.items() if k != "history"}, indent=2))
+    print(f"next: mv embed --backbone {name} --size {args.size}, then mv compare --backbones "
+          f"{name} --methods classifier,classifier+month,classifier+month+place --per-image, "
+          f"and mv heldout predict --backbone {name} --methods classifier,classifier+month")
+
+
+def cmd_picek_bench(conn, args) -> None:
+    """Measure the replication's speed: the data loader alone (CPU) and the GPU alone."""
+    from .replications.fungitastic import retrain as picek
+    out = {}
+    if not args.gpu_only:
+        store = open_store(args.source, config.DATA_DIR)
+        items = [(int(pid), path, 0) for pid, path in conn.execute(
+            "select photo_id, path from photo_copies where store = ? and size = ? "
+            "order by photo_id limit ?", (store.location, args.size, args.photos))]
+        out["loader"] = [picek.bench_loader(store, items, args.preset, w, args.photos)
+                         for w in _split_ints(args.workers)]
+    if not args.loader_only:
+        out["gpu"] = []
+        for mb in _split_ints(args.micro_batch):
+            for gc in ((True, False) if args.both_checkpointing
+                       else (not args.no_grad_checkpointing,)):
+                try:
+                    out["gpu"].append(picek.bench_gpu(args.preset, args.classes, mb,
+                                                      args.steps, gc))
+                except RuntimeError as e:          # e.g. CUDA out of memory: say so, go on
+                    out["gpu"].append({"micro_batch": mb, "grad_checkpointing": gc,
+                                       "error": str(e).splitlines()[0][:200]})
+                finally:
+                    import gc as _gc
+
+                    import torch
+                    _gc.collect()
+                    torch.cuda.empty_cache()
+    print(json.dumps(out, indent=2))
+
+
+def _split_ints(v: str) -> list[int]:
+    return [int(x) for x in _split(v)]
+
+
+def release_options(p) -> None:
+    p.add_argument("--release", metavar="ID",
+                   help="read records, labels, photos and splits from this dataset release "
+                        "(docs/dataset-release.md), not the live manifest")
+    p.add_argument("--allow-draft", action="store_true",
+                   help="accept a draft (dry-run) release: exploratory only")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
@@ -796,7 +1095,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("aws-launch-trainer",
                        help="embed the S3 photos and compare on a self-terminating GPU instance")
     p.add_argument("--backbones", default="bioclip-2",
-                   help="comma-separated aliases or specs (default: bioclip-2)")
+                   help="comma-separated aliases or specs (default: bioclip-2; 'none' with "
+                        "--picek to train only the replication)")
     p.add_argument("--methods", default="nearest,species-mean,linear,hybrid")
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
     p.add_argument("--max-hours", type=float, default=24,
@@ -809,6 +1109,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sample-records", type=int,
                    help="rehearsal: run everything on this many random records only "
                         "(its results can't be merged home)")
+    p.add_argument("--picek", default="",
+                   help="also train the Picek group's classifier recipe (retrain.py): presets "
+                        "as preset[@epochs[@cache_px]], e.g. fungitastic-beit-b384@15@440 "
+                        "(15 epochs from a 440 px photo cache); add the methods "
+                        "classifier,classifier+month to score it")
+    p.add_argument("--picek-exclude-benchmarks", default="match", choices=["match", "all"],
+                   help="benchmark records the replication leaves out: match (default) = "
+                        "exactly what the Vision models leave out (sealed benchmarks), so "
+                        "both train on the same records; all = every benchmark's records. "
+                        "With --release the release's splits decide, and a mismatch is refused")
+    release_options(p)        # the Picek stage trains on it; shipped without private.sqlite
+    p.add_argument("--dry-run", action="store_true",
+                   help="check and build everything locally (code archive, instance script, "
+                        "manifest copy, label snapshot, EC2 request) and send nothing")
+    p.add_argument("--ec2-check", action="store_true",
+                   help="with --dry-run: also ask EC2 with DryRun=True (needs aws login; no "
+                        "instance, no cost)")
     p.add_argument("--allow-over-time", action="store_true",
                    help="launch even when the time estimate exceeds --max-hours (the run "
                         "stops at the limit and keeps the stages it finished)")
@@ -839,6 +1156,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--readers", type=int, default=16, help="parallel photo reads from S3")
     p.add_argument("--finetune", default="")
+    p.add_argument("--picek", default="")
+    p.add_argument("--picek-exclude-benchmarks", default="match", choices=["match", "all"])
+    p.add_argument("--picek-exclude-ids", help="the ids to leave out with 'all' (shipped)")
+    p.add_argument("--picek-labels-hash", help="refuse to train on other labels than these")
+    p.add_argument("--picek-release", help="the shipped dataset release the Picek stage uses")
+    p.add_argument("--picek-release-manifest", help="sha256 of its MANIFEST.json at launch")
+    p.add_argument("--picek-allow-draft", action="store_true")
+    p.add_argument("--picek-place-cells",
+                   help="the place prior's counts the launch made from the release (shipped)")
+    p.add_argument("--picek-place-cells-sha256", help="their sha256 at launch")
     p.add_argument("--sample-records", type=int)
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
@@ -860,6 +1187,49 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--max-steps", type=int)
     p.add_argument("--test-days", type=int, default=28)
+
+    from .replications.fungitastic.retrain import PRESETS
+    p = sub.add_parser("picek-train", help="train the Picek group's fungi classifier recipe "
+                                           "(FungiTastic / DF20) on our records (retrain.py)")
+    p.add_argument("--preset", default="fungitastic-beit-b384", choices=sorted(PRESETS))
+    p.add_argument("--name", help="default: picek-<preset>-<date-time>")
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--epochs", type=int, help="default: the preset's (50; DF20 100)")
+    p.add_argument("--lr", type=float, help="default: the preset's")
+    p.add_argument("--max-steps", type=int, help="stop after this many optimizer steps (smoke)")
+    p.add_argument("--effective-batch", type=int, default=256)
+    p.add_argument("--micro-batch", type=int, default=16)
+    p.add_argument("--val-days", type=int, default=28,
+                   help="validation slice: the last days before the comparison cutoff")
+    p.add_argument("--val-max-photos", type=int, help="cap the validation pass (smoke)")
+    p.add_argument("--workers", type=int, default=6)
+    p.add_argument("--no-grad-checkpointing", action="store_true")
+    p.add_argument("--exclude-benchmarks", default="match", choices=["match", "all"],
+                   help="match (default): leave out what the Vision models leave out "
+                        "(sealed benchmarks); all: every benchmark's records")
+    release_options(p)
+    p.add_argument("--cache-px", type=int,
+                   help="resize the training photos once to this shorter side on local disk "
+                        "(e.g. 440) and train from those; off by default")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--test-days", type=int, default=28)
+
+    p = sub.add_parser("picek-bench", help="the replication's speed: data loader (CPU) and "
+                                           "GPU measured apart")
+    p.add_argument("--preset", default="fungitastic-beit-b384", choices=sorted(PRESETS))
+    p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
+    p.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    p.add_argument("--photos", type=int, default=512)
+    p.add_argument("--workers", default="1,4", help="loader worker counts to try")
+    p.add_argument("--micro-batch", default="16", help="micro-batch sizes to try on the GPU")
+    p.add_argument("--classes", type=int, default=18000)
+    p.add_argument("--steps", type=int, default=20)
+    p.add_argument("--no-grad-checkpointing", action="store_true")
+    p.add_argument("--both-checkpointing", action="store_true",
+                   help="measure with and without gradient checkpointing")
+    p.add_argument("--loader-only", action="store_true")
+    p.add_argument("--gpu-only", action="store_true")
 
     p = sub.add_parser("aws-pull-trainer", help="bring a trainer run home (or the stages a "
                                                 "stopped one finished): its complete "
@@ -891,9 +1261,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="also score names s.l. and as species complexes (name_equiv.py, beta)")
     p.add_argument("--no-sets", action="store_true",
                    help="don't fit likely sets (likely.py) into the calibration")
+    p.add_argument("--per-image", action="store_true",
+                   help="also answer every test photo on its own (top-1 per rank and species "
+                        "macro-F1 per photo, as the Picek group reports)")
+    p.add_argument("--test-release", metavar="ID",
+                   help="with --release: score this test release (e.g. v1-test) against the "
+                        "release's train + val instead of its val split")
     p.add_argument("--into", metavar="COMPARISON",
                    help="add the runs to this saved comparison (same records only; replaces "
                         "a run of the same backbone and method there)")
+    release_options(p)
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
                                       "any that fail), then compare them with the baselines")
@@ -959,10 +1336,48 @@ def main(argv: list[str] | None = None) -> int:
                        "ids, names, observers or places) for the server box's Models page")
     p.add_argument("--report", required=True, help="a report-*.json from mv heldout report")
     p.add_argument("--out", help="write to this file (default: standard output)")
+    p.add_argument("--reproducibility", default="exploratory-pre-freeze",
+                   help="exploratory-pre-freeze (default) or reproduced-on-<release>")
     p = sub.add_parser("benchmark-import", help="(server box) add a benchmark-export to the "
                        "site; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
+
+    p = sub.add_parser("fungus-gate", help="the not-a-fungus gate in front of Identify: build "
+                       "its BioCLIP 2 text vectors with thresholds (tune them on DEV only), or "
+                       "show the saved one")
+    p.add_argument("action", choices=["build", "show", "embed", "tune"],
+                   help="build/show the saved gate; embed photos through the serving fork; "
+                        "tune: fit the probe and pick thresholds on DEV (fungusgate_tune.py)")
+    p.add_argument("--list", help="embed: key<TAB>path per line")
+    p.add_argument("--backbone", default="bioclip-2-ft-20261007-165400",
+                   help="embed: the fine-tuned model whose fork gives base vectors")
+    p.add_argument("--out", help="embed: the .npz to write; tune: the folder for gate + report")
+    p.add_argument("--dev", help="tune: DEV photo vectors (.npz from embed)")
+    p.add_argument("--ood", help="tune: not-a-fungus photo vectors (.npz from embed)")
+    p.add_argument("--ood-manifest", help="tune: the not-a-fungus set's manifest CSV")
+    p.add_argument("--exclude", help="tune: TSV of reference records that are not iNat records "
+                                     "(observation_id column); their animal/plant photos are "
+                                     "the probe's negatives")
+    p.add_argument("--negatives", help="tune: extra negative vectors (.npz from embed)")
+    p.add_argument("--benchmark", default="heldout-2026-10-08")
+    p.add_argument("--embeddings-root", help="tune: the frozen bioclip-2 reference embeddings")
+    p.add_argument("--on-served", default=None, metavar="BACKBONE",
+                   help="tune: the lighter gate, a probe on this served backbone's own vectors "
+                        "(no second set of weights at serve time)")
+    p.add_argument("--text-from", help="tune: a folder with a saved gate whose text vectors to "
+                                       "reuse (skips loading BioCLIP 2's text tower)")
+    p.add_argument("--not-fungus", type=float, default=0.0,
+                   help="p(fungus) below this: not a fungus (no answer)")
+    p.add_argument("--unsure", type=float, default=0.0,
+                   help="p(fungus) below this: not sure (names, no chance)")
+    p.add_argument("--probe", default=None,
+                   help="an .npz with a linear probe's w and b on the base model's vectors "
+                        "(fungusgate.fit_logistic)")
+    p.add_argument("--mode", default="zero-shot", choices=["zero-shot", "probe", "both"],
+                   help="which scores make p(fungus); probe and both need --probe")
+    p.add_argument("--tuned-on", default="", help="where the thresholds came from (provenance)")
+    p.add_argument("--note", default="")
 
     p = sub.add_parser("serve", help="run the API for the frontend")
     p.add_argument("--host", default="127.0.0.1")
@@ -974,6 +1389,44 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--label", help="appended to the release id, e.g. bioclip2-full")
     p.add_argument("--make-current", action="store_true",
                    help="also point releases/current.json at it (the box pulls that one)")
+
+    p = sub.add_parser("dataset", help="dataset releases for research: frozen, verifiable "
+                                       "snapshots (docs/dataset-release.md)")
+    p.add_argument("--root", help="where releases live (default data/research-releases)")
+    dsub = p.add_subparsers(dest="action", required=True)
+    q = dsub.add_parser("build", help="cut a release from a private copy of the manifest")
+    q.add_argument("--name", help="v1, v2, v1-test ... (frozen; needs --freeze-approved); "
+                                  "default: a draft dry-<stamp>")
+    q.add_argument("--dry-run", action="store_true", help="a draft: counts and would-be hashes")
+    q.add_argument("--freeze-approved", help="who gave the freeze trigger, and when")
+    q.add_argument("--manifest", help="the manifest to copy (default: MV_MANIFEST_PATH)")
+    q.add_argument("--exclusions", action="append", default=[],
+                   help="a person-checked review list (TSV: kind, key, reason, note); repeat")
+    q.add_argument("--recipes", default="original,long500-q90")
+    q.add_argument("--derive", default="all",
+                   help="derived hashes for 'all' included photos, 'none', or a number (drafts)")
+    q.add_argument("--val-cutoff", help="YYYY-MM-DD: validated after it = val")
+    q.add_argument("--val-weeks", type=int, default=8,
+                   help="without --val-cutoff: the newest N weeks of validations are val")
+    q.add_argument("--all-regions", action="store_true", help="not only North America")
+    q.add_argument("--test-for", metavar="RELEASE",
+                   help="a test release for this one: only --ids, all 'test', disjoint from it")
+    q.add_argument("--ids", help="CSV with observation_id (or record_key): the test records")
+    q = dsub.add_parser("verify", help="recompute every file and content hash")
+    q.add_argument("id")
+    q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
+    q = dsub.add_parser("derive", help="make one derived image from our original, hash-checked")
+    q.add_argument("id")
+    q.add_argument("--photo", required=True, help="photo key, e.g. inat:123456")
+    q.add_argument("--recipe", required=True)
+    q.add_argument("--out", help="write the image here")
+    q = dsub.add_parser("diff", help="what changed between two releases")
+    q.add_argument("a")
+    q.add_argument("b")
+    q = dsub.add_parser("public", help="write <id>-cc: CC photos only, no coordinates")
+    q.add_argument("id")
+    q = dsub.add_parser("show", help="counts and hashes")
+    q.add_argument("id")
 
     p = sub.add_parser("pull-release", help="(server box) download a release, verify it and "
                                             "make it current; then restart the server")
@@ -1083,6 +1536,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--scores-out", help="also write each record's photo scores (.npz in "
                                         "occtune.save_scored_set's format), e.g. for "
                                         "mv tune-occurrence --scores")
+    release_options(q)
 
     q = hsub.add_parser("inat", help="iNat's computer vision on a named subsample "
                                      "(needs a 24-hour token in data/secrets/inat_jwt.txt)")
@@ -1103,10 +1557,85 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--reference-hash",
                    help="score the answers made against this reference (e.g. the run before "
                         "a relabel; default: each model's newest)")
+    q = hsub.add_parser("import-external",
+                        help="store an external model's answers (mv external predict's JSONL)")
+    q.add_argument("--name", required=True)
+    q.add_argument("--backbone", required=True, help="e.g. external:df20-vit-l384")
+    q.add_argument("--results", required=True, help="the JSONL mv external predict wrote")
+    q.add_argument("--redo", action="store_true", help="replace answers stored before")
+    release_options(q)
+
+    p = sub.add_parser("external", help="published fungi classifiers (DF20, FungiTastic) as "
+                                        "outside baselines (replications/fungitastic/)")
+    xsub = p.add_subparsers(dest="action", required=True)
+    model_help = ("comma list of models (short name, external:<name> or BVRA/<repo>); "
+                  "default: all")
+    q = xsub.add_parser("run", help="the whole protocol on a dataset release's split, one "
+                                    "re-runnable command: labels, coverage, predict, crosswalk, "
+                                    "report (under research-results/<release>/external/<split>)")
+    release_options(q)
+    q.add_argument("--eval", choices=["val", "test"],
+                   help="the scored split (default: val for a release, test for a test "
+                        "release such as v1-test; anything else is refused)")
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--batch-size", type=int, default=16)
+    q.add_argument("--no-fetch", action="store_true",
+                   help="crosswalk from the GBIF cache only (no requests)")
+    q.add_argument("--vision-results", nargs="*",
+                   help="JSONL of Vision's answers on the same records (same-vocabulary tables)")
+    q = xsub.add_parser("labels", help="rebuild each class map from the dataset's metadata CSV")
+    q.add_argument("--model", help=model_help)
+    q = xsub.add_parser("coverage", help="(read-only) how much of a split and of Vision's North "
+                                         "American records each model can name")
+    q.add_argument("--name", required=True)
+    q.add_argument("--split", default="dev", choices=["dev", "test"])
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--no-crosswalk", action="store_true", help="exact names only")
+    q = xsub.add_parser("crosswalk", help="match every formal name a report compares in GBIF "
+                                          "(Backbone and Catalogue of Life; cached, paced; "
+                                          "scoring only)")
+    q.add_argument("--name", required=True)
+    q.add_argument("--split", default="dev", choices=["dev", "test"])
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--results", nargs="*", help="mv external predict JSONL files")
+    q.add_argument("--vision", default="bioclip-2-ft-20261007-165400")
+    q.add_argument("--per-second", type=float, default=4.0,
+                   help="GBIF requests a second, both checklists together (default 4)")
+    q = xsub.add_parser("predict", help="(reads the manifest only) answer a held-out split; "
+                                        "writes JSONL for mv heldout import-external")
+    ids_options(q)
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--size", default="large", choices=["small", "medium", "large"])
+    q.add_argument("--batch-size", type=int, default=16)
+    q.add_argument("--out", help="the JSONL (one model only; default: the benchmark's "
+                                 "external/<model>-<split>.jsonl)")
+    q = xsub.add_parser("baseline", help="add a model to a saved scoreboard comparison, on the "
+                                         "same test records (like inat-baseline)")
+    q.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--batch-size", type=int, default=16)
+    q = xsub.add_parser("report", help="(read-only) the protocol tables: coverage, genus and "
+                                       "family on all, formal species, same vocabulary")
+    q.add_argument("--name", required=True)
+    q.add_argument("--split", default="dev", choices=["dev", "test"])
+    q.add_argument("--model", help=model_help)
+    q.add_argument("--results", nargs="*", help="mv external predict JSONL files (default: "
+                                                "only answers imported to the manifest)")
+    q.add_argument("--vision", default="bioclip-2-ft-20261007-165400",
+                   help="the Vision backbone whose stored answers are compared")
+    q.add_argument("--no-reference", action="store_true",
+                   help="skip coverage of Vision's North American records")
+    q.add_argument("--no-crosswalk", action="store_true",
+                   help="exact names only (default: also with the GBIF crosswalk, from its "
+                        "cache)")
+    q.add_argument("--out", help="where to write the JSON")
     from . import occtune
     occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
 
     args = parser.parse_args(argv)
+    if args.command == "dataset":             # never opens the manifest for writing
+        cmd_dataset(args)
+        return 0
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0
@@ -1114,6 +1643,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"no release in {config.RELEASE_ROOT} yet: run `mv pull-release` first")
     read_only = {"name-spellings": cmd_name_spellings, "fetch-taxonomy": cmd_fetch_taxonomy,
                  "taxonomy": cmd_taxonomy, "guests": cmd_guests}
+    if args.command == "external" and args.action in ("coverage", "crosswalk", "predict", "run",
+                                                       "report"):
+        read_only["external"] = cmd_external  # these only read the manifest
     if args.command in read_only:             # the manifest is opened as it is, read-only
         conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
         read_only[args.command](conn, args)
@@ -1138,6 +1670,8 @@ def main(argv: list[str] | None = None) -> int:
         "aws-train-job": cmd_aws_train_job,
         "aws-pull-trainer": cmd_aws_pull_trainer,
         "finetune": cmd_finetune,
+        "picek-train": cmd_picek_train,
+        "picek-bench": cmd_picek_bench,
         "embed": cmd_embed,
         "archive-embeddings": cmd_archive_embeddings,
         "compare": cmd_compare,
@@ -1155,6 +1689,7 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark-export": cmd_benchmark_export,
         "benchmark-import": cmd_benchmark_import,
         "models": cmd_models,
+        "fungus-gate": cmd_fungus_gate,
         "serve": cmd_serve,
         "status": cmd_status,
         "release": cmd_release,
@@ -1163,6 +1698,7 @@ def main(argv: list[str] | None = None) -> int:
         "contributors": cmd_contributors,
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
+        "external": cmd_external,
     }[args.command]
     handler(conn, args)
     return 0

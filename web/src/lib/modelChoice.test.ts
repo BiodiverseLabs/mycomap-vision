@@ -50,3 +50,28 @@ test("a method never offered is never sent", () => {
   assert.equal(resolveMethod({ base: "species-mean", weighNearest: false, usePlace: false }, ["nearest"]), null);
   assert.equal(defaultChoice([]), null);
 });
+
+// The Vision box since 2026-10-11: MV_METHODS=nearest,nearest+mean,nearest+mean+place,
+// MV_DEFAULT_METHOD=nearest+mean+place. The page sent plain nearest+mean, so no
+// identification on the website used the place and date.
+const BOX = ["nearest", "nearest+mean", "nearest+mean+place"];
+
+test("the box's place model is what the website asks for by default", () => {
+  const c = defaultChoice(BOX, "nearest+mean+place")!;
+  assert.deepEqual(c, { base: "nearest+mean", weighNearest: false, usePlace: true });
+  assert.equal(resolveMethod(c, BOX), "nearest+mean+place");
+});
+
+test("the place switch shows for nearest + species average when both variants are offered", () => {
+  assert.deepEqual(switchesFor("nearest+mean", BOX), { weighNearest: false, usePlace: true });
+  assert.equal(resolveMethod({ base: "nearest+mean", weighNearest: false, usePlace: false }, BOX), "nearest+mean");
+  assert.deepEqual(offeredBases(BOX), ["nearest+mean", "nearest"]);
+});
+
+test("the place model alone is still reachable, and never asked for where it isn't offered", () => {
+  assert.equal(resolveMethod({ base: "nearest+mean", weighNearest: false, usePlace: false }, ["nearest+mean+place"]),
+               "nearest+mean+place");
+  assert.equal(resolveMethod({ base: "nearest+mean", weighNearest: false, usePlace: true }, ["nearest", "nearest+mean"]),
+               "nearest+mean");
+  assert.equal(methodFor({ base: "nearest", weighNearest: false, usePlace: true }), "nearest+prior");
+});

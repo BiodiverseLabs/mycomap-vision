@@ -51,7 +51,7 @@ function contenders(r: Result, rank: Rank): Named[] {
   const likely = r.likely?.[rank]?.names;
   const list = likely?.length
     ? likely
-    : (r.ranks[rank] ?? []).filter((c, i) => i === 0 || c.confidence >= IN_PLAY_FLOOR);
+    : (r.ranks[rank] ?? []).filter((c, i) => i === 0 || (c.confidence ?? 0) >= IN_PLAY_FLOOR);
   return list.map((c) => ({ rank, name: c.name, confidence: c.confidence, place: c.place }));
 }
 

@@ -76,18 +76,30 @@ if [ "$up" -ne 1 ]; then
   exit 1
 fi
 
+# The preload block's own state ("loading", "ready", "off", "failed"): health has other
+# "state" fields (the nightly update's). Empty when health is slow or doesn't say yet.
+# Never fails: loading the model keeps the server busy, and under `set -euo pipefail` one
+# slow health call used to end the deploy here, before verify.sh (2026-10-11).
+preload_state() {
+  { curl -fsS -m 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
+      | grep -o '"preload":{"state":"[a-z]*"' | cut -d'"' -f6; } || true
+}
+
 # Not a failure if it takes longer: identifications wait for it. Just report it.
 echo "==> waiting for the model to load (MV_PRELOAD)"
-for i in $(seq 1 180); do
-  # The preload block's own state: health has other "state" fields (the nightly update's).
-  state="$(curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health" 2>/dev/null \
-           | grep -o '"preload":{"state":"[a-z]*"' | cut -d'"' -f6)"
+start=$SECONDS
+while :; do
+  state="$(preload_state)"
   case "$state" in
-    ready)  echo "    ready after ${i} s"; break ;;
+    ready)  echo "    ready after $((SECONDS - start)) s"; break ;;
     off)    echo "    no preload configured; the first identification loads it"; break ;;
     failed) echo "!!  preload failed (identifications still load on demand):"
-            curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health"; echo; break ;;
+            curl -fsS -m 5 "http://127.0.0.1:$PORT/api/health" || true; echo; break ;;
   esac
+  if [ $((SECONDS - start)) -ge 300 ]; then
+    echo "    still loading after 300 s; identifications wait for it (state: ${state:-no answer})"
+    break
+  fi
   sleep 1
 done
 bash deploy/lightsail/verify.sh

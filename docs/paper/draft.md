@@ -1,6 +1,6 @@
 # Photo identification of North American fungi from DNA-verified references
 
-**Draft 0.3.2, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
+**Draft 0.4.3, 9 October 2026.** A living draft for *Mycologia* (Original Research). Every number
 here is preliminary and will be rerun on the final model and test sets before submission. Where
 a result comes from a small or interim test, the text says so.
 
@@ -17,6 +17,12 @@ a result comes from a small or interim test, the text says so.
 > occurrence prior, per-species (macro) metrics, open-set analysis, leakage checks, and the
 > separately validated ~1,000-record paper test set. See Appendix A (benchmark plan) and
 > Appendix B (next tests).
+>
+> **Every number in this draft is development.** The experiments so far read a live data set
+> whose records, labels and photos kept changing, so they cannot be rebuilt exactly. The numbers
+> the paper reports will come from **dataset release v1**, a frozen, versioned snapshot cut once
+> the labels and the photo inclusion rules are fixed, with every experiment re-run on it by one
+> command each (Methods, "Reproducibility"). Decisions taken so far are provisional until then.
 
 ---
 
@@ -105,11 +111,13 @@ species with one to four records). The full-data fine-tune trained on these reco
 keys of every test are unaffected (test records are iNaturalist observations), so the results
 reported here stand as measured, for a reference set with this fault. The fix (an
 iNaturalist-only export, a rebuilt reference set and a retrain) will be reported as the "after"
-model. [Re-scoring without these records under way.]
+model, measured on the new sealed test set. [Re-scoring without these records under way.]
 
-**Name of a record.** The label is the observation's own name on MycoMap after a refresh from the
-legacy database, not the name of a linked sequence. A record can carry several sequences,
-including non-target or discarded ones.
+**Name of a record.** The label is the observation's own name, not the name of a linked sequence
+(a record can carry several sequences, including non-target or discarded ones). Where the
+iNaturalist observation carries both a Species Name Override and a Provisional Species Name, the
+override wins; the MycoBank number is looked up from that name, so name and number always agree.
+[Tie rule for names with several MycoBank entries to be stated.]
 
 **Name cleaning.**
 - *Spellings.* The same provisional name reaches MycoMap written several ways (`Inocybe sp.
@@ -199,14 +207,31 @@ photographs per record.
 
 **Held-out benchmark.** 13,145 North American records validated on the legacy MycoMap database
 but never imported into Vision's data (a synchronization fault), so never seen in training or as
-references. Split 3,000 for development and tuning, 10,145 for testing.
+references. Split 3,000 for development and tuning, 10,145 for testing. A development benchmark
+only: these records join the training data of dataset release v1, so a later model cannot be
+scored on them; the paper's test set and every before/after comparison use a new, sealed set of
+freshly validated records.
 
-**Paper test set (planned).** About 1,000 records validated after the method is frozen, registered
-as held out before any model sees them (Appendix A).
+**Paper test set ("v1-test", planned).** A new set of freshly validated North American records,
+provided after the method is frozen, kept apart from the training release by record and by photo
+bytes, and never used for training (Appendix A).
 
 **Advance predictions.** Every night the identifier predicts up to 300 records still awaiting
 DNA results; predictions are scored when the records are validated. Nothing could have seen the
 answer.
+
+**Reproducibility.** The results in this paper come from dataset release v1, an immutable
+snapshot cut after the labels and the inclusion rules were fixed: iNaturalist records and
+DNA-validated Mushroom Observer records with their own photos; MyCoPortal and legacy-sequence
+records, records with wrong photos, guest organisms and [non-fungus photos] left out, each with a
+recorded reason. The release holds every record's source, label and label provenance, every
+original photo's checksum and licence, the exact recipe that derives each image a model saw from its original (with the derived image's checksum), the inclusion list, the time-based training and validation split, the reference-index hash, the code commit and the checksums of
+every trained model. Each experiment is one command that reads the release and writes its id,
+reference hash and commit into its results. The test set is separate: newly validated North
+American records ("v1-test"), disjoint from the release by record and by photo bytes, and never
+used for training. A version of the release using only openly licensed
+photos can be rebuilt by anyone from public sources; results on it are reported
+beside ours. [Release v1 not yet cut; the numbers below are development and will be replaced.]
 
 **Baseline.** iNaturalist's computer vision (score_image endpoint), given every photograph of a
 record, scored photo-only and with location, taking the best score across photographs.
@@ -534,11 +559,13 @@ full-precision model is served.
 
 ## DATA AVAILABILITY STATEMENT
 
-*[Draft.]* Record identifiers, splits (test, development, held-out) and per-record predictions will
-be deposited [Zenodo/Dryad, DOI]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
-Zenodo DOI]. Photographs remain with their iNaturalist owners under their licenses; model weights
-[availability to decide: trained partly on all-rights-reserved photographs]. Coordinates are not
-released beyond iNaturalist's public precision.
+*[Draft.]* Dataset release v1: record identifiers (iNaturalist and Mushroom Observer), labels and
+their provenance, photo licences and public URLs, the inclusion list with reasons, the splits, the
+dataset card and per-record predictions will be deposited on Zenodo [DOI to be issued]. Sequences are in GenBank [accessions via MycoMap]. Code [GitHub +
+Zenodo DOI]. Photographs remain with their owners under their licenses; all-rights-reserved photo
+files are not redistributed. The released model is trained only on openly licensed (CC, including
+non-commercial) and permission-granted photographs, as its model card states. Coordinates are not
+released beyond the source's public precision.
 
 ## ACKNOWLEDGMENTS
 
@@ -727,8 +754,9 @@ open-set recognition (Vaze et al. 2022), calibration (Guo et al. 2017), REFORMS 
 4. **Classify development misses by cause**: stale label, no reference, look-alike in a complex,
    photograph problem, guest organism.
 5. **Measure answer-key noise** after the legacy-name refresh: rescore with corrected names.
-6. **Relabel, retrain, rescore** the same development set ("after"); fine-tuning variants (more
-   blocks, more epochs, metric-learning loss) on the GPU trainer. Save the fine-tune's classifier
+6. **Relabel, retrain on dataset release v1, rescore** on the new sealed test set ("after"; the
+   13,145 held-out records are v1 training data); fine-tuning variants (more blocks, more epochs,
+   metric-learning loss, **input size 224 / 336 / 448 px**) on the GPU trainer. Save the fine-tune's classifier
    heads this time and score them as an identifier beside nearest specimen.
 6a. **Danish Fungi method on our records** (A12) and the published Danish Fungi / FungiTastic
    models (A13) on the development set, once their compute is approved.
@@ -787,6 +815,15 @@ Checked 8 October 2026 against Taylor & Francis's Mycologia instructions (update
 
 # Changelog
 
+- **0.4.3 (9 Oct 2026).** Aligned with the release builder: train/val split by time, test set v1-test of new records.
+- **0.4.2 (9 Oct 2026).** Public files on Zenodo with a DOI (Steve).
+- **0.4.1 (9 Oct 2026).** Steve's decisions: the 13,145 held-out records join v1 training (a
+  development benchmark only; before/after and the paper's numbers on a new sealed set); public
+  scope approved; the public model trains only on CC and permission-granted photos; an input-size
+  arm (224 / 336 / 448 px) planned for the v1 retrain.
+- **0.4 (9 Oct 2026).** Reproducibility: the reported numbers will come from dataset release v1
+  (Methods, "Reproducibility"); everything earlier is development and its decisions provisional
+  (Steve). Data availability updated to the release.
 - **0.3.2 (9 Oct 2026).** Nearest + species average adopted as the default (Steve). The
   reference-set fault found by the label audit (5.8% of records with unrelated photos) stated in
   Methods and Limitations; numbers unchanged until the re-score.

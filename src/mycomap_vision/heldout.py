@@ -1090,7 +1090,7 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
             ids: list[str], load_model: Callable[[], object], place: str = "inat",
             size: str = "large", batch_size: int = 32, redo: bool = False,
             make_identifier: Callable | None = None, scores_out: Path | None = None,
-            log=print) -> dict:
+            release=None, log=print) -> dict:
     """Embed the set's photos with `backbone` and identify each record with each method,
     against the manifest's reference index for that backbone (Identifier: every record
     Vision would serve). Saves the top 5 per rank and the nearest reference photo's
@@ -1098,7 +1098,9 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
     answers.sqlite. Answers are keyed by method, place (for a method that uses it),
     photo size and reference, so a run with another of these is kept beside the
     earlier one, not over it. `scores_out`: also write every answered record's photo
-    scores against the first method's index (save_scores), for tuning a place prior."""
+    scores against the first method's index (save_scores), for tuning a place prior.
+    `release`: the reference index is a dataset release's train + val records
+    (dataset_release.py) instead of the live manifest's."""
     from . import evaluate
     from .identify import Identifier
     if place not in ("inat", "org", "none"):
@@ -1119,7 +1121,7 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
     state = set_state(conn, name)
     make_identifier = make_identifier or (lambda m: Identifier(
         conn, backbone, m, calibration=evaluate.latest_calibration(conn, backbone, m),
-        photo_info=False))
+        photo_info=False, release=release))
     version = config.code_version()
     scored: list[tuple] = []
     for method in methods:
@@ -1195,6 +1197,8 @@ def predict(conn: sqlite3.Connection, name: str, backbone: str, methods: list[st
             out["scores_out"] = {"path": str(scores_out),
                                  "records": save_scores(scores_out, scored, ident, truths, place)}
         del ident
+    if release is not None:
+        out["dataset_release"] = release.cite()
     return out
 
 
@@ -1289,3 +1293,74 @@ def inat_cv(conn: sqlite3.Connection, name: str, ids: list[str], client, size: s
         if i % 10 == 0:
             log(f"  {i}/{len(records)} records, {client.calls} iNat calls")
     return {"records": len(records), "inat_calls": client.calls, **dict(stats)}
+
+
+# --- answers of an external model (replications/fungitastic/published.py) ----------------
+
+def import_external(conn: sqlite3.Connection, name: str, results: Path, backbone: str,
+                    redo: bool = False, release=None) -> dict:
+    """Store an external model's answers (`mv external predict`'s JSONL: one record a line,
+    {observation_id, backbone, method, size, reference_hash, photos, result}) as
+    heldout_predictions rows beside Vision's, with a heldout_runs row whose reference_hash
+    is the checkpoint id (external.checkpoint_id: weights and class map), so the report
+    scores each checkpoint as one model. Every line must be this backbone's, of one method,
+    size and checkpoint, about a record of the set, with ranks of {name, confidence}.
+    `release` (a dataset release): its cite() goes into the run row, and lines naming
+    another release are refused."""
+    from .replications.fungitastic.published import is_external
+    if not is_external(backbone):
+        raise ValueError(f"{backbone!r} is not an external model (external:<name>)")
+    ensure_schema(conn)
+    members = set(benchmark_ids(conn, name))
+    rows, keys, seen = [], set(), set()
+    with open(results, encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            oid = clean(r.get("observation_id"))
+            if r.get("backbone") != backbone:
+                raise ValueError(f"line {n}: backbone {r.get('backbone')!r}, not {backbone!r}")
+            if release is not None and r.get("dataset_release") not in (None, release.id):
+                raise ValueError(f"line {n}: answers on release {r.get('dataset_release')!r}, "
+                                 f"not {release.id!r}")
+            if r.get("benchmark") not in (None, name):
+                raise ValueError(f"line {n}: answers for {r.get('benchmark')!r}, not {name!r}")
+            if oid not in members:
+                raise ValueError(f"line {n}: {oid!r} is not a record of {name}")
+            if oid in seen:
+                raise ValueError(f"line {n}: {oid} answered twice")
+            seen.add(oid)
+            result = r.get("result") or {}
+            for rank in RANKS:
+                cands = result.get(rank)
+                if not isinstance(cands, list) or not all(
+                        isinstance(c, dict) and isinstance(c.get("name"), str)
+                        and isinstance(c.get("confidence"), (int, float)) for c in cands):
+                    raise ValueError(f"line {n}: {rank} is not a list of name and confidence")
+            keys.add((r.get("method"), r.get("size") or "large", r.get("reference_hash")))
+            rows.append((oid, int(r.get("photos") or 0), result))
+    if len(keys) != 1:
+        raise ValueError(f"one method, size and checkpoint per file, not {sorted(map(str, keys))}")
+    method, size, ref_hash = keys.pop()
+    if not method or not ref_hash:
+        raise ValueError("every line needs its method and reference_hash (the checkpoint id)")
+    done = set() if redo else {r[0] for r in conn.execute(
+        "select observation_id from heldout_predictions where benchmark = ? and backbone = ? "
+        "and method = ? and place = ? and size = ? and reference_hash = ?",
+        (name, backbone, method, NO_PLACE, size, ref_hash))}
+    now, version = now_iso(), config.code_version()
+    new = [(name, oid, backbone, method, NO_PLACE, size, ref_hash, now, version, None, photos,
+            None, json.dumps(result)) for oid, photos, result in rows if oid not in done]
+    with conn:
+        conn.execute("insert or replace into heldout_runs values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (name, backbone, method, NO_PLACE, size, ref_hash, now, version,
+                      json.dumps({"external": True, "checkpoint": ref_hash,
+                                  "records": len(rows), "source": Path(results).name,
+                                  **({"dataset_release": release.cite()}
+                                     if release is not None else {})})))
+        conn.executemany("insert or replace into heldout_predictions values "
+                         "(?,?,?,?,?,?,?,?,?,?,?,?,?)", new)
+    return {"benchmark": name, "backbone": backbone, "method": method, "size": size,
+            "reference_hash": ref_hash, "lines": len(rows), "stored": len(new),
+            "already": len(rows) - len(new)}

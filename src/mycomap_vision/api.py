@@ -32,8 +32,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apiv1, config, evaluate, inat, manifest, models, names, nightly, permissions,
-               serving, uploads, workqueue)
+from . import (apiv1, config, evaluate, fungusgate, inat, manifest, models, names, nightly,
+               permissions, serving, uploads, workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -269,7 +269,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                taxon_counts: bool | None = None,
                api_v1: bool | None = None,
                app_tokens: "apiv1.AppTokens | None | bool" = True,
-               introspect: "Callable[[str], dict] | None | bool" = True) -> FastAPI:
+               introspect: "Callable[[str], dict] | None | bool" = True,
+               dataset_root: Path | None = None, dataset_store: str | None = None,
+               dataset_store_reader=None, dataset_allow_draft: bool = False,
+               fungus_gate: "fungusgate.FungusGate | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -292,9 +295,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `api_v1` turns on POST /api/v1/identify (default: MV_API_V1). `app_tokens` checks the
     app's tokens (default: the sign-in bridge's public key, for MV_PUBLIC_ORIGIN);
     `introspect` asks mycomap.org about a developer token (default: MV_ORG_BASE_URL with
-    the server key; tests pass a fake)."""
+    the server key; tests pass a fake).
+
+    `fungus_gate`: the not-a-fungus gate every identification passes (fungusgate.py).
+    True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
+    gate); a FungusGate uses that one; None or False runs ungated."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     limits = limits or Limits.from_settings()
+    if fungus_gate is True:
+        fungus_gate = (fungusgate.FungusGate.load()
+                       if config.setting("MV_FUNGUS_GATE", "1") != "0" else None)
+    fungus_gate = fungus_gate or None
     signin = signin or SigninConfig.from_settings()
     rate = RateLimiter(*limits.rate)
     in_flight = Gate(limits.max_in_flight)
@@ -503,7 +514,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         try:
             ident = Identifier(own, backbone, method, root, calibration=cal,
                                train=limits.fit_on_demand, photo_info=False,
-                               layer_root=layer.embeddings if layer else None)
+                               layer_root=layer.embeddings if layer else None,
+                               gate=fungus_gate)
         finally:
             own.close()
         ident.warm()
@@ -530,13 +542,21 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     warm = Preload()
 
+    def served_release() -> str | None:
+        """The release this server answers from (its id stays internal; v1 shows its date)."""
+        if layer:
+            return layer.release_id
+        from .release import current_release
+        return current_release(config.RELEASE_ROOT) if config.RELEASE_ROOT else None
+
     @app.get("/api/health")
     def health():
         return {"ok": True, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
-                "queue": model_queue.state()}
+                "queue": model_queue.state(),
+                "fungus_gate": fungus_gate.summary() if fungus_gate else None}
 
     def nightly_health() -> dict:
         if not layer:
@@ -634,6 +654,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return JSONResponse({**experiments.summary(e), "markdown": e.body},
                             headers={"Cache-Control": "private, no-store"})
 
+    # On-demand CC images of a public dataset release (dataset_api.py).
+    from . import dataset_api
+    dataset_api.add_routes(app, root=dataset_root, store_location=dataset_store,
+                           store_reader=dataset_store_reader, allow_draft=dataset_allow_draft)
+
     @app.get("/api/paper")
     def paper():
         """The paper draft as Markdown. Never cached on the way (an unreviewed draft)."""
@@ -703,13 +728,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         """One model's answer through the queue, timed: waiting, embedding, scoring."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
-            prepare = getattr(model, "prepare", None) or (lambda im: im)
-            return normalise(model.encode([prepare(im) for im in images]))
+            vecs, judged = ident.embed(model, images)      # the gate's verdicts too
+            verdicts.append(judged)
+            return vecs
 
         def finish(vecs, sims):
             return ident.identify_vectors(vecs, top_k, context=context, sims=sims,
                                           photo_lookup=photo_lookup, may_show=may_show,
-                                          higher_ranks=higher)
+                                          gate=verdicts[0], higher_ranks=higher)
+        verdicts: list = []
         return model_queue.run(workqueue.Job(
             key=id(ident), photos=len(images), embed=embed, search=ident.nearest.photo_sims,
             finish=finish, interactive=interactive, timer=timer))
@@ -980,7 +1007,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 try:
                     ident = served_index(backbone, method, view, timer)
                 except (serving.Updating, NotTrainedHere) as e:
-                    raise apiv1.V1Error(503, "updating", str(e), retry_after=30) from e
+                    note(f"[v1] {backbone}/{method} not ready: {e}")
+                    raise apiv1.V1Error(503, "updating", "the model is being updated; try "
+                                        "again shortly", retry_after=30) from e
                 result = embed_and_score(
                     ident, backbone, [img for img, _ in read], context,
                     lambda info: view.may_show(info.license_class, info.owner_user_id),
@@ -995,14 +1024,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                       timer: "apiv1.Timer") -> dict:
             """An identify result in the v1 shape (docs/api.md §4)."""
             cal = result.pop("calibration", None) or {}
-            comparison = str(cal.get("comparison_id") or "")
+            # Backbone and method ids never leave in a v1 answer (Steve, 2026-10-11).
+            prior = result.pop("prior", None) or {}
             out = {"request_id": "r_" + secrets.token_urlsafe(12),
                    **result,
-                   "model": {"backbone": backbone, "method": method,
-                             "version": layer.release_id if layer else None,
-                             "calibrated_on": (f"{comparison[:4]}-{comparison[4:6]}-"
-                                               f"{comparison[6:8]}"
-                                               if comparison[:8].isdigit() else None)},
+                   "model": apiv1.public_model(served_release(),
+                                               str(cal.get("comparison_id") or "")),
+                   "prior": {"applied": bool(prior.get("applied"))},
                    "context_used": used,
                    "gate": result.get("gate"),
                    "usage": None}
@@ -1032,13 +1060,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             try:
                 ident = identifier(backbone, method, view)
             except (serving.Updating, NotTrainedHere) as e:
-                raise apiv1.V1Error(503, "updating", str(e), retry_after=30) from e
+                note(f"[v1] {backbone}/{method} not ready: {e}")
+                raise apiv1.V1Error(503, "updating", "the model is being updated; try again "
+                                    "shortly", retry_after=30) from e
             key = (id(ident), version)   # a failed rebuild may still serve the old index
             if key not in counts_cache:
                 doc = apiv1.taxon_counts(
                     ident.rank_counts, records=ident.records,
-                    model={"backbone": backbone, "method": method,
-                           "version": layer.release_id if layer else None},
+                    model=apiv1.public_model(served_release()),
                     nightly_version=version[3] if layer else None)
                 body = apiv1.encode(doc)
                 counts_cache.clear()

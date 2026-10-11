@@ -36,9 +36,9 @@ def test_taxon_counts_are_the_served_index_reference_records(conn, tmp_path):
     assert doc["genera"] == {"A": 4, "B": 4}
     assert doc["families"] == {"F": 8}
     assert doc["totals"] == {"records": 8, "species": 2, "genera": 2, "families": 1}
-    assert doc["model"]["backbone"] == "m1"
+    assert doc["model"]["name"] == "MycoMap Vision" and "backbone" not in doc["model"]
     # The same number an identification shows on each candidate.
-    [result] = post_photos(client, [247], "m1/" + doc["model"]["method"]).json()["results"]
+    [result] = post_photos(client, [247], "m1/nearest+mean").json()["results"]
     for cand in result["ranks"]["species"]:
         assert doc["species"][cand["name"]] == cand["reference_records"]
 

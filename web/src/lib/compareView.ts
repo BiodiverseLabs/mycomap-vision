@@ -125,6 +125,8 @@ export interface PublishedBenchmark {
   records: number;
   scored_records: number;
   imported_at: string;
+  /** "exploratory-pre-freeze" until results come from a frozen dataset release. */
+  reproducibility?: string;
   models: Record<string, { records: number } & Partial<Record<Rank, Partial<Record<"top1" | "top5", Rate>>>>>;
   species_by_reference_records: Record<string, Record<string, Partial<Record<Rank, Rate>>>>;
   summary?: { models?: Record<string, { rows?: Record<string, Partial<Record<string, Rate | null>>> }> } | null;

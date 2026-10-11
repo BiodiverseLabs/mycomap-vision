@@ -35,7 +35,9 @@ function Header() {
         : "text-gray-700 hover:text-myco-green hover:bg-myco-green/5"
     }`;
   return (
-    <header className="sticky top-0 z-50 w-full border-b border-myco-brown/10 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80">
+    // Solid on phones: see-through, the page scrolling under the logo reads as faint text.
+    // From lg up it matches mycomap.org's translucent header.
+    <header className="sticky top-0 z-50 w-full border-b border-myco-brown/10 bg-white lg:bg-white/95 lg:backdrop-blur lg:supports-[backdrop-filter]:bg-white/80">
       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex h-16 items-center justify-between">
           <div className="flex items-center gap-8">

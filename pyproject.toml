@@ -26,4 +26,5 @@ packages = ["src/mycomap_vision"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+# tests too: tests in subfolders (tests/replications/...) import shared helpers from tests/.
+pythonpath = ["src", "tests"]

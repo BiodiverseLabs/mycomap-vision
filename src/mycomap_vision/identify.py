@@ -24,11 +24,11 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import config, likely, taxonomy
+from . import config, fungusgate, likely, taxonomy
 from .embed import normalise
 from .serving import map_embeddings
-from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
-                       with_rows)
+from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, make_method,
+                       rank_scores, with_rows)
 from .licenses import photo_url
 from .higher import HIGHER_RANKS, HigherRanks
 from .placeprior import PlaceCue
@@ -210,19 +210,22 @@ class Identifier:
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
                  embeddings_root: Path | None = None, calibration: dict | None = None,
                  model_cache: Path | None = None, train: bool = True, photo_info: bool = True,
-                 layer_root: Path | None = None):
+                 layer_root: Path | None = None, release=None,
+                 gate: "fungusgate.FungusGate | None" = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         self.backbone, self.method = backbone, method
+        # The not-a-fungus gate (fungusgate.py), or None: answers are then ungated.
+        self.gate = gate
         ids, vecs = map_embeddings(conn, backbone, embeddings_root, layer_root)
         if not len(ids):
             raise ValueError(f"no embeddings for {backbone!r}")
         self.embedded = len(ids)
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
-        by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()})
+        by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()}, release=release)
         records = with_rows(by_id, row_of)
         self.index = build_index(records)
-        self.model = METHODS[method]()
+        self.model = make_method(method, backbone)
         self.uses_context = getattr(self.model, "needs_context", False)
         self.loaded_from_cache = fit_cached(
             self.model, vecs, self.index, records,
@@ -293,8 +296,79 @@ class Identifier:
                          n_specimens: int = 6, context=None,
                          photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
                          may_show: Callable[[PhotoInfo], bool] = only_open_licences,
-                         n_photo_specimens: int = 3, higher_ranks: bool = False,
-                         sims: np.ndarray | None = None) -> dict:
+                         n_photo_specimens: int = 3, gate: list[dict] | None = None,
+                         higher_ranks: bool = False, sims: np.ndarray | None = None) -> dict:
+        """identify_vectors_ungated, behind the fungus gate (fungusgate.py) when `gate`
+        holds a verdict per photo. A photo judged not a fungus is left out of the answer
+        (a duck among mushroom photos doesn't sink the find); when every photo is, there
+        is no answer at all. When no photo is clearly a fungus, the names are given but
+        no stated chance: calibration holds only for fungus photos. `result["gate"]` is
+        None when the gate didn't run. `higher_ranks` and `sims` as in
+        identify_vectors_ungated (only the kept photos' rows of `sims` are used)."""
+        kw = dict(top_k=top_k, n_specimens=n_specimens, context=context,
+                  photo_lookup=photo_lookup, may_show=may_show,
+                  n_photo_specimens=n_photo_specimens, higher_ranks=higher_ranks)
+        if gate is None:
+            return {**self.identify_vectors_ungated(query, sims=sims, **kw), "gate": None,
+                    "confidence_withheld": False}
+        if len(gate) != len(query):
+            raise ValueError(f"{len(gate)} gate verdicts for {len(query)} photos")
+        verdicts = [g["verdict"] for g in gate]
+        kept = [i for i, v in enumerate(verdicts) if v != fungusgate.NOT_FUNGUS]
+        overall = fungusgate.observation_verdict(verdicts)
+        if kept:
+            out = self.identify_vectors_ungated(
+                query[kept], sims=None if sims is None else sims[kept], **kw)
+            renumber(out, kept, len(query))
+        else:
+            out = self.no_answer(len(query))
+        if higher_ranks:                     # left-out photos and no answer list them empty
+            for ranks in [out["ranks"], *(p["ranks"] for p in out["per_photo"])]:
+                for rank in HIGHER_RANKS:
+                    ranks.setdefault(rank, [])
+        for p in out["per_photo"]:
+            p["gate"] = gate[p["photo"]]
+        out["confidence_withheld"] = False
+        if overall != fungusgate.FUNGUS:
+            withhold_confidence(out)
+        like = fungusgate.find_looks_like(gate, overall)
+        out["hints"] = fungusgate.gate_hints(verdicts, overall, like) + (
+            out["hints"] if overall == fungusgate.FUNGUS else [])
+        out["gate"] = {"verdict": overall,
+                       "message": (fungusgate.LOOKS_LIKE[like]["message"] if like
+                                   else fungusgate.MESSAGES.get(overall)),
+                       "looks_like": like,
+                       "left_out": [i for i in range(len(query)) if i not in kept],
+                       "photos": gate}
+        return out
+
+    def no_answer(self, n_q: int) -> dict:
+        """What a find that isn't a fungus gets: no names, no chance, no specimens."""
+        return {
+            "model": {"backbone": self.backbone, "method": self.method},
+            "reference": {"records": self.records, "species": len(self.index.species),
+                          "photos": self.embedded},
+            "photos": n_q,
+            "ranks": {rank: [] for rank in RANKS},
+            "likely": {},
+            "specimens": [],
+            "per_photo": [{"photo": i, "ranks": {rank: [] for rank in RANKS},
+                           "overall_top": {rank: None for rank in RANKS}, "specimens": []}
+                          for i in range(n_q)],
+            "hints": [],
+            "species_url": None,
+            "calibration": self.calibration,
+            "confidence_note": self.confidence_note(),
+            "prior": {"applied": False, "method": self.method},
+            "photo_only_top": {},
+        }
+
+    def identify_vectors_ungated(self, query: np.ndarray, top_k: int = 5,
+                                 n_specimens: int = 6, context=None,
+                                 photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
+                                 may_show: Callable[[PhotoInfo], bool] = only_open_licences,
+                                 n_photo_specimens: int = 3, higher_ranks: bool = False,
+                                 sims: np.ndarray | None = None) -> dict:
         """Query photo vectors (already normalised) -> ranks, specimens, hints.
         `context` (place and date) is used by methods with a range-and-season score.
         `higher_ranks` adds order, class and phylum (higher.py) to the combined and
@@ -553,7 +627,61 @@ class Identifier:
 
     def identify(self, backbone_model, images: list, top_k: int = 5, context=None,
                  photo_lookup=None, may_show: Callable[[PhotoInfo], bool] = only_open_licences) -> dict:
+        vecs, verdicts = self.embed(backbone_model, images)
+        return self.identify_vectors(vecs, top_k, context=context,
+                                     photo_lookup=photo_lookup, may_show=may_show, gate=verdicts)
+
+    def embed(self, backbone_model, images: list) -> tuple[np.ndarray, list[dict] | None]:
+        """Photos -> (normalised vectors, the gate's verdict per photo or None). Every path
+        that answers from photos goes through here, so none can skip the gate."""
         prepare = getattr(backbone_model, "prepare", None) or (lambda im: im)
-        vecs = normalise(backbone_model.encode([prepare(im) for im in images]))
-        return self.identify_vectors(vecs, top_k, context=context, photo_lookup=photo_lookup,
-                                     may_show=may_show)
+        vecs, base = self.encode(backbone_model, [prepare(im) for im in images])
+        verdicts = self.gate.judge(base) if self.gate is not None and base is not None else None
+        return normalise(vecs), verdicts
+
+    def encode(self, backbone_model, items: list) -> tuple[np.ndarray, np.ndarray | None]:
+        """(this model's vectors, the gate's base-model vectors or None when the gate
+        can't run on this backbone). A fine-tuned BioCLIP 2 gives both from one pass."""
+        gate = self.gate
+        if gate is not None:
+            both = getattr(backbone_model, "encode_with_base", None)
+            if both is not None and getattr(backbone_model, "base_name", None) == gate.base:
+                pair = both(items)
+                if pair is not None:
+                    return pair
+            if self.backbone == gate.base:
+                vecs = backbone_model.encode(items)
+                return vecs, vecs
+        return backbone_model.encode(items), None
+
+
+def renumber(result: dict, kept: list[int], n_q: int) -> None:
+    """An answer made from the kept photos only, renumbered to the photos sent: specimens
+    point at the right photo, and every left-out photo gets an empty per-photo entry."""
+    for s in result["specimens"]:
+        s["matched_query_photo"] = kept[s["matched_query_photo"]]
+    own = {}
+    for p in result["per_photo"]:
+        p["photo"] = kept[p["photo"]]
+        for s in p["specimens"]:
+            s["matched_query_photo"] = p["photo"]
+        own[p["photo"]] = p
+    result["per_photo"] = [own.get(i) or {"photo": i, "ranks": {rank: [] for rank in RANKS},
+                                          "overall_top": {rank: None for rank in RANKS},
+                                          "specimens": []}
+                           for i in range(n_q)]
+    result["photos"] = n_q
+
+
+def withhold_confidence(result: dict) -> None:
+    """No stated chance anywhere in the result: the names stay, as look-alikes."""
+    result["likely"] = {}
+    for ranks in [result["ranks"], *(p["ranks"] for p in result["per_photo"])]:
+        for candidates in ranks.values():
+            for c in candidates:
+                c["confidence"] = None
+    for p in result["per_photo"]:
+        for place in p["overall_top"].values():
+            if place:
+                place["confidence"] = None
+    result["confidence_withheld"] = True

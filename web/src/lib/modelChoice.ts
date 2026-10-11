@@ -3,10 +3,11 @@
 // on the server box by MV_METHODS). Only offered methods are ever sent.
 //
 //   Trained classifier  linear   (+ nearest specimens: hybrid)
-//   Nearest + average   nearest+mean  (the site's default, Steve 2026-10-09)
+//   Nearest + average   nearest+mean  (the site's default, Steve 2026-10-09;
+//                       with place and date: nearest+mean+place, Steve 2026-10-11)
 //   Nearest specimen    nearest
 //   Species average     species-mean
-//   ...each with "+prior" when place and date (range and season) are used.
+//   ...the others with "+prior" when place and date (range and season) are used.
 
 export type Base = "linear" | "nearest+mean" | "nearest" | "species-mean";
 
@@ -14,8 +15,8 @@ export const BASES: Base[] = ["linear", "nearest+mean", "nearest", "species-mean
 
 export const BASE_LABEL: Record<Base, string> = {
   linear: "Trained classifier",
-  "nearest+mean": "Nearest + species average",
-  nearest: "Nearest specimen",
+  "nearest+mean": "Closest specimens + species average",
+  nearest: "Closest specimen",
   "species-mean": "Species average",
 };
 
@@ -27,15 +28,21 @@ export interface Choice {
   usePlace: boolean;
 }
 
+/** A method's place-and-date variant: nearest+mean's is the boost prior "+place", the
+ *  others' the range-and-season "+prior". */
+const withPlace = (core: string) => (core === "nearest+mean" ? "nearest+mean+place" : `${core}+prior`);
+
+/** True for a method that uses place and date. */
+export const usesPlaceAndDate = (method: string) => method.endsWith("+prior") || method.endsWith("+place");
+
 /** The method name a choice asks for, whether or not it is offered. */
 export function methodFor(c: Choice): string {
   const core = c.base === "linear" && c.weighNearest ? "hybrid" : c.base;
-  return c.usePlace ? `${core}+prior` : core;
+  return c.usePlace ? withPlace(core) : core;
 }
 
 const variants = (base: Base): string[] =>
-  base === "linear" ? ["linear", "hybrid", "linear+prior", "hybrid+prior"]
-    : base === "nearest+mean" ? ["nearest+mean"] : [base, `${base}+prior`];
+  base === "linear" ? ["linear", "hybrid", "linear+prior", "hybrid+prior"] : [base, withPlace(base)];
 
 /** Scoring methods the server offers at least one variant of, in menu order. */
 export function offeredBases(offered: string[]): Base[] {
@@ -62,7 +69,7 @@ export function switchesFor(base: Base, offered: string[]): { weighNearest: bool
   const v = variants(base).filter((m) => offered.includes(m));
   return {
     weighNearest: base === "linear" && v.some((m) => m.startsWith("hybrid")) && v.some((m) => m.startsWith("linear")),
-    usePlace: v.some((m) => m.endsWith("+prior")) && v.some((m) => !m.endsWith("+prior")),
+    usePlace: v.some(usesPlaceAndDate) && v.some((m) => !usesPlaceAndDate(m)),
   };
 }
 
@@ -72,7 +79,7 @@ export function defaultChoice(offered: string[], preferred?: string | null): Cho
   if (preferred && offered.includes(preferred)) {
     const base = BASES.find((b) => variants(b).includes(preferred));
     if (base) {
-      return { base, weighNearest: preferred.startsWith("hybrid"), usePlace: preferred.endsWith("+prior") };
+      return { base, weighNearest: preferred.startsWith("hybrid"), usePlace: usesPlaceAndDate(preferred) };
     }
   }
   const base = offeredBases(offered)[0];

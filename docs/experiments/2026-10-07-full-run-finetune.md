@@ -3,6 +3,7 @@ title: Full-data fine-tune on the AWS GPU
 slug: full-run-finetune
 date: '2026-10-07'
 status: adopted
+reproducibility: exploratory-pre-freeze
 question: How much does fine-tuning BioCLIP 2 on all DNA-verified records improve identification, and
   which model should the site serve?
 branch: main (finetune.py, trainer); run 20261007-165400
@@ -73,11 +74,14 @@ Fine-tuning helps at every rank; the fine-tuned model is served.
 ## Decision
 Adopted (Steve's rule, 2026-10-07); live on the site 2026-10-08.
 
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
+
 ## Known data fault
 A label audit (2026-10-09) found 8,868 of 154,067 reference and training records (5.8%) whose
 photos belong to unrelated iNaturalist observations (non-iNat record ids taken for iNat ids).
 These results were measured with that reference set; the answer keys are unaffected. The rebuilt
-reference set and retrain will be the "after".
+reference set and retrain will be the "after", measured on the new experiment dataset (the
+13,145 held-out records join v1's training).
 
 ## Next
 Relabel and retrain after the legacy-name refresh and full sync; save the heads; try more
