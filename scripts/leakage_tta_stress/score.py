@@ -84,6 +84,7 @@ def main() -> None:
     group_pos = {s: i for i, s in enumerate(prep["species"])}
     obs_refs = np.bincount(r_user[r_user >= 0])
     conditions = a.conditions.split(",")
+    leakage = conditions != ["base"]       # a base-only run (TTA) skips the leakage facts
 
     k_shard, n_shard = map(int, a.shard.split("/"))
     queries = prep["queries"][: a.limit or None][k_shard::n_shard]
@@ -171,6 +172,8 @@ def main() -> None:
             lat, lon = q["lat"], q["lon"]
         day = q["day"] if q["day"] >= 0 else None
         for km, days in ((0.1, 0), (0.1, 1), (1, 0), (1, 1), (1, 3), (5, 1), (5, 3), (25, 1)):
+            if not leakage:
+                break
             f[f"coll_{km}km_{days}d"][i] = int(stress.same_collection(
                 user, lat, lon, day, r_user, r_lat, r_lon, r_day, km, days).sum())
         coll_place = stress.same_collection(user, lat, lon, day, r_user, r_lat, r_lon, r_day,
@@ -220,10 +223,11 @@ def main() -> None:
                  "clean": non_inat, "clean+obs": non_inat | same_obs,
                  "clean+coll": non_inat | coll}
         bases = [stress.best_two(sv, starts) for sv in sims_views]
+        any_clean = any(c.startswith("clean") for c in conditions)
         clean_bases = [stress.best_two_masked(sv, starts, col_group, b2, clean_cols)
-                       for sv, b2 in zip(sims_views, bases)]
+                       for sv, b2 in zip(sims_views, bases)] if any_clean else None
         clean_means = [np.where(clean_sizes > 0, qv @ clean_unit_means.T, stress.NEG)
-                       for qv in qv_views]
+                       for qv in qv_views] if any_clean else None
         pparts = stress.prior_weights(prior, ctx)
         for cond in conditions:
             mrec = masks[cond]
