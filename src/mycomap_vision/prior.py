@@ -68,6 +68,16 @@ class RangeSeasonPrior:
     bandwidth_days = 20.0
     shrink = 3.0            # records' worth of weight given to the level above
     cap = float(np.log(20.0))
+    # None: place and season are summed and capped together, weight 1 (as nearest+prior
+    # ships). Set (tuned, exp/prior-tuning): each term capped on its own, then weighted.
+    place_weight: float | None = None
+    season_weight: float | None = None
+
+    def __init__(self, **settings):
+        for k, v in settings.items():
+            if not hasattr(type(self), k):
+                raise TypeError(f"RangeSeasonPrior has no setting {k!r}")
+            setattr(self, k, v)
 
     def fit(self, records, species: list[str]) -> None:
         """records: reference records (with latitude, longitude, observed_on, genus);
@@ -110,20 +120,28 @@ class RangeSeasonPrior:
 
     def log_prior(self, ctx: Context | None) -> np.ndarray:
         """(n_species,) capped log-ratio for this place and date; zeros when unknown."""
-        out = np.zeros(self.n_species)
+        place, season = self.terms(ctx)
+        if self.place_weight is None and self.season_weight is None:
+            return np.clip(place + season, -self.cap, self.cap)
+        return ((self.place_weight or 0.0) * np.clip(place, -self.cap, self.cap)
+                + (self.season_weight or 0.0) * np.clip(season, -self.cap, self.cap))
+
+    def terms(self, ctx: Context | None) -> tuple[np.ndarray, np.ndarray]:
+        """(place, season) uncapped log-ratios; zeros where the place or date is unknown."""
+        place, season = np.zeros(self.n_species), np.zeros(self.n_species)
         if ctx is None:
-            return out
+            return place, season
         if ctx.latitude is not None and ctx.longitude is not None:
             known = ~np.isnan(self.lat)
             d = haversine_km(ctx.latitude, ctx.longitude, np.nan_to_num(self.lat),
                              np.nan_to_num(self.lon))
-            out += self._log_ratio(np.exp(-0.5 * (d / self.bandwidth_km) ** 2), known)
+            place = self._log_ratio(np.exp(-0.5 * (d / self.bandwidth_km) ** 2), known)
         doy = ctx.day_of_year
         if doy is not None:
             known = ~np.isnan(self.doy)
             d = day_distance(doy, np.nan_to_num(self.doy))
-            out += self._log_ratio(np.exp(-0.5 * (d / self.bandwidth_days) ** 2), known)
-        return np.clip(out, -self.cap, self.cap)
+            season = self._log_ratio(np.exp(-0.5 * (d / self.bandwidth_days) ** 2), known)
+        return place, season
 
 
 class WithPrior:
@@ -135,19 +153,26 @@ class WithPrior:
         """identify.temperature: 1.9 for nearest+prior and species-mean+prior (AsLogProb
         scores, where it was measured). linear+prior and hybrid+prior keep the old
         behaviour (a comparison's calibration, else 0.02) until theirs is measured."""
+        if self._confidence is not None:
+            return self._confidence
         return LOGPROB_CONFIDENCE_TEMPERATURE if hasattr(self.base, "temperature") else None
 
-    def __init__(self, base_cls, weight: float = 1.0):
+    def __init__(self, base_cls, weight: float = 1.0, prior_settings: dict | None = None,
+                 confidence_temperature: float | None = None):
+        """prior_settings: RangeSeasonPrior attributes (kernels, cap, per-term weights);
+        confidence_temperature: this method's own, where it was measured."""
         self.base = base_cls()
         self.name = f"{self.base.name}+prior"      # AsLogProb keeps its base's name
         self.weight = weight
+        self.prior_settings = dict(prior_settings or {})
+        self._confidence = confidence_temperature
 
     def fit(self, vectors: np.ndarray, index, records=None, state: dict | None = None) -> None:
         if hasattr(self.base, "state"):
             self.base.fit(vectors, index, state=state)
         else:
             self.base.fit(vectors, index)
-        self.prior = RangeSeasonPrior()
+        self.prior = RangeSeasonPrior(**self.prior_settings)
         self.prior.fit(records or [], index.species)
 
     @property

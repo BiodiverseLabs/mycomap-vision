@@ -36,7 +36,7 @@ def jpeg(colour):
 
 
 def seed(conn, tmp_path, n=5, broken=()):
-    rows = [{"observation_id": "5", "scientific_name": "X", "continent": "North America",
+    rows = [{"source": "iNaturalist", "observation_id": "5", "scientific_name": "X", "continent": "North America",
              "validation_status_1": "yes"}]
     save_records(conn, build_records(rows, "t"))
     save_batch(conn, ["5"], [inat_obs(5, photos=[(i, 100 + i, "cc0", OPEN) for i in range(n)])],

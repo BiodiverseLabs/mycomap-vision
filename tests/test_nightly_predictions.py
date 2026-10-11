@@ -15,7 +15,7 @@ from mycomap_vision.api import create_app
 
 
 def pending(oid, continent="North America"):
-    return {"observation_id": str(oid), "scientific_name": "pending sp.", "continent": continent,
+    return {"source": "iNaturalist", "observation_id": str(oid), "scientific_name": "pending sp.", "continent": continent,
             "country": None, "latitude": None, "longitude": None}
 
 

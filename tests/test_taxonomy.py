@@ -91,7 +91,7 @@ def client(fake):
 def seed(conn, rows):
     """rows: (name, genus column, family column)."""
     save_records(conn, build_records(
-        [{"observation_id": str(100 + i), "scientific_name": name, "genus": genus,
+        [{"source": "iNaturalist", "observation_id": str(100 + i), "scientific_name": name, "genus": genus,
           "family": family, "continent": "North America", "validation_status_1": "yes",
           "validation_date_1": "1/1/2026"} for i, (name, genus, family) in enumerate(rows)],
         "t"))

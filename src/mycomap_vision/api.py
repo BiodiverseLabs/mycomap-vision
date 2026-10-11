@@ -25,21 +25,25 @@ from typing import Callable
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from starlette.concurrency import run_in_threadpool
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, RedirectResponse,
+                               Response)
 from PIL import Image
 
-from . import (config, evaluate, inat, manifest, models, names, nightly, permissions, serving,
-               uploads)
+from . import (apiv1, config, evaluate, inat, manifest, models, names, nightly, permissions,
+               serving, uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
-from .embed import photos_per_second
+from .embed import normalise, photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge)
 from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
 from .methods import method_ready
 from .prior import Context
 from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
-                     safe_return_to, verify_token)
+                     load_public_key, origin_of, safe_return_to, verify_token)
 
 log = logging.getLogger("mycomap_vision.api")
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
@@ -53,6 +57,7 @@ def open_manifest(path: Path) -> sqlite3.Connection:
     conn.executescript(EMBED_SCHEMA)
     conn.executescript(evaluate.SCOREBOARD_SCHEMA)
     permissions.ensure_schema(conn)
+    manifest.upgrade(conn)
     return conn
 
 
@@ -259,7 +264,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                nightly_fetch_pending: Callable[[], tuple[list[dict], str]] | None = None,
                photo_fetcher: Callable[[], object] | None = None,
                paper_file: Path = PAPER_FILE,
-               experiments_dir: Path | None = None) -> FastAPI:
+               experiments_dir: Path | None = None,
+               server_key: str | None | bool = True,
+               taxon_counts: bool | None = None,
+               api_v1: bool | None = None,
+               app_tokens: "apiv1.AppTokens | None | bool" = True,
+               introspect: "Callable[[str], dict] | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -274,7 +284,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `preload` (default: MV_PRELOAD) names models to load and index on a background
     thread at startup, so the first person to identify doesn't wait for it (about
     30-45 s on the server box). The server answers meanwhile; an identification that
-    arrives first waits for the load and then uses it."""
+    arrives first waits for the load and then uses it.
+
+    The public API v1 (apiv1.py, docs/api.md) lives under /api/v1/ and answers only a
+    credential. `server_key` is mycomap.org's key (default: MV_ORG_VISION_KEY(_FILE));
+    `taxon_counts` turns on GET /api/v1/taxon-counts (default: MV_TAXON_COUNTS);
+    `api_v1` turns on POST /api/v1/identify (default: MV_API_V1). `app_tokens` checks the
+    app's tokens (default: the sign-in bridge's public key, for MV_PUBLIC_ORIGIN);
+    `introspect` asks mycomap.org about a developer token (default: MV_ORG_BASE_URL with
+    the server key; tests pass a fake)."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     limits = limits or Limits.from_settings()
     signin = signin or SigninConfig.from_settings()
@@ -307,6 +325,53 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return RedirectResponse(f"/auth/signin?returnTo={quote(here, safe='')}",
                                     status_code=302)
         return await call_next(request)
+
+    # The public API answers credentials, never the site's cookie. Registered after
+    # require_signin, so it runs before it; signin.needs_session leaves /api/v1/ alone.
+    # Every /api/v1/ path passes here, so no v1 route can be left open by mistake.
+    org_secret = permissions.org_key() if server_key is True else server_key or None
+    if app_tokens is True:
+        key_file = config.setting("MV_SIGNIN_PUBLIC_KEY_FILE")
+        try:
+            public_key = signin.public_key or (load_public_key(Path(key_file).read_bytes())
+                                               if key_file else None)
+        except (OSError, SigninError) as e:
+            note(f"[v1] app tokens off: {type(e).__name__}: {e}")
+            public_key = None
+        app_tokens = apiv1.AppTokens(public_key, signin.origin
+                                     or origin_of(config.setting("MV_PUBLIC_ORIGIN")))
+    if introspect is True:
+        base_url = config.setting("MV_ORG_BASE_URL")
+        introspect = (apiv1.org_introspection(base_url, org_secret)
+                      if base_url and org_secret else None)
+    authenticator = apiv1.Authenticator(org_secret, app_tokens or None,
+                                        apiv1.Introspector(introspect, note=note)
+                                        if introspect else None)
+
+    @app.middleware("http")
+    async def require_v1_credential(request: Request, call_next):
+        if apiv1.is_v1(request.url.path):
+            try:
+                if authenticator.needs_network(request.headers):    # may ask mycomap.org
+                    request.state.credential = await run_in_threadpool(
+                        authenticator.check, request.headers)
+                else:
+                    request.state.credential = authenticator.check(request.headers)
+            except apiv1.V1Error as e:
+                return e.response()
+        return await call_next(request)
+
+    @app.exception_handler(apiv1.V1Error)
+    async def v1_refusal(request: Request, exc: apiv1.V1Error):
+        return exc.response()
+
+    @app.exception_handler(RequestValidationError)
+    async def bad_fields(request: Request, exc: RequestValidationError):
+        if not apiv1.is_v1(request.url.path):
+            return await request_validation_exception_handler(request, exc)
+        where = "; ".join(f"{'.'.join(str(x) for x in e.get('loc', ())[1:])}: {e.get('msg')}"
+                          for e in exc.errors())
+        return apiv1.V1Error(400, "bad_request", where or "malformed request").response()
 
     def signin_failed(reason: str) -> HTMLResponse:
         return HTMLResponse(
@@ -605,14 +670,50 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             in_flight.leave()
             raise HTTPException(400, "latitude or longitude out of range")
         context = Context(lat, lng, observed_on)
+        timer = apiv1.Timer()
         try:
-            return run_identify(photos, models_, context)
+            out = run_identify(photos, models_, context, timer)
         finally:
             in_flight.leave()
+        out["timing"] = timer.block()
+        return out
 
-    def run_identify(photos: list[UploadFile], models_: str, context: "Context") -> dict:
+    def decode_photos(photos: list[UploadFile], timer: "apiv1.Timer") -> list[tuple]:
+        start = time.monotonic()
         side = uploads.kept_side(list(backbones.values()))
         read = [read_photo(f, side) for f in photos]         # one at a time, kept small
+        timer.add("decode_ms", time.monotonic() - start)
+        return read
+
+    def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
+                        may_show, timer: "apiv1.Timer", top_k: int = 5) -> dict:
+        """One model's answer, timed: waiting for the model, embedding, scoring."""
+        waited = time.monotonic()
+        with gpu_lock:
+            timer.add("queue_ms", time.monotonic() - waited)
+            model = backbone_model(backbone)
+            start = time.monotonic()
+            prepare = getattr(model, "prepare", None) or (lambda im: im)
+            vecs = normalise(model.encode([prepare(im) for im in images]))
+            timer.add("embed_ms", time.monotonic() - start)
+            start = time.monotonic()
+            result = ident.identify_vectors(vecs, top_k, context=context,
+                                            photo_lookup=photo_lookup, may_show=may_show)
+            timer.add("score_ms", time.monotonic() - start)
+        timer.photos_embedded += len(images)
+        return result
+
+    def served_index(backbone: str, method: str, view, timer: "apiv1.Timer") -> Identifier:
+        """identifier(), its wait for a rebuild counted as queueing."""
+        start = time.monotonic()
+        try:
+            return identifier(backbone, method, view)
+        finally:
+            timer.add("queue_ms", time.monotonic() - start)
+
+    def run_identify(photos: list[UploadFile], models_: str, context: "Context",
+                     timer: "apiv1.Timer") -> dict:
+        read = decode_photos(photos, timer)
         images = [img for img, _ in read]
         context, used = fill_context(context, [found for _, found in read])
         ready = ready_backbones()
@@ -641,15 +742,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not limits.method_allowed(method) or not method_ready(method):
                 raise HTTPException(400, f"{method!r} is not offered here")
             try:
-                ident = identifier(backbone, method, view)
+                ident = served_index(backbone, method, view, timer)
             except NotTrainedHere as e:
                 raise HTTPException(503, f"{backbone}/{method} isn't ready on this "
                                          f"server ({e})") from e
             except serving.Updating as e:
                 raise HTTPException(503, str(e), headers={"Retry-After": "30"}) from e
-            with gpu_lock:
-                results.append(ident.identify(backbone_model(backbone), images, context=context,
-                                              photo_lookup=photo_lookup, may_show=may_show))
+            results.append(embed_and_score(ident, backbone, images, context, may_show, timer))
         return {"results": results, "context_used": used}
 
     def backbone_model(backbone: str):
@@ -794,6 +893,144 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     elif layer and background:
         schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
         nightly.start(schedule, run_nightly, note)
+
+    # POST /api/v1/identify (docs/api.md §3.1, §4): one model's answer for 1-10 photos,
+    # with timing, confident/answer, and the caller's own short-window limit.
+    if api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1":
+        photo_window = apiv1.PhotoWindow(int(_setting_number("MV_PHOTOS_PER_MINUTE") or 20))
+
+        def v1_model(spec: str | None) -> tuple[str, str]:
+            ready = ready_backbones()
+            if not spec:
+                if not ready:
+                    raise apiv1.V1Error(503, "updating", "no model is ready yet", retry_after=30)
+                return ready[0], default_method()
+            backbone, _, method = spec.strip().partition("/")
+            method = method or default_method()
+            if (backbone not in limits.allowed_backbones or backbone not in ready
+                    or method not in evaluate.METHODS or not limits.method_allowed(method)
+                    or not method_ready(method)):
+                raise apiv1.V1Error(400, "bad_request", f"model {spec!r} is not offered here; "
+                                    "see GET /api/v1/models")
+            return backbone, method
+
+        def v1_photos(photos: list[UploadFile], timer: "apiv1.Timer") -> list[tuple]:
+            try:
+                return decode_photos(photos, timer)
+            except HTTPException as e:
+                if e.status_code == 413:
+                    raise apiv1.V1Error(413, "too_large", str(e.detail)) from e
+                raise apiv1.V1Error(415, "unsupported_image", str(e.detail)) from e
+
+        @app.post("/api/v1/identify")
+        def v1_identify(request: Request, photos: list[UploadFile] = File(...),
+                        latitude: float | None = Form(None), longitude: float | None = Form(None),
+                        observed_on: str | None = Form(None), model: str | None = Form(None),
+                        top_k: int = Form(5)):
+            timer = apiv1.Timer()
+            cred: apiv1.Credential = request.state.credential
+            if not 1 <= len(photos) <= MAX_PHOTOS:
+                raise apiv1.V1Error(400, "too_many_photos", f"send 1 to {MAX_PHOTOS} photos")
+            if sum(f.size or 0 for f in photos) > MAX_REQUEST_BYTES:
+                raise apiv1.V1Error(413, "too_large", "the photos are over "
+                                    f"{MAX_REQUEST_BYTES // 2**20} MB together")
+            if not 1 <= top_k <= 10:
+                raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
+            if (latitude is None) != (longitude is None) or (
+                    latitude is not None and not (-90 <= latitude <= 90
+                                                  and -180 <= longitude <= 180)):
+                raise apiv1.V1Error(400, "bad_request", "send latitude and longitude together, "
+                                    "in range")
+            if observed_on:
+                try:
+                    date.fromisoformat(observed_on)
+                except ValueError:
+                    raise apiv1.V1Error(400, "bad_request", "observed_on is YYYY-MM-DD") from None
+            backbone, method = v1_model(model)
+            if cred.kind != "server":
+                wait = photo_window.take(cred.rate_key, len(photos))
+                if wait:
+                    raise apiv1.V1Error(429, "rate_limited", "too many photos in the last "
+                                        "minute", retry_after=int(wait) + 1)
+            if not in_flight.enter():
+                raise apiv1.V1Error(503, "busy", "busy identifying other photos",
+                                    retry_after=10, estimated_wait_seconds=10)
+            try:
+                read = v1_photos(photos, timer)
+                context, used = fill_context(Context(latitude, longitude, observed_on),
+                                             [found for _, found in read])
+                view = permission_view()
+                try:
+                    ident = served_index(backbone, method, view, timer)
+                except (serving.Updating, NotTrainedHere) as e:
+                    raise apiv1.V1Error(503, "updating", str(e), retry_after=30) from e
+                result = embed_and_score(
+                    ident, backbone, [img for img, _ in read], context,
+                    lambda info: view.may_show(info.license_class, info.owner_user_id),
+                    timer, top_k)
+            finally:
+                in_flight.leave()
+            body = v1_result(result, backbone, method, used, timer)
+            return JSONResponse(body, headers={"Cache-Control": "no-store",
+                                               "Server-Timing": apiv1.Timer.header(body["timing"])})
+
+        def v1_result(result: dict, backbone: str, method: str, used: dict,
+                      timer: "apiv1.Timer") -> dict:
+            """An identify result in the v1 shape (docs/api.md §4)."""
+            cal = result.pop("calibration", None) or {}
+            comparison = str(cal.get("comparison_id") or "")
+            out = {"request_id": "r_" + secrets.token_urlsafe(12),
+                   **result,
+                   "model": {"backbone": backbone, "method": method,
+                             "version": layer.release_id if layer else None,
+                             "calibrated_on": (f"{comparison[:4]}-{comparison[4:6]}-"
+                                               f"{comparison[6:8]}"
+                                               if comparison[:8].isdigit() else None)},
+                   "context_used": used,
+                   "gate": result.get("gate"),
+                   "usage": None}
+            apiv1.mark_confident(out)
+            out["timing"] = timer.block()
+            return out
+
+    # GET /api/v1/taxon-counts (docs/api.md §7): DNA-validated reference records per name,
+    # read from the index the default model serves. Built once per index version.
+    if taxon_counts if taxon_counts is not None else config.setting("MV_TAXON_COUNTS") == "1":
+        counts_cache: dict = {}
+
+        def served_default() -> tuple[str, str]:
+            if warm.models:
+                backbone, _, method = warm.models[0].partition("/")
+                return backbone, method
+            ready = ready_backbones()
+            if not ready:
+                raise apiv1.V1Error(503, "updating", "no model is ready yet", retry_after=30)
+            return ready[0], default_method()
+
+        @app.get("/api/v1/taxon-counts")
+        def v1_taxon_counts(request: Request):
+            backbone, method = served_default()
+            view = permission_view()
+            version = index_version(backbone, method, view)
+            try:
+                ident = identifier(backbone, method, view)
+            except (serving.Updating, NotTrainedHere) as e:
+                raise apiv1.V1Error(503, "updating", str(e), retry_after=30) from e
+            key = (id(ident), version)   # a failed rebuild may still serve the old index
+            if key not in counts_cache:
+                doc = apiv1.taxon_counts(
+                    ident.rank_counts, records=ident.records,
+                    model={"backbone": backbone, "method": method,
+                           "version": layer.release_id if layer else None},
+                    nightly_version=version[3] if layer else None)
+                body = apiv1.encode(doc)
+                counts_cache.clear()
+                counts_cache[key] = (body, apiv1.etag_of(body))
+            body, etag = counts_cache[key]
+            headers = {"ETag": etag, "Cache-Control": "private, max-age=3600"}
+            if etag in (request.headers.get("if-none-match") or ""):
+                return Response(status_code=304, headers=headers)
+            return Response(body, media_type="application/json", headers=headers)
 
     # The built frontend (web/dist), when present: files as-is, any other
     # non-API path gets index.html so client-side routes work on reload.
