@@ -1,6 +1,6 @@
 // What the Identify page says about the not-a-fungus gate (fungusgate.py on the server).
 
-import type { FindGate, IdentifyResult, PhotoResult } from "./api";
+import type { FindGate, GateVerdict, IdentifyResult, PhotoResult } from "./api";
 
 export interface GateBanner {
   verdict: "unsure" | "not_fungus";
@@ -55,4 +55,46 @@ export function pageHints(r: Pick<IdentifyResult, "gate" | "hints">): string[] {
   if (!banner) return r.hints;
   const said = banner.title.replace(/\.$/, "");
   return r.hints.filter((h) => !h.startsWith(said));
+}
+
+export type NextSteps = { title: string; steps: string[] };
+
+/** "{sequencing}" in a step is the link to MycoMap's free DNA sequencing. */
+export const WHAT_NEXT: Record<GateVerdict, NextSteps> = {
+  fungus: {
+    title: "Suggestions, then specimens, then DNA",
+    steps: [
+      "Compare your find with the closest specimens above: cap, underside and stem.",
+      "If the species is unclear, the genus often isn't. Go by the finest rank with a firm answer.",
+      "DNA settles it. MycoMap offers {sequencing}; once validated, your find joins the reference set.",
+    ],
+  },
+  unsure: {
+    title: "Check it's a fungus, then compare, then DNA",
+    steps: [
+      "Make sure the photos show the fungus itself: the cap from above, the underside and the stem, close and sharp.",
+      "Compare your find with the closest look-alikes above. They come with no chance, because the photos may not show a fungus.",
+      "If it is a fungus, DNA settles it. MycoMap offers {sequencing}; once validated, your find joins the reference set.",
+    ],
+  },
+  not_fungus: {
+    title: "Nothing to compare yet",
+    // The gate's notice above already says why: no name, no chance, only fungi known.
+    steps: [
+      "If it is a fungus, start over with clear, close photos of the cap from above, the underside and the stem.",
+      "Sure it's a fungus? MycoMap offers {sequencing}; once validated, your find joins the reference set.",
+    ],
+  },
+};
+
+/**
+ * The page-wide next steps follow the most hopeful result: names to compare when any
+ * model's photos look like a fungus, look-alikes when the gate is only unsure, and none
+ * when every result is "not a fungus". No gate (not deployed) counts as a fungus.
+ */
+export function whatNext(results: Pick<IdentifyResult, "gate">[]): NextSteps {
+  const verdicts = results.map((r) => r.gate?.verdict ?? "fungus");
+  const kind: GateVerdict = verdicts.includes("fungus") || !verdicts.length ? "fungus"
+    : verdicts.includes("unsure") ? "unsure" : "not_fungus";
+  return WHAT_NEXT[kind];
 }
