@@ -223,12 +223,16 @@ model's result, not a `results` list.
   no photo is clearly a fungus, names are still listed but every `confidence` is `null`
   and nothing is `confident`. When every photo is `not_fungus`, `ranks` are empty: still
   a 200, still counted. `gate` is `null` while the gate isn't deployed.
-- **`confident`** (per candidate, Vision owns the rule, so the app and Mobile H never
-  set a threshold of their own): `true` only for a rank's top name when (1) the gate
-  verdict is `fungus`, (2) that rank's `likely` set holds **only that name**, and (3) at
-  species, the name has ≥ 5 reference records. Ranks without a likely set (order and
-  above, for now) are never `confident`. If measurement shows a better rule (§8), the rule
-  changes on Vision and callers don't change.
+- **`confident`** (per candidate; Vision owns the rule, so the website, the app and
+  Mobile H never set a threshold of their own): `true` for a rank's top name when the
+  gate verdict is `fungus` and its calibrated `confidence` is **≥ 0.70**: Steve's rule for
+  the website's answer headline (2026-10-11), so web and app always agree. Ranks without
+  a fitted confidence (order and above, for now) are never `confident`. The top-level
+  **`answer`** is `{"rank", "name", "confidence"}` for the finest rank that is
+  `confident`, or `null`. On held-out records it was right 96% of the time at species and
+  at genus (§8). A one-name `likely` set was tried as the rule and was right only 65% of
+  the time at species, so it isn't used. The threshold may change on Vision; callers don't
+  change.
 - **Place and date (reserved, from the prior lane).** Steve's place/date decision adds a
   boost-only prior and a far-find cue per candidate: the distance to the nearest
   DNA-validated record of that name, whether the date is in its season, a "far from
@@ -442,9 +446,25 @@ nearest+mean, newest 28 days, 1,152 test records, comparison 20261008-012435-4ef
 
 Below 5 a species is effectively unknown to Vision. Gains flatten past ~20 and are small
 past ~100. These drift weekly as green records arrive, so callers keep cut-offs as
-settings. Before launch, this section gains measured tables: genus right by **genus**
-depth, and how often the top name was right when `confident` was true and when its
-`confidence` was ≥ 0.5 / 0.7 / 0.9.
+settings. Still to measure: genus right by **genus** depth.
+
+**How often the top name is right, by its confidence.** Held-out dev benchmark
+(heldout-2026-10-08, the 2,986 `dev` records with answers, never in the reference set),
+served model, no place/date, answer key = the record's observation name. Species top-1
+overall 51%, genus 81%.
+
+| | share of records | right |
+|---|---|---|
+| species top ≥ 0.9 | 2.1% | 95% |
+| species top ≥ 0.7 (**`confident` at species**) | 9.6% | 96% |
+| species top ≥ 0.5 | 22.9% | 86% |
+| genus top ≥ 0.7, species below (**`answer` at genus**) | 52.2% | 96% |
+| neither (answer at family or none) | 38.2% | |
+| *one-name species likely set (rejected rule)* | *9.9%* | *61%* |
+
+The benchmark's photos are DNA-validated records' own iNat photos: all fungi, often
+taken with care. App photos at a foray will score lower. So treat these shares as an
+upper bound, and expect fewer `confident` answers in the field.
 
 ## 9. Rollout (each behind a flag, one branch each, Steve reviews)
 
