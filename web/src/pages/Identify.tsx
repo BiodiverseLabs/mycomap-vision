@@ -12,7 +12,6 @@ import {
   ApiError,
   signInUrl,
   modelKey,
-  modelLabel,
   num,
   pct,
   RANKS,
@@ -29,8 +28,9 @@ import {
 import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, type GateBanner } from "@/lib/gate";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import {
-  identifyGate, LIKELY_COPY, modelName, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
+  identifyGate, LIKELY_COPY, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
 } from "@/lib/publicView";
+import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
 import {
@@ -42,7 +42,6 @@ import {
 } from "@/lib/modelChoice";
 
 const MAX_PHOTOS = 10;
-const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const RANK_LABEL: Record<Rank, string> = { family: "Family", genus: "Genus", species: "Species" };
 
 export function IdentifyPage() {
@@ -567,7 +566,7 @@ function ModelPicker({ models, onChange }: {
             {ready.length > 1 && (
               <select className={selectClass} value={backbone ?? ""} onChange={(e) => setBackbone(e.target.value)}
                 aria-label="Backbone" data-testid="select-backbone">
-                {ready.map((b) => <option key={b} value={b}>{modelName(b)}</option>)}
+                {ready.map((b) => <option key={b} value={b}>{publicModelName(b)}</option>)}
               </select>
             )}
             <select className={selectClass} value={choice.base} aria-label="Model"
@@ -589,8 +588,8 @@ function ModelPicker({ models, onChange }: {
               </label>
             )}
             {info && (
-              <p className="text-xs text-muted-foreground" title={info.backbone}>
-                {modelName(info.backbone)} · {num(info.embedded_photos)} reference photos
+              <p className="text-xs text-muted-foreground">
+                {publicModelName(info.backbone)} · {num(info.embedded_photos)} reference photos
               </p>
             )}
           </fieldset>
@@ -605,12 +604,12 @@ function ModelPicker({ models, onChange }: {
                 {ready.length > 1 && (
                   <select className={selectClass} value={second.backbone} aria-label="Second model backbone"
                     onChange={(e) => setSecond({ ...second, backbone: e.target.value })} data-testid="select-second-backbone">
-                    {ready.map((b) => <option key={b} value={b}>{modelName(b)}</option>)}
+                    {ready.map((b) => <option key={b} value={b}>{publicModelName(b)}</option>)}
                   </select>
                 )}
                 <select className={selectClass} value={second.method} aria-label="Second model"
                   onChange={(e) => setSecond({ ...second, method: e.target.value })} data-testid="select-second-method">
-                  {offered.map((m) => <option key={m} value={m}>{capitalize(modelLabel(second.backbone, m).how)}</option>)}
+                  {offered.map((m) => <option key={m} value={m}>{capitalize(publicMethodLabel(m))}</option>)}
                 </select>
                 {secondKey === first && (
                   <p className="text-xs text-muted-foreground">Same as the first model; pick another to compare.</p>
@@ -745,10 +744,10 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
     <Card className="overflow-hidden scroll-mt-20" data-result-card>
       <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3 px-4 sm:px-6">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <CardTitle className="text-base text-[#4a3728]" title={r.model.backbone}>
-            {modelName(r.model.backbone).split(",")[0]}{" "}
+          <CardTitle className="text-base text-[#4a3728]">
+            {publicModelName(r.model.backbone)}{" "}
             <span className="font-normal text-muted-foreground">
-              · {modelLabel(r.model.backbone, r.model.method).how}
+              · {publicMethodLabel(r.model.method)}
             </span>
           </CardTitle>
           <button type="button" className="text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-myco-green"
@@ -758,7 +757,7 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
         </div>
         {details && (
           <div className="mt-2 space-y-1 text-xs text-muted-foreground" data-testid="text-model-details">
-            <p>{modelName(r.model.backbone)}</p>
+            <p>{publicModelName(r.model.backbone)}: {capitalize(publicMethodLabel(r.model.method))}.</p>
             <p>
               {num(r.reference.records)} DNA-verified records · {num(r.reference.species)} names ·{" "}
               {num(r.reference.photos)} photos
