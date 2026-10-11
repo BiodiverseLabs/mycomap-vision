@@ -392,6 +392,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             picek_trainer=None, picek_exclude: str = "match", picek_ids_file: str | None = None,
             picek_labels_hash: str | None = None, picek_release: str | None = None,
             picek_release_manifest: str | None = None, picek_allow_draft: bool = False,
+            picek_place_cells: str | None = None, picek_place_cells_sha256: str | None = None,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
@@ -412,14 +413,17 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     holdouts.check_clean(conn, "the trainer run")
     release_cite = None
     if picek and picek_release:
-        # The release shipped with the run, verified again here (its SHA256SUMS, and the
-        # MANIFEST.json the launch read), then the launch's rules on it.
+        # The release shipped with the run (no private.sqlite), verified again here by the
+        # builder's trainer mode against the MANIFEST.json the launch read, with the place
+        # counts the launch made; then the launch's rules on it.
         from .replications.fungitastic import dataset, retrain
-        rel = dataset.load(picek_release, picek_allow_draft, files=dataset.SHIPPED,
+        rel = dataset.load(picek_release, picek_allow_draft, without_private=True,
                            expect_manifest_sha256=picek_release_manifest)
         retrain.check_release_exclusion(rel, picek_exclude)
+        place = (retrain.read_place_cells(picek_place_cells, picek_place_cells_sha256)
+                 if picek_place_cells else None)
         snap = retrain.release_snapshot(rel, retrain.build_data_from_release(
-            conn, rel, store.location, size), picek_exclude)
+            conn, rel, store.location, size, place_cells=place), picek_exclude)
         release_cite = dataset.cite(rel)
         rel.close()
         log("record sources: " + retrain.format_sources(snap["record_sources"]))
@@ -546,7 +550,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                     meta = (picek_trainer or _default_picek_trainer(
                         store, size, test_days, log, stopping, picek_exclude, picek_ids_file,
                         picek_labels_hash, picek_release, picek_release_manifest,
-                        picek_allow_draft))(
+                        picek_allow_draft, picek_place_cells, picek_place_cells_sha256))(
                         conn, s.spec, s.name, data_dir / "models")
                 else:
                     meta = (finetuner or _default_finetuner(store, size, test_days, log,
@@ -619,7 +623,8 @@ def model_files(kind: str) -> tuple[str, ...]:
 def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                            exclude: str = "match", ids_file: str | None = None,
                            labels_hash: str | None = None, release: str | None = None,
-                           release_manifest: str | None = None, allow_draft: bool = False):
+                           release_manifest: str | None = None, allow_draft: bool = False,
+                           place_cells: str | None = None, place_cells_sha256: str | None = None):
     def run(conn, spec, name, models_dir):
         import os
 
@@ -630,7 +635,8 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                           exclude_benchmarks=exclude, exclude_ids_file=ids_file,
                           expect_labels_hash=labels_hash, release=release,
                           allow_draft=allow_draft, expect_release_manifest=release_manifest,
-                          shipped_release=bool(release))
+                          shipped_release=bool(release), place_cells_file=place_cells,
+                          expect_place_cells_sha256=place_cells_sha256)
         return train(conn, store, size, name, cfg,
                      test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
     return run

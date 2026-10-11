@@ -214,6 +214,8 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_release=args.picek_release,
                           picek_release_manifest=args.picek_release_manifest,
                           picek_allow_draft=args.picek_allow_draft,
+                          picek_place_cells=args.picek_place_cells,
+                          picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
                           if args.resume else None)
     if watcher is not None:
@@ -1107,6 +1109,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--picek-release", help="the shipped dataset release the Picek stage uses")
     p.add_argument("--picek-release-manifest", help="sha256 of its MANIFEST.json at launch")
     p.add_argument("--picek-allow-draft", action="store_true")
+    p.add_argument("--picek-place-cells",
+                   help="the place prior's counts the launch made from the release (shipped)")
+    p.add_argument("--picek-place-cells-sha256", help="their sha256 at launch")
     p.add_argument("--sample-records", type=int)
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "

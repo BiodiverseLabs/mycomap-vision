@@ -1,9 +1,11 @@
 """The Picek run on a dataset release (docs/dataset-release.md; releases made by the
 builder, release_fixture): verified before anything else; the release is the source of
 truth for records, labels, splits, photos, sources and benchmark exclusion; its
-labels_hash is the run's labels identity; only release.sqlite, MANIFEST.json and
-SHA256SUMS ship (never private.sqlite); the instance verifies them again before its first
-stage; a test release is never trained on."""
+labels_hash is the run's labels identity; every release file but private.sqlite ships
+(release.sqlite, MANIFEST.json, SHA256SUMS, DATASET_CARD.md), and the instance opens it
+with the builder's trainer mode (load_release(without_private=True)) before its first
+stage; the place prior's counts come from the release's own places, made on the laptop
+and shipped; a test release is never trained on."""
 
 import json
 
@@ -141,14 +143,111 @@ def test_a_dry_run_on_a_release_ships_what_training_needs_and_never_private(
     sha = dataset.manifest_sha256(rel)
     assert out["dataset_release"]["manifest_sha256"] == sha
     assert out["picek_labels"]["labels_hash"] == rel.labels_hash
+    assert out["picek_labels"]["public_trainable_only"] is False
     shipped = tmp_path / "dry" / "release" / BASE
-    assert sorted(p.name for p in shipped.iterdir()) == sorted(dataset.SHIPPED)
+    files = dataset.shipped_files(rel)
+    assert sorted(files) == sorted([dr.CARD, dr.MANIFEST, dr.RELEASE_DB, dr.SUMS])
+    assert sorted(p.name for p in shipped.iterdir()) == sorted(files)
     script = (tmp_path / "dry" / "user-data.sh").read_text(encoding="utf-8")
     assert f"--picek-labels-hash {rel.labels_hash}" in script
     assert f"--picek-release {BASE} --picek-release-manifest {sha} --picek-allow-draft" in script
-    for f in dataset.SHIPPED:
+    for f in files:
         assert f"release/{BASE}/{f}" in script
     assert "private.sqlite" not in script
+    # The place counts the instance trains its place prior on, made here.
+    place = out["place_cells"]
+    assert place["sha256"] == out["picek_labels"]["place_prior"]["cells_sha256"]
+    assert f"--picek-place-cells data/{aws.PICEK_PLACE_KEY} " \
+           f"--picek-place-cells-sha256 {place['sha256']}" in script
+    doc = retrain.read_place_cells(tmp_path / "dry" / aws.PICEK_PLACE_KEY, place["sha256"])
+    assert doc["dataset_release"] == BASE and "47" not in str(doc["cells"].values())
+
+
+def test_the_trainer_copy_is_every_file_but_private_and_the_builder_checks_each(world,
+                                                                               tmp_path,
+                                                                               monkeypatch):
+    rel = rel_of()
+    assert dr.PRIVATE_DB not in dataset.shipped_files(rel)
+    inst, _sha = shipped_copy(world, tmp_path, monkeypatch)
+    dataset.load(BASE, True, without_private=True).close()
+    with pytest.raises(dr.ReleaseError, match="private.sqlite"):   # the full check
+        dataset.load(BASE, True)
+    (inst / "research-releases" / BASE / dr.CARD).unlink()
+    with pytest.raises(dr.ReleaseError, match="DATASET_CARD.md"):
+        dataset.load(BASE, True, without_private=True)
+
+
+def test_a_file_name_an_instance_script_cant_carry_is_refused(world, monkeypatch):
+    rel = rel_of()
+    monkeypatch.setitem(rel.manifest, "files",
+                        [*rel.manifest["files"], {"path": "inputs/a b.csv"}])
+    with pytest.raises(dr.ReleaseError, match="can't carry"):
+        dataset.shipped_files(rel)
+
+
+# --- the place prior ------------------------------------------------------------------------
+
+def test_place_counts_come_from_the_releases_places_not_the_manifests(world):
+    with world["conn"]:                          # the live manifest has moved on
+        world["conn"].execute("update records set latitude = -33.0, longitude = 151.0")
+    data = data_of(world, rel_of())
+    assert data.place_source == retrain.PLACE_RELEASE
+    assert list(data.cells) == [retrain.cell_of(47.0, -122.0, 4.0)]
+
+
+def test_the_instance_trains_its_place_prior_on_the_counts_made_at_launch(world, tmp_path,
+                                                                          monkeypatch):
+    laptop = data_of(world, rel_of())
+    doc = retrain.place_cells_doc(rel_of(), laptop)
+    shipped_copy(world, tmp_path, monkeypatch)
+    rel = dataset.load(BASE, True, without_private=True)
+    assert not rel.has_private
+    inst = retrain.build_data_from_release(world["conn"], rel, world["store"].location,
+                                           "large", place_cells=doc)
+    assert inst.place_source == retrain.PLACE_SHIPPED
+    assert inst.cells == laptop.cells and inst.cells
+    assert (retrain.release_snapshot(rel, inst)["place_prior"]["cells_sha256"]
+            == retrain.place_cells_sha256(doc))
+
+
+def test_without_private_or_shipped_counts_the_run_refuses_to_train(world, tmp_path,
+                                                                     monkeypatch):
+    shipped_copy(world, tmp_path, monkeypatch)
+    rel = dataset.load(BASE, True, without_private=True)
+    data = retrain.build_data_from_release(world["conn"], rel, world["store"].location, "large")
+    assert data.place_source == retrain.PLACE_NONE and data.cells == {}
+    assert retrain.place_cells_doc(rel, data) is None
+    cfg = retrain.PicekConfig(release=BASE, allow_draft=True, shipped_release=True)
+
+    def never(*a):
+        raise AssertionError("must refuse before a model is made")
+    with pytest.raises(ValueError, match="no place counts"):
+        retrain.train(world["conn"], world["store"], "large", "picek-x", cfg,
+                      out_dir=tmp_path / "models", log=lambda s: None, model_factory=never)
+
+
+@pytest.mark.parametrize("break_it,match", [
+    ("hash", "not the ones the launch made"), ("release", "not dry-"),
+    ("grid", "degree grid"), ("species", "doesn't train")])
+def test_shipped_place_counts_that_are_not_the_launchs_are_refused(world, tmp_path, break_it,
+                                                                  match):
+    rel = rel_of()
+    doc = retrain.place_cells_doc(rel, data_of(world, rel))
+    sha = retrain.place_cells_sha256(doc)
+    if break_it == "hash":
+        doc["cells"][next(iter(doc["cells"]))]["A x"] += 1
+    elif break_it == "release":
+        doc["dataset_release"] = "v0"
+    elif break_it == "grid":
+        doc["cell_degrees"] = 2.0
+    else:
+        doc["cells"][next(iter(doc["cells"]))]["Z z"] = 1
+    path = tmp_path / "place.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(ValueError, match=match):
+        got = retrain.read_place_cells(path, sha if break_it == "hash" else None)
+        pos = {"A x": 0, "B y": 1}
+        retrain.cells_from_doc(got, rel, pos, 4.0)
 
 
 @pytest.mark.parametrize("break_it,match", [
@@ -180,7 +279,7 @@ def shipped_copy(world, tmp_path, monkeypatch, alter=False):
     inst = tmp_path / "inst"
     folder = inst / "research-releases" / BASE
     folder.mkdir(parents=True)
-    for f in dataset.SHIPPED:
+    for f in dataset.shipped_files(rel_of()):
         shutil.copyfile(world["root"] / BASE / f, folder / f)
     monkeypatch.setattr(config, "DATA_DIR", inst)
     if alter:
@@ -210,7 +309,7 @@ def test_the_instance_verifies_the_shipped_release_and_records_it(world, tmp_pat
         pass
     assert trained, "the Picek stage ran on the verified release"
     progress = json.loads((inst / trainer.PROGRESS_FILE).read_text(encoding="utf-8"))
-    rel = dataset.load(BASE, True, files=dataset.SHIPPED)      # the instance's copy
+    rel = dataset.load(BASE, True, without_private=True)      # the instance's copy
     assert progress["dataset_release"] == {**rel.cite(), "manifest_sha256": sha}
 
 

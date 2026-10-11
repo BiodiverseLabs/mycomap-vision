@@ -3,10 +3,10 @@
 
 Only what the reader doesn't do yet lives here:
 
-- `load(..., files=SHIPPED)`: a trainer instance gets release.sqlite, MANIFEST.json and
-  SHA256SUMS only (never private.sqlite: coordinates and owners stay on the laptop), so it
-  checks those files against MANIFEST.json and opens the release without the full file
-  check (load_release's check_files needs every file).
+- `shipped_files` / `load(..., without_private=True)`: a trainer instance gets every file
+  MANIFEST.json lists except private.sqlite (release.sqlite, DATASET_CARD.md), plus
+  MANIFEST.json and SHA256SUMS; coordinates and owners stay on the laptop. The builder's
+  trainer mode (load_release(id, without_private=True)) checks every one of them.
 - `manifest_sha256` / `cite`: the reader's cite() plus the hash of the MANIFEST.json read,
   which a launch records and the instance must find again.
 - `allowed_sources`: the sources of the release's included records (the build excludes
@@ -16,7 +16,7 @@ Only what the reader doesn't do yet lives here:
 from __future__ import annotations
 
 import hashlib
-import json
+import re
 from pathlib import Path
 
 from ... import dataset_release as dr
@@ -25,7 +25,8 @@ ReleaseError = dr.ReleaseError
 SealedLeak = dr.SealedLeak
 TRAINABLE = dr.TRAINABLE
 RELEASES_DIR = "research-releases"                 # under the data folder (dr.ROOT)
-SHIPPED = (dr.RELEASE_DB, dr.MANIFEST, dr.SUMS)       # what a trainer needs; not private.sqlite
+# A shipped file's path as the instance script names it (no spaces, quotes or '..').
+SAFE_PATH = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
 
 
 def root_dir(root: Path | None = None) -> Path:
@@ -47,38 +48,28 @@ def is_test_release(rel) -> bool:
     return bool(rel.manifest.get("test_for"))
 
 
-def verify_shipped(folder: Path, files=SHIPPED) -> None:
-    """The shipped files against MANIFEST.json: each data file by its listed sha256,
-    SHA256SUMS by `sums_sha256`."""
-    manifest = json.loads((folder / dr.MANIFEST).read_text(encoding="utf-8"))
-    listed = {f["path"]: f for f in manifest.get("files") or []}
-    for name in files:
-        if name == dr.MANIFEST:
-            continue
-        path = folder / name
-        if not path.is_file():
-            raise ReleaseError(f"{folder.name}: {name} is missing")
-        want = (manifest.get("sums_sha256") if name == dr.SUMS
-                else (listed.get(name) or {}).get("sha256"))
-        if want is None:
-            raise ReleaseError(f"{folder.name}: {name} is not listed in {dr.MANIFEST}")
-        if dr.sha256_file(path) != want:
-            raise ReleaseError(f"{folder.name}: {name} does not match {dr.MANIFEST} (altered)")
+def shipped_files(rel) -> tuple[str, ...]:
+    """What a trainer copy of `rel` ships: MANIFEST.json, SHA256SUMS and every file
+    MANIFEST.json lists except private.sqlite (release.sqlite, DATASET_CARD.md, any review
+    inputs), which is what load_release(without_private=True) checks. Never private.sqlite.
+    SHA256SUMS is shipped as part of the release but read by nothing: MANIFEST.json (pinned
+    by its sha256 at launch) lists every file's hash."""
+    listed = sorted(f["path"] for f in rel.manifest["files"] if f["path"] != dr.PRIVATE_DB)
+    out = (dr.MANIFEST, dr.SUMS, *(p for p in listed if p not in (dr.MANIFEST, dr.SUMS)))
+    bad = [p for p in out if not SAFE_PATH.fullmatch(p) or ".." in p.split("/")]
+    if bad:
+        raise ReleaseError(f"{rel.id}: file names an instance script can't carry: {bad}")
+    return out
 
 
 def load(rid: str, allow_draft: bool = False, root: Path | None = None,
-         files: tuple[str, ...] | None = None, expect_manifest_sha256: str | None = None):
-    """dataset_release.load_release with every file checked; or, with `files` (a trainer's
-    shipped copy), only those. With `expect_manifest_sha256`, refuse any other release
-    than the one the launch recorded."""
-    base = root_dir(root)
-    if files is None:
-        rel = dr.load_release(rid, base, allow_draft=allow_draft)
-    else:
-        if not (base / rid / dr.MANIFEST).is_file():
-            raise ReleaseError(f"release {rid} is missing or unfinished in {base}")
-        verify_shipped(base / rid, files)
-        rel = dr.load_release(rid, base, allow_draft=allow_draft, check_files=False)
+         without_private: bool = False, expect_manifest_sha256: str | None = None):
+    """dataset_release.load_release with every file checked; `without_private`: a
+    trainer's shipped copy (shipped_files), the builder's trainer mode, which checks every
+    listed file but private.sqlite. With `expect_manifest_sha256`, refuse any other
+    release than the one the launch recorded."""
+    rel = dr.load_release(rid, root_dir(root), allow_draft=allow_draft,
+                          without_private=without_private)
     if expect_manifest_sha256 and manifest_sha256(rel) != expect_manifest_sha256:
         rel.close()
         raise ReleaseError(f"release {rid}'s {dr.MANIFEST} is not the one the launch "

@@ -94,7 +94,12 @@ class PicekConfig:
     release_root: str | None = None       # its folder (default <data>/research-releases/<id>)
     allow_draft: bool = False
     expect_release_manifest: str | None = None   # sha256 of the MANIFEST.json the launch read
-    shipped_release: bool = False         # a trainer's copy: release.sqlite, MANIFEST, SHA256SUMS
+    # A trainer's copy (dataset.shipped_files): every release file but private.sqlite,
+    # opened with load_release(without_private=True). Places are then not there: the place
+    # prior's counts come from the laptop (place_cells_file, made at launch).
+    shipped_release: bool = False
+    place_cells_file: str | None = None           # retrain.place_cells_doc, shipped
+    expect_place_cells_sha256: str | None = None  # its hash at launch
 
     def resolved(self) -> "PicekConfig":
         p = PRESETS[self.preset]

@@ -367,16 +367,32 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
     if release:
         from .replications.fungitastic import dataset
         rid, sha = release["dataset_release"], release["manifest_sha256"]
+        place_sha = release.get("place_cells_sha256")
+        files = release.get("shipped") or ()
         if not re.fullmatch(r"[A-Za-z0-9._-]+", rid) or not re.fullmatch(r"[0-9a-f]{64}", sha):
             raise ValueError(f"not a release id / manifest hash: {rid!r} {sha!r}")
-        release_cmd = ("# The dataset release the Picek run trains on (its public tables "
-                       "only; no coordinates).\n"
-                       f"mkdir -p data/{dataset.RELEASES_DIR}/{rid}\n" + "".join(
+        if place_sha is not None and not re.fullmatch(r"[0-9a-f]{64}", place_sha):
+            raise ValueError(f"not a place-counts hash: {place_sha!r}")
+        if not files or "private.sqlite" in files or not all(
+                dataset.SAFE_PATH.fullmatch(f) and ".." not in f.split("/") for f in files):
+            raise ValueError(f"not a trainer copy's file list: {files!r}")
+        here = f"data/{dataset.RELEASES_DIR}/{rid}"
+        dirs = sorted({f"{here}/{f.rsplit('/', 1)[0]}" for f in files if "/" in f})
+        release_cmd = ("# The dataset release the Picek run trains on: every file but its "
+                       "private part\n# (no coordinates, no owners), checked by "
+                       "load_release(without_private=True).\n"
+                       f"mkdir -p {' '.join([here, *dirs])}\n" + "".join(
                            f'aws s3 cp "s3://$BUCKET/$RUN/{RELEASE_PREFIX}{rid}/{f}" '
-                           f"data/{dataset.RELEASES_DIR}/{rid}/{f} || exit 1\n"
-                           for f in dataset.SHIPPED))
+                           f"{here}/{f} || exit 1\n" for f in files))
         release_arg = (f" --picek-release {rid} --picek-release-manifest {sha}"
                        + (" --picek-allow-draft" if release.get("draft") else ""))
+        if place_sha:
+            release_cmd += ("# The place prior's counts, made on the laptop from the "
+                            "release's places.\n"
+                            f'aws s3 cp "s3://$BUCKET/$RUN/{PICEK_PLACE_KEY}" '
+                            f"data/{PICEK_PLACE_KEY} || exit 1\n")
+            release_arg += (f" --picek-place-cells data/{PICEK_PLACE_KEY}"
+                            f" --picek-place-cells-sha256 {place_sha}")
     return TRAINER_USER_DATA.format(
         bucket=bucket_name, run_id=run_id, region=config.setting("MV_AWS_REGION", "us-east-2"),
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
@@ -402,25 +418,39 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
 PICEK_IDS_KEY = "picek-exclude-ids.txt"
 RELEASE_PREFIX = "release/"            # runs/<run>/release/<id>/<file>: what training needs
 PICEK_LABELS_KEY = "picek-labels.json"
+PICEK_PLACE_KEY = "picek-place-cells.json"   # retrain.place_cells_doc (a release run)
+
+
+def release_for_script(rel, place_doc: dict | None) -> dict:
+    """What the instance script needs of a release: its cite(), the files it ships and
+    the place counts' hash."""
+    from .replications.fungitastic import dataset, retrain
+    return {**dataset.cite(rel), "shipped": list(dataset.shipped_files(rel)),
+            "place_cells_sha256": retrain.place_cells_sha256(place_doc)}
 
 
 def picek_launch_labels(conn, store_location: str, size: str, test_days: int, exclude: str,
                         log=print, dry_run: bool = False, allowed_sources=None,
-                        release=None) -> tuple[dict, set[str] | None]:
+                        release=None) -> tuple[dict, set[str] | None, dict | None]:
     """The labels a Picek run will train on, read now from this manifest (launch time),
-    printed with the known label problems the manifest carries, and the ids to ship when
-    every benchmark is excluded. The instance checks it trains on the same (labels_hash).
-    A launch is refused unless every training and validation record comes from the run's
-    allowed sources (retrain.require_allowed_sources; a dry run only warns)."""
+    printed with the known label problems the manifest carries, the ids to ship when
+    every benchmark is excluded, and (a release run) the place prior's counts, made here
+    from the release's places since the instance gets no private.sqlite. The instance
+    checks it trains on the same (labels_hash, the counts' sha256). A launch is refused
+    unless every training and validation record comes from the run's allowed sources
+    (retrain.require_allowed_sources; a dry run only warns)."""
     from .replications.fungitastic import retrain as picek
     if release is not None:
         # The release is the source of truth: its records, labels, splits and sources.
         picek.check_release_exclusion(release, exclude)
+        if not release.has_private:
+            raise ValueError(f"release {release.id} has no private.sqlite here: a launch "
+                             "makes the place prior's counts from it, on the laptop")
         data = picek.build_data_from_release(conn, release, store_location, size)
         snap = picek.release_snapshot(release, data, exclude)
         log(picek.format_snapshot(snap))
         picek.require_allowed_sources(snap["record_sources"], dry_run=dry_run, log=log)
-        return snap, None
+        return snap, None, picek.place_cells_doc(release, data)
     if exclude not in picek.EXCLUDE_MODES:
         raise ValueError(f"--picek-exclude-benchmarks is one of "
                          f"{', '.join(picek.EXCLUDE_MODES)}")
@@ -444,7 +474,7 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
                 + ", ".join(f"{s} {n:,}" for s, n in audit["by_source"].items())
                 + f"); {audit['records'] - audit['listed']:,} not listed. Informational.")
     picek.require_allowed_sources(snap["record_sources"], dry_run=dry_run, log=log)
-    return snap, ids
+    return snap, ids, None
 
 
 def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
@@ -647,8 +677,10 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     `release`: the Picek stage trains on that dataset release (docs/dataset-release.md),
     verified (SHA256SUMS, MANIFEST.json) before anything else; a draft needs
     `allow_draft`. Its labels_hash is the run's labels identity, its MANIFEST hash is
-    recorded, and release.sqlite + MANIFEST.json + SHA256SUMS ship with the run (never
-    private.sqlite); the instance verifies them again before its first stage.
+    recorded, and every release file but private.sqlite ships with the run
+    (dataset.shipped_files: release.sqlite, MANIFEST.json, SHA256SUMS, DATASET_CARD.md),
+    with the place prior's counts made here from the release's places; the instance
+    verifies them again (load_release(without_private=True)) before its first stage.
 
     `spot`: a one-time Spot instance instead of On-Demand (`spot_max_price` in dollars an
     hour; none = the On-Demand price). `resume`: continue that run instead of starting a
@@ -716,17 +748,17 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                                      sample_records))
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
-    labels, exclude_ids = (picek_launch_labels(conn, f"s3://{b}/", size, test_days,
-                                               picek_exclude, log, dry_run=dry_run,
-                                               release=rel)
-                           if picek else (None, None))
+    labels, exclude_ids, place_doc = (picek_launch_labels(conn, f"s3://{b}/", size,
+                                                          test_days, picek_exclude, log,
+                                                          dry_run=dry_run, release=rel)
+                                      if picek else (None, None, None))
     labels_hash = labels["labels_hash"] if labels else None
     sha = release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)
     if dry_run:
         return dry_run_launch(conn, sha, names, methods, max_hours, b, size, test_days, ft,
                               sample_records, spot, spot_max_price, instance_type, picek,
                               picek_exclude, labels, exclude_ids, photos, est,
-                              dry_run_dir, ec2_check, log, rel)
+                              dry_run_dir, ec2_check, log, rel, place_doc)
     if prev is not None and prev.get("code_version") not in (None, sha):
         log(f"Note: run {resume} ran commit {str(prev.get('code_version'))[:10]}; the rest "
             f"runs commit {sha[:10]} (both are recorded in progress.json)")
@@ -760,9 +792,13 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         ship_taxonomy(s3, b, run_id, log)
     if rel is not None:
         from .replications.fungitastic import dataset
-        for f in dataset.SHIPPED:
+        shipped = dataset.shipped_files(rel)
+        for f in shipped:
             s3.upload_file(str(rel.folder / f), b, f"runs/{run_id}/{RELEASE_PREFIX}{rel.id}/{f}")
-        log(f"Uploaded release {rel.id} ({', '.join(dataset.SHIPPED)}; not private.sqlite)")
+        log(f"Uploaded release {rel.id} ({', '.join(shipped)}; not private.sqlite)")
+        if place_doc is not None:
+            s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_PLACE_KEY}",
+                          Body=json.dumps(place_doc, sort_keys=True).encode())
     if picek:
         s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_LABELS_KEY}",
                       Body=json.dumps(labels, indent=2).encode())
@@ -781,7 +817,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                          resume=bool(resume), code_key=code_key,
                                          picek=picek, picek_exclude=picek_exclude,
                                          picek_labels_hash=labels_hash,
-                                         release=dataset.cite(rel) if rel else None)
+                                         release=release_for_script(rel, place_doc)
+                                         if rel else None)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price,
                                                      extra_gb=picek_cache_gb(picek, photos)),
@@ -830,7 +867,7 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                    sample_records, spot: bool, spot_max_price, instance_type: str,
                    picek: list[str] | None, picek_exclude: str, labels: dict | None,
                    exclude_ids, photos: int, est: dict, dest: Path | None,
-                   ec2_check: bool, log=print, rel=None) -> dict:
+                   ec2_check: bool, log=print, rel=None, place_doc: dict | None = None) -> dict:
     """The rest of launch_trainer with nothing sent (see its `dry_run`)."""
     from .replications.fungitastic import dataset
     run_id = "dry-run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -843,13 +880,17 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                                          test_days, ft, sample_records, code_version=sha,
                                          spot=spot, picek=picek, picek_exclude=picek_exclude,
                                          picek_labels_hash=labels["labels_hash"] if labels
-                                         else None, release=dataset.cite(rel) if rel else None)
+                                         else None, release=release_for_script(rel, place_doc)
+                                         if rel else None)
     if rel is not None:
         import shutil as _sh
         shipped = dest / "release" / rel.id
-        shipped.mkdir(parents=True, exist_ok=True)
-        for f in dataset.SHIPPED:
+        for f in dataset.shipped_files(rel):
+            (shipped / f).parent.mkdir(parents=True, exist_ok=True)
             _sh.copyfile(rel.folder / f, shipped / f)
+    if place_doc is not None:
+        (dest / PICEK_PLACE_KEY).write_text(json.dumps(place_doc, sort_keys=True),
+                                            encoding="utf-8")
     (dest / "user-data.sh").write_text(user_data, encoding="utf-8", newline="\n")
     syntax = None
     import shutil
@@ -893,13 +934,22 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
            "picek": list(picek or []), "picek_exclude_benchmarks": picek_exclude if picek
            else None, "picek_labels": labels,
            "dataset_release": dataset.cite(rel) if rel else None,
-           "release_shipped": [f"release/{rel.id}/{f}" for f in dataset.SHIPPED]
-           if rel else None, "estimate_hours": est["total_hours"],
+           "release_shipped": [f"release/{rel.id}/{f}" for f in dataset.shipped_files(rel)]
+           if rel else None,
+           "place_cells": None if place_doc is None else {
+               "file": PICEK_PLACE_KEY, "cells": len(place_doc["cells"]),
+               "sha256": _place_sha(place_doc)},
+           "estimate_hours": est["total_hours"],
            "instance_type": instance_type, "disk_gb": args["BlockDeviceMappings"][0]["Ebs"][
                "VolumeSize"], "ec2_request": str(dest / "ec2-request.json"), "ec2": ec2_result,
            "sent": "nothing: no S3 upload, no instance"}
     log(f"DRY RUN: nothing sent. Folder {dest}; EC2: {ec2_result}")
     return out
+
+
+def _place_sha(doc: dict) -> str:
+    from .replications.fungitastic import retrain
+    return retrain.place_cells_sha256(doc)
 
 
 def pull_trainer(conn, run_id: str, log=print) -> dict:

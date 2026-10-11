@@ -173,6 +173,8 @@ class PicekData:
     missing_photos: int = 0                  # release photos with no copy in the store
     photo_licences: dict = field(default_factory=dict)   # train + val photos by licence class
     record_sources: dict = field(default_factory=dict)    # train + val records by source
+    place_source: str = "the manifest's records"           # where the place counts came from
+    cell_degrees: float = 4.0                                # the place prior's grid
 
 
 def benchmark_record_ids(conn) -> set[str]:
@@ -262,15 +264,21 @@ def check_release_exclusion(rel, mode: str) -> None:
 
 
 def build_data_from_release(conn, rel, store_location: str, size: str,
-                            cell_degrees: float = 4.0) -> PicekData:
+                            cell_degrees: float = 4.0,
+                            place_cells: dict | None = None) -> PicekData:
     """PicekData from a dataset release (dataset_release.Release): its `train` split
     trains (rel.training_records(); a test release raises SealedLeak), its `val` split
     validates (the plateau schedule, the best macro-F1 epoch and the temperature), and
     nothing else is read. Labels are the release's (`species`; a one-word name isn't
     trained). Photos are the release's originals (manifest_photo_id), read from this
     manifest's store copies (rel.check_photos_match: the same bytes); month and place prior
-    counts come from the train split only, places from this manifest (private.sqlite stays
-    on the laptop)."""
+    counts come from the train split only.
+
+    Places are the release's own (private.sqlite's record_places), so they exist only on
+    the laptop. A trainer instance gets no private.sqlite: there the place counts are
+    `place_cells`, computed on the laptop at launch (place_cells_doc) and shipped; without
+    them the data has no place counts (PLACE_NONE), which train() refuses. The manifest's
+    coordinates are never read here."""
     from . import dataset
     train_rows = [dict(r) for r in rel.training_records()]
     val_rows = [dict(r) for r in rel.records("val")]
@@ -284,8 +292,14 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
         (store_location, size))}
     if not copies:
         raise ValueError(f"no {size} photos in {store_location}")
-    place = {str(o): (lat, lon) for o, lat, lon in conn.execute(
-        "select observation_id, latitude, longitude from records")}
+    if rel.has_private:
+        place = {str(k): (None if lat is None else lat / 1e6, None if lon is None else lon / 1e6)
+                 for k, lat, lon in rel.private.execute(
+                     "select record_key, lat_micro, lon_micro from record_places")}
+        place_source = PLACE_RELEASE
+    else:
+        place = {}
+        place_source = PLACE_SHIPPED if place_cells is not None else PLACE_NONE
     one_word = sum(not r.get("species") for r in train_rows + val_rows)
     train_recs = [r for r in train_rows if r.get("species")]
     val_recs = [r for r in val_rows if r.get("species")]
@@ -334,6 +348,8 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
     if wanted and missing > MAX_MISSING_PHOTOS * wanted:
         raise ValueError(f"{missing:,} of release {rel.id}'s {wanted:,} train/val photos have "
                          f"no {size} copy in {store_location}")
+    if place_cells is not None and not rel.has_private:
+        cells = cells_from_doc(place_cells, rel, pos, cell_degrees)
     class_photos = np.bincount([k for _, _, k in train], minlength=len(classes)).astype(np.int64)
     dates = lambda rs: [r["validated_on"] for r in rs if r.get("validated_on")]  # noqa: E731
     newest_seen = max(dates(train_recs + val_recs), default="")
@@ -344,7 +360,60 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
                      sum(r["species"] not in pos for r in val_recs),
                      [(r["record_key"], r["species"]) for r in train_recs + val_recs],
                      release=dataset.cite(rel), missing_photos=missing, photo_licences=licences,
-                     record_sources=dict(sorted(by_source.items(), key=lambda kv: -kv[1])))
+                     record_sources=dict(sorted(by_source.items(), key=lambda kv: -kv[1])),
+                     place_source=place_source, cell_degrees=cell_degrees)
+
+
+# Where a release run's place prior counts come from (PicekData.place_source).
+PLACE_RELEASE = "the release's private.sqlite (record_places), on the laptop"
+PLACE_SHIPPED = "counts computed on the laptop at launch and shipped (picek-place-cells.json)"
+PLACE_NONE = "none: no private.sqlite here and no shipped counts"
+PLACE_CELLS_FILE = "picek-place-cells.json"
+
+
+def place_cells_doc(rel, data: PicekData) -> dict | None:
+    """The place prior's training counts as a document a trainer instance can use without
+    private.sqlite: per coarse grid cell, training photos per species (no coordinates,
+    no record ids). None when the data has no place counts."""
+    if data.place_source == PLACE_NONE:
+        return None
+    return {"dataset_release": rel.id, "cell_degrees": float(data.cell_degrees),
+            "cells": {str(c): {data.classes[k]: int(n) for k, n in sorted(row.items())}
+                      for c, row in sorted(data.cells.items())}}
+
+
+def place_cells_sha256(doc: dict | None) -> str | None:
+    if doc is None:
+        return None
+    import hashlib
+    return hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":"))
+                          .encode()).hexdigest()
+
+
+def read_place_cells(path, expect_sha256: str | None = None) -> dict:
+    """A shipped place_cells_doc, refused when it is not the one the launch made."""
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    if expect_sha256 and place_cells_sha256(doc) != expect_sha256:
+        raise ValueError(f"{path}: the place counts are not the ones the launch made "
+                         f"(sha256 {place_cells_sha256(doc)[:12]}, launch "
+                         f"{expect_sha256[:12]}): not training")
+    return doc
+
+
+def cells_from_doc(doc: dict, rel, pos: dict[str, int], cell_degrees: float
+                   ) -> dict[int, dict[int, int]]:
+    """PicekData.cells from a shipped place_cells_doc, for this release and grid."""
+    if doc.get("dataset_release") != rel.id:
+        raise ValueError(f"the shipped place counts are for {doc.get('dataset_release')!r}, "
+                         f"not {rel.id}")
+    if float(doc.get("cell_degrees") or 0) != float(cell_degrees):
+        raise ValueError(f"the shipped place counts use a {doc.get('cell_degrees')} degree "
+                         f"grid, not {cell_degrees}")
+    unknown = sorted({s for row in doc["cells"].values() for s in row if s not in pos})
+    if unknown:
+        raise ValueError(f"the shipped place counts name {len(unknown)} species this release "
+                         f"doesn't train (e.g. {unknown[:3]})")
+    return {int(c): {pos[s]: int(n) for s, n in row.items()} for c, row in doc["cells"].items()}
 
 
 def release_snapshot(rel, data: PicekData, exclude_mode: str = "match") -> dict:
@@ -365,6 +434,12 @@ def release_snapshot(rel, data: PicekData, exclude_mode: str = "match") -> dict:
         "photos_missing_in_store": data.missing_photos, "species": len(data.classes),
         "one_word_records_left_out": data.one_word_records,
         "photo_licence_policy": PHOTO_LICENCE_POLICY, "photo_licences": data.photo_licences,
+        "public_trainable_only": False,     # internal benchmarking: every included photo
+        "place_prior": {"source": data.place_source,
+                        "cells": len(data.cells),
+                        "photos_with_place": int(sum(sum(r.values())
+                                                     for r in data.cells.values())),
+                        "cells_sha256": place_cells_sha256(place_cells_doc(rel, data))},
         "allowed_sources": list(ok),
         "record_sources": {"recorded": True, "migration": "dataset release",
                            "allowed_sources": list(ok),
@@ -925,11 +1000,18 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
         from . import dataset
         rel = dataset.load(cfg.release, cfg.allow_draft,
                            Path(cfg.release_root) if cfg.release_root else None,
-                           files=dataset.SHIPPED if cfg.shipped_release else None,
+                           without_private=cfg.shipped_release,
                            expect_manifest_sha256=cfg.expect_release_manifest)
         check_release_exclusion(rel, cfg.exclude_benchmarks)
+        place_cells = (read_place_cells(cfg.place_cells_file, cfg.expect_place_cells_sha256)
+                       if cfg.place_cells_file else None)
         data = data or build_data_from_release(conn, rel, store.location, size,
-                                               cfg.cell_degrees)
+                                               cfg.cell_degrees, place_cells)
+        if data.place_source == PLACE_NONE:
+            raise ValueError("no place counts: this copy of the release has no "
+                             "private.sqlite and the launch shipped no "
+                             f"{PLACE_CELLS_FILE}, so classifier+month+place would silently "
+                             "be classifier+month. Not training.")
         snapshot = release_snapshot(rel, data, cfg.exclude_benchmarks)
     else:
         data = data or build_data(conn, store.location, size, test_days, cfg.val_days,
