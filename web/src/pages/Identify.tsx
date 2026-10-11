@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type RefObject,
+         type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
 import { ArrowUpRight, CalendarDays, Camera, ImagePlus, Lightbulb, Loader2, LocateFixed, MapPin,
-         Microscope, X } from "lucide-react";
+         Microscope, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,6 +31,7 @@ import {
   identifyGate, LIKELY_COPY, modelName, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
 } from "@/lib/publicView";
 import { SafetyNote } from "@/components/SafetyNote";
+import { canStartOver, startOver } from "@/lib/startOver";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -69,6 +71,24 @@ export function IdentifyPage() {
   });
   const sentUrls = useObjectUrls(run.variables?.files ?? NO_FILES);
 
+  // Start over: this find's photos, place and date, answer and error go; the model stays.
+  // Clearing the photos and the request releases their object URLs (useObjectUrls).
+  const pickZone = useRef<HTMLDivElement>(null);
+  const clearable = canStartOver({
+    files, where, hasAnswer: !!run.data, hasError: run.isError, identifying: run.isPending,
+  });
+  const restart = () => {
+    const blank = startOver();
+    reading.current = new Set();
+    setFiles(blank.files);
+    setFound(blank.found);
+    setWhere(blank.where);
+    setWaiting(null);
+    run.reset();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    pickZone.current?.focus({ preventScroll: true });
+  };
+
   // On a phone the answer appears below the form: bring it into view.
   const results = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -87,7 +107,8 @@ export function IdentifyPage() {
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 grid gap-8 lg:grid-cols-[360px_1fr]">
         <div className="space-y-6">
           {gate === "sign-in" && <SignInFirst />}
-          <PhotoPicker files={files} setFiles={setFiles} />
+          <PhotoPicker files={files} setFiles={setFiles} zone={pickZone}
+                       onStartOver={restart} canStartOver={clearable} />
           <PhotoChecklist />
           <WhereWhen where={where} setWhere={setWhere} />
           <ModelPicker models={models} onChange={setChosen} />
@@ -126,7 +147,12 @@ export function IdentifyPage() {
 
         <div className="min-w-0 scroll-mt-20" ref={results}>
           {!run.data && !run.isPending && <EmptyState />}
-          {run.data && <ContextLine used={run.data.context_used} sent={run.variables?.where} />}
+          {run.data && (
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+              <ContextLine used={run.data.context_used} sent={run.variables?.where} />
+              <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-top" />
+            </div>
+          )}
           {run.data && <SafetyNote className="mb-4" />}
           {run.data && (
             <div
@@ -139,6 +165,13 @@ export function IdentifyPage() {
             </div>
           )}
           {run.data && <WhatNext />}
+          {run.data && (
+            <div className="mt-6 flex justify-center">
+              <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-bottom">
+                Start over with another find
+              </StartOverButton>
+            </div>
+          )}
         </div>
       </div>
     </>
@@ -154,7 +187,28 @@ function useObjectUrls(files: File[]): string[] {
   return urls;
 }
 
-function PhotoPicker({ files, setFiles }: { files: File[]; setFiles: (f: File[]) => void }) {
+/** Clears the photos, place and date, and the answer, for the next find. */
+function StartOverButton({ onClick, disabled, testId, children = "Start over" }: {
+  onClick: () => void;
+  disabled?: boolean;
+  testId: string;
+  children?: ReactNode;
+}) {
+  return (
+    <Button type="button" variant="outline" size="sm" onClick={onClick} disabled={disabled}
+            data-testid={testId}>
+      <RotateCcw /> {children}
+    </Button>
+  );
+}
+
+function PhotoPicker({ files, setFiles, zone, onStartOver, canStartOver }: {
+  files: File[];
+  setFiles: (f: File[]) => void;
+  zone: RefObject<HTMLDivElement | null>;
+  onStartOver: () => void;
+  canStartOver: boolean;
+}) {
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   const urls = useObjectUrls(files);
@@ -166,10 +220,20 @@ function PhotoPicker({ files, setFiles }: { files: File[]; setFiles: (f: File[])
   return (
     <div>
       <div
-        className={`rounded-lg border-2 border-dashed p-6 text-center cursor-pointer transition-colors ${
+        ref={zone}
+        role="button"
+        tabIndex={0}
+        aria-label="Add photos"
+        className={`rounded-lg border-2 border-dashed p-6 text-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-myco-green ${
           over ? "border-myco-green bg-myco-green/5" : "border-[#A87146]/30 hover:border-myco-green"
         }`}
         onClick={() => input.current?.click()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            input.current?.click();
+          }
+        }}
         onDragOver={(e) => {
           e.preventDefault();
           setOver(true);
@@ -217,19 +281,28 @@ function PhotoPicker({ files, setFiles }: { files: File[]; setFiles: (f: File[])
           ))}
         </div>
       )}
+      {files.length > 0 && (
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <span className="text-xs text-muted-foreground">
+            {files.length} of {MAX_PHOTOS} photos
+          </span>
+          <StartOverButton onClick={onStartOver} disabled={!canStartOver} testId="button-start-over-picker" />
+        </div>
+      )}
     </div>
   );
 }
 
-function WhereWhen({ where, setWhere }: { where: Where; setWhere: (w: Where) => void }) {
+function WhereWhen({ where, setWhere }: { where: Where; setWhere: Dispatch<SetStateAction<Where>> }) {
   const [locating, setLocating] = useState(false);
   const locate = () => {
     if (!navigator.geolocation) return;
     setLocating(true);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setWhere({ ...where, lat: pos.coords.latitude.toFixed(4), lng: pos.coords.longitude.toFixed(4),
-                   placeFromPhoto: undefined });
+        // Applied to the form as it is when the position arrives, not as it was when asked.
+        setWhere((w) => ({ ...w, lat: pos.coords.latitude.toFixed(4), lng: pos.coords.longitude.toFixed(4),
+                           placeFromPhoto: undefined }));
         setLocating(false);
       },
       () => setLocating(false),
@@ -279,7 +352,7 @@ function WhereWhen({ where, setWhere }: { where: Where; setWhere: (w: Where) => 
 function ContextLine({ used, sent }: { used: ContextUsed; sent?: Where }) {
   if (!used.place_from && !used.date_from) {
     return (
-      <p className="mb-4 text-sm text-muted-foreground">
+      <p className="min-w-0 flex-1 text-sm text-muted-foreground">
         No place or date given or found in the photos, so models with a range-and-season
         score used the photos alone.
       </p>
@@ -289,7 +362,7 @@ function ContextLine({ used, sent }: { used: ContextUsed; sent?: Where }) {
   const from = (f: string | null, photo?: number) =>
     f === "photo" ? "from your photo" : photo ? `from photo ${photo}` : "as entered";
   return (
-    <p className="mb-4 text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+    <p className="min-w-0 flex-1 text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
       {used.place_from && (
         <span className="inline-flex items-center gap-1">
           <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from, sent?.placeFromPhoto)})
