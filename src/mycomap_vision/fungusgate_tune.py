@@ -193,13 +193,18 @@ def dev_records(conn, benchmark: str, keys: list[str]) -> list[str]:
 
 def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Path,
          out_dir: Path, benchmark: str = "heldout-2026-10-08", negatives_npz: Path | None = None,
-         embeddings_root: Path | None = None, gate_dir: Path | None = None, log=print) -> dict:
+         embeddings_root: Path | None = None, gate_dir: Path | None = None,
+         served: str | None = None, log=print) -> dict:
+    """See the module docstring. With `served` (a backbone name), the lighter gate: the
+    probe alone, fitted and scored on that backbone's own (served) vectors, so serving
+    needs no second set of weights and no extra pass; the gate's base is that backbone."""
     out_dir.mkdir(parents=True, exist_ok=True)
     exclude = {r["observation_id"] for r in csv.DictReader(open(exclude_tsv, encoding="utf-8"),
                                                           delimiter="\t")}
-    extra = unit(np.load(negatives_npz)["frozen"]) if negatives_npz else None
+    field, base = ("ft", served) if served else ("frozen", "bioclip-2")
+    extra = unit(np.load(negatives_npz)[field]) if negatives_npz else None
     X, y, prov = probe_training_set(conn, exclude, embeddings_root or config.DATA_DIR /
-                                    "embeddings" / "bioclip-2", extra)
+                                    "embeddings" / base, extra, base=base)
     log(f"probe: {int(y.sum()):,} fungus, {int((1 - y).sum()):,} not-fungus photos")
     w, b = fungusgate.fit_logistic(X, y)
     del X
@@ -213,7 +218,7 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
     cat = np.array([meta[str(k)]["category"] for k in ood["keys"]])
     everyday = np.isin(cat, EVERYDAY)
     report = {"benchmark": benchmark, "split": "dev", "reproducibility": "exploratory-pre-freeze",
-              "code_version": config.code_version(), "probe": prov,
+              "code_version": config.code_version(), "probe": prov, "vectors": base,
               "dev": {"photos": len(keys), "records": len(set(recs))},
               "not_a_fungus": {"photos": int(len(cat)), "everyday": int(everyday.sum()),
                                "manifest_sha256": sha256_file(ood_manifest)},
@@ -223,10 +228,10 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
     for i, r in enumerate(recs):
         by_rec[r].append(i)
     chosen = None
-    for mode in fungusgate.MODES:
+    for mode in (("probe",) if served else fungusgate.MODES):
         g = fungusgate.FungusGate(text.classes, text.sides, text.vectors, text.scale,
                                   fungusgate.Thresholds(0, 0), probe_w=w, probe_b=b, mode=mode)
-        pd, po = g.p_fungus(dev["frozen"]), g.p_fungus(ood["frozen"])
+        pd, po = g.p_fungus(dev[field]), g.p_fungus(ood[field])
         c = choose_thresholds([pd[ix] for ix in by_rec.values()])
         entry = {"auroc_everyday": fungusgate.auroc(pd, po[everyday]),
                  "auroc_all": fungusgate.auroc(pd, po), "choice": c.__dict__,
@@ -250,7 +255,7 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
         raise ValueError("no mode keeps every DEV record's answer at any grid value")
     mode, entry, c = chosen
     gate = fungusgate.FungusGate(text.classes, text.sides, text.vectors, text.scale,
-                                 fungusgate.Thresholds(c.not_fungus, c.unsure), "bioclip-2",
+                                 fungusgate.Thresholds(c.not_fungus, c.unsure), base,
                                  {"tuned_on": f"{benchmark} dev + not-a-fungus set",
                                   "reproducibility": "exploratory-pre-freeze",
                                   "code_version": report["code_version"],

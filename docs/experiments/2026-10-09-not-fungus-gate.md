@@ -95,6 +95,7 @@ Every signal, photo level, DEV photos vs the not-a-fungus set:
 | zero-shot on fine-tuned vectors | broken (fungi median p 0.12) | - | - |
 | zero-shot on frozen vectors | 0.993 | 0.967 | 2.0% |
 | linear probe on frozen vectors | **0.998** | **0.993** | 0.5% |
+| linear probe on the served fine-tuned vectors (no second model) | 0.983 | 0.936 | - |
 | zero-shot + probe (log-odds added) | 0.997 | 0.985 | 0.5% |
 
 The served answer is MORE confident on non-fungi: 36% of them get a species chance of 0.5 or more,
@@ -109,6 +110,12 @@ Each mode under the rule (DEV 2,989 records; 1,582 everyday non-fungi):
 | zero-shot | no grid value keeps every DEV record | - | - | - | - | - |
 | probe | 0.35 | 0.45 | 0 | 5 (0.17%) | 27 | 87.0% / 8.0% / 5.1% |
 | **zero-shot + probe** | **0.05** | **0.70** | **0** | **11 (0.37%)** | **36 (1.2%)** | **82.1% / 16.7% / 1.2%** |
+| probe on served vectors (lighter) | 0.40 | 0.55 | 0 | 12 (0.40%) | 26 | 78.1% / 14.0% / 7.8% |
+
+The lighter gate (`mv fungus-gate tune --on-served`) reuses the served model's own vectors, so it
+costs no memory and no time at serve time. It blocks ducks and birds as well (100%), but lets more
+everyday non-fungi through (7.8% against 1.2%) and few hard negatives are caught: 78% of Monotropa
+and 97% of slime moulds pass, lichens 59%.
 
 Also tried along the way: lichens counted as fungus, as other, or left out of the prompts (kept as
 fungus: iNat files them under Fungi, and MycoMap holds DNA-verified lichens); a probe without the Open
@@ -149,7 +156,10 @@ sure" below 0.70 (provisional).
   references: 0 refs 1.42%, 1-4 0.25%, 5-19 0.03%, 20-99 0.02%, 100+ 0.05% get no answer (and
   2.43%, 1.33%, 0.51%, 0.37%, 0.23% names without a chance).
 - **Serving cost**, measured on the Vision box (2 vCPU, read-only test process, 2026-10-11): 0 MiB
-  of private memory added. The base tail's 195 MiB of weights are read memory-mapped from the base
+  of private memory added (Linux smaps; on Windows the copy-on-write view of the 1.6 GB checkpoint
+  shows as +1.67 GB commit, not memory in use; working set +196 MiB, peak unchanged). The served-vector
+  probe adds about 1 MiB. Neither costs anything while the gate is off: the base weights are read on
+  first use only. The base tail's 195 MiB of weights are read memory-mapped from the base
   checkpoint and stay as clean, reclaimable file pages (~199 MiB after use). Time per photo +29% for
   one photo (1.9 s to 2.4 s) and +15% per photo for three, at 2 threads; laptop CPU +7%.
 
@@ -166,6 +176,9 @@ are pending his review of the branch. Reproducibility: exploratory-pre-freeze, t
 dataset release v1.
 
 ## Next
+- Deployment waits for memory room on the 4 GB box (Steve, 2026-10-11: box stays 4 GB for now; it
+  peaks at 3.3 GB plus 1.9 GB swap during the nightly index swap). The served-vector probe fits
+  today at a weaker cut; the frozen gate needs ~200 MB of reclaimable file pages per active process.
 - Confirm on dataset release v1, after the mislinked references leave. Refit the probe there; its
   negatives come from the excluded records' list, which travels with the release.
 - Insect and plant pathogens: show "not sure" rather than "not a fungus" (a fungus-on-host prompt

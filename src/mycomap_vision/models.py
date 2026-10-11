@@ -323,9 +323,11 @@ class FinetunedBackbone:
         if unknown:
             raise ValueError(f"{model_name}: weights for parameters {base.name} doesn't have: "
                              f"{unknown[:3]}")
-        # A copy of the base model's own last blocks, pooling norm and projection, kept so
+        # The base model's own values of the last blocks, pooling norm and projection, so
         # the base vector (fungusgate.py) comes from the same pass: the shared blocks run
-        # once, then the last blocks run twice, trained and as they were.
+        # once, then the last blocks run twice, trained and as they were. Read from the
+        # base checkpoint on first use only, so a server without the gate pays nothing;
+        # with no checkpoint file they must be cloned now, before the trained ones go in.
         start = fork_point(base, meta)
         try:
             spec = resolve_spec(meta["base_spec"])
@@ -333,8 +335,17 @@ class FinetunedBackbone:
             spec = ""
         weights_file = (open_clip_weights_file(spec.partition(":")[2].partition("@")[0])
                         if spec.startswith("open_clip:") else None)
-        self._base_tail = (BaseTail(base.model, start, trained, weights_file)
-                           if start is not None else None)
+        self._base_tail = self._make_tail = None
+        if start is not None:
+            outside = sorted(set(trained) - set(tail_names(base.model, start)))
+            if outside:
+                raise ValueError(f"{model_name}: trained parameters before the fork point: "
+                                 f"{outside[:3]}")
+        if start is not None and weights_file:
+            names = dict.fromkeys(trained)
+            self._make_tail = lambda: BaseTail(base.model, start, names, weights_file)
+        elif start is not None:
+            self._base_tail = BaseTail(base.model, start, trained)
         with torch.no_grad():
             for n, value in trained.items():
                 own[n].copy_(value.to(own[n].device, own[n].dtype))
@@ -351,6 +362,8 @@ class FinetunedBackbone:
     def encode_with_base(self, items):
         """(fine-tuned vectors, the base model's vectors) for the same photos in one pass,
         or None when the base isn't an open_clip ViT this can fork."""
+        if self._base_tail is None and self._make_tail is not None:
+            self._base_tail, self._make_tail = self._make_tail(), None
         if self._base_tail is None:
             return None
         torch = self.base.torch

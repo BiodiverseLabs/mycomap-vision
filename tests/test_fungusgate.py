@@ -3,6 +3,7 @@ answer and no stated chance, and doesn't sink the photos of a find that are."""
 
 import io
 import json
+import types
 
 import numpy as np
 import pytest
@@ -362,3 +363,56 @@ def test_the_base_weights_can_come_memory_mapped_from_the_checkpoint_file(tmp_pa
         assert torch.allclose(tail.module(h), tower(x), atol=1e-5)        # the trained one
     with pytest.raises(ValueError, match="before the fork point"):
         models.BaseTail(tower, 2, {"transformer.resblocks.0.ln_1.weight": torch.zeros(16)})
+
+
+def test_a_server_without_the_gate_never_reads_the_base_tail(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    tr = pytest.importorskip("open_clip.transformer")
+    from safetensors.torch import save_file
+
+    from mycomap_vision import models
+
+    def tiny():
+        torch.manual_seed(0)
+        t = types.SimpleNamespace(torch=torch, device="cpu", name="tiny", dim=8)
+        t.model = tr.VisionTransformer(image_size=16, patch_size=8, width=16, layers=3, heads=2,
+                                       mlp_ratio=2.0, output_dim=8).eval()
+        t.transform = lambda im: torch.from_numpy(
+            np.asarray(im.resize((16, 16)), dtype=np.float32).transpose(2, 0, 1) / 255)
+        t.prepare = t.transform
+        t.image_module = lambda: t.model
+        t.encode = lambda items: t.model(torch.stack(list(items))).detach().numpy()
+        return t
+    base = tiny()
+    ckpt = tmp_path / "open_clip_model.safetensors"
+    save_file({f"visual.{n}": p.detach().contiguous() for n, p in base.model.named_parameters()},
+              str(ckpt))
+    root = tmp_path / "models"
+    root.mkdir()
+    torch.save({n: p.detach() + 0.3 for n, p in base.model.named_parameters()
+                if n.startswith("transformer.resblocks.2.")}, root / "t-ft.pt")
+    (root / "t-ft.json").write_text(json.dumps({"base": "bioclip-2", "base_spec": "open_clip:hf-hub:x",
+                                                "weights": "t-ft.pt", "blocks_trained": 1}))
+    monkeypatch.setattr(models, "load_backbone", lambda spec: tiny())
+    monkeypatch.setattr(models, "open_clip_weights_file", lambda name: ckpt)
+    ft = models.FinetunedBackbone("t-ft", "t-ft", root=root)
+    assert ft._base_tail is None                     # nothing read while the gate is unused
+    img = [ft.prepare(Image.new("RGB", (16, 16), (200, 30, 10)))]
+    _, frozen = ft.encode_with_base(img)
+    assert ft._base_tail is not None and ft._base_tail.file_backed
+    assert np.allclose(frozen, base.encode(img), atol=1e-5)
+
+
+def test_a_gate_on_the_served_vectors_needs_no_second_model(conn, tmp_path):
+    # A probe on m1's own vectors: m1 maps a photo's red to an angle, and the probe calls
+    # a high angle (red, cos < 0) a fungus. Const has no fork (no encode_with_base).
+    served = FungusGate(**{**TEST_GATE, "thresholds": Thresholds(0.2, 0.5)}, base="m1",
+                        probe_w=np.array([-8.0, 0.0]), mode="probe")
+    root = seeded(conn, tmp_path)
+    client = TestClient(create_app(tmp_path / "manifest.sqlite", root,
+                                   backbone_loader=lambda name: Const(name), limits=open_limits(),
+                                   background=False, fungus_gate=served))
+    assert not hasattr(Const("m1"), "encode_with_base")
+    r = identify(client, [photo(247), photo(12)])
+    assert [p["verdict"] for p in r["gate"]["photos"]] == [FUNGUS, NOT_FUNGUS]
+    assert r["gate"]["left_out"] == [1]

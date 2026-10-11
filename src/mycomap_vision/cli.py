@@ -498,7 +498,8 @@ def cmd_fungus_gate(conn, args) -> None:
                            Path(args.exclude), Path(args.out), args.benchmark,
                            Path(args.negatives) if args.negatives else None,
                            Path(args.embeddings_root) if args.embeddings_root else None,
-                           Path(args.text_from) if args.text_from else None)
+                           Path(args.text_from) if args.text_from else None,
+                           args.on_served)
         print(json.dumps(report["chosen"], indent=2))
         print(f"gate and report.json in {args.out}; copy the gate into data/models to serve it")
         return
@@ -1034,6 +1035,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--negatives", help="tune: extra negative vectors (.npz from embed)")
     p.add_argument("--benchmark", default="heldout-2026-10-08")
     p.add_argument("--embeddings-root", help="tune: the frozen bioclip-2 reference embeddings")
+    p.add_argument("--on-served", default=None, metavar="BACKBONE",
+                   help="tune: the lighter gate, a probe on this served backbone's own vectors "
+                        "(no second set of weights at serve time)")
     p.add_argument("--text-from", help="tune: a folder with a saved gate whose text vectors to "
                                        "reuse (skips loading BioCLIP 2's text tower)")
     p.add_argument("--not-fungus", type=float, default=0.0,
