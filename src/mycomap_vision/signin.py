@@ -226,6 +226,9 @@ class SigninConfig:
         """Whether this request may only be answered for a signed-in person."""
         if self.mode == "off" or path in ("/api/health", "/api/me") or path.startswith("/auth/"):
             return False
+        # The public API answers its own credentials, never the site's cookie (apiv1.py).
+        if path.startswith("/api/v1/") or path == "/api/v1":
+            return False
         if self.mode == "identify":
             return (method == "POST" and path == "/api/identify") or members_only(path)
         return True
