@@ -50,10 +50,12 @@ def test_refetch_replaces_the_photo_list_when_owner_removed_a_photo(conn):
 
 def test_pending_ids_skip_fetched_non_inat_and_other_continents(conn):
     rows = [
-        {"observation_id": oid, "scientific_name": "X", "continent": cont,
+        {"source": src, "observation_id": oid, "scientific_name": "X", "continent": cont,
          "validation_status_1": "yes"}
-        for oid, cont in [("1", "North America"), ("2", "North America"),
-                          ("3", "Europe"), ("MO-9", "North America")]
+        for oid, cont, src in [("1", "North America", "iNaturalist"),
+                               ("2", "North America", "iNaturalist"),
+                               ("3", "Europe", "iNaturalist"),
+                               ("9", "North America", "MO Observations")]
     ]
     save_records(conn, build_records(rows, "t"))
     save_batch(conn, ["1"], [inat_obs(1)], "t")

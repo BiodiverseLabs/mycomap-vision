@@ -40,7 +40,7 @@ PHOTOS = {1000 + i: i for i in range(len(RECORDS))}
 def seed(conn, tmp_path, records=RECORDS):
     rows, obs = [], []
     for i, (name, genus, family, _red, when) in enumerate(records):
-        rows.append({"observation_id": str(100 + i), "scientific_name": name, "genus": genus,
+        rows.append({"source": "iNaturalist", "observation_id": str(100 + i), "scientific_name": name, "genus": genus,
                      "family": family, "continent": "North America",
                      "validation_status_1": "yes", "validation_date_1": when})
         obs.append(inat_obs(100 + i, photos=[(0, 1000 + i, "cc0", OPEN)]))

@@ -86,6 +86,10 @@ class Gate:
             self.active -= 1
 
 
+# A default method that can't answer here falls back to this one before nearest.
+DEFAULT_FALLBACK = {"nearest+mean+place": "nearest+mean"}
+
+
 @dataclass
 class Limits:
     rate: tuple[int, float]
@@ -125,6 +129,12 @@ class Limits:
         return self.allowed_methods is None or method in self.allowed_methods
 
     def served_default(self, ready: "Callable[[str], bool]" = lambda m: True) -> str:
-        """The default method, if this server offers it and can answer it; else nearest."""
+        """The default method, if this server offers it and can answer it; else its
+        fallback (DEFAULT_FALLBACK: nearest+mean+place without its occurrence store falls
+        back to nearest+mean, its own answer without place and date); else nearest."""
         m = self.default_method
-        return m if self.method_allowed(m) and ready(m) else "nearest"
+        while m:
+            if self.method_allowed(m) and ready(m):
+                return m
+            m = DEFAULT_FALLBACK.get(m)
+        return "nearest"

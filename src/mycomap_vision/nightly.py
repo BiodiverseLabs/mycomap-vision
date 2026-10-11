@@ -455,6 +455,13 @@ def fetch_pages(base_url: str, key: str, path: str, what: str,
         raise _fail(f"more than {MAX_PAGES} pages")
     if not rows and not allow_empty:
         raise _fail(f"mycomap.org listed no {what} records")
+    lacking = sum(1 for r in rows if "source" not in r)
+    if lacking:
+        # Vision never guesses a record's source from its id (sources.py): without
+        # .org's observations.source every record would be 'unknown' (no photos).
+        raise _fail(f"mycomap.org's {what} feed lacks source: {lacking:,} of {len(rows):,} "
+                    "rows have no `source` field (observations.source). Deploy the .org "
+                    "change that sends it; Vision never takes a source from an id")
     if abs(len(rows) - total) > max(50, total // 100):
         raise _fail(f"mycomap.org announced {total:,} {what} rows but sent {len(rows):,}")
     log(f"[nightly] {len(rows):,} {what} rows from mycomap.org in {page + 1} pages")
@@ -466,16 +473,37 @@ def fetch_pages(base_url: str, key: str, path: str, what: str,
 
 def changes(conn: sqlite3.Connection, recs: list[dict]) -> dict:
     """What saving `recs` would do: new, removed and renamed records (with examples).
-    Benchmark records (holdouts.py) are never saved, so they never count as new."""
+    Benchmark records (holdouts.py) are never saved, so they never count as new.
+
+    On a manifest whose sources older code guessed (sources.migrated false), a record
+    of another source stored under its bare id comes back under its own key ('123' ->
+    'mo:123'): that is a re-key, not a removal and a new record, so it is counted as
+    `rekeyed` and kept out of `removed` (and of the removal guard). `source_migration`
+    then says what the migration will take off those records (sources.plan_legacy)."""
+    from . import sources
     recs, held_out = holdouts.drop_held_out(conn, recs)
     before = dict(conn.execute("select observation_id, scientific_name from records"))
     now = {r["observation_id"]: r["scientific_name"] for r in recs}
-    new = sorted(set(now) - set(before))
-    removed = sorted(set(before) - set(now))
+    rekeyed: dict[str, str] = {}
+    migrated = sources.migrated(conn)
+    if not migrated:
+        moved = {str(r.get("source_id")): r["observation_id"] for r in recs
+                 if r.get("source") != sources.INAT and r.get("source_id") not in (None, "")}
+        rekeyed = {old: moved[old] for old in before if old not in now and old in moved}
+    new = sorted(set(now) - set(before) - set(rekeyed.values()))
+    removed = sorted(set(before) - set(now) - set(rekeyed))
     renamed = sorted(o for o in set(now) & set(before) if now[o] != before[o])
     out = {"before": len(before), "after": len(now), "new": len(new), "removed": len(removed),
            "renamed": len(renamed), "examples": {"new": new[:10], "removed": removed[:10],
                                                   "renamed": renamed[:10]}}
+    if rekeyed:
+        out["rekeyed"] = len(rekeyed)
+        out["examples"]["rekeyed"] = [f"{o} -> {n}" for o, n in sorted(rekeyed.items())[:10]]
+    if not migrated:
+        plan = sources.plan_legacy(conn, recs)
+        out["source_migration"] = {"wrong_sourced_records": len(plan["wrong_records"]),
+                                   "by_source": plan["by_source"],
+                                   "photo_links_to_unlink": plan["wrong_photos"]}
     if held_out:
         out["held_out"] = held_out
     return out

@@ -66,7 +66,6 @@ from .heldout import (NO_ANSWER, RANKS, SOURCE_OTHER_GENUS, SOURCES, TRUTH_ONE_W
                       TRUTH_STATUSES, Labeller, Truth)
 
 INAT = "external:inat-cv"
-EXTERNAL = "external:"          # an outside model (iNat, published.py): no Vision reference
 DEPTH_BUCKETS = [(0, 0, "0"), (1, 4, "1-4"), (5, 19, "5-19"), (20, 99, "20-99"),
                  (100, 10**9, "100+")]
 PHOTO_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 3, "3"), (4, 5, "4-5"), (6, 10**9, "6+")]
@@ -433,25 +432,28 @@ def identical_to_reference(conn: sqlite3.Connection, name: str) -> set[str]:
 def reference_run(conn: sqlite3.Connection, name: str, backbone: str | None,
                   chosen: dict[tuple, str]) -> dict | None:
     """The reference summary (heldout.reference_summary) the breakdowns use: of the chosen
-    reference of `backbone`, or of the newest chosen run of any backbone."""
-    # An external model (published.py) answers from no reference of Vision's: its run row
-    # holds a checkpoint, never the reference counts the breakdowns need.
-    hashes = [h for (b, *_k), h in chosen.items()
-              if (backbone is None or b == backbone) and not b.startswith(EXTERNAL)]
+    reference of `backbone`, or of the newest chosen run of any Vision backbone.
+
+    Only a run that answered from a Vision reference index has one (rank_counts: the
+    reference records per name, which the depth bands come from). An outside model's run
+    (external:*, e.g. the published Danish Fungi models) records only its checkpoint, so
+    it is never taken as the reference, even when it is the newest."""
+    hashes = [h for (b, *_k), h in chosen.items() if backbone is None or b == backbone]
     if not hashes:
         return None
-    row = conn.execute(
+    rows = conn.execute(
         "select backbone, reference_hash, reference_json from heldout_runs where benchmark = ? "
         f"and reference_hash in ({','.join('?' * len(hashes))}) "
-        "and (? is null or backbone = ?) and backbone not like 'external:%' "
-        "order by created_at desc limit 1",
-        (name, *hashes, backbone, backbone)).fetchone()
-    if not row:
-        return None
-    ref = json.loads(row[2])
-    ref["backbone"], ref["hash"] = row[0], row[1]
-    ref["observer_day_set"] = set(ref.pop("observer_days", []))
-    return ref
+        "and (? is null or backbone = ?) order by created_at desc",
+        (name, *hashes, backbone, backbone)).fetchall()
+    for b, h, raw in rows:
+        ref = json.loads(raw or "{}")
+        if b.startswith("external:") or "rank_counts" not in ref:
+            continue
+        ref["backbone"], ref["hash"] = b, h
+        ref["observer_day_set"] = set(ref.pop("observer_days", []))
+        return ref
+    return None
 
 
 def score(models: dict, truths: dict[str, Truth], labeller: Labeller) -> dict:
@@ -610,7 +612,8 @@ def report(conn: sqlite3.Connection, name: str, split: str | None = "dev",
         "benchmark": name, "split": split, **state, "records": len(records),
         "with_an_answer": len(truths_all), "guests_left_out": len(guests_left_out),
         "scored_records": len(truths), "code_version": config.code_version(),
-        "reference": ({k: ref[k] for k in ("backbone", "hash", "records", "photos", "species")}
+        # An older run may lack a key: report it as unknown rather than fail.
+        "reference": ({k: ref.get(k) for k in ("backbone", "hash", "records", "photos", "species")}
                       if ref else None),
         "references": {model_name(k): h for k, h in sorted(chosen.items())},
         "other_reference_answers_left_out": stale,

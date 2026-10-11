@@ -37,7 +37,7 @@ def no_retry_pauses(monkeypatch):
 
 
 def row(oid, name, when="10/1/2026"):
-    return {"observation_id": str(oid), "scientific_name": name, "genus": name.split()[0],
+    return {"source": "iNaturalist", "observation_id": str(oid), "scientific_name": name, "genus": name.split()[0],
             "family": "F", "continent": "North America", "validation_status_1": "yes",
             "validation_date_1": when}
 

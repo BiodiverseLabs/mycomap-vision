@@ -78,7 +78,7 @@ def test_an_exhausted_byte_budget_waits_instead_of_downloading(tmp_path):
 
 
 def _seed(conn):
-    rows = [{"observation_id": oid, "scientific_name": "X", "continent": cont,
+    rows = [{"source": "iNaturalist", "observation_id": oid, "scientific_name": "X", "continent": cont,
              "validation_status_1": "yes"} for oid, cont in [("5", "North America"),
                                                              ("6", "Europe")]]
     save_records(conn, build_records(rows, "t"))
@@ -174,7 +174,7 @@ def test_a_host_waiting_for_its_daily_budget_does_not_hold_up_the_others(conn, t
     # 30 all-rights-reserved photos come first in the queue, then 10 open ones. The
     # static host's day budget is used up (as on 2026-09-29, when the AWS downloader
     # sat for 9 hours with 206k open photos still to fetch).
-    rows = [{"observation_id": "5", "scientific_name": "X", "continent": "North America",
+    rows = [{"source": "iNaturalist", "observation_id": "5", "scientific_name": "X", "continent": "North America",
              "validation_status_1": "yes"}]
     save_records(conn, build_records(rows, "t"))
     save_batch(conn, ["5"], [inat_obs(5, photos=(

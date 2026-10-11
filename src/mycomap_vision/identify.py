@@ -29,11 +29,12 @@ from .embed import normalise
 from .serving import map_embeddings
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, make_method,
                        rank_scores, with_rows)
-from .licenses import sized_url
+from .licenses import photo_url
+from .placeprior import PlaceCue
+from .sources import INAT, record_url
 
 CONFIDENCE_TEMPERATURE = 0.02
 ORG_SPECIES_URL = "https://mycomap.org/species/"
-INAT_OBS_URL = "https://www.inaturalist.org/observations/"
 
 
 def softmax_confidence(scores: np.ndarray, temperature: float = CONFIDENCE_TEMPERATURE) -> np.ndarray:
@@ -135,6 +136,7 @@ class PhotoInfo:
     license_class: str
     owner_login: str | None
     owner_user_id: int | None = None
+    source: str = INAT                  # photos.source: picks the URL rule (licenses.photo_url)
 
 
 def only_open_licences(info: PhotoInfo) -> bool:
@@ -143,10 +145,12 @@ def only_open_licences(info: PhotoInfo) -> bool:
 
 
 def photo_info_rows(rows) -> dict[int, PhotoInfo]:
-    return {int(pid): PhotoInfo(url, lic, owner, uid) for pid, url, lic, owner, uid in rows}
+    return {int(pid): PhotoInfo(url, lic, owner, uid, src)
+            for pid, url, lic, owner, uid, src in rows}
 
 
-PHOTO_INFO_SQL = "select photo_id, source_url, license_class, owner_login, owner_user_id from photos"
+PHOTO_INFO_SQL = ("select photo_id, source_url, license_class, owner_login, owner_user_id, "
+                  "source from photos")
 
 
 class Specimen(NamedTuple):
@@ -155,6 +159,8 @@ class Specimen(NamedTuple):
     species: str
     genus: str
     family: str
+    source: str = INAT                   # records.source
+    source_id: str = ""                  # the id at the source
 
 
 class Specimens:
@@ -172,6 +178,9 @@ class Specimens:
         pos = {n: i for i, n in enumerate(names)}
         self.names = np.array(names or [""])
         self.obs = np.array([r.observation_id for r in records] or [""])
+        self.source = np.array([getattr(r, "source", INAT) for r in records] or [INAT])
+        self.source_id = np.array([getattr(r, "source_id", "") or r.observation_id
+                                   for r in records] or [""])
         self.taxa = np.array([(pos[r.species], pos[r.genus], pos[r.family]) for r in records],
                              dtype=np.int32).reshape(-1, 3)
 
@@ -181,7 +190,8 @@ class Specimens:
     def __getitem__(self, col: int) -> Specimen:
         r = int(self.rec[col])
         sp, ge, fa = (str(self.names[i]) for i in self.taxa[r])
-        return Specimen(str(self.obs[r]), sp, ge, fa)
+        return Specimen(str(self.obs[r]), sp, ge, fa, str(self.source[r]),
+                        str(self.source_id[r]))
 
     def starts(self) -> np.ndarray:
         """Where each record's run of columns starts (a record's photos are contiguous)."""
@@ -229,6 +239,10 @@ class Identifier:
         self.photos = (self._photo_info(conn, set(int(p) for p in self.col_photo.tolist()))
                        if photo_info else {})
         self.records = len(records)
+        # How far each taxon's nearest DNA record is, and its known season (placeprior.py):
+        # a cue beside every species and genus candidate when a place or date is given.
+        self.cue = PlaceCue()
+        self.cue.fit(records, self.index)
         self.rank_counts = {rank: Counter() for rank in RANKS}
         for r in records:
             for rank in RANKS:
@@ -239,6 +253,7 @@ class Identifier:
         # back to the OS. Park them in arrays, let the records go, and make them again.
         del records, by_id, row_of
         self._remake_names()
+        self.cue.attach(self.index)
 
     def _remake_names(self) -> None:
         index = self.index
@@ -291,6 +306,16 @@ class Identifier:
             # both come from the one similarity matrix.
             per_photo = np.maximum.reduceat(sims, self.index.starts, axis=1)
             scores = per_photo.mean(axis=0)
+        elif hasattr(self.model, "place_shift"):
+            # nearest + species average with place and date: the same shared path, plus
+            # the prior's shift on every photo when a place or date is given. Without
+            # them, exactly nearest + species average.
+            per_photo = self.model.per_photo_scores(sims, query)
+            photo_only = per_photo.mean(axis=0)
+            shift = self.model.place_shift(context)
+            if shift is not None:
+                per_photo = per_photo + shift
+            scores = per_photo.mean(axis=0)
         elif hasattr(self.model, "per_photo_scores") and not self.uses_context:
             # nearest + species average (the default): its specimen half comes from the
             # same similarities, so nothing is computed twice; the record's score is the
@@ -302,7 +327,18 @@ class Identifier:
             per_photo = (np.stack([self._species_scores(query[i:i + 1], context)
                                    for i in range(n_q)]) if n_q > 1 else scores[None, :])
         ranks = self._ranks(scores, top_k)
+        applied = shift is not None if hasattr(self.model, "place_shift") else False
+        # Where the place and date changed the top answer, what the photos alone said.
+        photo_only_top = {}
+        if applied:
+            alone = self._ranks(photo_only, 1)
+            photo_only_top = {rank: alone[rank][0]["name"] for rank in RANKS
+                              if alone[rank] and ranks[rank]
+                              and alone[rank][0]["name"] != ranks[rank][0]["name"]}
+        cue_tables = self._cue_tables(context)
+        self._add_place_cue(ranks, cue_tables)
         likely_sets = self._likely(scores)
+        self._add_place_cue({rank: s["names"] for rank, s in likely_sets.items()}, cue_tables)
         # Records are ranked by the same rule as species: for each of your photos,
         # its best match among the record's photos, averaged over your photos.
         per_record = np.maximum.reduceat(sims, self.rec_starts, axis=1)   # (q, records)
@@ -315,6 +351,7 @@ class Identifier:
         photos = []
         for i in range(n_q):
             own = self._ranks(per_photo[i], top_k, with_position_of=top)
+            self._add_place_cue({rank: own[rank]["candidates"] for rank in RANKS}, cue_tables)
             photos.append({
                 "photo": i,
                 "ranks": {rank: own[rank]["candidates"] for rank in RANKS},
@@ -335,7 +372,23 @@ class Identifier:
             "species_url": (ORG_SPECIES_URL + quote(top_species)) if top_species else None,
             "calibration": self.calibration,
             "confidence_note": self.confidence_note(),
+            # Place and date (placeprior.py): whether a prior moved the scores, and the
+            # photos-only top where it changed it ({} otherwise).
+            "prior": {"applied": applied, "method": self.method},
+            "photo_only_top": photo_only_top,
         }
+
+    def _cue_tables(self, context):
+        cue = getattr(self, "cue", None)
+        return cue.tables(context) if cue is not None else None
+
+    def _add_place_cue(self, ranks: dict, tables) -> None:
+        """Each species and genus name ({rank: [{"name": ...}]}) gets `place`
+        (PlaceCue.cue): None without a place and date, and at family."""
+        cue = getattr(self, "cue", None)
+        for rank, names in ranks.items():
+            for c in names:
+                c["place"] = cue.cue(tables, rank, c["name"]) if cue is not None else None
 
     def _species_scores(self, query: np.ndarray, context) -> np.ndarray:
         if self.uses_context:
@@ -441,10 +494,14 @@ class Identifier:
                 "species": rec.species, "genus": rec.genus, "family": rec.family,
                 "similarity": round(score, 4),
                 "matched_query_photo": q_best,
-                "photo_url": sized_url(info.source_url, "medium") if info else None,
+                "photo_url": photo_url(info.source, info.source_url, "medium") if info else None,
                 "photo_owner": info.owner_login if info else None,
                 "photo_withheld": info is None,
-                "inat_url": INAT_OBS_URL + rec.observation_id,
+                # The record's own page at its source (iNat or Mushroom Observer).
+                "source": rec.source,
+                "source_id": rec.source_id,
+                "record_url": record_url(rec.source, rec.source_id),
+                "inat_url": record_url(INAT, rec.source_id) if rec.source == INAT else None,
                 "species_url": ORG_SPECIES_URL + quote(rec.species) if rec.species else None,
             })
         return specimens

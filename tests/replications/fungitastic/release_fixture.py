@@ -41,13 +41,17 @@ def add_photo(conn, store: LocalStore, key: str, red: int) -> int:
     body = buf.getvalue()
     rel = f"photos/large/{pid % 1000:03d}/{pid}.jpg"
     store.put(rel, body)
-    lclass = "arr" if pid % 2 else "open"
+    # MO photos follow main's rule (permissions.MO_EXCLUDED_FROM_USE_SQL): only an MO
+    # photo marked ok_for_export, and not all rights reserved, is used.
+    lclass = "open" if source == "mo" else "arr" if pid % 2 else "open"
     conn.execute(
         "insert into photos (photo_id, source, source_photo_id, owner_user_id, owner_login, "
         "owner_name, license_code, license_class, attribution, source_url, first_seen_at, "
-        "license_checked_at, status) values (?,?,?,?,?,?,?,?,?,?, 'now', 'now', 'done')",
+        "license_checked_at, status, ok_for_export) "
+        "values (?,?,?,?,?,?,?,?,?,?, 'now', 'now', 'done', ?)",
         (pid, source, pid if source == "mo" else None, 7, "alice", "Alice",
-         "" if lclass == "arr" else "cc-by", lclass, "(c) Alice", f"https://example.org/{pid}"))
+         "" if lclass == "arr" else "cc-by", lclass, "(c) Alice", f"https://example.org/{pid}",
+         1 if source == "mo" else None))
     conn.execute("insert into observation_photos values (?, ?, 1)", (key, pid))
     conn.execute("insert into photo_copies values (?, ?, 'large', ?, ?, ?, 'now')",
                  (pid, store.location, rel, len(body), dr.sha256_bytes(body)))

@@ -11,11 +11,15 @@ from pathlib import Path
 
 from .holdouts import SCHEMA as HOLDOUTS_SCHEMA
 from .permissions import SCHEMA as PERMISSIONS_SCHEMA
+from .sources import SCHEMA as SOURCES_SCHEMA
 
 SCHEMA = """
 create table if not exists records (
-  observation_id   text primary key,   -- .org observations.observation_id (an iNat id for iNat records)
-  source           text not null,      -- 'inat' when the id is numeric, else 'other'
+  observation_id   text primary key,   -- the key: the iNat id for iNat, '<source>:<id>' otherwise (sources.record_key)
+  source           text not null,      -- inat | mo | mycoportal | com_sequence | genbank | unknown (sources.py);
+                                       -- older code guessed 'inat' from a numeric id: see sources.migrated
+  org_source       text,               -- .org's observations.source as spelt there
+  source_id        text,               -- the id at the source (.org observations.observation_id)
   scientific_name  text,               -- the DNA-validated name on .org: the training label
   phylum text, class text, "order" text, family text, genus text, species text, infraspecies text,
   latitude real, longitude real,
@@ -43,12 +47,17 @@ create table if not exists inat_observations (
 );
 
 create table if not exists photos (
-  photo_id         integer primary key,  -- iNat photo id
-  owner_user_id    integer,
+  photo_id         integer primary key,  -- iNat photo id; an MO image is MO_PHOTO_ID_BASE + its id (mo.py)
+  source           text not null default 'inat',  -- where the photo is from: 'inat' | 'mo'
+  source_photo_id  integer,              -- the id at the source (an MO image id)
+  owner_user_id    integer,              -- iNat user id; null for MO (permissions are iNat accounts)
+  source_owner_id  integer,              -- the owner's id at a non-iNat source (an MO user id)
   owner_login      text,
   owner_name       text,
   license_code     text,                 -- '' = all rights reserved
   license_class    text not null,        -- 'open' | 'nc' | 'arr' (see licenses.py)
+  license_text     text,                 -- the licence as the source names it (MO)
+  ok_for_export    integer,              -- MO's ok_for_export flag (null for iNat)
   attribution      text,
   source_url       text not null,        -- the URL iNat gave (square size)
   host             text,
@@ -66,6 +75,17 @@ create table if not exists photos (
 );
 create index if not exists photos_status_idx on photos(status, host);
 create index if not exists photos_owner_idx on photos(owner_login);
+
+-- Mushroom Observer observations of MO records (mo.py): what MO's images API answered.
+-- No MO location is stored, so none can be shown.
+create table if not exists mo_observations (
+  observation_id   text primary key,     -- records.observation_id ('mo:<n>')
+  mo_id            integer not null,     -- the MO observation number
+  status           text not null,        -- 'ok' | 'missing' (MO answered no images)
+  owner_id integer, owner_login text, owner_name text,
+  image_count      integer,
+  fetched_at       text not null
+);
 
 create table if not exists observation_photos (
   observation_id   text not null,
@@ -93,11 +113,12 @@ create table if not exists license_history (
   license_code     text,
   seen_at          text not null
 );
-""" + PERMISSIONS_SCHEMA + HOLDOUTS_SCHEMA
+""" + PERMISSIONS_SCHEMA + HOLDOUTS_SCHEMA + SOURCES_SCHEMA
 
 
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.exists() or path.stat().st_size == 0
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("pragma journal_mode=wal")
@@ -105,7 +126,17 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _add_missing_columns(conn)
     _backfill_copies(conn, local_store=str(path.parent))
+    if new:
+        # A manifest made by this code never held a guessed source (sources.py).
+        mark_new_manifest(conn)
     return conn
+
+
+def mark_new_manifest(conn: sqlite3.Connection) -> None:
+    from .sources import MIGRATION
+    with conn:
+        conn.execute("insert or ignore into manifest_migrations (name, applied_at, detail) "
+                     "values (?, datetime('now'), '{\"new_manifest\": true}')", (MIGRATION,))
 
 
 def _backfill_copies(conn: sqlite3.Connection, local_store: str) -> None:
@@ -124,7 +155,14 @@ def _backfill_copies(conn: sqlite3.Connection, local_store: str) -> None:
 
 # Columns added after a manifest may already exist; `create table if not exists`
 # does not add them, so they are added here.
-_LATER_COLUMNS = {"photos": {"store": "text"}, "records": {"first_seen_at": "text"}}
+_LATER_COLUMNS = {
+    "photos": {"store": "text",
+               # Every photo before MO photos came from iNat (even the ones fetched for the
+               # wrong record were iNat's): 'inat' is a fact for those rows, not a guess.
+               "source": "text not null default 'inat'", "source_photo_id": "integer",
+               "source_owner_id": "integer", "license_text": "text", "ok_for_export": "integer"},
+    "records": {"first_seen_at": "text", "org_source": "text", "source_id": "text"},
+}
 
 
 def snapshot(conn: sqlite3.Connection, dest: Path) -> Path:
@@ -164,6 +202,22 @@ def shippable_snapshot(conn: sqlite3.Connection, dest: Path) -> Path:
     finally:
         out.close()
     return dest
+
+
+def upgrade(conn: sqlite3.Connection) -> None:
+    """Bring a manifest opened without connect() (the API, a release copy made by older
+    code) up to this schema: missing tables and columns are added, nothing else. Does
+    nothing (and commits nothing) when it is already current."""
+    have = {r[0] for r in conn.execute("select name from sqlite_master where type = 'table'")}
+    missing_tables = {"records", "photos", "mo_observations", "manifest_migrations",
+                      "source_removals"} - have
+    missing_cols = any(
+        name not in {r[1] for r in conn.execute(f"pragma table_info({table})")}
+        for table, cols in _LATER_COLUMNS.items() for name in cols)
+    if missing_tables:
+        conn.executescript(SCHEMA)
+    if missing_tables or missing_cols:
+        _add_missing_columns(conn)
 
 
 def _add_missing_columns(conn: sqlite3.Connection) -> None:
