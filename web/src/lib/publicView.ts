@@ -2,6 +2,7 @@
 // results, and waiting in line instead of an error when the server is busy.
 
 import type { Me, ScoreRun } from "./api";
+import { publicModelName } from "./publicNames";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
@@ -152,7 +153,7 @@ export function shareWords(part: number, total: number): string {
  *  how many reference photos it compares with. */
 export function releaseNote(b: { backbone: string; embedded_photos: number;
                                  trained_through?: string | null }): string {
-  const parts = [`${modelName(b.backbone)}.`];
+  const parts = [`${publicModelName(b.backbone)}.`];
   if (b.trained_through) {
     parts.push(`Trained on DNA-verified records validated up to ${longDate(b.trained_through)}.`);
   }

@@ -14,8 +14,8 @@ export const BASES: Base[] = ["linear", "nearest+mean", "nearest", "species-mean
 
 export const BASE_LABEL: Record<Base, string> = {
   linear: "Trained classifier",
-  "nearest+mean": "Nearest + species average",
-  nearest: "Nearest specimen",
+  "nearest+mean": "Closest specimens + species average",
+  nearest: "Closest specimen",
   "species-mean": "Species average",
 };
 

@@ -3,8 +3,9 @@ import { ArrowUpRight, Check } from "lucide-react";
 import { PageHeader } from "@/components/Layout";
 import { SafetyNote } from "@/components/SafetyNote";
 import { api, num, pct, type Stats } from "@/lib/api";
+import { publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import {
-  headline, JOIN_URL, modelName, recentWeekLine, releaseNote, SEQUENCING_URL, shareWords,
+  headline, JOIN_URL, recentWeekLine, releaseNote, SEQUENCING_URL, shareWords,
 } from "@/lib/publicView";
 
 const DANISH_STUDY_URL = "https://pmc.ncbi.nlm.nih.gov/articles/PMC8779018/";
@@ -207,7 +208,7 @@ function Openness() {
           in the <a className="underline" href="/research/protocols">evaluation protocols</a>.
         </li>
         {served.map((b) => (
-          <li key={b.backbone} title={b.backbone} data-testid="text-release-note">
+          <li key={b.backbone} data-testid="text-release-note">
             Model in use: {releaseNote(b)}
           </li>
         ))}
@@ -260,7 +261,7 @@ function HowGood() {
           </div>
           {h.inat && (
             <p>
-              {modelName("external:inat-cv")}, given the same photos
+              {publicModelName("external:inat-cv")}, given the same photos
               {h.inat.method === "combined-max" ? " and locations" : ""}, was right for{" "}
               {pct(h.inat.species_top1, 1)} at species, {pct(h.inat.genus_top1, 1)} at genus and{" "}
               {pct(h.inat.family_top1, 1)} at family.
@@ -279,8 +280,8 @@ function HowGood() {
               {advance.resolved ? `, ${num(advance.resolved)} with their DNA answer in` : ", none with their DNA answer in yet"}.
             </p>
           )}
-          <p className="mt-3 text-sm text-muted-foreground" title={h.ours.backbone}>
-            Model: {modelName(h.ours.backbone)}, nearest specimen. Test {h.comparisonId}.
+          <p className="mt-3 text-sm text-muted-foreground">
+            Model: {publicModelName(h.ours.backbone)}, {publicMethodLabel("nearest")}. Test {h.comparisonId}.
           </p>
         </>
       )}
