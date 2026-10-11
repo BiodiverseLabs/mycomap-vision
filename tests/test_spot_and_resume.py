@@ -91,7 +91,7 @@ class RefusingEC2(FakeEC2):
 
 
 @pytest.mark.parametrize("code, spot, words", [
-    ("InsufficientInstanceCapacity", True, "no g6.2xlarge free right now"),
+    ("InsufficientInstanceCapacity", True, "no g6.xlarge free right now"),
     ("MaxSpotInstanceCountExceeded", True, "All G and VT Spot Instance Requests"),
     ("SpotMaxPriceTooLow", True, "above --spot-max-price"),
     ("VcpuLimitExceeded", False, "Running On-Demand G and VT instances"),

@@ -49,12 +49,13 @@ INDEX_FILE = "index.sqlite"     # embeddings index, speeds, fine-tunes, scoreboa
 INDEX_TABLES = ("embeddings", "embed_runs", "finetunes", "eval_runs")
 
 # --- how long a run takes ------------------------------------------------------
-# Photos per second at LARGE photos, measured on the LAPTOP GPU (Sep 2026), not on
-# the instance's L4. An L4 is not expected to be faster, so estimates multiply the
-# time by L4_FACTOR to stay on the safe side. Replace these with the instance's own
-# speeds (progress.json records them per stage) after the first run.
-EMBED_RATES = {"bioclip-2": 55.0, "dinov3-l16-512": 18.8}
-FINETUNE_RATES = {"bioclip-2": 83.0}   # photos seen per second while training
+# Photos per second at LARGE photos on the trainer instance: bioclip-2 measured on a
+# g6.xlarge (1 L4, 4 vCPU, JPEG decoding the limit) in run 20261007-165400 (embed
+# 108.3/s, its fine-tune embedded at 116.1/s; fine-tuning 586,512 photos x 2 epochs in
+# 19,822 s = 59.2/s). dinov3 is still the laptop's speed. Estimates multiply the time by
+# L4_FACTOR as a margin (a bigger release, a slower day for S3 reads).
+EMBED_RATES = {"bioclip-2": 108.0, "dinov3-l16-512": 18.8}
+FINETUNE_RATES = {"bioclip-2": 59.0}   # photos seen per second while training
 # The Picek replication (retrain.py), training photos per second on the instance. NOT yet
 # measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
 # (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).
@@ -87,7 +88,7 @@ def picek_rate(preset: str, cached: bool) -> float | None:
 PICEK_CACHE_BUILD_RATE = 250.0         # photos/s resizing into the cache on 4 vCPUs
 UNMEASURED_EMBED_RATE = 15.0           # a backbone never timed here: assume a slow one
 UNMEASURED_FINETUNE_RATE = 40.0
-L4_FACTOR = 1.5
+L4_FACTOR = 1.15
 SETUP_HOURS = 0.5                      # boot, installing packages, model weights
 COMPARE_HOURS = 0.5                    # the comparison and the final uploads
 STOP_MARGIN_HOURS = 0.75               # the job stops itself this long before the hard kill
@@ -196,8 +197,8 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
 
 
 def format_estimate(est: dict) -> str:
-    lines = [f"Estimate for {est['photos']:,} photos (laptop speeds x {est['factor']} for "
-             "the L4; conservative):"]
+    lines = [f"Estimate for {est['photos']:,} photos (g6.xlarge speeds x {est['factor']} "
+             "as a margin):"]
     for r in est["stages"]:
         lines.append(f"  {r['stage']:<40} {r['hours']:>5.1f} h at {r['photos_per_second']}/s"
                      + ("" if r["measured"] else " (NOT MEASURED: assumed)"))

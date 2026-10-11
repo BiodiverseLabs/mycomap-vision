@@ -275,7 +275,9 @@ def render_policy(template: str) -> str:
 
 TRAINER_AMI_PARAMETER = ("/aws/service/deeplearning/ami/x86_64/"
                          "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id")
-TRAINER_INSTANCE_TYPE = "g6.2xlarge"     # 1 NVIDIA L4 (24 GB), 8 vCPUs for JPEG decoding
+# 1 NVIDIA L4 (24 GB), 4 vCPUs: the On-Demand G quota granted in us-east-2 (4 vCPU,
+# 2026-10-07) fits only this size; g6.2xlarge (8 vCPUs, faster JPEG decoding) needs more.
+TRAINER_INSTANCE_TYPE = "g6.xlarge"
 
 TRAINER_USER_DATA = """#!/bin/bash
 set -uo pipefail

@@ -1112,7 +1112,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
     p.add_argument("--max-hours", type=float, default=24,
                    help="time limit; the job stops itself 45 minutes before it (default 24)")
-    p.add_argument("--instance-type", default="g6.2xlarge")
+    p.add_argument("--instance-type", default="g6.xlarge",
+                   help="default g6.xlarge: the only size the 4-vCPU On-Demand G quota fits")
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--finetune", default="bioclip-2",
                    help="backbones (also in --backbones) to fine-tune on the reference records "
