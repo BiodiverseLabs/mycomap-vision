@@ -40,6 +40,11 @@ from . import config, fungusgate
 
 GRID = tuple(round(0.05 * i, 2) for i in range(1, 20))
 MAX_UNSURE_SHARE = 0.005
+# Slime moulds are in scope (Steve, 2026-10-11): "not sure", never "not a fungus". Declared
+# before looking: the zero-shot slime-mould class lifts a "not a fungus" photo to "not sure"
+# at the lowest grid value at which at most 1% of everyday non-fungi are lifted.
+LIFT_CLASS = "slime"
+MAX_EVERYDAY_LIFTED = 0.01
 POSITIVE_RECORDS = 20_000
 SEED = 20261009
 FUNGI, ANIMALIA, PLANTAE = 47170, 1, 47126
@@ -69,6 +74,15 @@ def choose_thresholds(record_scores: list[np.ndarray], grid=GRID,
     b = max(t for t in grid if t >= a and ((best >= a) & (best < t)).sum() <= max_unsure_share * n)
     return Choice(a, b, n, int((best < a).sum()), int(((best >= a) & (best < b)).sum()),
                   int(((worst < a) & (best >= a)).sum()))
+
+
+def choose_lift(p_class_everyday: np.ndarray, judged_not_fungus: np.ndarray, grid=GRID,
+                max_lifted: float = MAX_EVERYDAY_LIFTED) -> float | None:
+    """The lowest grid value of a class's probability at which at most `max_lifted` of the
+    everyday non-fungi would move from "not a fungus" to "not sure"; None if none does."""
+    p = np.asarray(p_class_everyday, float)
+    nf = np.asarray(judged_not_fungus, bool)
+    return min((t for t in grid if (nf & (p >= t)).mean() <= max_lifted), default=None)
 
 
 def kingdom(ancestor_ids) -> str:
@@ -216,6 +230,7 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
     recs = dev_records(conn, benchmark, keys)
     meta = {r["file"]: r for r in csv.DictReader(open(ood_manifest, encoding="utf-8"))}
     cat = np.array([meta[str(k)]["category"] for k in ood["keys"]])
+    groups = [meta[str(k)]["group"] for k in ood["keys"]]
     everyday = np.isin(cat, EVERYDAY)
     report = {"benchmark": benchmark, "split": "dev", "reproducibility": "exploratory-pre-freeze",
               "code_version": config.code_version(), "probe": prov, "vectors": base,
@@ -254,13 +269,34 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
     if chosen is None:
         raise ValueError("no mode keeps every DEV record's answer at any grid value")
     mode, entry, c = chosen
+    lift = {}
+    if mode in ("zero-shot", "both") and not served:
+        g = fungusgate.FungusGate(text.classes, text.sides, text.vectors, text.scale,
+                                  fungusgate.Thresholds(c.not_fungus, c.unsure), probe_w=w,
+                                  probe_b=b, mode=mode)
+        k = g._class_names.index(LIFT_CLASS)
+        p_class = g.class_probs(unit(ood["frozen"]))[:, k]
+        po = g.p_fungus(ood["frozen"])
+        s = choose_lift(p_class[everyday], po[everyday] < c.not_fungus)
+        if s is not None:
+            lift = {LIFT_CLASS: s}
+            g.lift_to_unsure = lift
+            ver = [v["verdict"] for v in g.judge(ood["frozen"])]
+            report["lift"] = {"class": LIFT_CLASS, "threshold": s,
+                              "rule": f"lowest grid value with at most {MAX_EVERYDAY_LIFTED:.0%} "
+                                      "of everyday non-fungi lifted",
+                              "by_group": {grp: {v: sum(1 for x, gg in zip(ver, groups) if gg == grp
+                                                        and x == v) for v in fungusgate.VERDICTS}
+                                           for grp in sorted(set(groups))}}
+            pd_dev = g.judge(dev["frozen"])
+            report["lift"]["dev_photos_lifted"] = sum(1 for v in pd_dev if v.get("lifted_by"))
     gate = fungusgate.FungusGate(text.classes, text.sides, text.vectors, text.scale,
                                  fungusgate.Thresholds(c.not_fungus, c.unsure), base,
                                  {"tuned_on": f"{benchmark} dev + not-a-fungus set",
                                   "reproducibility": "exploratory-pre-freeze",
                                   "code_version": report["code_version"],
                                   "training_records_sha256": prov["training_records_sha256"]},
-                                 w, b, mode)
+                                 w, b, mode, lift)
     gate.save(out_dir)
     report["chosen"] = {"mode": mode, "not_fungus": c.not_fungus, "unsure": c.unsure,
                         "why": "fewest everyday non-fungi passed among modes meeting the rule"}
