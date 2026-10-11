@@ -137,6 +137,8 @@ export interface Where {
   dateFromPhoto?: number;
   /** Set while the place shown is the phone's current location ("Use my current location"). */
   placeFromDevice?: boolean;
+  /** Set while the place shown was picked on the map (components/LocationPicker.tsx). */
+  placeFromMap?: boolean;
 }
 
 export interface ContextUsed {

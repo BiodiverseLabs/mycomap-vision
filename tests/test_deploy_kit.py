@@ -74,6 +74,19 @@ def test_pages_allow_every_host_a_shown_photo_comes_from():
     assert any(inat.startswith(h + "/") for h in img_src), inat
 
 
+def test_pages_allow_the_map_tiles_and_nothing_else_new():
+    # The Identify page's map (web/src/components/LocationPicker.tsx): its tiles are images.
+    picker = (config.REPO_ROOT / "web" / "src" / "components" / "LocationPicker.tsx").read_text(
+        encoding="utf-8")
+    headers = read("nginx-vision-headers.conf")
+    img_src = re.search(r"img-src ([^;]+);", headers).group(1).split()
+    for url in re.findall(r'url: "(https://[^"]+)"', picker):
+        host = re.match(r"https://([^/]+)/", url).group(1).replace("{s}.", "*.")
+        assert f"https://{host}" in img_src, host
+    # Place search goes through Vision's own /api/geocode, so the page talks to no one else.
+    assert "connect-src 'self';" in headers
+
+
 def test_the_box_starts_with_the_whole_site_behind_mycomap_org_sign_in():
     env = env_template()
     assert env["MV_SIGNIN"] == "all"
