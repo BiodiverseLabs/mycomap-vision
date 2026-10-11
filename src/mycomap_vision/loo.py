@@ -397,8 +397,10 @@ def exclusion_rows(reviewed: list[dict], manifest_keys: set[str], photo_ids: set
             if key is None:
                 problems.append(f"{r['record_key']}: not in this manifest")
                 continue
-            out.append({"kind": "record", "key": key, "reason": r.get("category", ""),
-                        "note": note})
+            # Written source-namespaced (inat:<id>, mo:<n>), as Vision main and the release
+            # builder read them; the manifest check above used the manifest's own key.
+            out.append({"kind": "record", "key": key if ":" in key else f"inat:{key}",
+                        "reason": r.get("category", ""), "note": note})
         else:
             pid = str(r.get("photo_id") or "").strip()
             if not pid.isdigit() or int(pid) not in photo_ids:

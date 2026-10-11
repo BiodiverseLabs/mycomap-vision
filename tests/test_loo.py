@@ -250,5 +250,8 @@ def test_only_person_checked_exclusions_reach_the_release_list_and_missing_keys_
          "checked_by": "Steve", "category": "c"},
     ]
     rows, problems = loo.exclusion_rows(reviewed, {"1", "2", "3"}, {77})
-    assert [(r["kind"], r["key"]) for r in rows] == [("record", "1"), ("photo", "inat:77")]
+    assert [(r["kind"], r["key"]) for r in rows] == [("record", "inat:1"), ("photo", "inat:77")]
+    rows, _ = loo.exclusion_rows([{"record_key": "mo:5", "decision": "exclude-record",
+                                   "checked_by": "Steve"}], {"1", "mo:5"}, set())
+    assert rows[0]["key"] == "mo:5"
     assert any("inat:2" in p for p in problems) and any("inat:9" in p for p in problems)
