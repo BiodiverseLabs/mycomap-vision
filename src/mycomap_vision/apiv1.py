@@ -19,6 +19,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import threading
 import time
 from collections import deque
@@ -338,6 +339,25 @@ class Timer:
                  "embed_ms": "embed", "score_ms": "score", "total_ms": "total"}
         return ", ".join(f"{n};dur={block[k]}" for k, n in names.items()
                          if block.get(k) is not None)
+
+
+# What the product calls its model (Steve, 2026-10-11): never the backbone underneath.
+# Backbone and method ids stay internal (logs, /api/health, the website's own pages).
+PUBLIC_MODEL_NAME = "MycoMap Vision"
+
+
+def release_date(release_id: str | None) -> str | None:
+    """A release id ('20261008-015746-full-…') as the date it was made, '2026-10-08':
+    the public model version. Nothing else of the id leaves the server."""
+    m = re.match(r"(\d{4})(\d{2})(\d{2})-", release_id or "")
+    return f"{m[1]}-{m[2]}-{m[3]}" if m else None
+
+
+def public_model(release_id: str | None, calibration_id: str | None = None) -> dict:
+    """The `model` block of every v1 answer (docs/api.md §4): a name, the release date as
+    its version, the date its confidence was last calibrated."""
+    return {"name": PUBLIC_MODEL_NAME, "version": release_date(release_id),
+            "calibrated_on": release_date((calibration_id or "")[:8] + "-")}
 
 
 def taxon_counts(rank_counts: dict, *, records: int, model: dict,
