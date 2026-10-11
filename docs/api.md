@@ -371,8 +371,10 @@ or `{"active": false, "reason": "unknown|pending|disabled|revoked|account_inacti
   exactly that. `plan` is for display.
 - **`subject` (Vision asks for it):** an opaque, stable id for the owner, the same value
   as an app token's `sub`: `"u_"` + the first 32 characters of base64url
-  HMAC-SHA256(`VISION_SUBJECT_SECRET`, or `VISION_API_KEY` when unset,
-  `"vision-subject:v1:" + userId`). A member's keys and app use share one pool without
+  HMAC-SHA256(secret, `"vision-subject:v1:" + userId`). The secret is
+  `VISION_SUBJECT_SECRET` when set; on production it is otherwise derived from the
+  sign-in bridge's signing key, never `VISION_API_KEY` (.org `fix/vision-subject-secret-auto`).
+  Vision treats the value as opaque. A member's keys and app use share one pool without
   Vision learning who they are.
   **One pool per member** (Steve): every key and the app count against the member's
   `subject`. An admin override on a key gives that key its own limit.
