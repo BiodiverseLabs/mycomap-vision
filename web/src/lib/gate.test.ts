@@ -50,3 +50,13 @@ test("the page doesn't repeat the gate's verdict as a hint under its own banner"
   const left = ["Photo 2 doesn't look like a fungus, so it was left out of the answer."];
   assert.deepEqual(pageHints({ gate: find("fungus"), hints: left }), left);   // no banner: kept
 });
+
+test("a find that looks like a slime mould says so, with the names and no chance", () => {
+  const g = { ...find("unsure", "This looks like a slime mould."), looks_like: "slime" };
+  const b = gateBanner({ gate: g });
+  assert.equal(b?.title, "This looks like a slime mould.");
+  assert.match(b!.body, /aren't fungi, but MycoMap holds some DNA-verified ones/);
+  assert.equal(chanceWithheld({ gate: g }), true);
+  const hints = ["This looks like a slime mould. Slime moulds aren't fungi, …", "Add more photos."];
+  assert.deepEqual(pageHints({ gate: g, hints }), ["Add more photos."]);
+});

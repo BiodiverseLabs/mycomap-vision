@@ -13,6 +13,15 @@ export interface GateBanner {
 export function gateBanner(r: Pick<IdentifyResult, "gate">): GateBanner | null {
   const g: FindGate | null | undefined = r.gate;
   if (!g || g.verdict === "fungus") return null;
+  if (g.looks_like === "slime") {
+    return {
+      verdict: g.verdict,
+      title: g.message ?? "This looks like a slime mould.",
+      body:
+        "Slime moulds aren't fungi, but MycoMap holds some DNA-verified ones; the closest are " +
+        "below, without a stated chance.",
+    };
+  }
   if (g.verdict === "not_fungus") {
     return {
       verdict: "not_fungus",

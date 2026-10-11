@@ -45,6 +45,8 @@ MAX_UNSURE_SHARE = 0.005
 # at the lowest grid value at which at most 1% of everyday non-fungi are lifted.
 LIFT_CLASS = "slime"
 MAX_EVERYDAY_LIFTED = 0.01
+# Named to the user ("This looks like a slime mould"), fixed by Steve on 2026-10-11, not tuned.
+LOOKS_LIKE = {"slime": 0.5}
 POSITIVE_RECORDS = 20_000
 SEED = 20261009
 FUNGI, ANIMALIA, PLANTAE = 47170, 1, 47126
@@ -269,8 +271,9 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
     if chosen is None:
         raise ValueError("no mode keeps every DEV record's answer at any grid value")
     mode, entry, c = chosen
-    lift = {}
+    lift, looks = {}, {}
     if mode in ("zero-shot", "both") and not served:
+        looks = dict(LOOKS_LIKE)
         g = fungusgate.FungusGate(text.classes, text.sides, text.vectors, text.scale,
                                   fungusgate.Thresholds(c.not_fungus, c.unsure), probe_w=w,
                                   probe_b=b, mode=mode)
@@ -296,7 +299,7 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
                                   "reproducibility": "exploratory-pre-freeze",
                                   "code_version": report["code_version"],
                                   "training_records_sha256": prov["training_records_sha256"]},
-                                 w, b, mode, lift)
+                                 w, b, mode, lift, looks)
     gate.save(out_dir)
     report["chosen"] = {"mode": mode, "not_fungus": c.not_fungus, "unsure": c.unsure,
                         "why": "fewest everyday non-fungi passed among modes meeting the rule"}

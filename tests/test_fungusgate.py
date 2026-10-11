@@ -502,3 +502,38 @@ def test_the_slime_threshold_is_the_lowest_grid_value_within_the_everyday_budget
     assert tune.choose_lift(p, nf, grid=(0.1, 0.3), max_lifted=0.0) is None
     nf[:2] = False                                               # already not "not a fungus"
     assert tune.choose_lift(p, nf, grid=(0.1, 0.3, 0.5), max_lifted=0.01) == 0.1
+
+
+def test_a_slime_mould_find_is_called_a_slime_mould():
+    g = FungusGate(**SLIME_GATE, lift_to_unsure={"slime": 0.05}, looks_like={"slime": 0.5})
+    v = g.judge(np.array([[0.0, 0.0, 1.0]]))[0]
+    assert v["looks_like"] == "slime" and v["message"] == "This looks like a slime mould."
+    assert fungusgate.find_looks_like([v], UNSURE) == "slime"
+    hint = fungusgate.gate_hints([v["verdict"]], UNSURE, "slime")
+    assert hint == ["This looks like a slime mould. Slime moulds aren't fungi, but MycoMap holds "
+                    "some DNA-verified ones; the closest are below, without a stated chance."]
+
+
+def test_a_fungus_photo_is_never_called_a_slime_mould():
+    g = FungusGate(**SLIME_GATE, lift_to_unsure={"slime": 0.05}, looks_like={"slime": 0.3})
+    photo_ = np.array([[1.0, 0.0, 0.9]])                   # a fungus that also scores slime-like
+    assert g.class_probs(photo_ / np.linalg.norm(photo_))[0][g._class_names.index("slime")] >= 0.3
+    v = g.judge(photo_)[0]
+    assert v["verdict"] == FUNGUS and "looks_like" not in v
+    assert fungusgate.find_looks_like([{**v, "looks_like": "slime"}], FUNGUS) is None
+
+
+def test_the_api_names_a_slime_mould_find_and_the_page_says_so(conn, tmp_path):
+    root = seeded(conn, tmp_path)
+    g = FungusGate(**SLIME_GATE, lift_to_unsure={"slime": 0.05}, looks_like={"slime": 0.5})
+    client = TestClient(create_app(tmp_path / "manifest.sqlite", root,
+                                   backbone_loader=lambda name: Tuned3(name), limits=open_limits(),
+                                   background=False, fungus_gate=g))
+    r = identify(client, [photo(12, 0, 255)])
+    assert r["gate"]["looks_like"] == "slime"
+    assert r["gate"]["message"] == "This looks like a slime mould."
+    assert r["ranks"]["species"] and stated_chances(r) == []
+    assert r["hints"][0].startswith("This looks like a slime mould.")
+    assert identify(client, [photo(12, 255, 0)])["gate"]["looks_like"] is None   # a duck
+    g.save(tmp_path / "saved")
+    assert FungusGate.load(tmp_path / "saved").looks_like == {"slime": 0.5}
