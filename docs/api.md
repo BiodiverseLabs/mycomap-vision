@@ -262,7 +262,7 @@ model's result, not a `results` list.
     `far_from_known` are `null`. `in_season` is also `null` for a taxon with under 5
     dated records, and `nearest_record_km` for one with no record with coordinates.
 
-  Top level: `prior: {"applied": bool, "method": str}`, where `applied` means the place/date
+  Top level: `prior: {"applied": bool}` (v1 leaves out the method id), where `applied` means the place/date
   prior moved the scores (only the `nearest+mean+place` method does, and only given a
   place or date). Also `photo_only_top: {rank: name}`: the ranks where the prior changed
   the top name, `{}` otherwise. All of it is computed in
