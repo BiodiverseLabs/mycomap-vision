@@ -426,3 +426,10 @@ def test_health_says_which_gate_is_serving_so_a_deploy_can_be_checked(conn, tmp_
     assert app(tmp_path, root, with_gate=False).get("/api/health").json()["fungus_gate"] is None
     stricter = FungusGate(**{**TEST_GATE, "thresholds": Thresholds(0.3, 0.5)})
     assert stricter.fingerprint() != gate().fingerprint()       # a re-judge is due
+
+
+def test_a_non_fungus_answer_has_the_same_fields_as_any_other(conn, tmp_path):
+    client = client_for(conn, tmp_path)
+    duck, mushroom = identify(client, [photo(247, DUCK_GREEN)]), identify(client, [photo(247)])
+    assert set(duck) == set(mushroom)
+    assert set(duck["per_photo"][0]) == set(mushroom["per_photo"][0])

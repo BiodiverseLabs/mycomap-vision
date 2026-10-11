@@ -215,9 +215,14 @@ class OccurrencePrior(RangeSource):
     """The range source from iNat occurrence counts (an OccurrenceStore)."""
     name = "inat-occurrence"
 
-    def __init__(self, store: OccurrenceStore, params: OccParams | None = None):
+    def __init__(self, store: OccurrenceStore, params: OccParams | None = None,
+                 out_of_range_only: bool = False):
+        """out_of_range_only: compute only out of range (the served place prior,
+        placeprior.py): no density or season terms and no season table, which saves memory
+        on the 4 GB box and most of the time per identification."""
         self.store = store
         self.params = params or OccParams()
+        self.out_of_range_only = out_of_range_only
 
     def fit(self, records, species: list[str]) -> None:
         """records: the reference (DNA-verified) records; species: index group order."""
@@ -258,14 +263,23 @@ class OccurrencePrior(RangeSource):
         self.pair_local = np.repeat(np.arange(n_local), lengths)
         self.pair_pos = pos_of_cell[st.pair_cell[idx]]
         self.pair_count = st.pair_count[idx].astype(np.float64)
-        # Season: (local unit, band, week) counts, and all fungi per (band, week).
+        if self.out_of_range_only:
+            # Out of range asks only whether any find lies within the radius: every pair is
+            # a find, so its count isn't needed, and 32-bit indices hold the rest.
+            self.pair_local = self.pair_local.astype(np.int32)
+            self.pair_pos = self.pair_pos.astype(np.int32)
+            self.pair_count = None
+        # Season: (local unit, band, week) counts, and all fungi per (band, week). Not built
+        # for out of range only: it is the biggest table here, and the box has 4 GB.
         B = st.grid.n_bands
-        self.weeks = np.zeros((n_local, B, WEEKS), dtype=np.float32)
-        lu = np.array([local.get(int(u), -1) for u in st.week_unit.tolist()], dtype=np.int64) \
-            if n_local else np.zeros(0, np.int64)
-        k = lu >= 0
-        np.add.at(self.weeks, (lu[k], st.week_band[k].astype(np.int64),
-                               st.week_week[k].astype(np.int64)), st.week_count[k])
+        self.weeks = None
+        if not self.out_of_range_only:
+            self.weeks = np.zeros((n_local, B, WEEKS), dtype=np.float32)
+            lu = (np.array([local.get(int(u), -1) for u in st.week_unit.tolist()],
+                           dtype=np.int64) if n_local else np.zeros(0, np.int64))
+            k = lu >= 0
+            np.add.at(self.weeks, (lu[k], st.week_band[k].astype(np.int64),
+                                   st.week_week[k].astype(np.int64)), st.week_count[k])
         self.effort_weeks = st.effort_band_week.astype(np.float64)
         # DNA evidence: the reference records' coordinates per group.
         gpos = {s: i for i, s in enumerate(species)}
@@ -339,7 +353,9 @@ class OccurrencePrior(RangeSource):
                     dna_out[r] = np.zeros(self.n_groups, dtype=bool)
                     continue
                 near_local = np.bincount(self.pair_local, minlength=len(self.total),
-                                         weights=self.pair_count * within[self.pair_pos]
+                                         weights=(within[self.pair_pos].astype(np.float64)
+                                                  if self.pair_count is None else
+                                                  self.pair_count * within[self.pair_pos])
                                          ).astype(np.float64)
                 near_local[mine] -= self_near
                 dna_near = np.bincount(self.dna_group, weights=dna_within.astype(float),
@@ -360,7 +376,7 @@ class OccurrencePrior(RangeSource):
             k = gaussian(d, p.density_bandwidth_km)
             self_k = float(k[at]) if at >= 0 else 0.0
             local_effort = float((k * self.cell_effort).sum()) - self_k * own_effort
-            if local_effort > 0:
+            if local_effort > 0 and not self.out_of_range_only:
                 k_local = np.bincount(self.pair_local, minlength=len(self.total),
                                       weights=self.pair_count * k[self.pair_pos]
                                       ).astype(np.float64)
@@ -370,7 +386,7 @@ class OccurrencePrior(RangeSource):
         doy = ctx.day_of_year
         if doy is not None:
             week = min((doy - 1) // 7, WEEKS - 1)
-        if week is not None:
+        if week is not None and self.weeks is not None:
             B = self.store.grid.n_bands
             if has_place:
                 b = self.store.grid.band(ctx.latitude)

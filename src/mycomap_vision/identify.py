@@ -30,6 +30,7 @@ from .serving import map_embeddings
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
                        with_rows)
 from .licenses import photo_url
+from .placeprior import PlaceCue
 from .sources import INAT, record_url
 
 CONFIDENCE_TEMPERATURE = 0.02
@@ -240,6 +241,10 @@ class Identifier:
         self.photos = (self._photo_info(conn, set(int(p) for p in self.col_photo.tolist()))
                        if photo_info else {})
         self.records = len(records)
+        # How far each taxon's nearest DNA record is, and its known season (placeprior.py):
+        # a cue beside every species and genus candidate when a place or date is given.
+        self.cue = PlaceCue()
+        self.cue.fit(records, self.index)
         self.rank_counts = {rank: Counter() for rank in RANKS}
         for r in records:
             for rank in RANKS:
@@ -250,6 +255,7 @@ class Identifier:
         # back to the OS. Park them in arrays, let the records go, and make them again.
         del records, by_id, row_of
         self._remake_names()
+        self.cue.attach(self.index)
 
     def _remake_names(self) -> None:
         index = self.index
@@ -294,7 +300,8 @@ class Identifier:
                   photo_lookup=photo_lookup, may_show=may_show,
                   n_photo_specimens=n_photo_specimens)
         if gate is None:
-            return {**self.identify_vectors_ungated(query, **kw), "gate": None}
+            return {**self.identify_vectors_ungated(query, **kw), "gate": None,
+                    "confidence_withheld": False}
         if len(gate) != len(query):
             raise ValueError(f"{len(gate)} gate verdicts for {len(query)} photos")
         verdicts = [g["verdict"] for g in gate]
@@ -307,6 +314,7 @@ class Identifier:
             out = self.no_answer(len(query))
         for p in out["per_photo"]:
             p["gate"] = gate[p["photo"]]
+        out["confidence_withheld"] = False
         if overall != fungusgate.FUNGUS:
             withhold_confidence(out)
         out["hints"] = fungusgate.gate_hints(verdicts, overall) + (
@@ -333,6 +341,8 @@ class Identifier:
             "species_url": None,
             "calibration": self.calibration,
             "confidence_note": self.confidence_note(),
+            "prior": {"applied": False, "method": self.method},
+            "photo_only_top": {},
         }
 
     def identify_vectors_ungated(self, query: np.ndarray, top_k: int = 5,
@@ -358,6 +368,16 @@ class Identifier:
             # both come from the one similarity matrix.
             per_photo = np.maximum.reduceat(sims, self.index.starts, axis=1)
             scores = per_photo.mean(axis=0)
+        elif hasattr(self.model, "place_shift"):
+            # nearest + species average with place and date: the same shared path, plus
+            # the prior's shift on every photo when a place or date is given. Without
+            # them, exactly nearest + species average.
+            per_photo = self.model.per_photo_scores(sims, query)
+            photo_only = per_photo.mean(axis=0)
+            shift = self.model.place_shift(context)
+            if shift is not None:
+                per_photo = per_photo + shift
+            scores = per_photo.mean(axis=0)
         elif hasattr(self.model, "per_photo_scores") and not self.uses_context:
             # nearest + species average (the default): its specimen half comes from the
             # same similarities, so nothing is computed twice; the record's score is the
@@ -369,7 +389,18 @@ class Identifier:
             per_photo = (np.stack([self._species_scores(query[i:i + 1], context)
                                    for i in range(n_q)]) if n_q > 1 else scores[None, :])
         ranks = self._ranks(scores, top_k)
+        applied = shift is not None if hasattr(self.model, "place_shift") else False
+        # Where the place and date changed the top answer, what the photos alone said.
+        photo_only_top = {}
+        if applied:
+            alone = self._ranks(photo_only, 1)
+            photo_only_top = {rank: alone[rank][0]["name"] for rank in RANKS
+                              if alone[rank] and ranks[rank]
+                              and alone[rank][0]["name"] != ranks[rank][0]["name"]}
+        cue_tables = self._cue_tables(context)
+        self._add_place_cue(ranks, cue_tables)
         likely_sets = self._likely(scores)
+        self._add_place_cue({rank: s["names"] for rank, s in likely_sets.items()}, cue_tables)
         # Records are ranked by the same rule as species: for each of your photos,
         # its best match among the record's photos, averaged over your photos.
         per_record = np.maximum.reduceat(sims, self.rec_starts, axis=1)   # (q, records)
@@ -382,6 +413,7 @@ class Identifier:
         photos = []
         for i in range(n_q):
             own = self._ranks(per_photo[i], top_k, with_position_of=top)
+            self._add_place_cue({rank: own[rank]["candidates"] for rank in RANKS}, cue_tables)
             photos.append({
                 "photo": i,
                 "ranks": {rank: own[rank]["candidates"] for rank in RANKS},
@@ -402,7 +434,23 @@ class Identifier:
             "species_url": (ORG_SPECIES_URL + quote(top_species)) if top_species else None,
             "calibration": self.calibration,
             "confidence_note": self.confidence_note(),
+            # Place and date (placeprior.py): whether a prior moved the scores, and the
+            # photos-only top where it changed it ({} otherwise).
+            "prior": {"applied": applied, "method": self.method},
+            "photo_only_top": photo_only_top,
         }
+
+    def _cue_tables(self, context):
+        cue = getattr(self, "cue", None)
+        return cue.tables(context) if cue is not None else None
+
+    def _add_place_cue(self, ranks: dict, tables) -> None:
+        """Each species and genus name ({rank: [{"name": ...}]}) gets `place`
+        (PlaceCue.cue): None without a place and date, and at family."""
+        cue = getattr(self, "cue", None)
+        for rank, names in ranks.items():
+            for c in names:
+                c["place"] = cue.cue(tables, rank, c["name"]) if cue is not None else None
 
     def _species_scores(self, query: np.ndarray, context) -> np.ndarray:
         if self.uses_context:

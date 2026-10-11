@@ -25,11 +25,12 @@ from typing import Callable
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, RedirectResponse,
+                               Response)
 from PIL import Image
 
-from . import (config, evaluate, fungusgate, inat, manifest, models, names, nightly, permissions,
-               serving, uploads)
+from . import (apiv1, config, evaluate, fungusgate, inat, manifest, models, names, nightly,
+               permissions, serving, uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import photos_per_second
@@ -261,6 +262,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                photo_fetcher: Callable[[], object] | None = None,
                paper_file: Path = PAPER_FILE,
                experiments_dir: Path | None = None,
+               server_key: str | None | bool = True,
+               taxon_counts: bool | None = None,
                fungus_gate: "fungusgate.FungusGate | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
@@ -277,6 +280,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     thread at startup, so the first person to identify doesn't wait for it (about
     30-45 s on the server box). The server answers meanwhile; an identification that
     arrives first waits for the load and then uses it.
+
+    The public API v1 (apiv1.py, docs/api.md) lives under /api/v1/ and answers only a
+    credential. `server_key` is mycomap.org's key (default: MV_ORG_VISION_KEY(_FILE));
+    `taxon_counts` turns on GET /api/v1/taxon-counts (default: MV_TAXON_COUNTS).
 
     `fungus_gate`: the not-a-fungus gate every identification passes (fungusgate.py).
     True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
@@ -317,6 +324,25 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return RedirectResponse(f"/auth/signin?returnTo={quote(here, safe='')}",
                                     status_code=302)
         return await call_next(request)
+
+    # The public API answers credentials, never the site's cookie. Registered after
+    # require_signin, so it runs before it; signin.needs_session leaves /api/v1/ alone.
+    # Every /api/v1/ path passes here, so no v1 route can be left open by mistake.
+    authenticator = apiv1.Authenticator(permissions.org_key() if server_key is True
+                                        else server_key or None)
+
+    @app.middleware("http")
+    async def require_v1_credential(request: Request, call_next):
+        if apiv1.is_v1(request.url.path):
+            try:
+                request.state.credential = authenticator.check(request.headers)
+            except apiv1.V1Error as e:
+                return e.response()
+        return await call_next(request)
+
+    @app.exception_handler(apiv1.V1Error)
+    async def v1_refusal(request: Request, exc: apiv1.V1Error):
+        return exc.response()
 
     def signin_failed(reason: str) -> HTMLResponse:
         return HTMLResponse(
@@ -806,6 +832,45 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     elif layer and background:
         schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
         nightly.start(schedule, run_nightly, note)
+
+    # GET /api/v1/taxon-counts (docs/api.md §7): DNA-validated reference records per name,
+    # read from the index the default model serves. Built once per index version.
+    if taxon_counts if taxon_counts is not None else config.setting("MV_TAXON_COUNTS") == "1":
+        counts_cache: dict = {}
+
+        def served_default() -> tuple[str, str]:
+            if warm.models:
+                backbone, _, method = warm.models[0].partition("/")
+                return backbone, method
+            ready = ready_backbones()
+            if not ready:
+                raise apiv1.V1Error(503, "updating", "no model is ready yet", retry_after=30)
+            return ready[0], default_method()
+
+        @app.get("/api/v1/taxon-counts")
+        def v1_taxon_counts(request: Request):
+            backbone, method = served_default()
+            view = permission_view()
+            version = index_version(backbone, method, view)
+            try:
+                ident = identifier(backbone, method, view)
+            except (serving.Updating, NotTrainedHere) as e:
+                raise apiv1.V1Error(503, "updating", str(e), retry_after=30) from e
+            key = (id(ident), version)   # a failed rebuild may still serve the old index
+            if key not in counts_cache:
+                doc = apiv1.taxon_counts(
+                    ident.rank_counts, records=ident.records,
+                    model={"backbone": backbone, "method": method,
+                           "version": layer.release_id if layer else None},
+                    nightly_version=version[3] if layer else None)
+                body = apiv1.encode(doc)
+                counts_cache.clear()
+                counts_cache[key] = (body, apiv1.etag_of(body))
+            body, etag = counts_cache[key]
+            headers = {"ETag": etag, "Cache-Control": "private, max-age=3600"}
+            if etag in (request.headers.get("if-none-match") or ""):
+                return Response(status_code=304, headers=headers)
+            return Response(body, media_type="application/json", headers=headers)
 
     # The built frontend (web/dist), when present: files as-is, any other
     # non-API path gets index.html so client-side routes work on reload.
