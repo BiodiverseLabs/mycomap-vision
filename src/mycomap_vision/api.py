@@ -1032,6 +1032,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 return Response(status_code=304, headers=headers)
             return Response(body, media_type="application/json", headers=headers)
 
+    # Any other /api/v1/ path, by any method (a part turned off, a typo): a v1 404, never
+    # the site's catch-all below, which would answer a POST with 405.
+    @app.api_route("/api/v1/{rest:path}", include_in_schema=False,
+                   methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    def v1_not_found(rest: str):
+        raise apiv1.V1Error(404, "not_found", "no such API route (or it isn't turned on here)")
+
     # The built frontend (web/dist), when present: files as-is, any other
     # non-API path gets index.html so client-side routes work on reload.
     if web_dist and (web_dist / "index.html").exists():
