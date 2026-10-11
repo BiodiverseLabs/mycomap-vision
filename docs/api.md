@@ -1,10 +1,11 @@
 # MycoMap Vision public API (v1), proposal
 
-Status: **draft for agreement**, 2026-10-11. Nothing here is built or deployed yet.
+Status: **agreed contract**, 2026-10-11: Steve decided the open items the same day
+(§10). Nothing here is built or deployed yet.
 Written by the Vision API lane with Mobile G (.org keys, plans, quotas, admin, app UI),
 whose proposal of the same day is merged in. Mobile H (taxon counts), the not-a-fungus
-gate lane and the Vision Coordinator are copied. Steve reviews and decides; items marked
-**(decide)** are open.
+gate lane, the place/date prior lane and the Vision Coordinator are copied. Steve
+reviews and merges each part.
 
 Everything is under `https://vision.mycomap.org/api/v1/`. The website's routes
 (`/api/identify`, `/api/models`, …) stay as they are. They gain only the `timing` block.
@@ -143,13 +144,13 @@ Why sessions rather than stateless calls:
   a removed one or a place/date change runs `identify_vectors` over the stored vectors
   and never re-embeds. With today's default method (nearest+mean), place and date don't
   change the scores. They're echoed and used by methods with a place/date prior.
-- **Lifetime.** 30 min after the last call, 2 h at most from creation **(decide)**. A
+- **Lifetime.** 30 min after the last call, 2 h at most from creation (Steve). A
   session gone to expiry or a restart answers 404 `session_gone`. The app opens a new
   one and resends the photos it keeps locally anyway. Sessions belong to the credential's
   subject; anyone else gets 404.
-- `keep_photos: true` is accepted and recorded but changes nothing in v1. Keeping
-  consented photos (for review or training) needs storage and a consent text Steve
-  approves **(decide, later)**.
+- `keep_photos: true` is accepted and recorded but changes nothing in v1: **nothing is
+  kept** (Steve). Keeping consented photos would need storage and a consent text, and is
+  a later decision.
 - Memory: ~3 KB of vector per photo plus its per-photo answer (~5 KB), so 1,000 open
   sessions of 10 photos ≈ 80 MB. Capped by `MV_SESSIONS_MAX` (default 500); past it the
   oldest idle session is dropped.
@@ -226,6 +227,15 @@ model's result, not a `results` list.
   species, the name has ≥ 5 reference records. Ranks without a likely set (order and
   above, for now) are never `confident`. If measurement shows a better rule (§8), the rule
   changes on Vision and callers don't change.
+- **Place and date (reserved, from the prior lane).** Steve's place/date decision adds a
+  boost-only prior and a far-find cue per candidate: the distance to the nearest
+  DNA-validated record of that name, whether the date is in its season, a "far from
+  known records" flag, and the photo-only top name when the prior changed it. The field
+  names are reserved here: `candidate.place` (`{"nearest_record_km", "in_season",
+  "far_from_known"}`), and top-level `photo_only_top` (`{rank: name}` when it differs)
+  and `prior` (`{"applied": bool, "method"}`). The prior lane fixes the exact shape, and
+  this section is updated when it does. Distances are rounded (whole km) and never reveal
+  a record's location.
 - **`confidence`**: a softmax with a temperature fitted per rank on the newest weekly
   comparison (by log-likelihood). It is calibrated on average, not a promise per answer.
   `checked_coverage` says how often a likely set really held the right name on unseen
@@ -286,8 +296,7 @@ the website's routes). Retryable ones carry `Retry-After` and `retry_after_secon
 | 503 | `auth_unavailable` | .org couldn't be asked about a key Vision has no recent answer for |
 
 429 means the caller's own limits; 503 means the server is out of capacity, so the
-caller did nothing wrong. Agreed with Mobile G. **(decide: Steve's note said
-429 for capacity too; either works with an honest `Retry-After`.)**
+caller did nothing wrong (Steve).
 
 **Limits are per credential, never per IP**, for anything authenticated: a foray group
 on one hotspot or carrier NAT shares an address. The per-IP limit stays only on the
@@ -298,7 +307,7 @@ makes it a FIFO queue in front of the model. `queue_ms` reports the wait. When t
 estimated wait (photos ahead × the recent seconds per photo) would pass
 `MV_QUEUE_MAX_WAIT` (20 s), the call is refused at once with `busy` and that estimate as
 `Retry-After`. Website and app session calls go ahead of developer and by-observation
-calls **(decide)**.
+calls (Steve).
 
 **What the app does** (Mobile G): at most one photo in flight per device, ≤ 10 per
 observation, nothing when the user turned suggestions off. On `busy`/`updating` it
@@ -336,8 +345,8 @@ or `{"active": false, "reason": "unknown|pending|disabled|revoked|account_inacti
 - **`subject` (Vision asks for it):** an opaque, stable id for the owner, the same value
   as an app token's `sub`, e.g. an HMAC of the user id. Then a member's keys and app
   use can share one pool if Steve wants that, without Vision learning who they are.
-  Without it, each key is its own pool and a member with 3 keys gets 3×.
-  **(decide: per-key or per-member pool.)**
+  **One pool per member** (Steve): every key and the app count against the member's
+  `subject`. An admin override on a key gives that key its own limit.
 - Vision caches positive answers 60 s and negative ones 10 s. If .org is unreachable, a
   cached active answer is used for up to 10 min, then 503 `auth_unavailable`. Revocation
   reaches Vision within 60 s.
@@ -360,7 +369,7 @@ or `{"active": false, "reason": "unknown|pending|disabled|revoked|account_inacti
 
 - **Unit: one identification** = one `identify` call, one by-observation call, or one
   session (counted at its first photo; ≤ 10 photos). Counting per photo would punish
-  adding more photos, which gives better answers. Proposed by Mobile G **(decide)**.
+  adding more photos, which gives better answers (Steve).
   The CPU cost is per photo, so Vision also keeps a short per-credential window in
   **photos per minute** (`MV_PHOTOS_PER_MINUTE`, default 20) and a global daily ceiling
   for developer tokens (`MV_API_DAILY_PHOTOS`), so API use can't eat the capacity the
@@ -449,3 +458,16 @@ depth, and how often the top name was right when `confident` was true and when i
 `/api/vision/app-token`, `/api/vision/usage`, plan limits and per-key override
 (additive column), member and admin pages, the app client and UI. Nothing deploys to
 Vision without Steve's OK.
+
+## 10. Decisions (Steve, 2026-10-11)
+
+1. Server out of capacity → 503 `busy`; the caller's own limits → 429.
+2. Quota counts identifications (a call, or a session from its first photo), with a
+   photos-per-minute guard per credential.
+3. One pool per member (an opaque `subject` from .org), with a per-key admin override.
+4. Sessions: 30 min idle, 2 h hard cap.
+5. Interactive calls (website, app sessions) ahead of developer and by-observation calls.
+6. `keep_photos` is a no-op in v1: no photo is kept.
+
+The box stays 4 GB for now (Steve declined the resize). Session memory has a hard cap,
+set in `docs/capacity.md`.
