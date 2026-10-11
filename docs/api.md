@@ -117,7 +117,7 @@ Why sessions rather than stateless calls:
 ```
 
 → `201 {"session_id": "s_7Yp2…", "expires_at": "…", "max_photos": 10,
-"model": {"backbone", "method", "version"}, "context_used": {…}}`
+"model": {"name", "version", "calibrated_on"}, "context_used": {…}}`
 
 `POST /api/v1/sessions/{id}/photos`, multipart: `photo` (one file; JPEG, long side
 1024, q≈85, EXIF date kept) and `photo_ref` (the app's id for it, ≤ 64 chars):
@@ -168,7 +168,7 @@ model's result, not a `results` list.
 ```json
 {
   "request_id": "r_01J…",
-  "model": {"backbone": "bioclip-2", "method": "nearest+mean", "version": "<release>",
+  "model": {"name": "MycoMap Vision", "version": "2026-10-08",
             "calibrated_on": "2026-10-08"},
   "reference": {"records": 152915, "species": 9876, "photos": 593224},
   "photos": 3,
@@ -212,6 +212,12 @@ model's result, not a `results` list.
 }
 ```
 
+- **`model`** (Steve, 2026-10-11: the product never names the backbone underneath):
+  `name` is always "MycoMap Vision"; `version` is the date of the release that answered
+  (`YYYY-MM-DD`): store it on records to say which model made a suggestion. It never
+  embeds a backbone id. `calibrated_on` is the date its confidences were last
+  calibrated. Backbone and method ids never appear in any v1 answer or refusal (tested),
+  and `prior` carries only `applied`. (Vision branch fix/api-v1-public-model-name.)
 - **Combined and per-photo, at every rank.** Top-level `ranks`/`likely`/`specimens` are
   the combined answer over the photos the gate kept. `per_photo[i]` is photo *i* alone,
   with `overall_top`: where the combined top name places in that photo's own ranking.
@@ -459,7 +465,7 @@ stay in front of the monthly numbers.
 
 ```json
 {"generated_at": "2026-10-11T12:00:00Z",
- "model": {"backbone": "bioclip-2", "method": "nearest+mean", "version": "<release>"},
+ "model": {"name": "MycoMap Vision", "version": "2026-10-08", "calibrated_on": null},
  "nightly_version": 12,
  "counts_are": "reference_records",
  "species": {"Amanita muscaria": 412, "Russula sp. 'IN01'": 7},
