@@ -185,6 +185,7 @@ function Footer() {
               ["https://mycomap.org/network", "Free sequencing"],
               ["https://mycomap.org/protocols", "Participation protocols"],
               ["https://mycomap.org/join", "Support MycoMap, a nonprofit"],
+              ["/api-docs", "API for developers"],
             ].map(([href, label]) => (
               <li key={href}>
                 <a href={href} className="text-white/70 hover:text-myco-green transition-colors">

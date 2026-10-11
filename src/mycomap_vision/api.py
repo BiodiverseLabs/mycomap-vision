@@ -32,7 +32,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apiv1, config, evaluate, fungusgate, inat, manifest, models, names, nightly,
+from . import (apidocs, apiv1, config, evaluate, fungusgate, inat, manifest, models, names, nightly,
                permissions, serving, uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
@@ -918,6 +918,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     elif layer and background:
         schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
         nightly.start(schedule, run_nightly, note)
+
+    # The API's public outline (apidocs.py): the Vision site's /api-docs page and the tab
+    # on mycomap.org/api-docs both render it. Open to anyone, from any site.
+    v1_parts = {"identify": bool(api_v1 if api_v1 is not None
+                                 else config.setting("MV_API_V1") == "1"),
+                "taxon_counts": bool(taxon_counts if taxon_counts is not None
+                                     else config.setting("MV_TAXON_COUNTS") == "1")}
+
+    @app.get("/api/docs/v1.json")
+    def api_outline():
+        return JSONResponse(apidocs.outline(v1_parts),
+                            headers={"Access-Control-Allow-Origin": "*",
+                                     "Cache-Control": "public, max-age=300"})
 
     # POST /api/v1/identify (docs/api.md §3.1, §4): one model's answer for 1-10 photos,
     # with timing, confident/answer, and the caller's own short-window limit.
