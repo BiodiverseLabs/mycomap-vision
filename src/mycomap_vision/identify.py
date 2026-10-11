@@ -24,12 +24,13 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import config, likely
+from . import config, likely, taxonomy
 from .embed import normalise
 from .serving import map_embeddings
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
                        with_rows)
 from .licenses import photo_url
+from .higher import HIGHER_RANKS, HigherRanks
 from .placeprior import PlaceCue
 from .sources import INAT, record_url
 
@@ -253,6 +254,11 @@ class Identifier:
         # back to the OS. Park them in arrays, let the records go, and make them again.
         del records, by_id, row_of
         self._remake_names()
+        # Order, class and phylum (higher.py), from the taxonomy cache beside the manifest;
+        # None without one. Only callers that ask for them get them (the public API).
+        self.higher = HigherRanks.from_taxonomy(taxonomy.for_manifest(conn),
+                                                self.index.labels["genus"],
+                                                self.rank_counts["genus"])
         self.cue.attach(self.index)
 
     def _remake_names(self) -> None:
@@ -287,9 +293,13 @@ class Identifier:
                          n_specimens: int = 6, context=None,
                          photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
                          may_show: Callable[[PhotoInfo], bool] = only_open_licences,
-                         n_photo_specimens: int = 3) -> dict:
+                         n_photo_specimens: int = 3, higher_ranks: bool = False,
+                         sims: np.ndarray | None = None) -> dict:
         """Query photo vectors (already normalised) -> ranks, specimens, hints.
         `context` (place and date) is used by methods with a range-and-season score.
+        `higher_ranks` adds order, class and phylum (higher.py) to the combined and
+        per-photo ranks. `sims`: the photos' similarities to every reference photo, when
+        the caller already has them (a batch scored together, workqueue.py).
 
         The main answer uses all the photos together. `per_photo` gives what the same
         model says from each photo on its own, so a person can see which photo pulled
@@ -300,7 +310,8 @@ class Identifier:
         now rather than when the model was built, so a licence change on iNat or a
         withdrawal on mycomap.org applies to the next identification."""
         n_q = int(query.shape[0])
-        sims = self.nearest.photo_sims(query)                 # (q, reference photos)
+        if sims is None:
+            sims = self.nearest.photo_sims(query)             # (q, reference photos)
         if self.model is self.nearest:
             # The nearest-specimen score is the mean of each photo's own scores, so
             # both come from the one similarity matrix.
@@ -326,7 +337,7 @@ class Identifier:
             scores = self._species_scores(query, context)
             per_photo = (np.stack([self._species_scores(query[i:i + 1], context)
                                    for i in range(n_q)]) if n_q > 1 else scores[None, :])
-        ranks = self._ranks(scores, top_k)
+        ranks = self._ranks(scores, top_k, higher=higher_ranks)
         applied = shift is not None if hasattr(self.model, "place_shift") else False
         # Where the place and date changed the top answer, what the photos alone said.
         photo_only_top = {}
@@ -336,7 +347,7 @@ class Identifier:
                               if alone[rank] and ranks[rank]
                               and alone[rank][0]["name"] != ranks[rank][0]["name"]}
         cue_tables = self._cue_tables(context)
-        self._add_place_cue(ranks, cue_tables)
+        self._add_place_cue({rank: ranks[rank] for rank in RANKS}, cue_tables)
         likely_sets = self._likely(scores)
         self._add_place_cue({rank: s["names"] for rank, s in likely_sets.items()}, cue_tables)
         # Records are ranked by the same rule as species: for each of your photos,
@@ -350,11 +361,11 @@ class Identifier:
         top = {rank: (ranks[rank][0]["name"] if ranks[rank] else None) for rank in RANKS}
         photos = []
         for i in range(n_q):
-            own = self._ranks(per_photo[i], top_k, with_position_of=top)
+            own = self._ranks(per_photo[i], top_k, with_position_of=top, higher=higher_ranks)
             self._add_place_cue({rank: own[rank]["candidates"] for rank in RANKS}, cue_tables)
             photos.append({
                 "photo": i,
-                "ranks": {rank: own[rank]["candidates"] for rank in RANKS},
+                "ranks": {rank: own[rank]["candidates"] for rank in own},
                 "overall_top": {rank: own[rank]["position_of"] for rank in RANKS},
                 "specimens": self._specimens(photo_picks[i], infos, may_show),
             })
@@ -395,9 +406,11 @@ class Identifier:
             return self.model.species_scores(query, context)
         return self.model.species_scores(query)
 
-    def _ranks(self, scores: np.ndarray, top_k: int, with_position_of: dict | None = None) -> dict:
+    def _ranks(self, scores: np.ndarray, top_k: int, with_position_of: dict | None = None,
+               higher: bool = False) -> dict:
         """Top candidates at every rank. With `with_position_of` ({rank: name}), each rank
-        is {"candidates": [...], "position_of": where that name places here, 1-based}."""
+        is {"candidates": [...], "position_of": where that name places here, 1-based}.
+        `higher` adds order, class and phylum after family (no position_of there)."""
         ranks: dict = {}
         for rank in RANKS:
             # Species candidates are species only: never a one-word name (evaluate.Index).
@@ -417,6 +430,12 @@ class Identifier:
             ranks[rank] = {"candidates": candidates,
                            "position_of": self._position(with_position_of.get(rank), names,
                                                          rs, finite, conf)}
+        if higher:
+            above = (self.higher.candidates(rank_scores(scores, self.index, "genus"), top_k)
+                     if getattr(self, "higher", None) else {r: [] for r in HIGHER_RANKS})
+            for rank, candidates in above.items():
+                ranks[rank] = (candidates if with_position_of is None
+                               else {"candidates": candidates, "position_of": None})
         return ranks
 
     def _likely(self, scores: np.ndarray) -> dict:

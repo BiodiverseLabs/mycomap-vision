@@ -33,7 +33,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
 from PIL import Image
 
 from . import (apiv1, config, evaluate, inat, manifest, models, names, nightly, permissions,
-               serving, uploads)
+               serving, uploads, workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -462,6 +462,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     db_lock = threading.Lock()
     gpu_lock = threading.Lock()
     backbones: dict[str, object] = {}
+    # Every identification goes through one queue in front of the model (workqueue.py):
+    # interactive calls first, and calls waiting on the same index share one search.
+    model_queue = workqueue.ModelQueue(
+        gpu_lock, max_wait=_setting_number("MV_QUEUE_MAX_WAIT") or 20.0,
+        max_batch_photos=int(_setting_number("MV_QUEUE_BATCH_PHOTOS") or 20), note=note)
+    app.state.model_queue = model_queue
 
     def q(sql: str, params: tuple = ()):
         with db_lock:
@@ -529,7 +535,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"ok": True, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
-                "nightly": nightly_health()}
+                "nightly": nightly_health(),
+                "queue": model_queue.state()}
 
     def nightly_health() -> dict:
         if not layer:
@@ -672,6 +679,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         context = Context(lat, lng, observed_on)
         timer = apiv1.Timer()
         try:
+            try:
+                model_queue.admit(interactive=True)
+            except workqueue.Busy as e:
+                raise HTTPException(503, "busy identifying other photos; try again shortly",
+                                    headers={"Retry-After": str(int(e.wait_seconds) + 1)}) from e
             out = run_identify(photos, models_, context, timer)
         finally:
             in_flight.leave()
@@ -686,22 +698,21 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return read
 
     def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
-                        may_show, timer: "apiv1.Timer", top_k: int = 5) -> dict:
-        """One model's answer, timed: waiting for the model, embedding, scoring."""
-        waited = time.monotonic()
-        with gpu_lock:
-            timer.add("queue_ms", time.monotonic() - waited)
+                        may_show, timer: "apiv1.Timer", top_k: int = 5,
+                        interactive: bool = True, higher: bool = False) -> dict:
+        """One model's answer through the queue, timed: waiting, embedding, scoring."""
+        def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
-            start = time.monotonic()
             prepare = getattr(model, "prepare", None) or (lambda im: im)
-            vecs = normalise(model.encode([prepare(im) for im in images]))
-            timer.add("embed_ms", time.monotonic() - start)
-            start = time.monotonic()
-            result = ident.identify_vectors(vecs, top_k, context=context,
-                                            photo_lookup=photo_lookup, may_show=may_show)
-            timer.add("score_ms", time.monotonic() - start)
-        timer.photos_embedded += len(images)
-        return result
+            return normalise(model.encode([prepare(im) for im in images]))
+
+        def finish(vecs, sims):
+            return ident.identify_vectors(vecs, top_k, context=context, sims=sims,
+                                          photo_lookup=photo_lookup, may_show=may_show,
+                                          higher_ranks=higher)
+        return model_queue.run(workqueue.Job(
+            key=id(ident), photos=len(images), embed=embed, search=ident.nearest.photo_sims,
+            finish=finish, interactive=interactive, timer=timer))
 
     def served_index(backbone: str, method: str, view, timer: "apiv1.Timer") -> Identifier:
         """identifier(), its wait for a rebuild counted as queueing."""
@@ -952,6 +963,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if wait:
                     raise apiv1.V1Error(429, "rate_limited", "too many photos in the last "
                                         "minute", retry_after=int(wait) + 1)
+            try:
+                model_queue.admit(interactive=cred.interactive)
+            except workqueue.Busy as e:
+                wait = int(e.wait_seconds) + 1
+                raise apiv1.V1Error(503, "busy", "busy identifying other photos",
+                                    retry_after=wait, estimated_wait_seconds=wait) from e
             if not in_flight.enter():
                 raise apiv1.V1Error(503, "busy", "busy identifying other photos",
                                     retry_after=10, estimated_wait_seconds=10)
@@ -967,7 +984,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 result = embed_and_score(
                     ident, backbone, [img for img, _ in read], context,
                     lambda info: view.may_show(info.license_class, info.owner_user_id),
-                    timer, top_k)
+                    timer, top_k, interactive=cred.interactive, higher=True)
             finally:
                 in_flight.leave()
             body = v1_result(result, backbone, method, used, timer)
