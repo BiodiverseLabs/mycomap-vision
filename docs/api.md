@@ -367,10 +367,13 @@ No new secret on the Vision box: it reuses `MV_ORG_VISION_KEY` and the bridge pu
 or `{"active": false, "reason": "unknown|pending|disabled|revoked|account_inactive|wrong_service"}`.
 
 - `limit` is the effective limit after any per-key admin override (`limit_source`:
-  `plan` | `override`). Vision enforces exactly that. `plan` is for display.
+  `plan` | `override` | `staff`). `monthly: null` means unlimited. Vision enforces
+  exactly that. `plan` is for display.
 - **`subject` (Vision asks for it):** an opaque, stable id for the owner, the same value
-  as an app token's `sub`, e.g. an HMAC of the user id. Then a member's keys and app
-  use can share one pool if Steve wants that, without Vision learning who they are.
+  as an app token's `sub`: `"u_"` + the first 32 characters of base64url
+  HMAC-SHA256(`VISION_SUBJECT_SECRET`, or `VISION_API_KEY` when unset,
+  `"vision-subject:v1:" + userId`). A member's keys and app use share one pool without
+  Vision learning who they are.
   **One pool per member** (Steve): every key and the app count against the member's
   `subject`. An admin override on a key gives that key its own limit.
 - Vision caches positive answers 60 s and negative ones 10 s. If .org is unreachable, a
@@ -381,10 +384,13 @@ or `{"active": false, "reason": "unknown|pending|disabled|revoked|account_inacti
 
 - `POST https://mycomap.org/api/vision/app-token` (the app's Bearer JWT, or a web
   session) → `{"token": "mvt.<body>.<sig>", "expires_at": "…" (15 min),
-  "vision_base": "https://vision.mycomap.org", "quota": {"limit", "period"}}`.
+  "vision_base": "https://vision.mycomap.org",
+  "vision_api": "https://vision.mycomap.org/api/v1", "quota": {"limit", "period"}}`.
+  **The app takes Vision's address only from `vision_api`**, so it can move without an
+  app release. Built on .org branch `feat/mobile-vision` (d2e124fd, not merged).
 - Same Ed25519 key and body/signature format as the sign-in bridge; body
-  `{"v": 1, "typ": "vision-api", "sub", "aud": "https://vision.mycomap.org", "iat", "exp",
-  "plan", "limit"}`.
+  `{"v": 1, "typ": "vision-api", "sub", "aud": "https://vision.mycomap.org", "iat",
+  "exp": iat + 900, "plan", "limit"}`, where `limit: null` means unlimited (staff).
 - Vision requires `typ == "vision-api"`, the exact `aud`, and `exp` not passed (30 s skew).
   A bridge sign-in token has no `typ`, so it can't be used here. An app token has no
   `nonce`, so it can't finish a sign-in. Both directions are tested on Vision.
@@ -425,9 +431,24 @@ enforced from Vision's own count, never from .org's display.
 
 ### 6.6 Plan limits
 
-The numbers come from the capacity note (`docs/capacity.md`, next) and Steve.
-Placeholders, identifications per month: free member 300, supporting member 3,000,
-staff unlimited, per-key admin override any.
+Steve's table (2026-10-11), identifications per month per member, set on .org:
+
+| Plan (.org membership level) | identifications / month |
+|---|---|
+| free | 100 |
+| community-supporter | 500 |
+| network-supporter | 2,000 |
+| sustaining-supporter | 10,000 |
+| partner-organization | 10,000 |
+| sustaining-organization | 25,000 |
+| institutional-partner | 75,000 |
+| staff | unlimited (`null`) |
+
+A per-key admin override replaces the plan's number for that key. The box can't
+serve every plan at its ceiling at once: throttled, it answers roughly 1,500–2,500
+identifications a day for everyone together (`docs/capacity.md`). So the
+photos-per-minute guard and the developer-token daily ceiling (`MV_API_DAILY_PHOTOS`)
+stay in front of the monthly numbers.
 
 ## 7. Taxon counts (Mobile H)
 
