@@ -138,7 +138,8 @@ Why sessions rather than stateless calls:
 - `PATCH` → `{"context_used", "combined"}`; `GET` → `{"combined", "context_used",
   "expires_at"}` (`combined.per_photo` holds every photo); `DELETE …/photos/{photo_ref}`
   → `{"combined"}`; `DELETE` session → 204.
-- **What is kept.** Per photo: its vector for the served model, its gate verdict and its
+- **What is kept.** Per photo: its vector for the served model, the gate's base vector and
+  verdict with `p_fungus` (so a gate threshold change can re-judge it), and its
   per-photo answer, all computed once on upload. The photo itself is decoded, embedded
   and dropped in that call; **no photo bytes are kept**. Re-scoring after a new photo,
   a removed one or a place/date change runs `identify_vectors` over the stored vectors
@@ -151,9 +152,10 @@ Why sessions rather than stateless calls:
 - `keep_photos: true` is accepted and recorded but changes nothing in v1: **nothing is
   kept** (Steve). Keeping consented photos would need storage and a consent text, and is
   a later decision.
-- Memory: ~3 KB of vector per photo plus its per-photo answer (~5 KB), so 1,000 open
-  sessions of 10 photos ≈ 80 MB. Capped by `MV_SESSIONS_MAX` (default 500); past it the
-  oldest idle session is dropped.
+- Memory: ~70 KB a photo (its vectors, its species score row so a new photo never
+  re-searches the others, its best 2,000 records, its answer; `docs/capacity.md`). Hard
+  cap `MV_SESSIONS_MAX_MB=64`: past it the oldest idle session is dropped, and if all
+  were active in the last 2 minutes a new session gets 503 `busy`.
 
 ## 4. The answer
 
