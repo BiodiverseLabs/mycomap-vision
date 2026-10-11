@@ -3,6 +3,7 @@ title: 'Uninformative photos: drop or down-weight?'
 slug: uninformative-photos
 date: '2026-10-09'
 status: dropped
+reproducibility: exploratory-pre-freeze
 question: Should photos dominated by a voucher slip, a basket of fungi or habitat be dropped or weighted
   down when a find's photos are combined?
 branch: exp/uninformative-photos (merged 4a3265d, docs only)
@@ -70,6 +71,8 @@ No change to nearest.
 
 ## Decision
 Dropped; not to be proposed again (Steve, 2026-10-09).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 None. Better levers: underside and stem photo hints, species-complex scoring, more references.

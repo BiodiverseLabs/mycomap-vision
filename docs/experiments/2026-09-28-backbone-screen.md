@@ -3,6 +3,7 @@ title: Which frozen image model? Screening eight backbones
 slug: backbone-screen
 date: '2026-09-28'
 status: adopted
+reproducibility: exploratory-pre-freeze
 question: Which off-the-shelf image model gives the best nearest-specimen identification of fungi before
   any fine-tuning?
 branch: main (models.py registry, mv compare)
@@ -74,6 +75,8 @@ later work).
 
 ## Decision
 BioCLIP 2 adopted as the backbone (Steve, 2026-09-28).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 DINOv3-L 512 on the full data only if an ensemble test on the sample earns it.

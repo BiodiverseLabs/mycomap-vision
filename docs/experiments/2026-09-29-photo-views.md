@@ -3,6 +3,7 @@ title: 'Photo views: crops, slip and habitat tags'
 slug: photo-views
 date: '2026-09-29'
 status: dropped
+reproducibility: exploratory-pre-freeze
 question: Do voucher slips, microscope and habitat photos hurt identification, and do crops or view tags
   help?
 branch: feat/photo-views (deleted 2026-09-29; only record is the memory note and this entry)
@@ -53,6 +54,8 @@ Not worth building.
 ## Decision
 Dropped (Steve, 2026-09-29). Re-tested on the full-run model as uninformative-photos (also
 dropped).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 None.

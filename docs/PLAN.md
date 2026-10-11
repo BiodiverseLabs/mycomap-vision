@@ -8,6 +8,154 @@ mycomap.org links to it and calls its API when needed.
 Decisions to date are recorded in the project memory and CLAUDE.md. This file is
 the working plan; update it as phases land.
 
+## Next phase: a reproducible dataset release, and every experiment re-run on it (Steve, 2026-10-09)
+
+Steve: "For the past experiments, if there has been drift of image numbers and what's included,
+none of them are replicable from a scientific perspective. I would like to redo the experiments
+once we finish image labeling improvement, photo inclusion/exclusion (MO, MP, etc), so that way
+they are reproducible by anyone and better suited for inclusion in a future paper." And: "I want to
+make sure all of our experiments and the decisions made from them are fundamentally sound."
+
+**Why.** Every experiment so far read the live manifest: records were added and renamed nightly,
+labels were refreshed, photos were downloaded and withdrawn, and 5.8% of reference records turned
+out to carry photos of unrelated iNaturalist observations (non-iNat record ids taken for iNat ids;
+label audit 2026-10-09). Two runs of the "same" experiment a week apart did not see the same data,
+and none can be rebuilt by someone else. From here on, research numbers come from a frozen,
+versioned dataset release; the live site keeps changing on its own track.
+
+### 1. The freeze gate (all must hold before release v1 is cut)
+
+| # | Condition | Owner / status |
+|---|---|---|
+| G1 | **Labels fixed by Steve's name rule (2026-10-09)**: the iNat Species Name Override beats the Provisional Species Name; the MycoBank number is looked up from that name (.com scientificnames API, cached on .org; the tie rule is being confirmed with Steve in the sync session); name and number always agree. Also: the stale-name refresh (incl. the BC02 bulk write and the *Tubariua* typo); the .com stale index-number repair (taxonomy_index.index_mycobank_number left on the old number after a rename: ~3,450 references, 87 development and 290 test answer keys; the index session is building the fix); then a full .org API sync after that deploy. The label snapshot time is recorded | label, index and sync lanes; in progress |
+| G2 | **Sources decided and carried**: the export carries `observations.source` (records.py EXPORT_SQL lacks it today). iNaturalist records in; DNA-validated Mushroom Observer records in **with their own MO photos**; MyCoPortal and .com Sequences records out (no photos of the specimen) | export fix + MO photo fetch: to build |
+| G3 | **Wrong-photo records out**: the 8,868 records whose photos came from unrelated iNat observations, and any found later | label-audit lane |
+| G4 | **Guest organisms** applied (guests.py, adopted 2026-10-07) | done |
+| G5 | **Non-fungus photos**: the not-fungus gate / photo scan decision made and applied (which photos are dropped, by what rule) | gate and scan lanes; decision open |
+| G6 | **Leave-one-out scan fixes** applied (records whose photos match another species far better than their own, after a person's check) | label-audit lane |
+| G7 | **Held-out records and the test set: DECIDED (Steve, 2026-10-09)**. The 13,145 records **join v1's training and references**, dated like every record (their membership kept as columns); they stay a pre-freeze development benchmark only. Steve **provides a new dataset of new records for testing**: it becomes `v1-test`, cut later, disjoint from v1 by record and by photo bytes, and never trainable. Consequence: an "after" score on the same 13,145 is no longer valid once v1 trains on them, so before/after comparisons use `v1-test` | decided |
+| G8 | **Photo permissions** fixed at the freeze: which all-rights-reserved photos are used (answered yes / no answer / withdrawn), as of a recorded date | rule exists (permissions.py); snapshot at freeze |
+
+### 2. Dataset release v1 (immutable)
+
+A read-only snapshot, never edited after it is cut; a correction makes v2. North America only.
+Stored apart from the serving releases, in `data/research-releases/<id>/` (S3
+`research-releases/<id>/` later), with a `MANIFEST.json` and a `SHA256SUMS` of every file. The
+full specification is `docs/dataset-release.md` (release builder, feat/dataset-release).
+
+- **records**: id, source (iNat / MO), label, label provenance (title field, override or
+  provisional, refresh time), title snapshot time, validation date, validating project(s), name
+  kind (formal / provisional / one-word), family and genus from the taxonomy snapshot.
+- **photos**: photo id, record, the **original's** sha256, size, licence and licence class, and a
+  **public-trainable** flag (CC licence, NC included, or the photographer's permission granted;
+  Steve 2026-10-09); the derivation recipe and each derived image's sha256 (below). Owners and
+  coordinates stay in a private companion table.
+- **inclusion list**: every candidate record with in / out and a reason code (source, wrong photos,
+  guest, non-fungus, no photos, label conflict, one-word without a usable rank, held out).
+- **splits**: `train` and `val`, by time (val = the newest 8 weeks unless Steve sets a cutoff).
+  The test set is `v1-test`: Steve's new dataset of new records, cut later, disjoint from v1 by
+  record and by photo bytes, never trainable. (The 13,145 held-out records are ordinary training
+  records in v1; their membership is kept as columns.)
+- **hashes** (what `rel.cite()` returns, and what experiments record): `dataset_release` (the id),
+  `release_hash`, `reference_hash` (train + val: record key, label and the sorted sha256s of its
+  original photos), `labels_hash`, and `release_code_commit`; the taxonomy snapshot; the sha256 of
+  every model trained on it.
+- **dataset card** (datasheet): what is in it, how it was built, known gaps and biases, licences.
+
+**Images: originals kept, derived images by recipe (Steve, 2026-10-09).** No zip archives. The
+original photos (S3 `large`, ~624k photos, ~274 GB) are retained permanently. A release records
+each photo's original sha256 and a deterministic derivation recipe (resize and crop algorithm,
+size, JPEG quality, library and version) together with each derived image's sha256, so anyone can
+regenerate exactly the image a model saw, on demand, and check it. Public derivation is for
+CC-licensed photos only.
+
+**Who builds it.** A dedicated session owns the release builder (task "Prep Vision Dataset release
+v1 builder"; specification `docs/dataset-release.md` on feat/dataset-release). Its commands are
+`mv dataset build | verify | derive | diff | public | show` (`mv release` stays the serving
+publisher). A release id is only frozen with `--freeze-approved "<who, when>"` and every derived
+hash in place; research commands refuse a draft unless `--allow-draft`. It does not cut v1 until
+Steve gives the trigger.
+
+**Rules once v1 exists.** Every research command takes `--release v1` (or `--manifest <path>`) and
+writes the release's citation (`rel.cite()`: release id, release hash, reference hash, labels hash,
+release code commit) and its own code commit into its outputs (`mv compare --release v1` and
+`mv heldout predict --release v1` are wired); registry entries after the
+freeze must carry them (tests/test_experiments.py enforces it). Research never reads the live
+manifest. Live serving (nightly updates, permission syncs) keeps changing and is reported apart;
+a serving release says which research release its model came from.
+
+### 3. Every past decision is provisional until re-run on v1
+
+All 18 registry entries are tagged `reproducibility: exploratory-pre-freeze`. What the site does
+today follows them, but each decision is provisional:
+
+| Decision | Registry entry | In effect now |
+|---|---|---|
+| BioCLIP 2 as the backbone | backbone-screen | yes |
+| Small classifier heads dropped | trained-heads | yes |
+| Photo views, crops and filters dropped | photo-views, uninformative-photos | yes |
+| Per-photo votes dropped | nearest-mix | yes |
+| 8-bit model not used | int8-onnx | yes |
+| Guest genera left out | guest-genera | yes (part of the freeze gate) |
+| The fine-tuned model served | full-run-finetune | yes |
+| Likely-name lists | likely-sets | yes |
+| s.l. and complex scoring beside strict | name-equivalence | yes (scoring only) |
+| Nearest + species average as the default | depth-bias | yes, once deployed |
+| DNA-record range prior not default | dna-range-prior | yes |
+| Occurrence prior | occurrence-prior | not tuned |
+| Outside comparisons (iNat CV, published Danish models) | inat-cv-baseline, published-danish-models | reported as development |
+
+**Re-run order** (what defines the benchmarks first, then what builds on them):
+1. Scoring and benchmark definitions: name equivalence (rule check), the temporal splits, the
+   likely-list protocol; `v1-test` once Steve's new records are validated and cut.
+2. Backbone screen (frozen models, cheap).
+3. Full fine-tune on v1, saving its classifier heads; the heads scored; the trained-heads
+   comparison; the Picek replication on exactly v1's training records. **Image-size arm**
+   (registry: image-size): BioCLIP 2 fine-tuned at 224 vs 336 vs 448 px input (it has only ever
+   run at 224; DINOv3 went 4.4 -> 16.2% species from 256 to 512 px); about 2-4x the compute.
+4. Scoring method: nearest vs nearest + species average vs species average (`val`).
+5. Calibration and likely lists (fitted on `val`, checked on `v1-test`).
+6. Priors: DNA-record and occurrence (tuned on `val`).
+7. Photo handling: per-photo votes, uninformative photos, 8-bit model.
+8. Outside comparisons: iNat CV (iNat identifications snapshotted first, model version recorded)
+   and the published Danish models, on `v1-test`.
+9. Descriptive analyses (genus gap, depth over time).
+
+A decision stands if its re-run agrees within its interval; otherwise it is revisited and the
+registry entry says so.
+
+### 4. Lanes running now
+
+Their results are exploratory. Each analysis should ship as **one re-runnable command** taking
+`--release` / `--manifest`, so the v1 re-run is mechanical. Data corrections they find (labels,
+sources, photos) are acted on now and feed the freeze gate; method decisions stay provisional.
+
+### 5. "Reproducible by anyone": what is public (DECIDED, Steve 2026-10-09: approved as drafted)
+
+**Public** ("the standard"): iNaturalist and MO record ids; labels with provenance; every
+Creative Commons licence (NC and ND photos as plain resizes only), with each photo's attribution,
+licence and public URL; the inclusion list with reasons; splits; the code; the dataset card and
+model card; aggregate results. **Not public**: all-rights-reserved photo files (used with the
+photographers' permission for our model, not ours to redistribute), never; coordinates, never;
+observer contact and permission records.
+
+Two variants of each release:
+- **v1** (ours): everything we may use, including permitted all-rights-reserved photos.
+- **v1-cc** (public, built from v1): Creative Commons photos only. Anyone can rebuild it from
+  public URLs and get the same numbers; its results are reported next to ours, and the paper
+  explains the difference.
+
+**Model weights (Steve, 2026-10-09).** Internal benchmarking models may train on all photos,
+all-rights-reserved included. The **final public model** trains only on public-trainable photos
+(CC, NC included, or permission granted); its model card says so and lists the photo set by its
+release hash.
+
+**Where the public files live: Zenodo, with a DOI (DECIDED, Steve 2026-10-09).** Each public
+release (CC-only) is deposited as a Zenodo record with its own DOI; a new release is a new version
+of the same Zenodo concept record. The release builder's `mv dataset public` writes a Zenodo-ready
+bundle: the record metadata (title, creators, description, version, related identifiers such as the
+paper, keywords), the files list with checksums, and the licence of every file; CC photos only.
+
 ## Phase 0: data and a first honest number (in progress)
 
 - [x] Export green records from mycomap.org (read-only). 164,201 records,
