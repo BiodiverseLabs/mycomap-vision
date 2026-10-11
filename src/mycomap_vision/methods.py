@@ -367,6 +367,12 @@ for _base in (LinearHead, Hybrid):
 for _base in (NearestSpecimen, SpeciesMean):
     METHODS[f"{_base.name}+occ"] = partial(WithOccurrence, _base, True)
 
+# nearest + species average with place and date (placeprior.py; Steve, 2026-10-11): the
+# boost prior only when a place or date is given, else nearest + species average exactly.
+from .placeprior import NearestMeanPlace  # noqa: E402
+
+METHODS[NearestMeanPlace.name] = NearestMeanPlace
+
 
 def method_ready(name: str) -> bool:
     """False for a method whose data isn't on this machine (a +occ method without an
