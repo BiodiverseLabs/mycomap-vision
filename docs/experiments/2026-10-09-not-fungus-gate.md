@@ -203,6 +203,21 @@ On the 168 photos of DNA-verified slime-mould reference records: not a fungus 31
 (77% not sure, 23% passed). The lift never touches a fungus verdict, so no DEV record loses a chance;
 14 DEV fungus photos that were left out are kept as "not sure" instead.
 
+### Naming a slime mould (Steve, 2026-10-11)
+A photo not judged a fungus whose slime-mould class probability is at least 0.5 (Steve's value, not
+tuned) is named: the find says "This looks like a slime mould." with "Slime moulds aren't fungi, but
+MycoMap holds some DNA-verified ones; the closest are below, without a stated chance." A fungus
+verdict is never relabelled. With the frozen gate: 90% of the 120 slime-mould photos are called slime
+moulds; 1 of 1,582 everyday non-fungi and 1 of 60 oak galls; no lichens, Nostoc, food or Monotropa.
+On DEV, 5 of 2,989 true fungus records would be called a slime mould, all crust fungi
+(Phanerochaete, Botryobasidium twice, Resinicium, Cheimonophyllum), which already had no stated
+chance. A higher value does not spare them (still 4 at 0.6 to 0.9) and names fewer slime moulds (75%
+at 0.9), so 0.5 stays.
+
+The identifier itself names the right group only partly: on the 120 slime-mould photos its top answer
+is a slime mould 50% of the time (76% in the top 5), the iNat genus 36%, with 68 DNA-verified
+slime-mould records under 40 names to match against.
+
 ## Next
 - Deployment waits for memory room on the 4 GB box (Steve, 2026-10-11: box stays 4 GB for now; it
   peaks at 3.3 GB plus 1.9 GB swap during the nightly index swap). The served-vector probe fits
