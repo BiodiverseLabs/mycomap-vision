@@ -10,6 +10,7 @@ branch: exp/leakage-tta-stress (pushed, not merged)
 commits:
 - 318cf04
 - 1765827
+- cc0fb56
 benchmark: heldout-2026-10-08 (development benchmark, not sealed), reference 5dbfdb1d24a5
 split: dev (all choices); test (leakage confirmation only)
 model: bioclip-2-ft-20261007-165400
