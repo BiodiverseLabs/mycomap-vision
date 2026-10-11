@@ -611,8 +611,11 @@ each capped and at half weight, season kernel 10 days (`nearest+mean+prior`, con
 temperature 1.52). Species top-1 52.8 -> 55.1% on development (cross-validated), 54.3 -> 56.2% on
 test (confirmation only); genus +0.8 / +0.7. The iNat occurrence prior adds less (+1.2) and
 nothing on top. Cost: records whose species is known only more than 300 km away (test: 230 ->
-180 right of 1,039). Full record: docs/experiments/2026-10-09-prior-tuning.md. Pending Steve:
-whether it becomes the method when a place and date are given.
+180 right of 1,039). Follow-ups: a boost-only prior moves that cost (none beyond 1,500 km, a new
+loss at 100-300 km); a prior used only when the photos are unsure shrinks gain and cost alike.
+Steve (2026-10-09): no place prior is served for now; a prior is served only if it is best
+overall without losing the 300-1,500 km band, and none passed (gated, test 2026-10-11). Full
+record: docs/experiments/2026-10-09-prior-tuning.md.
 
 ## Training on an AWS GPU instance (Steve, 2026-09-28)
 

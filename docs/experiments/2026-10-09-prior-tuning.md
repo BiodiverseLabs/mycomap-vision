@@ -2,7 +2,7 @@
 title: Place and date prior on top of nearest + species average, tuned on development
 slug: prior-tuning
 date: '2026-10-09'
-status: done
+status: dropped
 question: Does a place-and-date prior (our DNA records, iNat occurrences, or both, with a season
   weight) add to nearest + species average once its settings are tuned honestly on development?
 branch: exp/prior-tuning
@@ -11,6 +11,8 @@ commits:
 - 31f6770
 - d3a4e58
 - bbc06c2
+- 3f7c643
+- 6c235d7
 benchmark: heldout-2026-10-08 development split (tuning, 5-fold cross-validation by observer); test
   (confirmation only, once)
 split: dev
@@ -27,8 +29,11 @@ headline: 'Development, cross-validated: nearest + species average 52.8 -> 55.1%
 verdict: The DNA-record prior at half weight adds about 2 points at species and 0.7 at genus to nearest
   + species average on development and test, but costs records whose species is known only far away;
   a boost-only follow-up moves that cost (none beyond 1,500 km, half at 300-1,500 km, a new one at
-  100-300 km) rather than removing it; the iNat occurrence prior adds less and nothing on top.
-decision: 'pending; the chosen setting is provisional, to confirm on Dataset release v1'
+  100-300 km) rather than removing it, and a prior used only when the photos are unsure still
+  loses the 300-1,500 km band; no variant passes Steve's rule.
+decision: 'Steve 2026-10-09: no place prior is served for now (everyone keeps nearest + species
+  average); his rule: best overall without losing the 300-1,500 km band. No variant passed (gated
+  follow-up on test, 2026-10-11). May come back with Atlas ranges or on Dataset release v1.'
 reproducibility: exploratory-pre-freeze
 related:
 - occurrence-prior
@@ -287,6 +292,57 @@ out-of-range finds), about half at 300-1,500 km, and a new loss at 100-300 km, w
 75 km kernel prefers species with records right at the spot. Overall it ties the first choice at
 species and is a little weaker at genus.
 
+### Follow-up 2: the prior only when the photos are unsure
+
+Steve (2026-10-09) chose not to serve either prior, because both lose the records far from their
+species' DNA records. His rule for a prior to be served: best overall WITHOUT losing the 300-1,500
+km band (records whose true species' nearest DNA record is 300-1,500 km away) against nearest +
+species average. Tried next: the prior added only in proportion to how unsure the photos are (the
+margin between the best and second-best species photo score). Grid declared and pushed before any
+result (6c235d7, `priortune.GATE_GRID`, 24 settings plus "no prior"; every one in
+`2026-10-09-prior-tuning-gate-settings.csv`): the first choice or the boost
+as the prior; a hard gate (full prior below the 0.25 / 0.5 / 0.75 quantile of the development
+margins, 0.011 / 0.026 / 0.052 in score units, none above) or a soft one (weight exp(-margin / s),
+s 0.01 / 0.02 / 0.04); scale 0.5 or 1. Selection follows the rule itself: on the training folds,
+the most species right among settings that keep at least nearest + species average's right answers
+in the band (every truth with a DNA reference), else no prior. Pass, judged on test: overall up and
+the band held, for every truth and for truths with 6+ references.
+
+Development: only 2 of the 25 settings held the band on all of development, one being "no prior";
+the other (boost x0.5, soft s = 0.01) was chosen on all of development and in three folds. Folds
+chose boost x0.5 soft 0.01 (3), x0.5 soft 0.02 (1) and x1 soft 0.04 (1); out of fold the choice
+held the band in 3 of 5 folds. Cross-validated: species 54.1, genus 81.7 (nearest + species average
+52.8 / 81.3); band 125 -> 121 right of 390. Fails on development already.
+
+Test (confirmation only; the third experiment confirmed on this split), n = 10,105 (species 9,867,
+genus 10,066), top 1 / 3 / 5 / 10:
+
+| method | species strict | species s.l. | species complex (beta) | genus strict | genus s.l. |
+|---|---|---|---|---|---|
+| nearest + species average | 54.3 / 72.0 / 77.4 / 83.4 | 54.3 / 72.0 / 77.4 / 83.4 | 57.2 / 73.9 / 79.0 / 84.4 | 83.0 / 92.2 / 94.1 / 95.7 | 83.6 / 92.3 / 94.2 / 95.7 |
+| gated (chosen: boost x0.5, soft s = 0.01) | 55.1 / 72.4 / 77.7 / 83.7 | 55.1 / 72.4 / 77.7 / 83.7 | 58.0 / 74.2 / 79.2 / 84.6 | 83.2 / 92.3 / 94.2 / 95.7 | 83.8 / 92.4 / 94.2 / 95.8 |
+
+Species top-1 (top-5) by the true species' reference records, gated: 0.0 (0.0) / 21.1 (42.3) /
+42.5 (74.6) / 67.5 (89.0) / 73.3 (91.7), n 343 / 1,134 / 2,250 / 4,450 / 1,690. Paired against
+nearest + species average: species 172 fixed / 90 broken (P < 0.001), genus 72 / 54 (P = 0.13).
+Confidence at the development temperature: ECE 0.057.
+
+Species top-1 by distance to the true species' nearest DNA record, test, nearest + species average
+-> gated (fixed / broken):
+
+| distance | every truth with a reference | truths with 6+ references |
+|---|---|---|
+| < 100 km | n 6,113: 64.3 -> 66.1 (+143 / -35) | n 5,689: 66.7 -> 68.4 (+132 / -34) |
+| 100-300 km | n 1,890: 50.1 -> 49.6 (+22 / -31) | n 1,583: 55.9 -> 55.5 (+19 / -26) |
+| 300-1,500 km | n 1,306: 30.8 -> 29.4 (+4 / -22) | n 807: 42.8 -> 41.4 (+4 / -15) |
+| > 1,500 km | n 215: 11.2 -> 12.1 (+3 / -1) | n 78: 20.5 -> 23.1 (+3 / -1) |
+
+**Fails the rule**: overall up (+0.8 points), but the 300-1,500 km band loses 18 records net (and
+100-300 km loses 9). Gating shrinks both the gain and the cost by about two thirds; it does not
+change their balance. Every variant tried (tuned, boost, gated; 1,956 settings in all) trades far
+finds for nearer ones, because ranking species with nearby records up is what pushes a far true
+species down.
+
 ## Verdict
 A place-and-date prior helps nearest + species average: on development, cross-validated, the
 DNA-record prior adds 2.3 points at species and 0.8 at genus; test confirms 1.9 and 0.7, with
@@ -298,19 +354,24 @@ the best, and the shipped settings score as well overall (55.5% on development).
 bought is gentleness: half weight keeps more of the records whose species is known only far away
 (the shipped settings keep 117 of 1,039 such test records with nearest, the tuned 180 with
 nearest + species average), but even the tuned prior gives up about 50 of them for about 240 gains
-nearer home. Confidence stays honest when the method carries its own temperature.
+nearer home. Confidence stays honest when the method carries its own temperature. No variant,
+including a boost-only one and one used only when the photos are unsure, keeps the 300-1,500 km
+band while gaining overall, so none passes Steve's rule.
 
 ## Decision
-pending
+Steve, 2026-10-09: no place prior is served for now; everyone keeps nearest + species average.
+Reason: far finds (range extensions, first state records, new Atlas sites) are the records MycoMap
+most wants, and every prior tried costs them; serving one would also steer submitters and
+validators toward places already sampled. Rule for serving one later: best overall without losing
+the 300-1,500 km band. The gated follow-up (2026-10-11) did not pass it, so no serving branch was
+built. `nearest+mean+prior` stays in the code as an experimental method only.
 
 ## Next
 - Re-run on Dataset release v1 (`run_all.py --release`); until then the choice is provisional.
-- Steve: which trade-off, if any: the first choice (best overall and genus, worst for far
-  finds) or the boost (protects finds beyond 1,500 km, costs 100-300 km); and whether `nearest+mean+prior` becomes the method when a place and date are given
-  (photos only stays `nearest+mean`).
-- Range edges: done as the boost-only follow-up above; it moves the cost, not removes it. A
-  remaining idea is to use place to reorder only when the photos are unsure (weight the prior by
-  the photo margin), or to show it as a separate "found near here" cue instead of reordering.
+- Place as a separate cue next to the answer ("found near here" / "far from known records of
+  this species") instead of reordering: keeps far finds visible and flags possible range
+  extensions for validators. A site change, to plan with Steve.
+- Any future prior is judged by the same rule (overall up, 300-1,500 km band held).
 - MycoMap Atlas's range maps as the place term (the pluggable source in `atlasrange.py`) once
   its rebuilt release exists; compare on the same records and range-edge bands.
 - iNat's public (possibly obscured) place instead of mycomap.org's for the same records.
