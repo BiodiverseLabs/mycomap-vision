@@ -7,11 +7,22 @@ import { modelName, sendWaitingInLine } from "./publicView";
 export type Rank = "family" | "genus" | "species";
 export const RANKS: Rank[] = ["family", "genus", "species"];
 
+/** The place lane's far-find cue for one name (reserved in docs/api.md): present only when a
+ *  place or date was given and a model with a range-and-season score ran. */
+export interface PlaceCue {
+  nearest_record_km?: number | null;
+  in_season?: boolean | null;
+  far_from_known?: boolean | null;
+  /** The server's own wording, for other API clients; the page builds its lines (answer.placeCue). */
+  note?: string | null;
+}
+
 export interface Candidate {
   name: string;
   score: number;
   confidence: number;
   reference_records: number;
+  place?: PlaceCue;
 }
 
 export interface Specimen {
@@ -63,7 +74,7 @@ export interface LikelySet {
   coverage: number;
   /** The same, measured on records the list was not fitted on. */
   checked_coverage: number | null;
-  names: { name: string; confidence: number; reference_records: number }[];
+  names: { name: string; confidence: number; reference_records: number; place?: PlaceCue }[];
   /** True when more names qualified than are listed. */
   capped: boolean;
 }
@@ -81,6 +92,11 @@ export interface IdentifyResult {
   hints: string[];
   species_url: string | null;
   confidence_note: string;
+  /** Per rank, the top name from the photos alone when the place and date changed it
+   *  (reserved for the place lane). */
+  photo_only_top?: Partial<Record<Rank, string>>;
+  /** Whether a place/date prior was applied, and by which method (place lane). */
+  prior?: { applied: boolean; method: string };
 }
 
 export interface Where {
@@ -207,6 +223,35 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * POST with upload progress, which fetch can't report. Answers a standard Response so the
+ * caller treats it like fetch's. Falls back to fetch where XMLHttpRequest is missing.
+ */
+function postWithProgress(url: string, body: FormData, onSent?: (fraction: number) => void): Promise<Response> {
+  if (typeof XMLHttpRequest === "undefined") return fetch(url, { method: "POST", body });
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.responseType = "blob";
+    onSent?.(0);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && e.total) onSent?.(Math.min(1, e.loaded / e.total)); };
+    xhr.upload.onload = () => onSent?.(1);
+    xhr.onload = () => {
+      const headers = new Headers();
+      xhr.getAllResponseHeaders().trim().split(/[\r\n]+/).forEach((line) => {
+        const i = line.indexOf(":");
+        if (i > 0) headers.append(line.slice(0, i).trim(), line.slice(i + 1).trim());
+      });
+      // 204/304 can't carry a body in a Response.
+      const empty = xhr.status === 204 || xhr.status === 304;
+      resolve(new Response(empty ? null : xhr.response, { status: xhr.status, statusText: xhr.statusText, headers }));
+    };
+    xhr.onerror = () => reject(new TypeError("Network error: the photos couldn't be sent. Check your connection and try again."));
+    xhr.ontimeout = xhr.onerror;
+    xhr.send(body);
+  });
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new ApiError(res.status, await errorText(res));
@@ -263,9 +308,11 @@ export const api = {
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
   run: (id: number) => getJson<RunReport>(`/api/scoreboard/${id}`),
-  /** `onWait(attempt, seconds)`: the server was busy and the photos wait in line. */
+  /** `onWait(attempt, seconds)`: the server was busy and the photos wait in line.
+   *  `onSent(fraction)`: how much of the photos has been sent, 0 to 1, for each try. */
   async identify(photos: File[], models: string[], where: Where = {},
-                 onWait?: (attempt: number, seconds: number) => void):
+                 onWait?: (attempt: number, seconds: number) => void,
+                 onSent?: (fraction: number) => void):
       Promise<{ results: IdentifyResult[]; context_used: ContextUsed }> {
     const form = new FormData();
     photos.forEach((p) => form.append("photos", p));
@@ -276,7 +323,7 @@ export const api = {
     }
     if (where.observedOn) form.append("observed_on", where.observedOn);
     const res = await sendWaitingInLine(
-      () => fetch("/api/identify", { method: "POST", body: form }), onWait);
+      () => postWithProgress("/api/identify", form, onSent), onWait);
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();
   },
