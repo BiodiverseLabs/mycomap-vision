@@ -234,7 +234,20 @@ def test_the_upper_bound_is_the_fixs_photo_sources():
 
 
 def test_a_release_supplies_its_allowed_sources_through_the_seam():
+    """The release's allowed sources are its included records' sources (data, not a list);
+    excluded records don't count, and a release that includes another site is refused."""
+    import sqlite3
+
     class Release:
-        allowed_sources = ("inat", "mo")
-    assert retrain.allowed_sources(release=Release()) == ("inat", "mo")
+        id = "dry-test"
+
+        def __init__(self, rows):
+            self.db = sqlite3.connect(":memory:")
+            self.db.execute("create table records (source text, included integer)")
+            self.db.executemany("insert into records values (?, ?)", rows)
+
+    rel = Release([("inat", 1), ("mo", 1), ("mycoportal", 0)])
+    assert retrain.allowed_sources(release=rel) == ("inat", "mo")
     assert retrain.allowed_sources() == ("inat",)
+    with pytest.raises(retrain.RecordSourceError):
+        retrain.allowed_sources(release=Release([("inat", 1), ("mycoportal", 1)]))
