@@ -844,27 +844,58 @@ Prepare everything, but launch only once Vision's internal labelling is fixed an
 
 ### Launch day (runbook)
 
-**On a dataset release (2026-10-09, replaces the label-hash checks below).** The launch
-takes `--release <id> [--allow-draft]`: it verifies the release first (SHA256SUMS and
-MANIFEST.json, `mv dataset verify` semantics), and the release is the source of truth for
-records, labels, splits, photos, allowed sources and benchmark exclusion (v1 trains on the
-held-out 13,145, so `--picek-exclude-benchmarks all` is refused when the release trains on
-benchmark records). The release's `labels_hash` replaces our own as the identity check;
-the release id, MANIFEST hash and labels_hash go into the label snapshot and result.json,
-with the photo-licence policy (internal benchmarking: every included photo, ARR too) and
-the counts by licence class. release.sqlite, MANIFEST.json and SHA256SUMS ship with the run
-(never private.sqlite); the instance verifies them against the launch's MANIFEST hash
-before its first stage. Training: the release's `train` split; its `val` split for the
-plateau, the best macro-F1 epoch and the temperature; month and place prior counts from
-`train` only. v1 holds train + val only; its test set is the separate release `v1-test`
-(fresh records, disjoint by record and photo bytes), which training refuses (SealedLeak).
-Then, on the laptop: `mv compare --release v1 --test-release v1-test` (the Picek model
+**On a dataset release (2026-10-09, updated 2026-10-11; replaces the label-hash checks
+below).** The launch takes `--release <id> [--allow-draft]`: it opens the release with
+every file checked against MANIFEST.json (`mv dataset verify` semantics), and the release
+is the source of truth for records, labels, splits, photos, allowed sources and benchmark
+exclusion (v1 trains on the held-out 13,145, so `--picek-exclude-benchmarks all` is
+refused when the release trains on benchmark records). The release's `labels_hash`
+replaces our own as the identity check; the release id, MANIFEST hash and labels_hash go
+into the label snapshot and result.json, with the photo-licence policy and
+`public_trainable_only: false` (internal benchmarking: every included photo, ARR too; only
+the final public model is CC + permission-granted) and the counts by licence class.
+
+- **Splits.** v1 holds `train` + `val` only. Training: its `train` split; its `val` split
+  for the plateau, the best macro-F1 epoch and the temperature; month and place prior
+  counts from `train` only. The test set is the separate release `v1-test` (fresh
+  records, disjoint by record and photo bytes), which training refuses (SealedLeak).
+- **What ships** (`dataset.shipped_files`): every file MANIFEST.json lists except
+  private.sqlite (release.sqlite, DATASET_CARD.md, any review inputs), plus MANIFEST.json
+  and SHA256SUMS. **Never private.sqlite.** The instance opens its copy with the builder's
+  trainer mode, `load_release(id, without_private=True)`, which checks every one of those
+  files, and refuses any MANIFEST.json but the one the launch read.
+- **The place prior** (`classifier+month+place`, our extension). A release's places are in
+  private.sqlite, so the instance has none (`as_records()` gives lat/lon None there). The
+  launch makes the counts on the laptop from the release's own places (never the live
+  manifest's coordinates): per 4-degree cell, training photos per species, no coordinates
+  and no record ids. It ships them as `runs/<run>/picek-place-cells.json` with their
+  sha256, which the instance checks. A copy with neither private.sqlite nor shipped
+  counts refuses to train, rather than let `classifier+month+place` quietly equal
+  `classifier+month`. The instance's own comparison scores the methods on its manifest
+  copy; the reported numbers come from the laptop, which has the release's places.
+- **Sources.** The record-sources fix is on main (`mycomap_vision.sources`); the guard
+  uses `sources.migrated` and `sources.PHOTO_SOURCES`. On a release the allowed sources
+  are its included records' sources (`dataset.allowed_sources`: inat and mo in the drafts).
+
+Then, on the laptop: `mv compare --release v1 --test-release v1-test` (the Picek model is
 selected on v1's val, so it is reported on v1-test, against v1's train + val) and
 `mv external run --release v1` / `--release v1-test` for the published checkpoints. Code:
 replications/fungitastic/{dataset,release_eval,published_release}.py, on the builder's
 reader (mycomap_vision.dataset_release, feat/dataset-release, merged into this branch);
-dataset.py only adds what the reader lacks (verifying a trainer's shipped subset, the
-MANIFEST hash, the included sources).
+dataset.py only adds what the reader lacks (the trainer copy's file list, the MANIFEST
+hash, the included sources).
+
+**Dry run on a draft (2026-10-11).** On a scratch copy of the manifest, draft
+`dry-20261011-231034` (`mv dataset build --dry-run --derive none --recipes original`;
+labels_hash 149c95f2..., MANIFEST b15ebbee...): 143,796 train + 4,672 val records
+(577,451 + 17,604 photos), 16,640 species, sources inat 143,773 and mo 4,695 (allowed:
+inat, mo), photo licences nc 388,310, open 114,063, arr 92,682; 128 place cells; estimate
+46.2 h on g6.xlarge. It shipped MANIFEST.json, SHA256SUMS, DATASET_CARD.md and
+release.sqlite (not private.sqlite) and sent nothing.
+
+**The launch waits for Steve's v1 freeze trigger.** Then: `mv dataset build --name v1
+--freeze-approved "..."` (and `v1-test`), the dry run below on `--release v1`, and the
+launch.
 
 Everything below runs on **this PC** (Steve's Windows laptop). Shell commands are **Git
 Bash**; `aws login` can run in PowerShell or Git Bash. Nothing runs on the .org boxes.
@@ -885,7 +916,8 @@ feat/external-bvra-baselines together. Either:
   main checkout's `.env` beside it (git-ignored) and setting
   `MV_DATA_DIR=C:/Users/info/Projects/mycomap-vision/data`.
 
-Launch refuses uncommitted changes and a commit that isn't pushed.
+Launch refuses uncommitted changes and a commit that isn't pushed. Since 2026-10-11 only
+the Vision Coordinator merges to main; the replication branch is pushed and handed over.
 
 **On the instance.** The pinned, hashed requirements are installed. The BEiT weights
 (`timm/beit_base_patch16_384.in22k_ft_in22k_in1k`, ~350 MB) download from the Hugging
@@ -895,9 +927,11 @@ GPU AMI. `--ec2-check` reads the real size. The run needs about 3 GB for weights
 embeddings, plus the manifest.
 
 **Preconditions:**
-1. Labels final. The internal labelling fixes are done, and Vision's manifest is refreshed
-   with them (`mv export-records` or the weekly `mv refresh`; then `mv name-spellings`
-   and `mv taxonomy` look clean enough).
+1. Labels final, and frozen in Dataset release v1 (Steve's freeze trigger). The internal
+   labelling fixes are done, and Vision's manifest is refreshed with them
+   (`mv export-records` or the weekly `mv refresh`; then `mv name-spellings` and
+   `mv taxonomy` look clean enough). On a release, the release's records and labels are
+   what trains; the notes below on the live manifest are the history of the rule.
    - **Records from the release's allowed sources only (launch guard, 2026-10-09).** The
      label audit found 8,868 Vision reference/training records (5.8%) that are Mushroom
      Observer, MyCoPortal or .com sequence ids fetched AS iNat ids, so they carry other
@@ -905,27 +939,26 @@ embeddings, plus the manifest.
      The rule (Steve, 2026-10-09): train on records from the Dataset release's allowed
      sources, iNat and MO, each with photos from its own source (DNA-validated MO records
      are in, with MO's photos); MyCoPortal, .com sequences, GenBank and unknown are
-     excluded; Vision and the replication train on the SAME release. The launch waits
-     for the record-sources fix (feat/record-sources-mo: `records.source` normalised to
-     inat | mo | mycoportal | com_sequence | genbank | unknown) and a snapshot migrated
-     by it. The guard (`retrain.require_allowed_sources`, run by
-     `mv aws-launch-trainer --picek` and again by the instance before its first stage)
-     first asks whether the manifest is migrated: the `record-sources-v1` row in
-     `manifest_migrations` (`retrain.sources_migrated`; TODO: the fix's
-     `sources.migrated` once merged). Before that row, `records.source` is the old guess
-     ('inat' for any numeric id) and proves nothing, so a real launch is refused (the dry
-     run only warns). Once migrated, any training or validation record whose source is
-     outside the run's allowed sources refuses the launch, with the count by source.
-     The allowed set is a parameter, at most `PHOTO_SOURCES` (inat, mo); until a release
-     exists it is ('inat',), and a release will supply it through
-     `retrain.allowed_sources(release=...)` (TODO). The allowed set and the breakdown go
+     excluded; Vision and the replication train on the SAME release. The record-sources
+     fix is on main (`mycomap_vision.sources`: `records.source` normalised to inat | mo |
+     mycoportal | com_sequence | genbank | unknown; `evaluate.load_records` loads only inat
+     and mo records, each with photos of its own source). The guard
+     (`retrain.require_allowed_sources`, run by `mv aws-launch-trainer --picek` and again
+     by the instance before its first stage) first asks whether the manifest is migrated:
+     the `record-sources-v1` row in `manifest_migrations` (`sources.migrated`). Before
+     that row, `records.source` is the old guess ('inat' for any numeric id) and proves
+     nothing, so a real launch is refused (the dry run only warns). Once migrated, any
+     training or validation record whose source is outside the run's allowed sources
+     refuses the launch, with the count by source. The allowed set is a parameter, at
+     most `sources.PHOTO_SOURCES` (inat, mo); without a release it is ('inat',), and a
+     release supplies its own through `retrain.allowed_sources(release=...)`. The allowed set and the breakdown go
      into the label snapshot (`allowed_sources`, `record_sources`: picek-labels.json and
      result.json). A dry run also reports, for information, how many training records
      the laptop's audit file (`data/audits/record-sources-2026-10-09/org-sources-live.tsv`)
      lists as non-iNat; that file never ships.
    - **Photos come from each record's recorded source** (an MO record's photos from MO,
-     not from an iNat id). Not checked by the launch yet: it belongs with the release
-     builder (owner not decided), and the launch waits for a release that guarantees it.
+     not from an iNat id): main's `evaluate.load_records` and the release builder both
+     take only photos whose source is the record's.
 2. The Vision model the replication is compared against is trained on the same manifest
    state. Same `trained_through` (the cutoff 28 days before the newest record) and same
    benchmark exclusion.
@@ -942,15 +975,17 @@ embeddings, plus the manifest.
 5. `aws login` (profile `mycomap-vision`). The On-Demand G quota of 4 vCPU is enough for
    g6.xlarge.
 
-**Commands:**
+**Commands** (on v1, once frozen; a draft needs `--allow-draft` and counts for nothing):
 ```bash
 # 1. Dry run: builds and checks everything, sends nothing. Read the label snapshot it
-#    prints: records, species, provisional share, known label problems, labels hash.
-mv aws-launch-trainer --backbones none --finetune none --picek fungitastic-beit-b384@15 \
+#    prints: release, records, species, sources, licences, place cells, labels hash.
+mv aws-launch-trainer --release v1 --backbones none --finetune none \
+  --picek fungitastic-beit-b384@15 \
   --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
   --instance-type g6.xlarge --max-hours 52 --dry-run [--ec2-check]
 # 2. Launch: the same without --dry-run. Note the run id and the labels hash.
-mv aws-launch-trainer --backbones none --finetune none --picek fungitastic-beit-b384@15 \
+mv aws-launch-trainer --release v1 --backbones none --finetune none \
+  --picek fungitastic-beit-b384@15 \
   --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
   --instance-type g6.xlarge --max-hours 52
 # 3. Monitor: progress.json shows each epoch's validation loss, macro-F1, top-1 and
@@ -959,11 +994,11 @@ aws s3 cp s3://<bucket>/runs/<run>/progress.json - --profile mycomap-vision
 aws s3 cp s3://<bucket>/runs/<run>/train.log - --profile mycomap-vision | tail -50
 # 4. Pull: weights, head, records list, embeddings, scoreboard rows.
 mv aws-pull-trainer --run <run>
-# 5. The held-out dev set (dev only; test is not scored).
-mv heldout predict --name heldout-2026-10-08 --split dev \
-  --backbone picek-fungitastic-beit-b384-<run> \
-  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place
-mv heldout report --name heldout-2026-10-08 --split dev
+# 5. The test release, against v1's train + val (the model was selected on v1's val).
+mv compare --release v1 --test-release v1-test \
+  --backbones picek-fungitastic-beit-b384-<run>,<vision model> \
+  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
+  --per-image
 ```
 
 Use `--max-hours 52`, not 48. The estimate is 44.5 h, and the job stops itself 45 min
@@ -991,11 +1026,12 @@ photos/s; check it in the first hour (step 3). If it is below ~45/s, the run won
 - Compare with Vision on heldout dev (species top-1 and macro-F1, by reference depth)
   before spending more.
 
-**Open launch-day decisions (Steve):** when the labelling is final (the precondition);
-`--picek-exclude-benchmarks match` or `all` (match = what the compared Vision fine-tune
-used); 15 epochs now, 50 later from the curve; the month-prior smoothing (betas, tune on dev
+**Open launch-day decisions (Steve):** the v1 freeze trigger (the precondition);
+`--picek-exclude-benchmarks match` (on a release, the release's splits decide; `all` is
+refused when v1 trains on benchmark records); 15 epochs now, 50 later from the curve; the month-prior smoothing (betas, tune on dev
 only); whether the paper reports `classifier+month` (smoothed) or `classifier+month-raw`
-(their estimate) as "their method"; launch from main after review, or from the branch.
+(their estimate) as "their method"; launch from main once the Vision Coordinator has
+merged the branch.
 
 ## Phase 3: the platform
 

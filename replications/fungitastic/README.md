@@ -91,8 +91,10 @@ Retraining their recipe:
 - **Training photos are decoded at reduced size.** JPEGs are decoded in PIL's draft
   mode at no less than the crop size (1024 to 512 px, before the 384 px crop). This is
   cheaper and leaves the 384 px input essentially unchanged. Validation decodes in full.
-- **The place prior is ours.** `classifier+month+place` adds a coarse place prior.
-  It is not their method, and it is reported separately.
+- **The place prior is ours.** `classifier+month+place` adds a coarse place prior
+  (4-degree cells). It is not their method, and it is reported separately. Its counts
+  come from the release's own places, which are private, so they are made on the laptop
+  and shipped to the training instance as counts per cell and species (no coordinates).
 - **Their released code multiplies p(c | x) in twice** when it applies the prior. We
   use the formula in their paper.
 - **Unseen species get ~0 probability.** A classifier has no class for a species first
@@ -109,8 +111,9 @@ Retraining their recipe:
   exploratory runs used that.)
 - **Photos of every licence, for benchmarking.** The replication is internal
   benchmarking, so it trains on every photo the release includes, all-rights-reserved
-  ones too. The final public Vision model uses CC and permission-granted photos only.
-  Each run records this policy and its photo counts by licence class.
+  ones too (`public_trainable_only: false`). The final public Vision model uses CC and
+  permission-granted photos only. Each run records this policy and its photo counts by
+  licence class.
 
 Running their published checkpoints:
 
@@ -131,10 +134,11 @@ says which machine it runs on: **the laptop (this PC)**, or **an AWS g6.xlarge v
 
 Every result that counts is run on a **dataset release** (`<release>`, e.g. `v1`; spec:
 `docs/dataset-release.md`): a frozen, verifiable snapshot of records, labels, splits and
-photos under `data/research-releases/<release>/`, built with `mv dataset build`. Each
-command verifies the release first (MANIFEST.json, every file's sha256) and cites it in
-its output. A draft (`dry-<stamp>`) needs `--allow-draft`, and its results are not v1's.
-Tune on `v1`'s val split; report once on the test release `v1-test`.
+photos under `data/research-releases/<release>/`, built with `mv dataset build`. `v1`
+holds `train` + `val`; its test set is the separate release `v1-test`. Each command
+verifies the release first (MANIFEST.json, every file's sha256) and cites it in its
+output. A draft (`dry-<stamp>`) needs `--allow-draft`, and its results are not v1's.
+Tune on `v1`'s val split; report once on `v1-test`.
 
 ### On a dataset release (the laptop (this PC) unless said)
 
@@ -147,9 +151,11 @@ Tune on `v1`'s val split; report once on the test release `v1-test`.
    mv external run --release v1-test     # the test release, against v1's train + val
    ```
 2. Their recipe retrained, on an AWS g6.xlarge via `mv aws-launch-trainer`. Dry run
-   first (sends nothing), then the same without `--dry-run`. Only release.sqlite,
-   MANIFEST.json and SHA256SUMS ship (never private.sqlite); the instance verifies them
-   again, and refuses other labels than the release's labels_hash.
+   first (sends nothing), then the same without `--dry-run`. The release ships without
+   private.sqlite (release.sqlite, MANIFEST.json, SHA256SUMS, DATASET_CARD.md), with the
+   place prior's counts made on the laptop; the instance opens it with the builder's
+   trainer mode (`load_release(id, without_private=True)`), and refuses another
+   MANIFEST.json, other place counts or other labels than the release's labels_hash.
    ```bash
    mv aws-launch-trainer --release v1 --backbones none --finetune none \
      --picek fungitastic-beit-b384@15 \
@@ -260,13 +266,15 @@ the rest are provisional species or formal names their models never saw.
   re-run on the immutable Dataset release v1.
 - Published checkpoints: built and run on the development split. The paper's numbers
   come later, on the test release (v1-test).
-- Retrain: prepared and dry-run tested, not yet run. It waits for the Dataset release,
-  and Vision and the retrain train on the same release. The rule: records from the
-  release's allowed sources only (iNaturalist and Mushroom Observer, each with photos
-  from its own source). MyCoPortal, .com sequences and records of unknown source are
-  excluded. Some records from other sites were fetched as iNaturalist ids and carry the
-  wrong photos, so the launch is refused until every training and validation record's
-  recorded source is allowed.
+- Retrain: prepared, and dry-run tested on a draft release (2026-10-11: 143,796 train +
+  4,672 val records, 16,640 species, iNaturalist and Mushroom Observer; nothing sent).
+  Not yet run. The launch waits for Steve's freeze trigger for Dataset release v1;
+  Vision and the retrain train on the same release. The rule: records from the release's
+  allowed sources only (iNaturalist and Mushroom Observer, each with photos from its own
+  source). MyCoPortal, .com sequences, GenBank and records of unknown source are
+  excluded: the record-sources fix (`mycomap_vision.sources`) is on main, and the launch
+  still refuses a run unless every training and validation record's recorded source is
+  allowed.
 
 ## The code
 
@@ -279,7 +287,7 @@ All under [`src/mycomap_vision/replications/fungitastic/`](../../src/mycomap_vis
 | `published.py` | running their checkpoints: the class map, the observation rule, answers on a benchmark or a comparison |
 | `published_report.py` | the comparison protocol: coverage, genus and family, formal species, same vocabulary |
 | `crosswalk.py` | the GBIF Backbone + Catalogue of Life synonym crosswalk |
-| `dataset.py` | reading a dataset release: verified, read-only, never private.sqlite |
+| `dataset.py` | reading a dataset release: verified, read-only; a trainer's copy without private.sqlite |
 | `release_eval.py` | which split a release scores, against which reference; `mv compare --release` |
 | `published_release.py` | `mv external run --release`: the published checkpoints' protocol in one command |
 
