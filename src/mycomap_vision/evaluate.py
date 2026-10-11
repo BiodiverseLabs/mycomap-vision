@@ -78,7 +78,7 @@ def clean(s: str | None) -> str:
 
 
 def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
-                 north_america_only: bool = True) -> list[Record]:
+                 north_america_only: bool = True, release=None) -> list[Record]:
     """Green, unconflicted iNat and Mushroom Observer records with at least one embedded photo.
 
     Every reference set, comparison and training run is built here, so this is
@@ -105,7 +105,14 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     photos of its own source. MyCoPortal, .com Sequences, GenBank and unknown-source
     records are never loaded. An MO photo is used only when MO's use rule allows it
     (permissions.MO_EXCLUDED_FROM_USE_SQL). An MO record's observer is 'mo:<login>', so
-    it is never counted as the iNat account with the same name."""
+    it is never counted as the iNat account with the same name.
+
+    With `release` (a dataset release, dataset_release.load_release), the records,
+    labels and photos are the release's reference records (train + val), not the live
+    manifest's; the manifest only maps photos to vectors."""
+    if release is not None:
+        release.check_photos_match(conn)
+        return release.as_records(("train", "val"), photo_row)
     from .manifest import upgrade
     na = "and r.north_america = 1" if north_america_only else ""
     upgrade(conn)
@@ -517,8 +524,10 @@ class SharedSet:
 
 def shared_records(conn: sqlite3.Connection, backbones: list[str], test_days: int = 28,
                    max_test: int | None = None, seed: int = 0,
-                   embeddings_root=None) -> SharedSet:
-    """The records a comparison of these backbones uses: only photos all of them embedded."""
+                   embeddings_root=None, release=None) -> SharedSet:
+    """The records a comparison of these backbones uses: only photos all of them embedded.
+    With a dataset `release`, reference = its train split and test = its val split
+    (test_days is not used)."""
     from .embed import load_embeddings
     loaded = {}
     for b in backbones:
@@ -528,8 +537,14 @@ def shared_records(conn: sqlite3.Connection, backbones: list[str], test_days: in
             raise ValueError(f"no embeddings for {b!r}; run mv embed --backbone {b}")
         loaded[b] = (ids, vecs)
     common = set.intersection(*(set(ids.tolist()) for ids, _ in loaded.values()))
-    records = load_records(conn, {p: p for p in common})      # photo_rows hold photo ids
-    ref, test, cutoff = split_by_time(records, test_days)
+    if release is not None:
+        release.check_photos_match(conn)
+        ref = release.as_records("train", {p: p for p in common})
+        test = release.as_records("val", {p: p for p in common})
+        cutoff = release.val_cutoff or ""
+    else:
+        records = load_records(conn, {p: p for p in common})      # photo_rows hold photo ids
+        ref, test, cutoff = split_by_time(records, test_days)
     if max_test and len(test) > max_test:
         rng = np.random.default_rng(seed)
         test = [test[i] for i in sorted(rng.choice(len(test), max_test, replace=False))]
@@ -564,7 +579,7 @@ def save_run(conn: sqlite3.Connection, comparison_id: str, backbone: str, method
 def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] | None = None,
             test_days: int = 28, max_test: int | None = None, seed: int = 0,
             embeddings_root=None, name_scores: bool = False, sets: bool = True,
-            into: str | None = None, log=print) -> dict:
+            into: str | None = None, release=None, log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
@@ -590,7 +605,8 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         if max_test:
             raise ValueError("--into rebuilds a saved comparison's records: no sampling")
         test_days = saved[3]
-    shared = shared_records(conn, backbones, test_days, max_test, seed, embeddings_root)
+    shared = shared_records(conn, backbones, test_days, max_test, seed, embeddings_root,
+                            release=release)
     check_not_trained_on_test(conn, list(shared.loaded), shared.cutoff)
     ref, test = shared.ref, shared.test
     if into:
@@ -622,6 +638,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             runs.append(save_run(conn, comparison_id, b, m, shared, test_days, all_photos, first,
                                  extra))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
+            **({"dataset_release": release.cite()} if release is not None else {}),
             "reference_records": len(ref), "test_records": len(test),
             "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)
                                             / max(1, len(test)), 3),

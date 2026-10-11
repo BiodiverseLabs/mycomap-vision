@@ -183,6 +183,7 @@ class SigninConfig:
     public_key: object | None = None
     secret: bytes | None = None
     session_days: float = 7.0
+    dataset_public: bool = False        # MV_DATASET_PUBLIC: CC dataset images need no sign-in
 
     def __post_init__(self):
         if self.mode not in MODES:
@@ -220,6 +221,8 @@ class SigninConfig:
             public_key=load_public_key(Path(key_file).read_bytes()) if key_file else None,
             secret=Path(secret_file).read_bytes().strip() if secret_file else None,
             session_days=float(config.setting("MV_SESSION_DAYS") or 7),
+            dataset_public=(config.setting("MV_DATASET_PUBLIC") or "").lower()
+            in ("1", "true", "yes"),
         )
 
     def needs_session(self, method: str, path: str) -> bool:
@@ -228,6 +231,9 @@ class SigninConfig:
             return False
         # The public API answers its own credentials, never the site's cookie (apiv1.py).
         if path.startswith("/api/v1/") or path == "/api/v1":
+            return False
+        # The public dataset release's CC images (dataset_api.py), when Steve opens them.
+        if self.dataset_public and method in ("GET", "HEAD") and path.startswith("/api/dataset/"):
             return False
         if self.mode == "identify":
             return (method == "POST" and path == "/api/identify") or members_only(path)

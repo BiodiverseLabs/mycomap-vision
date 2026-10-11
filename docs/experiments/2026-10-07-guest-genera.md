@@ -3,6 +3,7 @@ title: Leave out records named for a guest organism
 slug: guest-genera
 date: '2026-10-07'
 status: adopted
+reproducibility: exploratory-pre-freeze
 question: Should records whose DNA name is a yeast or parasite living in or on the photographed fungus
   be left out?
 branch: feat/guest-genera-exclusion (merged 9dd37ec)
@@ -56,6 +57,8 @@ Adopt.
 
 ## Decision
 Adopted (Steve, 2026-10-07).
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Scan for further guest genera as the reference set grows.

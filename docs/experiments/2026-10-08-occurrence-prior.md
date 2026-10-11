@@ -3,6 +3,7 @@ title: Range and season from iNat occurrence data
 slug: occurrence-prior
 date: '2026-10-08'
 status: running
+reproducibility: exploratory-pre-freeze
 question: Does a range-and-season score from iNaturalist's open occurrence data, with only a wide berth
   for out of range, improve identification where our DNA records are too sparse?
 branch: feat/occurrence-prior (merged 88cc672)
@@ -58,6 +59,8 @@ Pending.
 
 ## Decision
 pending
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Tune on development, check once on test; count how often the true species is penalized; try it

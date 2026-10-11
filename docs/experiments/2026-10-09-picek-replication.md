@@ -3,6 +3,7 @@ title: 'Their method, our data: replicating the Danish Fungi training recipe'
 slug: picek-replication
 date: '2026-10-09'
 status: planned
+reproducibility: exploratory-pre-freeze
 question: Trained on exactly Vision's records, does the Danish Fungi / FungiTastic classifier recipe do
   better or worse than nearest-specimen retrieval?
 branch: feat/picek-replication (586b16d, not merged); feat/replications-fungitastic
@@ -57,6 +58,8 @@ Not run.
 
 ## Decision
 pending
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 Relabel from refreshed observation names; hours and cost on the g6.xlarge (4 vCPU loading limit)

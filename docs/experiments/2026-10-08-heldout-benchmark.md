@@ -3,6 +3,7 @@ title: 'Held-out benchmark: the ''before'' number'
 slug: heldout-benchmark
 date: '2026-10-08'
 status: done
+reproducibility: exploratory-pre-freeze
 question: How does the served model do on DNA-verified records that no model has seen?
 branch: feat/heldout-benchmark (merged e4a6d38); heldout-summary-format (merged)
 commits:
@@ -83,12 +84,19 @@ The "before" number is recorded; nearest + species average is confirmed (depth-b
 ## Decision
 Development benchmark only (Steve, 2026-10-08).
 
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
+
 ## Known data fault
 A label audit (2026-10-09) found 8,868 of 154,067 reference and training records (5.8%) whose
 photos belong to unrelated iNaturalist observations (non-iNat record ids taken for iNat ids).
 These results were measured with that reference set; the answer keys are unaffected. The rebuilt
 reference set and retrain will be the "after".
 
+## Role in dataset release v1 (Steve, 2026-10-09)
+These 13,145 records join v1's training and references, so they remain a pre-freeze development
+benchmark only. A score on them after a v1 retrain is not a valid "after": the model will have
+trained on them. Before/after comparisons use the new experiment dataset (freshly validated
+records, sealed) when it exists.
+
 ## Next
-The same records after the relabel and retrain ("after"); iNat on the subsample; seal a fresh
-paper test set.
+iNat CV on the 2,000-record subsample; the new experiment dataset for before/after.

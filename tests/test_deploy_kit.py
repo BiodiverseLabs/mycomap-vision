@@ -109,9 +109,12 @@ def test_the_web_build_runs_where_its_pnpm_version_is_pinned():
     assert "(cd web && pnpm install --frozen-lockfile" in deploy
 
 
-def _preload_state_seen_by_deploy(health_body: str) -> str:
-    """Run deploy.sh's own parsing of /api/health on `health_body`, in bash."""
-    import re
+def _preload_wait(tmp_path, answers: list[str | None],
+                  verify: str = 'echo "VERIFY RAN"') -> "subprocess.CompletedProcess[str]":
+    """Run deploy.sh's own preload wait (up to verify.sh), in bash, as the box would: under
+    `set -euo pipefail`, with `curl` answering each /api/health call from `answers` in turn
+    (None: the call times out, as while the model loads) and `sleep` adding 100 s at once.
+    verify.sh is replaced by `verify` (a marker line by default)."""
     import subprocess
 
     import pytest
@@ -119,13 +122,37 @@ def _preload_state_seen_by_deploy(health_body: str) -> str:
     if not bash:
         pytest.skip("needs bash")
     script = read("deploy.sh").replace("\r\n", "\n")
-    pipe = re.search(r'2>/dev/null \\\n\s*(\| grep -o .*?)\)"', script).group(1)
-    out = subprocess.run([bash, "-c", f"cat {pipe}"], input=health_body, capture_output=True,
-                         text=True, check=True)
-    return out.stdout.strip()
+    wait = script[script.index("preload_state() {"):script.index("bash deploy/lightsail/verify.sh")]
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for i, a in enumerate(answers):
+        (tmp_path / f"answer{i}").write_text("" if a is None else a, encoding="utf-8")
+        if a is None:
+            (tmp_path / f"answer{i}.timeout").write_text("", encoding="utf-8")
+    d = str(tmp_path).replace("\\", "/")
+    fake = f"""set -euo pipefail
+PORT=8010
+curl() {{
+  n=$(cat "{d}/calls" 2>/dev/null || echo 0); echo $((n + 1)) > "{d}/calls"
+  [ -f "{d}/answer$n" ] || n={len(answers) - 1}   # the last answer repeats
+  if [ -f "{d}/answer$n.timeout" ]; then echo "curl: (28) timed out" >&2; return 28; fi
+  cat "{d}/answer$n"
+}}
+sleep() {{ SECONDS=$((SECONDS + 100)); }}
+"""
+    return subprocess.run([bash, "-c", fake + wait + verify + "\n"],
+                          capture_output=True, text=True, timeout=60)
 
 
-def test_deploy_waits_for_the_model_and_not_for_the_nightly_updates_state(box):
+def _preload_state_seen_by_deploy(health_body: str, tmp_path) -> str:
+    """deploy.sh's own reading of the preload state in `health_body`."""
+    out = _preload_wait(tmp_path, [health_body])
+    assert out.returncode == 0, out.stdout + out.stderr
+    first = out.stdout.splitlines()[1]
+    return ("ready" if "ready after" in first else "failed" if "preload failed" in first
+            else "off" if "no preload" in first else first)
+
+
+def test_deploy_waits_for_the_model_and_not_for_the_nightly_updates_state(box, tmp_path):
     import time
 
     from fastapi.testclient import TestClient
@@ -147,9 +174,50 @@ def test_deploy_waits_for_the_model_and_not_for_the_nightly_updates_state(box):
             break
         time.sleep(0.05)
     assert '"nightly":' in body and body.count('"state":') == 2     # both blocks have a state
-    assert _preload_state_seen_by_deploy(body) == "ready"
+    assert _preload_state_seen_by_deploy(body, tmp_path / "a") == "ready"
     assert _preload_state_seen_by_deploy('{"ok":true,"preload":{"state":"failed","error":"x"},'
-                                         '"nightly":{"state":"ok"}}') == "failed"
+                                         '"nightly":{"state":"ok"}}', tmp_path / "b") == "failed"
+
+
+LOADING = '{"ok":true,"preload":{"state":"loading"},"nightly":{"state":"ok"}}'
+READY = '{"ok":true,"preload":{"state":"ready"},"nightly":{"state":"ok"}}'
+
+
+def test_a_slow_health_call_while_the_model_loads_does_not_end_the_deploy(tmp_path):
+    # 2026-10-11: one health call timed out during the 70 s preload and set -e ended the
+    # deploy before verify.sh ran.
+    out = _preload_wait(tmp_path, [LOADING, None, None, READY])
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "ready after" in out.stdout
+    assert out.stdout.rstrip().endswith("VERIFY RAN")
+
+
+def test_health_without_a_preload_block_keeps_waiting_instead_of_failing(tmp_path):
+    out = _preload_wait(tmp_path, ['{"ok":true}', READY])
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert out.stdout.rstrip().endswith("VERIFY RAN")
+
+
+def test_a_model_still_loading_after_five_minutes_is_reported_and_verify_still_runs(tmp_path):
+    out = _preload_wait(tmp_path, [LOADING])
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "still loading after 300 s" in out.stdout
+    assert out.stdout.rstrip().endswith("VERIFY RAN")
+
+
+def test_verify_runs_last_so_a_failed_check_still_fails_the_deploy(tmp_path):
+    script = read("deploy.sh").replace("\r\n", "\n")
+    assert script.rstrip().endswith("bash deploy/lightsail/verify.sh")
+    out = _preload_wait(tmp_path, [LOADING, None, READY], verify='echo "VERIFY RAN"; exit 1')
+    assert "VERIFY RAN" in out.stdout
+    assert out.returncode != 0
+
+
+def test_a_failed_preload_whose_health_then_times_out_still_reaches_verify(tmp_path):
+    out = _preload_wait(tmp_path, ['{"ok":true,"preload":{"state":"failed","error":"x"}}', None])
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "preload failed" in out.stdout
+    assert out.stdout.rstrip().endswith("VERIFY RAN")
 
 
 def _git_bash():

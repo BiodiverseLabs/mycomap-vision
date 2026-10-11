@@ -3,6 +3,7 @@ title: Range and season prior from DNA-verified records
 slug: dna-range-prior
 date: '2026-09-28'
 status: done
+reproducibility: exploratory-pre-freeze
 question: Does a range-and-season score built from our own DNA-verified records improve identification?
 branch: main (prior.py, methods '+prior')
 commits: []
@@ -60,6 +61,8 @@ Helps species on large data, not genus or family, and less than the species-aver
 
 ## Decision
 Not the default; kept as `+prior`.
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1 (docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 iNat occurrence prior (occurrence-prior), then whether either prior adds to nearest + species
