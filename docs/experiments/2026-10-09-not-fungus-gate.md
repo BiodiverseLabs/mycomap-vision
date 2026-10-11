@@ -2,7 +2,7 @@
 title: 'Not a fungus: a gate in front of the identifier'
 slug: not-fungus-gate
 date: '2026-10-09'
-status: done
+status: adopted
 question: Can Vision tell that a photo is not a fungus at all, cheaply at serve time, and hold back the
   species answer and its calibrated chance when it isn't, without costing true fungi?
 branch: feat/not-fungus-gate (pushed, not merged)
@@ -27,9 +27,9 @@ headline: 'Zero-shot + probe on frozen BioCLIP 2 vectors, AUROC 0.997 on 1,582 e
   the stated chance, and 98.8% of everyday non-fungi get no species chance (ducks, birds, pets 100%).'
 verdict: The served answer's own confidence cannot flag a non-fungus (it is higher for non-fungi);
   frozen BioCLIP 2 vectors can, at almost no cost to true fungi.
-decision: 'Steve 2026-10-09: approach approved (frozen BioCLIP 2 "is this a fungus?" check). Thresholds
-  and deployment: pending his review of the branch. Reproducibility: exploratory-pre-freeze; confirm on
-  dataset release v1.'
+decision: 'Steve 2026-10-11: ship the lighter gate now (the probe on the served vectors, 0.40 / 0.55),
+  since the 4 GB box has no room for the frozen one; slime moulds are in scope. Reproducibility:
+  exploratory-pre-freeze; confirm on dataset release v1.'
 related:
 - uninformative-photos
 - photo-views
@@ -171,9 +171,12 @@ zero-shot adds lichens back and turns mushroom-like plants into "not sure". Smal
 groups of 15-120 photos) are direction, not results.
 
 ## Decision
-Approach approved by Steve on 2026-10-09. The thresholds (0.05 / 0.70, combined mode) and deployment
-are pending his review of the branch. Reproducibility: exploratory-pre-freeze, to be confirmed on
-dataset release v1.
+Approach approved by Steve on 2026-10-09. On 2026-10-11 he chose to ship the lighter gate now: the probe
+on the served fine-tuned vectors, "not a fungus" below 0.40 and "not sure" below 0.55, which costs the
+4 GB box no memory. The frozen combined gate (0.05 / 0.70) waits for memory room. Slime moulds are in
+scope: the lighter gate passes 97% of them, and the frozen gate's prompts must move the slime-mould
+class to the fungus side (and be re-tuned) before it ships. Reproducibility: exploratory-pre-freeze,
+to be confirmed on dataset release v1.
 
 ## Next
 - Deployment waits for memory room on the 4 GB box (Steve, 2026-10-11: box stays 4 GB for now; it
@@ -183,5 +186,6 @@ dataset release v1.
   negatives come from the excluded records' list, which travels with the release.
 - Insect and plant pathogens: show "not sure" rather than "not a fungus" (a fungus-on-host prompt
   class, or a host-aware not-sure band).
-- Slime moulds: Steve to say whether they are in scope. 63% get "not a fungus" today.
+- Slime moulds are in scope (Steve, 2026-10-11): before the frozen gate ships, count the slime-mould
+  prompt class as fungus and add slime moulds to the probe's positives; re-tune.
 - The Identify page redesign keeps the gate's notice first in each result card.

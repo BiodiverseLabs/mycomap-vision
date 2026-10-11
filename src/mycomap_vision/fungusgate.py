@@ -215,6 +215,23 @@ class FungusGate:
                         "message": MESSAGES.get(v)})
         return out
 
+    def fingerprint(self) -> str:
+        """A short hash of what decides the verdicts (mode, base, thresholds, probe, text
+        vectors): a stored verdict made under another fingerprint should be judged again."""
+        import hashlib
+        h = hashlib.sha256(f"{self.mode}|{self.base}|{self.thresholds.not_fungus}|"
+                           f"{self.thresholds.unsure}|{self.scale}|{self.probe_b}".encode())
+        if self.probe_w is not None:
+            h.update(np.asarray(self.probe_w, np.float32).tobytes())
+        h.update(np.asarray(self.vectors, np.float32).tobytes())
+        return h.hexdigest()[:16]
+
+    def summary(self) -> dict:
+        """What /api/health says about the gate."""
+        return {"mode": self.mode, "base": self.base, "fingerprint": self.fingerprint(),
+                "thresholds": {"not_fungus": self.thresholds.not_fungus,
+                               "unsure": self.thresholds.unsure}}
+
     # --- files -----------------------------------------------------------------------
 
     def save(self, root: Path | None = None) -> Path:

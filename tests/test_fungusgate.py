@@ -416,3 +416,13 @@ def test_a_gate_on_the_served_vectors_needs_no_second_model(conn, tmp_path):
     r = identify(client, [photo(247), photo(12)])
     assert [p["verdict"] for p in r["gate"]["photos"]] == [FUNGUS, NOT_FUNGUS]
     assert r["gate"]["left_out"] == [1]
+
+
+def test_health_says_which_gate_is_serving_so_a_deploy_can_be_checked(conn, tmp_path):
+    root = seeded(conn, tmp_path)
+    on = app(tmp_path, root).get("/api/health").json()["fungus_gate"]
+    assert on["mode"] == "zero-shot" and on["thresholds"] == {"not_fungus": 0.2, "unsure": 0.5}
+    assert on["fingerprint"] == gate().fingerprint()
+    assert app(tmp_path, root, with_gate=False).get("/api/health").json()["fungus_gate"] is None
+    stricter = FungusGate(**{**TEST_GATE, "thresholds": Thresholds(0.3, 0.5)})
+    assert stricter.fingerprint() != gate().fingerprint()       # a re-judge is due

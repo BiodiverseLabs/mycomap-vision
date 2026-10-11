@@ -475,7 +475,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"ok": True, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
-                "nightly": nightly_health()}
+                "nightly": nightly_health(),
+                "fungus_gate": fungus_gate.summary() if fungus_gate else None}
 
     def nightly_health() -> dict:
         if not layer:
