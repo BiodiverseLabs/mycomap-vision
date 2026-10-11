@@ -178,7 +178,8 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         resume=args.resume, picek=_split(args.picek),
                                         picek_exclude=args.picek_exclude_benchmarks,
                                         dry_run=args.dry_run, ec2_check=args.ec2_check,
-                                        release=_dataset_release(args)),
+                                        release=_dataset_release(args),
+                                        allow_draft=args.allow_draft),
                      indent=2))
 
 

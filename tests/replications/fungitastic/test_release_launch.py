@@ -268,6 +268,23 @@ def test_a_launch_refuses_a_bad_release_before_anything_is_sent(launchable, tmp_
                dry_run=False, exclude="all" if break_it == "benchmark-all" else "match")
 
 
+def test_the_command_passes_allow_draft_to_the_launch(world, monkeypatch):
+    """mv aws-launch-trainer --release <draft> --allow-draft reaches launch_trainer with
+    allow_draft (it re-opens the release by id), so a draft dry run can run at all."""
+    from mycomap_vision import cli, config
+    monkeypatch.setattr(config, "MANIFEST_PATH", world["path"])
+    monkeypatch.setattr(dr, "ROOT", world["root"])
+    got = {}
+
+    def fake_launch(conn, backbones, methods, **kw):
+        got.update(kw)
+        return {"dry_run": True}
+    monkeypatch.setattr(aws, "launch_trainer", fake_launch)
+    cli.main(["aws-launch-trainer", "--release", BASE, "--allow-draft", "--backbones", "none",
+              "--finetune", "none", "--picek", "fungitastic-beit-b384@15", "--dry-run"])
+    assert got["allow_draft"] is True and got["release"].id == BASE
+
+
 # --- the instance -----------------------------------------------------------------------------
 
 def shipped_copy(world, tmp_path, monkeypatch, alter=False):
