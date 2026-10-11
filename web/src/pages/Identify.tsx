@@ -25,7 +25,7 @@ import {
   type Rank,
   type Specimen,
 } from "@/lib/api";
-import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, type GateBanner } from "@/lib/gate";
+import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, whatNext, type GateBanner } from "@/lib/gate";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import {
@@ -187,7 +187,7 @@ export function IdentifyPage() {
               ))}
             </div>
           )}
-          {run.data && <WhatNext />}
+          {run.data && <WhatNext results={run.data.results} />}
           {run.data && (
             <div className="mt-6 flex justify-center">
               <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-bottom">
@@ -724,25 +724,31 @@ function PhotoChecklist({ hasPhotos }: { hasPhotos: boolean }) {
   );
 }
 
-/** After an answer: how to go from a suggestion to a name you can rely on. */
-function WhatNext() {
+/** After an answer: how to go from a suggestion to a name you can rely on (gate.whatNext
+ *  words it for photos that may not show a fungus). */
+function WhatNext({ results }: { results: IdentifyResult[] }) {
+  const next = whatNext(results);
   return (
     <div className="mt-6 rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-4 text-sm text-[#5c4a3a]"
          data-testid="card-what-next">
-      <p className="font-semibold text-[#4a3728]">Suggestions, then specimens, then DNA</p>
+      <p className="font-semibold text-[#4a3728]">{next.title}</p>
       <ol className="mt-2 list-decimal pl-5 space-y-1">
-        <li>Compare your find with the closest specimens above: cap, underside and stem.</li>
-        <li>
-          If the species is unclear, the genus often isn't. Go by the finest rank with a firm
-          answer.
-        </li>
-        <li>
-          DNA settles it. MycoMap offers{" "}
-          <a className="underline" href={SEQUENCING_URL} target="_blank" rel="noreferrer">
-            free DNA sequencing
-          </a>
-          ; once validated, your find joins the reference set.
-        </li>
+        {next.steps.map((step) => {
+          const [before, after] = step.split("{sequencing}");
+          return (
+            <li key={step}>
+              {before}
+              {after !== undefined && (
+                <>
+                  <a className="underline" href={SEQUENCING_URL} target="_blank" rel="noreferrer">
+                    free DNA sequencing
+                  </a>
+                  {after}
+                </>
+              )}
+            </li>
+          );
+        })}
       </ol>
     </div>
   );
