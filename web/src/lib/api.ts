@@ -68,11 +68,15 @@ export interface PhotoGate {
   /** BioCLIP 2's zero-shot chance that the photo shows a fungus. */
   p_fungus: number;
   message: string | null;
+  /** Set when a photo not judged a fungus looks like an in-scope class ("slime": a slime mould). */
+  looks_like?: string;
 }
 
 export interface FindGate {
   verdict: GateVerdict;
   message: string | null;
+  /** What a find not judged a fungus looks like ("slime": a slime mould), or null. */
+  looks_like?: string | null;
   /** Photos (0-based) left out of the answer because they don't look like a fungus. */
   left_out: number[];
   photos: PhotoGate[];

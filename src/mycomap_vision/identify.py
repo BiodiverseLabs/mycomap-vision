@@ -318,9 +318,13 @@ class Identifier:
         out["confidence_withheld"] = False
         if overall != fungusgate.FUNGUS:
             withhold_confidence(out)
-        out["hints"] = fungusgate.gate_hints(verdicts, overall) + (
+        like = fungusgate.find_looks_like(gate, overall)
+        out["hints"] = fungusgate.gate_hints(verdicts, overall, like) + (
             out["hints"] if overall == fungusgate.FUNGUS else [])
-        out["gate"] = {"verdict": overall, "message": fungusgate.MESSAGES.get(overall),
+        out["gate"] = {"verdict": overall,
+                       "message": (fungusgate.LOOKS_LIKE[like]["message"] if like
+                                   else fungusgate.MESSAGES.get(overall)),
+                       "looks_like": like,
                        "left_out": [i for i in range(len(query)) if i not in kept],
                        "photos": gate}
         return out
