@@ -330,3 +330,35 @@ def test_a_probe_mode_without_a_probe_is_refused():
         FungusGate(**TEST_GATE, mode="probe")
     with pytest.raises(ValueError, match="unknown gate mode"):
         FungusGate(**TEST_GATE, mode="vibes")
+
+
+def test_the_base_weights_can_come_memory_mapped_from_the_checkpoint_file(tmp_path):
+    torch = pytest.importorskip("torch")
+    tr = pytest.importorskip("open_clip.transformer")
+    from safetensors.torch import save_file
+
+    from mycomap_vision import models
+    torch.manual_seed(0)
+    tower = tr.VisionTransformer(image_size=16, patch_size=8, width=16, layers=3, heads=2,
+                                 mlp_ratio=2.0, output_dim=8).eval()
+    x = torch.rand(2, 3, 16, 16)
+    with torch.no_grad():
+        before = tower(x)
+    path = tmp_path / "open_clip_model.safetensors"
+    save_file({f"visual.{n}": p.detach().contiguous() for n, p in tower.named_parameters()}, str(path))
+    trained = {n: p.detach() + 0.3 for n, p in tower.named_parameters()
+               if n.startswith(("transformer.resblocks.2.", "ln_post.", "proj"))}
+    tail = models.BaseTail(tower, 2, trained, weights_file=path)
+    assert tail.file_backed
+    with torch.no_grad():
+        for n, v in trained.items():
+            dict(tower.named_parameters())[n].copy_(v)
+        h = tower._embeds(x)
+        if not tower.transformer.batch_first:
+            h = h.transpose(0, 1).contiguous()
+        for block in tower.transformer.resblocks[:2]:
+            h = block(h)
+        assert torch.allclose(tail(tower, h), before, atol=1e-5)          # the base vector
+        assert torch.allclose(tail.module(h), tower(x), atol=1e-5)        # the trained one
+    with pytest.raises(ValueError, match="before the fork point"):
+        models.BaseTail(tower, 2, {"transformer.resblocks.0.ln_1.weight": torch.zeros(16)})
