@@ -535,6 +535,58 @@ def cmd_models(conn, args) -> None:
     print("Methods: " + ", ".join(evaluate.METHODS))
 
 
+def cmd_fungus_gate(conn, args) -> None:
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from . import fungusgate
+    if args.action in ("embed", "tune"):
+        from . import fungusgate_tune as tune
+        if not args.out:
+            raise SystemExit("--out is required")
+        if args.action == "embed":
+            if not args.list:
+                raise SystemExit("embed needs --list (key<TAB>path per line)")
+            n = tune.embed_list(args.backbone, Path(args.list), Path(args.out))
+            print(f"{n} photos embedded into {args.out}")
+            return
+        missing = [o for o in ("dev", "ood", "ood_manifest", "exclude") if not getattr(args, o)]
+        if missing:
+            raise SystemExit("tune needs " + ", ".join("--" + m.replace("_", "-") for m in missing))
+        report = tune.tune(conn, Path(args.dev), Path(args.ood), Path(args.ood_manifest),
+                           Path(args.exclude), Path(args.out), args.benchmark,
+                           Path(args.negatives) if args.negatives else None,
+                           Path(args.embeddings_root) if args.embeddings_root else None,
+                           Path(args.text_from) if args.text_from else None,
+                           args.on_served)
+        print(json.dumps(report["chosen"], indent=2))
+        print(f"gate and report.json in {args.out}; copy the gate into data/models to serve it")
+        return
+    if args.action == "show":
+        gate = fungusgate.FungusGate.load()
+        if gate is None:
+            print("No fungus gate saved: identifications run ungated.")
+            return
+        t = gate.thresholds
+        print(f"Fungus gate ({gate.mode}) on {gate.base} vectors: not a fungus below p={t.not_fungus}, "
+              f"not sure below p={t.unsure}; {len(gate.classes)} prompts in "
+              f"{len(set(gate.classes.tolist()))} classes")
+        print(json.dumps(gate.provenance, indent=2))
+        return
+    if not 0 <= args.not_fungus <= args.unsure <= 1:
+        raise SystemExit("need 0 <= --not-fungus <= --unsure <= 1")
+    probe = None
+    if args.probe:
+        import numpy as np
+        with np.load(args.probe) as f:
+            probe = (f["w"], float(f["b"]))
+    gate = fungusgate.build(fungusgate.Thresholds(args.not_fungus, args.unsure),
+                            provenance={"tuned_on": args.tuned_on, "note": args.note,
+                                        "built_at": datetime.now(timezone.utc).isoformat()},
+                            probe=probe, mode=args.mode)
+    print(f"saved {gate.save()}")
+
+
 def cmd_serve(conn, args) -> None:
     from .api import serve
     conn.close()
@@ -1035,6 +1087,42 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("file", help="the export, or - for standard input")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
+    p = sub.add_parser("fungus-gate", help="the not-a-fungus gate in front of Identify: build "
+                       "its BioCLIP 2 text vectors with thresholds (tune them on DEV only), or "
+                       "show the saved one")
+    p.add_argument("action", choices=["build", "show", "embed", "tune"],
+                   help="build/show the saved gate; embed photos through the serving fork; "
+                        "tune: fit the probe and pick thresholds on DEV (fungusgate_tune.py)")
+    p.add_argument("--list", help="embed: key<TAB>path per line")
+    p.add_argument("--backbone", default="bioclip-2-ft-20261007-165400",
+                   help="embed: the fine-tuned model whose fork gives base vectors")
+    p.add_argument("--out", help="embed: the .npz to write; tune: the folder for gate + report")
+    p.add_argument("--dev", help="tune: DEV photo vectors (.npz from embed)")
+    p.add_argument("--ood", help="tune: not-a-fungus photo vectors (.npz from embed)")
+    p.add_argument("--ood-manifest", help="tune: the not-a-fungus set's manifest CSV")
+    p.add_argument("--exclude", help="tune: TSV of reference records that are not iNat records "
+                                     "(observation_id column); their animal/plant photos are "
+                                     "the probe's negatives")
+    p.add_argument("--negatives", help="tune: extra negative vectors (.npz from embed)")
+    p.add_argument("--benchmark", default="heldout-2026-10-08")
+    p.add_argument("--embeddings-root", help="tune: the frozen bioclip-2 reference embeddings")
+    p.add_argument("--on-served", default=None, metavar="BACKBONE",
+                   help="tune: the lighter gate, a probe on this served backbone's own vectors "
+                        "(no second set of weights at serve time)")
+    p.add_argument("--text-from", help="tune: a folder with a saved gate whose text vectors to "
+                                       "reuse (skips loading BioCLIP 2's text tower)")
+    p.add_argument("--not-fungus", type=float, default=0.0,
+                   help="p(fungus) below this: not a fungus (no answer)")
+    p.add_argument("--unsure", type=float, default=0.0,
+                   help="p(fungus) below this: not sure (names, no chance)")
+    p.add_argument("--probe", default=None,
+                   help="an .npz with a linear probe's w and b on the base model's vectors "
+                        "(fungusgate.fit_logistic)")
+    p.add_argument("--mode", default="zero-shot", choices=["zero-shot", "probe", "both"],
+                   help="which scores make p(fungus); probe and both need --probe")
+    p.add_argument("--tuned-on", default="", help="where the thresholds came from (provenance)")
+    p.add_argument("--note", default="")
+
     p = sub.add_parser("serve", help="run the API for the frontend")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8010)
@@ -1268,6 +1356,7 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark-export": cmd_benchmark_export,
         "benchmark-import": cmd_benchmark_import,
         "models": cmd_models,
+        "fungus-gate": cmd_fungus_gate,
         "serve": cmd_serve,
         "status": cmd_status,
         "release": cmd_release,

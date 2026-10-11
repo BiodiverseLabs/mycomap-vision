@@ -156,6 +156,18 @@ def release_memory() -> None:
             pass
 
 
+def open_clip_weights_file(model_name: str):
+    """The local safetensors checkpoint of an open_clip `hf-hub:` model, or None (no such
+    file, or not cached while offline)."""
+    if not model_name.startswith("hf-hub:"):
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+        return hf_hub_download(model_name[len("hf-hub:"):], "open_clip_model.safetensors")
+    except Exception:
+        return None
+
+
 def load_open_clip_image_tower(model_name: str, pretrained: str | None):
     """(image tower, preprocess) of an open_clip model. Only the image tower is ever
     used (encode_image is the tower's output), so the text tower is never kept.
@@ -166,13 +178,9 @@ def load_open_clip_image_tower(model_name: str, pretrained: str | None):
     copy while loading), measured on the 4 GB server box, with identical vectors."""
     import open_clip
     if model_name.startswith("hf-hub:") and not pretrained:
-        try:
-            from huggingface_hub import hf_hub_download
-            from safetensors import safe_open
-            path = hf_hub_download(model_name[len("hf-hub:"):], "open_clip_model.safetensors")
-        except Exception:        # no safetensors file (or not cached offline): the plain way
-            path = None
+        path = open_clip_weights_file(model_name)
         if path:
+            from safetensors import safe_open
             model, _, preprocess = open_clip.create_model_and_transforms(
                 model_name, load_weights=False, pretrained_text=False, device="meta")
             tower = model.visual
@@ -218,6 +226,86 @@ class OpenClipBackbone(TimmBackbone):
         return self.model
 
 
+def fork_point(base, meta: dict) -> int | None:
+    """The first block fine-tuning trained, when `base` is an open_clip ViT whose earlier
+    blocks are untouched (so its vectors and the base's share them); else None."""
+    tower = getattr(base, "model", None)
+    blocks = getattr(getattr(tower, "transformer", None), "resblocks", None)
+    if blocks is None or not all(hasattr(tower, a) for a in ("_embeds", "_pool", "ln_post")):
+        return None
+    n_trained = int(meta.get("blocks_trained") or 0)
+    if not 0 < n_trained <= len(blocks):
+        return None
+    return len(blocks) - n_trained
+
+
+def tail_names(tower, start: int) -> list[str]:
+    """The tower's parameters after the fork point: its last blocks, final norm, projection."""
+    inside = (tuple(f"transformer.resblocks.{i}." for i in range(start, len(tower.transformer.resblocks)))
+              + ("ln_post.",))
+    return [n for n, _ in tower.named_parameters() if n.startswith(inside) or n == "proj"]
+
+
+def _tail_module():
+    import torch
+
+    class Tail(torch.nn.Module):
+        """The tower's blocks after the fork, then its pooling and projection."""
+
+        def __init__(self, tower, start: int):
+            super().__init__()
+            self.tower, self.start = tower, start
+
+        def forward(self, h):
+            tower = self.tower
+            for block in tower.transformer.resblocks[self.start:]:
+                h = block(h)
+            if not tower.transformer.batch_first:
+                h = h.transpose(0, 1)
+            pooled, _ = tower._pool(h)
+            return pooled @ tower.proj if tower.proj is not None else pooled
+    return Tail
+
+
+class BaseTail:
+    """The base model's own values of the parameters after the fork point, kept so the
+    base vector (fungusgate.py) comes from the fine-tuned model's own pass: the shared
+    blocks run once, then the tail runs twice, with trained and with base values.
+
+    The base values are read from the base model's safetensors file when there is one:
+    memory-mapped, file-backed pages the OS can drop under pressure (the server box runs
+    close to its memory cap), not ~200 MB of private copies. Otherwise they are cloned
+    from the tower before the fine-tuned weights go in."""
+
+    def __init__(self, tower, start: int, trained: dict, weights_file=None, prefix: str = "visual."):
+        names = tail_names(tower, start)
+        outside = sorted(set(trained) - set(names))
+        if outside:
+            raise ValueError(f"trained parameters before the fork point: {outside[:3]}")
+        self.start, self.file_backed = start, False
+        own = dict(tower.named_parameters())
+        if weights_file:
+            from safetensors import safe_open
+            with safe_open(str(weights_file), "pt") as f:
+                keys = set(f.keys())
+                if all(prefix + n in keys for n in names):
+                    self.params = {n: f.get_tensor(prefix + n) for n in names}
+                    self.file_backed = True
+        if not self.file_backed:
+            self.params = {n: own[n].detach().clone() for n in names}
+        for n in names:
+            if self.params[n].shape != own[n].shape:
+                raise ValueError(f"base weight {n} has shape {tuple(self.params[n].shape)}, "
+                                 f"the model {tuple(own[n].shape)}")
+        self.module = _tail_module()(tower, start)
+
+    def __call__(self, tower, h):
+        from torch.func import functional_call
+        device = next(tower.parameters()).device
+        params = {f"tower.{n}": v.to(device) for n, v in self.params.items()}
+        return functional_call(self.module, params, (h,), strict=False)
+
+
 class FinetunedBackbone:
     """A base backbone with the weights fine-tuning trained put back in (finetune.py)."""
 
@@ -235,17 +323,63 @@ class FinetunedBackbone:
         if unknown:
             raise ValueError(f"{model_name}: weights for parameters {base.name} doesn't have: "
                              f"{unknown[:3]}")
+        # The base model's own values of the last blocks, pooling norm and projection, so
+        # the base vector (fungusgate.py) comes from the same pass: the shared blocks run
+        # once, then the last blocks run twice, trained and as they were. Read from the
+        # base checkpoint on first use only, so a server without the gate pays nothing;
+        # with no checkpoint file they must be cloned now, before the trained ones go in.
+        start = fork_point(base, meta)
+        try:
+            spec = resolve_spec(meta["base_spec"])
+        except ValueError:                             # a base known only to its loader
+            spec = ""
+        weights_file = (open_clip_weights_file(spec.partition(":")[2].partition("@")[0])
+                        if spec.startswith("open_clip:") else None)
+        self._base_tail = self._make_tail = None
+        if start is not None:
+            outside = sorted(set(trained) - set(tail_names(base.model, start)))
+            if outside:
+                raise ValueError(f"{model_name}: trained parameters before the fork point: "
+                                 f"{outside[:3]}")
+        if start is not None and weights_file:
+            names = dict.fromkeys(trained)
+            self._make_tail = lambda: BaseTail(base.model, start, names, weights_file)
+        elif start is not None:
+            self._base_tail = BaseTail(base.model, start, trained)
         with torch.no_grad():
             for n, value in trained.items():
                 own[n].copy_(value.to(own[n].device, own[n].dtype))
         self.base, self.meta, self.name = base, meta, name
         self.dim, self.device, self.transform = base.dim, base.device, base.transform
+        self.base_name = meta.get("base")
 
     def prepare(self, image):
         return self.base.prepare(image)
 
     def encode(self, items):
         return self.base.encode(items)
+
+    def encode_with_base(self, items):
+        """(fine-tuned vectors, the base model's vectors) for the same photos in one pass,
+        or None when the base isn't an open_clip ViT this can fork."""
+        if self._base_tail is None and self._make_tail is not None:
+            self._base_tail, self._make_tail = self._make_tail(), None
+        if self._base_tail is None:
+            return None
+        torch = self.base.torch
+        tower, start = self.base.model, self._base_tail.start
+        x = torch.stack([i if isinstance(i, torch.Tensor) else self.transform(i)
+                         for i in items]).to(self.device, non_blocking=True)
+        with torch.inference_mode(), torch.autocast(self.device, dtype=torch.float16,
+                                                    enabled=self.device == "cuda"):
+            h = tower._embeds(x)
+            if not tower.transformer.batch_first:
+                h = h.transpose(0, 1).contiguous()
+            for block in tower.transformer.resblocks[:start]:
+                h = block(h)
+            tuned = self._base_tail.module(h)          # the tail as trained
+            base = self._base_tail(tower, h)           # the same tail, base weights
+        return tuned.float().cpu().numpy(), base.float().cpu().numpy()
 
     def image_module(self):
         return self.base.image_module()

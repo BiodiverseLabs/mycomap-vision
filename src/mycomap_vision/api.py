@@ -32,8 +32,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apiv1, config, evaluate, inat, manifest, models, names, nightly, permissions,
-               serving, uploads)
+from . import (apiv1, config, evaluate, fungusgate, inat, manifest, models, names, nightly,
+               permissions, serving, uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -271,7 +271,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                app_tokens: "apiv1.AppTokens | None | bool" = True,
                introspect: "Callable[[str], dict] | None | bool" = True,
                dataset_root: Path | None = None, dataset_store: str | None = None,
-               dataset_store_reader=None, dataset_allow_draft: bool = False) -> FastAPI:
+               dataset_store_reader=None, dataset_allow_draft: bool = False,
+               fungus_gate: "fungusgate.FungusGate | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -294,9 +295,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `api_v1` turns on POST /api/v1/identify (default: MV_API_V1). `app_tokens` checks the
     app's tokens (default: the sign-in bridge's public key, for MV_PUBLIC_ORIGIN);
     `introspect` asks mycomap.org about a developer token (default: MV_ORG_BASE_URL with
-    the server key; tests pass a fake)."""
+    the server key; tests pass a fake).
+
+    `fungus_gate`: the not-a-fungus gate every identification passes (fungusgate.py).
+    True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
+    gate); a FungusGate uses that one; None or False runs ungated."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     limits = limits or Limits.from_settings()
+    if fungus_gate is True:
+        fungus_gate = (fungusgate.FungusGate.load()
+                       if config.setting("MV_FUNGUS_GATE", "1") != "0" else None)
+    fungus_gate = fungus_gate or None
     signin = signin or SigninConfig.from_settings()
     rate = RateLimiter(*limits.rate)
     in_flight = Gate(limits.max_in_flight)
@@ -499,7 +508,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         try:
             ident = Identifier(own, backbone, method, root, calibration=cal,
                                train=limits.fit_on_demand, photo_info=False,
-                               layer_root=layer.embeddings if layer else None)
+                               layer_root=layer.embeddings if layer else None,
+                               gate=fungus_gate)
         finally:
             own.close()
         ident.warm()
@@ -531,7 +541,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"ok": True, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
-                "nightly": nightly_health()}
+                "nightly": nightly_health(),
+                "fungus_gate": fungus_gate.summary() if fungus_gate else None}
 
     def nightly_health() -> dict:
         if not layer:
@@ -700,12 +711,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             timer.add("queue_ms", time.monotonic() - waited)
             model = backbone_model(backbone)
             start = time.monotonic()
-            prepare = getattr(model, "prepare", None) or (lambda im: im)
-            vecs = normalise(model.encode([prepare(im) for im in images]))
+            vecs, verdicts = ident.embed(model, images)        # the gate's verdicts too
             timer.add("embed_ms", time.monotonic() - start)
             start = time.monotonic()
             result = ident.identify_vectors(vecs, top_k, context=context,
-                                            photo_lookup=photo_lookup, may_show=may_show)
+                                            photo_lookup=photo_lookup, may_show=may_show,
+                                            gate=verdicts)
             timer.add("score_ms", time.monotonic() - start)
         timer.photos_embedded += len(images)
         return result

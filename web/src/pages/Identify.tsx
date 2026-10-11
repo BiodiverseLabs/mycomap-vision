@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type RefObject,
          type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
-import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, ImagePlus, Lightbulb, Loader2,
-         LocateFixed, Lock, MapPin, Microscope, RotateCcw, X } from "lucide-react";
+import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, ImagePlus, Lightbulb,
+         Loader2, LocateFixed, Lock, MapPin, Microscope, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,6 +26,7 @@ import {
   type Rank,
   type Specimen,
 } from "@/lib/api";
+import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, type GateBanner } from "@/lib/gate";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import {
   identifyGate, LIKELY_COPY, modelName, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
@@ -732,9 +733,13 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
   const photo = view == null ? null : (r.per_photo.find((p) => p.photo === view) ?? null);
   const ranks = photo ? photo.ranks : r.ranks;
   const specimens = photo ? photo.specimens : r.specimens;
-  // The not-a-fungus gate sets these (gateBanner(r)?.verdict === "not_fungus", chanceWithheld(r)).
-  const gate = { notFungus: false, withheld: false };
+  // The not-a-fungus gate (lib/gate.ts): its notice, and whether the chance is withheld.
+  const banner = gateBanner(r);
+  const gate = { notFungus: banner?.verdict === "not_fungus", withheld: chanceWithheld(r) };
   const answer = answerFor(r, gate);
+  const hints = pageHints(r);
+  const noRanks = gate.notFungus || (photo != null && leftOut(photo));
+  const found = gate.withheld ? "look-alikes" : "specimens";
   const coverage = coverageSummary(r.likely);
   return (
     <Card className="overflow-hidden scroll-mt-20" data-result-card>
@@ -764,9 +769,10 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
       </CardHeader>
       <CardContent className="pt-5 space-y-6 px-4 sm:px-6">
         {/* The gate's notice goes first, above everything else in the card. */}
+        {banner && <GateNotice banner={banner} />}
         {answer && (
           <div className="space-y-3">
-            <AnswerBox a={answer} r={r} photos={photos} />
+            <AnswerBox a={answer} r={{ ...r, hints }} photos={photos} />
             <SafetyNote />
           </div>
         )}
@@ -774,35 +780,61 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
           <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} />
         )}
         {photo && <PhotoVerdict p={photo} />}
-        <div className="space-y-5">
-          {RANKS.map((rank) => (
-            photo == null && r.likely?.[rank]?.names.length
-              ? <LikelyBlock key={rank} rank={rank} set={r.likely[rank]!} candidates={ranks[rank]} />
-              : <RankBlock key={rank} rank={rank} candidates={ranks[rank]} />
-          ))}
-          <p className="text-xs text-muted-foreground" data-testid="text-coverage">
-            {photo
-              ? "One photo on its own is a rougher guide than all of them together."
-              : coverage
-                ? `${coverage} ${LIKELY_COPY.noReference}`
-                : publicNote(r.confidence_note)}
-          </p>
-        </div>
-        {!photo && !answer && r.hints.length > 0 && <Hints hints={r.hints} />}
-        <div>
-          <h3 className="text-sm font-semibold text-[#4a3728] mb-2">
-            {photo
-              ? `Closest DNA-verified specimens to photo ${photo.photo + 1}`
-              : "Closest DNA-verified specimens"}
-          </h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-            {specimens.map((s) => (
-              <SpecimenCard key={s.observation_id} s={s} urls={urls} showMatched={!photo} />
+        {!noRanks && (
+          <div className="space-y-5">
+            {RANKS.map((rank) => (
+              photo == null && r.likely?.[rank]?.names.length
+                ? <LikelyBlock key={rank} rank={rank} set={r.likely[rank]!} candidates={ranks[rank]} />
+                : <RankBlock key={rank} rank={rank} candidates={ranks[rank]} withheld={gate.withheld} />
             ))}
+            <p className="text-xs text-muted-foreground" data-testid="text-coverage">
+              {photo
+                ? "One photo on its own is a rougher guide than all of them together."
+                : gate.withheld
+                  ? "No chance is stated: it is calibrated on photos of fungi only."
+                  : coverage
+                    ? `${coverage} ${LIKELY_COPY.noReference}`
+                    : publicNote(r.confidence_note)}
+            </p>
           </div>
-        </div>
+        )}
+        {!photo && !answer && hints.length > 0 && <Hints hints={hints} />}
+        {specimens.length > 0 && (
+          <div>
+            <h3 className="text-sm font-semibold text-[#4a3728] mb-2">
+              {photo
+                ? `Closest DNA-verified ${found} to photo ${photo.photo + 1}`
+                : `Closest DNA-verified ${found}`}
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {specimens.map((s) => (
+                <SpecimenCard key={s.observation_id} s={s} urls={urls} showMatched={!photo} />
+              ))}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+/** The not-a-fungus gate's verdict on the whole find. */
+function GateNotice({ banner }: { banner: GateBanner }) {
+  const strong = banner.verdict === "not_fungus";
+  return (
+    <div
+      role="status"
+      data-testid={`gate-${banner.verdict}`}
+      className={`flex gap-3 rounded-md border p-3 text-sm ${
+        strong ? "border-amber-300 bg-amber-50 text-amber-900" : "border-[#A87146]/30 bg-[#fbf7f0] text-[#5c4a3a]"
+      }`}
+    >
+      <CircleHelp className={`h-5 w-5 shrink-0 ${strong ? "text-amber-600" : "text-myco-tan"}`} aria-hidden />
+      <div className="space-y-1">
+        <p className="font-semibold">{banner.title}</p>
+        <p>{banner.body}</p>
+      </div>
+    </div>
   );
 }
 
@@ -944,6 +976,7 @@ function PhotoSwitcher({ r, urls, view, setView }: {
         {r.per_photo.map((p) => {
           const place = p.overall_top.species;
           const agrees = place?.position === 1;
+          const label = photoGateLabel(p);
           return (
             <button
               key={p.photo}
@@ -952,7 +985,9 @@ function PhotoSwitcher({ r, urls, view, setView }: {
               aria-selected={view === p.photo}
               className={tile(view === p.photo)}
               onClick={() => setView(p.photo)}
-              title={place ? `Photo ${p.photo + 1} on its own puts ${place.name} ${ordinal(place.position)} (${pct(place.confidence)})` : undefined}
+              title={leftOut(p)
+                ? `Photo ${p.photo + 1} doesn't look like a fungus and was left out`
+                : place ? `Photo ${p.photo + 1} on its own puts ${place.name} ${ordinal(place.position)}` : undefined}
             >
               <span className="relative h-14 w-14 overflow-hidden rounded border bg-muted">
                 {urls[p.photo] && (
@@ -962,9 +997,15 @@ function PhotoSwitcher({ r, urls, view, setView }: {
                   {p.photo + 1}
                 </span>
               </span>
-              <span className={`text-[11px] tabular-nums ${agrees ? "font-semibold text-myco-green" : "text-muted-foreground"}`}>
-                {place ? pct(place.confidence) : "–"}
-              </span>
+              {label ? (
+                <span className="text-[11px] font-medium text-amber-700" data-testid={`photo-gate-${p.photo}`}>
+                  {label}
+                </span>
+              ) : (
+                <span className={`text-[11px] tabular-nums ${agrees ? "font-semibold text-myco-green" : "text-muted-foreground"}`}>
+                  {place ? (place.confidence == null ? `#${place.position}` : pct(place.confidence)) : "–"}
+                </span>
+              )}
             </button>
           );
         })}
@@ -977,19 +1018,28 @@ function PhotoVerdict({ p }: { p: PhotoResult }) {
   const species = p.overall_top.species;
   const genus = p.overall_top.genus;
   const n = p.photo + 1;
+  if (leftOut(p)) {
+    return (
+      <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        <span className="font-semibold">Photo {n} doesn't look like a fungus,</span> so it was left
+        out of the answer.
+      </div>
+    );
+  }
+  const chance = (c: number | null) => (c == null ? "" : ` (${pct(c)})`);
   return (
     <div className="rounded-md border border-[#A87146]/20 bg-[#faf9f7] p-3 text-sm text-[#5c4a3a]">
       <span className="font-semibold text-[#4a3728]">Photo {n} on its own.</span>{" "}
       {species &&
         (species.position === 1 ? (
           <>
-            It agrees with the answer from all photos, <span className="sci">{species.name}</span>{" "}
-            ({pct(species.confidence)}).
+            It agrees with the answer from all photos, <span className="sci">{species.name}</span>
+            {chance(species.confidence)}.
           </>
         ) : (
           <>
             It puts <span className="sci">{species.name}</span>, the answer from all photos,{" "}
-            {ordinal(species.position)} ({pct(species.confidence)}).
+            {ordinal(species.position)}{chance(species.confidence)}.
           </>
         ))}
       {genus && genus.position > 1 && (
@@ -1049,7 +1099,12 @@ function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; ca
   );
 }
 
-function RankBlock({ rank, candidates }: { rank: Rank; candidates: Candidate[] }) {
+function RankBlock({ rank, candidates, withheld }: {
+  rank: Rank;
+  candidates: Candidate[];
+  /** Names only, no chance: the gate isn't sure the photos show a fungus. */
+  withheld?: boolean;
+}) {
   const [top, ...rest] = candidates;
   if (!top) return null;
   const italic = rank !== "family";
@@ -1063,16 +1118,26 @@ function RankBlock({ rank, candidates }: { rank: Rank; candidates: Candidate[] }
       </div>
       <div className="flex items-baseline justify-between gap-3">
         <NameLink rank={rank} name={top.name} className={`text-lg font-semibold text-[#4a3728] ${italic ? "sci" : ""}`} />
-        <span className="text-lg font-semibold text-myco-green tabular-nums">{pct(top.confidence)}</span>
+        {withheld || top.confidence == null ? (
+          <span className="text-xs text-muted-foreground">closest look-alike</span>
+        ) : (
+          <span className="text-lg font-semibold text-myco-green tabular-nums">{pct(top.confidence)}</span>
+        )}
       </div>
-      <Bar value={top.confidence} strong />
+      {!withheld && top.confidence != null && <Bar value={top.confidence} strong />}
       <div className="mt-2 space-y-1">
         {rest.slice(0, 3).map((c) => (
-          <div key={c.name} className="grid grid-cols-[1fr_72px_40px] items-center gap-2 text-sm">
-            <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
-            <Bar value={c.confidence} />
-            <span className="text-right text-xs text-muted-foreground tabular-nums">{pct(c.confidence)}</span>
-          </div>
+          withheld || c.confidence == null ? (
+            <div key={c.name} className="text-sm">
+              <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
+            </div>
+          ) : (
+            <div key={c.name} className="grid grid-cols-[1fr_72px_40px] items-center gap-2 text-sm">
+              <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
+              <Bar value={c.confidence} />
+              <span className="text-right text-xs text-muted-foreground tabular-nums">{pct(c.confidence)}</span>
+            </div>
+          )
         ))}
       </div>
     </div>
