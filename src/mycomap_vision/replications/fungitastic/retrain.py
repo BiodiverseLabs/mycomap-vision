@@ -78,6 +78,7 @@ import numpy as np
 KIND = "classifier"           # meta["kind"] of a model made here; its spec is classifier:<name>
 LOG_FLOOR = math.log(1e-12)    # a species the classifier has no class for
 
+from ... import sources  # noqa: E402  (record sources: MIGRATION, INAT, PHOTO_SOURCES)
 # The recipe's presets and hyperparameters live in presets.py; read here as retrain.X too.
 from .presets import EXCLUDE_MODES, MEAN, PRESETS, STD, PicekConfig, Preset  # noqa: E402,F401
 
@@ -294,7 +295,7 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
     pos = {c: i for i, c in enumerate(classes)}
     genus_of = [""] * len(classes)
     missing, wanted = 0, 0
-    licences, sources = {}, {}
+    licences, by_source = {}, {}
 
     def paths_of(rec):
         nonlocal missing, wanted
@@ -312,7 +313,7 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
     train, month_counts = [], np.zeros((len(classes), 12), dtype=np.int32)
     cells: dict[int, dict[int, int]] = {}
     for r in train_recs:
-        sources[r["source"]] = sources.get(r["source"], 0) + 1
+        by_source[r["source"]] = by_source.get(r["source"], 0) + 1
         k = pos[r["species"]]
         genus_of[k] = genus_of[k] or (r.get("genus") or "")
         m = month_of(r.get("observed_on"))
@@ -327,7 +328,7 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
                 row[k] = row.get(k, 0) + 1
     val = []
     for r in val_recs:
-        sources[r["source"]] = sources.get(r["source"], 0) + 1
+        by_source[r["source"]] = by_source.get(r["source"], 0) + 1
         val += [(pid, path, pos.get(r["species"], -1), r["record_key"])
                 for pid, path in paths_of(r)]
     if wanted and missing > MAX_MISSING_PHOTOS * wanted:
@@ -343,7 +344,7 @@ def build_data_from_release(conn, rel, store_location: str, size: str,
                      sum(r["species"] not in pos for r in val_recs),
                      [(r["record_key"], r["species"]) for r in train_recs + val_recs],
                      release=dataset.cite(rel), missing_photos=missing, photo_licences=licences,
-                     record_sources=dict(sorted(sources.items(), key=lambda kv: -kv[1])))
+                     record_sources=dict(sorted(by_source.items(), key=lambda kv: -kv[1])))
 
 
 def release_snapshot(rel, data: PicekData, exclude_mode: str = "match") -> dict:
@@ -423,10 +424,11 @@ def label_snapshot(conn, data: PicekData, exclude_mode: str = "match",
 # --- where the records come from -----------------------------------------------------------
 # A record's photos must be its own. Records that are not iNat observations (Mushroom
 # Observer, MyCoPortal, .com sequences, GenBank) fetched AS iNat ids carried other
-# observations' photos (mammals, birds, plants). The record-sources fix
-# (feat/record-sources-mo) normalises records.source to inat | mo | mycoportal |
-# com_sequence | genbank | unknown, from .org's own field, and marks a migrated manifest
-# with a manifest_migrations row. BEFORE that migration records.source holds the old
+# observations' photos (mammals, birds, plants). The record-sources fix (sources.py, on
+# main) normalises records.source to inat | mo | mycoportal | com_sequence | genbank |
+# unknown, from .org's own field, and marks a migrated manifest with a
+# manifest_migrations row; evaluate.load_records then loads only inat and mo records, each
+# with photos of its own source. The checks here stay as the run's own proof. BEFORE that migration records.source holds the old
 # guess ('inat' for any numeric id), so it says nothing until the marker is there; an
 # unmigrated manifest can't prove where its records come from, and a real launch is
 # refused (the dry run only warns). Never decided by the shape of an id.
@@ -435,12 +437,9 @@ def label_snapshot(conn, data: PicekData, exclude_mode: str = "match",
 # sources, the same release for Vision and the replication: iNat, and DNA-validated MO
 # records with photos from MO itself. MyCoPortal, .com sequences, GenBank and unknown are
 # never allowed. Until a release exists the set is ('inat',): strict.
-# Local copies of the fix's names (feat/record-sources-mo @ 90428e1, not merged yet).
-# TODO(feat/record-sources-mo): once it merges, import MIGRATION, INAT and PHOTO_SOURCES
-# from mycomap_vision.sources instead of these copies.
-MIGRATION = "record-sources-v1"     # sources.MIGRATION
-INAT = "inat"                       # sources.INAT
-PHOTO_SOURCES = ("inat", "mo")      # sources.PHOTO_SOURCES: the most any release may allow
+MIGRATION = sources.MIGRATION
+INAT = sources.INAT
+PHOTO_SOURCES = sources.PHOTO_SOURCES   # the most any release may allow: inat, mo
 SOURCE_COLUMN = "source"
 DEFAULT_ALLOWED_SOURCES = (INAT,)
 
@@ -469,12 +468,8 @@ def allowed_sources(allowed=None, release=None) -> tuple[str, ...]:
 def sources_migrated(conn) -> bool:
     """Whether this manifest's records.source is the record-sources fix's (its migration
     marker row is there). A missing manifest_migrations table = not migrated. Reads only:
-    never creates the table. The same rule as the fix's sources.migrated(conn).
-    TODO(feat/record-sources-mo): once it merges, return sources.migrated(conn)."""
-    has_table = conn.execute("select 1 from sqlite_master where type = 'table' and "
-                             "name = 'manifest_migrations'").fetchone()
-    return bool(has_table) and conn.execute(
-        "select 1 from manifest_migrations where name = ?", (MIGRATION,)).fetchone() is not None
+    never creates the table (sources.migrated)."""
+    return sources.migrated(conn)
 
 
 def record_sources(conn, record_ids) -> dict[str, int] | None:
