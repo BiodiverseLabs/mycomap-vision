@@ -536,6 +536,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     warm = Preload()
 
+    def served_release() -> str | None:
+        """The release this server answers from (its id stays internal; v1 shows its date)."""
+        if layer:
+            return layer.release_id
+        from .release import current_release
+        return current_release(config.RELEASE_ROOT) if config.RELEASE_ROOT else None
+
     @app.get("/api/health")
     def health():
         return {"ok": True, "code_version": config.code_version(),
@@ -981,7 +988,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 try:
                     ident = served_index(backbone, method, view, timer)
                 except (serving.Updating, NotTrainedHere) as e:
-                    raise apiv1.V1Error(503, "updating", str(e), retry_after=30) from e
+                    note(f"[v1] {backbone}/{method} not ready: {e}")
+                    raise apiv1.V1Error(503, "updating", "the model is being updated; try "
+                                        "again shortly", retry_after=30) from e
                 result = embed_and_score(
                     ident, backbone, [img for img, _ in read], context,
                     lambda info: view.may_show(info.license_class, info.owner_user_id),
@@ -996,14 +1005,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                       timer: "apiv1.Timer") -> dict:
             """An identify result in the v1 shape (docs/api.md §4)."""
             cal = result.pop("calibration", None) or {}
-            comparison = str(cal.get("comparison_id") or "")
+            # Backbone and method ids never leave in a v1 answer (Steve, 2026-10-11).
+            prior = result.pop("prior", None) or {}
             out = {"request_id": "r_" + secrets.token_urlsafe(12),
                    **result,
-                   "model": {"backbone": backbone, "method": method,
-                             "version": layer.release_id if layer else None,
-                             "calibrated_on": (f"{comparison[:4]}-{comparison[4:6]}-"
-                                               f"{comparison[6:8]}"
-                                               if comparison[:8].isdigit() else None)},
+                   "model": apiv1.public_model(served_release(),
+                                               str(cal.get("comparison_id") or "")),
+                   "prior": {"applied": bool(prior.get("applied"))},
                    "context_used": used,
                    "gate": result.get("gate"),
                    "usage": None}
@@ -1033,13 +1041,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             try:
                 ident = identifier(backbone, method, view)
             except (serving.Updating, NotTrainedHere) as e:
-                raise apiv1.V1Error(503, "updating", str(e), retry_after=30) from e
+                note(f"[v1] {backbone}/{method} not ready: {e}")
+                raise apiv1.V1Error(503, "updating", "the model is being updated; try again "
+                                    "shortly", retry_after=30) from e
             key = (id(ident), version)   # a failed rebuild may still serve the old index
             if key not in counts_cache:
                 doc = apiv1.taxon_counts(
                     ident.rank_counts, records=ident.records,
-                    model={"backbone": backbone, "method": method,
-                           "version": layer.release_id if layer else None},
+                    model=apiv1.public_model(served_release()),
                     nightly_version=version[3] if layer else None)
                 body = apiv1.encode(doc)
                 counts_cache.clear()
