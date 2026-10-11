@@ -131,6 +131,8 @@ export interface Where {
   /** Set while the place / date shown is the one read from photo N (1-based), not typed. */
   placeFromPhoto?: number;
   dateFromPhoto?: number;
+  /** Set while the place shown is the phone's current location ("Use my current location"). */
+  placeFromDevice?: boolean;
 }
 
 export interface ContextUsed {
