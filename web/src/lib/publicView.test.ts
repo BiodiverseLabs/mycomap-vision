@@ -116,14 +116,14 @@ test("the provisional share is said from the data, never hard-coded as half", ()
   assert.equal(shareWords(0, 0), "None");
 });
 
-test("a model's release note says what it learned from only when it was fine-tuned", () => {
+test("a model's release note names it MycoMap Vision and says what it learned from", () => {
   assert.equal(
     releaseNote({ backbone: "bioclip-2-ft-20261007-165400", embedded_photos: 152915,
                   trained_through: "2026-09-07" }),
-    "BioCLIP 2, fine-tuned on DNA-verified records (October 2026). Trained on DNA-verified " +
+    "MycoMap Vision · October 2026 model. Trained on DNA-verified " +
     "records validated up to 7 September 2026. Compares your photos with 152,915 reference photos.");
   assert.equal(releaseNote({ backbone: "bioclip-2", embedded_photos: 10, trained_through: null }),
-    "BioCLIP 2. Compares your photos with 10 reference photos.");
+    "MycoMap Vision. Compares your photos with 10 reference photos.");
 });
 
 test("the newest week's count is said only when there is one", () => {

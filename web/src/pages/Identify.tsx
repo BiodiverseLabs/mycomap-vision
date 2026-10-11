@@ -12,7 +12,6 @@ import {
   ApiError,
   signInUrl,
   modelKey,
-  modelLabel,
   num,
   pct,
   RANKS,
@@ -28,9 +27,11 @@ import {
 } from "@/lib/api";
 import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, type GateBanner } from "@/lib/gate";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
+import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import {
-  identifyGate, LIKELY_COPY, modelName, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
+  identifyGate, LIKELY_COPY, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
 } from "@/lib/publicView";
+import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
 import {
@@ -42,7 +43,6 @@ import {
 } from "@/lib/modelChoice";
 
 const MAX_PHOTOS = 10;
-const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const RANK_LABEL: Record<Rank, string> = { family: "Family", genus: "Genus", species: "Species" };
 
 export function IdentifyPage() {
@@ -55,6 +55,8 @@ export function IdentifyPage() {
   const gate = identifyGate(me.data, me.isError);
 
   // Read each new photo's place and date, then fill the fields once every photo is read.
+  // Phones hand photos over without their location; they get offered the current one.
+  const platform = useMemo(() => platformOf(navigator.userAgent, navigator.maxTouchPoints), []);
   const reading = useRef(new Set<File>());
   useEffect(() => {
     files.filter((f) => !found.has(f) && !reading.current.has(f)).forEach((f) => {
@@ -140,7 +142,8 @@ export function IdentifyPage() {
           <PhotoPicker files={files} setFiles={setFiles} zone={pickZone}
                        onStartOver={restart} canStartOver={clearable} />
           <PhotoChecklist hasPhotos={files.length > 0} />
-          <WhereWhen where={where} setWhere={setWhere} />
+          <WhereWhen where={where} setWhere={setWhere}
+                     noPlace={noPhotoPlace({ found: files.map((f) => found.get(f)), where, platform })} />
           <ModelPicker models={models} onChange={setChosen} />
           {gate === "sign-in" ? (
             <Button asChild size="lg" className="w-full" data-testid="button-signin-to-identify">
@@ -413,22 +416,33 @@ function PhotoPicker({ files, setFiles, zone, onStartOver, canStartOver }: {
   );
 }
 
-function WhereWhen({ where, setWhere }: { where: Where; setWhere: Dispatch<SetStateAction<Where>> }) {
+function WhereWhen({ where, setWhere, noPlace }: {
+  where: Where;
+  setWhere: Dispatch<SetStateAction<Where>>;
+  /** Set on a phone whose photos carry no place: offer the current location. */
+  noPlace: { tip: string } | null;
+}) {
   const [locating, setLocating] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   const locate = () => {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) return setFailed(locateError(2));
     setLocating(true);
+    setFailed(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         // Applied to the form as it is when the position arrives, not as it was when asked.
         setWhere((w) => ({ ...w, lat: pos.coords.latitude.toFixed(4), lng: pos.coords.longitude.toFixed(4),
-                           placeFromPhoto: undefined }));
+                           placeFromPhoto: undefined, placeFromDevice: true }));
         setLocating(false);
       },
-      () => setLocating(false),
-      { timeout: 10_000 },
+      (err) => {
+        setLocating(false);
+        setFailed(locateError(err.code));
+      },
+      { timeout: 15_000, maximumAge: 60_000 },
     );
   };
+  const note = placeNote(where);
   const input = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm";
   return (
     <Card>
@@ -440,12 +454,27 @@ function WhereWhen({ where, setWhere }: { where: Where; setWhere: Dispatch<SetSt
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
+        {noPlace && (
+          <div className="rounded-md border border-myco-green/40 bg-myco-green/5 p-3 space-y-2"
+               data-testid="box-no-photo-place">
+            <p className="text-sm font-medium text-[#4a3728]">Your photos don't say where they were taken.</p>
+            <Button type="button" className="w-full" onClick={locate} disabled={locating}
+                    data-testid="button-use-current-location">
+              {locating ? <Loader2 className="animate-spin" /> : <LocateFixed />} Use my current location
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Only if you're still where you found it. Otherwise type its coordinates below, or
+              leave them empty.
+            </p>
+            <p className="text-xs text-muted-foreground" data-testid="text-no-place-tip">{noPlace.tip}</p>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <MapPin className="h-4 w-4 text-myco-brown shrink-0" />
           <input className={`${input} min-w-0`} placeholder="Latitude" inputMode="decimal" value={where.lat ?? ""}
-                 onChange={(e) => setWhere({ ...where, lat: e.target.value, placeFromPhoto: undefined })} aria-label="Latitude" />
+                 onChange={(e) => setWhere({ ...where, lat: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined })} aria-label="Latitude" />
           <input className={`${input} min-w-0`} placeholder="Longitude" inputMode="decimal" value={where.lng ?? ""}
-                 onChange={(e) => setWhere({ ...where, lng: e.target.value, placeFromPhoto: undefined })} aria-label="Longitude" />
+                 onChange={(e) => setWhere({ ...where, lng: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined })} aria-label="Longitude" />
           <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={locate}
                   disabled={locating} title="Use my location" aria-label="Use my location">
             {locating ? <Loader2 className="animate-spin" /> : <LocateFixed />}
@@ -456,14 +485,8 @@ function WhereWhen({ where, setWhere }: { where: Where; setWhere: Dispatch<SetSt
           <input className={input} type="date" value={where.observedOn ?? ""}
                  onChange={(e) => setWhere({ ...where, observedOn: e.target.value, dateFromPhoto: undefined })} aria-label="Date found" />
         </div>
-        {(where.placeFromPhoto || where.dateFromPhoto) && (
-          <p className="text-xs text-muted-foreground">
-            {where.placeFromPhoto === where.dateFromPhoto
-              ? `Place and date from photo ${where.placeFromPhoto}.`
-              : [where.placeFromPhoto && `Place from photo ${where.placeFromPhoto}.`,
-                 where.dateFromPhoto && `Date from photo ${where.dateFromPhoto}.`].filter(Boolean).join(" ")}
-          </p>
-        )}
+        {failed && <p className="text-xs text-destructive" data-testid="text-locate-failed">{failed}</p>}
+        {note && <p className="text-xs text-muted-foreground" data-testid="text-place-source">{note}</p>}
       </CardContent>
     </Card>
   );
@@ -480,13 +503,12 @@ function ContextLine({ used, sent, placeModel }: { used: ContextUsed; sent?: Whe
     );
   }
   // Places and dates filled in from a photo reach the server as entered; say where they came from.
-  const from = (f: string | null, photo?: number) =>
-    f === "photo" ? "from your photo" : photo ? `from photo ${photo}` : "as entered";
+  const from = (f: "entered" | "photo" | null, photo?: number, device?: boolean) => sourceWords(f, photo, device);
   return (
     <p className="min-w-0 flex-1 text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
       {used.place_from && (
         <span className="inline-flex items-center gap-1">
-          <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from, sent?.placeFromPhoto)})
+          <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from, sent?.placeFromPhoto, sent?.placeFromDevice)})
         </span>
       )}
       {used.date_from && (
@@ -567,7 +589,7 @@ function ModelPicker({ models, onChange }: {
             {ready.length > 1 && (
               <select className={selectClass} value={backbone ?? ""} onChange={(e) => setBackbone(e.target.value)}
                 aria-label="Backbone" data-testid="select-backbone">
-                {ready.map((b) => <option key={b} value={b}>{modelName(b)}</option>)}
+                {ready.map((b) => <option key={b} value={b}>{publicModelName(b)}</option>)}
               </select>
             )}
             <select className={selectClass} value={choice.base} aria-label="Model"
@@ -589,8 +611,8 @@ function ModelPicker({ models, onChange }: {
               </label>
             )}
             {info && (
-              <p className="text-xs text-muted-foreground" title={info.backbone}>
-                {modelName(info.backbone)} · {num(info.embedded_photos)} reference photos
+              <p className="text-xs text-muted-foreground">
+                {publicModelName(info.backbone)} · {num(info.embedded_photos)} reference photos
               </p>
             )}
           </fieldset>
@@ -605,12 +627,12 @@ function ModelPicker({ models, onChange }: {
                 {ready.length > 1 && (
                   <select className={selectClass} value={second.backbone} aria-label="Second model backbone"
                     onChange={(e) => setSecond({ ...second, backbone: e.target.value })} data-testid="select-second-backbone">
-                    {ready.map((b) => <option key={b} value={b}>{modelName(b)}</option>)}
+                    {ready.map((b) => <option key={b} value={b}>{publicModelName(b)}</option>)}
                   </select>
                 )}
                 <select className={selectClass} value={second.method} aria-label="Second model"
                   onChange={(e) => setSecond({ ...second, method: e.target.value })} data-testid="select-second-method">
-                  {offered.map((m) => <option key={m} value={m}>{capitalize(modelLabel(second.backbone, m).how)}</option>)}
+                  {offered.map((m) => <option key={m} value={m}>{capitalize(publicMethodLabel(m))}</option>)}
                 </select>
                 {secondKey === first && (
                   <p className="text-xs text-muted-foreground">Same as the first model; pick another to compare.</p>
@@ -745,10 +767,10 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
     <Card className="overflow-hidden scroll-mt-20" data-result-card>
       <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3 px-4 sm:px-6">
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <CardTitle className="text-base text-[#4a3728]" title={r.model.backbone}>
-            {modelName(r.model.backbone).split(",")[0]}{" "}
+          <CardTitle className="text-base text-[#4a3728]">
+            {publicModelName(r.model.backbone)}{" "}
             <span className="font-normal text-muted-foreground">
-              · {modelLabel(r.model.backbone, r.model.method).how}
+              · {publicMethodLabel(r.model.method)}
             </span>
           </CardTitle>
           <button type="button" className="text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-myco-green"
@@ -758,7 +780,7 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
         </div>
         {details && (
           <div className="mt-2 space-y-1 text-xs text-muted-foreground" data-testid="text-model-details">
-            <p>{modelName(r.model.backbone)}</p>
+            <p>{publicModelName(r.model.backbone)}: {capitalize(publicMethodLabel(r.model.method))}.</p>
             <p>
               {num(r.reference.records)} DNA-verified records · {num(r.reference.species)} names ·{" "}
               {num(r.reference.photos)} photos

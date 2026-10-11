@@ -83,3 +83,26 @@ test("a typed date stays while the place still fills from a photo", () => {
   assert.deepEqual(fillFromPhotos({ observedOn: "2026-01-02" }, [A]),
                    { observedOn: "2026-01-02", lat: "42.2800", lng: "-83.7400", placeFromPhoto: 1 });
 });
+
+// Phone-like files (2026-10-11): an iPhone's own JPEG layout (maker note, full GPS block
+// with altitude, direction and positioning error), and the same photo as iOS Safari's and
+// Android's photo pickers hand it to a web page by default: GPS gone, dates kept.
+test("an iPhone photo's place and date are read from its full GPS block", async () => {
+  const pd = await readPhotoPlaceDate(photo("iphone-gps.jpg"));
+  assert.ok(Math.abs(pd.lat! - 44.0476) < 1e-4, String(pd.lat));
+  assert.ok(Math.abs(pd.lng! - -123.087) < 1e-4, String(pd.lng));
+  assert.equal(pd.date, "2026-10-04");
+});
+
+test("a photo from a phone's picker keeps its date but has no place", async () => {
+  assert.deepEqual(await readPhotoPlaceDate(photo("picker-stripped.jpg")),
+                   { lat: null, lng: null, date: "2026-10-04" });
+});
+
+test("a current location the person chose isn't replaced by a photo read later", () => {
+  const chosen = { lat: "44.5600", lng: "-123.2600", placeFromDevice: true };
+  const filled = fillFromPhotos(chosen, [{ lat: 44.0476, lng: -123.087, date: "2026-10-04" }]);
+  assert.equal(filled.lat, "44.5600");
+  assert.equal(filled.placeFromDevice, true);
+  assert.equal(filled.observedOn, "2026-10-04", "the date still comes from the photo");
+});
