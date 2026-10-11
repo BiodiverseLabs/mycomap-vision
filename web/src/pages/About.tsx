@@ -281,7 +281,9 @@ function HowGood() {
             </p>
           )}
           <p className="mt-3 text-sm text-muted-foreground">
-            Model: {publicModelName(h.ours.backbone)}, {publicMethodLabel("nearest")}. Test {h.comparisonId}.
+            Model: {publicModelName(h.ours.backbone)}, {publicMethodLabel("nearest")}. Measured on
+            the newest DNA-verified weeks; every test is on the{" "}
+            <a className="underline" href="/research/results">Results page</a>.
           </p>
         </>
       )}

@@ -74,3 +74,12 @@ test("pages outside Research use the public names and never show a raw backbone 
     assert.doesNotMatch(src, />\s*\{[^}]*\.backbone\}\s*</, `${f}: a backbone id as text`);
   }
 });
+
+// Steve's decision D (2026-10-11): no internal ids such as comparison runs in public text.
+test("pages outside Research show no comparison run id", () => {
+  for (const f of publicSources()) {
+    const src = read(f);
+    assert.doesNotMatch(src, /\b\d{8}-\d{6}-[0-9a-f]{6}\b/, `${f}: a comparison id written out`);
+    assert.doesNotMatch(src, /\{[^}]*comparisonId[^}]*\}/, `${f}: a comparison id rendered`);
+  }
+});
