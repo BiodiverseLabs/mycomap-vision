@@ -596,11 +596,17 @@ class Identifier:
 
     def identify(self, backbone_model, images: list, top_k: int = 5, context=None,
                  photo_lookup=None, may_show: Callable[[PhotoInfo], bool] = only_open_licences) -> dict:
+        vecs, verdicts = self.embed(backbone_model, images)
+        return self.identify_vectors(vecs, top_k, context=context,
+                                     photo_lookup=photo_lookup, may_show=may_show, gate=verdicts)
+
+    def embed(self, backbone_model, images: list) -> tuple[np.ndarray, list[dict] | None]:
+        """Photos -> (normalised vectors, the gate's verdict per photo or None). Every path
+        that answers from photos goes through here, so none can skip the gate."""
         prepare = getattr(backbone_model, "prepare", None) or (lambda im: im)
         vecs, base = self.encode(backbone_model, [prepare(im) for im in images])
-        verdicts = self.gate.judge(base) if base is not None else None
-        return self.identify_vectors(normalise(vecs), top_k, context=context,
-                                     photo_lookup=photo_lookup, may_show=may_show, gate=verdicts)
+        verdicts = self.gate.judge(base) if self.gate is not None and base is not None else None
+        return normalise(vecs), verdicts
 
     def encode(self, backbone_model, items: list) -> tuple[np.ndarray, np.ndarray | None]:
         """(this model's vectors, the gate's base-model vectors or None when the gate
