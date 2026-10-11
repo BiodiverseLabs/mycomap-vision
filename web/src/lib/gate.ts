@@ -47,3 +47,12 @@ export function photoGateLabel(p: Pick<PhotoResult, "gate">): string | null {
 export function chanceWithheld(r: Pick<IdentifyResult, "confidence_withheld" | "gate">): boolean {
   return !!r.confidence_withheld || (!!r.gate && r.gate.verdict !== "fungus");
 }
+
+/** The hints the page lists under a result: the server's, less the gate's own hint when
+ *  the banner already says it (the API keeps it for callers without a banner). */
+export function pageHints(r: Pick<IdentifyResult, "gate" | "hints">): string[] {
+  const banner = gateBanner(r);
+  if (!banner) return r.hints;
+  const said = banner.title.replace(/\.$/, "");
+  return r.hints.filter((h) => !h.startsWith(said));
+}

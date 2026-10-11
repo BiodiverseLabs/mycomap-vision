@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { chanceWithheld, gateBanner, leftOut, photoGateLabel } from "./gate";
+import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel } from "./gate";
 import type { FindGate, PhotoGate } from "./api";
 
 const photo = (verdict: PhotoGate["verdict"]): PhotoGate => ({ verdict, p_fungus: 0.5, message: null });
@@ -41,4 +41,12 @@ test("a photo left out as not a fungus is labelled under its tile", () => {
   assert.equal(photoGateLabel({ gate: photo("unsure") }), "fungus?");
   assert.equal(photoGateLabel({ gate: photo("fungus") }), null);
   assert.equal(leftOut({}), false);
+});
+
+test("the page doesn't repeat the gate's verdict as a hint under its own banner", () => {
+  const hints = ["This doesn't look like a fungus, so no identification is given.", "Add more photos."];
+  assert.deepEqual(pageHints({ gate: find("not_fungus", "This doesn't look like a fungus."), hints }),
+                   ["Add more photos."]);
+  const left = ["Photo 2 doesn't look like a fungus, so it was left out of the answer."];
+  assert.deepEqual(pageHints({ gate: find("fungus"), hints: left }), left);   // no banner: kept
 });

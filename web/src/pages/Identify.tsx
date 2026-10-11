@@ -25,7 +25,7 @@ import {
   type Rank,
   type Specimen,
 } from "@/lib/api";
-import { chanceWithheld, gateBanner, leftOut, photoGateLabel, type GateBanner } from "@/lib/gate";
+import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, type GateBanner } from "@/lib/gate";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import {
   identifyGate, LIKELY_COPY, modelName, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
@@ -570,9 +570,9 @@ function ResultCard({ r, urls }: { r: IdentifyResult; urls: string[] }) {
             </p>
           </div>
         )}
-        {!photo && r.hints.length > 0 && (
+        {!photo && pageHints(r).length > 0 && (
           <div className="rounded-md border border-myco-tan-light/50 bg-[#fbf7f0] p-3 space-y-1.5">
-            {r.hints.map((h) => (
+            {pageHints(r).map((h) => (
               <p key={h} className="flex gap-2 text-sm text-[#5c4a3a]">
                 <Lightbulb className="h-4 w-4 mt-0.5 shrink-0 text-myco-tan" />
                 {h}
