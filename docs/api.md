@@ -117,7 +117,7 @@ Why sessions rather than stateless calls:
 ```
 
 → `201 {"session_id": "s_7Yp2…", "expires_at": "…", "max_photos": 10,
-"model": {"name", "version", "calibrated_on"}, "context_used": {…}}`
+"model": {"name", "version", "data", "calibrated_on"}, "context_used": {…}}`
 
 `POST /api/v1/sessions/{id}/photos`, multipart: `photo` (one file; JPEG, long side
 1024, q≈85, EXIF date kept) and `photo_ref` (the app's id for it, ≤ 64 chars):
@@ -168,7 +168,9 @@ model's result, not a `results` list.
 ```json
 {
   "request_id": "r_01J…",
-  "model": {"name": "MycoMap Vision", "version": "2026-10-08",
+  "model": {"name": "MycoMap Vision", "version": "2026-10-06",
+            "data": {"snapshot": "2026-10-06", "records": 160173, "species": 18688,
+                     "genera": 1620},
             "calibrated_on": "2026-10-08"},
   "reference": {"records": 152915, "species": 9876, "photos": 593224},
   "photos": 3,
@@ -213,11 +215,20 @@ model's result, not a `results` list.
 ```
 
 - **`model`** (Steve, 2026-10-11: the product never names the backbone underneath):
-  `name` is always "MycoMap Vision"; `version` is the date of the release that answered
-  (`YYYY-MM-DD`): store it on records to say which model made a suggestion. It never
-  embeds a backbone id. `calibrated_on` is the date its confidences were last
-  calibrated. Backbone and method ids never appear in any v1 answer or refusal (tested),
-  and `prior` carries only `applied`. (Vision branch fix/api-v1-public-model-name.)
+  `name` is always "MycoMap Vision". `version` reflects the **training data** (Steve,
+  2026-10-11): the date the DNA-validated label set behind the served model was
+  exported from mycomap.org (`YYYY-MM-DD`), then `.2`, `.3` for a later release built on
+  the same export; opaque, matches `[A-Za-z0-9._:-]{1,40}`, never a backbone id. Store it
+  on records to say which model made a suggestion. `data` = `{snapshot, records, species,
+  genera}`: that export's date and size as Vision uses it (North America, no conflicting
+  label, spellings of a name counted once), from the release itself, so it doesn't move
+  with the nightly additions (`reference` does). `calibrated_on` is the date its
+  confidences were last calibrated. Backbone and method ids never appear in any v1
+  answer or refusal (tested), and `prior` carries only `applied`. Today's served model:
+  `version` 2026-10-06 (the 10-08 release packaged the 10-06 export; its fine-tune learned
+  from the validations through 09-07 in that export), 160,173 records, 18,688 species,
+  1,620 genera. (Vision branches fix/api-v1-public-model-name, merged;
+  feat/api-v1-model-version for `version`/`data`.)
 - **Combined and per-photo, at every rank.** Top-level `ranks`/`likely`/`specimens` are
   the combined answer over the photos the gate kept. `per_photo[i]` is photo *i* alone,
   with `overall_top`: where the combined top name places in that photo's own ranking.
@@ -231,6 +242,11 @@ model's result, not a `results` list.
   no photo is clearly a fungus, names are still listed but every `confidence` is `null`
   and nothing is `confident`. When every photo is `not_fungus`, `ranks` are empty: still
   a 200, still counted. `gate` is `null` while the gate isn't deployed.
+  `gate.looks_like` is `null` or `"slime"` (a slime mould): then `gate.message` is "This
+  looks like a slime mould.", the verdict is `unsure` (rarely `not_fungus`) and never
+  `fungus`, names are shown and confidence is `null`. A photo's verdict may carry
+  `looks_like: "slime"` and/or `lifted_by: "slime"` (gate branch
+  feat/fungus-gate-slime-not-sure).
 - **`confident`** (per candidate; Vision owns the rule, so the website, the app and
   Mobile H never set a threshold of their own): `true` for a rank's top name when the
   gate verdict is `fungus` and its calibrated `confidence` is **≥ 0.70**: Steve's rule for
@@ -465,7 +481,7 @@ stay in front of the monthly numbers.
 
 ```json
 {"generated_at": "2026-10-11T12:00:00Z",
- "model": {"name": "MycoMap Vision", "version": "2026-10-08", "calibrated_on": null},
+ "model": {"name": "MycoMap Vision", "version": "2026-10-06", "data": {…}, "calibrated_on": null},
  "nightly_version": 12,
  "counts_are": "reference_records",
  "species": {"Amanita muscaria": 412, "Russula sp. 'IN01'": 7},
