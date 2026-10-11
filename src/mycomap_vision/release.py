@@ -6,6 +6,7 @@ A release is the folder s3://<bucket>/releases/<id>/:
     embeddings/<backbone>/...   the served backbones' vectors
     models/<name>.json, .pt     fine-tuned weights, when a served backbone is one
     taxonomy/inat_genera.sqlite iNat's families per genus (taxonomy.py), when fetched
+    occurrence/inat-fungi-na.npz iNat occurrence counts for the place prior, when built
     release.json                id, backbones, code version, and every file with its
                                 size and sha256; written LAST, so a release without
                                 it is unfinished and is never pulled
@@ -33,6 +34,7 @@ from pathlib import Path
 
 from . import config, holdouts
 from .manifest import shippable_snapshot
+from .occurrence import STORE_NAME as OCCURRENCE_STORE
 from .taxonomy import CACHE as TAXONOMY_CACHE
 
 PREFIX = "releases/"
@@ -80,6 +82,11 @@ def release_files(conn, backbones: list[str], data_dir: Path) -> list[tuple[Path
     # iNat's families per genus (taxonomy.py): the site labels records as comparisons do.
     if (data_dir / TAXONOMY_CACHE).is_file():
         files.append((data_dir / TAXONOMY_CACHE, TAXONOMY_CACHE.as_posix()))
+    # iNat open-data occurrence counts (occurrence.py, ~6 MB): the served place prior's
+    # wide berth (placeprior.py) needs them. Never the leave-one-out index beside it
+    # (.loo.npz, ~120 MB): that is for scoring benchmark records, not for serving.
+    if (data_dir / OCCURRENCE_STORE).is_file():
+        files.append((data_dir / OCCURRENCE_STORE, OCCURRENCE_STORE.as_posix()))
     return files
 
 

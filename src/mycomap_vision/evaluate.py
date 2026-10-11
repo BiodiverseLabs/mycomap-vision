@@ -418,8 +418,16 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     return out
 
 
+def calibration_method(method: str) -> str:
+    """Whose calibration a method uses: its own, or the one it names (`calibration_from`:
+    nearest+mean+place answers exactly as nearest+mean without a place or date)."""
+    return getattr(METHODS.get(method), "calibration_from", None) or method
+
+
 def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> dict | None:
-    """The newest comparison's fitted temperatures for this model, with where they came from."""
+    """The newest comparison's fitted temperatures for this model (or for the method whose
+    calibration it shares), with where they came from."""
+    method = calibration_method(method)
     conn.executescript(SCOREBOARD_SCHEMA)
     row = conn.execute("select id, comparison_id, report_json from eval_runs "
                        "where backbone = ? and method = ? order by id desc limit 1",
