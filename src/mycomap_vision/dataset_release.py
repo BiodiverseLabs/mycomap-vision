@@ -56,7 +56,8 @@ RECORD_REASONS = ("source_mycoportal", "source_com_sequence", "source_genbank",
                   "source_unknown", "held_out", "not_north_america", "not_fetched",
                   "missing_at_source",
                   "label_conflict", "no_label", "guest", "review", "no_photos", "ok")
-PHOTO_REASONS = ("record_excluded", "no_original", "permission_withdrawn", "review", "ok")
+PHOTO_REASONS = ("record_excluded", "other_source", "no_original", "permission_withdrawn",
+                 "mo_not_for_use", "review", "ok")
 
 MANIFEST = "MANIFEST.json"
 SUMS = "SHA256SUMS"
@@ -354,6 +355,10 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
     from .evaluate import clean
     from .permissions import EXCLUDED_FROM_USE_SQL
     from .permissions import SCHEMA as PERMISSIONS_SCHEMA
+    try:                                  # MO's use rule (feat/record-sources-mo, on main)
+        from .permissions import MO_EXCLUDED_FROM_USE_SQL
+    except ImportError:
+        MO_EXCLUDED_FROM_USE_SQL = "1"
     conn.executescript(PERMISSIONS_SCHEMA)
     holdouts.ensure_schema(conn)
     review_records, review_photos = review_records or {}, review_photos or {}
@@ -428,7 +433,9 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             "label_rule": LABEL_RULE, "label_exported_at": exported,
             "validated_on": vdate, "green_projects": projects, "observed_on": observed,
             "country": country, "state": state, "north_america": int(bool(na)),
-            "observer_login": inat_login if source == "inat" else mo_login,
+            # An MO observer is 'mo:<login>', never the iNat account of that name (evaluate.py).
+            "observer_login": inat_login if source == "inat" else
+            (f"mo:{mo_login}" if mo_login else None),
             "inat_uuid": uuid if source == "inat" else None,
             "included": 0, "reason": reason, "split": None,
             "benchmark": b[0], "benchmark_split": b[1]})
@@ -439,6 +446,8 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
     # 'large' copy, S3 first) and the permission rule of evaluate.load_records.
     withdrawn = {r[0] for r in conn.execute(
         f"select op.photo_id from observation_photos op where not ({EXCLUDED_FROM_USE_SQL})")}
+    mo_refused = {r[0] for r in conn.execute(
+        f"select op.photo_id from observation_photos op where not ({MO_EXCLUDED_FROM_USE_SQL})")}
     copies: dict[int, tuple] = {}
     for pid, store, path, nbytes, sha in conn.execute(
             "select photo_id, store, path, bytes, sha256 from photo_copies "
@@ -468,10 +477,14 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
         copy = copies.get(pid)
         if rec["reason"] != "ok":
             reason = "record_excluded"
+        elif psource != rec["source"]:
+            reason = "other_source"             # a photo of another source's record
         elif copy is None:
             reason = "no_original"
         elif pid in withdrawn:
             reason = "permission_withdrawn"
+        elif pid in mo_refused:
+            reason = "mo_not_for_use"           # MO's ok_for_export / licence rule
         elif pkey in review_photos:
             reason = review_photos[pkey]
         else:
@@ -983,7 +996,7 @@ class Release:
                 projects=tuple(json.loads(r["green_projects"] or "[]")),
                 stored_name=r["org_name"] if r["org_name"] != r["label"] else "",
                 taxon="" if r["species"] else (r["label"] or ""),
-                uuid=r["inat_uuid"] or ""))
+                uuid=r["inat_uuid"] or "", **_source_fields(r)))
         return out
 
     def check_photos_match(self, conn: sqlite3.Connection) -> None:
@@ -1037,6 +1050,16 @@ class Release:
         self.db.close()
         if self._private is not None:
             self._private.close()
+
+
+def _source_fields(r) -> dict:
+    """evaluate.Record's source fields, when this checkout's Record has them."""
+    from dataclasses import fields
+
+    from .evaluate import Record
+    names = {f.name for f in fields(Record)}
+    return {k: v for k, v in (("source", r["source"]), ("source_id", r["source_id"] or ""))
+            if k in names}
 
 
 def load_release(rid: str, root: Path | None = None, *, allow_draft: bool = False,

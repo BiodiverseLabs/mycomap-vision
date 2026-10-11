@@ -728,7 +728,8 @@ def pending_photos(conn: sqlite3.Connection, name: str, ids: list[str], size: st
     for oid, pid, url, host, _attempts in rows:
         if oid in want and pid not in seen:
             seen.add(pid)
-            out.append({"photo_id": pid, "source_url": url, "host": host})
+            # A benchmark's photos are iNat's (its records are iNat records).
+            out.append({"photo_id": pid, "source_url": url, "host": host, "source": "inat"})
     return out[:limit] if limit is not None else out
 
 

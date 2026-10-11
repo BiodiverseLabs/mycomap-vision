@@ -139,9 +139,11 @@ Every candidate gets exactly one reason (the first that applies), so the counts 
 | `no_photos` | no included photo left after the photo rules |
 | `ok` | in |
 
-**Photos**, in this order: `record_excluded`, `no_original` (no kept original with a
-sha256), `permission_withdrawn` (ARR, owner withdrew on mycomap.org; the rule of
-`evaluate.load_records`, read from permissions.py), `review:<list>` (non-fungus scan,
+**Photos**, in this order: `record_excluded`, `other_source` (a photo of another source
+than its record's), `no_original` (no kept original with a sha256), `permission_withdrawn`
+(ARR, owner withdrew on mycomap.org), `mo_not_for_use` (MO marks it not for export, or ARR
+while MO ARR use is off: `permissions.MO_EXCLUDED_FROM_USE_SQL`); these are the rules of
+`evaluate.load_records`, read from permissions.py. Then `review:<list>` (non-fungus scan,
 wrong-photo lists, after a person's check), `ok`.
 
 Wrong-photo records need no reason of their own: a build refuses a manifest without the

@@ -39,7 +39,8 @@ def migrate(conn):
     manifest.py predates it."""
     for table, cols in {"records": {"org_source": "text", "source_id": "text"},
                         "photos": {"source": "text not null default 'inat'",
-                                   "source_photo_id": "integer", "source_owner_id": "integer"}
+                                   "source_photo_id": "integer", "source_owner_id": "integer",
+                                   "ok_for_export": "integer"}
                         }.items():
         have = {r[1] for r in conn.execute(f"pragma table_info({table})")}
         for c, decl in cols.items():
@@ -88,13 +89,15 @@ def add_record(conn, key, name, *, source="inat", vdate="2026-01-01", na=1, conf
 
 
 def add_photo(conn, store, key, pid, lic="cc-by", lclass="open", *, owner=7, copy=True,
-              source="inat", seed=None):
+              source="inat", seed=None, ok_for_export=1):
     conn.execute(
         "insert into photos (photo_id, source, source_photo_id, owner_user_id, owner_login, "
         "owner_name, license_code, license_class, attribution, source_url, first_seen_at, "
-        "license_checked_at, status) values (?,?,?,?,?,?,?,?,?,?, 'now', 'now', 'done')",
+        "license_checked_at, status, ok_for_export) "
+        "values (?,?,?,?,?,?,?,?,?,?, 'now', 'now', 'done', ?)",
         (pid, source, pid if source == "mo" else None, owner, "alice", "Alice", lic, lclass,
-         "(c) Alice", f"https://example.org/photos/{pid}/square.jpg"))
+         "(c) Alice", f"https://example.org/photos/{pid}/square.jpg",
+         ok_for_export if source == "mo" else None))
     conn.execute("insert into observation_photos values (?, ?, 1)", (key, pid))
     if copy:
         body = jpeg(seed if seed is not None else pid)
@@ -146,10 +149,15 @@ def world(tmp_path):
     conn.close()
 
 
+_DRAFTS = iter(range(10**6))
+
+
 def build(world, name=None, **kw):
     kw.setdefault("store_reader", dr.default_store_reader())
     kw.setdefault("val_weeks", 8)
-    return dr.build(name=name or dr.draft_id(), manifest_path=world["path"], root=world["root"],
+    # Two builds can fall in one second: a unique draft id each, not the clock's.
+    name = name or f"dry-20990101-{next(_DRAFTS):06d}"
+    return dr.build(name=name, manifest_path=world["path"], root=world["root"],
                     log=lambda *a: None, **kw)
 
 
@@ -188,6 +196,29 @@ def test_photo_reasons_follow_the_permission_and_original_rules(world):
     assert got["inat:111"] == "permission_withdrawn"
     assert got["inat:71"] == "record_excluded"
     assert got["mo:9000000004"] == "ok"
+
+
+def test_mo_photos_follow_mos_use_rule_and_photos_stay_with_their_source(world):
+    """As evaluate.load_records: an MO photo MO marks not for export is not used, and a
+    record takes only photos of its own source."""
+    c = world["conn"]
+    add_photo(c, world["store"], "mo:4", 9_000_000_005, lic="cc-by-sa", source="mo",
+              ok_for_export=0)
+    add_photo(c, world["store"], "2", 9_000_000_006, lic="cc-by-sa", source="mo")
+    c.commit()
+    c.execute("pragma wal_checkpoint(truncate)")
+    m = build(world)
+    rel = dr.load_release(m["id"], world["root"], allow_draft=True)
+    try:
+        got = dict(rel.db.execute("select photo_key, reason from photos"))
+        observer = rel.db.execute("select observer_login from records where record_key = 'mo:4'"
+                                  ).fetchone()[0]
+    finally:
+        rel.close()
+    assert got["mo:9000000005"] == "mo_not_for_use"
+    assert got["mo:9000000006"] == "other_source"
+    assert got["mo:9000000004"] == "ok"
+    assert observer == "mo:bob"
 
 
 def test_excluded_records_never_appear_in_train_val_or_test(world):

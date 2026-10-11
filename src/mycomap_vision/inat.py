@@ -16,7 +16,7 @@ from typing import Callable, Iterable, Iterator
 
 import requests
 
-from . import config
+from . import config, sources
 from .dates import real_date
 from .licenses import host_of, license_class
 from .ratelimit import MinInterval
@@ -163,7 +163,10 @@ def save_batch(conn: sqlite3.Connection, requested: Iterable[str], results: list
 
 
 def pending_ids(conn: sqlite3.Connection, refresh: bool, north_america_only: bool) -> list[str]:
-    where = ["r.source = 'inat'"]
+    """Records to ask iNat about: iNat records only, by records.source (never by the look
+    of an id: MO and MyCoPortal numbers look the same), in a migrated manifest only."""
+    sources.require_migrated(conn, "fetching iNat details")
+    where = [f"r.source = '{sources.INAT}'"]
     if north_america_only:
         where.append("r.north_america = 1")
     if not refresh:

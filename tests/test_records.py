@@ -5,7 +5,7 @@ from mycomap_vision.records import (build_records, is_north_america, parse_expor
 
 
 def row(oid, name="Amanita muscaria", **kw):
-    base = {"observation_id": oid, "scientific_name": name, "latitude": "39.1",
+    base = {"observation_id": oid, "source": "iNaturalist", "scientific_name": name, "latitude": "39.1",
             "longitude": "-86.5", "country": "US", "continent": "North America",
             "validation_status_1": "yes", "validation_project_1": "Indiana",
             "validation_date_1": "9/2/2026 14:03"}
@@ -71,11 +71,6 @@ def test_disagreeing_names_for_one_record_are_flagged_as_label_conflicts():
     assert recs["200"]["label_conflict"] == 1
     assert json.loads(recs["200"]["names_json"]) == ["Russula A", "Russula B"]
     assert recs["300"]["label_conflict"] == 0
-
-
-def test_non_numeric_ids_are_not_treated_as_inat():
-    [rec] = build_records([row("MO-123")], "now")
-    assert rec["source"] == "other"
 
 
 def test_export_parsing_skips_the_header_line():

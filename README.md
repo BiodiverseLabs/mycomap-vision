@@ -13,8 +13,10 @@ Phase 0 runs on a local machine with a GPU. Its goal is one number: does a
 multi-photo model on DNA-validated labels beat iNat's model on the newest weeks
 of green records?
 
-1. `mv export-records`: pull green records from mycomap.org into the manifest.
-2. `mv fetch-inat`: photo lists, licenses and owners from iNat (1 request/s).
+1. `mv export-records`: pull green records from mycomap.org into the manifest, each
+   with its source (`mv record-sources` shows what an export would change).
+2. `mv fetch-inat`: photo lists, licenses and owners from iNat (1 request/s), for iNat
+   records; `mv fetch-mo`: the same from Mushroom Observer for MO records (5 s apart).
 3. `mv aws-launch-downloader`: large (1024 px) photos straight into the private S3
    bucket from a self-terminating EC2 instance, within iNat's limits. See
    [deploy/aws/README.md](deploy/aws/README.md). (`mv download-photos` does the
@@ -81,12 +83,29 @@ Everything lives under `data/` (git-ignored; override with `MV_DATA_DIR`):
 
 - `manifest.sqlite`: records, iNat observations, photos, observation-photo
   links and license history.
-- `raw/`: the records export and every iNat API answer (gzipped), as fetched.
+- `raw/`: the records export and every iNat and MO API answer (gzipped), as fetched.
 - `photos/<size>/<id % 1000>/<photo_id>.<ext>`: the images, under the same path in
   the S3 bucket (`MV_S3_BUCKET`) when they are downloaded to S3.
 - `reports/`: contributor lists, the genera in doubt (`taxonomy-doubts.csv`).
 - `taxonomy/inat_genera.sqlite`: iNat's answer for each genus and every taxon fetched
   (never inside the manifest; a release ships it).
+
+### Sources
+
+A record's source is .org's `observations.source`, stored as `records.source`:
+`inat`, `mo` (Mushroom Observer), `mycoportal`, `com_sequence` (legacy .com
+Sequences), `genbank` or `unknown` (`sources.py`). Ids are never read for it: MO,
+MyCoPortal and iNat numbers look alike, and until 2026-10-09 the export took every
+number for an iNat id, so MO and MyCoPortal records carried photos of whatever iNat
+observation shared their number. Non-iNat records are keyed `<source>:<id>`.
+
+Vision takes photos from iNat records (from iNat) and MO records (from MO, Steve
+2026-10-09). MyCoPortal records are left out (Steve: they rarely have field images),
+and so are .com Sequences, GenBank and unknown-source records (no photos of their
+own). The first export with this code migrates an older manifest: the iNat photos and
+details fetched for non-iNat records come off them, each written to `source_removals`,
+and `manifest_migrations` gets `record-sources-v1`; nothing is fetched, downloaded or
+embedded before that.
 
 ### Labels
 
@@ -122,3 +141,10 @@ Every photo keeps its owner, license and a license history, so any contributor's
 photos can be listed or removed. CC-licensed photos come from the iNaturalist
 Open Data bucket on AWS; all-rights-reserved ones come from iNat's static host,
 capped at 4 GB/hour and 20 GB/day (iNat's rule is under 5 and 24).
+
+Mushroom Observer photos (`mo.py`) are read from MO's images API and image host, one
+request at a time and at least 5 seconds apart (MO asks anonymous clients for 20 a
+minute at most), with MO's licence name, owner and `ok_for_export` flag kept per photo.
+An MO photo is shown only when it is Creative Commons; it is used only when MO marks it
+ok for export and, for now, only when it is not all rights reserved (Steve to decide).
+No MO location is read.

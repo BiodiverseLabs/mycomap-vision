@@ -25,11 +25,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 
-from . import config, guests, holdouts, likely, name_equiv, names, taxonomy
+from . import config, guests, holdouts, likely, name_equiv, names, sources, taxonomy
 from .dates import real_date
 from .methods import (METHODS, Hybrid, LinearHead, NearestSpecimen,  # noqa: F401
                       Scorer, SpeciesMean, species_scores)
-from .permissions import EXCLUDED_FROM_USE_SQL
+from .permissions import EXCLUDED_FROM_USE_SQL, MO_EXCLUDED_FROM_USE_SQL
 from .permissions import ensure_schema as ensure_permissions_schema
 
 BUCKETS = [(0, 0, "novel (0 refs)"), (1, 1, "1 ref"), (2, 2, "2 refs"),
@@ -59,6 +59,8 @@ class Record:
     stored_name: str = ""              # the name as .org spells it, when the label differs
     taxon: str = ""                    # a one-word name ("Russula"): species is then ''
     uuid: str = ""                     # its iNat observation's uuid (occurrence priors leave it out)
+    source: str = sources.INAT         # records.source: 'inat' or 'mo' (sources.PHOTO_SOURCES)
+    source_id: str = ""                # the id at the source ('' = the observation_id)
 
     @property
     def unit(self) -> str:
@@ -77,7 +79,7 @@ def clean(s: str | None) -> str:
 
 def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
                  north_america_only: bool = True, release=None) -> list[Record]:
-    """Green, unconflicted iNat records with at least one embedded photo.
+    """Green, unconflicted iNat and Mushroom Observer records with at least one embedded photo.
 
     Every reference set, comparison and training run is built here, so this is
     where photos a photographer has refused us (all rights reserved, permission
@@ -98,23 +100,40 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     records table holds it: no reference set, comparison, fine-tune or served index
     can contain it. The benchmark loads its records itself (heldout.py).
 
+    The source is records.source, never the look of an id (sources.py): an iNat record
+    needs its iNat details, an MO record its MO answer (mo.py), and each takes only
+    photos of its own source. MyCoPortal, .com Sequences, GenBank and unknown-source
+    records are never loaded. An MO photo is used only when MO's use rule allows it
+    (permissions.MO_EXCLUDED_FROM_USE_SQL). An MO record's observer is 'mo:<login>', so
+    it is never counted as the iNat account with the same name.
+
     With `release` (a dataset release, dataset_release.load_release), the records,
     labels and photos are the release's reference records (train + val), not the live
     manifest's; the manifest only maps photos to vectors."""
     if release is not None:
         release.check_photos_match(conn)
         return release.as_records(("train", "val"), photo_row)
+    from .manifest import upgrade
     na = "and r.north_america = 1" if north_america_only else ""
+    upgrade(conn)
     ensure_permissions_schema(conn)
     holdouts.ensure_schema(conn)
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
-             o.user_login, op.photo_id, op.position, r.latitude, r.longitude,
-             r.observed_on, o.observed_on, r.green_projects, o.uuid
+             coalesce(o.user_login, 'mo:' || m.owner_login), op.photo_id, op.position,
+             r.latitude, r.longitude, r.observed_on, o.observed_on, r.green_projects, o.uuid,
+             r.source, r.source_id
       from records r
-      join inat_observations o on o.observation_id = r.observation_id and o.status = 'ok'
+      left join inat_observations o on r.source = '{sources.INAT}'
+        and o.observation_id = r.observation_id and o.status = 'ok'
+      left join mo_observations m on r.source = '{sources.MO}'
+        and m.observation_id = r.observation_id and m.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
-      where r.label_conflict = 0 {na} and {EXCLUDED_FROM_USE_SQL}
+      join photos p on p.photo_id = op.photo_id and p.source = r.source
+      where r.source in {sources.PHOTO_SOURCES_SQL}
+        and (o.observation_id is not null or m.observation_id is not null)
+        and r.label_conflict = 0 {na} and {EXCLUDED_FROM_USE_SQL}
+        and {MO_EXCLUDED_FROM_USE_SQL}
         and {holdouts.not_held_out('r.observation_id')}
       order by r.observation_id, op.position
     """).fetchall()
@@ -123,7 +142,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     recs: dict[str, Record] = {}
     unlabelled: set[str] = set()
     for (oid, name, genus, family, vdate, login, pid, _pos, lat, lon, org_observed,
-         inat_observed, projects, uuid) in rows:
+         inat_observed, projects, uuid, source, source_id) in rows:
         if pid not in photo_row or not clean(name) or oid in unlabelled:
             continue
         rec = recs.get(oid)
@@ -145,7 +164,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
                                      projects=tuple(json.loads(projects or "[]")),
                                      stored_name=clean(name) if respelled else "",
                                      taxon="" if lab.species else lab.unit,
-                                     uuid=uuid or "")
+                                     uuid=uuid or "", source=source,
+                                     source_id=source_id or "")
         rec.photo_rows.append(photo_row[pid])
     return list(recs.values())
 
@@ -405,8 +425,16 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     return out
 
 
+def calibration_method(method: str) -> str:
+    """Whose calibration a method uses: its own, or the one it names (`calibration_from`:
+    nearest+mean+place answers exactly as nearest+mean without a place or date)."""
+    return getattr(METHODS.get(method), "calibration_from", None) or method
+
+
 def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> dict | None:
-    """The newest comparison's fitted temperatures for this model, with where they came from."""
+    """The newest comparison's fitted temperatures for this model (or for the method whose
+    calibration it shares), with where they came from."""
+    method = calibration_method(method)
     conn.executescript(SCOREBOARD_SCHEMA)
     row = conn.execute("select id, comparison_id, report_json from eval_runs "
                        "where backbone = ? and method = ? order by id desc limit 1",

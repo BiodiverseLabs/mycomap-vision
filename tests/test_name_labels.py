@@ -45,7 +45,7 @@ def seed(conn, tmp_path):
     rows, obs = [], []
     for i, (name, genus, _red, when) in enumerate(RECORDS):
         oid = str(100 + i)
-        rows.append({"observation_id": oid, "scientific_name": name, "genus": genus,
+        rows.append({"source": "iNaturalist", "observation_id": oid, "scientific_name": name, "genus": genus,
                      "family": "F", "continent": "North America",
                      "validation_status_1": "yes", "validation_date_1": when})
         obs.append(inat_obs(100 + i, photos=[(0, 1000 + i, "cc0", OPEN)]))
