@@ -32,11 +32,12 @@ from .records import is_north_america, parse_export
 
 CANDIDATE_SQL = """
 select row_to_json(t)::text from (
-  select observation_id, scientific_name, continent, country, latitude, longitude
+  select observation_id, source, scientific_name, continent, country, latitude, longitude
   from observations
   where coalesce(validation_status_1, '') not in ('yes', 'no')
     and coalesce(validation_status_2, '') not in ('yes', 'no')
     and coalesce(validation_status_3, '') not in ('yes', 'no')
+    and source = 'iNaturalist'
     and observation_id ~ '^[0-9]+$'
   order by observation_id
 ) t
@@ -71,7 +72,12 @@ def now_iso() -> str:
 
 
 def save_candidates(conn: sqlite3.Connection, rows: list[dict], seen_at: str) -> int:
+    """Store the pending iNat records. A row is iNat only when its source says so
+    (sources.normalise): an MO or MyCoPortal number, or a row with no source, is never
+    predicted from the iNat observation that happens to share the number."""
+    from .sources import INAT, normalise
     conn.executescript(SCHEMA)
+    rows = [r for r in rows if normalise(r.get("source")) == INAT]
     with conn:
         for r in rows:
             lat = r.get("latitude")
