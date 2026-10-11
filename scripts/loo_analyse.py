@@ -354,6 +354,8 @@ def main() -> None:
         removal[name] = [r["observation_id"] for r in ranked[:k]]
         clean = [r for r in ranked if "non-iNat id" not in r["known_issue"]]
         removal[name + "-skip-noninat"] = [r["observation_id"] for r in clean[:k]]
+    # Secondary (added after the scan, before any removal-variant dev scoring): all of (a).
+    removal["a-only"] = [r["observation_id"] for r in by["a"]]
     for name, ids in removal.items():
         (a.out / f"remove-{name}.txt").write_text("\n".join(ids) + "\n")
 

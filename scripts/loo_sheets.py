@@ -16,6 +16,7 @@ import sys
 sys.modules["torch"] = None      # noqa: E402
 
 import argparse
+import io
 import csv
 import pickle
 import random
@@ -59,7 +60,9 @@ def main() -> None:
     path_of = {}
     for pid, store, path in conn.execute(
             "select photo_id, store, path from photo_copies where size = 'large'"):
-        path_of[pid] = Path(store) / path
+        path_of[pid] = (store, path)          # a local folder or the private S3 bucket
+    from mycomap_vision.heldout import open_location
+    stores: dict = {}
     # Per record: is its LOO top-1 its own label (to pick typical label photos).
     chunks = sorted((a.scan / "chunks").glob("chunk-*.npz"))
     top1 = np.full(layout.n_records, -1)
@@ -79,7 +82,8 @@ def main() -> None:
         for pid in recs["photo_ids"][rec_idx][:n]:
             p = path_of.get(int(pid))
             try:
-                im = Image.open(p).convert("RGB")
+                store = stores.setdefault(p[0], open_location(p[0]))
+                im = Image.open(io.BytesIO(store.get(p[1]))).convert("RGB")
                 im.thumbnail((H * 2, H))
                 out.append(im)
             except Exception:
