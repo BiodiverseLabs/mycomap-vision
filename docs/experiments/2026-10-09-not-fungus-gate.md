@@ -3,6 +3,11 @@ title: 'Not a fungus: a gate in front of the identifier'
 slug: not-fungus-gate
 date: '2026-10-09'
 status: adopted
+reproducibility: exploratory-pre-freeze
+code_commit: de00410
+reproduce_command: 'mv fungus-gate tune --dev dev.npz --ood ood.npz --ood-manifest ood-manifest.csv
+  --negatives neg.npz --exclude non-inat-reference-records.tsv --out DIR (add --on-served
+  bioclip-2-ft-20261007-165400 for the lighter gate); vectors from mv fungus-gate embed'
 question: Can Vision tell that a photo is not a fungus at all, cheaply at serve time, and hold back the
   species answer and its calibrated chance when it isn't, without costing true fungi?
 branch: feat/not-fungus-gate (pushed, not merged)
@@ -177,6 +182,9 @@ on the served fine-tuned vectors, "not a fungus" below 0.40 and "not sure" below
 scope: the lighter gate passes 97% of them, and the frozen gate's prompts must move the slime-mould
 class to the fungus side (and be re-tuned) before it ships. Reproducibility: exploratory-pre-freeze,
 to be confirmed on dataset release v1.
+
+Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1
+(docs/PLAN.md, "a reproducible dataset release").
 
 ## Next
 - Deployment waits for memory room on the 4 GB box (Steve, 2026-10-11: box stays 4 GB for now; it
