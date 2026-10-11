@@ -13,6 +13,8 @@ export interface PlaceCue {
   nearest_record_km?: number | null;
   in_season?: boolean | null;
   far_from_known?: boolean | null;
+  /** The server's own wording, for other API clients; the page builds its lines (answer.placeCue). */
+  note?: string | null;
 }
 
 export interface Candidate {
@@ -93,6 +95,8 @@ export interface IdentifyResult {
   /** Per rank, the top name from the photos alone when the place and date changed it
    *  (reserved for the place lane). */
   photo_only_top?: Partial<Record<Rank, string>>;
+  /** Whether a place/date prior was applied, and by which method (place lane). */
+  prior?: { applied: boolean; method: string };
 }
 
 export interface Where {
