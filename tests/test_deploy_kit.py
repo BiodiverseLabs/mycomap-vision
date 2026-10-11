@@ -61,6 +61,19 @@ def test_pages_allow_the_inat_photo_hosts_and_stay_out_of_search_engines():
     assert 'X-Robots-Tag "noindex, nofollow"' in headers
 
 
+def test_pages_allow_every_host_a_shown_photo_comes_from():
+    # Specimen cards show MO photos too (record sources, 2026-10-09): licenses.photo_url
+    # gives https://mushroomobserver.org/images/..., which may redirect to a subdomain.
+    from mycomap_vision import licenses
+    img_src = re.search(r"img-src ([^;]+);", read("nginx-vision-headers.conf")).group(1).split()
+    mo = licenses.photo_url("mo", "https://mushroomobserver.org/images/thumb/12.jpg?1", "medium")
+    assert mo.startswith("https://mushroomobserver.org/")
+    assert "https://mushroomobserver.org" in img_src and "https://*.mushroomobserver.org" in img_src
+    inat = licenses.photo_url("inat", "https://inaturalist-open-data.s3.amazonaws.com/photos/1/large.jpg",
+                              "medium")
+    assert any(inat.startswith(h + "/") for h in img_src), inat
+
+
 def test_the_box_starts_with_the_whole_site_behind_mycomap_org_sign_in():
     env = env_template()
     assert env["MV_SIGNIN"] == "all"
