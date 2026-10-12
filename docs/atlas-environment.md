@@ -47,9 +47,11 @@ Taking away the absence penalty didn't fix it, and neither did gating.
 are percentiles within each taxon's own range, so they are never compared across taxa. It is
 boost only: f ≥ 1, so no taxon is ever ranked down for a low rank.
 
-**Outside the accessible area: neutral, fixed, not tuned.** This changes `atlasrange`'s
-stub, which treats outside as out of range with a tuned penalty. Penalising outside the area
-would rebuild the distance prior's far-find loss with a 500 km radius.
+**Outside the accessible area: neutral in P2a–P2c** (P2c replaces "outside" with the
+continent-wide projection). This changes `atlasrange`'s stub, which treats outside as out of
+range with a tuned penalty. Penalising outside the area could rebuild the distance prior's
+far-find loss with a 500 km radius. P2d tests exactly that, as Steve's "Atlas area as the
+range" version, so the data decides.
 
 **Season.** Atlas has no phenology, so every arm keeps the served DNA season term (0.5 at
 10 days) and the far penalty beyond 1,500 km.
@@ -67,15 +69,44 @@ arms (P2a/P2b).
 | 500–1,500 km | **loss likely persists** | Atlas is silent, so the true species gets no boost while nearby mapped look-alikes do |
 | sparse truths | possible new loss | unmapped truths (most far finds are sparse species) compete with boosted mapped look-alikes |
 
-Verdict: the Atlas maps alone are unlikely to pass Steve's rule. They should shrink the
-100–500 km loss for about a fifth of records.
+Verdict: the Atlas maps alone, clipped to the accessible area, are unlikely to pass Steve's
+rule. They should shrink the 100–500 km loss for about a fifth of records.
 
-**Environment head (the better route).** A small MLP: ~55 Atlas layer bands plus month
-(sin/cos) → 256 → 256 → every v1 species. It uses a presence-only, SINR-style loss and is
-trained on v1 `train` only. Rare species shrink toward their genus, as the month prior does.
-`log p(c | env, month)` is added at a tuned weight. It has no distance input, so a far find in
-suitable habitat isn't penalised for being far, and it covers every species with ≥ 1 train
-record. Its risk: sister taxa split east/west in similar climates.
+### Review, 2026-10-12 (Steve and a critical pass)
+
+- **Atlas adds habitat, which no prior tried so far has used.** Every tested prior (DNA
+  kernel, iNat occurrence density) was a distance kernel over points. They overlap: the iNat
+  prior added 1.2 points alone, but only 55.1 → 55.4 on top of the DNA prior. An Atlas map is
+  points *plus* climate, soil and host trees, so that overlap is no evidence against it.
+- **The distance problem is mostly the near-records boost, not the 1,500 km berth.** On test
+  the served setting loses 100–300 km (+70 / −116) and 300–1,500 km (+19 / −62); beyond
+  1,500 km it is near even (+5 / −6, n 215). The target is to replace the boost with habitat
+  weighting, not only to move the berth.
+- **Atlas predicts only inside its 500 km accessible area**: `atlas_predict_raster` masks
+  before predicting (`R/fit.R`). Used literally as "the range", that edge is a 500 km cutoff,
+  tighter than today's 1,500 km. So the useful version is a **continent-wide projection** of
+  each strong model. Atlas's area-of-applicability measure then says per cell how far the
+  model is extrapolating, and that sets the weight. That is what lets habitat speak for a
+  find 800 km from any record (arms P2c, P2d).
+- **The environment head can turn into a disguised distance prior.** ~55 bands nearly
+  identify a 5 km cell (the same fact that drives the privacy rule in section 2), so a
+  flexible MLP can memorise training locations. It must therefore be **low-capacity**: about
+  8 principal axes of climate and soil, a small model, trained with spatially blocked
+  validation. It is checked against **P6**, the same model given only coordinates. If P4
+  behaves like P6 in the far band, it is a distance prior and is not adopted.
+- **Habitat as a cue, not a reorder (H).** For a far find, "the habitat here suits this
+  species" separates a plausible range extension from a likely misidentification. That helps
+  validators exactly where the most valuable records are, and it cannot cost a record its
+  rank. This matches the served far-find cue.
+- **Expectation:** 0 to +1 point overall over the served prior. Whether any arm holds the
+  300–1,500 km band is open; P2c is the most likely to.
+
+**Environment head (low-capacity, see the review).** About 8 principal axes of Atlas's
+climate and soil layers, plus month (sin/cos), into a small presence-only (SINR-style) model
+over every v1 species. It is trained on v1 `train` only, with spatially blocked validation,
+and rare species shrink toward their genus as the month prior does. `log p(c | env, month)`
+is added at a tuned weight, and every species with ≥ 1 train record is covered. Its risks:
+sister taxa split east/west in similar climates, and location memorising (checked by P6).
 
 **Pre-declared experiment on v1.** Commit the grid before any result. Everything is
 nearest + species average + the served season term + the far penalty, on the v1-retrained
@@ -87,14 +118,20 @@ model, in the same run as `retrain-v1.md` §6 item 6 (the prior re-tune):
 | P1 | served DNA boost, re-tuned on v1 | prior lane's grid |
 | P2a / P2b | Atlas f(rank) for mapped taxa; unmapped → served DNA boost (a) or 0 (b) | weight 0.25 / 0.5 / 1 (×2 = 6) |
 | P3 | max(DNA boost, Atlas boost) | weight 0.25 / 0.5 / 1 (3) |
-| P4 | environment head | weight 0.25 / 0.5 / 1; month in or out (6) |
+| P2c | Atlas **continent-wide** projected suitability, f(rank), down-weighted by the area-of-applicability measure, for mapped taxa; replaces the DNA boost for them; unmapped keep the served boost and berth | weight 0.25 / 0.5 / 1; trust cut-off at the AOA threshold or graded (6) |
+| P2d | Steve's version: Atlas accessible area as the range for mapped taxa. f(rank) inside it, a mild penalty outside it **in place of** the 1,500 km berth; unmapped keep the berth | penalty 0.5 / 1 / 2 nats; weight 0.5 / 1 (6) |
+| P4 | environment head (low-capacity) | weight 0.25 / 0.5 / 1; month in or out (6) |
 | P5 | environment head + served DNA boost | env weight 0.25 / 0.5 (2) |
+| P6 | control: the same head on coordinates only (not a candidate for serving) | weight as P4's choice (1) |
+| H | habitat cue (no reordering). Judged on whether, among records 300+ km from their truth's DNA records, Atlas suitability (P2c's) separates right top answers from wrong ones: AUC and right-share by suitability tercile | report only |
 
 - **Selection** (as in the gated follow-up): on 5 observer folds of `val`, the most species
   right among settings that hold the band on the training folds; otherwise no prior.
 - **Pass** (Steve, 10/9): species top-1 above P0 overall, **and** right answers in the
   300–1,500 km band ≥ P0's, both for every truth with a reference and for truths with 6+
   references.
+- **Disguised-distance check:** if P4's fixed / broken counts by distance band track P6's
+  within noise, P4 is a distance prior and is not adopted, whatever its overall score.
 - **Also reported:** each arm against P1. The band is split into 300–500 and 500–1,500 km
   (the accessible-area edge), and every table is split by whether the truth has a strong map.
   Standard summary format throughout.
@@ -208,8 +245,15 @@ every reference). **Decided: B (Steve, 2026-10-12).**
   with its settings, layer set, grid and seeds. No null tests; grades are taken from
   `R_main` (leak 3, declared). AOA is computed, because the prior uses it. A taxon that falls
   below its minimum sites loses its map and counts as unmapped (listed).
+- **Continent-wide projection (added 2026-10-12, for P2c / H).** For each strong model, in
+  both `R_train` (benchmarks) and `R_main` (serving), also predict across the whole grid, not
+  just the accessible area. Store per 20 km cell: the rank (a percentile of the taxon's own
+  in-area suitability, so it is comparable with the in-area ranks) and the
+  area-of-applicability dissimilarity index (or an inside/outside flag at the model's own
+  threshold). Prediction only, no refit: about 400 models on the 20 km grid; the CPU cost is
+  small next to the fits (to be measured on the pilot).
 - **Output:** never promoted, pulled to the box, served or archived. Its prior export (ranks,
-  taxa, grid) and its trained-ids list stay private.
+  taxa, grid, and the continent-wide table) and its trained-ids list stay private.
 - Check: `trained-ids(R_train) ∩ (val ∪ v1-test) = 0`, with a positive control
   (`∩ train > 0`). `atlasrange.leak_check` already refuses until those ids exist.
 - B keeps the one-way rule: Vision hands Atlas a date (the val cutoff), not records.
@@ -267,3 +311,6 @@ Read access (Steve, 2026-10-12): **no IAM change.** The vision-reader policy sta
 `private/trained-ids/*/releases/*`. The Atlas ops lane hands over the `R_main` layer files and
 manifest and `R_train`'s private prior export as one-off copies or 12 h presigned links (the
 `trained.R` pattern).
+
+Added 2026-10-12, after the review (section 1), on Steve's go: arms P2c, P2d, P6 and H; the
+low-capacity environment head; and the continent-wide projection in the Atlas ask (section 3).
