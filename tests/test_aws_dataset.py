@@ -261,3 +261,30 @@ def test_the_instance_refuses_a_manifest_other_than_the_one_shipped(cut, tmp_pat
     with pytest.raises(dr.ReleaseError, match="not the one the launch shipped"):
         aws_dataset.run_build_job("20261012-000004", request, s3, "bkt", manifest_path=path,
                                   root=tmp_path / "inst", log=lambda s: None)
+
+
+def test_a_pulled_release_holds_every_file_a_training_launch_ships(cut, tmp_path):
+    """v1, 2026-10-12: SHA256SUMS never reached the kept copy, so the pulled release lacked
+    it and the training launch (which ships it) failed."""
+    from mycomap_vision.replications.fungitastic import dataset as release_files
+    rel, root = cut[3], cut[4]
+    s3 = BucketS3()
+    dataset_s3.upload_release(rel.id, root, s3, "bkt", log=lambda s: None)
+    assert dataset_s3.release_prefix(rel.id) + dr.SUMS in s3.objects
+    home = tmp_path / "home"
+    folder = dataset_s3.fetch_release(rel.id, home, s3, "bkt", include_private=True,
+                                      log=lambda s: None)
+    assert (folder / dr.SUMS).read_bytes() == (root / rel.id / dr.SUMS).read_bytes()
+    pulled = dr.load_release(rel.id, home, allow_draft=True)
+    assert all((folder / f).is_file() for f in release_files.shipped_files(pulled))
+    pulled.close()
+
+
+def test_a_tampered_checksum_file_in_the_kept_copy_is_refused(cut, tmp_path):
+    rel, root = cut[3], cut[4]
+    s3 = BucketS3()
+    dataset_s3.upload_release(rel.id, root, s3, "bkt", log=lambda s: None)
+    s3.objects[dataset_s3.release_prefix(rel.id) + dr.SUMS] += b"x"
+    with pytest.raises(dr.ReleaseError, match="SHA256SUMS does not match"):
+        dataset_s3.fetch_release(rel.id, tmp_path / "home", s3, "bkt", include_private=True,
+                                 log=lambda s: None)
