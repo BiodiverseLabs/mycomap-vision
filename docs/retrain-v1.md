@@ -93,21 +93,43 @@ Run from a worktree of origin/main with `MV_DATA_DIR=<main checkout>/data`, `PYT
 and the AWS settings from the main `.env`. Spending lines are marked $.
 
 **B. Cut v1** (only after the coordinator relays Steve's freeze approval; the ~$1.50 below was
-approved in advance on 2026-10-11):
+approved in advance on 2026-10-11). Owner: the retrain lane (the release builder's session has
+closed).
+
+**LOO gate** (Steve, 2026-10-11: "review first, then build"): v1 is not built until (a) Steve has
+filled `decision` and `checked_by` on every row of
+`data/audits/loo-mislabel-2026-10-09/candidates-for-person-review.csv` (187 records, 229 rows);
+(b) `scripts/loo_exclusions.py` has turned it into the release exclusion TSV against the frozen
+manifest copy of step 3 below, with exit 0 (any key that copy lacks stops it, and is reported
+to Steve, never dropped); (c) the TSV's path, rows and sha256 are recorded and passed to the
+build as `--loo-exclusions`. "No LOO exclusions" counts only on Steve's explicit word,
+recorded with `--no-loo-exclusions "<Steve, date>"`. The build refuses a frozen release with
+neither, and the release's MANIFEST.json records which (file, rows, sha256, or the word).
+
 1. Full re-export into the shared manifest (the ~15.5k new records incl. the 13,145; renames).
-   Back up `data/manifest.sqlite` first.
+   Back up `data/manifest.sqlite` first. (It can run before the LOO review is finished.)
 2. $ Fetch the new records' photos to S3: `mv aws-launch-downloader` (t3.small, self-terminating;
    ~50k photos ≈ 21 GB, 3-4 GB from the all-rights-reserved host, within its 20 GB/day cap),
-   then `mv aws-pull-manifest`.
-3. $ The derived-hash pass and build in-region: `mv aws-launch-dataset-build --name v1
-   --freeze-approved "<who, when>"` (c7i.2xlarge, self-terminating; ~650k originals ≈ 10
+   then `mv aws-pull-manifest`. (Also covers the 3 photos of the newest MO record that the
+   record-sources lane left for a normal download.)
+3. Freeze the manifest: `mv manifest-freeze --out data/manifest-v1-freeze.sqlite` (a consistent
+   copy; prints its sha256). Send its path and sha256 to the LOO lane, which runs
+   `scripts/loo_exclusions.py --manifest data/manifest-v1-freeze.sqlite` once Steve's review is
+   complete, and returns the TSV's path, rows and sha256.
+4. $ The derived-hash pass and build in-region: `mv aws-launch-dataset-build --name v1
+   --freeze-approved "<who, when>" --manifest data/manifest-v1-freeze.sqlite
+   --loo-exclusions <the TSV>` (c7i.2xlarge, self-terminating; ~650k originals ≈ 10
    core-hours, ~1.5-2 h, ~$1; S3 reads in-region cost nothing, against ~$25 of download fees
-   to do it on the laptop). The instance verifies the release and uploads its kept copy to
-   `research-releases/v1/`; `dataset-builds/<build>/result.json` (written last) has its
-   release_hash. Then `mv dataset pull v1` brings it home, private part included, verified.
-4. `mv dataset show v1` (the kept copy is already in S3; `mv dataset upload v1` only for a
+   to do it on the laptop). The launch ships that exact manifest file and LOO list (the
+   instance refuses either if its sha256 differs). The instance verifies the release and
+   uploads its kept copy to `research-releases/v1/`; `dataset-builds/<build>/result.json`
+   (written last) has its release_hash. Then `mv dataset pull v1` brings it home, private
+   part included, verified.
+5. `mv dataset show v1` (the kept copy is already in S3; `mv dataset upload v1` only for a
    release built on the laptop).
-5. Report to the coordinator: release_hash, counts by source and split, val cutoff.
+6. Report to the coordinator: release_hash, counts by source and split, val cutoff, the LOO
+   list's rows and sha256. After the cut, the record-sources experiment copies
+   `data/sources-exp/{a,b,c}` may be deleted (their entry is merged).
 
 **C. Retrain** ($ ~$8.50; ask Steve through the coordinator before launching):
 1. `mv aws-launch-trainer --release v1 --backbones bioclip-2 --finetune bioclip-2

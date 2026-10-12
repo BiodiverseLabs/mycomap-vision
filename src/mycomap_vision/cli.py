@@ -237,6 +237,23 @@ def cmd_aws_train_job(conn, args) -> None:
         print_scoreboard(evaluate.scoreboard(conn, out["comparison_id"]))
 
 
+def cmd_manifest_freeze(conn, args) -> None:
+    """A consistent, fixed copy of the manifest for a release cut: the LOO exclusion list is
+    written against it and `mv aws-launch-dataset-build --manifest` ships it unchanged."""
+    from pathlib import Path
+
+    from . import dataset_release as dr
+    from .manifest import snapshot
+    out = Path(args.out)
+    if out.exists():
+        raise SystemExit(f"{out} exists: a freeze copy is never overwritten")
+    snapshot(conn, out)
+    print(json.dumps({"manifest": str(out), "bytes": out.stat().st_size,
+                      "sha256": dr.sha256_file(out),
+                      "records": conn.execute("select count(*) from records").fetchone()[0]},
+                     indent=2))
+
+
 def cmd_aws_launch_dataset_build(conn, args) -> None:
     from pathlib import Path
 
@@ -244,6 +261,9 @@ def cmd_aws_launch_dataset_build(conn, args) -> None:
     print(json.dumps(aws_dataset.launch(
         conn, args.name, args.freeze_approved, val_weeks=args.val_weeks,
         val_cutoff=args.val_cutoff, review_files=[Path(p) for p in args.exclusions],
+        loo_exclusions=Path(args.loo_exclusions) if args.loo_exclusions else None,
+        no_loo_exclusions=args.no_loo_exclusions,
+        manifest_path=Path(args.manifest) if args.manifest else None,
         instance_type=args.instance_type, max_hours=args.max_hours,
         allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
 
@@ -402,7 +422,9 @@ def cmd_dataset(args) -> None:
                      val_cutoff=args.val_cutoff, val_weeks=args.val_weeks,
                      north_america_only=not args.all_regions,
                      freeze_approved=args.freeze_approved, test_for=args.test_for,
-                     test_ids=Path(args.ids) if args.ids else None, store_reader=reader)
+                     test_ids=Path(args.ids) if args.ids else None, store_reader=reader,
+                     loo_exclusions=Path(args.loo_exclusions) if args.loo_exclusions else None,
+                     no_loo_exclusions=args.no_loo_exclusions)
         print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits")},
                          indent=2))
     elif args.action == "verify":
@@ -1079,6 +1101,14 @@ def _split_ints(v: str) -> list[int]:
     return [int(x) for x in _split(v)]
 
 
+def loo_options(p) -> None:
+    p.add_argument("--loo-exclusions", metavar="TSV",
+                   help="the person-checked LOO exclusion list (scripts/loo_exclusions.py, "
+                        "against the manifest this build freezes); a frozen release needs it")
+    p.add_argument("--no-loo-exclusions", metavar="WHO_WHEN",
+                   help="instead of the list: Steve's explicit word that there are none")
+
+
 def release_options(p) -> None:
     p.add_argument("--release", metavar="ID",
                    help="read records, labels, photos and splits from this dataset release "
@@ -1312,6 +1342,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--loader-only", action="store_true")
     p.add_argument("--gpu-only", action="store_true")
 
+    p = sub.add_parser("manifest-freeze", help="a fixed copy of the manifest for a release "
+                                               "cut (the LOO list and the build both use it)")
+    p.add_argument("--out", required=True)
+
     p = sub.add_parser("aws-launch-dataset-build",
                        help="cut a dataset release on a self-terminating instance in the "
                             "bucket's region (reads every original for the derived hashes)")
@@ -1321,6 +1355,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--val-cutoff", help="YYYY-MM-DD: validated after it = val")
     p.add_argument("--exclusions", action="append", default=[],
                    help="a person-checked review list (TSV); repeat")
+    loo_options(p)
+    p.add_argument("--manifest", help="ship this manifest file as the one the release freezes "
+                                      "(the copy the LOO list was written against); default: a "
+                                      "snapshot of the live manifest now")
     p.add_argument("--instance-type", default="c7i.2xlarge")
     p.add_argument("--max-hours", type=float, default=6)
     p.add_argument("--allow-dirty", action="store_true")
@@ -1529,6 +1567,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--test-for", metavar="RELEASE",
                    help="a test release for this one: only --ids, all 'test', disjoint from it")
     q.add_argument("--ids", help="CSV with observation_id (or record_key): the test records")
+    loo_options(q)
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
@@ -1796,6 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-train-job": cmd_aws_train_job,
         "standard-summary": cmd_standard_summary,
         "aws-launch-dataset-build": cmd_aws_launch_dataset_build,
+        "manifest-freeze": cmd_manifest_freeze,
         "model-sanity": cmd_model_sanity,
         "aws-pull-trainer": cmd_aws_pull_trainer,
         "finetune": cmd_finetune,
