@@ -209,7 +209,7 @@ def outline(enabled: dict[str, bool]) -> dict:
                     ["`answer`", "Vision's answer in one line: the most precise rank it is confident at (`{rank, name, confidence}`), or `null` when it isn't confident even at family."],
                     ["`ranks`", "The top candidates at species, genus, family, order, class and phylum, combining all the photos. Order and above have names and scores but no confidence yet."],
                     ["`confidence`", "How likely the name is to be right, from 0 to 1, calibrated weekly on newly verified records. `null` when it can't be stated (see `gate`)."],
-                    ["`confident`", "`true` for a rank's top name when its confidence is at least 0.70 and the photos show a fungus. When it was, it was right about 96% of the time in testing."],
+                    ["`confident`", "`true` for a rank's top name when its confidence is at least 0.70 and the photos show a fungus. In testing with photos prepared as the app sends them, a confident species answer was right about 92–93% of the time; expect less with field photos."],
                     ["`reference_records`", "How many DNA-verified records Vision has of that name. Under 5, Vision is rarely right at species."],
                     ["`place`", "When you send a place or date: distance to the nearest verified record of that name (rounded to 10 km), whether the date is in its known season, and a note when the find would be far from known records."],
                     ["`likely`", "A short list per rank that held the right name about the stated share of the time in testing."],
