@@ -91,16 +91,18 @@ The trainer embeds every large photo in S3 with the chosen backbones, fine-tunes
 some of them, compares every backbone x method on the newest weeks, uploads the
 results to `s3://<bucket>/runs/<run>/` and shuts itself down (backstop: max
 hours + 30 min). It starts from the Deep Learning Base GPU AMI (Amazon Linux
-2023) on a `g6.2xlarge` (one NVIDIA L4, 8 vCPUs, about $1/hour on demand).
+2023) on a `g6.xlarge` by default (one NVIDIA L4, 4 vCPUs, about $0.80/hour on
+demand; `--instance-type g6.2xlarge` gives 8 vCPUs, which keeps the GPU fed better,
+if the quota allows).
 
 One-time setup:
 
 1. **GPU quota** (AWS console, your region → Service Quotas → Amazon Elastic
    Compute Cloud (Amazon EC2) → "Running On-Demand G and VT instances" →
-   Request increase). It is counted in vCPUs: 8 covers one g6.2xlarge. New
-   accounts often start at 0, and approval can take a day. For `--spot` the
-   quota is "All G and VT Spot Instance Requests" (also vCPUs, 8 for one
-   g6.2xlarge); either one is enough to run.
+   Request increase). It is counted in vCPUs: 4 covers one g6.xlarge, 8 one
+   g6.2xlarge. New accounts often start at 0, and approval can take a day. For
+   `--spot` the quota is "All G and VT Spot Instance Requests" (also vCPUs);
+   either one is enough to run.
 2. **Ops policy**: it now also reads the Deep Learning AMI's public parameter
    (`/aws/service/deeplearning/ami/*`). Print it with `mv aws-policies` and
    replace the ops user's policy JSON (IAM → Users → the ops user → Permissions →
@@ -188,7 +190,7 @@ systemic is wrong and that backbone fails instead.
 .venv/Scripts/mv aws-launch-trainer --spot [--spot-max-price 0.60]
 ```
 
-`--spot` asks for a one-time Spot `g6.2xlarge` instead of On-Demand: the same
+`--spot` asks for a one-time Spot instance (same type) instead of On-Demand: the same
 instance, usually well under the On-Demand price, but AWS may take it back. With
 no `--spot-max-price` the most it pays is the On-Demand price. If EC2 won't start
 it, the launcher says why in plain words: no capacity free right now

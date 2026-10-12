@@ -69,8 +69,7 @@ size, JPEG quality, library and version) together with each derived image's sha2
 regenerate exactly the image a model saw, on demand, and check it. Public derivation is for
 CC-licensed photos only.
 
-**Who builds it.** A dedicated session owns the release builder (task "Prep Vision Dataset release
-v1 builder"; specification `docs/dataset-release.md` on feat/dataset-release). Its commands are
+**Who builds it.** The release builder is specified in `docs/dataset-release.md`. Its commands are
 `mv dataset build | verify | derive | diff | public | show` (`mv release` stays the serving
 publisher). A release id is only frozen with `--freeze-approved "<who, when>"` and every derived
 hash in place; research commands refuse a draft unless `--allow-draft`. It does not cut v1 until
@@ -639,8 +638,8 @@ mild confidence^0.25 weight (+4 species but -3 genus on 4ef7b0, +1 at each rank 
 the audit). Both are within noise. Better levers for these records: the page's
 existing hint asking for clear underside and stem photos when two species are
 close, the species-complex score for look-alikes, and more references for sparse
-species. Scripts and hand labels live in this session's
-scratchpad, not the repo (the labels point at private audit photos).
+species. Scripts and hand labels are kept outside the repo (the labels point at
+private audit photos).
 
 ## Phase 1: a better identifier
 
@@ -920,7 +919,7 @@ every Vision model, and prints them under the standard summary. Public name:
   at 384 px it gains little, because the L4 is the limit there (see below).
 
 **Speed and cost.** Measured on the laptop CPU on 2026-10-09 (local large photos; GPU idle,
-but the laptop was busy with another session's job), in photos/s for one process, and
+but the laptop was also running another job), in photos/s for one process, and
 for 4 workers:
 
 | loader pipeline | 1 process | 4 workers |
@@ -1056,13 +1055,12 @@ prints the commit and checks the archive holds the replication's code
 trainer and requirements/trainer.txt (timm 1.0.30, torch 2.14.0, torchvision 0.29.0, the
 same as the laptop). feat/replications-fungitastic carries feat/picek-replication and
 feat/external-bvra-baselines together. Either:
-- (a) merge feat/replications-fungitastic to main (Steve reviews), pull main in
-  `C:\Users\info\Projects\mycomap-vision`, and use `mv` there; or
-- (b) launch from the branch worktree with
-  `cd /c/Users/info/Projects/mycomap-vision-replications && PYTHONPATH=src
-  ../mycomap-vision/.venv/Scripts/python -m mycomap_vision.cli ...`, after copying the
-  main checkout's `.env` beside it (git-ignored) and setting
-  `MV_DATA_DIR=C:/Users/info/Projects/mycomap-vision/data`.
+- (a) merge feat/replications-fungitastic to main (Steve reviews), pull main in the
+  main checkout, and use `mv` there; or
+- (b) launch from a worktree of the branch with
+  `PYTHONPATH=src <main checkout>/.venv/Scripts/python -m mycomap_vision.cli ...`, after
+  copying the main checkout's `.env` beside it (git-ignored) and setting
+  `MV_DATA_DIR=<main checkout>/data`.
 
 Launch refuses uncommitted changes and a commit that isn't pushed. Since 2026-10-11 only
 the Vision Coordinator merges to main; the replication branch is pushed and handed over.

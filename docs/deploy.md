@@ -32,8 +32,8 @@ create one.
 
 ## First-time setup
 
-Steps marked **(Steve)** involve a console, a key or production; the rest can be
-run by Claude over SSH.
+Steps marked **(Steve)** involve a console, a key or production and are done by
+the project owner; the rest are run over SSH by an operator.
 
 ### 1. Create the instance (Steve, Lightsail console)
 
@@ -42,9 +42,7 @@ run by Claude over SSH.
 2. Networking → **attach a static IP**.
 3. Networking → firewall (IPv4 and IPv6): SSH 22, HTTP 80, HTTPS 443.
 4. Snapshots → turn on **automatic snapshots**.
-5. For Claude's access (full, as on the Library box), add Claude's public key to
-   `~/.ssh/authorized_keys` on the box; Claude adds an `mycomap-vision` alias to
-   its ssh config once it has the static IP.
+5. Add each operator's SSH public key to `~/.ssh/authorized_keys` on the box.
 
 ### 2. Clone the repo onto the box (Steve: the deploy key)
 
@@ -77,8 +75,8 @@ In `/etc/mycomap-vision/vision.env`, replace `<BUCKET>` and `<REGION>` with the
 values from the laptop's `.env` (the folder is root's, so edit with sudo:
 `sudo sed -i 's/<BUCKET>/.../; s/<REGION>/.../' /etc/mycomap-vision/vision.env`,
 or `sudo nano`). Then put the sign-in bridge's public key in
-place. It is the same key the dev site uses (`DEV_BRIDGE_PUBLIC_KEY` in the dev
-box's ecosystem file). It is public, so pasting it is fine:
+place. It is the same public key mycomap.org's dev site uses to check its
+sign-ins. It is public, so pasting it is fine:
 
 ```bash
 sudo tee /etc/mycomap-vision/signin-public.pem >/dev/null   # paste the PEM, then Ctrl-D
@@ -102,9 +100,8 @@ aws configure --profile mycomap-vision-box      # region: the bucket's; output: 
 
 ### 5. Let mycomap.org sign people in here (Steve, production)
 
-On the mycomap.org box, add this to the `env` block of
-`/var/www/mycomap-next/ecosystem.staging.config.cjs`. It takes effect at the next
-routine deploy, once the `feat/signin-bridge-sites` change is on main:
+On the mycomap.org server, add this to the API process's environment. It takes
+effect at mycomap.org's next deploy:
 
 ```js
 SIGNIN_BRIDGE_SITES: "https://vision.mycomap.org",
@@ -264,9 +261,7 @@ Before turning it on:
 1. mycomap.org serves `GET /api/vision/green-records` (the .org branch
    `feat/vision-green-records`, deployed there), with the same `VISION_API_KEY` as
    the photographers' answers (5b).
-2. Cloudflare lets the box through to it: widen the WAF Skip rule for this box
-   from the exact path `/api/vision/photo-permissions` to
-   `starts_with(http.request.uri.path, "/api/vision/")` (Steve).
+2. mycomap.org's firewall lets this box's server-to-server calls through to it (Steve).
 3. On this box, `.venv/bin/mv nightly --plan` reads mycomap.org and prints what the
    first night would change, changing nothing.
 
@@ -351,5 +346,6 @@ What is where:
   and verify with `SIGNIN=identify bash deploy/lightsail/verify.sh`.
 - Search engines: delete the `X-Robots-Tag` line in `nginx-vision-headers.conf`
   (and its test), copy the file to the box and reload nginx.
-- Results only ever show Creative Commons photos (`identify.SHOWN_LICENSES`); a
-  record with only all-rights-reserved photos is linked to iNat without a photo.
+- Results show a photo only when it is Creative Commons licensed or its
+  photographer granted permission on mycomap.org (`identify.SHOWN_LICENSES`,
+  `permissions.py`); any other record is linked to its source without a photo.

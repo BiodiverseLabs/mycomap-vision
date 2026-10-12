@@ -1,158 +1,161 @@
 # MycoMap Vision
 
-Fungal identification from photos, trained only on DNA-validated MycoMap records
-("green in a project"), using every photo of a record rather than one.
+[![CI](https://github.com/BiodiverseLabs/mycomap-vision/actions/workflows/ci.yml/badge.svg)](https://github.com/BiodiverseLabs/mycomap-vision/actions/workflows/ci.yml)
 
-It is a separate platform from mycomap.org. .org is read, never written: records
-come from the read-only production SQL route, and .org will call this platform's
-API when it needs a prediction.
+Photo identification for North American fungi, built only on records whose names
+were confirmed by DNA sequencing. Give it one or more photos of a find and it
+suggests a name at every rank (species, genus, family) with a calibrated
+confidence, shows the DNA-verified specimens that look most alike, and says what
+photo would help (for example, the gills).
 
-## Status: phase 0 (data)
+It is a project of [MycoMap](https://mycomap.org), a nonprofit. The site is
+**[vision.mycomap.org](https://vision.mycomap.org)**; before public launch it is
+open to anyone with a mycomap.org account.
 
-Phase 0 runs on a local machine with a GPU. Its goal is one number: does a
-multi-photo model on DNA-validated labels beat iNat's model on the newest weeks
-of green records?
+## Status (October 2026)
 
-1. `mv export-records`: pull green records from mycomap.org into the manifest, each
-   with its source (`mv record-sources` shows what an export would change).
-2. `mv fetch-inat`: photo lists, licenses and owners from iNat (1 request/s), for iNat
-   records; `mv fetch-mo`: the same from Mushroom Observer for MO records (5 s apart).
-3. `mv aws-launch-downloader`: large (1024 px) photos straight into the private S3
-   bucket from a self-terminating EC2 instance, within iNat's limits. See
-   [deploy/aws/README.md](deploy/aws/README.md). (`mv download-photos` does the
-   same into a local folder or any `--dest`.)
-4. `mv embed --backbone <alias or timm:/open_clip: spec>`: one vector per photo.
-5. `mv compare --backbones a,b --methods nearest,species-mean`: score models on the
-   same photos (newest 28 days vs older records); `mv scoreboard` lists results;
-   `mv models` lists backbones and methods. Plan: [docs/PLAN.md](docs/PLAN.md).
+**Live:** the Identify site, answering from about 600,000 photos of DNA-validated
+records with a fine-tuned model; a not-a-fungus check in front of it; "likely" name
+lists; an optional place-and-date prior; nightly updates as new records are
+validated on mycomap.org; and a versioned API for mycomap.org and its mobile app.
 
-6. `mv release --backbones bioclip-2 --make-current`: publish what the public site
-   serves to S3; the server box pulls it with `mv pull-release`. The site
-   (vision.mycomap.org, its own Lightsail box, sign-in with a mycomap.org account)
-   is set up and deployed as in [docs/deploy.md](docs/deploy.md).
+**Accuracy so far** (top-1; exploratory, measured on a dataset that was still
+changing, see below):
 
-`mv status` prints counts. `mv contributors [--arr-only]` writes the list of
-photographers, with their all-rights-reserved photo counts, for permission requests.
-`mv name-spellings [--json]` lists the names written more than one way: how many
-Vision merges, and the ones a person has to decide (read-only).
-`mv fetch-taxonomy [--refresh | --older-than DAYS]` asks iNat for the family, order,
-class and phylum of every genus the records use (1 request/s, resumable, kept in
-`data/taxonomy/inat_genera.sqlite`); `mv taxonomy` reports what that changes and writes
-the genera in doubt to `data/reports/taxonomy-doubts.csv` (no network). The weekly
-`mv refresh` asks only about genera no lookup has answered yet, for at most 20 minutes
-(`--taxonomy-minutes`; the next refresh carries on), and goes on without it when iNat
-is down; `--no-taxonomy` skips it.
+| Benchmark | Species | Genus | Family |
+| --- | --- | --- | --- |
+| Newest 4 weeks of validated records (1,152 records), nearest specimen | 34.5% | 71.6% | 79.7% |
+| Same records, nearest + species average (served) | 38.4% | | |
+| Held-out test set (10,143 records), nearest + species average | 54.2% | 83.5% | |
 
-### Photo permission
+Accuracy follows how many DNA-verified references a species has: on a sample,
+genera with 100+ references matched iNaturalist's model, and the gap was in genera
+with few or none ([genus gap](docs/experiments/2026-10-07-genus-gap.md)). A full
+comparison with iNaturalist's computer vision is still to come.
 
-Photographers answer on mycomap.org (its `docs/vision-photo-permissions.md`).
-`mv serve` reads the answers every 5 minutes from mycomap.org's
-`/api/vision/photo-permissions` (settings `MV_ORG_BASE_URL`, `MV_ORG_VISION_KEY`;
-`mv permissions --sync` does it by hand, `mv permissions` shows where they stand):
+**In progress:** a frozen, versioned **dataset release (v1)** so anyone can reproduce
+every result, then a retrain and every experiment re-run on it under a pre-declared
+evaluation ([docs/retrain-v1.md](docs/retrain-v1.md)). Until then, all numbers here
+are development numbers, not final results.
 
-- an all-rights-reserved photo is shown as an example match only with its
-  owner's grant, read within the last hour; otherwise the card says it isn't shown;
-- a photographer who declines or withdraws has their all-rights-reserved photos
-  left out of the reference set at once, and out of comparisons and training
-  (`evaluate.load_records`); no answer yet = still used while permission is sought;
-- licences are read when the photo is shown, and `mv refresh-licenses` (or
-  `MV_LICENSE_REFRESH_HOURS=24` in `mv serve`) re-reads them from iNat, so a
-  licence change there is picked up.
+## How it works
 
-## Replications
+1. **Labels come only from DNA.** A record is used when a project on mycomap.org
+   validated its name with a DNA sequence. Community identifications from
+   iNaturalist or Mushroom Observer are never used as labels.
+2. **Every photo of a find counts.** Each photo becomes a vector from an image model
+   (a fine-tuned [BioCLIP 2](https://imageomics.github.io/bioclip-2/)), and a find is
+   scored over all its photos.
+3. **Nearest DNA-verified specimens.** Candidate names are ranked by how closely
+   their reference photos match, blended with each species' average photo. There is
+   no classifier head to retrain, so a newly validated record joins the reference
+   set overnight.
+4. **Confidence per rank.** Scores are calibrated on the newest weeks of records;
+   "likely" lists hold the right name about 9 times in 10.
+5. **Honest evaluation.** Tests use the newest records (split by time, never at
+   random) and records held out of everything, and are reported by how many
+   references each species has.
 
-[replications/fungitastic/](replications/fungitastic/README.md): the code we use to
-compare Vision with the Picek group's FungiTastic and Danish Fungi 2020 classifiers.
-Their published checkpoints are scored on our records, and their training recipe is
-retrained on our data. The page cites their work, lists every way we differ from them
-and why, and gives the commands to reproduce each step.
+More: [docs/PLAN.md](docs/PLAN.md) (the working plan and findings),
+[docs/experiments/](docs/experiments/README.md) (one entry per experiment) and the
+paper draft ([docs/paper/draft.md](docs/paper/draft.md)).
 
-## Setup (Windows, Git Bash or PowerShell)
+## Run it yourself
+
+The code, tests and web app run without any private data. Identifying needs a
+trained release, which is private for now (see [Data and privacy](#data-and-privacy)).
+
+Requirements: Python 3.12 (3.11 works; the pinned requirements are compiled for
+3.12). For the web app, Node 22 and pnpm 10 (through corepack).
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install --require-hashes -r requirements/dev.txt
-.venv/Scripts/python -m pip install -e . --no-deps
-.venv/Scripts/python -m pytest -q
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install --require-hashes -r requirements/dev.txt
+pip install -e . --no-deps
+pytest -q                            # what CI runs; no data or GPU needed
 ```
 
-For embeddings, install PyTorch for your GPU first (e.g. the CUDA build from
-download.pytorch.org), then `pip install -e ".[embed]"`. The web app is in `web/`
-(`pnpm install`, `pnpm build`); `mv serve` serves the API and the built site.
-See SECURITY.md for what stays private.
+The web app (`web/`, Vite + React):
 
-Copy `.env.example` to `.env` and fill it in. `mv export-records` needs a read-only
-SQL route to the mycomap.org database (`MV_ORG_SQL_SSH_HOST`); the AWS commands need
-the AWS settings.
+```bash
+cd web
+corepack enable
+pnpm install
+pnpm build    # mv serve then serves web/dist and the API on :8010
+pnpm dev      # or a dev server on :5010 that proxies /api to :8010
+```
 
-## Data
+To compute embeddings, install PyTorch for your GPU first (from
+download.pytorch.org), then `pip install -e ".[embed]"`. The pipeline and every
+command are in [docs/cli.md](docs/cli.md). The command is called `mv`, which
+shadows the Unix `mv` in an activated venv.
 
-Everything lives under `data/` (git-ignored; override with `MV_DATA_DIR`):
+## Repository layout
 
-- `manifest.sqlite`: records, iNat observations, photos, observation-photo
-  links and license history.
-- `raw/`: the records export and every iNat and MO API answer (gzipped), as fetched.
-- `photos/<size>/<id % 1000>/<photo_id>.<ext>`: the images, under the same path in
-  the S3 bucket (`MV_S3_BUCKET`) when they are downloaded to S3.
-- `reports/`: contributor lists, the genera in doubt (`taxonomy-doubts.csv`).
-- `taxonomy/inat_genera.sqlite`: iNat's answer for each genus and every taxon fetched
-  (never inside the manifest; a release ships it).
+| Path | What's there |
+| --- | --- |
+| `src/mycomap_vision/` | the Python package: data pipeline, models, evaluation, API server (`api.py`), CLI (`cli.py`) |
+| `web/` | the vision.mycomap.org site (Vite, React, Tailwind) |
+| `tests/` | the pytest suite (runs without data) |
+| `docs/` | plan, data rules, CLI, deployment, dataset releases, experiments, paper draft |
+| `replications/fungitastic/` | scoring and retraining the FungiTastic and Danish Fungi 2020 classifiers on our records |
+| `deploy/aws/`, `deploy/lightsail/` | self-terminating GPU and download instances; the web server |
+| `scripts/` | analysis scripts for the label audit (leave-one-out scan) |
+| `requirements/` | hash-pinned dependencies: `dev` (tests), `serve` and `box` (server), `trainer` and `downloader` (instances) |
 
-### Sources
+## Documentation
 
-A record's source is .org's `observations.source`, stored as `records.source`:
-`inat`, `mo` (Mushroom Observer), `mycoportal`, `com_sequence` (legacy .com
-Sequences), `genbank` or `unknown` (`sources.py`). Ids are never read for it: MO,
-MyCoPortal and iNat numbers look alike, and until 2026-10-09 the export took every
-number for an iNat id, so MO and MyCoPortal records carried photos of whatever iNat
-observation shared their number. Non-iNat records are keyed `<source>:<id>`.
+| Doc | For | What it covers |
+| --- | --- | --- |
+| [docs/data.md](docs/data.md) | everyone | which records are used; labels, photos, licences, photographer permissions |
+| [docs/cli.md](docs/cli.md) | developers | the pipeline and every `mv` command |
+| [docs/PLAN.md](docs/PLAN.md) | researchers, developers | the working plan, decisions and findings, newest phase first |
+| [docs/experiments/](docs/experiments/README.md) | researchers | one entry per experiment: question, setup, results, decision |
+| [docs/dataset-release.md](docs/dataset-release.md) | researchers | frozen, verifiable dataset releases |
+| [docs/retrain-v1.md](docs/retrain-v1.md) | researchers | the pre-declared evaluation for the v1 retrain |
+| [replications/fungitastic/](replications/fungitastic/README.md) | researchers | comparison with the Picek group's classifiers |
+| [docs/paper/draft.md](docs/paper/draft.md) | researchers | manuscript draft |
+| [docs/deploy.md](docs/deploy.md), [deploy/aws/](deploy/aws/README.md) | operators | the server and the cloud instances |
+| [SECURITY.md](SECURITY.md) | everyone | reporting problems; what stays private |
+| [CLAUDE.md](CLAUDE.md) | contributors | project rules (written for AI coding assistants, binding on everyone) |
 
-Vision takes photos from iNat records (from iNat) and MO records (from MO, Steve
-2026-10-09). MyCoPortal records are left out (Steve: they rarely have field images),
-and so are .com Sequences, GenBank and unknown-source records (no photos of their
-own). The first export with this code migrates an older manifest: the iNat photos and
-details fetched for non-iNat records come off them, each written to `source_removals`,
-and `manifest_migrations` gets `record-sources-v1`; nothing is fetched, downloaded or
-embedded before that.
+## Glossary
 
-### Labels
+- **Green / validated**: a record whose name a mycomap.org project confirmed with a
+  DNA sequence. Only these records provide labels.
+- **mycomap.org**: MycoMap's main site, where records, sequences and validations
+  live. Vision only reads from it. The "legacy site" is MycoMap's older platform.
+- **Reference set**: the DNA-validated photos a new photo is compared against.
+- **Serving release** vs **dataset release**: what the website loads (`mv release`)
+  vs a frozen research snapshot (`mv dataset`).
+- **The box**: the small server that runs vision.mycomap.org. It only answers
+  requests; all training runs on short-lived GPU instances.
+- **Exploratory-pre-freeze**: a result measured before dataset release v1, on data
+  that kept changing.
+- **Steve**: Steve Russell, MycoMap's founder and this project's owner. "Steve's
+  decision" records who decided.
+- **Lanes, coordinator, sessions**: the owner builds the project with several AI
+  coding sessions (Claude Code) working in parallel, each on one area (a "lane").
+  One coordinating session merges and deploys. The docs mention them where they
+  record who did what.
 
-The label is the record's `scientific_name` on .org. A record is included when
-any of its three flattened validation slots on .org is `yes`. Records green only
-in a fourth or later project are missed (small). Records with more than one name
-on .org are flagged `label_conflict` and are not used for training.
+## Data and privacy
 
-Spellings of one name are one label: `Inocybe PNW18` and `Inocybe "sp-PNW18"` are
-both `Inocybe sp. 'PNW18'`. Only differences in writing are merged; a code that is
-also in use as a plain name, IN7 / IN07 and described codes stay separate until
-someone decides on mycomap.org. The manifest keeps the name as .org spells it
-(`names.py`, the same rule as mycomap.org's `services/nameVariants.ts`).
+The data is not in this repository and never will be. The photos belong to their
+photographers (many are non-commercial or all rights reserved), and records can hold
+the true locations of obscured observations of rare species. The manifest,
+embeddings, contributor lists and trained models stay private until photographers'
+permissions allow otherwise; a Creative-Commons-only dataset release is planned.
+Photographers can grant or withdraw permission on mycomap.org, and a withdrawal
+takes effect at once. Details: [docs/data.md](docs/data.md), [SECURITY.md](SECURITY.md).
 
-Family (and order, class, phylum) comes from iNaturalist's taxonomy, one answer per
-genus, so every record of a genus has the same family (`taxonomy.py`, Steve
-2026-09-30). The genus is looked up within Fungi only; a genus in any doubt (not on
-iNat, two fungal genera of that name, inactive, provisional, not a Latin name) keeps
-.org's family and is listed by `mv taxonomy`, as is any genus whose iNat family
-differs from what most of its records say on .org (iNat's is applied).
+## Contributing and contact
 
-A one-word name ("Russula", "Agaricales") is never a species: the record has no
-species label, adds no species class, is never a species candidate and isn't scored
-at species. It counts at genus when the word is a genus (iNat says so, or, when iNat
-can't, the genus column agrees) and at family. A record left with no label at family,
-genus or species ("Fungi", "Agaricales", "Unknown") is left out.
+Issues and pull requests are welcome. CI must pass, and every change comes with
+tests. Report security problems privately (see [SECURITY.md](SECURITY.md)). Contact:
+**info@mycomap.org**.
 
-### Photos and licenses
+## Licence
 
-All photos of green records are pulled, including all-rights-reserved ones
-(Steve's decision, 2026-09-28: he will ask those photographers for permission).
-Every photo keeps its owner, license and a license history, so any contributor's
-photos can be listed or removed. CC-licensed photos come from the iNaturalist
-Open Data bucket on AWS; all-rights-reserved ones come from iNat's static host,
-capped at 4 GB/hour and 20 GB/day (iNat's rule is under 5 and 24).
-
-Mushroom Observer photos (`mo.py`) are read from MO's images API and image host, one
-request at a time and at least 5 seconds apart (MO asks anonymous clients for 20 a
-minute at most), with MO's licence name, owner and `ok_for_export` flag kept per photo.
-An MO photo is shown only when it is Creative Commons; it is used only when MO marks it
-ok for export and, for now, only when it is not all rights reserved (Steve to decide).
-No MO location is read.
+No licence has been chosen yet, so for now all rights are reserved.
