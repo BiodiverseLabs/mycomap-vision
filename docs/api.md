@@ -255,7 +255,7 @@ model's result, not a `results` list.
   a fitted confidence (order and above, for now) are never `confident`. The top-level
   **`answer`** is `{"rank", "name", "confidence"}` for the finest rank that is
   `confident`, or `null`. On held-out records the species `answer` was right about
-  **92–93%** of the time through the app's path on the served setup, and 96–97% in the
+  **92–93%** of the time when photos went through the app's photo path, and 96–97% in the
   earlier offline scoring (sources in §8). A one-name `likely` set was tried as the rule and was right only 65% of
   the time at species, so it isn't used. The threshold may change on Vision; callers don't
   change.
@@ -541,10 +541,16 @@ overall 51%, genus 81%.
 These are offline numbers: the stored answers of the 2026-10-09 benchmark run (scored by
 `mv heldout`), before the not-a-fungus gate, single-photo embedding and int8 serving.
 
-**Through the app's path** (integration testing lane, 2026-10-12): the same dev records
-sent through the live serving setup as the app sends them (POST /identify, gate on): the
-species `answer` (confident at species) was right about **92–93%** of the time. Quote
-that range, not the offline 96%, as what people get.
+**Through the app's photo path** (integration testing lane, 2026-10-12; exploratory,
+pre-v1): 2,989 dev records of heldout-2026-10-08, through the app's photo path (1024 px
+JPEG q85, EXIF dropped) to POST /api/v1/identify, top_k 10, on a **local** Vision server
+at main b8f789f (laptop GPU, fp32/fp16 as main serves, no int8), method
+nearest+mean+place, fungus gate mode both (fingerprint 73ce44b9afa55ff6). Reference = the
+laptop's shared manifest after the MO migration (151,870 records, 17,262 species), not
+the box's release. Confident species answers (v1 `answer` at species): right **93.5%**
+(273/292, photos only) and **92.2%** (412/447, with place/date); genus 95.8% / 94.9%.
+The box's reference set differs, so its figure may move a little. Quote about 92–93%, not
+the offline 96%, as what people get.
 
 The benchmark's photos are DNA-validated records' own iNat photos: all fungi, often
 taken with care. App photos at a foray will score lower. So treat these shares as an
