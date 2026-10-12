@@ -986,11 +986,9 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
     """Train the preset's classifier on the reference records (build_data), keep the epoch
     with the best validation macro-F1, fit its temperature, save and register it. Returns
     the metadata. `should_stop()` is asked between steps: when it says stop, the best
-    epoch so far is NOT saved (screening.Stopped), as for a fine-tune."""
-    import torch
+    epoch so far is NOT saved (screening.Stopped), as for a fine-tune.
 
-    from ...finetune import batches_with_fallback, register
-    from ...screening import Stopped
+    Every refusal comes before torch is imported, so they hold (and are tested) without it."""
     cfg = (cfg or PicekConfig()).resolved()
     preset = PRESETS[cfg.preset]
     out_dir = out_dir or models_dir()
@@ -1030,6 +1028,10 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
         f"{len(data.train_records):,} records, {n_classes:,} species; validation "
         f"{len(data.val):,} photos of {len(data.val_records):,} records; trained through "
         f"{data.trained_through} (gradients through {data.train_through})")
+    import torch
+
+    from ...finetune import batches_with_fallback, register
+    from ...screening import Stopped
     torch.manual_seed(cfg.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = (model_factory or (lambda: create_model(preset, n_classes)))()
