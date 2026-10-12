@@ -86,6 +86,10 @@ def add_record(conn, key, name, *, source="inat", vdate="2026-01-01", na=1, conf
     elif source == "mo":
         conn.execute("insert into mo_observations values (?, ?, ?, 9, 'bob', 'Bob', 1, 'now')",
                      (key, int(key.split(":")[1]), status))
+        from mycomap_vision import mopoints           # its public point, read (D1)
+        mopoints.ensure_schema(conn)
+        conn.execute("insert into mo_public_points values (?, null, null, 0, 45.2, 45.1, "
+                     "-122.5, -122.7, 'ok', 'now')", (key,))
 
 
 def add_photo(conn, store, key, pid, lic="cc-by", lclass="open", *, owner=7, copy=True,
