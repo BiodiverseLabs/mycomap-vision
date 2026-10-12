@@ -473,9 +473,9 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
                if has_mo else "")
     has_points = "mo_public_points" in tables
     pt_sel = ("p.latitude, p.longitude, p.gps_hidden, p.box_north, p.box_south, p.box_east, "
-              "p.box_west, p.fetched_at" if has_points else ", ".join(["null"] * 8))
-    pt_join = ("left join mo_public_points p on p.observation_id = r.observation_id and "
-               "p.status = 'ok'" if has_points else "")
+              "p.box_west, p.fetched_at, p.status" if has_points else ", ".join(["null"] * 9))
+    pt_join = ("left join mo_public_points p on p.observation_id = r.observation_id"
+               if has_points else "")
     held = holdouts.held_out_ids(conn)
     bench: dict[str, tuple[str, str]] = {}
     if "heldout_records" in tables:
@@ -502,7 +502,7 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
          observed, country, state, na, conflict, lat, lon, inat_status, inat_login, uuid,
          mo_status, mo_login, *pub) = row
         (i_lat, i_lon, i_obs, i_geo, i_tgeo, i_acc, i_at, m_lat, m_lon, m_hidden, m_n, m_s,
-         m_e, m_w, m_at) = pub
+         m_e, m_w, m_at, m_status) = pub
         if only_keys is not None and key not in only_keys:
             continue
         name = clean(name)
@@ -554,9 +554,11 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
         inat_pub = None if inat_status is None else {
             "latitude": i_lat, "longitude": i_lon, "obscured": i_obs, "geoprivacy": i_geo,
             "taxon_geoprivacy": i_tgeo, "positional_accuracy": i_acc, "fetched_at": i_at}
+        # Read but not returned by MO's observations API (it shows no public point for
+        # it): an answer, `none`, never .org's point.
         mo_pub = None if m_at is None else {
             "latitude": m_lat, "longitude": m_lon, "gps_hidden": m_hidden, "box_north": m_n,
-            "box_south": m_s, "box_east": m_e, "box_west": m_w, "fetched_at": m_at}
+            "box_south": m_s, "box_east": m_e, "box_west": m_w, "fetched_at": m_at}             if m_status == "ok" else {"fetched_at": m_at}
         pp = public_place(key, source, inat_pub, mo_pub)
         if pp is not None:
             public_places.append(pp)
