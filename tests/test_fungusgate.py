@@ -45,9 +45,9 @@ class Tuned(Const):
         return self.encode(images), np.asarray(base)
 
 
-def photo(red, green=0):
+def photo(red, green=0, blue=0):
     buf = io.BytesIO()
-    Image.new("RGB", (8, 8), (red, green, 0)).save(buf, "PNG")
+    Image.new("RGB", (8, 8), (red, green, blue)).save(buf, "PNG")
     return buf.getvalue()
 
 
@@ -433,3 +433,107 @@ def test_a_non_fungus_answer_has_the_same_fields_as_any_other(conn, tmp_path):
     duck, mushroom = identify(client, [photo(247, DUCK_GREEN)]), identify(client, [photo(247)])
     assert set(duck) == set(mushroom)
     assert set(duck["per_photo"][0]) == set(mushroom["per_photo"][0])
+
+
+# --- slime moulds: in scope, so "not sure", never "not a fungus" (Steve, 2026-10-11) ------
+
+# Base vectors in 3D: (1,0,0) a mushroom, (0,1,0) a bird, (0,0,1) a slime mould.
+SLIME_GATE = dict(classes=np.array(["mushroom", "bird", "slime"]),
+                  sides=np.array(["fungus", "other", "other"]),
+                  vectors=np.eye(3), scale=10.0, thresholds=Thresholds(0.2, 0.5))
+
+
+def slime_gate(lift=0.3):
+    return FungusGate(**SLIME_GATE, lift_to_unsure={"slime": lift} if lift else {})
+
+
+def test_a_slime_mould_is_never_told_it_isnt_a_fungus():
+    slime, bird = np.array([[0.0, 0.0, 1.0]]), np.array([[0.0, 1.0, 0.0]])
+    assert slime_gate(None).judge(slime)[0]["verdict"] == NOT_FUNGUS     # without the rule
+    v = slime_gate().judge(slime)[0]
+    assert v["verdict"] == UNSURE and v["lifted_by"] == "slime"
+    assert v["message"] == "Not sure this is a fungus."
+    b = slime_gate().judge(bird)[0]
+    assert b["verdict"] == NOT_FUNGUS and "lifted_by" not in b             # a bird stays out
+
+
+def test_the_slime_rule_never_lowers_a_fungus_verdict():
+    slimy_mushroom = np.array([[1.0, 0.0, 0.9]])
+    assert slime_gate().judge(slimy_mushroom)[0]["verdict"] == FUNGUS
+
+
+def test_the_slime_rule_is_saved_reported_and_part_of_the_fingerprint(tmp_path):
+    slime_gate().save(tmp_path)
+    back = FungusGate.load(tmp_path)
+    assert back.lift_to_unsure == {"slime": 0.3}
+    assert back.summary()["lift_to_unsure"] == {"slime": 0.3}
+    assert slime_gate().fingerprint() != slime_gate(None).fingerprint()
+    with pytest.raises(ValueError, match="doesn't have"):
+        FungusGate(**SLIME_GATE, lift_to_unsure={"myxo": 0.3})
+
+
+class Tuned3(Const):
+    """Base vectors from the photo's colour: red a mushroom, green a bird, blue a slime mould."""
+    base_name = "bioclip-2"
+
+    def encode_with_base(self, images):
+        base = [np.asarray(im, dtype=np.float32).reshape(-1, 3).mean(0) / 255 + 1e-3 for im in images]
+        return self.encode(images), np.asarray(base)
+
+
+def test_a_slime_mould_find_gets_the_names_but_no_chance(conn, tmp_path):
+    root = seeded(conn, tmp_path)
+    client = TestClient(create_app(tmp_path / "manifest.sqlite", root,
+                                   backbone_loader=lambda name: Tuned3(name), limits=open_limits(),
+                                   background=False, fungus_gate=slime_gate()))
+    r = identify(client, [photo(12, 0, 255)])                  # blue: a slime mould
+    assert r["gate"]["verdict"] == UNSURE
+    assert r["gate"]["photos"][0]["lifted_by"] == "slime"
+    assert r["ranks"]["species"] and stated_chances(r) == []
+    duck = identify(client, [photo(12, 255, 0)])               # green: still not a fungus
+    assert duck["gate"]["verdict"] == NOT_FUNGUS
+
+
+def test_the_slime_threshold_is_the_lowest_grid_value_within_the_everyday_budget():
+    from mycomap_vision import fungusgate_tune as tune
+    p = np.array([0.9, 0.6, 0.2, 0.01] + [0.0] * 96)            # 100 everyday non-fungi
+    nf = np.ones(100, bool)
+    assert tune.choose_lift(p, nf, grid=(0.1, 0.3, 0.5, 0.7), max_lifted=0.02) == 0.3
+    assert tune.choose_lift(p, nf, grid=(0.1, 0.3), max_lifted=0.0) is None
+    nf[:2] = False                                               # already not "not a fungus"
+    assert tune.choose_lift(p, nf, grid=(0.1, 0.3, 0.5), max_lifted=0.01) == 0.1
+
+
+def test_a_slime_mould_find_is_called_a_slime_mould():
+    g = FungusGate(**SLIME_GATE, lift_to_unsure={"slime": 0.05}, looks_like={"slime": 0.5})
+    v = g.judge(np.array([[0.0, 0.0, 1.0]]))[0]
+    assert v["looks_like"] == "slime" and v["message"] == "This looks like a slime mould."
+    assert fungusgate.find_looks_like([v], UNSURE) == "slime"
+    hint = fungusgate.gate_hints([v["verdict"]], UNSURE, "slime")
+    assert hint == ["This looks like a slime mould. Slime moulds aren't fungi, but MycoMap holds "
+                    "some DNA-verified ones; the closest are below, without a stated chance."]
+
+
+def test_a_fungus_photo_is_never_called_a_slime_mould():
+    g = FungusGate(**SLIME_GATE, lift_to_unsure={"slime": 0.05}, looks_like={"slime": 0.3})
+    photo_ = np.array([[1.0, 0.0, 0.9]])                   # a fungus that also scores slime-like
+    assert g.class_probs(photo_ / np.linalg.norm(photo_))[0][g._class_names.index("slime")] >= 0.3
+    v = g.judge(photo_)[0]
+    assert v["verdict"] == FUNGUS and "looks_like" not in v
+    assert fungusgate.find_looks_like([{**v, "looks_like": "slime"}], FUNGUS) is None
+
+
+def test_the_api_names_a_slime_mould_find_and_the_page_says_so(conn, tmp_path):
+    root = seeded(conn, tmp_path)
+    g = FungusGate(**SLIME_GATE, lift_to_unsure={"slime": 0.05}, looks_like={"slime": 0.5})
+    client = TestClient(create_app(tmp_path / "manifest.sqlite", root,
+                                   backbone_loader=lambda name: Tuned3(name), limits=open_limits(),
+                                   background=False, fungus_gate=g))
+    r = identify(client, [photo(12, 0, 255)])
+    assert r["gate"]["looks_like"] == "slime"
+    assert r["gate"]["message"] == "This looks like a slime mould."
+    assert r["ranks"]["species"] and stated_chances(r) == []
+    assert r["hints"][0].startswith("This looks like a slime mould.")
+    assert identify(client, [photo(12, 255, 0)])["gate"]["looks_like"] is None   # a duck
+    g.save(tmp_path / "saved")
+    assert FungusGate.load(tmp_path / "saved").looks_like == {"slime": 0.5}

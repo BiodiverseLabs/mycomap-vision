@@ -68,11 +68,15 @@ export interface PhotoGate {
   /** BioCLIP 2's zero-shot chance that the photo shows a fungus. */
   p_fungus: number;
   message: string | null;
+  /** Set when a photo not judged a fungus looks like an in-scope class ("slime": a slime mould). */
+  looks_like?: string;
 }
 
 export interface FindGate {
   verdict: GateVerdict;
   message: string | null;
+  /** What a find not judged a fungus looks like ("slime": a slime mould), or null. */
+  looks_like?: string | null;
   /** Photos (0-based) left out of the answer because they don't look like a fungus. */
   left_out: number[];
   photos: PhotoGate[];
@@ -131,6 +135,10 @@ export interface Where {
   /** Set while the place / date shown is the one read from photo N (1-based), not typed. */
   placeFromPhoto?: number;
   dateFromPhoto?: number;
+  /** Set while the place shown is the phone's current location ("Use my current location"). */
+  placeFromDevice?: boolean;
+  /** Set while the place shown was picked on the map (components/LocationPicker.tsx). */
+  placeFromMap?: boolean;
 }
 
 export interface ContextUsed {
@@ -225,6 +233,7 @@ const METHOD_LABEL: Record<string, string> = {
   nearest: "nearest specimen",
   "species-mean": "species average",
   "nearest+mean": "nearest + species average",
+  "nearest+mean+place": "nearest + species average + place and date",
   "nearest-mix": "nearest specimen, photo votes",
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",

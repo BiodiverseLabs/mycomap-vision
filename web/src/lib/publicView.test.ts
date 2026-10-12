@@ -32,7 +32,17 @@ test("visitors read a model's name, not its file name", () => {
   assert.equal(modelName("bioclip-2"), "BioCLIP 2");
   assert.equal(modelName("bioclip-2-ft-sample"), "BioCLIP 2, fine-tuned on a sample (test model)");
   assert.equal(modelName("external:inat-cv"), "iNaturalist's computer vision");
+  assert.equal(modelName("external:df20-vit-l384"),
+    "Danish Fungi 2020 ViT-L (Picek et al., Danish records)");
+  assert.equal(modelName("external:fungitastic-beit-b384"),
+    "FungiTastic BEiT-B (Picek et al., Danish records)");
   assert.equal(modelName("dinov3-l16-512"), "dinov3-l16-512");
+  assert.equal(modelName("picek-fungitastic-beit-b384-20261012-080000"),
+    "Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records");
+  assert.equal(modelName("picek-fungitastic-beit-b384-smoke"),
+    "Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records (test model)");
+  assert.equal(modelName("picek-unknown-preset-20261012-080000"),
+    "picek-unknown-preset-20261012-080000");
 });
 
 const run = (id: number, comparison_id: string, backbone: string, method: string,
@@ -116,14 +126,14 @@ test("the provisional share is said from the data, never hard-coded as half", ()
   assert.equal(shareWords(0, 0), "None");
 });
 
-test("a model's release note says what it learned from only when it was fine-tuned", () => {
+test("a model's release note names it MycoMap Vision and says what it learned from", () => {
   assert.equal(
     releaseNote({ backbone: "bioclip-2-ft-20261007-165400", embedded_photos: 152915,
                   trained_through: "2026-09-07" }),
-    "BioCLIP 2, fine-tuned on DNA-verified records (October 2026). Trained on DNA-verified " +
+    "MycoMap Vision · October 2026 model. Trained on DNA-verified " +
     "records validated up to 7 September 2026. Compares your photos with 152,915 reference photos.");
   assert.equal(releaseNote({ backbone: "bioclip-2", embedded_photos: 10, trained_through: null }),
-    "BioCLIP 2. Compares your photos with 10 reference photos.");
+    "MycoMap Vision. Compares your photos with 10 reference photos.");
 });
 
 test("the newest week's count is said only when there is one", () => {

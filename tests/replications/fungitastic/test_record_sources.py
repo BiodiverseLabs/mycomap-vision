@@ -1,0 +1,271 @@
+"""A Picek run trains only on records from its allowed sources (the Dataset release's:
+iNat, and MO with MO's own photos; never MyCoPortal, .com sequences or unknown; until a
+release exists, iNat only). Records fetched by another site's id carry other observations'
+photos, so the launch (and the instance, before its first stage) refuses any training or
+validation record from outside the allowed sources, and refuses a real launch outright
+while the manifest's sources are not migrated (the record-sources-v1 marker row; before
+it, records.source is a guess from the id). A dry run sends nothing, so it only warns.
+
+Since record-sources-mo is on main, evaluate.load_records itself loads only iNat and MO
+records, each with photos of its own source: a MyCoPortal, .com sequence, GenBank or
+unknown record never reaches a run, and the guard here is the run's own proof on top."""
+
+import pytest
+from test_models_and_scoreboard import seed_two_species
+from test_retrain_trainer import fake_picek_trainer, head_sha
+
+from mycomap_vision import aws, config, trainer
+from mycomap_vision.replications.fungitastic import retrain
+
+
+def migration_table(conn):
+    """The record-sources fix's marker table (sources.SCHEMA), WITHOUT its row:
+    manifest.connect marks a new manifest migrated, so the not-migrated tests remove the
+    row explicitly."""
+    conn.execute("create table if not exists manifest_migrations (name text primary key, "
+                 "applied_at text not null, code_version text, detail text)")
+    conn.execute("delete from manifest_migrations where name = ?", (retrain.MIGRATION,))
+
+
+def unmigrated(conn, table=True):
+    """A manifest the fix has not migrated: the marker table without its row, or (table
+    False) no marker table at all."""
+    with conn:
+        if table:
+            migration_table(conn)
+        else:
+            conn.execute("drop table if exists manifest_migrations")
+    assert not retrain.sources_migrated(conn)
+    return conn
+
+
+def record_sources_as(conn, monkeypatch=None, default="inat", **by_id):
+    """A manifest migrated by the record-sources fix: its marker row, the raw .org source
+    column, and records.source normalised (`default`, or by_id[observation_id]). An MO
+    record is made a real one (sources.py): MO's answer for it, and its photo an MO
+    photo that MO's use rule allows (ok_for_export, not all rights reserved)."""
+    with conn:
+        migration_table(conn)
+        conn.execute("insert into manifest_migrations values (?, 't', 'sha', null)",
+                     (retrain.MIGRATION,))
+        if "org_source" not in {r[1] for r in conn.execute("pragma table_info(records)")}:
+            conn.execute("alter table records add column org_source text")
+        conn.execute("update records set source = ?", (default,))
+        for oid, source in by_id.items():
+            conn.execute("update records set source = ? where observation_id = ?",
+                         (source, oid))
+            if source == "mo":
+                conn.execute("insert into mo_observations values (?, ?, 'ok', 9, 'bob', 'Bob', "
+                             "1, 'now')", (oid, int(oid)))
+                conn.execute("update photos set source = 'mo', ok_for_export = 1 where "
+                             "photo_id in (select photo_id from observation_photos where "
+                             "observation_id = ?)", (oid,))
+
+
+@pytest.fixture
+def launchable(conn, tmp_path, monkeypatch):
+    """A manifest whose photos are in the bucket, with AWS forbidden: anything that would
+    be sent fails the test."""
+    seed_two_species(conn, tmp_path)
+    with conn:
+        conn.executemany("insert into photo_copies values (?, 's3://bkt/', 'large', ?, 1, 'h', "
+                         "'t')", [(1000 + i, f"p/{1000 + i}.png") for i in range(8)])
+    monkeypatch.setattr(aws, "bucket", lambda: "bkt")
+    monkeypatch.setattr(aws, "release_commit", lambda **k: head_sha())
+
+    def no_aws(*a, **k):
+        raise AssertionError("a refused launch must not touch AWS")
+    monkeypatch.setattr(aws, "s3_client", no_aws)
+    monkeypatch.setattr(aws, "session", no_aws)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    return conn
+
+
+def launch(conn, tmp_path, dry_run, log=lambda s: None):
+    return aws.launch_trainer(conn, [], ["classifier"], max_hours=48, instance_type="g6.xlarge",
+                              picek=["fungitastic-beit-b384@15"], dry_run=dry_run,
+                              dry_run_dir=tmp_path / "dry", log=log)
+
+
+def first_record(conn):
+    return conn.execute("select min(observation_id) from records").fetchone()[0]
+
+
+def test_a_real_launch_is_refused_while_the_manifest_records_no_source(launchable, tmp_path):
+    unmigrated(launchable)
+    with pytest.raises(retrain.RecordSourceError, match="not migrated"):
+        launch(launchable, tmp_path, dry_run=False)
+
+
+def test_without_a_source_the_dry_run_still_runs_and_warns_loudly(launchable, tmp_path):
+    unmigrated(launchable)
+    said = []
+    out = launch(launchable, tmp_path, dry_run=True, log=said.append)
+    assert out["sent"].startswith("nothing")
+    assert any(s.startswith("WARNING (a real launch is refused)") and "not migrated" in s
+               for s in said)
+    assert out["picek_labels"]["record_sources"]["recorded"] is False
+    assert any("record sources: NOT MIGRATED" in s for s in said)
+
+
+def test_a_manifest_without_the_migration_table_is_refused(launchable, tmp_path):
+    unmigrated(launchable, table=False)
+    with launchable:
+        launchable.execute("update records set source = 'inat'")
+    with pytest.raises(retrain.RecordSourceError, match="not migrated"):
+        launch(launchable, tmp_path, dry_run=False)
+
+
+def test_the_old_guess_inat_everywhere_is_refused_until_the_marker_row_is_there(
+        launchable, tmp_path):
+    # The trap: before the migration records.source says 'inat' for any numeric id (MO ids
+    # too), and opening a manifest with the new code already adds org_source. Neither
+    # proves anything; only the marker row does.
+    unmigrated(launchable)
+    with launchable:
+        if "org_source" not in {r[1] for r in launchable.execute(
+                "pragma table_info(records)")}:
+            launchable.execute("alter table records add column org_source text")
+        launchable.execute("update records set source = 'inat'")
+    assert not retrain.sources_migrated(launchable)
+    with pytest.raises(retrain.RecordSourceError, match="not migrated"):
+        launch(launchable, tmp_path, dry_run=False)
+
+
+def test_by_default_a_launch_refuses_an_mo_record(launchable, tmp_path,
+                                                                      monkeypatch):
+    record_sources_as(launchable, monkeypatch, **{first_record(launchable): "mo"})
+    with pytest.raises(retrain.RecordSourceError, match=r"1 of the 6 .*inat: 5, mo: 1"):
+        launch(launchable, tmp_path, dry_run=False)
+    said = []
+    out = launch(launchable, tmp_path, dry_run=True, log=said.append)
+    assert out["picek_labels"]["record_sources"] == {
+        "recorded": True, "migration": "record-sources-v1", "allowed_sources": ["inat"],
+        "records": 6, "by_source": {"inat": 5, "mo": 1}, "not_allowed": 1}
+    assert out["picek_labels"]["allowed_sources"] == ["inat"]
+    assert any(s.startswith("WARNING (a real launch is refused)") for s in said)
+
+
+@pytest.mark.parametrize("other", ["mycoportal", "com_sequence", "unknown", "genbank"])
+def test_a_record_of_another_source_never_reaches_the_run(launchable, monkeypatch, other):
+    # main's evaluate.load_records leaves it out (sources.PHOTO_SOURCES), before any check.
+    record_sources_as(launchable, monkeypatch, **{first_record(launchable): other})
+    labels, *_ = aws.picek_launch_labels(launchable, "s3://bkt/", "large", 28, "match",
+                                         log=lambda s: None, dry_run=False,
+                                         allowed_sources=("inat", "mo"))
+    assert labels["record_sources"]["by_source"] == {"inat": 5}
+    assert labels["record_sources"]["records"] == 5
+
+
+@pytest.mark.parametrize("other", ["mycoportal", "com_sequence", "unknown", "genbank"])
+def test_the_guard_refuses_a_record_of_another_source_that_got_through(other):
+    check = {"recorded": True, "allowed_sources": ["inat", "mo"], "records": 6,
+             "by_source": {"inat": 5, other: 1}, "not_allowed": 1}
+    with pytest.raises(retrain.RecordSourceError, match=f"{other}: 1"):
+        retrain.require_allowed_sources(check)
+
+
+def test_an_inat_only_snapshot_passes_the_launch_check(launchable, monkeypatch):
+    record_sources_as(launchable, monkeypatch)
+    said = []
+    labels, *_ = aws.picek_launch_labels(launchable, "s3://bkt/", "large", 28, "match",
+                                         log=said.append, dry_run=False)
+    assert labels["record_sources"]["not_allowed"] == 0
+    assert any("come from the allowed sources (inat)" in s for s in said)
+
+
+def run_on_instance(conn, store, tmp_path, monkeypatch, trained):
+    data_dir = tmp_path / "inst"
+    monkeypatch.setattr(config, "DATA_DIR", data_dir)
+
+    def picek_trainer(*a, **k):
+        trained.append(a)
+        return fake_picek_trainer(*a, **k)
+    return trainer.run_job(conn, store, [], ["classifier"], lambda p, k: None, "r1",
+                           data_dir=data_dir, picek=["fungitastic-beit-b384@2"],
+                           picek_trainer=picek_trainer, log=lambda s: None)
+
+
+def test_the_instance_refuses_before_its_first_stage_without_a_source(conn, tmp_path,
+                                                                      monkeypatch):
+    store = seed_two_species(conn, tmp_path)
+    unmigrated(conn)
+    trained = []
+    with pytest.raises(retrain.RecordSourceError, match="not migrated"):
+        run_on_instance(conn, store, tmp_path, monkeypatch, trained)
+    assert trained == []
+    assert not (tmp_path / "inst" / trainer.PROGRESS_FILE).exists()
+
+
+def test_the_instance_refuses_a_manifest_with_a_record_not_from_inaturalist(conn, tmp_path,
+                                                                            monkeypatch):
+    store = seed_two_species(conn, tmp_path)
+    record_sources_as(conn, monkeypatch, **{first_record(conn): "mo"})   # allowed: inat
+    trained = []
+    with pytest.raises(retrain.RecordSourceError, match="mo: 1"):
+        run_on_instance(conn, store, tmp_path, monkeypatch, trained)
+    assert trained == []
+
+
+def test_the_dry_run_reports_the_audit_files_non_inat_records(launchable, tmp_path,
+                                                             monkeypatch):
+    data = tmp_path / "laptop-data"
+    audit = data / retrain.AUDIT_TSV
+    audit.parent.mkdir(parents=True)
+    ids = [r[0] for r in launchable.execute("select observation_id from records "
+                                            "order by observation_id")]
+    rows = ["observation_id\tsource\tcoalesce"] + [
+        f"{oid}\t{'MO Observations' if n == 0 else 'iNaturalist'}\tNA"
+        for n, oid in enumerate(ids)]
+    audit.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    said = []
+    out = launch(launchable, tmp_path, dry_run=True, log=said.append)
+    assert any("Audit file" in s and "1 of the 6" in s and "MO Observations 1" in s
+               for s in said)
+    assert "audit" not in str(out["picek_labels"]).lower()      # never shipped
+
+
+def test_allowing_inat_and_mo_accepts_an_mo_record(launchable, monkeypatch):
+    record_sources_as(launchable, monkeypatch, **{first_record(launchable): "mo"})
+    labels, *_ = aws.picek_launch_labels(launchable, "s3://bkt/", "large", 28, "match",
+                                         log=lambda s: None, allowed_sources=("mo", "inat"))
+    assert labels["record_sources"]["by_source"] == {"inat": 5, "mo": 1}
+    assert labels["allowed_sources"] == ["inat", "mo"]
+    assert labels["record_sources"]["not_allowed"] == 0
+
+
+@pytest.mark.parametrize("bad", [("inat", "mycoportal"), ("com_sequence",), ("unknown",),
+                                 ("mo", "genbank"), ()])
+def test_an_allowed_set_beyond_inat_and_mo_is_rejected(launchable, monkeypatch, bad):
+    record_sources_as(launchable, monkeypatch)
+    with pytest.raises(retrain.RecordSourceError, match="non-empty subset"):
+        aws.picek_launch_labels(launchable, "s3://bkt/", "large", 28, "match",
+                                log=lambda s: None, dry_run=True, allowed_sources=bad)
+
+
+def test_the_upper_bound_is_the_fixs_photo_sources():
+    from mycomap_vision import sources
+    assert retrain.PHOTO_SOURCES == sources.PHOTO_SOURCES == ("inat", "mo")
+    assert retrain.INAT == sources.INAT == "inat"
+    assert retrain.MIGRATION == sources.MIGRATION == "record-sources-v1"
+
+
+def test_a_release_supplies_its_allowed_sources_through_the_seam():
+    """The release's allowed sources are its included records' sources (data, not a list);
+    excluded records don't count, and a release that includes another site is refused."""
+    import sqlite3
+
+    class Release:
+        id = "dry-test"
+
+        def __init__(self, rows):
+            self.db = sqlite3.connect(":memory:")
+            self.db.execute("create table records (source text, included integer)")
+            self.db.executemany("insert into records values (?, ?)", rows)
+
+    rel = Release([("inat", 1), ("mo", 1), ("mycoportal", 0)])
+    assert retrain.allowed_sources(release=rel) == ("inat", "mo")
+    assert retrain.allowed_sources() == ("inat",)
+    with pytest.raises(retrain.RecordSourceError):
+        retrain.allowed_sources(release=Release([("inat", 1), ("mycoportal", 1)]))

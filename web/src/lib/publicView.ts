@@ -2,15 +2,38 @@
 // results, and waiting in line instead of an error when the server is busy.
 
 import type { Me, ScoreRun } from "./api";
+import { publicModelName } from "./publicNames";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
 const BASE_NAME: Record<string, string> = { "bioclip-2": "BioCLIP 2" };
+/** The Picek group's classifier recipe replicated on our records (retrain.py), named
+ *  `picek-<preset>-<run>`: the architecture each preset trains. */
+const PICEK_NAME: Record<string, string> = {
+  "fungitastic-beit-b384": "BEiT",
+  "fungitastic-beit-b224": "BEiT at 224 px",
+  "vit-b384-ce": "ViT-B",
+  "df20-vit-l384": "ViT-L",
+};
+/** Published classifiers run as outside baselines (published.py): the authors' models,
+ *  trained on Danish records, never retrained by us. */
+const EXTERNAL_NAME: Record<string, string> = {
+  "external:fungitastic-beit-b384": "FungiTastic BEiT-B (Picek et al., Danish records)",
+  "external:fungitastic-vit-b384": "FungiTastic ViT-B (Picek et al., Danish records)",
+  "external:df20-vit-l384": "Danish Fungi 2020 ViT-L (Picek et al., Danish records)",
+};
 
 /** A model as a visitor should read it. Fine-tuned models are named `<base>-ft-<YYYYMMDD>-…`
  *  (finetune.py); the internal name stays available for a tooltip. */
 export function modelName(backbone: string): string {
   if (backbone === "external:inat-cv") return "iNaturalist's computer vision";
+  const picek = /^picek-(.+?)-(\d{8}-\d{6}|smoke)$/.exec(backbone);
+  if (picek && PICEK_NAME[picek[1]]) {
+    const test = picek[2] === "smoke" ? " (test model)" : "";
+    return `Danish Fungi method (${PICEK_NAME[picek[1]]}, Picek et al.), trained on our ` +
+      `DNA-verified records${test}`;
+  }
+  if (backbone in EXTERNAL_NAME) return EXTERNAL_NAME[backbone];
   const ft = /^(.+)-ft-(\d{4})(\d{2})\d{2}-\d+$/.exec(backbone);
   if (ft) {
     const base = BASE_NAME[ft[1]] ?? ft[1];
@@ -152,7 +175,7 @@ export function shareWords(part: number, total: number): string {
  *  how many reference photos it compares with. */
 export function releaseNote(b: { backbone: string; embedded_photos: number;
                                  trained_through?: string | null }): string {
-  const parts = [`${modelName(b.backbone)}.`];
+  const parts = [`${publicModelName(b.backbone)}.`];
   if (b.trained_through) {
     parts.push(`Trained on DNA-verified records validated up to ${longDate(b.trained_through)}.`);
   }

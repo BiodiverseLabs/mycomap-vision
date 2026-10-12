@@ -54,6 +54,36 @@ INDEX_TABLES = ("embeddings", "embed_runs", "finetunes", "eval_runs")
 # speeds (progress.json records them per stage) after the first run.
 EMBED_RATES = {"bioclip-2": 55.0, "dinov3-l16-512": 18.8}
 FINETUNE_RATES = {"bioclip-2": 83.0}   # photos seen per second while training
+# The Picek replication (retrain.py), training photos per second on the instance. NOT yet
+# measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
+# (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).
+# Training photos per second on g6.xlarge: the slower of the data loader (4 vCPU) and the
+# L4. Loader: the 384 px recipe costs the same per photo as the BioCLIP fine-tune's loader
+# (measured on the laptop CPU, 2026-10-09), which gave 59 photos/s on g6.xlarge; a 440 px
+# photo cache or the 224 px recipe is 1.7x cheaper. GPU: measured on the laptop's RTX 4070
+# (mv picek-bench, 2026-10-09: BEiT-B 384 55/s without gradient checkpointing, 44/s with;
+# 224 px 179/s; ViT-L not measured) and scaled by L4_TRAIN_FACTOR, an ESTIMATE (the
+# BioCLIP fine-tune ran 83/s on the laptop and 106/s in its L4 rehearsal). Replace with the
+# first run's own speeds (progress.json).
+PICEK_LOADER_RATES = {"fungitastic-beit-b384": 59.0, "fungitastic-beit-b224": 100.0,
+                      "vit-b384-ce": 59.0, "df20-vit-l384": 59.0}
+L4_TRAIN_FACTOR = 1.1
+PICEK_GPU_RATES = {"fungitastic-beit-b384": 55.0 * L4_TRAIN_FACTOR,
+                   "fungitastic-beit-b224": 179.0 * L4_TRAIN_FACTOR,
+                   "vit-b384-ce": 55.0 * L4_TRAIN_FACTOR,
+                   "df20-vit-l384": 18.0 * L4_TRAIN_FACTOR}       # ViT-L: ~1/3 of ViT-B, guessed
+PICEK_CACHE_SPEEDUP = 1.7              # the loader's gain from a photo cache
+
+
+def picek_rate(preset: str, cached: bool) -> float | None:
+    """Training photos/s on the instance: the slower of loader and GPU (see above)."""
+    loader, gpu = PICEK_LOADER_RATES.get(preset), PICEK_GPU_RATES.get(preset)
+    if loader is None or gpu is None:
+        return None
+    return round(min(loader * (PICEK_CACHE_SPEEDUP if cached else 1.0), gpu), 1)
+
+
+PICEK_CACHE_BUILD_RATE = 250.0         # photos/s resizing into the cache on 4 vCPUs
 UNMEASURED_EMBED_RATE = 15.0           # a backbone never timed here: assume a slow one
 UNMEASURED_FINETUNE_RATE = 40.0
 L4_FACTOR = 1.5
@@ -72,15 +102,22 @@ def finetuned_name(base: str, run_id: str) -> str:
 
 @dataclass
 class Stage:
-    kind: str                 # "embed" or "finetune"
+    kind: str                 # "embed", "finetune" or "picek" (picek.train)
     name: str                 # what the stage produces (a backbone's storage name)
     spec: str                 # what the loader is given
     base: str | None = None   # for a fine-tune and its embedding: the backbone it starts from
 
 
-def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str) -> list[Stage]:
+def picek_name(spec: str, run_id: str) -> str:
+    from .replications.fungitastic.retrain import parse_spec
+    return f"picek-{parse_spec(spec)[0]}-{run_id}"
+
+
+def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str,
+                picek: list[str] | None = None) -> list[Stage]:
     """The order a run works in. Each backbone to fine-tune comes first, followed directly
-    by its fine-tune and the fine-tuned model's embedding; the other backbones follow. If
+    by its fine-tune and the fine-tuned model's embedding; then each Picek replication
+    (`picek`: preset[@epochs], retrain.py) and its embedding; the other backbones follow. If
     time runs out, what's left undone is the extra backbones, not the fine-tune."""
     from .models import storage_name
     specs = {}
@@ -94,12 +131,18 @@ def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str) -
         if n not in ft:
             ft.append(n)
     stages = []
-    for n in ft + [n for n in specs if n not in ft]:
+    for n in ft:
         stages.append(Stage("embed", n, specs[n]))
-        if n in ft:
-            name = finetuned_name(n, run_id)
-            stages.append(Stage("finetune", name, name, base=n))
-            stages.append(Stage("embed", name, name, base=n))
+        name = finetuned_name(n, run_id)
+        stages.append(Stage("finetune", name, name, base=n))
+        stages.append(Stage("embed", name, name, base=n))
+    for spec in picek or []:
+        name = picek_name(spec, run_id)
+        stages.append(Stage("picek", name, spec))
+        stages.append(Stage("embed", name, name, base=name))
+    for n in specs:
+        if n not in ft:
+            stages.append(Stage("embed", n, specs[n]))
     return stages
 
 
@@ -114,6 +157,26 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
     rows, total = [], SETUP_HOURS + COMPARE_HOURS
     for s in stages:
         key = s.base or s.name
+        if s.kind == "picek":
+            from .replications.fungitastic.retrain import parse_spec
+            preset, n_epochs = parse_spec(s.spec)
+            from .replications.fungitastic.retrain import cache_of
+            cached = cache_of(s.spec)
+            rate = picek_rate(preset, bool(cached))
+            hours = photos * n_epochs / (rate or UNMEASURED_FINETUNE_RATE) / 3600
+            if cached:
+                hours += photos / PICEK_CACHE_BUILD_RATE / 3600
+            total += hours
+            rows.append({"stage": f"{s.kind} {s.name} ({n_epochs} epochs)",
+                         "photos_per_second": rate or UNMEASURED_FINETUNE_RATE,
+                         "measured": False, "hours": round(hours, 1)})
+            continue
+        if s.kind == "embed" and key.startswith("picek-"):
+            hours = photos / 150.0 / 3600 * factor        # eval at 384 px, loader-bound
+            total += hours
+            rows.append({"stage": f"{s.kind} {s.name}", "photos_per_second": 150.0,
+                         "measured": False, "hours": round(hours, 1)})
+            continue
         if s.kind == "embed":
             rate = EMBED_RATES.get(key)
             work = photos
@@ -283,11 +346,11 @@ def restore_finished(conn: sqlite3.Connection, files, run_id: str, stages: list[
             prev = done.get((s.kind, s.name))
             if prev is None:
                 continue
-            if s.kind == "finetune":
+            if s.kind in ("finetune", "picek"):
                 models_dir = data_dir / "models"
                 got = all(files.fetch(f"{prefix}models/{s.name}{suffix}",
                                       models_dir / f"{s.name}{suffix}")
-                          for suffix in (".pt", ".json"))
+                          for suffix in model_files(s.kind))
                 if not got or not _remote_is_finetune(conn, s.name):
                     log(f"[{s.name}] its weights or index row are missing: fine-tuning again")
                     continue
@@ -325,7 +388,11 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             upload: Callable[[Path, str], None], run_id: str, size: str = "large",
             test_days: int = 28, batch_size: int = 64, readers: int = 16,
             loader=None, data_dir: Path | None = None, finetune: list[str] | None = None,
-            finetuner=None, sample_records: int | None = None,
+            finetuner=None, sample_records: int | None = None, picek: list[str] | None = None,
+            picek_trainer=None, picek_exclude: str = "match", picek_ids_file: str | None = None,
+            picek_labels_hash: str | None = None, picek_release: str | None = None,
+            picek_release_manifest: str | None = None, picek_allow_draft: bool = False,
+            picek_place_cells: str | None = None, picek_place_cells_sha256: str | None = None,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
@@ -340,16 +407,44 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
-    stages = plan_stages(backbones, finetune, run_id)
+    stages = plan_stages(backbones, finetune, run_id, picek)
     # The laptop refuses to ship such a manifest (aws.check_trainer_request); this is the
     # instance's own check, before anything is embedded or trained.
     holdouts.check_clean(conn, "the trainer run")
+    release_cite = None
+    if picek and picek_release:
+        # The release shipped with the run (no private.sqlite), verified again here by the
+        # builder's trainer mode against the MANIFEST.json the launch read, with the place
+        # counts the launch made; then the launch's rules on it.
+        from .replications.fungitastic import dataset, retrain
+        rel = dataset.load(picek_release, picek_allow_draft, without_private=True,
+                           expect_manifest_sha256=picek_release_manifest)
+        retrain.check_release_exclusion(rel, picek_exclude)
+        place = (retrain.read_place_cells(picek_place_cells, picek_place_cells_sha256)
+                 if picek_place_cells else None)
+        snap = retrain.release_snapshot(rel, retrain.build_data_from_release(
+            conn, rel, store.location, size, place_cells=place), picek_exclude)
+        release_cite = dataset.cite(rel)
+        rel.close()
+        log("record sources: " + retrain.format_sources(snap["record_sources"]))
+        retrain.require_allowed_sources(snap["record_sources"], log=log)
+    elif picek:
+        # The same rule as at launch (aws.picek_launch_labels), on the manifest shipped here:
+        # every record the Picek run trains or validates on is from its allowed sources.
+        from .replications.fungitastic import retrain
+        sources = retrain.run_sources(conn, store.location, size, test_days, picek_exclude,
+                                      picek_ids_file)
+        log("record sources: " + retrain.format_sources(sources))
+        retrain.require_allowed_sources(sources, log=log)
     cleared = clear_embeddings(conn)
     log(f"cleared {cleared:,} embedding rows brought from the laptop")
     kept = None
     if sample_records:
         kept = restrict_to_sample(conn, sample_records, store.location, size)
         log(f"REHEARSAL: kept {kept:,} random records; results won't be merged home")
+        if picek_labels_hash:
+            log("REHEARSAL: the launch's label hash can't hold on a sample; not checked")
+            picek_labels_hash = None
     restored: dict[int, dict] = {}
     attempts: list[dict] = []
     if resume is not None:
@@ -364,7 +459,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     progress = Progress(data_dir / PROGRESS_FILE, prefix + PROGRESS_FILE, upload,
                         run_id=run_id, code_version=config.code_version(), size=size,
                         methods=methods, test_days=test_days, sample_records=kept,
-                        attempts=attempts,
+                        attempts=attempts, picek_exclude_benchmarks=picek_exclude,
+                        picek_labels_hash=picek_labels_hash,
+                        dataset_release=release_cite,
                         stages=[{**restored[i], "restored": True} if i in restored
                                 else {**asdict(s), "status": "pending"}
                                 for i, s in enumerate(stages)])
@@ -398,7 +495,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             continue
         # A stage whose input didn't come about: stopped with it, or failed with it.
         needs = None
-        if s.kind == "finetune" and s.base not in embedded:
+        if s.kind == "picek":
+            pass                         # trains from the photos: needs no embedding first
+        elif s.kind == "finetune" and s.base not in embedded:
             needs, why = s.base, f"{s.base} was not embedded"
         elif s.kind == "embed" and s.base and s.name not in finetuned:
             needs, why = s.name, f"{s.name} was not fine-tuned"
@@ -408,7 +507,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                 stopped.setdefault(s.name, why)
                 progress.stage(i, status="stopped", error=why)
             else:
-                if s.kind == "finetune":
+                if s.kind in ("finetune", "picek"):
                     failed[s.name] = why
                 progress.stage(i, status="skipped", error=why)
             continue
@@ -447,11 +546,18 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                 progress.stage(i, status="failed", error=failed[s.name], skipped=len(bad))
         else:
             try:
-                meta = (finetuner or _default_finetuner(store, size, test_days, log,
-                                                        stopping))(
-                    conn, s.base, s.name, root, data_dir / "models")
+                if s.kind == "picek":
+                    meta = (picek_trainer or _default_picek_trainer(
+                        store, size, test_days, log, stopping, picek_exclude, picek_ids_file,
+                        picek_labels_hash, picek_release, picek_release_manifest,
+                        picek_allow_draft, picek_place_cells, picek_place_cells_sha256))(
+                        conn, s.spec, s.name, data_dir / "models")
+                else:
+                    meta = (finetuner or _default_finetuner(store, size, test_days, log,
+                                                            stopping))(
+                        conn, s.base, s.name, root, data_dir / "models")
                 publish([(data_dir / "models" / f"{s.name}{suffix}",
-                          f"{prefix}models/{s.name}{suffix}") for suffix in (".pt", ".json")])
+                          f"{prefix}models/{s.name}{suffix}") for suffix in model_files(s.kind)])
                 finetuned[s.name] = meta
                 progress.stage(i, status="done", finished_at=_now(),
                                seconds=round(time.monotonic() - t0, 1),
@@ -504,7 +610,36 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
 
 
 FINETUNE_KEYS = ("base", "trained_through", "records", "photos", "species", "steps",
-                 "minutes", "final_loss")
+                 "minutes", "final_loss", "label_snapshot")
+PICEK_FILES = (".pt", ".json", ".classifier.npz", ".records.csv")
+
+
+def model_files(kind: str) -> tuple[str, ...]:
+    """The files a trained model stage leaves in models/: weights and metadata, and for a
+    Picek classifier also its head, temperature and metadata counts, and its records."""
+    return PICEK_FILES if kind == "picek" else (".pt", ".json")
+
+
+def _default_picek_trainer(store, size, test_days, log, should_stop=None,
+                           exclude: str = "match", ids_file: str | None = None,
+                           labels_hash: str | None = None, release: str | None = None,
+                           release_manifest: str | None = None, allow_draft: bool = False,
+                           place_cells: str | None = None, place_cells_sha256: str | None = None):
+    def run(conn, spec, name, models_dir):
+        import os
+
+        from .replications.fungitastic.retrain import PicekConfig, cache_of, parse_spec, train
+        preset, epochs = parse_spec(spec)
+        cfg = PicekConfig(preset=preset, epochs=epochs, cache_px=cache_of(spec),
+                          workers=max(2, min(6, os.cpu_count() or 4)),
+                          exclude_benchmarks=exclude, exclude_ids_file=ids_file,
+                          expect_labels_hash=labels_hash, release=release,
+                          allow_draft=allow_draft, expect_release_manifest=release_manifest,
+                          shipped_release=bool(release), place_cells_file=place_cells,
+                          expect_place_cells_sha256=place_cells_sha256)
+        return train(conn, store, size, name, cfg,
+                     test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
+    return run
 
 
 def _default_finetuner(store, size, test_days, log, should_stop=None):
@@ -555,6 +690,8 @@ def resume_request(doc: dict) -> dict:
     spec_of = {s["name"]: s["spec"] for s in stages if s["kind"] == "embed" and not s.get("base")}
     finetune = [spec_of[s["base"]] for s in stages if s["kind"] == "finetune"]
     return {"backbones": list(spec_of.values()), "finetune": finetune,
+            "picek": [s["spec"] for s in stages if s["kind"] == "picek"],
+            "picek_exclude_benchmarks": doc.get("picek_exclude_benchmarks") or "match",
             "methods": list(doc.get("methods") or []), "size": doc.get("size") or "large",
             "test_days": int(doc.get("test_days") or 28),
             "sample_records": doc.get("sample_records"),
@@ -619,6 +756,11 @@ def merge_results(conn: sqlite3.Connection, remote_path: Path, staged: Path, res
         if not all(p.is_file() for p in srcs):
             refused[name] = "its weights are not staged"
             continue
+        extra = [staged.parent / "models" / f"{name}{suffix}" for suffix in PICEK_FILES[2:]]
+        if name.startswith("picek-") and not all(p.is_file() for p in extra):
+            refused[name] = "its classifier head or records list is not staged"
+            continue
+        srcs += [p for p in extra if p.is_file()]
         dest = data_dir / "models"
         dest.mkdir(parents=True, exist_ok=True)
         for src in srcs:

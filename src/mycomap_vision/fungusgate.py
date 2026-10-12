@@ -38,12 +38,24 @@ from . import config
 
 FUNGUS, UNSURE, NOT_FUNGUS = "fungus", "unsure", "not_fungus"
 MODES = ("zero-shot", "probe", "both")
+VERDICTS = (FUNGUS, UNSURE, NOT_FUNGUS)
 GATE_NAME = "fungus-gate"
 
 # Messages the API and page show.
 MESSAGES = {
     NOT_FUNGUS: "This doesn't look like a fungus.",
     UNSURE: "Not sure this is a fungus.",
+}
+
+# What a find is said to look like when it isn't judged a fungus and its photos score high
+# for an in-scope class (Steve, 2026-10-11: "This looks like a slime mould. Slime moulds
+# aren't fungi, but MycoMap holds some DNA-verified ones").
+LOOKS_LIKE = {
+    "slime": {
+        "message": "This looks like a slime mould.",
+        "hint": ("This looks like a slime mould. Slime moulds aren't fungi, but MycoMap holds "
+                 "some DNA-verified ones; the closest are below, without a stated chance."),
+    },
 }
 
 TEMPLATES = ("a photo of {}.", "a photo of a {}.")
@@ -107,8 +119,19 @@ def observation_verdict(verdicts: list[str]) -> str:
     return NOT_FUNGUS
 
 
-def gate_hints(verdicts: list[str], overall: str) -> list[str]:
+def find_looks_like(photos: list[dict], overall: str) -> str | None:
+    """What a find not judged a fungus looks like: the class its photos name (LOOKS_LIKE),
+    or None. A find judged a fungus never gets one."""
+    if overall == FUNGUS:
+        return None
+    named = [p["looks_like"] for p in photos if p.get("looks_like")]
+    return named[0] if named else None
+
+
+def gate_hints(verdicts: list[str], overall: str, looks_like: str | None = None) -> list[str]:
     """What the page says about the gate, before the usual hints."""
+    if looks_like is not None and overall != FUNGUS:
+        return [LOOKS_LIKE[looks_like]["hint"]]
     if overall == NOT_FUNGUS:
         return ["This doesn't look like a fungus, so no identification is given. Vision "
                 "only knows DNA-verified fungi; if it is one, add a clear photo of the "
@@ -170,12 +193,26 @@ class FungusGate:
     probe_b: float = 0.0
     # Which scores make p(fungus): "zero-shot", "probe", or "both" (their log-odds added).
     mode: str = "zero-shot"
+    # Zero-shot classes in scope although not fungi (Steve, 2026-10-11: slime moulds): a photo
+    # judged "not a fungus" whose probability for such a class is at least the value given is
+    # lifted to "not sure" (the names, no chance). A verdict is never lowered by this.
+    lift_to_unsure: dict = field(default_factory=dict)
+    # Zero-shot classes named to the user (LOOKS_LIKE): a photo not judged a fungus whose
+    # probability for the class is at least the value given "looks like" it (slime: 0.5).
+    looks_like: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if self.mode not in MODES:
             raise ValueError(f"unknown gate mode {self.mode!r}")
         if self.mode != "zero-shot" and self.probe_w is None:
             raise ValueError(f"gate mode {self.mode!r} needs a probe")
+        for name, given in (("lift_to_unsure", self.lift_to_unsure), ("looks_like", self.looks_like)):
+            unknown = sorted(set(given) - set(np.asarray(self.classes).tolist()))
+            if unknown:
+                raise ValueError(f"{name} names classes the gate doesn't have: {unknown}")
+        unworded = sorted(set(self.looks_like) - set(LOOKS_LIKE))
+        if unworded:
+            raise ValueError(f"looks_like has no wording for {unworded}")
         self.classes = np.asarray(self.classes)
         self.sides = np.asarray(self.sides)
         self._class_names = sorted(set(self.classes.tolist()))
@@ -195,24 +232,54 @@ class FungusGate:
             z += v @ np.asarray(self.probe_w, np.float32) + self.probe_b
         return 1 / (1 + np.exp(-z))
 
-    def zero_shot(self, v: np.ndarray) -> np.ndarray:
-        """BioCLIP 2 zero-shot p(fungus) for unit-length base vectors."""
+    def class_probs(self, v: np.ndarray) -> np.ndarray:
+        """BioCLIP 2 zero-shot probability of every class (columns: sorted class names), for
+        unit-length base vectors."""
         logits = (v @ self.vectors.T.astype(np.float32)) * self.scale
         top = logits.max(axis=1, keepdims=True)
         # A class's score: the log of its prompts' mean likelihood.
         per_class = np.stack([np.log(np.exp(logits[:, self.classes == c] - top).mean(axis=1))
                               for c in self._class_names], axis=1) + top
         p = np.exp(per_class - per_class.max(axis=1, keepdims=True))
-        p /= p.sum(axis=1, keepdims=True)
-        return p[:, self._fungus_class].sum(axis=1)
+        return p / p.sum(axis=1, keepdims=True)
+
+    def zero_shot(self, v: np.ndarray) -> np.ndarray:
+        """BioCLIP 2 zero-shot p(fungus) for unit-length base vectors."""
+        return self.class_probs(v)[:, self._fungus_class].sum(axis=1)
+
+    def _first_at_or_above(self, base_vectors: np.ndarray, rule: dict) -> list[str | None]:
+        """Per photo, the first class of `rule` ({class: threshold}) the photo reaches, or None."""
+        if not rule:
+            return [None] * len(base_vectors)
+        v = np.asarray(base_vectors, dtype=np.float32)
+        v = v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-12)
+        out: list[str | None] = []
+        for row in self.class_probs(v):
+            hit = [c for c, t in rule.items() if row[self._class_names.index(c)] >= t]
+            out.append(hit[0] if hit else None)
+        return out
+
+    def lifted(self, base_vectors: np.ndarray) -> list[str | None]:
+        """Per photo, the in-scope class that lifts a "not a fungus" verdict, or None."""
+        return self._first_at_or_above(base_vectors, self.lift_to_unsure)
 
     def judge(self, base_vectors: np.ndarray) -> list[dict]:
-        """One verdict per photo: {"verdict", "p_fungus", "message"}."""
+        """One verdict per photo: {"verdict", "p_fungus", "message"}, plus "lifted_by" (the
+        in-scope class, e.g. "slime") when a "not a fungus" verdict was lifted to "not sure"."""
         out = []
-        for p in self.p_fungus(base_vectors).tolist():
+        looks = self._first_at_or_above(base_vectors, self.looks_like)
+        for p, by, like in zip(self.p_fungus(base_vectors).tolist(), self.lifted(base_vectors),
+                               looks):
             v = self.thresholds.verdict(p)
-            out.append({"verdict": v, "p_fungus": round(float(p), 4),
-                        "message": MESSAGES.get(v)})
+            entry = {"verdict": v, "p_fungus": round(float(p), 4)}
+            if v == NOT_FUNGUS and by is not None:
+                v = entry["verdict"] = UNSURE
+                entry["lifted_by"] = by
+            entry["message"] = MESSAGES.get(v)
+            if v != FUNGUS and like is not None:       # a fungus is never relabelled
+                entry["looks_like"] = like
+                entry["message"] = LOOKS_LIKE[like]["message"]
+            out.append(entry)
         return out
 
     def fingerprint(self) -> str:
@@ -220,7 +287,9 @@ class FungusGate:
         vectors): a stored verdict made under another fingerprint should be judged again."""
         import hashlib
         h = hashlib.sha256(f"{self.mode}|{self.base}|{self.thresholds.not_fungus}|"
-                           f"{self.thresholds.unsure}|{self.scale}|{self.probe_b}".encode())
+                           f"{self.thresholds.unsure}|{self.scale}|{self.probe_b}|"
+                           f"{sorted(self.lift_to_unsure.items())}|"
+                           f"{sorted(self.looks_like.items())}".encode())
         if self.probe_w is not None:
             h.update(np.asarray(self.probe_w, np.float32).tobytes())
         h.update(np.asarray(self.vectors, np.float32).tobytes())
@@ -230,7 +299,9 @@ class FungusGate:
         """What /api/health says about the gate."""
         return {"mode": self.mode, "base": self.base, "fingerprint": self.fingerprint(),
                 "thresholds": {"not_fungus": self.thresholds.not_fungus,
-                               "unsure": self.thresholds.unsure}}
+                               "unsure": self.thresholds.unsure},
+                "lift_to_unsure": dict(self.lift_to_unsure),
+                "looks_like": dict(self.looks_like)}
 
     # --- files -----------------------------------------------------------------------
 
@@ -242,7 +313,8 @@ class FungusGate:
         np.savez(root / f"{GATE_NAME}.npz", classes=self.classes, sides=self.sides,
                  vectors=self.vectors.astype(np.float32), **extra)
         meta = {"base": self.base, "scale": self.scale, "mode": self.mode,
-                "probe_b": self.probe_b,
+                "probe_b": self.probe_b, "lift_to_unsure": dict(self.lift_to_unsure),
+                "looks_like": dict(self.looks_like),
                 "thresholds": {"not_fungus": self.thresholds.not_fungus,
                                "unsure": self.thresholds.unsure},
                 "provenance": self.provenance}
@@ -264,7 +336,9 @@ class FungusGate:
                        Thresholds(**meta["thresholds"]), meta.get("base", "bioclip-2"),
                        meta.get("provenance", {}),
                        f["probe_w"] if "probe_w" in f.files else None,
-                       float(meta.get("probe_b", 0.0)), meta.get("mode", "zero-shot"))
+                       float(meta.get("probe_b", 0.0)), meta.get("mode", "zero-shot"),
+                       dict(meta.get("lift_to_unsure") or {}),
+                       dict(meta.get("looks_like") or {}))
 
 
 # --- choosing thresholds (on development sets only) ------------------------------------

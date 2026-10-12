@@ -32,9 +32,10 @@ headline: 'Zero-shot + probe on frozen BioCLIP 2 vectors, AUROC 0.997 on 1,582 e
   the stated chance, and 98.8% of everyday non-fungi get no species chance (ducks, birds, pets 100%).'
 verdict: The served answer's own confidence cannot flag a non-fungus (it is higher for non-fungi);
   frozen BioCLIP 2 vectors can, at almost no cost to true fungi.
-decision: 'Steve 2026-10-11: ship the lighter gate now (the probe on the served vectors, 0.40 / 0.55),
-  since the 4 GB box has no room for the frozen one; slime moulds are in scope. Reproducibility:
-  exploratory-pre-freeze; confirm on dataset release v1.'
+decision: 'Steve 2026-10-11: shipped the lighter gate first (probe on the served vectors, 0.40 / 0.55);
+  later that day (via the Vision coordinator) serve the frozen combined gate (0.05 / 0.70), which fits
+  the box as file pages, and give slime moulds "not sure", never "not a fungus" (lift rule, slime 0.05).
+  Exploratory-pre-freeze; confirm on dataset release v1.'
 related:
 - uninformative-photos
 - photo-views
@@ -185,6 +186,37 @@ to be confirmed on dataset release v1.
 
 Provisional: an exploratory result from before the dataset freeze; to be re-run on dataset release v1
 (docs/PLAN.md, "a reproducible dataset release").
+
+### Slime moulds: "not sure", never "not a fungus" (Steve, 2026-10-11)
+Declared in code before the run (fungusgate_tune.py, LIFT_CLASS and MAX_EVERYDAY_LIFTED): a photo the
+gate judges "not a fungus" whose BioCLIP 2 zero-shot probability for the slime-mould class reaches s is
+lifted to "not sure" (names shown, no chance); a verdict is never lowered. s is the lowest value on the
+0.05 grid at which at most 1% of everyday non-fungi are lifted. Result: s = 0.05 (0.6% lifted; every
+value from 0.10 to 0.90 gives the same slime-mould result with 0.1% lifted).
+
+| frozen combined gate | slime moulds (120): not a fungus / not sure / passed | DEV: no answer / without a chance / with a photo left out / photos left out | everyday: not a fungus / not sure / passed |
+|---|---|---|---|
+| without the slime rule | 63% / 30% / 7% | 0 / 11 / 36 / 49 | 82.1% / 16.7% / 1.2% |
+| with it (s = 0.05) | **0% / 93% / 7%** | **0 / 11 / 28 / 35** | 81.5% / 17.3% / 1.2% |
+
+On the 168 photos of DNA-verified slime-mould reference records: not a fungus 31% before, 1% after
+(77% not sure, 23% passed). The lift never touches a fungus verdict, so no DEV record loses a chance;
+14 DEV fungus photos that were left out are kept as "not sure" instead.
+
+### Naming a slime mould (Steve, 2026-10-11)
+A photo not judged a fungus whose slime-mould class probability is at least 0.5 (Steve's value, not
+tuned) is named: the find says "This looks like a slime mould." with "Slime moulds aren't fungi, but
+MycoMap holds some DNA-verified ones; the closest are below, without a stated chance." A fungus
+verdict is never relabelled. With the frozen gate: 90% of the 120 slime-mould photos are called slime
+moulds; 1 of 1,582 everyday non-fungi and 1 of 60 oak galls; no lichens, Nostoc, food or Monotropa.
+On DEV, 5 of 2,989 true fungus records would be called a slime mould, all crust fungi
+(Phanerochaete, Botryobasidium twice, Resinicium, Cheimonophyllum), which already had no stated
+chance. A higher value does not spare them (still 4 at 0.6 to 0.9) and names fewer slime moulds (75%
+at 0.9), so 0.5 stays.
+
+The identifier itself names the right group only partly: on the 120 slime-mould photos its top answer
+is a slime mould 50% of the time (76% in the top 5), the iNat genus 36%, with 68 DNA-verified
+slime-mould records under 40 names to match against.
 
 ## Next
 - Deployment waits for memory room on the 4 GB box (Steve, 2026-10-11: box stays 4 GB for now; it
