@@ -154,3 +154,20 @@ def test_a_trainer_copy_cannot_read_the_public_points(world, tmp_path):
     with pytest.raises(dr.ReleaseError, match="without private.sqlite"):
         rel.public_places()
     rel.close()
+
+
+def test_an_mo_record_its_observations_api_does_not_return_has_no_public_point(world):
+    """MO's observations API can leave out an observation whose page and images exist;
+    read and not returned is an answer (none), so a frozen build may go ahead."""
+    c = world["conn"]
+    c.execute("update mo_public_points set status = 'missing', box_north = null, "
+              "box_south = null, box_east = null, box_west = null where observation_id = 'mo:4'")
+    c.commit()
+    build(world, name="v1", freeze_approved=FREEZE, no_loo_exclusions=FREEZE)
+    rel = dr.load_release("v1", world["root"])
+    try:
+        p = rel.public_places()["mo:4"]
+        assert p["public_kind"] == "none" and p["public_lat_micro"] is None
+        assert p["read_at"] == "now"
+    finally:
+        rel.close()
