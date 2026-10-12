@@ -346,18 +346,21 @@ class Timer:
 PUBLIC_MODEL_NAME = "MycoMap Vision"
 
 
-def release_date(release_id: str | None) -> str | None:
-    """A release id ('20261008-015746-full-…') as the date it was made, '2026-10-08':
-    the public model version. Nothing else of the id leaves the server."""
-    m = re.match(r"(\d{4})(\d{2})(\d{2})-", release_id or "")
+def id_date(stamped: str | None) -> str | None:
+    """An id that starts with a stamp ('20261008-012435-…') as that date, '2026-10-08'."""
+    m = re.match(r"(\d{4})(\d{2})(\d{2})-", stamped or "")
     return f"{m[1]}-{m[2]}-{m[3]}" if m else None
 
 
-def public_model(release_id: str | None, calibration_id: str | None = None) -> dict:
-    """The `model` block of every v1 answer (docs/api.md §4): a name, the release date as
-    its version, the date its confidence was last calibrated."""
-    return {"name": PUBLIC_MODEL_NAME, "version": release_date(release_id),
-            "calibrated_on": release_date((calibration_id or "")[:8] + "-")}
+def public_model(card: dict | None, calibration_id: str | None = None) -> dict:
+    """The `model` block of every v1 answer (docs/api.md §4): a name; the version of the
+    training data behind it and that snapshot's size (modelcard.py); the date its
+    confidence was last calibrated. Nothing names a backbone or method."""
+    card = card or {}
+    data = card.get("data") or {"snapshot": None, "records": 0, "species": 0, "genera": 0}
+    return {"name": PUBLIC_MODEL_NAME, "version": card.get("version"),
+            "data": {k: data.get(k) for k in ("snapshot", "records", "species", "genera")},
+            "calibrated_on": id_date((calibration_id or "")[:16] + "-")}
 
 
 def taxon_counts(rank_counts: dict, *, records: int, model: dict,

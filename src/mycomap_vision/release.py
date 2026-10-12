@@ -33,7 +33,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import config, holdouts
+from . import config, holdouts, modelcard
 from .fungusgate import GATE_NAME
 from .manifest import shippable_snapshot
 from .occurrence import STORE_NAME as OCCURRENCE_STORE
@@ -118,8 +118,13 @@ def publish(conn, backbones: list[str], *, label: str | None = None, make_curren
     for path, rel in files:
         s3.upload_file(str(path), bucket, f"{PREFIX}{rid}/{rel}")
         listed.append({"path": rel, "bytes": path.stat().st_size, "sha256": sha256_of(path)})
+    # The public model version (modelcard.py): the date of the label set's export, .2, .3
+    # for a later release on the same export.
+    snapshot = modelcard.snapshot_of(conn)
     info = {"id": rid, "backbones": backbones, "code_version": config.code_version(),
             "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "snapshot": snapshot,
+            "version": modelcard.version_for(snapshot, earlier_versions(s3, bucket)),
             "files": listed}
     s3.put_object(Bucket=bucket, Key=f"{PREFIX}{rid}/release.json",
                   Body=json.dumps(info, indent=2).encode(), ContentType="application/json")
@@ -129,6 +134,26 @@ def publish(conn, backbones: list[str], *, label: str | None = None, make_curren
     log(f"release {rid}: {len(listed)} files, {total / 2**20:.0f} MB"
         + (" (now current)" if make_current else ""))
     return {"id": rid, "files": len(listed), "bytes": total, "current": make_current}
+
+
+def earlier_versions(s3, bucket: str) -> list[str]:
+    """The public versions recorded by earlier releases (those made before versions were
+    recorded have none)."""
+    out = []
+    pages = s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=PREFIX,
+                                                         Delimiter="/")
+    for page in pages:
+        for p in page.get("CommonPrefixes", []):
+            rid = p["Prefix"][len(PREFIX):].rstrip("/")
+            if not RELEASE_ID.match(rid):
+                continue
+            try:
+                version = read_json(s3, bucket, f"{PREFIX}{rid}/release.json").get("version")
+            except Exception:  # noqa: BLE001 - an unfinished release has no release.json
+                continue
+            if isinstance(version, str):
+                out.append(version)
+    return out
 
 
 def set_current(rid: str, *, s3, bucket: str) -> None:
