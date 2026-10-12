@@ -120,12 +120,20 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
      was never read; `public_kind = 'none'` is an explicit answer.
    - `mv fetch-inat` (new and newly North American iNat records) and `mv fetch-mo` (753 MO
      records at the audit), then `mv fetch-mo-points` again for MO records the export added.
-   $ Then the photos into S3: `mv aws-launch-downloader` (t3.small, self-terminating) for the
-   iNat photos with no S3 copy (58,563 at the audit, incl. 54,066 of the held-out records',
-   which exist only as the local benchmark copy; ~25 GB, ~4.6 GB from the all-rights-reserved
-   host, inside its 20 GB/day cap; ~2 h), and the new MO records' photos at MO's pace
-   (~3,400, ~4-5 h; or a zip from MO), then `mv aws-pull-manifest`. A record counts only with
-   a kept original in S3: skipping this would drop the held-out records from v1.
+   Then the photos into S3. Nothing already in S3 is fetched again, and nothing we hold is
+   fetched twice:
+   - the held-out records' photos (54,352 at the audit) already sit on the laptop in the
+     benchmark's folder: `mv adopt-benchmark-photos --benchmark heldout-2026-10-08`, then
+     `mv copy-photos --source <the folder it prints> --dest s3://<bucket>/ --size large`
+     (every file re-hashed before upload; ~24 GB from the laptop's uplink);
+   - $ the photos held nowhere (4,490 iNat at the audit, 799 of them all-rights-reserved):
+     `mv aws-launch-downloader` (t3.small, self-terminating; minutes), then
+     `mv aws-pull-manifest`;
+   - the new MO records' images (4,655 from 1,088 observations at the audit): from MO's zip
+     (list `data/audits/v1-cut-2026-10-12/mo-images-for-zip-v1.csv`, files named
+     `<mo_image_id>.jpg`) with `mv import-mo-zip`, else downloaded at MO's pace (~6 h).
+   A record counts only with a kept original in S3: skipping this would drop the held-out
+   records from v1.
 3. Freeze the manifest: `mv manifest-freeze --out data/manifest-v1-freeze.sqlite` (a consistent
    copy; prints its sha256). With its path and sha256, the retrain owner runs
    `scripts/loo_exclusions.py --manifest data/manifest-v1-freeze.sqlite` once Steve's review is
@@ -212,7 +220,11 @@ swapped. Before it is switched on for v1: a dark run on the box with it on acros
 nightly update, reading the service cgroup's `memory.current`, `memory.stat` (anon vs file)
 and `memory.events` (high, oom) before, during the index swap and after, first on the current
 release, then on v1's int8 release before it serves. If v1's peak nears the 3.5 GB cap, it
-stays off for v1 (one setting), or `MV_SEARCH_REFINE` is lowered.
+stays off for v1 (one setting), or `MV_SEARCH_REFINE` is lowered. **Measured 2026-10-12 on the box:** on since
+04:31 UTC with today's release, through a full nightly index swap: anon peak 1.81 GB, memory
+events high/max/oom 0, search 1.61 → 0.061 s (1 photo), identical answers. The packed copy
+costs ~800 bytes a reference row; v1's ~660k rows (+~12%) stay under the 25% re-measure line,
+so it stays on for v1, and the same watch reruns on v1's first nightly as a check.
 
 ## 6. Re-running every earlier experiment on v1
 

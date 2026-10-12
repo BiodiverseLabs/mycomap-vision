@@ -94,6 +94,11 @@ def cmd_download_photos(conn, args) -> None:
     print(json.dumps(stats, indent=2))
 
 
+def cmd_adopt_benchmark_photos(conn, args) -> None:
+    """A development benchmark's own downloaded photos as ordinary copies (photos.py)."""
+    print(json.dumps(photos.adopt_benchmark_photos(conn, args.benchmark), indent=2))
+
+
 def cmd_copy_photos(conn, args) -> None:
     source = open_store(args.source, config.DATA_DIR)
     dest = open_store(args.dest, config.DATA_DIR)
@@ -1216,6 +1221,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="only photos in iNat's open-data bucket; leaves the capped host's "
                         "daily budget to another downloader")
 
+    p = sub.add_parser("adopt-benchmark-photos",
+                       help="register a development benchmark's downloaded photos as copies, so "
+                            "copy-photos can put them in S3 instead of fetching them again")
+    p.add_argument("--benchmark", required=True, help="e.g. heldout-2026-10-08")
+
     p = sub.add_parser("copy-photos", help="copy photos we already hold from one store to "
                                            "another (e.g. S3 to this machine), hash-checked")
     p.add_argument("--source", required=True, help="folder or s3://bucket/prefix")
@@ -1896,6 +1906,7 @@ def main(argv: list[str] | None = None) -> int:
         "import-mo-zip": cmd_import_mo_zip,
         "download-photos": cmd_download_photos,
         "copy-photos": cmd_copy_photos,
+        "adopt-benchmark-photos": cmd_adopt_benchmark_photos,
         "aws-launch-downloader": cmd_aws_launch_downloader,
         "aws-pull-manifest": cmd_aws_pull_manifest,
         "aws-policies": cmd_aws_policies,
