@@ -258,6 +258,14 @@ def cmd_aws_dataset_build_job(args) -> None:
     print(json.dumps(out, indent=2))
 
 
+def cmd_int8_check(conn, args) -> None:
+    """Would int8 reference vectors change the answers? (quantize.py)"""
+    from . import models, quantize
+    rel = _dataset_release(args)
+    r = quantize.check(conn, models.storage_name(args.backbone), rel, _split(args.methods))
+    print(json.dumps(r, indent=2) if args.json else quantize.format_check(r))
+
+
 def cmd_standard_summary(conn, args) -> None:
     """Steve's standard tables for a saved comparison (standard_report.py)."""
     from . import standard_report
@@ -1331,6 +1339,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--request", required=True)
     p.add_argument("--bucket", required=True)
 
+    p = sub.add_parser("int8-check", help="score a release's val records with float16 and "
+                                          "int8 reference vectors (box memory option)")
+    p.add_argument("--backbone", required=True)
+    p.add_argument("--methods", default="nearest,nearest+mean")
+    p.add_argument("--json", action="store_true")
+    release_options(p)
+
     p = sub.add_parser("standard-summary", help="Steve's standard tables (top 1/3/5/10, s.l., "
                                                 "depth bands) for a saved comparison")
     p.add_argument("--comparison", required=True)
@@ -1795,6 +1810,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-launch-trainer": cmd_aws_launch_trainer,
         "aws-train-job": cmd_aws_train_job,
         "standard-summary": cmd_standard_summary,
+        "int8-check": cmd_int8_check,
         "aws-launch-dataset-build": cmd_aws_launch_dataset_build,
         "model-sanity": cmd_model_sanity,
         "aws-pull-trainer": cmd_aws_pull_trainer,
