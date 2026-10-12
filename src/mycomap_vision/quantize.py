@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from pathlib import Path
 
 import numpy as np
 
@@ -146,3 +147,57 @@ def format_check(r: dict) -> str:
     lines.append(f"verdict (nearest+mean species top-1, pre-declared): "
                  f"{r['verdict_nearest_mean'] or 'not measured'}")
     return "\n".join(lines)
+
+
+# --- int8 shards for a serving release (Steve, 2026-10-12: v1 stays on the 4 GB box) ----
+
+SCALE_SUFFIX = ".scale.npy"          # serving.SCALE_SUFFIX
+CONVERT_ROWS = 65_536
+
+
+def write_int8_shards(src: Path, dest: Path) -> dict:
+    """A backbone's float embedding folder as int8 shards for a release: each
+    shard-NNNNN.npy becomes int8 codes with shard-NNNNN.scale.npy beside it (one float32
+    per vector); the photo-id files and anything else are copied as they are. Each shard
+    is checked after conversion: every vector's round trip keeps cosine >= MIN_COSINE with
+    the original. Returns counts. `dest` must not exist."""
+    import shutil
+    src, dest = Path(src), Path(dest)
+    if dest.exists():
+        raise ValueError(f"{dest} exists")
+    dest.mkdir(parents=True)
+    shards = rows = 0
+    worst = 1.0
+    for p in sorted(src.iterdir()):
+        if not p.is_file():
+            continue
+        name = p.name
+        if not (name.startswith("shard-") and name.endswith(".npy")) or \
+                name.endswith((".ids.npy", SCALE_SUFFIX)):
+            shutil.copyfile(p, dest / name)
+            continue
+        v = np.load(p, mmap_mode="r")
+        if v.ndim != 2 or v.dtype not in (np.float16, np.float32):
+            raise ValueError(f"{p}: not a float vector shard ({v.dtype}, {v.shape})")
+        codes = np.empty(v.shape, dtype=np.int8)
+        scale = np.empty(len(v), dtype=np.float32)
+        for s in range(0, len(v), CONVERT_ROWS):
+            block = np.asarray(v[s:s + CONVERT_ROWS], dtype=np.float32)
+            q, sc = quantize_int8(block)
+            codes[s:s + CONVERT_ROWS], scale[s:s + CONVERT_ROWS] = q, sc
+            back = dequantize(q, sc)
+            num = (back * block).sum(1)
+            den = np.linalg.norm(back, axis=1) * np.linalg.norm(block, axis=1)
+            ok = den > 0
+            if ok.any():
+                worst = min(worst, float((num[ok] / den[ok]).min()))
+        if worst < MIN_COSINE:
+            raise ValueError(f"{p}: an int8 round trip fell to cosine {worst:.5f}")
+        np.save(dest / name, codes)
+        np.save(dest / (name[:-len(".npy")] + SCALE_SUFFIX), scale)
+        shards += 1
+        rows += len(v)
+    return {"shards": shards, "vectors": rows, "worst_cosine": round(worst, 6)}
+
+
+MIN_COSINE = 0.999

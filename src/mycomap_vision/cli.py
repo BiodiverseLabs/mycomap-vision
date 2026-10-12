@@ -732,7 +732,8 @@ def cmd_serve(conn, args) -> None:
 def cmd_release(conn, args) -> None:
     from . import release
     print(json.dumps(release.publish(conn, _split(args.backbones), label=args.label,
-                                     make_current=args.make_current), indent=2))
+                                     make_current=args.make_current,
+                                     int8_vectors=args.int8_vectors), indent=2))
 
 
 def cmd_pull_release(conn, args) -> None:
@@ -1559,6 +1560,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--label", help="appended to the release id, e.g. bioclip2-full")
     p.add_argument("--make-current", action="store_true",
                    help="also point releases/current.json at it (the box pulls that one)")
+    p.add_argument("--int8-vectors", action="store_true",
+                   help="ship the reference vectors as int8 + a scale each: half the box's "
+                        "vector memory (Steve, 2026-10-12; accuracy: mv int8-check)")
 
     p = sub.add_parser("dataset", help="dataset releases for research: frozen, verifiable "
                                        "snapshots (docs/dataset-release.md)")

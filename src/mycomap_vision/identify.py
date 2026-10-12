@@ -281,6 +281,13 @@ class Identifier:
         self.rank_counts = {rank: Counter(dict(zip(names.tolist(), n.tolist())))
                             for rank, (names, n) in counts.items()}
 
+    def vector_storage(self) -> dict:
+        """How the reference vectors are held: int8 and float rows (serving.MappedVectors),
+        or all float when they are an ordinary array."""
+        ref = self.nearest.scorer.ref
+        storage = getattr(getattr(ref, "vectors", None), "storage", None)
+        return storage() if storage else {"int8_rows": 0, "float_rows": int(len(ref))}
+
     def warm(self) -> None:
         """Score one blank photo: reads every reference vector once, which proves the
         files are whole and brings them into the page cache, so the first identification

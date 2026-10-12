@@ -595,7 +595,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "quotas": {"mode": quotas.mode},
                 "sessions": (app.state.sessions.state()
                              if getattr(app.state, "sessions", None) else None),
-                "fungus_gate": fungus_gate.summary() if fungus_gate else None}
+                "fungus_gate": fungus_gate.summary() if fungus_gate else None,
+                "vectors": vector_storage()}
+
+    def vector_storage() -> dict:
+        """Per served index (backbone/method): reference vectors held as int8 and float."""
+        out = {}
+        for key, idx in indexes.served().items():
+            store = getattr(idx, "vector_storage", None)
+            if store is not None:
+                out["/".join(map(str, key)) if isinstance(key, tuple) else str(key)] = store()
+        return out
 
     def nightly_health() -> dict:
         if not layer:
