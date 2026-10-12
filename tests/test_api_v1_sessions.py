@@ -87,7 +87,9 @@ def test_each_photo_gets_its_own_answer_and_the_combined_one_equals_identify(con
     assert one["photo"]["photo_ref"] == "cap" and one["photo"]["index"] == 0
     assert one["photos_scored"] == 1 and one["combined"]["ranks"]["species"][0]["name"] == "A x"
     assert (one["timing"]["photos_embedded"], one["timing"]["photos_reused"]) == (1, 0)
-    assert "timing" not in one["combined"] and one["session"]["session_id"] == sid
+    # The combined answer carries the call's timing, like any v1 answer (the app reads it).
+    assert one["combined"]["timing"] == one["timing"] and one["session"]["session_id"] == sid
+    assert "usage" in one["combined"]
     two = add(client, sid, 12, "gills").json()
     assert two["photos_scored"] == 2 and two["photo"]["photo_ref"] == "gills"
     # The stored photo is scored again from its vector, never embedded again.

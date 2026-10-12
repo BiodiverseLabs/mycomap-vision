@@ -1197,10 +1197,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return combined
 
         def session_answer(s, timer, **extra) -> JSONResponse:
-            block = timer.block()
-            body = {**extra, "combined": s.combined, "photos_scored": len(s.photos),
+            block, usage = timer.block(), None
+            # The combined answer carries this call's timing and usage too, like any v1
+            # answer (docs/api.md §4): the app reads combined.timing.
+            combined = ({**s.combined, "timing": block, "usage": usage}
+                        if s.combined is not None else None)
+            body = {**extra, "combined": combined, "photos_scored": len(s.photos),
                     "context_used": entered_context(s, s.photos)[1], "timing": block,
-                    "usage": None,
+                    "usage": usage,
                     "session": {"session_id": s.id, "expires_at": expires_at(s)}}
             return JSONResponse(body, headers={"Cache-Control": "no-store",
                                                "Server-Timing": apiv1.Timer.header(block)})
