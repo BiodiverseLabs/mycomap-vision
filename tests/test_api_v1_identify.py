@@ -83,7 +83,8 @@ def test_an_app_token_gets_one_models_answer_with_timing_and_every_rank(conn, tm
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["request_id"].startswith("r_")
-    assert body["model"] == {"name": "MycoMap Vision", "version": None, "calibrated_on": None}
+    assert body["model"]["name"] == "MycoMap Vision" and body["model"]["calibrated_on"] is None
+    assert set(body["model"]["data"]) == {"snapshot", "records", "species", "genera"}
     assert body["prior"] == {"applied": False}
     assert "calibration" not in body                    # internal; not part of v1
     assert body["photos"] == 2 and len(body["per_photo"]) == 2

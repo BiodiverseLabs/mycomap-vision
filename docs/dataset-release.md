@@ -275,8 +275,20 @@ everything built on them), `evaluate.shared_records` / `mv compare --release` (r
 `train`, test = `val`), and `mv heldout predict --release`. Records, labels, photos and
 splits come from the release; vectors are found by photo id in the manifest, and refused
 when that photo's kept original no longer has the release's sha256. Outputs carry
-`rel.cite()`. Still to add, by their owners: `mv finetune` and the Picek launcher (whose
-guard checks `labels_hash`).
+`rel.cite()`. Still to add, by its owner: the Picek launcher (whose guard checks
+`labels_hash`).
+
+**Training from a release** (2026-10-12): `mv finetune --release v1` and
+`mv aws-launch-trainer --release v1 --finetune bioclip-2` fine-tune on the `train` split
+only (never `val`, never a test release; `trained_through` = the val cutoff) and compare on
+train vs val. The launcher verifies the release, checks every included photo has an S3 copy
+with the release's sha256 (MO photos too), and ships the trainer copy with the run
+(`runs/<run>/release/<id>/`, never `private.sqlite`), as for the Picek stage; the instance
+re-verifies it against the MANIFEST.json hash the launch pinned and drops every manifest
+record the release does not include before embedding. Every model it trains records
+`dataset_release` (the citation with the MANIFEST hash), `version` (the training-data
+snapshot date, `label_snapshot_at`) and its `.heads.npz`; so do `progress.json` and
+`result.json`. A draft needs `--allow-draft`; a release run is never a rehearsal.
 
 **The final public model** (Steve, 2026-10-09): trains with `public_trainable_only=True`
 (CC photos, NC included, plus photos whose photographer granted permission). Internal
@@ -358,5 +370,5 @@ Zenodo-ready bundle in `v1-cc/zenodo/`:
 ## Not in this branch
 
 Cutting v1 (waits for Steve's freeze trigger, relayed by the coordinator); uploading a release
-to S3 or Zenodo; deploying the image endpoint (box settings + AWS policy); `--release` in
-`mv finetune` and the Picek launcher; `add-model` after the first training run on v1.
+to Zenodo; deploying the image endpoint (box settings + AWS policy); `--release` in
+the Picek launcher; `add-model` after the first training run on v1.

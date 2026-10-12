@@ -18,7 +18,10 @@ they're rare (balanced training lost badly on the sample, see methods.LinearHead
 
 A fine-tuned model is registered as `<base>-ft-<tag>`: data/models/<name>.json
 (what it was trained on) and <name>.pt (only the trained weights; the rest are
-the base model's). models.load_backbone finds it by that name.
+the base model's). models.load_backbone finds it by that name. Since 2026-10-11
+the trained classifier itself is kept too, in <name>.heads.npz (read_heads), so the
+fine-tune's own classifier can be scored as a method (methods.FinetuneHead); models
+trained before then have no heads file and load as before.
 """
 
 from __future__ import annotations
@@ -71,10 +74,20 @@ class TrainSet:
 
 
 def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, size: str,
-                   test_days: int = 28, embeddings_root=None) -> TrainSet:
+                   test_days: int = 28, embeddings_root=None, release=None) -> TrainSet:
     """Every photo of the reference records a comparison of `base` would use, with its
-    labels. The base must be embedded: its vectors seed the classifier."""
-    shared = evaluate.shared_records(conn, [base], test_days, embeddings_root=embeddings_root)
+    labels. The base must be embedded: its vectors seed the classifier.
+
+    With a dataset `release` (dataset_release.load_release) those are the release's
+    `train` records only: never `val` (what the model is judged on), never a test
+    release, never an excluded record; trained_through is the release's val cutoff."""
+    if release is not None:
+        release.training_records()      # raises SealedLeak for a test release
+        if not release.val_cutoff:
+            raise ValueError(f"release {release.id} records no val cutoff: nothing says "
+                             "which records the model may not see")
+    shared = evaluate.shared_records(conn, [base], test_days, embeddings_root=embeddings_root,
+                                     release=release)
     ids, vecs = shared.loaded[base]
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     paths = dict(conn.execute("select photo_id, path from photo_copies where store = ? and "
@@ -158,6 +171,67 @@ def read_meta(name: str, root: Path | None = None) -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"no fine-tuned model {name!r} in {path.parent}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def release_fields(release) -> dict:
+    """What a model trained on a dataset release records about it: the citation
+    (id, release_hash, reference_hash, labels_hash, ...) and `version`, the training-data
+    snapshot date the public name shows (Steve, 2026-10-11). Nothing without a release."""
+    if release is None:
+        return {}
+    return {"dataset_release": release.cite(), "version": release.snapshot_date,
+            "split_trained": "train", "val_cutoff": release.val_cutoff}
+
+
+def model_version(meta: dict) -> str | None:
+    """A model's version (its training-data snapshot date), or None for a model trained
+    before releases (the API then falls back to its own label)."""
+    return meta.get("version")
+
+
+# --- the trained classifier heads ------------------------------------------------
+
+HEADS_SUFFIX = ".heads.npz"
+# Every file a fine-tune writes, in the order they are uploaded and pulled. The heads
+# file is optional when reading: models trained before 2026-10-11 have none.
+MODEL_SUFFIXES = (".pt", ".json", HEADS_SUFFIX)
+REQUIRED_SUFFIXES = (".pt", ".json")
+
+
+def save_heads(path: Path, heads: dict[str, np.ndarray], names: dict[str, list[str]],
+               scale: float) -> Path:
+    """The cosine classifier per rank: unit-length class vectors (float16) and their
+    class names in the same order. Plain numpy (no pickle), readable without torch."""
+    arrays = {"scale": np.asarray(scale, dtype=np.float32)}
+    for rank in RANKS:
+        h = np.asarray(heads[rank], dtype=np.float32)
+        if len(h) != len(names[rank]):
+            raise ValueError(f"{rank}: {len(h)} class vectors for {len(names[rank])} names")
+        norms = np.linalg.norm(h, axis=1, keepdims=True)
+        arrays[rank] = np.where(norms > 0, h / np.maximum(norms, 1e-12), 0).astype(np.float16)
+        arrays[f"{rank}_names"] = np.asarray(names[rank], dtype=str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.savez(f, **arrays)
+    tmp.replace(path)
+    return path
+
+
+def read_heads(name: str, root: Path | None = None) -> dict:
+    """{rank: (class vectors, names)} and "scale" for a fine-tuned model. A model trained
+    before the heads were kept says so, rather than scoring with nothing."""
+    root = root or models_dir()
+    meta = read_meta(name, root)
+    file = meta.get("heads")
+    if not file or not (root / file).is_file():
+        raise FileNotFoundError(
+            f"{name!r} kept no classifier heads (trained before 2026-10-11, or its "
+            f"{HEADS_SUFFIX} file is missing): only its embeddings can be scored")
+    with np.load(root / file, allow_pickle=False) as z:
+        out = {rank: (z[rank], [str(n) for n in z[f"{rank}_names"]]) for rank in RANKS}
+        out["scale"] = float(z["scale"])
+    return out
 
 
 # --- training (needs torch) -----------------------------------------------------
@@ -255,10 +329,13 @@ def batches_with_fallback(make_loader, workers: int, steps: int, seed: int, curr
 
 def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
              cfg: FinetuneConfig | None = None, test_days: int = 28, embeddings_root=None,
-             out_dir: Path | None = None, loader=None, log=print, should_stop=None) -> dict:
-    """Train, save <name>.pt and <name>.json in out_dir, register; returns the metadata.
-    `should_stop()` is asked before each step; when it says stop, screening.Stopped is
-    raised and nothing is saved (a half-trained model is not the model asked for)."""
+             out_dir: Path | None = None, loader=None, log=print, should_stop=None,
+             release=None) -> dict:
+    """Train, save <name>.pt, <name>.heads.npz and <name>.json in out_dir, register;
+    returns the metadata. `should_stop()` is asked before each step; when it says stop,
+    screening.Stopped is raised and nothing is saved (a half-trained model is not the
+    model asked for). `release`: train on a dataset release's train split (build_trainset);
+    the model then carries the release's citation and its snapshot date as `version`."""
     import torch
     import torch.nn.functional as F
 
@@ -267,7 +344,7 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
     cfg = cfg or FinetuneConfig()
     out_dir = out_dir or models_dir()
     started = time.monotonic()
-    ts = build_trainset(conn, base, store.location, size, test_days, embeddings_root)
+    ts = build_trainset(conn, base, store.location, size, test_days, embeddings_root, release)
     log(f"[{name}] {len(ts.items):,} photos of {ts.records:,} records, "
         f"{len(ts.names['species']):,} species, trained through {ts.trained_through}")
     backbone = (loader or models.load_backbone)(base)
@@ -351,9 +428,13 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             break
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save({n: p.detach().cpu() for n, p in tail}, out_dir / f"{name}.pt")
+    heads_file = save_heads(out_dir / f"{name}{HEADS_SUFFIX}",
+                            {rank: h.detach().float().cpu().numpy()
+                             for rank, h in zip(RANKS, heads)}, ts.names, cfg.scale)
     meta = {"name": name, "base": base,
             "base_spec": getattr(backbone, "spec", None) or models.resolve_spec(base),
-            "weights": f"{name}.pt", "trained_through": ts.trained_through,
+            "weights": f"{name}.pt", "heads": heads_file.name,
+            "trained_through": ts.trained_through,
             "test_days": test_days, "records": ts.records, "photos": len(ts.items),
             "species": len(ts.names["species"]), "steps": step, "photos_seen": seen,
             "final_loss": round(float(np.mean(losses[-100:])), 4) if losses else None,
@@ -361,7 +442,8 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             "loader_fallback_at_step": fallback["at_step"],
             "config": asdict(cfg), "minutes": round((time.monotonic() - started) / 60, 1),
             "code_version": config.code_version(),
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **release_fields(release)}
     (out_dir / f"{name}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     register(conn, meta)
     log(f"[{name}] saved to {out_dir}, {meta['minutes']} min")

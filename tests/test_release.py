@@ -30,6 +30,18 @@ class MemoryS3:
         with open(filename, "wb") as f:
             f.write(self.objects[key])
 
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        objects = self.objects
+
+        class Pages:
+            def paginate(self, Bucket, Prefix, Delimiter):  # noqa: N803
+                below = sorted({k[len(Prefix):].split(Delimiter)[0] + Delimiter
+                                for k in objects if k.startswith(Prefix)
+                                and Delimiter in k[len(Prefix):]})
+                return [{"CommonPrefixes": [{"Prefix": Prefix + p} for p in below]}]
+        return Pages()
+
 
 def with_embeddings(conn, data_dir, backbone="m1", finetuned=False):
     conn.executescript(EMBED_SCHEMA)
@@ -135,3 +147,33 @@ def test_release_labels_are_plain_words():
     with pytest.raises(ValueError):
         release.new_release_id("../x")
     assert release.RELEASE_ID.match(release.new_release_id("bioclip2-full"))
+
+
+def exported(conn, at):
+    """Records exported from mycomap.org at `at`."""
+    from test_models_and_scoreboard import seed_two_species  # noqa: F401 (schema)
+    from mycomap_vision.records import build_records, save_records
+    rows = [{"source": "iNaturalist", "observation_id": str(100 + i), "scientific_name": sp,
+             "genus": sp.split()[0], "family": "F", "continent": "North America",
+             "validation_status_1": "yes", "validation_date_1": "1/1/2026"}
+            for i, sp in enumerate(["A x", "A x", "B y"])]
+    save_records(conn, build_records(rows, at))
+    conn.commit()
+
+
+def test_a_release_records_its_data_snapshot_and_numbers_later_builds_on_it(conn, tmp_path):
+    data = tmp_path / "data"
+    with_embeddings(conn, data)
+    exported(conn, "2026-10-06T18:01:55+00:00")
+    s3 = MemoryS3()
+
+    def version(**kw):
+        rid = publish(conn, data, s3, **kw)["id"]
+        info = json.loads(s3.objects[f"releases/{rid}/release.json"])
+        return info["snapshot"], info["version"]
+    assert version() == ("2026-10-06", "2026-10-06")
+    assert version(label="rebuild") == ("2026-10-06", "2026-10-06.2")
+    assert version(label="again") == ("2026-10-06", "2026-10-06.3")
+    conn.execute("update records set exported_at = '2026-10-20T09:00:00+00:00'")
+    conn.commit()
+    assert version(label="new-export") == ("2026-10-20", "2026-10-20")

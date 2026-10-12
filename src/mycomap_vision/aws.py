@@ -275,7 +275,9 @@ def render_policy(template: str) -> str:
 
 TRAINER_AMI_PARAMETER = ("/aws/service/deeplearning/ami/x86_64/"
                          "base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id")
-TRAINER_INSTANCE_TYPE = "g6.2xlarge"     # 1 NVIDIA L4 (24 GB), 8 vCPUs for JPEG decoding
+# 1 NVIDIA L4 (24 GB), 4 vCPUs: the On-Demand G quota granted in us-east-2 (4 vCPU,
+# 2026-10-07) fits only this size; g6.2xlarge (8 vCPUs, faster JPEG decoding) needs more.
+TRAINER_INSTANCE_TYPE = "g6.xlarge"
 
 TRAINER_USER_DATA = """#!/bin/bash
 set -uo pipefail
@@ -320,7 +322,7 @@ MV_DATA_DIR=/opt/mv/data PYTHONPATH=/opt/mv/src PYTHONUNBUFFERED=1 timeout {job_
   .venv/bin/python -m mycomap_vision.cli aws-train-job \\
   --run-id {run_id} --backbones {backbones} --methods {methods} --size {size} \\
   --test-days {test_days} --stop-after-hours {stop_hours} \\
-  --source "s3://$BUCKET"{finetune_arg}{picek_arg}{sample_arg}{spot_arg}{resume_arg}
+  --source "s3://$BUCKET"{finetune_arg}{picek_arg}{sample_arg}{spot_arg}{resume_arg}{release_run_arg}
 """
 
 
@@ -378,7 +380,7 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
             raise ValueError(f"not a trainer copy's file list: {files!r}")
         here = f"data/{dataset.RELEASES_DIR}/{rid}"
         dirs = sorted({f"{here}/{f.rsplit('/', 1)[0]}" for f in files if "/" in f})
-        release_cmd = ("# The dataset release the Picek run trains on: every file but its "
+        release_cmd = ("# The dataset release the run trains on: every file but its "
                        "private part\n# (no coordinates, no owners), checked by "
                        "load_release(without_private=True).\n"
                        f"mkdir -p {' '.join([here, *dirs])}\n" + "".join(
@@ -407,7 +409,12 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                    + (f" --picek-labels-hash {picek_labels_hash}" if picek_labels_hash else "")
                    + release_arg
                    if picek else ""),
-        release_cmd=release_cmd if picek else "",
+        release_cmd=release_cmd if (picek or finetune) else "",
+        # The fine-tune trains on the shipped release too (its train split; compared on val).
+        release_run_arg=(f" --release {release['dataset_release']} --release-manifest "
+                         f"{release['manifest_sha256']}"
+                         + (" --allow-draft" if release.get("draft") else "")
+                         if release and finetune else ""),
         picek_ids_cmd=(f'aws s3 cp "s3://$BUCKET/$RUN/{PICEK_IDS_KEY}" '
                        "data/picek-exclude-ids.txt || exit 1\n"
                        if picek and picek_exclude == "all" else ""),
@@ -475,6 +482,27 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
                 + f"); {audit['records'] - audit['listed']:,} not listed. Informational.")
     picek.require_allowed_sources(snap["record_sources"], dry_run=dry_run, log=log)
     return snap, ids, None
+
+
+def check_release_photos(conn, rel, store_location: str, size: str) -> int:
+    """For a run whose fine-tune trains on a dataset release, checked on the laptop before
+    anything is paid for: not a test release, a val cutoff to hold the val split out, and
+    every photo the release includes has a copy in the store at `size` with the sha256 the
+    release recorded (MO photos too: they are read from their S3 keys). Returns how many
+    photos it includes."""
+    if rel.manifest.get("test_for"):
+        raise ValueError(f"{rel.id} is a test release: never trained on")
+    if not rel.val_cutoff:
+        raise ValueError(f"{rel.id} records no val cutoff: nothing holds the val split out")
+    rel.check_photos_match(conn)
+    want = set(rel.photo_ids())
+    have = {r[0] for r in conn.execute("select photo_id from photo_copies where store = ? and "
+                                       "size = ?", (store_location, size))}
+    missing = want - have
+    if missing:
+        raise ValueError(f"{len(missing):,} photos of release {rel.id} have no {size} copy in "
+                         f"{store_location} (e.g. {sorted(missing)[:5]}): fetch them first")
+    return len(want)
 
 
 def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
@@ -703,8 +731,12 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         from .replications.fungitastic import dataset
         if not isinstance(release, str):          # already opened (cli._dataset_release)
             release = release.id
-        if not picek:
-            raise ValueError("--release applies to the Picek stage: name a --picek preset")
+        if not picek and not finetune:
+            raise ValueError("--release trains from a dataset release: name --finetune "
+                             "and/or a --picek preset")
+        if sample_records:
+            raise ValueError("--release trains on the whole release; for a rehearsal cut a "
+                             "small draft release and pass --allow-draft")
         if resume:
             raise ValueError("--release with --resume is not supported yet: launch a new run")
         rel = dataset.load(release, allow_draft)          # mv dataset verify, first of all
@@ -734,6 +766,10 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             f"{size} photos and its own manifest")
     photos = check_trainer_request(conn, backbones, methods, size, f"s3://{b}/", finetune,
                                    picek)
+    if rel is not None and finetune:
+        photos = check_release_photos(conn, rel, f"s3://{b}/", size)
+        log(f"  the fine-tune trains on {rel.id}'s train split, compared on val (after "
+            f"{rel.val_cutoff}): {photos:,} photos, every one in S3 as the release hashed it")
     names = [storage_name(x) for x in backbones]
     ft = [storage_name(x) for x in finetune or []]
     plan = trainer.plan_stages(names, ft, resume or "<run>", picek)

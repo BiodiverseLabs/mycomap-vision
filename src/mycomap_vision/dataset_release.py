@@ -903,6 +903,20 @@ class Release:
         return self.manifest.get("splits", {}).get("val_cutoff")
 
     @property
+    def snapshot_date(self) -> str:
+        """The training-data snapshot date (YYYY-MM-DD): when the newest label in the
+        release was read from .org, else when the manifest was copied for the build. A
+        model trained on this release takes it as its version (Steve, 2026-10-11)."""
+        row = self.db.execute("select max(label_exported_at) from records "
+                              "where included = 1").fetchone()
+        for when in (self.manifest.get("label_snapshot_at"), (row[0] if row else None),
+                     self.manifest.get("inputs", {}).get("manifest", {}).get("copied_at"),
+                     self.manifest["created"]):
+            if when and re.match(r"\d{4}-\d{2}-\d{2}", str(when)):
+                return str(when)[:10]
+        raise ReleaseError(f"{self.id} records no snapshot date")
+
+    @property
     def has_private(self) -> bool:
         return (self.folder / PRIVATE_DB).is_file()
 

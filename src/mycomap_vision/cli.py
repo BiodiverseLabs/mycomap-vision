@@ -188,6 +188,16 @@ RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sam
                    "picek", "picek_exclude_benchmarks")
 
 
+def trainer_release(args):
+    """On the instance: the release shipped with the run (no private.sqlite), checked
+    file by file and refused unless its MANIFEST.json is the one the launch recorded."""
+    if not getattr(args, "release", None):
+        return None
+    from .replications.fungitastic import dataset
+    return dataset.load(args.release, args.allow_draft, without_private=True,
+                        expect_manifest_sha256=args.release_manifest)
+
+
 def cmd_aws_train_job(conn, args) -> None:
     """Runs on the trainer instance (see aws.TRAINER_USER_DATA)."""
     from . import trainer
@@ -218,13 +228,68 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_place_cells=args.picek_place_cells,
                           picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
-                          if args.resume else None)
+                          if args.resume else None, release=trainer_release(args))
     if watcher is not None:
         watcher.stop()
     print(json.dumps(out, indent=2))
     if out["comparison_id"]:
         from . import evaluate
         print_scoreboard(evaluate.scoreboard(conn, out["comparison_id"]))
+
+
+def cmd_aws_launch_dataset_build(conn, args) -> None:
+    from pathlib import Path
+
+    from . import aws_dataset
+    print(json.dumps(aws_dataset.launch(
+        conn, args.name, args.freeze_approved, val_weeks=args.val_weeks,
+        val_cutoff=args.val_cutoff, review_files=[Path(p) for p in args.exclusions],
+        instance_type=args.instance_type, max_hours=args.max_hours,
+        allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
+
+
+def cmd_aws_dataset_build_job(args) -> None:
+    """Runs on the dataset-build instance (aws_dataset.USER_DATA)."""
+    from pathlib import Path
+
+    from . import aws, aws_dataset
+    request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+    out = aws_dataset.run_build_job(args.build_id, request, aws.s3_client(), args.bucket)
+    print(json.dumps(out, indent=2))
+
+
+def cmd_standard_summary(conn, args) -> None:
+    """Steve's standard tables for a saved comparison (standard_report.py)."""
+    from . import standard_report
+    s = standard_report.summary(conn, args.comparison)
+    print(json.dumps(s, indent=2) if args.json else standard_report.format_summary(s))
+
+
+def cmd_model_sanity(conn, args) -> None:
+    """The pre-declared sanity gate before a new model is served (sanity.py)."""
+    import io
+
+    from PIL import Image
+
+    from . import sanity
+    rel = _dataset_release(args)
+    if rel is None:
+        raise SystemExit("--release: the dataset release the model was trained on")
+    r = sanity.run(conn, args.backbone, rel, args.comparison, method=args.method)
+    if args.cpu_photos:
+        store = open_store(args.source, config.DATA_DIR)
+        val = set(rel.photo_ids(splits=("val",)))
+        paths = conn.execute("select photo_id, path from photo_copies where store = ? and "
+                             "size = 'large' order by photo_id", (store.location,)).fetchall()
+        picked = [p for pid, p in paths if pid in val][:args.cpu_photos]
+        images = [Image.open(io.BytesIO(store.get(p))).convert("RGB") for p in picked]
+        r["checks"].append(sanity.cpu_check(conn, args.backbone, rel, images, args.method))
+        r["passed"] = all(c["ok"] for c in r["checks"])
+    print(sanity.format_result(r))
+    if args.json:
+        print(json.dumps(r, indent=2))
+    if not r["passed"]:
+        raise SystemExit(1)
 
 
 def cmd_aws_pull_trainer(conn, args) -> None:
@@ -246,7 +311,8 @@ def cmd_finetune(conn, args) -> None:
                                   batch_size=args.batch_size, workers=args.workers,
                                   max_steps=args.max_steps)
     meta = finetune.finetune(conn, base, open_store(args.source, config.DATA_DIR), args.size,
-                             name, cfg, test_days=args.test_days)
+                             name, cfg, test_days=args.test_days,
+                             release=_dataset_release(args))
     print(json.dumps(meta, indent=2))
     print(f"next: mv embed --backbone {name} --size {args.size}, then mv compare "
           f"--backbones {base},{name}")
@@ -355,6 +421,16 @@ def cmd_dataset(args) -> None:
                          indent=2))
     elif args.action == "diff":
         print(json.dumps(dr.diff(args.a, args.b, root), indent=2))
+    elif args.action == "pull":
+        from . import aws, dataset_s3
+        dataset_s3.fetch_release(args.id, root, aws.s3_client(), aws.bucket(),
+                                 include_private=True)
+        print(json.dumps(dr.verify(args.id, root), indent=2))
+    elif args.action == "upload":
+        from . import aws, dataset_s3
+        dr.load_release(args.id, root, allow_draft=True).close()     # checks every file
+        print(json.dumps(dataset_s3.upload_release(args.id, root, aws.s3_client(), aws.bucket()),
+                         indent=2))
     elif args.action == "public":
         m = dr.public_variant(args.id, root)
         print(json.dumps({k: m[k] for k in ("id", "hashes", "counts")}, indent=2))
@@ -1101,7 +1177,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--size", default="large", choices=["small", "medium", "large"])
     p.add_argument("--max-hours", type=float, default=24,
                    help="time limit; the job stops itself 45 minutes before it (default 24)")
-    p.add_argument("--instance-type", default="g6.2xlarge")
+    p.add_argument("--instance-type", default="g6.xlarge",
+                   help="default g6.xlarge: the only size the 4-vCPU On-Demand G quota fits")
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--finetune", default="bioclip-2",
                    help="backbones (also in --backbones) to fine-tune on the reference records "
@@ -1166,6 +1243,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--picek-place-cells",
                    help="the place prior's counts the launch made from the release (shipped)")
     p.add_argument("--picek-place-cells-sha256", help="their sha256 at launch")
+    p.add_argument("--release", help="the shipped dataset release the fine-tune trains on")
+    p.add_argument("--release-manifest", help="sha256 of its MANIFEST.json at launch")
+    p.add_argument("--allow-draft", action="store_true")
     p.add_argument("--sample-records", type=int)
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
@@ -1187,6 +1267,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--max-steps", type=int)
     p.add_argument("--test-days", type=int, default=28)
+    release_options(p)
 
     from .replications.fungitastic.retrain import PRESETS
     p = sub.add_parser("picek-train", help="train the Picek group's fungi classifier recipe "
@@ -1230,6 +1311,42 @@ def main(argv: list[str] | None = None) -> int:
                    help="measure with and without gradient checkpointing")
     p.add_argument("--loader-only", action="store_true")
     p.add_argument("--gpu-only", action="store_true")
+
+    p = sub.add_parser("aws-launch-dataset-build",
+                       help="cut a dataset release on a self-terminating instance in the "
+                            "bucket's region (reads every original for the derived hashes)")
+    p.add_argument("--name", required=True, help="v1, v2 ... (or a dry-<stamp> draft)")
+    p.add_argument("--freeze-approved", help="who gave the freeze trigger, and when")
+    p.add_argument("--val-weeks", type=int, default=8)
+    p.add_argument("--val-cutoff", help="YYYY-MM-DD: validated after it = val")
+    p.add_argument("--exclusions", action="append", default=[],
+                   help="a person-checked review list (TSV); repeat")
+    p.add_argument("--instance-type", default="c7i.2xlarge")
+    p.add_argument("--max-hours", type=float, default=6)
+    p.add_argument("--allow-dirty", action="store_true")
+    p.add_argument("--allow-unpushed", action="store_true")
+
+    p = sub.add_parser("aws-dataset-build-job", help="(runs on the dataset-build instance)")
+    p.add_argument("--build-id", required=True)
+    p.add_argument("--request", required=True)
+    p.add_argument("--bucket", required=True)
+
+    p = sub.add_parser("standard-summary", help="Steve's standard tables (top 1/3/5/10, s.l., "
+                                                "depth bands) for a saved comparison")
+    p.add_argument("--comparison", required=True)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("model-sanity", help="the pre-declared sanity gate for a new model on "
+                                            "its dataset release (docs/retrain-v1.md)")
+    p.add_argument("--backbone", required=True, help="the fine-tuned model, e.g. "
+                                                     "bioclip-2-ft-<run>")
+    p.add_argument("--comparison", required=True, help="its comparison on the release")
+    p.add_argument("--method", default="nearest+mean")
+    p.add_argument("--cpu-photos", type=int, default=0,
+                   help="also time N val photos on the CPU (start with CUDA_VISIBLE_DEVICES=-1)")
+    p.add_argument("--source", help="photo store for --cpu-photos (default: the data folder)")
+    p.add_argument("--json", action="store_true")
+    release_options(p)
 
     p = sub.add_parser("aws-pull-trainer", help="bring a trainer run home (or the stages a "
                                                 "stopped one finished): its complete "
@@ -1426,6 +1543,12 @@ def main(argv: list[str] | None = None) -> int:
     q = dsub.add_parser("public", help="write <id>-cc: CC photos only, no coordinates")
     q.add_argument("id")
     q = dsub.add_parser("show", help="counts and hashes")
+    q.add_argument("id")
+    q = dsub.add_parser("upload", help="copy the release to s3 research-releases/<id>/ (its "
+                                       "kept copy, private part included)")
+    q.add_argument("id")
+    q = dsub.add_parser("pull", help="download a release's kept copy from s3 (with its "
+                                     "private part) and verify it")
     q.add_argument("id")
 
     p = sub.add_parser("pull-release", help="(server box) download a release, verify it and "
@@ -1636,6 +1759,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "dataset":             # never opens the manifest for writing
         cmd_dataset(args)
         return 0
+    if args.command == "aws-dataset-build-job":   # the build reads a private copy only
+        cmd_aws_dataset_build_job(args)
+        return 0
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0
@@ -1668,6 +1794,9 @@ def main(argv: list[str] | None = None) -> int:
         "aws-backup": cmd_aws_backup,
         "aws-launch-trainer": cmd_aws_launch_trainer,
         "aws-train-job": cmd_aws_train_job,
+        "standard-summary": cmd_standard_summary,
+        "aws-launch-dataset-build": cmd_aws_launch_dataset_build,
+        "model-sanity": cmd_model_sanity,
         "aws-pull-trainer": cmd_aws_pull_trainer,
         "finetune": cmd_finetune,
         "picek-train": cmd_picek_train,

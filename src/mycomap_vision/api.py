@@ -33,8 +33,9 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apiv1, config, evaluate, fungusgate, geocode, inat, manifest, models, names,
-               nightly, permissions, serving, sessions as session_store, uploads, workqueue)
+from . import (apidocs, apiv1, config, evaluate, fungusgate, geocode, inat, manifest, modelcard,
+               models, names, nightly, permissions, serving, sessions as session_store, uploads,
+               workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -546,12 +547,31 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     warm = Preload()
 
-    def served_release() -> str | None:
-        """The release this server answers from (its id stays internal; v1 shows its date)."""
+    def served_release_dir() -> Path | None:
+        """The folder of the release this server answers from, or None (a laptop)."""
         if layer:
-            return layer.release_id
+            return layer.release_dir
         from .release import current_release
-        return current_release(config.RELEASE_ROOT) if config.RELEASE_ROOT else None
+        rid = current_release(config.RELEASE_ROOT) if config.RELEASE_ROOT else None
+        return config.RELEASE_ROOT / "releases" / rid if rid else None
+
+    # The public model card (modelcard.py): the training-data version and its size. Read
+    # once from the release (a few seconds over the full manifest), in the background at
+    # startup, else at its first use.
+    card_lock = threading.Lock()
+    card_cache: dict = {}
+
+    def model_card() -> dict:
+        with card_lock:
+            if "card" not in card_cache:
+                try:
+                    card_cache["card"] = modelcard.card(served_release_dir(), manifest_path)
+                except Exception as e:  # noqa: BLE001 - the answer goes on without it
+                    note(f"[v1] model card: {type(e).__name__}: {e}")
+                    return modelcard.card(None, None)
+            return card_cache["card"]
+    if background:
+        threading.Thread(target=model_card, name="model card", daemon=True).start()
 
     @app.get("/api/health")
     def health():
@@ -947,12 +967,25 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
         nightly.start(schedule, run_nightly, note)
 
-    # POST /api/v1/identify (docs/api.md §3.1, §4): one model's answer for 1-10 photos,
-    # with timing, confident/answer, and the caller's own short-window limit. The app's
-    # observation sessions (§3.3) share its helpers.
     v1_on = bool(api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1")
     sessions_on = bool(sessions if sessions is not None
                        else config.setting("MV_SESSIONS") == "1")
+
+    # The API's public outline (apidocs.py): the Vision site's /api-docs page and the tab
+    # on mycomap.org/api-docs both render it. Open to anyone, from any site.
+    v1_parts = {"identify": v1_on, "sessions": sessions_on,
+                "taxon_counts": bool(taxon_counts if taxon_counts is not None
+                                     else config.setting("MV_TAXON_COUNTS") == "1")}
+
+    @app.get("/api/docs/v1.json")
+    def api_outline():
+        return JSONResponse(apidocs.outline(v1_parts),
+                            headers={"Access-Control-Allow-Origin": "*",
+                                     "Cache-Control": "public, max-age=300"})
+
+    # POST /api/v1/identify (docs/api.md §3.1, §4): one model's answer for 1-10 photos,
+    # with timing, confident/answer, and the caller's own short-window limit. The app's
+    # observation sessions (§3.3) share its helpers.
     if v1_on or sessions_on:
         photo_window = apiv1.PhotoWindow(int(_setting_number("MV_PHOTOS_PER_MINUTE") or 20))
 
@@ -1059,7 +1092,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             prior = result.pop("prior", None) or {}
             out = {"request_id": "r_" + secrets.token_urlsafe(12),
                    **result,
-                   "model": apiv1.public_model(served_release(),
+                   "model": apiv1.public_model(model_card(),
                                                str(cal.get("comparison_id") or "")),
                    "prior": {"applied": bool(prior.get("applied"))},
                    "context_used": used,
@@ -1192,7 +1225,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                     retry_after=60, estimated_wait_seconds=60) from None
             body = {"session_id": s.id, "expires_at": expires_at(s),
                     "ttl_seconds": int(store.idle_ttl), "max_photos": session_store.MAX_PHOTOS,
-                    "model": apiv1.public_model(served_release()),
+                    "model": apiv1.public_model(model_card()),
                     "context_used": entered_context(s, [])[1]}
             return JSONResponse(body, status_code=201, headers={"Cache-Control": "no-store"})
 
@@ -1311,7 +1344,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if key not in counts_cache:
                 doc = apiv1.taxon_counts(
                     ident.rank_counts, records=ident.records,
-                    model=apiv1.public_model(served_release()),
+                    model=apiv1.public_model(model_card()),
                     nightly_version=version[3] if layer else None)
                 body = apiv1.encode(doc)
                 counts_cache.clear()
