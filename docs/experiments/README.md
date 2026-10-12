@@ -1,9 +1,11 @@
 # Experiment registry
 
 Every MycoMap Vision experiment gets one file here, so it can be reviewed later: what was
-asked, everything that was tried, what came out, and what was decided. The site shows them
-under Research > Experiments to signed-in mycomap.org members (they hold development
-numbers and unpublished results). `tests/test_experiments.py` checks every file.
+asked, everything that was tried, what came out, and what was decided. The site also shows
+them under Research > Experiments. Each entry's front matter gives its status, headline and
+decision at a glance. Most are development numbers on a live, changing dataset
+(`exploratory-pre-freeze`, below), not final results. `tests/test_experiments.py` checks
+every file.
 
 ## File
 

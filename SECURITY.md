@@ -12,7 +12,7 @@ found, how to reproduce it, and what it affects. We aim to reply within a week.
 The code, the evaluation method and the web app are here. The data is not, and
 never will be:
 
-- **Photos** belong to their photographers on iNaturalist. Many are licensed for
+- **Photos** belong to their photographers on iNaturalist and Mushroom Observer. Many are licensed for
   non-commercial use only, and some are all rights reserved (used for training
   only while permission is sought). They are stored privately, never in this repo.
 - **The manifest, embeddings, contributor lists and trained models** are derived

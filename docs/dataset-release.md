@@ -1,8 +1,8 @@
 # Dataset releases: a frozen, verifiable snapshot for research
 
-Status: **specification, for Steve's review (2026-10-09)**. Code on `feat/dataset-release`.
-Release v1 is **not** cut until the coordinator relays Steve's freeze trigger
-(docs/PLAN.md, "a reproducible dataset release": freeze gate G1–G8).
+Status: **specification (2026-10-09); the builder is on main** (`mv dataset ...`,
+`dataset_release.py`). Release v1 is **not** cut until the project owner gives the freeze
+trigger (docs/PLAN.md, "a reproducible dataset release": freeze gate G1–G8).
 
 Steve, 2026-10-09: every experiment so far is exploratory because the data drifted. Once
 labelling and photo inclusion are final, we cut an immutable **dataset release** and re-run
@@ -367,8 +367,7 @@ Zenodo-ready bundle in `v1-cc/zenodo/`:
   whether the images are public without sign-in (`MV_DATASET_PUBLIC`); the box's S3 read
   access to the originals; the table licence and the Zenodo creators.
 
-## Not in this branch
+## Not built yet
 
-Cutting v1 (waits for Steve's freeze trigger, relayed by the coordinator); uploading a release
-to Zenodo; deploying the image endpoint (box settings + AWS policy); `--release` in
-the Picek launcher; `add-model` after the first training run on v1.
+Cutting v1 (waits for the freeze trigger); uploading a release to Zenodo; deploying the
+image endpoint (box settings + AWS policy); `add-model` after the first training run on v1.
