@@ -108,37 +108,94 @@ and rare species shrink toward their genus as the month prior does. `log p(c | e
 is added at a tuned weight, and every species with ≥ 1 train record is covered. Its risks:
 sister taxa split east/west in similar climates, and location memorising (checked by P6).
 
-**Pre-declared experiment on v1.** Commit the grid before any result. Everything is
-nearest + species average + the served season term + the far penalty, on the v1-retrained
-model, in the same run as `retrain-v1.md` §6 item 6 (the prior re-tune):
+**Pre-declared experiment on v1.** Commit the grid and this analysis plan before any result.
+Every arm is nearest + species average + the served season term + the far penalty, on the
+v1-retrained model, in the same run as `retrain-v1.md` §6 item 6 (the prior re-tune).
+Scientific-validity revisions (2026-10-12, Steve): fixes 1–5 below.
 
-| arm | place term | settings |
-|---|---|---|
-| P0 | none (nearest + species average) | reference |
-| P1 | served DNA boost, re-tuned on v1 | prior lane's grid |
-| P2a / P2b | Atlas f(rank) for mapped taxa; unmapped → served DNA boost (a) or 0 (b) | weight 0.25 / 0.5 / 1 (×2 = 6) |
-| P3 | max(DNA boost, Atlas boost) | weight 0.25 / 0.5 / 1 (3) |
-| P2c | Atlas **continent-wide** projected suitability, f(rank), down-weighted by the area-of-applicability measure, for mapped taxa; replaces the DNA boost for them; unmapped keep the served boost and berth | weight 0.25 / 0.5 / 1; trust cut-off at the AOA threshold or graded (6) |
-| P2d | Steve's version: Atlas accessible area as the range for mapped taxa. f(rank) inside it, a mild penalty outside it **in place of** the 1,500 km berth; unmapped keep the berth | penalty 0.5 / 1 / 2 nats; weight 0.5 / 1 (6) |
-| P4 | environment head (low-capacity) | weight 0.25 / 0.5 / 1; month in or out (6) |
-| P5 | environment head + served DNA boost | env weight 0.25 / 0.5 (2) |
-| P6 | control: the same head on coordinates only (not a candidate for serving) | weight as P4's choice (1) |
-| H | habitat cue (no reordering). Judged on whether, among records 300+ km from their truth's DNA records, Atlas suitability (P2c's) separates right top answers from wrong ones: AUC and right-share by suitability tercile | report only |
+**Fixed definitions (declared now, not tuned):**
+- **Distance bands** on `val` use the true species' nearest **train** DNA record. Never
+  train + val, which would leak `val` into the band definitions.
+- **Trust weight** for a mapped taxon at a cell: `trust = map_strength × agreement ×
+  applicability`.
+  - `map_strength`: Atlas's 0–1 per-taxon value.
+  - `agreement` = clip(1 − sd(ranks of its strong models) / 50, 0, 1); 1 with one model.
+  - `applicability`: 1 inside the model's area of applicability. Outside it: 0 (cut) or
+    exp(−(DI − threshold) / threshold) (graded), the one setting P2c chooses between.
+- **Environment head capacity**: 8 principal axes of the climate and soil bands (fitted on
+  train cells) + month sin/cos → 2 hidden layers of 64 → every v1 species. Presence-only
+  (SINR-style) loss, 20 epochs, weight decay 1e-4, spatially blocked early stopping (500 km
+  blocks). P6 is the identical model with 3-D unit-sphere coordinates as its input.
 
-- **Selection** (as in the gated follow-up): on 5 observer folds of `val`, the most species
-  right among settings that hold the band on the training folds; otherwise no prior.
-- **Pass** (Steve, 10/9): species top-1 above P0 overall, **and** right answers in the
-  300–1,500 km band ≥ P0's, both for every truth with a reference and for truths with 6+
-  references.
+| arm | role | place term | settings |
+|---|---|---|---|
+| P0 | reference | none (nearest + species average) | — |
+| P1 | reference (served) | DNA boost, re-tuned on v1 | prior lane's grid |
+| **P2c** | **PRIMARY** | Atlas **continent-wide** projected suitability f(rank) × trust, for mapped taxa, **replacing** the DNA boost for them; unmapped taxa keep the served boost and berth | weight 0.25 / 0.5 / 1 × applicability cut / graded (6) |
+| P2c-u | secondary | P2c without trust (trust = 1): the test of the trust weighting | P2c's chosen weight (1) |
+| P2a / P2b | secondary | in-area Atlas f(rank) × trust for mapped taxa; unmapped → served boost (a) or 0 (b) | weight 0.25 / 0.5 / 1 (×2 = 6) |
+| P2d | secondary | Steve's version: the accessible area as the range for mapped taxa. f(rank) × trust inside it, a mild penalty outside it in place of the 1,500 km berth | penalty 0.5 / 1 / 2 nats; weight 0.5 / 1 (6) |
+| P3 | secondary, combined | max(DNA boost, Atlas boost) | weight 0.25 / 0.5 / 1 (3) |
+| P4 | secondary | environment head (fixed capacity above) | weight 0.25 / 0.5 / 1; month in or out (6) |
+| P5 | secondary, combined | environment head + served DNA boost | env weight 0.25 / 0.5 (2) |
+| P6 | control | P4's model on coordinates only (a standard location prior); never served | P4's chosen weight (1) |
+| H | projection test, report only | see fix 5 | — |
+
+**Fix 1: one primary hypothesis.** The primary hypothesis is **P2c, with its setting chosen
+by the selection procedure, meets Steve's rule against P0**.
+- It is an intersection-union test: both parts must pass at α = 0.05, so no correction is
+  needed within it.
+- Every other arm is secondary. Its p-values are Holm-adjusted across the secondary family
+  and it is labelled exploratory.
+- A secondary arm that passes can be served only after confirmation on the next fresh test
+  release.
+- P2c against P1 is the key secondary comparison: the case for replacing the served prior.
+
+**Fix 2: the rule as statistical tests** (paired by record; 10,000 bootstrap resamples of
+records, stratified by observer fold):
+- **Overall (superiority):** species top-1 of P2c > P0, McNemar one-sided p < 0.05.
+- **300–1,500 km band (non-inferiority):** the one-sided 95% lower bound of
+  (right P2c − right P0) / n_band is above **−2%** of band records (≈ −14 of ≈ 680). Tested
+  for every truth with a train reference; truths with 6+ references reported beside it.
+  The margin is about the band's sampling noise (≈ 40 discordant records, CI half-width
+  ≈ 1.8%). Steve may tighten it before results; it cannot move after.
+- Selection inside the training folds keeps the band rule as before (settings that hold the
+  band on the training folds; otherwise no prior), so the reported number stays
+  cross-validated.
+
+**Fix 3: no double counting in the primary.** P2c *replaces* the DNA boost for mapped taxa;
+Atlas and the DNA prior are fitted on the same records. The combined arms (P3, P5) are
+secondary. They report calibration (10-bin ECE, NLL, share stated at 99%+), and are adoptable
+only if their calibration is no worse than P1's (ECE within 0.01).
+
+**Fix 4: map quality vs commonness.** Every effect of P2c, P2c-u and P2a is also reported
+inside the reference-depth bands **20–99** and **100+**: mapped against unmapped truths at
+matched depth, and the trust weighting's effect (P2c vs P2c-u) within each band. A gain that
+appears only as "mapped vs unmapped" without the depth match is not claimed.
+
+**Fix 5: test the projection where it extrapolates (H).** Records whose truth is mapped and
+lies **500+ km** from its train DNA records are out-of-area test points for the projection.
+On `val` (CV) and confirmed on `v1-test`:
+- **Projection validity:** the continuous Boyce index of the truth's projected rank at those
+  records, plus the share falling in cells ranked ≥ 50 with a binomial 95% CI. Valid if the
+  CI excludes 0.5 upward, inside the area of applicability. Outside it, reported but not
+  relied on.
+- **Cue value:** AUC of projected suitability for separating right from wrong top answers,
+  and right-share by suitability tercile.
+- If the projection is not valid, P2c's out-of-area cells are set to neutral and P2c is
+  reported as "in-area only". It then cannot be the served arm on the strength of
+  out-of-area cells.
+
+**Also declared:**
 - **Disguised-distance check:** if P4's fixed / broken counts by distance band track P6's
-  within noise, P4 is a distance prior and is not adopted, whatever its overall score.
-- **Also reported:** each arm against P1. The band is split into 300–500 and 500–1,500 km
-  (the accessible-area edge), and every table is split by whether the truth has a strong map.
-  Standard summary format throughout.
-- **Confirmation:** `v1-test` once, all arms together.
-- **Power:** draft `val` had 5,156 records, so ≈ 680 in the band (13%). If `v1-test` is
-  ~1,000 records, its band holds ~130 and a "no loss" verdict there is within noise (±8
-  records). D5 decides where the band is judged.
+  within the bootstrap CI, P4 is a distance prior and is not adopted.
+- **Reporting:** each arm against P0 and P1; the band split into 300–500 and 500–1,500 km;
+  every table split by whether the truth has a strong map; standard summary format; every
+  setting's counts in a CSV.
+- **Confirmation:** `v1-test` once, all arms together (D5: a direction check for the band).
+- **Power:** ≈ 680 `val` records in the band → ≈ 40 discordant records between two
+  methods. That detects a net band change of about ±13 records (≈ 2%). A ~1,000-record
+  `v1-test` has ~130 in the band: direction only.
 
 ## 2. Environment modality in the v1 benchmark (FungiTastic-style)
 
@@ -314,3 +371,14 @@ manifest and `R_train`'s private prior export as one-off copies or 12 h presigne
 
 Added 2026-10-12, after the review (section 1), on Steve's go: arms P2c, P2d, P6 and H; the
 low-capacity environment head; and the continent-wide projection in the Atlas ask (section 3).
+
+Revised 2026-10-12 after a scientific-validity review (Steve: "implement 1–5"):
+- one primary hypothesis (P2c), tested as an intersection-union test; Holm across the
+  secondary arms;
+- non-inferiority with a 2% margin and paired bootstrap intervals in place of a raw count;
+- replace arms as primary, with calibration gates on combined arms;
+- depth-matched reporting;
+- a Boyce-index test of the continent-wide projection on out-of-area records.
+
+Fixed in advance: the trust weight, the environment-head capacity, and train-only distance
+bands. Atlas ask: trust signals added to the export (section 3).
