@@ -34,8 +34,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
 from PIL import Image
 
 from . import (apidocs, apiv1, config, evaluate, fastsearch, fungusgate, geocode, inat, manifest,
-               modelcard, models, names, nightly, permissions, quotas as quota_rules, serving,
-               sessions as session_store, uploads, workqueue)
+               modelcard, models, names, nightly, onnxtower, permissions,
+               quotas as quota_rules, serving, sessions as session_store, uploads, workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -308,6 +308,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
     gate); a FungusGate uses that one; None or False runs ungated."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
+    # The image tower as int8 ONNX (onnxtower.py, MV_EMBED_ONNX=1), where the release ships
+    # it for the served weights; torch otherwise.
+    if config.setting("MV_EMBED_ONNX") == "1":
+        from .finetune import models_dir
+        backbone_loader = onnxtower.loader(backbone_loader, models_dir(), note=note)
     limits = limits or Limits.from_settings()
     if fungus_gate is True:
         fungus_gate = (fungusgate.FungusGate.load()
@@ -609,6 +614,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "nightly": nightly_health(),
                 "queue": model_queue.state(),
                 "search": fastsearch.SLOT.state(),
+                "embed": onnxtower.STATE.state(),
                 "quotas": {"mode": quotas.mode},
                 "sessions": (app.state.sessions.state()
                              if getattr(app.state, "sessions", None) else None),
