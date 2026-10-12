@@ -158,7 +158,7 @@ records, stratified by observer fold):
   (right P2c − right P0) / n_band is above **−2%** of band records (≈ −14 of ≈ 680). Tested
   for every truth with a train reference; truths with 6+ references reported beside it.
   The margin is about the band's sampling noise (≈ 40 discordant records, CI half-width
-  ≈ 1.8%). Steve may tighten it before results; it cannot move after.
+  ≈ 1.8%). **Approved by Steve 2026-10-12; fixed from here on.**
 - Selection inside the training folds keeps the band rule as before (settings that hold the
   band on the training folds; otherwise no prior), so the reported number stays
   cross-validated.
@@ -392,3 +392,19 @@ Revised 2026-10-12 after a scientific-validity review (Steve: "implement 1–5")
 
 Fixed in advance: the trust weight, the environment-head capacity, and train-only distance
 bands. Atlas ask: trust signals added to the export (section 3).
+
+## 7. What Atlas gains (for the Atlas side to take up as its own proposals)
+
+None of this changes Atlas's fits, grades or public maps. The one-way rule holds: Atlas never
+trains on Vision output. What it gets back is methods, summary numbers per map, and its own
+.org data, never record-level Vision outputs.
+
+| # | gain | from | proposal to Atlas |
+|---|---|---|---|
+| 1 | **A forward-looking test of the maps.** Do strong maps predict where *newly* validated DNA records turn up? It tests the strong / weak grading on real finds, not virtual species | `R_train` + records validated after the val cutoff | Vision hands over, per strong map, the Boyce index and the share in cells ranked ≥ 50 on later records (no record ids); Atlas reports it as field validation of the null-test grades |
+| 2 | **The 500 km area measured, not assumed** | the projection test (fix 5) | if projected suitability predicts real records beyond 500 km inside the area of applicability, the area could widen; if not, Atlas has evidence never to show out-of-area suitability |
+| 3 | **Survey guidance ("where to look next")** | continent-wide projection + area of applicability | suitable, unsampled, trusted cells beyond the known range = range-extension targets; the parked survey-guidance item gets its core input |
+| 4 | **A forward-looking skill number every release** | the validation-date filter + private run mode | "maps fitted to records up to date X predicted Y% of later finds", published per release; a headline result for an Atlas paper |
+| 5 | **Uncertainty as data in the API** | trust-signals export (item 6) | map strength, per-cell model spread and applicability thresholds as data for the mobile app, .org conservation and outside users (today the disagreement layer is only a picture) |
+| 6 | **A pilot for sparse taxa** | Vision's environment head + coordinates control (P4 vs P6) | answers whether a multi-species model (Atlas's SINR / FS-SINR idea for 3–19-site taxa) learns habitat or location, before Atlas builds one in R |
+| 7 | **Map value beyond sampling effort** | depth-matched reporting (fix 4) | whether strong maps add information beyond how well-sampled a species is, the same confound Atlas faces |
