@@ -169,17 +169,20 @@ weights are file pages the kernel can drop and re-read), but searches slow down 
 pages are evicted, and the nightly index swap peaks higher. Nightly growth is small (~6 MB of
 vectors a week).
 
-Options for Steve, cheapest first:
-1. **8 GB box** (Lightsail plan change, roughly +$20 a month): the working set fits with room
-   for the gate and API sessions. Recommended once v1 is adopted.
-2. **int8 reference vectors** (serving code still to build): vectors ~970 → ~490 MB, working
-   set ~3.1 GB, under the cap. The accuracy check is ready:
-   `mv int8-check --release v1 --backbone bioclip-2-ft-<run> --methods nearest,nearest+mean`
-   scores v1's `val` with float16 and int8 reference vectors (queries stay float, as on the
-   box). Pre-declared: "no loss" when `nearest+mean` species top-1 moves by less than 0.3
-   points and the paired sign test is not significant (p ≥ 0.05).
-3. **Serve fewer methods** (drop `nearest` from `MV_METHODS`): saves little (<0.1 GB); a stopgap.
-Decide after the sanity gate, with the model's measured CPU timings.
+**Decided (Steve, 2026-10-12): int8 reference vectors; the box stays at 4 GB** ("keep it
+low for now"). The serving release is made with `mv release --backbones <model> --int8-vectors`:
+each vector ships as int8 codes plus a float32 scale (772 bytes instead of 1,536), the server
+maps and scores them (serving.MappedVectors), the nightly update's own shards stay float16,
+and `/api/health` shows `vectors` per served index (`int8_rows`, `float_rows`). Measured on
+the served model's 625,366 vectors: 922 MB → 467 MB, worst round-trip cosine 0.99983; an index
+built on CPU from them gives the same species top-1 as the float16 one on 40 of 40 sampled
+photos; on the draft release's val split (5,156 records) `nearest+mean` species top-1 moved
+44.89 → 44.83% (3 vs 0 discordant, p 0.25): "no loss" by the pre-declared rule. Before v1 is
+served, the check runs again on v1's val with the new model, and must pass:
+`mv int8-check --release v1 --backbone bioclip-2-ft-<run> --methods nearest,nearest+mean`
+("no loss" = `nearest+mean` species top-1 moves by less than 0.3 points and the paired sign
+test is not significant, p ≥ 0.05). Projected v1 working set ~3.1 GB, under the 3.5 GB cap.
+Fallbacks if it does not fit: serve fewer methods (<0.1 GB), then the 8 GB box (~+$20/month).
 
 ## 6. Re-running every earlier experiment on v1
 

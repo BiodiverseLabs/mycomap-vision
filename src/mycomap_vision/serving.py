@@ -12,6 +12,14 @@ On the server box the shards are the release's files, which `mv pull-release` ha
 already checked against their sha256; a build checks their shapes (MappedVectors)
 and reads every page once before it is swapped in (Identifier.warm).
 
+A release made with `mv release --int8-vectors` (Steve, 2026-10-12: v1 stays on the 4 GB
+box) ships each reference vector as int8 codes, `shard-NNNNN.npy`, with one float32 scale
+per vector beside it, `shard-NNNNN.scale.npy` (quantize.py): 772 bytes a vector instead
+of 1,536. The codes are memory-mapped like float16 shards; the scales (4 bytes a vector)
+are read in. A score is (query . codes) x scale, block by block, which is the query
+against the dequantized vector. The nightly update's own shards stay float16, so one
+backbone may mix both; every row comes out (or is scored) as the same float vector.
+
 ServedIndexes swaps indexes: a new version (someone withdrew permission, a new
 calibration) is built on its own thread and swapped in only when it is complete; the
 old one is released right after. Builds run one at a time. A failed build leaves the
@@ -34,24 +42,48 @@ from . import config
 # ---------------------------------------------------------------------------
 # Reference vectors, memory-mapped
 
+SCALE_SUFFIX = ".scale.npy"
+
+
 class MappedVectors:
     """A backbone's embedding shards, memory-mapped read-only, as one (rows, dim) matrix
-    in shard order (the order embed.load_embeddings gives)."""
+    in shard order (the order embed.load_embeddings gives). `scales`: per shard, None for
+    a float shard, or the float32 scale of each row of an int8 shard."""
 
-    def __init__(self, shards: list[np.ndarray]):
+    def __init__(self, shards: list[np.ndarray], scales: list | None = None):
         if not shards:
             raise ValueError("no embedding shards")
+        scales = list(scales) if scales is not None else [None] * len(shards)
+        if len(scales) != len(shards):
+            raise ValueError("one scale array (or None) per shard")
         dims = {s.shape[1] if s.ndim == 2 else None for s in shards}
-        dtypes = {s.dtype for s in shards}
         if len(dims) != 1 or None in dims:
             raise ValueError(f"embedding shards disagree on their shape: {sorted(map(str, dims))}")
-        if len(dtypes) != 1 or next(iter(dtypes)) not in (np.float16, np.float32):
-            raise ValueError(f"embedding shards must all be float16 or float32: {dtypes}")
-        self.shards = shards
+        floats = set()
+        for s, sc in zip(shards, scales):
+            if sc is None:
+                if s.dtype not in (np.float16, np.float32):
+                    raise ValueError(f"a float embedding shard must be float16 or float32, "
+                                     f"not {s.dtype}")
+                floats.add(s.dtype)
+            elif s.dtype != np.int8 or sc.ndim != 1 or len(sc) != len(s):
+                raise ValueError(f"an int8 shard needs int8 codes and one scale per row "
+                                 f"({s.dtype}, {len(s)} rows, {sc.shape} scales)")
+        if len(floats) > 1:
+            raise ValueError(f"float embedding shards must share one dtype: {floats}")
+        self.shards, self.scales = shards, [None if sc is None else
+                                            np.asarray(sc, dtype=np.float32) for sc in scales]
         self.offsets = np.cumsum([0] + [len(s) for s in shards]).astype(np.int64)
-        self.dtype = shards[0].dtype
+        # What rows come out as: the float shards' dtype; int8 rows are dequantized to it
+        # (float16 when every shard is int8).
+        self.dtype = floats.pop() if floats else np.dtype(np.float16)
         self.shape = (int(self.offsets[-1]), dims.pop())
         self.ndim = 2
+
+    def storage(self) -> dict:
+        """Rows held as int8 and as float (for /api/health and the box's memory sums)."""
+        n8 = sum(len(s) for s, sc in zip(self.shards, self.scales) if sc is not None)
+        return {"int8_rows": int(n8), "float_rows": int(len(self) - n8)}
 
     def __len__(self) -> int:
         return self.shape[0]
@@ -61,10 +93,15 @@ class MappedVectors:
         training a classifier; the nearest-specimen lookup uses select() instead)."""
         rows = np.arange(len(self))[rows] if isinstance(rows, slice) else np.asarray(rows)
         out = np.empty((len(rows), self.shape[1]), dtype=self.dtype)
-        for shard, lo, hi in zip(self.shards, self.offsets[:-1], self.offsets[1:]):
+        for shard, scale, lo, hi in zip(self.shards, self.scales, self.offsets[:-1],
+                                        self.offsets[1:]):
             here = (rows >= lo) & (rows < hi)
             if here.any():
-                out[here] = shard[rows[here] - lo]
+                local = rows[here] - lo
+                if scale is None:
+                    out[here] = shard[local]
+                else:
+                    out[here] = shard[local].astype(np.float32) * scale[local][:, None]
         return out
 
     def select(self, cols: np.ndarray) -> "MappedSelection":
@@ -86,7 +123,8 @@ class MappedSelection:
         # Per shard: which of its rows are wanted (in file order, for sequential reads)
         # and where each goes in the output. None = every row, in order.
         self.plan = []
-        for shard, lo, hi in zip(vectors.shards, vectors.offsets[:-1], vectors.offsets[1:]):
+        for shard, scale, lo, hi in zip(vectors.shards, vectors.scales, vectors.offsets[:-1],
+                                        vectors.offsets[1:]):
             pos = np.flatnonzero((self.cols >= lo) & (self.cols < hi))
             if not len(pos):
                 continue
@@ -94,7 +132,9 @@ class MappedSelection:
             order = np.argsort(local, kind="stable")
             pos, local = pos[order], local[order]
             whole = len(local) == len(shard) and bool((local == np.arange(len(shard))).all())
-            self.plan.append((shard, None if whole else local, pos))
+            # An int8 shard's scales, in the same order as the rows scored (in memory).
+            sc = None if scale is None else (scale if whole else scale[local])
+            self.plan.append((shard, None if whole else local, pos, sc))
 
     def __len__(self) -> int:
         return self.shape[0]
@@ -106,10 +146,13 @@ class MappedSelection:
     def sims(self, query: np.ndarray) -> np.ndarray:
         q = np.asarray(query, dtype=np.float32)
         out = np.empty((len(q), len(self.cols)), dtype=np.float32)
-        for shard, local, pos in self.plan:
+        for shard, local, pos, scale in self.plan:
             for s in range(0, len(pos), self.CHUNK):
                 block = shard[s:s + self.CHUNK] if local is None else shard[local[s:s + self.CHUNK]]
-                out[:, pos[s:s + self.CHUNK]] = q @ block.astype(np.float32).T
+                part = q @ block.astype(np.float32).T
+                if scale is not None:            # int8 codes: (q . codes) x scale
+                    part *= scale[s:s + self.CHUNK][None, :]
+                out[:, pos[s:s + self.CHUNK]] = part
         return out
 
 
@@ -139,7 +182,7 @@ def map_embeddings(conn: sqlite3.Connection, backbone: str, root: Path | None = 
     shards = sorted({r[0] for r in conn.execute(
         "select distinct shard from embeddings where backbone = ?", (backbone,))})
     first_layer = layer_first_shard(conn, backbone) if layer_root else None
-    ids, vecs = [], []
+    ids, vecs, scales = [], [], []
     for s in shards:
         here = layer_root / backbone if first_layer is not None and s >= first_layer else root
         i = np.load(here / f"shard-{s:05d}.ids.npy")
@@ -147,11 +190,16 @@ def map_embeddings(conn: sqlite3.Connection, backbone: str, root: Path | None = 
         if v.ndim != 2 or len(v) != len(i):
             raise ValueError(f"{backbone} shard {s}: {len(i)} photo ids but vectors of shape "
                              f"{v.shape}")
+        scale_file = here / f"shard-{s:05d}{SCALE_SUFFIX}"
+        sc = np.load(scale_file) if scale_file.is_file() else None
+        if v.dtype == np.int8 and sc is None:
+            raise ValueError(f"{backbone} shard {s}: int8 codes without their {SCALE_SUFFIX}")
         ids.append(i)
         vecs.append(v)
+        scales.append(sc)
     if not ids:
         return np.zeros(0, dtype=np.int64), None
-    return np.concatenate(ids), MappedVectors(vecs)
+    return np.concatenate(ids), MappedVectors(vecs, scales)
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +242,11 @@ class ServedIndexes:
         """(version, index) being served for `key`, or None."""
         with self._lock:
             return self._served.get(key)
+
+    def served(self) -> dict:
+        """{key: index} of everything being served now (a snapshot)."""
+        with self._lock:
+            return {k: idx for k, (_v, idx) in self._served.items()}
 
     def get(self, key, version, wait=_DEFAULT_WAIT):
         """The index for `version`. `wait`: seconds to wait for a rebuild when an older

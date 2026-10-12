@@ -61,9 +61,13 @@ def new_release_id(label: str | None = None, now: datetime | None = None) -> str
     return rid
 
 
-def release_files(conn, backbones: list[str], data_dir: Path) -> list[tuple[Path, str]]:
+def release_files(conn, backbones: list[str], data_dir: Path,
+                  int8_dir: Path | None = None) -> list[tuple[Path, str]]:
     """(local path, path inside the release) for everything the served backbones need.
-    Refuses a backbone with no embeddings: the site could not answer with it."""
+    Refuses a backbone with no embeddings: the site could not answer with it.
+    `int8_dir`: ship the vectors as int8 codes + a scale per vector (quantize.py; Steve,
+    2026-10-12: v1 stays on the 4 GB box), converted into <int8_dir>/<backbone>/ from the
+    local float shards, which are left as they are."""
     from .embed import SCHEMA
     conn.executescript(SCHEMA)
     files: list[tuple[Path, str]] = []
@@ -72,8 +76,16 @@ def release_files(conn, backbones: list[str], data_dir: Path) -> list[tuple[Path
         root = data_dir / "embeddings" / b
         if not n or not root.is_dir():
             raise ValueError(f"{b!r} has no embeddings to release")
-        files += [(p, p.relative_to(data_dir).as_posix())
-                  for p in sorted(root.rglob("*")) if p.is_file()]
+        if int8_dir is not None:
+            from .quantize import write_int8_shards
+            got = write_int8_shards(root, Path(int8_dir) / b)
+            files += [(p, f"embeddings/{b}/{p.name}")
+                      for p in sorted((Path(int8_dir) / b).iterdir()) if p.is_file()]
+            print(f"release: {b} vectors as int8 ({got['vectors']:,} in {got['shards']} "
+                  f"shards, worst round-trip cosine {got['worst_cosine']})")
+        else:
+            files += [(p, p.relative_to(data_dir).as_posix())
+                      for p in sorted(root.rglob("*")) if p.is_file()]
         meta_path = data_dir / "models" / f"{b}.json"
         if meta_path.is_file():                       # a fine-tuned model: ship its weights
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -98,8 +110,10 @@ def release_files(conn, backbones: list[str], data_dir: Path) -> list[tuple[Path
 
 def publish(conn, backbones: list[str], *, label: str | None = None, make_current: bool = False,
             s3=None, bucket: str | None = None, data_dir: Path | None = None,
-            work_dir: Path | None = None, log=print) -> dict:
+            work_dir: Path | None = None, int8_vectors: bool = False, log=print) -> dict:
     """Upload a release; with make_current, point releases/current.json at it.
+    `int8_vectors`: the reference vectors as int8 codes + a scale each, half the memory on
+    the box (serving.MappedVectors reads both; the accuracy check is mv int8-check).
     Refused while the records table holds a benchmark's held-out record (holdouts.py);
     the manifest it ships carries the held-out list to the box's nightly update."""
     if not backbones:
@@ -110,7 +124,8 @@ def publish(conn, backbones: list[str], *, label: str | None = None, make_curren
     bucket = bucket or aws.bucket()
     data_dir = data_dir or config.DATA_DIR
     rid = new_release_id(label)
-    files = release_files(conn, backbones, data_dir)
+    int8_dir = ((work_dir or data_dir) / "release-int8" / rid) if int8_vectors else None
+    files = release_files(conn, backbones, data_dir, int8_dir=int8_dir)
     # The benchmark tables stay home; benchmark_holdouts ships (the nightly update needs it).
     snap = shippable_snapshot(conn, (work_dir or data_dir) / "manifest-release.sqlite")
     files = [(snap, "manifest.sqlite")] + files
@@ -125,15 +140,19 @@ def publish(conn, backbones: list[str], *, label: str | None = None, make_curren
             "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "snapshot": snapshot,
             "version": modelcard.version_for(snapshot, earlier_versions(s3, bucket)),
-            "files": listed}
+            "vectors": "int8" if int8_vectors else "float", "files": listed}
     s3.put_object(Bucket=bucket, Key=f"{PREFIX}{rid}/release.json",
                   Body=json.dumps(info, indent=2).encode(), ContentType="application/json")
     if make_current:
         set_current(rid, s3=s3, bucket=bucket)
+    if int8_dir is not None:                     # uploaded: the local floats stay the copy
+        import shutil
+        shutil.rmtree(int8_dir, ignore_errors=True)
     total = sum(f["bytes"] for f in listed)
     log(f"release {rid}: {len(listed)} files, {total / 2**20:.0f} MB"
-        + (" (now current)" if make_current else ""))
-    return {"id": rid, "files": len(listed), "bytes": total, "current": make_current}
+        + (" (int8 vectors)" if int8_vectors else "") + (" (now current)" if make_current else ""))
+    return {"id": rid, "files": len(listed), "bytes": total, "current": make_current,
+            "vectors": info["vectors"]}
 
 
 def earlier_versions(s3, bucket: str) -> list[str]:

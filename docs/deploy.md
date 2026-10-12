@@ -309,6 +309,11 @@ fresh layer starts (nearly) empty.
 
 ## Memory on the 4 GB box
 
+Since 2026-10-12 (Steve: v1 stays on the 4 GB box) the reference vectors can ship as int8
+(`mv release --int8-vectors`): half the vector memory, the same answers within the
+pre-declared check (docs/retrain-v1.md section 5); `/api/health` → `vectors` says which a
+served index holds. The measurements below are of float16 vectors.
+
 Measured in a Linux container with the box's packages, on the full photo set
 (593,224 reference photos; `anon` is memory only the process holds, `RSS` also
 counts file pages mapped from disk, which the kernel can drop and re-read):
