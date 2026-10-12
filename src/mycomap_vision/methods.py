@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import config
+
 
 class Scorer:
     """Cosine similarity of query photos to every reference photo, on the GPU when there is one.
@@ -30,9 +32,13 @@ class Scorer:
 
     def __init__(self, ref_vecs: np.ndarray):
         self.torch = None
+        # The fast int8 search (fastsearch.py) runs on the CPU over the mapped vectors:
+        # with it on, they stay mapped even where a GPU could hold them (the model still
+        # embeds on the GPU).
+        int8 = hasattr(ref_vecs, "use_int8") and config.setting("MV_SEARCH_INT8") == "1"
         try:
             import torch
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and not int8:
                 self.torch = torch
                 self.ref = torch.from_numpy(np.asarray(ref_vecs, dtype=np.float16)).cuda()
         except ImportError:
