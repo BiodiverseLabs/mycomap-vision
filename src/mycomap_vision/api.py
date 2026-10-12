@@ -580,6 +580,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
                 "queue": model_queue.state(),
+                "sessions": (app.state.sessions.state()
+                             if getattr(app.state, "sessions", None) else None),
                 "fungus_gate": fungus_gate.summary() if fungus_gate else None}
 
     def nightly_health() -> dict:
