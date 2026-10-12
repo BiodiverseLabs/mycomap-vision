@@ -79,6 +79,7 @@ def outline(enabled: dict[str, bool]) -> dict:
         ["latitude, longitude", "number", "no", "Decimal degrees, sent together. Used for scoring only, never stored."],
         ["observed_on", "YYYY-MM-DD", "no", "The day it was found. Read from the photo's EXIF date when not sent."],
         ["top_k", "1–10", "no", "Candidates per rank (default 5)."],
+        ["client_ref", "string ≤ 64", "no", "Your id for the find. The same find identified again within a day (or after its session) isn't counted twice."],
     ]
     return {
         "title": "MycoMap Vision API",

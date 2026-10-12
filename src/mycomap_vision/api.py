@@ -34,8 +34,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
 from PIL import Image
 
 from . import (apidocs, apiv1, config, evaluate, fungusgate, geocode, inat, manifest, modelcard,
-               models, names, nightly, permissions, serving, sessions as session_store, uploads,
-               workqueue)
+               models, names, nightly, permissions, quotas as quota_rules, serving,
+               sessions as session_store, uploads, workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -271,6 +271,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                taxon_counts: bool | None = None,
                api_v1: bool | None = None,
                sessions: bool | None = None,
+               quotas: "quota_rules.Quotas | None" = None,
+               usage_post: Callable[[dict], None] | None = None,
                app_tokens: "apiv1.AppTokens | None | bool" = True,
                introspect: "Callable[[str], dict] | None | bool" = True,
                dataset_root: Path | None = None, dataset_store: str | None = None,
@@ -484,6 +486,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         gpu_lock, max_wait=_setting_number("MV_QUEUE_MAX_WAIT") or 20.0,
         max_batch_photos=int(_setting_number("MV_QUEUE_BATCH_PHOTOS") or 20), note=note)
     app.state.model_queue = model_queue
+    # Quotas (quotas.py, MV_QUOTAS off|count|enforce): monthly identifications per member,
+    # counted here, durable on the box, reported to mycomap.org every few minutes.
+    if quotas is None:
+        quotas = quota_rules.Quotas(
+            (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT else config.DATA_DIR)
+            / "vision-usage.sqlite",
+            mode=(config.setting("MV_QUOTAS") or "off").strip().lower(),
+            default_monthly=int(_setting_number("MV_QUOTA_DEFAULT_MONTHLY")
+                                or quota_rules.DEFAULT_MONTHLY))
+    app.state.quotas = quotas
 
     def q(sql: str, params: tuple = ()):
         with db_lock:
@@ -580,6 +592,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
                 "queue": model_queue.state(),
+                "quotas": {"mode": quotas.mode},
                 "sessions": (app.state.sessions.state()
                              if getattr(app.state, "sessions", None) else None),
                 "fungus_gate": fungus_gate.summary() if fungus_gate else None}
@@ -759,15 +772,30 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         timer.add("decode_ms", time.monotonic() - start)
         return read
 
+    def embed_one(ident: Identifier, model, image) -> tuple:
+        """One photo -> (its unit vector, float32; the gate's base vector or None when it is
+        the vector itself or the gate can't run; the gate's verdict or None). Every photo
+        is embedded on its own, by /identify and by sessions alike, so the same photo
+        always gets the same vector: a forward pass over a batch differs from one over a
+        single photo by ~1e-4, enough to swap near-tied names (integration testing,
+        2026-10-12). Call with gpu_lock held."""
+        prepare = getattr(model, "prepare", None) or (lambda im: im)
+        vecs, base = ident.encode(model, [prepare(image)])
+        vector = normalise(vecs)[0].astype(np.float32)
+        gate = getattr(ident, "gate", None)
+        verdict = gate.judge(base)[0] if gate is not None and base is not None else None
+        return vector, (None if base is None or base is vecs else np.asarray(base[0])), verdict
+
     def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
                         may_show, timer: "apiv1.Timer", top_k: int = 5,
                         interactive: bool = True, higher: bool = False) -> dict:
         """One model's answer through the queue, timed: waiting, embedding, scoring."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
-            vecs, judged = ident.embed(model, images)      # the gate's verdicts too
-            verdicts.append(judged)
-            return vecs
+            parts = [embed_one(ident, model, im) for im in images]
+            judged = [v for _, _, v in parts]
+            verdicts.append(judged if all(v is not None for v in judged) else None)
+            return np.stack([vec for vec, _, _ in parts])
 
         def finish(vecs, sims):
             return ident.identify_vectors(vecs, top_k, context=context, sims=sims,
@@ -896,6 +924,21 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     own.close()
             start_background("licences", 3600, refresh_licences, note)
 
+    # Use reported to mycomap.org (quotas.py): running totals every MV_USAGE_REPORT_SECONDS
+    # (300), so a failed report is simply sent again next time.
+    app.state.report_usage = None
+    if quotas.on:
+        post = usage_post
+        if post is None and config.setting("MV_ORG_BASE_URL") and permissions.org_key():
+            post = quota_rules.org_poster(config.setting("MV_ORG_BASE_URL"),
+                                          permissions.org_key())
+        if post is not None:
+            app.state.report_usage = lambda: quota_rules.report(quotas, post, note=note)
+            if background:
+                start_background("usage report",
+                                 _setting_number("MV_USAGE_REPORT_SECONDS") or 300,
+                                 app.state.report_usage, note)
+
     # The nightly update (nightly.py): runs here because this process holds the model.
     nightly_settings = nightly_settings or (nightly.Settings.from_env() if layer else None)
     nightly_zone = None
@@ -1011,11 +1054,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if cred.kind != "server" and n:
                 wait = photo_window.take(cred.rate_key, n)
                 if wait:
+                    quotas.refused(cred, "rate_limited")
                     raise apiv1.V1Error(429, "rate_limited", "too many photos in the last "
                                         "minute", retry_after=int(wait) + 1)
             try:
                 model_queue.admit(interactive=cred.interactive)
             except workqueue.Busy as e:
+                quotas.refused(cred, "busy")
                 wait = int(e.wait_seconds) + 1
                 raise apiv1.V1Error(503, "busy", "busy identifying other photos",
                                     retry_after=wait, estimated_wait_seconds=wait) from e
@@ -1054,7 +1099,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def v1_identify(request: Request, photos: list[UploadFile] = File(...),
                         latitude: float | None = Form(None), longitude: float | None = Form(None),
                         observed_on: str | None = Form(None), model: str | None = Form(None),
-                        top_k: int = Form(5)):
+                        top_k: int = Form(5), client_ref: str | None = Form(None)):
             timer = apiv1.Timer()
             cred: apiv1.Credential = request.state.credential
             if not 1 <= len(photos) <= MAX_PHOTOS:
@@ -1066,6 +1111,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
             check_context(latitude, longitude, observed_on or None)
             backbone, method = v1_model(model)
+            if client_ref is not None and not (
+                    1 <= len(client_ref) <= session_store.MAX_REF_LENGTH):
+                raise apiv1.V1Error(400, "bad_request", "client_ref is 1 to "
+                                    f"{session_store.MAX_REF_LENGTH} characters")
+            # The same find counted in the last day (its session, before signal dropped)
+            # is free here too: the app finishes a find this way after saving it.
+            same_find = quotas.counted_before(cred, client_ref)
+            if not same_find:
+                quotas.check(cred)                  # before the photo window is spent
             take_photos(cred, len(photos))
             if not in_flight.enter():
                 raise apiv1.V1Error(503, "busy", "busy identifying other photos",
@@ -1082,7 +1136,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     timer, top_k, interactive=cred.interactive, higher=True)
             finally:
                 in_flight.leave()
+            quotas.count(cred, 0 if same_find else 1, len(photos))
+            if not same_find:
+                quotas.remember_counted(cred, client_ref)
             body = v1_result(result, backbone, method, used, timer)
+            body["usage"] = quotas.usage(cred)
             return JSONResponse(body, headers={"Cache-Control": "no-store",
                                                "Server-Timing": apiv1.Timer.header(body["timing"])})
 
@@ -1145,16 +1203,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
             def embed():                                # the worker holds gpu_lock
                 if image is not None:
-                    model = backbone_model(s.backbone)
-                    prepare = getattr(model, "prepare", None) or (lambda im: im)
-                    vecs, base = ident.encode(model, [prepare(image)])
-                    vector = normalise(vecs)[0].astype(np.float32)
-                    verdict = gate.judge(base)[0] if gate is not None and base is not None else None
+                    vector, base, verdict = embed_one(ident, backbone_model(s.backbone), image)
                     added.append(session_store.Photo(
-                        ref=ref, vector=vector,
-                        base=None if base is None or base is vecs else np.asarray(base[0]),
-                        verdict=verdict, gate_fingerprint=fingerprint if verdict else None,
-                        found=found))
+                        ref=ref, vector=vector, base=base, verdict=verdict,
+                        gate_fingerprint=fingerprint if verdict else None, found=found))
                 for p in s.photos:                      # judged by an older gate: again
                     if gate is not None and p.gate_fingerprint != fingerprint:
                         base = p.base if p.base is not None else (
@@ -1187,11 +1239,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             s.remember(combined)
             return combined
 
-        def session_answer(s, timer, **extra) -> JSONResponse:
-            block = timer.block()
-            body = {**extra, "combined": s.combined, "photos_scored": len(s.photos),
+        def session_answer(s, timer, cred, **extra) -> JSONResponse:
+            block, usage = timer.block(), quotas.usage(cred)
+            # The combined answer carries this call's timing and usage too, like any v1
+            # answer (docs/api.md §4): the app reads combined.timing.
+            combined = ({**s.combined, "timing": block, "usage": usage}
+                        if s.combined is not None else None)
+            body = {**extra, "combined": combined, "photos_scored": len(s.photos),
                     "context_used": entered_context(s, s.photos)[1], "timing": block,
-                    "usage": None,
+                    "usage": usage,
                     "session": {"session_id": s.id, "expires_at": expires_at(s)}}
             return JSONResponse(body, headers={"Cache-Control": "no-store",
                                                "Server-Timing": apiv1.Timer.header(block)})
@@ -1243,10 +1299,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             with s.lock:
                 index = s.index_of(photo_ref)
                 if index is not None:                   # a resend: the answer as it stands
-                    return session_answer(s, timer, photo=photo_entry(s, index))
+                    return session_answer(s, timer, cred, photo=photo_entry(s, index))
                 if len(s.photos) >= session_store.MAX_PHOTOS:
                     raise apiv1.V1Error(400, "too_many_photos", "a session holds at most "
                                         f"{session_store.MAX_PHOTOS} photos")
+                # An identification at the first photo, unless the same find was counted
+                # in the last day (a session re-opened after a restart or expiry).
+                reopened = not s.counted and quotas.counted_before(cred, s.client_ref)
+                if not s.counted and not reopened:
+                    quotas.check(cred)
                 take_photos(cred, 1)
                 try:
                     store.make_room(64 * 1024)
@@ -1262,8 +1323,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     rescore(s, cred, timer, image=image, ref=photo_ref, found=found)
                 finally:
                     in_flight.leave()
-                s.counted = True                        # quota: once, at its first photo
-                return session_answer(s, timer, photo=photo_entry(s, len(s.photos) - 1))
+                first = not s.counted and not reopened
+                quotas.count(cred, 1 if first else 0, 1)       # once, at its first photo
+                if first:
+                    quotas.remember_counted(cred, s.client_ref)
+                s.counted = True
+                return session_answer(s, timer, cred, photo=photo_entry(s, len(s.photos) - 1))
 
         def photo_entry(s, index: int) -> dict | None:
             per_photo = (s.combined or {}).get("per_photo") or []
@@ -1278,7 +1343,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 rescore(s, cred, timer)
             else:
                 s.remember(None)
-            return session_answer(s, timer)
+            return session_answer(s, timer, cred)
 
         @app.patch("/api/v1/sessions/{sid}")
         def v1_session_context(request: Request, sid: str, payload: dict | None = Body(None)):
@@ -1295,7 +1360,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         @app.get("/api/v1/sessions/{sid}")
         def v1_session_state(request: Request, sid: str):
             s = session_of(request, sid)
-            return session_answer(s, apiv1.Timer())
+            return session_answer(s, apiv1.Timer(), request.state.credential)
 
         @app.delete("/api/v1/sessions/{sid}/photos/{ref}")
         def v1_session_drop_photo(request: Request, sid: str, ref: str):
