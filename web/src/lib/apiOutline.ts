@@ -1,5 +1,5 @@
 // The API outline served at /api/docs/v1.json (src/mycomap_vision/apidocs.py): the one
-// source for this site's /api-docs page and the tab on mycomap.org/api-docs.
+// source for this site's API page (Research > API) and the tab on mycomap.org/api-docs.
 
 export type Block =
   | { type: "p"; text: string }

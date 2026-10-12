@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, ChevronDown, Menu, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { api, signInUrl, type Me } from "@/lib/api";
-import { isResearchPath, PUBLIC_NAV, researchNav } from "@/lib/research";
+import { API_PATH, isResearchPath, PUBLIC_NAV, researchNav } from "@/lib/research";
 
 // Header and footer follow mycomap.org's PublicLayout and MainNavigation so the
 // two sites read as one: sticky white header, logo + "MycoMap" in brown, grey
@@ -185,7 +185,7 @@ function Footer() {
               ["https://mycomap.org/network", "Free sequencing"],
               ["https://mycomap.org/protocols", "Participation protocols"],
               ["https://mycomap.org/join", "Support MycoMap, a nonprofit"],
-              ["/api-docs", "API for developers"],
+              [API_PATH, "API for developers"],
             ].map(([href, label]) => (
               <li key={href}>
                 <a href={href} className="text-white/70 hover:text-myco-green transition-colors">

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BENCHMARKS, isResearchPath, MOVED, PUBLIC_NAV, researchNav, STATUS_LABEL } from "./research";
+import { API_PATH, BENCHMARKS, isResearchPath, MOVED, mustSignIn, PUBLIC_NAV, researchNav,
+         STATUS_LABEL } from "./research";
 import type { Me } from "./api";
 
 const me = (signin: Me["signin"], user: Me["user"]): Me => ({ signin, user });
@@ -27,7 +28,7 @@ test("experiments, like the paper, show only to signed-in members", () => {
 
 test("pages that moved under Research keep their old addresses", () => {
   assert.deepEqual(MOVED, { "/models": "/research/results", "/data": "/research/data",
-                            "/paper": "/research/paper" });
+                            "/paper": "/research/paper", "/api-docs": "/research/api" });
   for (const to of Object.values(MOVED)) assert.ok(isResearchPath(to));
   assert.equal(isResearchPath("/researchers"), false);
 });
@@ -46,4 +47,31 @@ test("every benchmark page is complete and addressable", () => {
 test("the held-out benchmark says it is not the paper's test set", () => {
   const h = BENCHMARKS.find((b) => b.slug === "held-out")!;
   assert.match(h.records, /development benchmark/);
+});
+
+test("API is the last item under Research, for visitors and members alike", () => {
+  for (const m of [undefined, me("identify", null), me("all", null), me("all", someone)]) {
+    const last = researchNav(m).at(-1)!;
+    assert.deepEqual([last.href, last.label], ["/research/api", "API"]);
+  }
+  assert.equal(API_PATH, "/research/api");
+});
+
+test("a signed-out visitor reads the API page but signs in for any other page", () => {
+  const visitor = me("all", null);
+  assert.equal(mustSignIn(visitor, "/research/api"), false);
+  assert.equal(mustSignIn(visitor, "/api-docs"), false);
+  for (const page of ["/", "/research", "/research/results", "/research/paper", "/about"]) {
+    assert.equal(mustSignIn(visitor, page), true, page);
+  }
+});
+
+test("nobody else is sent to sign in by the site itself", () => {
+  assert.equal(mustSignIn(me("all", someone), "/research/results"), false);
+  assert.equal(mustSignIn(me("identify", null), "/about"), false);
+  assert.equal(mustSignIn(me("off", null), "/"), false);
+  assert.equal(mustSignIn(undefined, "/"), false, "not known yet: wait for /api/me");
+  // The sign-in pages themselves never send people to sign in: that would loop.
+  assert.equal(mustSignIn(me("all", null), "/auth/signin"), false);
+  assert.equal(mustSignIn(me("all", null), "/auth/signed-out"), false);
 });
