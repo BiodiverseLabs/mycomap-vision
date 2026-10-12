@@ -180,6 +180,41 @@ Why sessions rather than stateless calls:
   cap `MV_SESSIONS_MAX_MB=64`: past it the oldest idle session is dropped, and if all
   were active in the last 2 minutes a new session gets 503 `busy`.
 
+### 3.4 Model and usage
+
+`GET /api/v1/models` (any credential; `Cache-Control: private, max-age=300`): the one
+model answering, by its public name only. Requests leave `model` out.
+
+```json
+{"models": [{"name": "MycoMap Vision", "version": "2026-10-06",
+             "data": {"snapshot": "2026-10-06", "records": 160173, "species": 18688,
+                      "genera": 1620},
+             "calibrated_on": "2026-10-08", "default": true,
+             "reference": {"records": 152915, "species": 9876, "photos": 593224},
+             "ranks": ["species", "genus", "family", "order", "class", "phylum"],
+             "confident_at": 0.7}],
+ "limits": {"max_photos": 10, "max_file_mb": 25, "max_request_mb": 80, "top_k_max": 10,
+            "photos_per_minute": 20},
+ "features": {"identify": true, "sessions": true, "by_observation": false,
+              "models": true, "usage": true, "taxon_counts": true}}
+```
+
+`GET /api/v1/usage` (any credential; `no-store`): this credential's use this month. Reading
+it is never counted.
+
+```json
+{"usage": {"plan": "member", "used": 12, "limit": 300, "period": "2026-10",
+           "resets_at": "2026-11-01T00:00:00Z"},
+ "quotas": "enforce", "pool": "member", "limit_source": "plan"}
+```
+
+`usage` is the block every answer carries (§4.1), `null` when quotas are off or for
+mycomap.org's server key (`pool: "none"`). `pool` says whose month it is: `member` (the
+member's app and their tokens without an override share one) or `key` (a token with its own
+override counts alone). `limit_source` is `plan`, `override` (per token, or per member set
+on mycomap.org) or `staff`. Counts arrive at mycomap.org's member page within about 15
+minutes; this endpoint is current.
+
 ## 4. The answer
 
 Every identify call, and `combined` in a session, is today's per-model result with
