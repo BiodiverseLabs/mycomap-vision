@@ -237,6 +237,27 @@ def cmd_aws_train_job(conn, args) -> None:
         print_scoreboard(evaluate.scoreboard(conn, out["comparison_id"]))
 
 
+def cmd_aws_launch_dataset_build(conn, args) -> None:
+    from pathlib import Path
+
+    from . import aws_dataset
+    print(json.dumps(aws_dataset.launch(
+        conn, args.name, args.freeze_approved, val_weeks=args.val_weeks,
+        val_cutoff=args.val_cutoff, review_files=[Path(p) for p in args.exclusions],
+        instance_type=args.instance_type, max_hours=args.max_hours,
+        allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
+
+
+def cmd_aws_dataset_build_job(args) -> None:
+    """Runs on the dataset-build instance (aws_dataset.USER_DATA)."""
+    from pathlib import Path
+
+    from . import aws, aws_dataset
+    request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+    out = aws_dataset.run_build_job(args.build_id, request, aws.s3_client(), args.bucket)
+    print(json.dumps(out, indent=2))
+
+
 def cmd_standard_summary(conn, args) -> None:
     """Steve's standard tables for a saved comparison (standard_report.py)."""
     from . import standard_report
@@ -400,6 +421,16 @@ def cmd_dataset(args) -> None:
                          indent=2))
     elif args.action == "diff":
         print(json.dumps(dr.diff(args.a, args.b, root), indent=2))
+    elif args.action == "pull":
+        from . import aws, dataset_s3
+        dataset_s3.fetch_release(args.id, root, aws.s3_client(), aws.bucket(),
+                                 include_private=True)
+        print(json.dumps(dr.verify(args.id, root), indent=2))
+    elif args.action == "upload":
+        from . import aws, dataset_s3
+        dr.load_release(args.id, root, allow_draft=True).close()     # checks every file
+        print(json.dumps(dataset_s3.upload_release(args.id, root, aws.s3_client(), aws.bucket()),
+                         indent=2))
     elif args.action == "public":
         m = dr.public_variant(args.id, root)
         print(json.dumps({k: m[k] for k in ("id", "hashes", "counts")}, indent=2))
@@ -1281,6 +1312,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--loader-only", action="store_true")
     p.add_argument("--gpu-only", action="store_true")
 
+    p = sub.add_parser("aws-launch-dataset-build",
+                       help="cut a dataset release on a self-terminating instance in the "
+                            "bucket's region (reads every original for the derived hashes)")
+    p.add_argument("--name", required=True, help="v1, v2 ... (or a dry-<stamp> draft)")
+    p.add_argument("--freeze-approved", help="who gave the freeze trigger, and when")
+    p.add_argument("--val-weeks", type=int, default=8)
+    p.add_argument("--val-cutoff", help="YYYY-MM-DD: validated after it = val")
+    p.add_argument("--exclusions", action="append", default=[],
+                   help="a person-checked review list (TSV); repeat")
+    p.add_argument("--instance-type", default="c7i.2xlarge")
+    p.add_argument("--max-hours", type=float, default=6)
+    p.add_argument("--allow-dirty", action="store_true")
+    p.add_argument("--allow-unpushed", action="store_true")
+
+    p = sub.add_parser("aws-dataset-build-job", help="(runs on the dataset-build instance)")
+    p.add_argument("--build-id", required=True)
+    p.add_argument("--request", required=True)
+    p.add_argument("--bucket", required=True)
+
     p = sub.add_parser("standard-summary", help="Steve's standard tables (top 1/3/5/10, s.l., "
                                                 "depth bands) for a saved comparison")
     p.add_argument("--comparison", required=True)
@@ -1494,6 +1544,12 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("id")
     q = dsub.add_parser("show", help="counts and hashes")
     q.add_argument("id")
+    q = dsub.add_parser("upload", help="copy the release to s3 research-releases/<id>/ (its "
+                                       "kept copy, private part included)")
+    q.add_argument("id")
+    q = dsub.add_parser("pull", help="download a release's kept copy from s3 (with its "
+                                     "private part) and verify it")
+    q.add_argument("id")
 
     p = sub.add_parser("pull-release", help="(server box) download a release, verify it and "
                                             "make it current; then restart the server")
@@ -1703,6 +1759,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "dataset":             # never opens the manifest for writing
         cmd_dataset(args)
         return 0
+    if args.command == "aws-dataset-build-job":   # the build reads a private copy only
+        cmd_aws_dataset_build_job(args)
+        return 0
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0
@@ -1736,6 +1795,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-launch-trainer": cmd_aws_launch_trainer,
         "aws-train-job": cmd_aws_train_job,
         "standard-summary": cmd_standard_summary,
+        "aws-launch-dataset-build": cmd_aws_launch_dataset_build,
         "model-sanity": cmd_model_sanity,
         "aws-pull-trainer": cmd_aws_pull_trainer,
         "finetune": cmd_finetune,

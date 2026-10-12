@@ -102,8 +102,11 @@ approved in advance on 2026-10-11):
 3. $ The derived-hash pass and build in-region: `mv aws-launch-dataset-build --name v1
    --freeze-approved "<who, when>"` (c7i.2xlarge, self-terminating; ~650k originals ≈ 10
    core-hours, ~1.5-2 h, ~$1; S3 reads in-region cost nothing, against ~$25 of download fees
-   to do it on the laptop). Then pull the release home.
-4. `mv dataset verify v1`, `mv dataset show v1`; `mv dataset upload v1` (kept copy in S3).
+   to do it on the laptop). The instance verifies the release and uploads its kept copy to
+   `research-releases/v1/`; `dataset-builds/<build>/result.json` (written last) has its
+   release_hash. Then `mv dataset pull v1` brings it home, private part included, verified.
+4. `mv dataset show v1` (the kept copy is already in S3; `mv dataset upload v1` only for a
+   release built on the laptop).
 5. Report to the coordinator: release_hash, counts by source and split, val cutoff.
 
 **C. Retrain** ($ ~$8.50; ask Steve through the coordinator before launching):
