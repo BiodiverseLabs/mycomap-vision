@@ -196,6 +196,15 @@ tower 539 MB anon + 1,007 MB file-mapped weights, 1.76 s/photo; float32 ONNX 1,9
 `mv export-onnx`. If an export is made later, `mv release` ships `models/<b>.onnx` +
 `.onnx.json` and refuses one exported from other weights than the `.pt` it ships.
 
+**Fast int8 search (`MV_SEARCH_INT8`) on the box only after a measurement.** It searches a
+packed int8 copy (~0.48 GB anon) and re-reads only each query's top rows from the mapped
+shards, so the hot set moves from reclaimable file pages to anon memory that can only be
+swapped. Before it is switched on for v1: a dark run on the box with it on across one
+nightly update, reading the service cgroup's `memory.current`, `memory.stat` (anon vs file)
+and `memory.events` (high, oom) before, during the index swap and after, first on the current
+release, then on v1's int8 release before it serves. If v1's peak nears the 3.5 GB cap, it
+stays off for v1 (one setting), or `MV_SEARCH_REFINE` is lowered.
+
 ## 6. Re-running every earlier experiment on v1
 
 Each re-run ships one command taking `--release v1` and a registry entry
