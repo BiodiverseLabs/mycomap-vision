@@ -19,12 +19,13 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+import numpy as np
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.concurrency import run_in_threadpool
@@ -33,7 +34,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
 from PIL import Image
 
 from . import (apidocs, apiv1, config, evaluate, fungusgate, geocode, inat, manifest, modelcard,
-               models, names, nightly, permissions, serving, uploads, workqueue)
+               models, names, nightly, permissions, serving, sessions as session_store, uploads,
+               workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -268,6 +270,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                server_key: str | None | bool = True,
                taxon_counts: bool | None = None,
                api_v1: bool | None = None,
+               sessions: bool | None = None,
                app_tokens: "apiv1.AppTokens | None | bool" = True,
                introspect: "Callable[[str], dict] | None | bool" = True,
                dataset_root: Path | None = None, dataset_store: str | None = None,
@@ -293,7 +296,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     The public API v1 (apiv1.py, docs/api.md) lives under /api/v1/ and answers only a
     credential. `server_key` is mycomap.org's key (default: MV_ORG_VISION_KEY(_FILE));
     `taxon_counts` turns on GET /api/v1/taxon-counts (default: MV_TAXON_COUNTS);
-    `api_v1` turns on POST /api/v1/identify (default: MV_API_V1). `app_tokens` checks the
+    `api_v1` turns on POST /api/v1/identify (default: MV_API_V1); `sessions` the
+    app's observation sessions under /api/v1/sessions (default: MV_SESSIONS). `app_tokens` checks the
     app's tokens (default: the sign-in bridge's public key, for MV_PUBLIC_ORIGIN);
     `introspect` asks mycomap.org about a developer token (default: MV_ORG_BASE_URL with
     the server key; tests pass a fake).
@@ -963,10 +967,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
         nightly.start(schedule, run_nightly, note)
 
+    v1_on = bool(api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1")
+    sessions_on = bool(sessions if sessions is not None
+                       else config.setting("MV_SESSIONS") == "1")
+
     # The API's public outline (apidocs.py): the Vision site's /api-docs page and the tab
     # on mycomap.org/api-docs both render it. Open to anyone, from any site.
-    v1_parts = {"identify": bool(api_v1 if api_v1 is not None
-                                 else config.setting("MV_API_V1") == "1"),
+    v1_parts = {"identify": v1_on, "sessions": sessions_on,
                 "taxon_counts": bool(taxon_counts if taxon_counts is not None
                                      else config.setting("MV_TAXON_COUNTS") == "1")}
 
@@ -977,9 +984,47 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                      "Cache-Control": "public, max-age=300"})
 
     # POST /api/v1/identify (docs/api.md §3.1, §4): one model's answer for 1-10 photos,
-    # with timing, confident/answer, and the caller's own short-window limit.
-    if api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1":
+    # with timing, confident/answer, and the caller's own short-window limit. The app's
+    # observation sessions (§3.3) share its helpers.
+    if v1_on or sessions_on:
         photo_window = apiv1.PhotoWindow(int(_setting_number("MV_PHOTOS_PER_MINUTE") or 20))
+
+        def check_context(latitude, longitude, observed_on) -> None:
+            """Place and date as the caller sent them, or 400 bad_request."""
+            def number(v):
+                return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
+            if not (number(latitude) and number(longitude)) or (latitude is None) != (
+                    longitude is None) or (latitude is not None and not (
+                    -90 <= latitude <= 90 and -180 <= longitude <= 180)):
+                raise apiv1.V1Error(400, "bad_request", "send latitude and longitude together, "
+                                    "in range")
+            if observed_on is not None:
+                try:
+                    date.fromisoformat(observed_on)
+                except (TypeError, ValueError):
+                    raise apiv1.V1Error(400, "bad_request", "observed_on is YYYY-MM-DD") from None
+
+        def take_photos(cred: "apiv1.Credential", n: int) -> None:
+            """The caller's photos-per-minute window, then room in the queue, or refuse."""
+            if cred.kind != "server" and n:
+                wait = photo_window.take(cred.rate_key, n)
+                if wait:
+                    raise apiv1.V1Error(429, "rate_limited", "too many photos in the last "
+                                        "minute", retry_after=int(wait) + 1)
+            try:
+                model_queue.admit(interactive=cred.interactive)
+            except workqueue.Busy as e:
+                wait = int(e.wait_seconds) + 1
+                raise apiv1.V1Error(503, "busy", "busy identifying other photos",
+                                    retry_after=wait, estimated_wait_seconds=wait) from e
+
+        def v1_index(backbone: str, method: str, view, timer) -> Identifier:
+            try:
+                return served_index(backbone, method, view, timer)
+            except (serving.Updating, NotTrainedHere) as e:
+                note(f"[v1] {backbone}/{method} not ready: {e}")
+                raise apiv1.V1Error(503, "updating", "the model is being updated; try "
+                                    "again shortly", retry_after=30) from e
 
         def v1_model(spec: str | None) -> tuple[str, str]:
             ready = ready_backbones()
@@ -1004,7 +1049,6 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise apiv1.V1Error(413, "too_large", str(e.detail)) from e
                 raise apiv1.V1Error(415, "unsupported_image", str(e.detail)) from e
 
-        @app.post("/api/v1/identify")
         def v1_identify(request: Request, photos: list[UploadFile] = File(...),
                         latitude: float | None = Form(None), longitude: float | None = Form(None),
                         observed_on: str | None = Form(None), model: str | None = Form(None),
@@ -1018,28 +1062,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                     f"{MAX_REQUEST_BYTES // 2**20} MB together")
             if not 1 <= top_k <= 10:
                 raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
-            if (latitude is None) != (longitude is None) or (
-                    latitude is not None and not (-90 <= latitude <= 90
-                                                  and -180 <= longitude <= 180)):
-                raise apiv1.V1Error(400, "bad_request", "send latitude and longitude together, "
-                                    "in range")
-            if observed_on:
-                try:
-                    date.fromisoformat(observed_on)
-                except ValueError:
-                    raise apiv1.V1Error(400, "bad_request", "observed_on is YYYY-MM-DD") from None
+            check_context(latitude, longitude, observed_on or None)
             backbone, method = v1_model(model)
-            if cred.kind != "server":
-                wait = photo_window.take(cred.rate_key, len(photos))
-                if wait:
-                    raise apiv1.V1Error(429, "rate_limited", "too many photos in the last "
-                                        "minute", retry_after=int(wait) + 1)
-            try:
-                model_queue.admit(interactive=cred.interactive)
-            except workqueue.Busy as e:
-                wait = int(e.wait_seconds) + 1
-                raise apiv1.V1Error(503, "busy", "busy identifying other photos",
-                                    retry_after=wait, estimated_wait_seconds=wait) from e
+            take_photos(cred, len(photos))
             if not in_flight.enter():
                 raise apiv1.V1Error(503, "busy", "busy identifying other photos",
                                     retry_after=10, estimated_wait_seconds=10)
@@ -1048,12 +1073,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 context, used = fill_context(Context(latitude, longitude, observed_on),
                                              [found for _, found in read])
                 view = permission_view()
-                try:
-                    ident = served_index(backbone, method, view, timer)
-                except (serving.Updating, NotTrainedHere) as e:
-                    note(f"[v1] {backbone}/{method} not ready: {e}")
-                    raise apiv1.V1Error(503, "updating", "the model is being updated; try "
-                                        "again shortly", retry_after=30) from e
+                ident = v1_index(backbone, method, view, timer)
                 result = embed_and_score(
                     ident, backbone, [img for img, _ in read], context,
                     lambda info: view.may_show(info.license_class, info.owner_user_id),
@@ -1081,6 +1101,219 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             apiv1.mark_confident(out)
             out["timing"] = timer.block()
             return out
+
+        if v1_on:
+            app.post("/api/v1/identify")(v1_identify)
+
+    # The app's observation sessions (docs/api.md §3.3, sessions.py): photos sent one at a
+    # time as they're taken; each answer is the combined answer over all of them,
+    # re-scored from the stored vectors (never re-embedded, never a photo kept).
+    if sessions_on:
+        store = session_store.Sessions(
+            max_bytes=int((_setting_number("MV_SESSIONS_MAX_MB") or 64) * 2**20))
+        app.state.sessions = store
+
+        def session_of(request: Request, sid: str) -> "session_store.Session":
+            try:
+                return store.get(sid, request.state.credential.rate_key)
+            except session_store.Gone:
+                raise apiv1.V1Error(404, "session_gone", "this session has ended; open a new "
+                                    "one") from None
+
+        def expires_at(s) -> str:
+            return (datetime.now(timezone.utc) + timedelta(seconds=store.expires_in(s))
+                    ).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+        def entered_context(s, photos) -> tuple["Context", dict]:
+            e = s.entered
+            return fill_context(Context(e.get("latitude"), e.get("longitude"),
+                                        e.get("observed_on")), [p.found for p in photos])
+
+        def rescore(s, cred, timer, image=None, ref=None, found=(None, None, None)) -> dict | None:
+            """The session's combined answer, from its stored vectors plus the new photo
+            (embedded here, once), through the queue. Keeps the new photo only once it has
+            scored. Re-judges stored photos when the gate changed. None with no photos."""
+            if image is None and not s.photos:
+                return None
+            view = permission_view()
+            ident = v1_index(s.backbone, s.method, view, timer)
+            gate = getattr(ident, "gate", None)
+            fingerprint = gate.fingerprint() if gate is not None else None
+            added: list = []
+
+            def embed():                                # the worker holds gpu_lock
+                if image is not None:
+                    model = backbone_model(s.backbone)
+                    prepare = getattr(model, "prepare", None) or (lambda im: im)
+                    vecs, base = ident.encode(model, [prepare(image)])
+                    vector = normalise(vecs)[0].astype(np.float32)
+                    verdict = gate.judge(base)[0] if gate is not None and base is not None else None
+                    added.append(session_store.Photo(
+                        ref=ref, vector=vector,
+                        base=None if base is None or base is vecs else np.asarray(base[0]),
+                        verdict=verdict, gate_fingerprint=fingerprint if verdict else None,
+                        found=found))
+                for p in s.photos:                      # judged by an older gate: again
+                    if gate is not None and p.gate_fingerprint != fingerprint:
+                        base = p.base if p.base is not None else (
+                            p.vector if ident.backbone == gate.base else None)
+                        if base is not None:
+                            p.verdict = gate.judge(np.asarray(base)[None])[0]
+                            p.gate_fingerprint = fingerprint
+                return np.stack([p.vector for p in [*s.photos, *added]])
+
+            def finish(vecs, sims):
+                photos = [*s.photos, *added]
+                verdicts = [p.verdict for p in photos]
+                context, _ = entered_context(s, photos)
+                return ident.identify_vectors(
+                    vecs, s.top_k, context=context, sims=sims,
+                    gate=verdicts if gate is not None and all(verdicts) else None,
+                    photo_lookup=photo_lookup, higher_ranks=True,
+                    may_show=lambda info: view.may_show(info.license_class, info.owner_user_id))
+            result = model_queue.run(workqueue.Job(
+                key=id(ident), photos=1 if image is not None else 0, embed=embed,
+                search=ident.nearest.photo_sims, finish=finish,
+                interactive=cred.interactive, timer=timer))
+            s.photos.extend(added)
+            _, used = entered_context(s, s.photos)
+            combined = v1_result(result, s.backbone, s.method, used, timer)
+            for i, p in enumerate(combined.get("per_photo") or []):
+                p["photo_ref"] = s.photos[p.get("photo", i)].ref
+            combined.pop("timing", None)
+            combined.pop("usage", None)
+            s.remember(combined)
+            return combined
+
+        def session_answer(s, timer, **extra) -> JSONResponse:
+            block = timer.block()
+            body = {**extra, "combined": s.combined, "photos_scored": len(s.photos),
+                    "context_used": entered_context(s, s.photos)[1], "timing": block,
+                    "usage": None,
+                    "session": {"session_id": s.id, "expires_at": expires_at(s)}}
+            return JSONResponse(body, headers={"Cache-Control": "no-store",
+                                               "Server-Timing": apiv1.Timer.header(block)})
+
+        def context_fields(payload: dict) -> dict:
+            out = {k: payload[k] for k in ("latitude", "longitude", "observed_on")
+                   if k in payload}
+            check_context(out.get("latitude"), out.get("longitude"), out.get("observed_on"))
+            return out
+
+        @app.post("/api/v1/sessions", status_code=201)
+        def v1_open_session(request: Request, payload: dict | None = Body(None)):
+            payload = payload or {}
+            if not isinstance(payload, dict):
+                raise apiv1.V1Error(400, "bad_request", "send a JSON object")
+            cred: apiv1.Credential = request.state.credential
+            entered = context_fields(payload)
+            client_ref = payload.get("client_ref")
+            if client_ref is not None and (not isinstance(client_ref, str)
+                                           or len(client_ref) > session_store.MAX_REF_LENGTH):
+                raise apiv1.V1Error(400, "bad_request", "client_ref is a string of at most "
+                                    f"{session_store.MAX_REF_LENGTH} characters")
+            top_k = payload.get("top_k", 5)
+            if not isinstance(top_k, int) or isinstance(top_k, bool) or not 1 <= top_k <= 10:
+                raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
+            backbone, method = v1_model(payload.get("model"))
+            try:
+                s = store.create(cred.rate_key, backbone=backbone, method=method, top_k=top_k,
+                                 entered=entered, client_ref=client_ref,
+                                 keep_photos=bool(payload.get("keep_photos")))
+            except session_store.Full:
+                raise apiv1.V1Error(503, "busy", "too many open sessions; try again shortly",
+                                    retry_after=60, estimated_wait_seconds=60) from None
+            body = {"session_id": s.id, "expires_at": expires_at(s),
+                    "ttl_seconds": int(store.idle_ttl), "max_photos": session_store.MAX_PHOTOS,
+                    "model": apiv1.public_model(model_card()),
+                    "context_used": entered_context(s, [])[1]}
+            return JSONResponse(body, status_code=201, headers={"Cache-Control": "no-store"})
+
+        @app.post("/api/v1/sessions/{sid}/photos")
+        def v1_session_photo(request: Request, sid: str, photo: UploadFile = File(...),
+                             photo_ref: str = Form(...)):
+            timer = apiv1.Timer()
+            cred: apiv1.Credential = request.state.credential
+            s = session_of(request, sid)
+            if not 1 <= len(photo_ref) <= session_store.MAX_REF_LENGTH:
+                raise apiv1.V1Error(400, "bad_request", "photo_ref is 1 to "
+                                    f"{session_store.MAX_REF_LENGTH} characters")
+            with s.lock:
+                index = s.index_of(photo_ref)
+                if index is not None:                   # a resend: the answer as it stands
+                    return session_answer(s, timer, photo=photo_entry(s, index))
+                if len(s.photos) >= session_store.MAX_PHOTOS:
+                    raise apiv1.V1Error(400, "too_many_photos", "a session holds at most "
+                                        f"{session_store.MAX_PHOTOS} photos")
+                take_photos(cred, 1)
+                try:
+                    store.make_room(64 * 1024)
+                except session_store.Full:
+                    raise apiv1.V1Error(503, "busy", "too many open sessions; try again "
+                                        "shortly", retry_after=60,
+                                        estimated_wait_seconds=60) from None
+                if not in_flight.enter():
+                    raise apiv1.V1Error(503, "busy", "busy identifying other photos",
+                                        retry_after=10, estimated_wait_seconds=10)
+                try:
+                    [(image, found)] = v1_photos([photo], timer)
+                    rescore(s, cred, timer, image=image, ref=photo_ref, found=found)
+                finally:
+                    in_flight.leave()
+                s.counted = True                        # quota: once, at its first photo
+                return session_answer(s, timer, photo=photo_entry(s, len(s.photos) - 1))
+
+        def photo_entry(s, index: int) -> dict | None:
+            per_photo = (s.combined or {}).get("per_photo") or []
+            entry = next((p for p in per_photo if p.get("photo") == index), None)
+            return {**entry, "index": index, "photo_ref": s.photos[index].ref} if entry else None
+
+        def rescore_now(request: Request, s) -> JSONResponse:
+            timer = apiv1.Timer()
+            cred: apiv1.Credential = request.state.credential
+            if s.photos:
+                take_photos(cred, 0)
+                rescore(s, cred, timer)
+            else:
+                s.remember(None)
+            return session_answer(s, timer)
+
+        @app.patch("/api/v1/sessions/{sid}")
+        def v1_session_context(request: Request, sid: str, payload: dict | None = Body(None)):
+            if not isinstance(payload, dict):
+                raise apiv1.V1Error(400, "bad_request", "send a JSON object")
+            s = session_of(request, sid)
+            with s.lock:
+                s.entered = {**s.entered, **context_fields(payload)}
+                s.entered = {k: v for k, v in s.entered.items() if v is not None}
+                check_context(s.entered.get("latitude"), s.entered.get("longitude"),
+                              s.entered.get("observed_on"))
+                return rescore_now(request, s)
+
+        @app.get("/api/v1/sessions/{sid}")
+        def v1_session_state(request: Request, sid: str):
+            s = session_of(request, sid)
+            return session_answer(s, apiv1.Timer())
+
+        @app.delete("/api/v1/sessions/{sid}/photos/{ref}")
+        def v1_session_drop_photo(request: Request, sid: str, ref: str):
+            s = session_of(request, sid)
+            with s.lock:
+                index = s.index_of(ref)
+                if index is None:
+                    raise apiv1.V1Error(404, "not_found", "no photo with that photo_ref in "
+                                        "this session")
+                del s.photos[index]
+                return rescore_now(request, s)
+
+        @app.delete("/api/v1/sessions/{sid}")
+        def v1_close_session(request: Request, sid: str):
+            try:
+                store.delete(sid, request.state.credential.rate_key)
+            except session_store.Gone:
+                raise apiv1.V1Error(404, "session_gone", "this session has ended") from None
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
 
     # GET /api/v1/taxon-counts (docs/api.md §7): DNA-validated reference records per name,
     # read from the index the default model serves. Built once per index version.

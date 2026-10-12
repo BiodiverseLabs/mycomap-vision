@@ -23,7 +23,7 @@ IDS = ("bioclip", "dinov", "siglip", "eva02", "convnext", "open_clip", "timm", "
        "nearest+", "species-mean", "nearest-mix", "linear+", "hybrid")
 
 
-def app(conn, tmp_path, api_v1=True, taxon_counts=True, signin=None):
+def app(conn, tmp_path, api_v1=True, taxon_counts=True, signin=None, sessions=True):
     store = seed_two_species(conn, tmp_path)
     root = tmp_path / "emb"
     todo = photos_to_embed(conn, "m1", "large", store.location, "local")
@@ -32,6 +32,7 @@ def app(conn, tmp_path, api_v1=True, taxon_counts=True, signin=None):
     return create_app(tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
                       limits=open_limits(), background=False, server_key=SERVER_KEY,
                       api_v1=api_v1, taxon_counts=taxon_counts, signin=signin,
+                      sessions=sessions,
                       app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE), introspect=FakeOrg(),
                       note=lambda s: None)
 
@@ -65,7 +66,7 @@ def test_every_route_the_server_answers_is_in_the_outline_and_marked_available(c
 
 
 def test_a_part_turned_off_is_listed_as_planned(conn, tmp_path):
-    a = app(conn, tmp_path, api_v1=False, taxon_counts=False)
+    a = app(conn, tmp_path, api_v1=False, taxon_counts=False, sessions=False)
     doc = TestClient(a).get("/api/docs/v1.json").json()
     assert {e["status"] for e in apidocs.endpoints(doc)} == {"planned"}
 
