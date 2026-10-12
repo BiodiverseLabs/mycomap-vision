@@ -213,10 +213,25 @@ def outline(enabled: dict[str, bool]) -> dict:
                  "notes": ["Cached for an hour; send `If-None-Match` with the last `ETag`."]},
                 {"type": "endpoint", "method": "GET", "path": "/models",
                  "status": status("models"), "summary": "The model answering now and its reference set.",
-                 "auth": "Vision token"},
+                 "auth": "Vision token",
+                 "response": _json({"models": [{"name": "MycoMap Vision", "version": "2026-10-06",
+                                                "default": True, "confident_at": 0.7,
+                                                "reference": {"records": 152915, "species": 9876,
+                                                              "photos": 593224}}],
+                                    "limits": {"max_photos": 10, "photos_per_minute": 20}}),
+                 "notes": ["Also its data snapshot, calibration date, the ranks answered, "
+                           "request limits and which parts of the API are on.",
+                           "There is one model; leave `model` out of your requests."]},
                 {"type": "endpoint", "method": "GET", "path": "/usage",
                  "status": status("usage"), "summary": "Your token's use and limit this month.",
-                 "auth": "Vision token"},
+                 "auth": "Vision token",
+                 "response": _json({"usage": {"plan": "member", "used": 12, "limit": 300,
+                                              "period": "2026-10",
+                                              "resets_at": "2026-11-01T00:00:00Z"},
+                                    "quotas": "enforce", "pool": "member",
+                                    "limit_source": "plan"}),
+                 "notes": ["Reading it is never counted. `pool` is `member` when the token "
+                           "shares its owner's month, `key` when it has its own limit."]},
             ]},
             {"id": "answer", "title": "The answer", "blocks": [
                 {"type": "table", "columns": ["Field", "What it is"], "rows": [

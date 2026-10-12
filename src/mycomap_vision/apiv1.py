@@ -428,6 +428,35 @@ def public_model(card: dict | None, calibration_id: str | None = None) -> dict:
             "calibrated_on": id_date((calibration_id or "")[:16] + "-")}
 
 
+ANSWER_RANKS = ("species", "genus", "family", "order", "class", "phylum")
+
+
+def models_doc(model: dict, reference: dict, limits: dict, features: dict) -> dict:
+    """GET /api/v1/models (docs/api.md §2): the one model answering, by its public name
+    (public_model: version, data, calibration date), the reference set it compares with,
+    what a request may send, and which parts of the API are on here. Never a backbone or
+    method id (Steve, 2026-10-11): callers leave `model` out of requests."""
+    return {"models": [{**model, "default": True,
+                        "reference": {k: reference.get(k) for k in ("records", "species",
+                                                                    "photos")},
+                        "ranks": list(ANSWER_RANKS),
+                        "confident_at": CONFIDENT_AT}],
+            "limits": limits,
+            "features": features}
+
+
+def usage_doc(cred: "Credential", usage: dict | None, mode: str) -> dict:
+    """GET /api/v1/usage (docs/api.md §6.4): this credential's use this month, the same
+    `usage` block every answer carries, and what kind of pool it counts against.
+    `usage` is None when quotas are off or the caller has no pool (mycomap.org's key)."""
+    pool = ("none" if cred.kind == "server"
+            else "key" if cred.kind == "key" and (cred.limit_source == "override"
+                                                  or not cred.subject)
+            else "member")
+    return {"usage": usage, "quotas": mode, "pool": pool,
+            "limit_source": cred.limit_source if cred.kind != "server" else None}
+
+
 def taxon_counts(rank_counts: dict, *, records: int, model: dict,
                  nightly_version: int | None, generated_at: datetime | None = None) -> dict:
     """GET /api/v1/taxon-counts (docs/api.md §7): DNA-validated reference records per

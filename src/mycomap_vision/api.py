@@ -1081,7 +1081,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # The API's public outline (apidocs.py): the Vision site's API page (Research > API) and the tab
     # on mycomap.org/api-docs both render it. Open to anyone, from any site.
     v1_parts = {"identify": v1_on, "sessions": sessions_on,
-                "by_observation": by_observation_on,
+                "by_observation": by_observation_on, "models": v1_on, "usage": v1_on,
                 "taxon_counts": bool(taxon_counts if taxon_counts is not None
                                      else config.setting("MV_TAXON_COUNTS") == "1")}
 
@@ -1095,7 +1095,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # with timing, confident/answer, and the caller's own short-window limit. The app's
     # observation sessions (§3.3) share its helpers.
     if v1_on or sessions_on:
-        photo_window = apiv1.PhotoWindow(int(_setting_number("MV_PHOTOS_PER_MINUTE") or 20))
+        photos_per_minute = int(_setting_number("MV_PHOTOS_PER_MINUTE") or 20)
+        photo_window = apiv1.PhotoWindow(photos_per_minute)
 
         def check_context(latitude, longitude, observed_on) -> None:
             """Place and date as the caller sent them, or 400 bad_request."""
@@ -1230,6 +1231,29 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
         if v1_on:
             app.post("/api/v1/identify")(v1_identify)
+
+            # GET /api/v1/models: the model answering now, by its public name only.
+            @app.get("/api/v1/models")
+            def v1_models(request: Request):
+                backbone, method = v1_model(None)
+                ident = v1_index(backbone, method, permission_view(), apiv1.Timer())
+                cal = (ident.calibration or {}).get("comparison_id")
+                doc = apiv1.models_doc(
+                    apiv1.public_model(model_card(), str(cal or "")),
+                    {"records": ident.records, "species": len(ident.index.species),
+                     "photos": ident.embedded},
+                    {"max_photos": MAX_PHOTOS, "max_file_mb": MAX_FILE_BYTES // 2**20,
+                     "max_request_mb": MAX_REQUEST_BYTES // 2**20, "top_k_max": 10,
+                     "photos_per_minute": photos_per_minute},
+                    {k: bool(v) for k, v in v1_parts.items()})
+                return JSONResponse(doc, headers={"Cache-Control": "private, max-age=300"})
+
+            # GET /api/v1/usage: this credential's use this month. Reading it costs nothing.
+            @app.get("/api/v1/usage")
+            def v1_usage(request: Request):
+                cred: apiv1.Credential = request.state.credential
+                return JSONResponse(apiv1.usage_doc(cred, quotas.usage(cred), quotas.mode),
+                                    headers={"Cache-Control": "no-store"})
 
         # POST /api/v1/identify/{inat|mo}/{number} (docs/api.md §3.2): an observation's own
         # photos, place and date, read politely from iNat or MO (byobservation.py) and kept
