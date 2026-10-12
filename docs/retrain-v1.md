@@ -220,7 +220,11 @@ swapped. Before it is switched on for v1: a dark run on the box with it on acros
 nightly update, reading the service cgroup's `memory.current`, `memory.stat` (anon vs file)
 and `memory.events` (high, oom) before, during the index swap and after, first on the current
 release, then on v1's int8 release before it serves. If v1's peak nears the 3.5 GB cap, it
-stays off for v1 (one setting), or `MV_SEARCH_REFINE` is lowered.
+stays off for v1 (one setting), or `MV_SEARCH_REFINE` is lowered. **Measured 2026-10-12 on the box:** on since
+04:31 UTC with today's release, through a full nightly index swap: anon peak 1.81 GB, memory
+events high/max/oom 0, search 1.61 → 0.061 s (1 photo), identical answers. The packed copy
+costs ~800 bytes a reference row; v1's ~660k rows (+~12%) stay under the 25% re-measure line,
+so it stays on for v1, and the same watch reruns on v1's first nightly as a check.
 
 ## 6. Re-running every earlier experiment on v1
 
