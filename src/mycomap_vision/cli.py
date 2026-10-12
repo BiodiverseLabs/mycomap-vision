@@ -286,6 +286,20 @@ def cmd_int8_check(conn, args) -> None:
     print(json.dumps(r, indent=2) if args.json else quantize.format_check(r))
 
 
+def cmd_export_onnx(conn, args) -> None:
+    """The served model's image tower as ONNX, for MV_EMBED_ONNX (onnxtower.py)."""
+    from pathlib import Path
+
+    from . import models, onnxtower
+    from .finetune import models_dir
+    name = models.storage_name(args.backbone)
+    out = Path(args.out) if args.out else models_dir()
+    backbone = models.load_backbone(args.backbone)
+    meta = onnxtower.export(backbone, name, out, onnxtower.source_weights_of(name, models_dir()),
+                            precision=args.precision)
+    print(json.dumps(meta, indent=2))
+
+
 def cmd_standard_summary(conn, args) -> None:
     """Steve's standard tables for a saved comparison (standard_report.py)."""
     from . import standard_report
@@ -1378,6 +1392,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--request", required=True)
     p.add_argument("--bucket", required=True)
 
+    p = sub.add_parser("export-onnx", help="write models/<backbone>.onnx (+ .onnx.json): the "
+                                           "image tower as ONNX, checked against torch "
+                                           "(MV_EMBED_ONNX on the server)")
+    p.add_argument("--backbone", required=True)
+    p.add_argument("--out", default=None, help="folder (default: data/models)")
+    p.add_argument("--precision", choices=("fp32", "int8"), default="fp32",
+                   help="fp32 (default: torch's vectors exactly, ~2x faster on CPU) or int8 "
+                        "(refused unless it matches torch to cosine 0.99)")
     p = sub.add_parser("int8-check", help="score a release's val records with float16 and "
                                           "int8 reference vectors (box memory option)")
     p.add_argument("--backbone", required=True)
@@ -1854,6 +1876,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-train-job": cmd_aws_train_job,
         "standard-summary": cmd_standard_summary,
         "int8-check": cmd_int8_check,
+        "export-onnx": cmd_export_onnx,
         "aws-launch-dataset-build": cmd_aws_launch_dataset_build,
         "manifest-freeze": cmd_manifest_freeze,
         "model-sanity": cmd_model_sanity,
