@@ -1293,7 +1293,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if len(s.photos) >= session_store.MAX_PHOTOS:
                     raise apiv1.V1Error(400, "too_many_photos", "a session holds at most "
                                         f"{session_store.MAX_PHOTOS} photos")
-                if not s.counted:                       # an identification: the first photo
+                # An identification at the first photo, unless the same find was counted
+                # in the last day (a session re-opened after a restart or expiry).
+                reopened = not s.counted and quotas.counted_before(cred, s.client_ref)
+                if not s.counted and not reopened:
                     quotas.check(cred)
                 take_photos(cred, 1)
                 try:
@@ -1310,7 +1313,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     rescore(s, cred, timer, image=image, ref=photo_ref, found=found)
                 finally:
                     in_flight.leave()
-                quotas.count(cred, 0 if s.counted else 1, 1)   # once, at its first photo
+                first = not s.counted and not reopened
+                quotas.count(cred, 1 if first else 0, 1)       # once, at its first photo
+                if first:
+                    quotas.remember_counted(cred, s.client_ref)
                 s.counted = True
                 return session_answer(s, timer, cred, photo=photo_entry(s, len(s.photos) - 1))
 

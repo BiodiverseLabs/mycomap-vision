@@ -231,3 +231,48 @@ def test_app_and_key_limits_read_null_as_unlimited_and_absence_as_none():
     assert apiv1.limit_of({"limit": 300}) == {"monthly": 300}
     assert apiv1.limit_of({"limit": {"monthly": None, "period": "2026-10"}})["monthly"] is None
     assert apiv1.limit_of({"limit": {"monthly": "lots"}})["monthly"] == 0      # fails closed
+
+
+# --- a find re-opened within a day is free (Steve, 2026-10-12) --------------------------
+
+def test_a_find_counted_in_the_last_day_is_free_and_later_counts_again(tmp_path):
+    qs, clock = quotas(tmp_path)
+    member_cred = cred(limit={"monthly": 5})
+    assert not qs.counted_before(member_cred, "obs-1")
+    qs.remember_counted(member_cred, "obs-1")
+    clock[0] += 23 * 3600
+    assert qs.counted_before(member_cred, "obs-1")
+    assert not qs.counted_before(member_cred, "obs-2")                 # another find
+    assert not qs.counted_before(cred(subject="u_member0009"), "obs-1")  # another member
+    assert not qs.counted_before(member_cred, None)                    # no find id: counts
+    clock[0] += 2 * 3600                                               # 25 h after
+    assert not qs.counted_before(member_cred, "obs-1")
+    # The member's own keys share the pool, so the same find is free through them too.
+    assert qs.counted_before(cred("key", key_id="42"), "obs-1") is False
+    qs.remember_counted(member_cred, "obs-1")
+    assert qs.counted_before(cred("key", key_id="42"), "obs-1")
+
+
+def test_a_reopened_session_for_the_same_find_is_not_counted_again(conn, tmp_path):
+    client = app(conn, tmp_path)
+    headers = member(limit=1)
+
+    def session(client_ref):
+        return client.post("/api/v1/sessions", json={"client_ref": client_ref},
+                           headers=headers).json()["session_id"]
+
+    def add(sid, red, ref):
+        return client.post(f"/api/v1/sessions/{sid}/photos", headers=headers,
+                           files={"photo": ("p.png", png(red), "image/png")},
+                           data={"photo_ref": ref})
+    first = add(session("obs-1"), 247, "p1")
+    assert first.status_code == 200 and first.json()["usage"]["used"] == 1
+    # The session is lost (restart, idle expiry); the app re-opens it for the same find
+    # and resends: free, even though the month's one identification is used.
+    again = add(session("obs-1"), 247, "p1")
+    assert again.status_code == 200 and again.json()["usage"]["used"] == 1
+    # A new find is a new identification: refused at the limit.
+    res = add(session("obs-2"), 245, "p1")
+    assert res.status_code == 429 and res.json()["code"] == "quota_exceeded"
+    # A session without a find id always counts.
+    assert add(session(None), 245, "p1").status_code == 429

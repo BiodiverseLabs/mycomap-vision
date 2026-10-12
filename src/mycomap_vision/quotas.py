@@ -5,7 +5,10 @@ Steve, 2026-10-11:
 - the unit is one **identification**: a /identify call, or a session counted once, at its
   first photo (extra photos never cost more; they're counted as photos for capacity);
 - one pool per member: the app and the member's developer tokens all count against the
-  member's opaque `subject`; a token with its own admin override counts alone.
+  member's opaque `subject`; a token with its own admin override counts alone;
+- a session re-opened for the same find (same pool, same `client_ref`) within 24 hours of
+  the one that was counted is free: the app re-opens one after a restart, the 30-minute
+  idle end or the 2-hour cap (Steve, 2026-10-12). Its photos still count as photos.
 
 Counts are running totals per calendar month (UTC), kept in SQLite on the box so a restart
 loses nothing. A refusal is never counted as use. Modes (MV_QUOTAS): `off` (nothing
@@ -31,6 +34,7 @@ from .apiv1 import Credential, V1Error
 
 MODES = ("off", "count", "enforce")
 DEFAULT_MONTHLY = 100              # a credential that names no limit: the free plan's
+REOPEN_FREE_SECONDS = 86400        # a find re-opened within a day isn't counted again
 SCHEMA = """
 create table if not exists usage (
   period          text not null,       -- YYYY-MM, UTC
@@ -41,6 +45,13 @@ create table if not exists usage (
   refused         text not null default '{}',   -- {code: n}
   last_used_at    text,
   primary key (period, kind, ref)
+);
+create table if not exists counted_finds (
+  kind            text not null,
+  ref             text not null,
+  client_ref      text not null,       -- the app's id for the find (its observation)
+  counted_at      real not null,       -- when its session was counted (unix seconds)
+  primary key (kind, ref, client_ref)
 );
 """
 
@@ -146,6 +157,32 @@ class Quotas:
                            "identifications + excluded.identifications, photos = photos + "
                            "excluded.photos, last_used_at = excluded.last_used_at",
                            (period, kind, ref, identifications, photos, at))
+
+    def counted_before(self, cred: Credential, client_ref: str | None) -> bool:
+        """Whether a session for this find was counted in the last REOPEN_FREE_SECONDS, so
+        a re-opened one is free."""
+        rows = rows_for(cred)
+        if not self.on or not rows or not client_ref:
+            return False
+        kind, ref = rows[0]
+        with self._lock, self._db() as db:
+            row = db.execute("select counted_at from counted_finds where kind = ? and ref = ? "
+                             "and client_ref = ?", (kind, ref, client_ref)).fetchone()
+        return bool(row) and self.clock() - row[0] < REOPEN_FREE_SECONDS
+
+    def remember_counted(self, cred: Credential, client_ref: str | None) -> None:
+        rows = rows_for(cred)
+        if not self.on or not rows or not client_ref:
+            return
+        kind, ref = rows[0]
+        with self._lock, self._db() as db:
+            db.execute("insert into counted_finds (kind, ref, client_ref, counted_at) "
+                       "values (?, ?, ?, ?) on conflict (kind, ref, client_ref) do update "
+                       "set counted_at = excluded.counted_at",
+                       (kind, ref, client_ref, self.clock()))
+            # Forget finds counted long ago (the table stays small).
+            db.execute("delete from counted_finds where counted_at < ?",
+                       (self.clock() - 7 * REOPEN_FREE_SECONDS,))
 
     def refused(self, cred: Credential, code: str) -> None:
         rows = rows_for(cred)
