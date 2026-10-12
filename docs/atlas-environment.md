@@ -404,7 +404,42 @@ trains on Vision output. What it gets back is methods, summary numbers per map, 
 | 1 | **A forward-looking test of the maps.** Do strong maps predict where *newly* validated DNA records turn up? It tests the strong / weak grading on real finds, not virtual species | `R_train` + records validated after the val cutoff | Vision hands over, per strong map, the Boyce index and the share in cells ranked ≥ 50 on later records (no record ids); Atlas reports it as field validation of the null-test grades |
 | 2 | **The 500 km area measured, not assumed** | the projection test (fix 5) | if projected suitability predicts real records beyond 500 km inside the area of applicability, the area could widen; if not, Atlas has evidence never to show out-of-area suitability |
 | 3 | **Survey guidance ("where to look next")** | continent-wide projection + area of applicability | suitable, unsampled, trusted cells beyond the known range = range-extension targets; the parked survey-guidance item gets its core input |
-| 4 | **A forward-looking skill number every release** | the validation-date filter + private run mode | "maps fitted to records up to date X predicted Y% of later finds", published per release; a headline result for an Atlas paper |
+| 4 | **A standing new-find tracker** (Steve, 2026-10-12: "tracking of new finds into atlas and how they score based on the previous model") | the validation-date filter + archived releases | every newly validated record scored against the *previous* release; see "New-find tracker" below |
 | 5 | **Uncertainty as data in the API** | trust-signals export (item 6) | map strength, per-cell model spread and applicability thresholds as data for the mobile app, .org conservation and outside users (today the disagreement layer is only a picture) |
 | 6 | **A pilot for sparse taxa** | Vision's environment head + coordinates control (P4 vs P6) | answers whether a multi-species model (Atlas's SINR / FS-SINR idea for 3–19-site taxa) learns habitat or location, before Atlas builds one in R |
 | 7 | **Map value beyond sampling effort** | depth-matched reporting (fix 4) | whether strong maps add information beyond how well-sampled a species is, the same confound Atlas faces |
+
+### New-find tracker (proposal for the Atlas side)
+
+A standing, forward-looking test of Atlas: each new DNA-validated record is scored against the
+maps that existed **before** it was validated. Atlas's own data only (.org records), so no
+Vision involvement is needed once built.
+
+- **When:** at each pull (nightly, once the timer is back on after the rebuild), for records
+  whose first green date is after the previous release's pull date.
+- **What each new find gets,** from the previous release, which is kept in the store:
+  - its taxon's grade there (strong, weak, failed, untested, or no map);
+  - the cell's rank, inside or outside the accessible area, and the area of applicability;
+  - whether it is a **new 5 km survey site**. Sites are counted, not records, so one
+    observer's repeat visits don't count many times.
+- **Release metrics:**
+  - per grade: the share of new sites in cells ranked ≥ 50 (chance = 50%), the continuous
+    Boyce index, and the share falling outside the accessible area;
+  - split by distance from the taxon's known sites (< 100 / 100–500 / 500+ km).
+  - Published as a "how the last maps did" line per release: the honest trust measure, in
+    the field.
+- **Per-taxon tally** on the taxon page: new sites since the map was made, and how many fell
+  in its top half.
+- **Flags for validators:**
+  - a new find in a low-ranked cell inside the area: worth a second look (possible misID or
+    a real habitat surprise);
+  - a find outside the accessible area: a possible range extension, the records Steve
+    values most.
+- **Cost:** lookups only, no fitting; seconds per pull.
+- **Needs:**
+  - the first-green-date column in the pull (Atlas ask item 1, already requested);
+  - releases kept, not overwritten (the store keeps them);
+  - the date-filter run mode for a clean "fitted before" baseline when a release is
+    rebuilt mid-stream.
+- **Owner:** the Atlas lanes (method: metrics; operations: page and API). Vision consumes the
+  per-grade numbers only for its paper, as summaries.
