@@ -172,8 +172,12 @@ vectors a week).
 Options for Steve, cheapest first:
 1. **8 GB box** (Lightsail plan change, roughly +$20 a month): the working set fits with room
    for the gate and API sessions. Recommended once v1 is adopted.
-2. **int8 reference vectors** (code change + a check on v1's `val` that accuracy is unchanged):
-   vectors ~970 → ~490 MB, working set ~3.1 GB, under the cap.
+2. **int8 reference vectors** (serving code still to build): vectors ~970 → ~490 MB, working
+   set ~3.1 GB, under the cap. The accuracy check is ready:
+   `mv int8-check --release v1 --backbone bioclip-2-ft-<run> --methods nearest,nearest+mean`
+   scores v1's `val` with float16 and int8 reference vectors (queries stay float, as on the
+   box). Pre-declared: "no loss" when `nearest+mean` species top-1 moves by less than 0.3
+   points and the paired sign test is not significant (p ≥ 0.05).
 3. **Serve fewer methods** (drop `nearest` from `MV_METHODS`): saves little (<0.1 GB); a stopgap.
 Decide after the sanity gate, with the model's measured CPU timings.
 
