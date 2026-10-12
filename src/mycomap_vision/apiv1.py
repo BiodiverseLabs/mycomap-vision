@@ -356,8 +356,59 @@ class Timer:
 
 
 # What the product calls its model (Steve, 2026-10-11): never the backbone underneath.
-# Backbone and method ids stay internal (logs, /api/health, the website's own pages).
+# Backbone and method ids stay internal (logs, the full /api/health, the website's own pages).
 PUBLIC_MODEL_NAME = "MycoMap Vision"
+INTERNAL_MARKERS = ("bioclip", "-ft-")      # what no public health string may contain
+
+
+def public_health(full: dict, served: str | None, backbones) -> dict:
+    """/api/health as anyone may read it: the same figures, with every backbone id (and a
+    method after it, "backbone/method") replaced by a public label, and no error or reason
+    text (which can name files, hosts or models). `served` is the backbone answering
+    identifications ("MycoMap Vision"); any other in `backbones` is "model 2", "model 3",
+    ... in name order. Keys keep their order, so deploy.sh's read of
+    `"preload":{"state":` still works, and the nightly block keeps every field
+    nightly_notes reads. Anything left that still looks like an id (INTERNAL_MARKERS)
+    reads "internal"."""
+    others = sorted({b for b in backbones if b} - {served})
+    labels = {**({served: PUBLIC_MODEL_NAME} if served else {}),
+              **{b: f"model {i}" for i, b in enumerate(others, 2)}}
+    ids = sorted(labels, key=len, reverse=True)
+    pattern = (re.compile("|".join(re.escape(b) + r"(?:/[A-Za-z0-9+._-]+)?" for b in ids))
+               if ids else None)
+
+    def text(s: str) -> str:
+        s = pattern.sub(lambda m: labels[m.group(0).split("/", 1)[0]], s) if pattern else s
+        return "internal" if any(m in s.lower() for m in INTERNAL_MARKERS) else s
+
+    def scrub(v):
+        if isinstance(v, dict):
+            out: dict = {}
+            for k, x in v.items():
+                key = base = text(k) if isinstance(k, str) else k
+                n = 2
+                while key in out:                   # two methods of one model: keep both
+                    key, n = f"{base} ({n})", n + 1
+                out[key] = scrub(x)
+            return out
+        if isinstance(v, list):
+            return [scrub(x) for x in v]
+        return text(v) if isinstance(v, str) else v
+
+    body = json.loads(json.dumps(full, default=str))
+    preload = body.get("preload")
+    if isinstance(preload, dict) and preload.get("error"):
+        preload["error"] = "failed to load; see the server log"
+    search = body.get("search")
+    if isinstance(search, dict) and search.get("last_error"):
+        search["last_error"] = "see the server log"
+    for state in (body.get("embed") or {}).values():
+        if isinstance(state, dict):
+            state.pop("reason", None)
+    gate = body.get("fungus_gate")
+    if isinstance(gate, dict):
+        gate.pop("base", None)
+    return scrub(body)
 
 
 def id_date(stamped: str | None) -> str | None:

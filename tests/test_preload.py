@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from test_api import open_limits, post_photos
 from test_models_and_scoreboard import Const, seed_two_species
 
+from test_public_health import HEALTH_KEY, full_health
 from mycomap_vision.api import create_app, preload_specs
 from mycomap_vision.embed import embed_photos, photos_to_embed
 
@@ -28,14 +29,14 @@ def app(conn, tmp_path, preload):
     loader = CountingLoader()
     client = TestClient(create_app(tmp_path / "manifest.sqlite", root, backbone_loader=loader,
                                    limits=open_limits(), background=False, preload=preload,
-                                   note=lambda s: None))
+                                   note=lambda s: None, server_key=HEALTH_KEY))
     return client, loader
 
 
 def settled(client, timeout=20.0) -> dict:
     end = time.monotonic() + timeout
     while True:
-        state = client.get("/api/health").json()["preload"]
+        state = full_health(client)["preload"]
         if state["state"] not in ("loading",) or time.monotonic() > end:
             return state
         time.sleep(0.05)
@@ -54,7 +55,7 @@ def test_the_default_model_is_loaded_at_startup_and_reused_by_identifications(co
 
 def test_nothing_is_loaded_at_startup_unless_asked(conn, tmp_path):
     client, loader = app(conn, tmp_path, [])
-    assert client.get("/api/health").json()["preload"]["state"] == "off"
+    assert full_health(client)["preload"]["state"] == "off"
     assert loader.loaded == []
     assert post_photos(client, [247], "m1/nearest").status_code == 200
     assert loader.loaded == ["m1"]                       # on demand, as before

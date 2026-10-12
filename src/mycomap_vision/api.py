@@ -606,9 +606,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     if background:
         threading.Thread(target=model_card, name="model card", daemon=True).start()
 
+    # /api/health is public: model ids only with mycomap.org's server key (apiv1.public_health).
+    # Which backbone answers is read from the database at most once a minute.
+    served_cache: dict = {"at": -1e9, "served": None, "ready": []}
+
+    def served_backbones() -> tuple[str | None, list[str]]:
+        now = time.monotonic()
+        if now - served_cache["at"] > 60:
+            ready = ready_backbones()
+            served_cache.update(at=now, ready=ready, served=ready[0] if ready else None)
+        return served_cache["served"], served_cache["ready"]
+
     @app.get("/api/health")
-    def health():
-        return {"ok": True, "code_version": config.code_version(),
+    def health(request: Request):
+        full = {"ok": True, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
@@ -620,6 +631,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                              if getattr(app.state, "sessions", None) else None),
                 "fungus_gate": fungus_gate.summary() if fungus_gate else None,
                 "vectors": vector_storage()}
+        given = request.headers.get("authorization", "")
+        if org_secret and secrets.compare_digest(given.encode(),
+                                                 f"Bearer {org_secret}".encode()):
+            return full
+        served, ready = served_backbones()
+        known = {*limits.allowed_backbones, *ready, *(full["nightly"].get("layer") or {}),
+                 *full["embed"], *(m.split("/", 1)[0] for m in warm.models),
+                 *(k.split("/", 1)[0] for k in full["vectors"]),
+                 *([fungus_gate.base] if fungus_gate else [])}
+        return apiv1.public_health(full, served, known)
 
     def vector_storage() -> dict:
         """Per served index (backbone/method): reference vectors held as int8 and float."""

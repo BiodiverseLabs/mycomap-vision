@@ -11,6 +11,7 @@ from test_api import open_limits
 from test_models_and_scoreboard import Const
 from test_nightly import EST, RID, FakeOutside, QUIET, box, night, row, seed_rows  # noqa: F401
 
+from test_public_health import HEALTH_KEY, full_health
 from mycomap_vision import config, manifest, nightly, nightly_notes
 from mycomap_vision.api import create_app
 
@@ -22,8 +23,8 @@ def health_of(box, layer, **kw):
         layer.manifest if layer else box / "releases" / RID / "manifest.sqlite",
         box / "releases" / RID / "embeddings", backbone_loader=lambda name: Const(name),
         limits=open_limits(), background=False, layer=layer, note=lambda s: None,
-        nightly_settings=nightly.Settings(), **kw))
-    return client.get("/api/health").json()["nightly"]
+        nightly_settings=nightly.Settings(), server_key=HEALTH_KEY, **kw))
+    return full_health(client)["nightly"]
 
 
 def test_health_says_the_nightly_update_is_off_without_a_layer(box):

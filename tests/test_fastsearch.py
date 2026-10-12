@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from test_api import open_limits, post_photos
 from test_models_and_scoreboard import Const, seed_two_species
 
+from test_public_health import HEALTH_KEY, full_health
 from mycomap_vision import fastsearch
 from mycomap_vision.api import create_app
 from mycomap_vision.embed import embed_photos, photos_to_embed
@@ -95,7 +96,8 @@ def seeded(conn, tmp_path):
 def server(tmp_path, root):
     return TestClient(create_app(tmp_path / "manifest.sqlite", root,
                                  backbone_loader=lambda n: Const(n), limits=open_limits(),
-                                 background=False, fungus_gate=None, note=lambda s: None))
+                                 background=False, fungus_gate=None, note=lambda s: None,
+                                 server_key=HEALTH_KEY))
 
 
 def app(conn, tmp_path):
@@ -110,7 +112,7 @@ def test_identify_answers_the_same_with_the_int8_search(conn, tmp_path, monkeypa
     fast = post_photos(client, [247, 12], "m1/nearest").json()
     for key in ("ranks", "specimens", "per_photo"):
         assert fast["results"][0][key] == plain["results"][0][key], key
-    assert client.get("/api/health").json()["search"]["mode"] in ("fbgemm", "x86", "onednn")
+    assert full_health(client)["search"]["mode"] in ("fbgemm", "x86", "onednn")
 
 
 def test_without_the_engine_the_mapped_search_keeps_answering(conn, tmp_path, monkeypatch):
@@ -120,7 +122,7 @@ def test_without_the_engine_the_mapped_search_keeps_answering(conn, tmp_path, mo
     monkeypatch.setattr(fastsearch, "SLOT", fastsearch.Slot())
     client = app(conn, tmp_path)
     assert post_photos(client, [247], "m1/nearest").status_code == 200
-    search = client.get("/api/health").json()["search"]
+    search = full_health(client)["search"]
     assert search["mode"] == "float" and "no engine" in search["last_error"]
 
 

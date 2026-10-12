@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from test_serving import big_reference
 
+from test_public_health import HEALTH_KEY, full_health
 from mycomap_vision import quantize, release
 from mycomap_vision.embed import load_embeddings
 from mycomap_vision.identify import Identifier
@@ -108,10 +109,11 @@ def test_served_indexes_list_what_they_serve():
     assert s.served() == {("big", "nearest"): "index ('big', 'nearest')"}
 
 
-def test_health_says_how_each_served_index_holds_its_vectors(conn, tmp_path):
+def test_health_says_how_each_served_index_holds_its_vectors(conn, tmp_path, monkeypatch):
     from test_api import app_with_model, post_photos
+    monkeypatch.setenv("MV_ORG_VISION_KEY", HEALTH_KEY)
     client = app_with_model(conn, tmp_path)
-    assert client.get("/api/health").json()["vectors"] == {}        # nothing built yet
+    assert full_health(client)["vectors"] == {}        # nothing built yet
     assert post_photos(client, [247], "m1/nearest").status_code == 200
-    vectors = client.get("/api/health").json()["vectors"]
+    vectors = full_health(client)["vectors"]
     assert vectors == {"m1/nearest": {"int8_rows": 0, "float_rows": 8}}
