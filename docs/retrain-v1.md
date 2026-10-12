@@ -208,8 +208,8 @@ stays off for v1 (one setting), or `MV_SEARCH_REFINE` is lowered.
 
 ## 6. Re-running every earlier experiment on v1
 
-Each re-run ships one command taking `--release v1` and a registry entry
-`reproduced-on-v1`. A decision stands if its re-run agrees within its interval; otherwise it is
+Each re-run ships one command taking `--release v1` (code in this repo) and a registry entry
+`reproduced-on-v1` in the private research checkout (`config.RESEARCH_DIR`, never this repo). A decision stands if its re-run agrees within its interval; otherwise it is
 revisited and the entry says so. Order (PLAN §3: what defines the benchmarks first). Owners
 are suggestions for the coordinator; times are the laptop's unless marked AWS.
 
