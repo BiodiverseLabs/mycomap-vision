@@ -426,6 +426,14 @@ or `{"active": false, "reason": "unknown|pending|disabled|revoked|account_inacti
 - **Unit: one identification** = one `identify` call, one by-observation call, or one
   session (counted at its first photo; ≤ 10 photos). Counting per photo would punish
   adding more photos, which gives better answers (Steve).
+  A session re-opened for the **same find** (same member pool, same `client_ref`) within
+  24 hours of the counted one is free: not counted and not refused at the limit. The app
+  re-opens one after a restart, the 30-minute idle end or the 2-hour cap (Steve,
+  2026-10-12). Its photos still count as photos. Without a `client_ref`, every session
+  counts.
+  Modes (`MV_QUOTAS`): `off`; `count` (counted, shown in `usage`, reported, never refused);
+  `enforce`. A credential with no limit gets `MV_QUOTA_DEFAULT_MONTHLY` (100); `null` is
+  unlimited. Built on Vision branch feat/api-v1-quotas.
   The CPU cost is per photo, so Vision also keeps a short per-credential window in
   **photos per minute** (`MV_PHOTOS_PER_MINUTE`, default 20) and a global daily ceiling
   for developer tokens (`MV_API_DAILY_PHOTOS`), so API use can't eat the capacity the
