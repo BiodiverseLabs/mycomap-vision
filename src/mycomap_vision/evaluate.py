@@ -41,6 +41,9 @@ RANKS = ("family", "genus", "species")
 STANDARD_K = (1, 3, 5, 10)
 STANDARD_DEPTH = [(0, 0, "0"), (1, 4, "1-4"), (5, 19, "5-19"), (20, 99, "20-99"),
                   (100, 10**9, "100+")]
+# The standard table's rows beyond strict (name_equiv, beta): each looser level counts every
+# stricter hit too.
+EQUIV_LEVELS = {"species": ("strict", "sl", "complex"), "genus": ("strict", "sl")}
 
 
 @dataclass
@@ -374,6 +377,9 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     # compact row (its top scores, normalisers and true position; not its full row).
     kept = {rank: [] for rank in RANKS}
     equiv = {"species": Counter(), "genus": Counter()}
+    # The standard table's s.l. and complex rows at top 1/3/5/10: a level is hit at k when
+    # any of the top k answers matches the truth at that level (or more strictly).
+    equiv_k = {"species": Counter(), "genus": Counter()}
     # Weekly batches are lumpy (one big project, one prolific observer), so results
     # are also kept per project and per observer at genus and species.
     groups = {"project": defaultdict(Counter), "observer": defaultdict(Counter)}
@@ -399,11 +405,24 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 kept[rank].append(likely.compact(rs, position[rank].get(t), T_GRID, lse=lse))
             top = top_labels(rs, names[rank], deepest)
             if name_scores and rank in ("species", "genus") and top:
-                eq = (name_equiv.species_match if rank == "species"
-                      else name_equiv.genus_match)(top[0], t)
+                match = (name_equiv.species_match if rank == "species"
+                         else name_equiv.genus_match)
+                eq = match(top[0], t)
                 equiv[rank]["n"] += 1
                 for k, v in eq.items():
                     equiv[rank][k] += v
+                levels = EQUIV_LEVELS[rank]
+                first = {lv: None for lv in levels}       # best position hit at each level
+                for i, answer in enumerate(top[:max(STANDARD_K)]):
+                    m = match(answer, t)
+                    m["strict"] = answer == t             # the table's strict row is exact
+                    for j, lv in enumerate(levels):
+                        if first[lv] is None and any(m[x] for x in levels[:j + 1]):
+                            first[lv] = i
+                equiv_k[rank]["n"] += 1
+                for lv, pos in first.items():
+                    for k in STANDARD_K:
+                        equiv_k[rank][f"{lv}_top{k}"] += pos is not None and pos < k
             for key in ("all", b):
                 c = tally[rank][key]
                 c["n"] += 1
@@ -444,6 +463,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                                       for k in (("strict", "sl", "complex") if rank == "species"
                                                 else ("strict", "sl"))}}
                for rank, c in equiv.items()}}
+        out["standard_equivalence"] = {
+            "beta": True, "k": list(STANDARD_K),
+            **{rank: {"n": c["n"], **{lv: {f"top{k}": round(c[f"{lv}_top{k}"] / c["n"], 4)
+                                           if c["n"] else None for k in STANDARD_K}
+                                      for lv in EQUIV_LEVELS[rank]}}
+               for rank, c in equiv_k.items()}}
     out["macro_f1"] = {"species": _round(metrics.macro_f1(*zip(*predicted)) if predicted
                                          else None), "n": len(predicted)}
     if per_image:

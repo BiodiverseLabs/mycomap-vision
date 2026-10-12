@@ -237,6 +237,40 @@ def cmd_aws_train_job(conn, args) -> None:
         print_scoreboard(evaluate.scoreboard(conn, out["comparison_id"]))
 
 
+def cmd_standard_summary(conn, args) -> None:
+    """Steve's standard tables for a saved comparison (standard_report.py)."""
+    from . import standard_report
+    s = standard_report.summary(conn, args.comparison)
+    print(json.dumps(s, indent=2) if args.json else standard_report.format_summary(s))
+
+
+def cmd_model_sanity(conn, args) -> None:
+    """The pre-declared sanity gate before a new model is served (sanity.py)."""
+    import io
+
+    from PIL import Image
+
+    from . import sanity
+    rel = _dataset_release(args)
+    if rel is None:
+        raise SystemExit("--release: the dataset release the model was trained on")
+    r = sanity.run(conn, args.backbone, rel, args.comparison, method=args.method)
+    if args.cpu_photos:
+        store = open_store(args.source, config.DATA_DIR)
+        val = set(rel.photo_ids(splits=("val",)))
+        paths = conn.execute("select photo_id, path from photo_copies where store = ? and "
+                             "size = 'large' order by photo_id", (store.location,)).fetchall()
+        picked = [p for pid, p in paths if pid in val][:args.cpu_photos]
+        images = [Image.open(io.BytesIO(store.get(p))).convert("RGB") for p in picked]
+        r["checks"].append(sanity.cpu_check(conn, args.backbone, rel, images, args.method))
+        r["passed"] = all(c["ok"] for c in r["checks"])
+    print(sanity.format_result(r))
+    if args.json:
+        print(json.dumps(r, indent=2))
+    if not r["passed"]:
+        raise SystemExit(1)
+
+
 def cmd_aws_pull_trainer(conn, args) -> None:
     from . import aws, evaluate
     out = aws.pull_trainer(conn, args.run)
@@ -1247,6 +1281,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--loader-only", action="store_true")
     p.add_argument("--gpu-only", action="store_true")
 
+    p = sub.add_parser("standard-summary", help="Steve's standard tables (top 1/3/5/10, s.l., "
+                                                "depth bands) for a saved comparison")
+    p.add_argument("--comparison", required=True)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("model-sanity", help="the pre-declared sanity gate for a new model on "
+                                            "its dataset release (docs/retrain-v1.md)")
+    p.add_argument("--backbone", required=True, help="the fine-tuned model, e.g. "
+                                                     "bioclip-2-ft-<run>")
+    p.add_argument("--comparison", required=True, help="its comparison on the release")
+    p.add_argument("--method", default="nearest+mean")
+    p.add_argument("--cpu-photos", type=int, default=0,
+                   help="also time N val photos on the CPU (start with CUDA_VISIBLE_DEVICES=-1)")
+    p.add_argument("--source", help="photo store for --cpu-photos (default: the data folder)")
+    p.add_argument("--json", action="store_true")
+    release_options(p)
+
     p = sub.add_parser("aws-pull-trainer", help="bring a trainer run home (or the stages a "
                                                 "stopped one finished): its complete "
                                                 "embeddings replace the local ones (archived)")
@@ -1684,6 +1735,8 @@ def main(argv: list[str] | None = None) -> int:
         "aws-backup": cmd_aws_backup,
         "aws-launch-trainer": cmd_aws_launch_trainer,
         "aws-train-job": cmd_aws_train_job,
+        "standard-summary": cmd_standard_summary,
+        "model-sanity": cmd_model_sanity,
         "aws-pull-trainer": cmd_aws_pull_trainer,
         "finetune": cmd_finetune,
         "picek-train": cmd_picek_train,
