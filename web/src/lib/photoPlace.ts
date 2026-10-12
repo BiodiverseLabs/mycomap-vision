@@ -45,15 +45,17 @@ export function placeNote(w: Where): string | null {
   const place = w.placeFromPhoto ? `photo ${w.placeFromPhoto}` : w.placeFromDevice ? "your current location" : null;
   const date = w.dateFromPhoto ? `photo ${w.dateFromPhoto}` : null;
   if (place && place === date) return `Place and date from ${place}.`;
-  return [place && `Place from ${place}.`, date && `Date from ${date}.`].filter(Boolean).join(" ") || null;
+  const placeLine = w.placeFromMap ? "Place picked on the map." : place && `Place from ${place}.`;
+  return [placeLine, date && `Date from ${date}.`].filter(Boolean).join(" ") || null;
 }
 
 /** In the line above the answer: where the place or date the server used came from. */
 export function sourceWords(from: "entered" | "photo" | null, sentFromPhoto?: number,
-                            sentFromDevice?: boolean): string {
+                            sentFromDevice?: boolean, sentFromMap?: boolean): string {
   if (from === "photo") return "from your photo";        // the server read it from a photo itself
   if (sentFromPhoto) return `from photo ${sentFromPhoto}`;
   if (sentFromDevice) return "your current location";
+  if (sentFromMap) return "picked on the map";
   return "as entered";
 }
 
