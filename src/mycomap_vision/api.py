@@ -759,15 +759,30 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         timer.add("decode_ms", time.monotonic() - start)
         return read
 
+    def embed_one(ident: Identifier, model, image) -> tuple:
+        """One photo -> (its unit vector, float32; the gate's base vector or None when it is
+        the vector itself or the gate can't run; the gate's verdict or None). Every photo
+        is embedded on its own, by /identify and by sessions alike, so the same photo
+        always gets the same vector: a forward pass over a batch differs from one over a
+        single photo by ~1e-4, enough to swap near-tied names (integration testing,
+        2026-10-12). Call with gpu_lock held."""
+        prepare = getattr(model, "prepare", None) or (lambda im: im)
+        vecs, base = ident.encode(model, [prepare(image)])
+        vector = normalise(vecs)[0].astype(np.float32)
+        gate = getattr(ident, "gate", None)
+        verdict = gate.judge(base)[0] if gate is not None and base is not None else None
+        return vector, (None if base is None or base is vecs else np.asarray(base[0])), verdict
+
     def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
                         may_show, timer: "apiv1.Timer", top_k: int = 5,
                         interactive: bool = True, higher: bool = False) -> dict:
         """One model's answer through the queue, timed: waiting, embedding, scoring."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
-            vecs, judged = ident.embed(model, images)      # the gate's verdicts too
-            verdicts.append(judged)
-            return vecs
+            parts = [embed_one(ident, model, im) for im in images]
+            judged = [v for _, _, v in parts]
+            verdicts.append(judged if all(v is not None for v in judged) else None)
+            return np.stack([vec for vec, _, _ in parts])
 
         def finish(vecs, sims):
             return ident.identify_vectors(vecs, top_k, context=context, sims=sims,
@@ -1145,16 +1160,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
             def embed():                                # the worker holds gpu_lock
                 if image is not None:
-                    model = backbone_model(s.backbone)
-                    prepare = getattr(model, "prepare", None) or (lambda im: im)
-                    vecs, base = ident.encode(model, [prepare(image)])
-                    vector = normalise(vecs)[0].astype(np.float32)
-                    verdict = gate.judge(base)[0] if gate is not None and base is not None else None
+                    vector, base, verdict = embed_one(ident, backbone_model(s.backbone), image)
                     added.append(session_store.Photo(
-                        ref=ref, vector=vector,
-                        base=None if base is None or base is vecs else np.asarray(base[0]),
-                        verdict=verdict, gate_fingerprint=fingerprint if verdict else None,
-                        found=found))
+                        ref=ref, vector=vector, base=base, verdict=verdict,
+                        gate_fingerprint=fingerprint if verdict else None, found=found))
                 for p in s.photos:                      # judged by an older gate: again
                     if gate is not None and p.gate_fingerprint != fingerprint:
                         base = p.base if p.base is not None else (

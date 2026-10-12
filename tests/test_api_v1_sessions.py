@@ -297,3 +297,32 @@ def test_an_unknown_session_is_session_gone_never_not_found(conn, tmp_path):
                 client.delete(f"/api/v1/sessions/{sid}/photos/p1", headers=APP),
                 client.delete(f"/api/v1/sessions/{sid}", headers=APP)):
         assert res.status_code == 404 and res.json()["code"] == "session_gone", res.request.url
+
+
+class BatchSensitive(Const):
+    """Like a real model on real hardware: a photo's vector moves a little with the size of
+    the batch it was embedded in (~1e-4 on the box)."""
+
+    def encode(self, images):
+        return super().encode(images) + 1e-3 * len(images)
+
+
+def test_a_photo_gets_the_same_vector_alone_or_with_others(conn, tmp_path):
+    # Found by integration testing (2026-10-12): /identify embedded a request's photos as
+    # one batch, a session one at a time, and near-ties swapped. Both now embed singly.
+    seed = seed_two_species(conn, tmp_path)
+    root = tmp_path / "emb"
+    todo = photos_to_embed(conn, "m1", "large", seed.location, "local")
+    embed_photos(conn, seed, Const("m1"), todo, root / "m1", log=lambda s: None)
+    conn.commit()
+    client = TestClient(create_app(
+        tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: BatchSensitive(n),
+        limits=open_limits(), background=False, server_key=SERVER_KEY, api_v1=True,
+        sessions=True, app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE), introspect=FakeOrg(),
+        fungus_gate=None, note=lambda s: None))
+    sid = open_session(client)["session_id"]
+    for i, red in enumerate((247, 120, 12)):
+        last = add(client, sid, red, f"p{i}").json()
+    together = identify(client, APP, reds=(247, 120, 12)).json()
+    assert last["combined"]["ranks"] == together["ranks"]           # scores to the last digit
+    assert last["combined"]["specimens"] == together["specimens"]
