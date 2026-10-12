@@ -264,6 +264,11 @@ create table photo_owners (photo_key text primary key, owner_user_id integer,
                            source_owner_id integer, permission text);
 create table stores (store_id integer primary key, location text not null);
 create table photo_stores (photo_key text primary key, store_id integer not null);
+create table record_public_places (record_key text primary key, public_lat_micro integer,
+                                   public_lon_micro integer, public_kind text not null,
+                                   positional_accuracy_m integer, source text not null,
+                                   read_at text, box_n_micro integer, box_s_micro integer,
+                                   box_e_micro integer, box_w_micro integer);
 """
 
 
@@ -290,6 +295,65 @@ def check_migrated(conn: sqlite3.Connection) -> None:
 
 def micro(v) -> int | None:
     return None if v is None else int(round(float(v) * 1_000_000))
+
+
+PUBLIC_KINDS = ("inat_open", "inat_obscured", "mo_gps", "mo_box_centre", "none")
+
+
+def _km(lat1, lon1, lat2, lon2) -> float:
+    import math
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = (math.sin((p2 - p1) / 2) ** 2
+         + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
+    return 2 * 6371.0088 * math.asin(math.sqrt(a))
+
+
+def public_place(key: str, source: str, inat: dict | None, mo: dict | None) -> dict | None:
+    """The record's PUBLIC point (Steve, 2026-10-12, D1 of docs/atlas-environment.md): what
+    the source itself shows, never .org's true point. iNat: the point the anonymous API
+    gave (inat_observations: already randomised in its 0.2-degree cell when obscured, none
+    when private). MO: its shown GPS, else the centre of its location box
+    (mo_public_points, read anonymously by mopoints.py). None when the source's point was
+    never read (the build's pre-flight refuses that for a frozen release)."""
+    row = {"record_key": key, "public_lat_micro": None, "public_lon_micro": None,
+           "public_kind": "none", "positional_accuracy_m": None, "source": source,
+           "read_at": None, "box_n_micro": None, "box_s_micro": None, "box_e_micro": None,
+           "box_w_micro": None}
+    if source == "inat":
+        if inat is None:
+            return None
+        row["read_at"] = inat.get("fetched_at")
+        lat, lon = inat.get("latitude"), inat.get("longitude")
+        if lat is None or lon is None:
+            return row                      # private, or no location: nothing public
+        obscured = bool(inat.get("obscured")) or "obscured" in (
+            inat.get("geoprivacy"), inat.get("taxon_geoprivacy"))
+        acc = inat.get("positional_accuracy")
+        row.update(public_lat_micro=micro(lat), public_lon_micro=micro(lon),
+                   public_kind="inat_obscured" if obscured else "inat_open",
+                   positional_accuracy_m=None if acc is None else int(round(float(acc))))
+        return row
+    if source == "mo":
+        if mo is None:
+            return None
+        row["read_at"] = mo.get("fetched_at")
+        if mo.get("latitude") is not None and mo.get("longitude") is not None \
+                and not mo.get("gps_hidden"):
+            row.update(public_lat_micro=micro(mo["latitude"]),
+                       public_lon_micro=micro(mo["longitude"]), public_kind="mo_gps")
+            return row
+        n, s, e, w = (mo.get(k) for k in ("box_north", "box_south", "box_east", "box_west"))
+        if None in (n, s, e, w):
+            return row
+        lon_c = (e + w) / 2 if e >= w else ((e + w + 360) / 2 + 180) % 360 - 180
+        lat_c = (n + s) / 2
+        half_diag_m = int(round(_km(s, w, n, e if e >= w else e + 360) * 1000 / 2))
+        row.update(public_lat_micro=micro(lat_c), public_lon_micro=micro(lon_c),
+                   public_kind="mo_box_centre", positional_accuracy_m=half_diag_m,
+                   box_n_micro=micro(n), box_s_micro=micro(s), box_e_micro=micro(e),
+                   box_w_micro=micro(w))
+        return row
+    return None
 
 
 def name_kind(name: str) -> str:
@@ -366,6 +430,8 @@ class Built:
     stores: dict[str, int]
     photo_stores: list[dict]
     info: dict
+    public_places: list[dict] = field(default_factory=list)
+    public_missing: list[str] = field(default_factory=list)   # included, point never read
 
 
 def public_trainable(license_class: str, answer: str | None) -> int:
@@ -405,6 +471,11 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
     mo_sel = ("mo.status, mo.owner_login" if has_mo else "null, null")
     mo_join = ("left join mo_observations mo on mo.observation_id = r.observation_id"
                if has_mo else "")
+    has_points = "mo_public_points" in tables
+    pt_sel = ("p.latitude, p.longitude, p.gps_hidden, p.box_north, p.box_south, p.box_east, "
+              "p.box_west, p.fetched_at" if has_points else ", ".join(["null"] * 8))
+    pt_join = ("left join mo_public_points p on p.observation_id = r.observation_id and "
+               "p.status = 'ok'" if has_points else "")
     held = holdouts.held_out_ids(conn)
     bench: dict[str, tuple[str, str]] = {}
     if "heldout_records" in tables:
@@ -414,19 +485,24 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
     labels = names.manifest_labels(conn)
     tax = taxonomy.for_manifest(conn)
 
-    records, places, keep = [], [], {}
+    records, places, keep, public_places = [], [], {}, []
     for row in conn.execute(f"""
         select r.observation_id, r.source, r.source_id, r.org_source, r.scientific_name, {mb},
                r.genus, r.family, r.exported_at, r.validated_on, r.green_projects,
                r.observed_on, r.country, r.state, r.north_america, r.label_conflict,
-               r.latitude, r.longitude, o.status, o.user_login, o.uuid, {mo_sel}
+               r.latitude, r.longitude, o.status, o.user_login, o.uuid, {mo_sel},
+               o.inat_latitude, o.inat_longitude, o.obscured, o.geoprivacy,
+               o.taxon_geoprivacy, o.positional_accuracy, o.fetched_at, {pt_sel}
         from records r
         left join inat_observations o on o.observation_id = r.observation_id
         {mo_join}
+        {pt_join}
         order by r.observation_id"""):
         (key, source, source_id, org_source, name, mbn, genus, family, exported, vdate, projects,
          observed, country, state, na, conflict, lat, lon, inat_status, inat_login, uuid,
-         mo_status, mo_login) = row
+         mo_status, mo_login, *pub) = row
+        (i_lat, i_lon, i_obs, i_geo, i_tgeo, i_acc, i_at, m_lat, m_lon, m_hidden, m_n, m_s,
+         m_e, m_w, m_at) = pub
         if only_keys is not None and key not in only_keys:
             continue
         name = clean(name)
@@ -475,6 +551,15 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             "included": 0, "reason": reason, "split": None,
             "benchmark": b[0], "benchmark_split": b[1]})
         places.append({"record_key": key, "lat_micro": micro(lat), "lon_micro": micro(lon)})
+        inat_pub = None if inat_status is None else {
+            "latitude": i_lat, "longitude": i_lon, "obscured": i_obs, "geoprivacy": i_geo,
+            "taxon_geoprivacy": i_tgeo, "positional_accuracy": i_acc, "fetched_at": i_at}
+        mo_pub = None if m_at is None else {
+            "latitude": m_lat, "longitude": m_lon, "gps_hidden": m_hidden, "box_north": m_n,
+            "box_south": m_s, "box_east": m_e, "box_west": m_w, "fetched_at": m_at}
+        pp = public_place(key, source, inat_pub, mo_pub)
+        if pp is not None:
+            public_places.append(pp)
         keep[key] = records[-1]
 
     # Photos: every photo linked to a candidate record, with its kept original (the
@@ -553,7 +638,11 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
     exported = [r["label_exported_at"] for r in records if r["label_exported_at"]]
     info = {"label_snapshot_at": max(exported) if exported else None,
             "north_america_only": north_america_only}
-    return Built(records, photos, places, owners, stores, photo_stores, info)
+    have_point = {p["record_key"] for p in public_places}
+    missing = [r["record_key"] for r in records if r["included"] and r["record_key"]
+               not in have_point]
+    return Built(records, photos, places, owners, stores, photo_stores, info,
+                 public_places, missing)
 
 
 def assign_splits(records: list[dict], *, val_cutoff: str | None = None,
@@ -685,6 +774,7 @@ def write_release(folder: Path, rid: str, built: Built, split_rules: dict, *,
     _insert(priv, "photo_owners", built.owners)
     _insert(priv, "stores", [{"store_id": i, "location": loc} for loc, i in built.stores.items()])
     _insert(priv, "photo_stores", built.photo_stores)
+    _insert(priv, "record_public_places", built.public_places)
     db.commit()
     priv.commit()
     hashes = content_hashes(db, priv)
@@ -724,6 +814,7 @@ def summary_counts(built: Built) -> dict:
     by = lambda rows, *keys: dict(sorted(Counter(  # noqa: E731
         "/".join(str(r[k]) for k in keys) for r in rows).items()))
     inc_photos = [p for p in built.photos if p["included"]]
+    included_keys = {r["record_key"] for r in built.records if r["included"]}
     return {"records": len(built.records), "records_included": sum(r["included"] for r in built.records),
             "records_by_source_reason": by(built.records, "source", "reason"),
             "records_by_split": by([r for r in built.records if r["included"]], "split"),
@@ -732,7 +823,9 @@ def summary_counts(built: Built) -> dict:
             "photos": len(built.photos), "photos_included": len(inc_photos),
             "photos_by_source_reason": by(built.photos, "source", "reason"),
             "photos_included_by_licence": by(inc_photos, "source", "license_class"),
-            "labels_included": len({r["label"] for r in built.records if r["included"]})}
+            "labels_included": len({r["label"] for r in built.records if r["included"]}),
+            "public_places_by_kind": by([p for p in built.public_places
+                                         if p["record_key"] in included_keys], "public_kind")}
 
 
 def dataset_card(info: dict, counts: dict, hashes: dict) -> str:
@@ -819,6 +912,14 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
                                    f"(e.g. {sorted(missing)[:5]})")
             check_disjoint(base, built)
             extra.update({"test_for": base.id, "test_for_release_hash": base.release_hash})
+        if built.public_missing:
+            msg = (f"{len(built.public_missing):,} included records have no public point "
+                   f"read (e.g. {built.public_missing[:5]}): run `mv fetch-mo-points` (MO) "
+                   "or `mv fetch-inat` (iNat) first")
+            if not is_draft(name):
+                raise ReleaseError(msg)
+            log(f"DRAFT: {msg}")
+        extra["public_places_missing"] = len(built.public_missing)
         rules = assign_splits(built.records, val_cutoff=val_cutoff, val_weeks=val_weeks,
                               test_only=base is not None)
         derived = derive_all(built, recipes, derive_photos, store_reader, log=log)
@@ -971,6 +1072,14 @@ class Release:
         if self._private is None:
             self._private = _ro(self.folder / PRIVATE_DB)
         return self._private
+
+    def public_places(self) -> dict[str, dict]:
+        """record_key -> its frozen PUBLIC point (D1; private.sqlite only: never shipped to
+        a trainer, never public): public_lat_micro, public_lon_micro, public_kind,
+        positional_accuracy_m, source, read_at and, for an MO box, its edges."""
+        cur = self.private.execute("select * from record_public_places")
+        cols = [d[0] for d in cur.description]
+        return {r[0]: dict(zip(cols, r)) for r in cur}
 
     def cite(self) -> dict:
         """What an experiment writes into its outputs (and the registry entry)."""

@@ -61,6 +61,32 @@ def new_release_id(label: str | None = None, now: datetime | None = None) -> str
     return rid
 
 
+def _onnx_source_sha(doc: dict) -> str | None:
+    """The sha256 of the weights an ONNX export was made from (models/<b>.onnx.json's
+    source_weights: a sha256 string, or {"file": ..., "sha256": ...})."""
+    src = doc.get("source_weights")
+    if isinstance(src, dict):
+        return src.get("sha256")
+    return src if isinstance(src, str) else None
+
+
+def onnx_files(backbone: str, data_dir: Path, weights: Path | None) -> list[tuple[Path, str]]:
+    """The ONNX image tower (`mv export-onnx`: models/<b>.onnx and
+    models/<b>.onnx.json) when both are there; refused when the export was made from other
+    weights than the fine-tune shipped beside it, so a stale export never rides along."""
+    onnx = data_dir / "models" / f"{backbone}.onnx"
+    doc_path = data_dir / "models" / f"{backbone}.onnx.json"
+    if not onnx.is_file() and not doc_path.is_file():
+        return []
+    if not (onnx.is_file() and doc_path.is_file()):
+        raise ValueError(f"{backbone}: {onnx.name} and {doc_path.name} go together; one is missing")
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    if weights is not None and _onnx_source_sha(doc) != sha256_of(weights):
+        raise ValueError(f"{backbone}: {onnx.name} was exported from other weights than "
+                         f"{weights.name}; export it again (mv export-onnx)")
+    return [(onnx, f"models/{onnx.name}"), (doc_path, f"models/{doc_path.name}")]
+
+
 def release_files(conn, backbones: list[str], data_dir: Path,
                   int8_dir: Path | None = None) -> list[tuple[Path, str]]:
     """(local path, path inside the release) for everything the served backbones need.
@@ -93,6 +119,7 @@ def release_files(conn, backbones: list[str], data_dir: Path,
             if not weights.is_file():
                 raise ValueError(f"{b!r}: weights file {meta['weights']} is missing")
             files += [(meta_path, f"models/{b}.json"), (weights, f"models/{meta['weights']}")]
+        files += onnx_files(b, data_dir, weights if meta_path.is_file() else None)
     # The not-a-fungus gate (fungusgate.py): its text vectors and thresholds.
     gate = [data_dir / "models" / f"{GATE_NAME}{ext}" for ext in (".json", ".npz")]
     if all(p.is_file() for p in gate):

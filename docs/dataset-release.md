@@ -101,7 +101,12 @@ existing id; `verify` recomputes everything and fails on any difference.
 | `public_trainable` | 1 when the photo is CC (NC included) or its photographer granted permission: what the final public model may learn from (Steve, 2026-10-09); internal benchmarking models may use every included photo |
 | `included`, `reason` | `ok` or the first photo reason in §4 |
 
-`private.sqlite` holds the rest: record coordinates (needed by the location priors),
+`private.sqlite` holds the rest: record coordinates (needed by the location priors), each
+record's frozen PUBLIC point beside them (`record_public_places`: what iNat's anonymous API or
+MO showed, `public_kind` inat_open / inat_obscured / mo_gps / mo_box_centre / none, its
+`positional_accuracy_m`, source, `read_at`, an MO box's edges; Steve, 2026-10-12, for the
+`v1-env` sidecar, docs/atlas-environment.md; a frozen build refuses an included record without
+one),
 owners' numeric ids, the photo-permission answer per ARR photo at the freeze
 (`granted` / `no_answer` / `withdrawn`), and the photo store each original is in. It is
 hashed into `release_hash` (so v1 is one thing) but never published.

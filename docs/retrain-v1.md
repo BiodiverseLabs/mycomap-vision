@@ -1,7 +1,7 @@
 # Retrain on dataset release v1: runbook and pre-declared evaluation
 
-Status: **pre-declared 2026-10-12, before any v1 result.** Owner: the Vision retrain lane.
-Only the Vision Coordinator merges to main and deploys vision.mycomap.org. Steve approves
+Status: **pre-declared 2026-10-12, before any v1 result.** Owner: the retrain owner.
+Only the project coordinator merges to main and deploys vision.mycomap.org. Steve approves
 the freeze, the spending and the adoption.
 
 Steve, 2026-10-11: everything before v1 is preliminary. v1 is the first real training dataset,
@@ -24,7 +24,7 @@ earlier experiment is re-run on v1 afterwards (section 6).
   **saved** (`<model>.heads.npz`). AWS g6.xlarge On-Demand, us-east-2.
 - **Name**: the public name stays "MycoMap Vision"; `version` = the training-data snapshot
   date (`release.snapshot_date`: the release's `label_snapshot_at`), written into the model's
-  metadata. `mv release` adds `.2`, `.3` for later builds of the same data (API lane).
+  metadata. `mv release` adds `.2`, `.3` for later builds of the same data (the API's model card).
 
 ## 2. The official numbers (pre-declared)
 
@@ -45,7 +45,7 @@ mv standard-summary --comparison <id>
 - `ft-head` scores the fine-tune's own classifier (research only; never served unless adopted).
 - `nearest+mean+place` needs `data/occurrence/inat-fungi-na.npz` (md5 `a599fb51…`). Its val
   numbers count each record's own iNat occurrence in the store's far-penalty counts: a small
-  inflation, stated in the entry (the prior lane re-tunes it on v1 with its leave-one-out
+  inflation, stated in the entry (the prior owner re-tunes it on v1 with its leave-one-out
   index, section 6, item 6).
 
 **Format** (Steve, 2026-10-09; `mv standard-summary`), every table with its n:
@@ -80,7 +80,7 @@ must print PASS before the model is proposed for serving. Thresholds are fixed i
 
 Then, by hand, before the coordinator deploys:
 - **Box memory** fits (section 5); the coordinator's call with Steve.
-- **Not-a-fungus gate**: re-tuned on v1 (`mv fungus-gate tune`, gate lane), since it forks the
+- **Not-a-fungus gate**: re-tuned on v1 (`mv fungus-gate tune`, gate owner), since it forks the
   served fine-tune after its last frozen block. After deploy, `/api/health` shows the new gate's
   `fungus_gate` fingerprint (not today's `73ce44b9afa55ff6`) and `verify` is all ok.
 - **Occurrence store** present in the serving release (md5 `a599fb51…`).
@@ -93,8 +93,7 @@ Run from a worktree of origin/main with `MV_DATA_DIR=<main checkout>/data`, `PYT
 and the AWS settings from the main `.env`. Spending lines are marked $.
 
 **B. Cut v1** (only after the coordinator relays Steve's freeze approval; the ~$1.50 below was
-approved in advance on 2026-10-11). Owner: the retrain lane (the release builder's session has
-closed).
+approved in advance on 2026-10-11). Owner: the retrain owner.
 
 **LOO gate** (Steve, 2026-10-11: "review first, then build"): v1 is not built until (a) Steve has
 filled `decision` and `checked_by` on every row of
@@ -111,9 +110,16 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
 2. $ Fetch the new records' photos to S3: `mv aws-launch-downloader` (t3.small, self-terminating;
    ~50k photos ≈ 21 GB, 3-4 GB from the all-rights-reserved host, within its 20 GB/day cap),
    then `mv aws-pull-manifest`. (Also covers the 3 photos of the newest MO record that the
-   record-sources lane left for a normal download.)
+   record-sources migration left for a normal download.)
+   Then `mv fetch-mo-points`: each MO record's PUBLIC point (its shown GPS, else the centre
+   of its location box), read anonymously at MO's pace (~7.2k records, ~8 min). Steve,
+   2026-10-12 (D1, docs/atlas-environment.md): v1's `private.sqlite` freezes every record's
+   public point in `record_public_places` (iNat: the point the anonymous API showed, obscured
+   where iNat obscures it; never .org's true point), so the later `v1-env` sidecar samples
+   Atlas layers only there. A frozen build refuses an included record whose public point was
+   never read; `public_kind = 'none'` (private on iNat, no MO GPS or box) is an explicit answer.
 3. Freeze the manifest: `mv manifest-freeze --out data/manifest-v1-freeze.sqlite` (a consistent
-   copy; prints its sha256). Send its path and sha256 to the LOO lane, which runs
+   copy; prints its sha256). With its path and sha256, the retrain owner runs
    `scripts/loo_exclusions.py --manifest data/manifest-v1-freeze.sqlite` once Steve's review is
    complete, and returns the TSV's path, rows and sha256.
 4. $ The derived-hash pass and build in-region: `mv aws-launch-dataset-build --name v1
@@ -184,6 +190,12 @@ served, the check runs again on v1's val with the new model, and must pass:
 test is not significant, p ≥ 0.05). Projected v1 working set ~3.1 GB, under the 3.5 GB cap.
 Fallbacks if it does not fit: serve fewer methods (<0.1 GB), then the 8 GB box (~+$20/month).
 
+**ONNX image tower: not for the 4 GB box** (measured on the box 2026-10-12, 2 threads: torch
+tower 539 MB anon + 1,007 MB file-mapped weights, 1.76 s/photo; float32 ONNX 1,989 MB anon,
+1.98 s/photo: +1.45 GB anon and no speed gain). `MV_EMBED_ONNX` stays off and v1 skips
+`mv export-onnx`. If an export is made later, `mv release` ships `models/<b>.onnx` +
+`.onnx.json` and refuses one exported from other weights than the `.pt` it ships.
+
 ## 6. Re-running every earlier experiment on v1
 
 Each re-run ships one command taking `--release v1` and a registry entry
@@ -193,15 +205,15 @@ are suggestions for the coordinator; times are the laptop's unless marked AWS.
 
 | # | Re-run | Registry entries | Suggested owner | Estimate |
 |---|---|---|---|---|
-| 1 | Scoring definitions: name-equivalence rule check, the time splits, the likely-list protocol; cut `v1-test` when Steve's records are validated | name-equivalence, likely-sets | retrain lane | 1 h; v1-test cut ~1 h + photo fetch |
-| 2 | Backbone screen (frozen backbones) on v1 | backbone-screen | benchmarking lane | bioclip-2 comes free with the retrain; others on a 20k-record stratified subset of `train`/`val` ≈ 3-4 h (all ~610k photos per backbone is 3-13 h each on the laptop) |
-| 3 | Fine-tune (this run), its heads scored, the small trained heads, the Picek replication on v1's training records, the image-size arm (224/336/448) | full-run-finetune, trained-heads, picek-replication, image-size | retrain lane; Picek and image-size: benchmarking lane | retrain ~11 h AWS ~$8.50; trained heads 1 h; Picek ~44 h AWS ~$36; image-size ~2-4x the retrain, ~$20-35 (each needs Steve's OK) |
-| 4 | Scoring method: nearest vs species average vs nearest + species average | depth-bias, nearest-mix | retrain lane (in section 2's comparison) | 0 extra |
-| 5 | Calibration and likely lists, fitted on `val`, checked on `v1-test` | likely-sets | retrain lane | in section 2's comparison; v1-test check 0.5 h |
-| 6 | Priors: DNA-record prior, occurrence prior, the served place boost re-tuned on `val`; the not-a-fungus gate re-tuned | dna-range-prior, occurrence-prior, prior-tuning, not-fungus-gate | prior lane; gate lane | prior grid with CV 3-4 h CPU; gate 1-2 h GPU |
-| 7 | Photo handling: per-photo votes, photo views, uninformative photos, 8-bit model, test-time flips | nearest-mix, photo-views, uninformative-photos, int8-onnx | benchmarking lane | ~1 h each; flips ~3 h GPU |
-| 8 | Outside comparisons on `v1-test`: iNat CV (identifications snapshotted first, model version recorded) and the published Danish models | inat-cv-baseline, published-danish-models | benchmarking lane | iNat ~2,000 records ≈ 7-17 h of paced calls (needs a fresh JWT from Steve); Danish models 1-2 h GPU |
-| 9 | Descriptive: genus gap, depth over time, learning curve, leakage and stress slices, guest-genera counts, observation sets | genus-gap, guest-genera, learning-curve, leakage-tta-stress, observation-sets | plan-review / paper lane | 1-3 h each |
+| 1 | Scoring definitions: name-equivalence rule check, the time splits, the likely-list protocol; cut `v1-test` when Steve's records are validated | name-equivalence, likely-sets | retrain owner | 1 h; v1-test cut ~1 h + photo fetch |
+| 2 | Backbone screen (frozen backbones) on v1 | backbone-screen | benchmarking owner | bioclip-2 comes free with the retrain; others on a 20k-record stratified subset of `train`/`val` ≈ 3-4 h (all ~610k photos per backbone is 3-13 h each on the laptop) |
+| 3 | Fine-tune (this run), its heads scored, the small trained heads, the Picek replication on v1's training records, the image-size arm (224/336/448) | full-run-finetune, trained-heads, picek-replication, image-size | retrain owner; Picek and image-size: benchmarking owner | retrain ~11 h AWS ~$8.50; trained heads 1 h; Picek ~44 h AWS ~$36; image-size ~2-4x the retrain, ~$20-35 (each needs Steve's OK) |
+| 4 | Scoring method: nearest vs species average vs nearest + species average | depth-bias, nearest-mix | retrain owner (in section 2's comparison) | 0 extra |
+| 5 | Calibration and likely lists, fitted on `val`, checked on `v1-test` | likely-sets | retrain owner | in section 2's comparison; v1-test check 0.5 h |
+| 6 | Priors: DNA-record prior, occurrence prior, the served place boost re-tuned on `val`; the not-a-fungus gate re-tuned | dna-range-prior, occurrence-prior, prior-tuning, not-fungus-gate | prior owner; gate owner | prior grid with CV 3-4 h CPU; gate 1-2 h GPU |
+| 7 | Photo handling: per-photo votes, photo views, uninformative photos, 8-bit model, test-time flips | nearest-mix, photo-views, uninformative-photos, int8-onnx | benchmarking owner | ~1 h each; flips ~3 h GPU |
+| 8 | Outside comparisons on `v1-test`: iNat CV (identifications snapshotted first, model version recorded) and the published Danish models | inat-cv-baseline, published-danish-models | benchmarking owner | iNat ~2,000 records ≈ 7-17 h of paced calls (needs a fresh JWT from Steve); Danish models 1-2 h GPU |
+| 9 | Descriptive: genus gap, depth over time, learning curve, leakage and stress slices, guest-genera counts, observation sets | genus-gap, guest-genera, learning-curve, leakage-tta-stress, observation-sets | paper owner | 1-3 h each |
 
 Not re-run, by design: the label audit, the LOO scan and the non-fungus photo scan are data
 reviews whose fixes are inputs to v1 (person-checked lists), not experiments on it.

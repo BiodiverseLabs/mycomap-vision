@@ -743,6 +743,13 @@ def cmd_serve(conn, args) -> None:
     serve(args.host, args.port)
 
 
+def cmd_fetch_mo_points(conn, args) -> None:
+    """MO records' public points (mopoints.py), read anonymously at MO's pace."""
+    from . import mopoints
+    print(json.dumps(mopoints.fetch_all(conn, refresh=args.refresh, limit=args.limit),
+                     indent=2))
+
+
 def cmd_release(conn, args) -> None:
     from . import release
     print(json.dumps(release.publish(conn, _split(args.backbones), label=args.label,
@@ -1576,6 +1583,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8010)
 
+    p = sub.add_parser("fetch-mo-points", help="each MO record's public point (shown GPS, else "
+                                               "its location box) for dataset releases; "
+                                               "anonymous, MO's pace (~5 s a request)")
+    p.add_argument("--refresh", action="store_true", help="read every MO record again")
+    p.add_argument("--limit", type=int)
+
     p = sub.add_parser("release", help="publish what the site serves (manifest, embeddings, "
                                        "fine-tuned weights) to s3://<bucket>/releases/<id>/")
     p.add_argument("--backbones", required=True, help="comma list of backbones to serve")
@@ -1875,6 +1888,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-launch-trainer": cmd_aws_launch_trainer,
         "aws-train-job": cmd_aws_train_job,
         "standard-summary": cmd_standard_summary,
+        "fetch-mo-points": cmd_fetch_mo_points,
         "int8-check": cmd_int8_check,
         "export-onnx": cmd_export_onnx,
         "aws-launch-dataset-build": cmd_aws_launch_dataset_build,
