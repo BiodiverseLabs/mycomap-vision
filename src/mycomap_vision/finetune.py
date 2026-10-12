@@ -74,10 +74,20 @@ class TrainSet:
 
 
 def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, size: str,
-                   test_days: int = 28, embeddings_root=None) -> TrainSet:
+                   test_days: int = 28, embeddings_root=None, release=None) -> TrainSet:
     """Every photo of the reference records a comparison of `base` would use, with its
-    labels. The base must be embedded: its vectors seed the classifier."""
-    shared = evaluate.shared_records(conn, [base], test_days, embeddings_root=embeddings_root)
+    labels. The base must be embedded: its vectors seed the classifier.
+
+    With a dataset `release` (dataset_release.load_release) those are the release's
+    `train` records only: never `val` (what the model is judged on), never a test
+    release, never an excluded record; trained_through is the release's val cutoff."""
+    if release is not None:
+        release.training_records()      # raises SealedLeak for a test release
+        if not release.val_cutoff:
+            raise ValueError(f"release {release.id} records no val cutoff: nothing says "
+                             "which records the model may not see")
+    shared = evaluate.shared_records(conn, [base], test_days, embeddings_root=embeddings_root,
+                                     release=release)
     ids, vecs = shared.loaded[base]
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     paths = dict(conn.execute("select photo_id, path from photo_copies where store = ? and "
@@ -161,6 +171,22 @@ def read_meta(name: str, root: Path | None = None) -> dict:
     if not path.is_file():
         raise FileNotFoundError(f"no fine-tuned model {name!r} in {path.parent}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def release_fields(release) -> dict:
+    """What a model trained on a dataset release records about it: the citation
+    (id, release_hash, reference_hash, labels_hash, ...) and `version`, the training-data
+    snapshot date the public name shows (Steve, 2026-10-11). Nothing without a release."""
+    if release is None:
+        return {}
+    return {"dataset_release": release.cite(), "version": release.snapshot_date,
+            "split_trained": "train", "val_cutoff": release.val_cutoff}
+
+
+def model_version(meta: dict) -> str | None:
+    """A model's version (its training-data snapshot date), or None for a model trained
+    before releases (the API then falls back to its own label)."""
+    return meta.get("version")
 
 
 # --- the trained classifier heads ------------------------------------------------
@@ -303,10 +329,13 @@ def batches_with_fallback(make_loader, workers: int, steps: int, seed: int, curr
 
 def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
              cfg: FinetuneConfig | None = None, test_days: int = 28, embeddings_root=None,
-             out_dir: Path | None = None, loader=None, log=print, should_stop=None) -> dict:
-    """Train, save <name>.pt and <name>.json in out_dir, register; returns the metadata.
-    `should_stop()` is asked before each step; when it says stop, screening.Stopped is
-    raised and nothing is saved (a half-trained model is not the model asked for)."""
+             out_dir: Path | None = None, loader=None, log=print, should_stop=None,
+             release=None) -> dict:
+    """Train, save <name>.pt, <name>.heads.npz and <name>.json in out_dir, register;
+    returns the metadata. `should_stop()` is asked before each step; when it says stop,
+    screening.Stopped is raised and nothing is saved (a half-trained model is not the
+    model asked for). `release`: train on a dataset release's train split (build_trainset);
+    the model then carries the release's citation and its snapshot date as `version`."""
     import torch
     import torch.nn.functional as F
 
@@ -315,7 +344,7 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
     cfg = cfg or FinetuneConfig()
     out_dir = out_dir or models_dir()
     started = time.monotonic()
-    ts = build_trainset(conn, base, store.location, size, test_days, embeddings_root)
+    ts = build_trainset(conn, base, store.location, size, test_days, embeddings_root, release)
     log(f"[{name}] {len(ts.items):,} photos of {ts.records:,} records, "
         f"{len(ts.names['species']):,} species, trained through {ts.trained_through}")
     backbone = (loader or models.load_backbone)(base)
@@ -413,7 +442,8 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             "loader_fallback_at_step": fallback["at_step"],
             "config": asdict(cfg), "minutes": round((time.monotonic() - started) / 60, 1),
             "code_version": config.code_version(),
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **release_fields(release)}
     (out_dir / f"{name}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     register(conn, meta)
     log(f"[{name}] saved to {out_dir}, {meta['minutes']} min")

@@ -247,6 +247,38 @@ def restrict_to_sample(conn: sqlite3.Connection, n: int, store_location: str, si
     return len(keep)
 
 
+def restrict_to_release(conn: sqlite3.Connection, release, store_location: str, size: str
+                        ) -> dict:
+    """Make this instance's manifest copy hold only the records a dataset release
+    includes, so nothing outside the release is embedded, trained on or compared. Only
+    for the instance's own copy (it deletes records). Refuses when the copy's photos are
+    not the release's (another original, or included photos with no copy in the store:
+    their bytes could not be the ones the release hashed)."""
+    release.check_photos_match(conn)
+    keys = {r[0] for r in release.db.execute("select record_key from records where included = 1")}
+    want = {r[0] for r in release.db.execute(
+        "select manifest_photo_id from photos p join records r using (record_key) "
+        "where p.included = 1 and r.included = 1")}
+    have = {r[0] for r in conn.execute("select photo_id from photo_copies where store = ? and "
+                                       "size = ?", (store_location, size))}
+    missing = want - have
+    if missing:
+        raise ValueError(f"{len(missing):,} photos of release {release.id} have no {size} copy "
+                         f"in {store_location} (e.g. {sorted(missing)[:5]}); fetch them first")
+    with conn:
+        conn.execute("create temp table if not exists keep_records (id text primary key)")
+        conn.execute("delete from keep_records")
+        conn.executemany("insert into keep_records values (?)", [(k,) for k in keys])
+        dropped = conn.execute("delete from records where observation_id not in "
+                               "(select id from keep_records)").rowcount
+    kept = conn.execute("select count(*) from records").fetchone()[0]
+    if kept != len(keys):
+        raise ValueError(f"release {release.id} includes {len(keys):,} records, this manifest "
+                         f"copy holds {kept:,} of them: it is not the manifest the release "
+                         "was cut from")
+    return {"records": kept, "dropped": dropped, "photos": len(want)}
+
+
 def write_index(conn: sqlite3.Connection, dest: Path) -> Path:
     """The tables a merge reads (INDEX_TABLES), in a small file of their own, so each
     finished stage can be uploaded without the whole manifest."""
@@ -398,7 +430,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             picek_release_manifest: str | None = None, picek_allow_draft: bool = False,
             picek_place_cells: str | None = None, picek_place_cells_sha256: str | None = None,
             should_stop: Callable[[], bool] | None = None,
-            interrupted: Callable[[], bool] | None = None, resume=None, log=print) -> dict:
+            interrupted: Callable[[], bool] | None = None, resume=None, release=None,
+            log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
     key)` copies one file to the bucket. `finetuner(conn, base, name, embeddings_root,
     models_dir)` fine-tunes (default: finetune.finetune with its default settings) and
@@ -407,7 +440,11 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     steps and stages; once either says stop, the stage under way is abandoned (never
     uploaded), no new stage starts, and the run ends "stopped" (the time limit) or
     "interrupted" (Spot). `resume` (RunFiles over the bucket) continues an earlier
-    attempt of the same run: the stages it finished are restored, not run again."""
+    attempt of the same run: the stages it finished are restored, not run again.
+    `release` (a trainer copy, dataset_release.load_release(..., without_private=True)):
+    the run sees only the release's included records (restrict_to_release), fine-tunes on
+    its train split, compares on train vs val, and cites the release in progress.json,
+    result.json and every model it trains."""
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
@@ -443,6 +480,18 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     cleared = clear_embeddings(conn)
     log(f"cleared {cleared:,} embedding rows brought from the laptop")
     kept = None
+    cite = None
+    if release is not None:
+        from .replications.fungitastic import dataset as release_files
+        cite = release_files.cite(release)          # cite() + the MANIFEST.json hash
+    if release is not None:
+        if sample_records:
+            raise ValueError("a release run trains on the whole release; a rehearsal "
+                             "(--sample-records) uses a draft release cut for it instead")
+        r = restrict_to_release(conn, release, store.location, size)
+        log(f"dataset release {release.id} (release_hash {release.release_hash[:12]}): "
+            f"{r['records']:,} records, {r['photos']:,} photos; {r['dropped']:,} manifest "
+            "records outside it left out")
     if sample_records:
         kept = restrict_to_sample(conn, sample_records, store.location, size)
         log(f"REHEARSAL: kept {kept:,} random records; results won't be merged home")
@@ -465,7 +514,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                         methods=methods, test_days=test_days, sample_records=kept,
                         attempts=attempts, picek_exclude_benchmarks=picek_exclude,
                         picek_labels_hash=picek_labels_hash,
-                        dataset_release=release_cite,
+                        dataset_release=cite or release_cite,
                         stages=[{**restored[i], "restored": True} if i in restored
                                 else {**asdict(s), "status": "pending"}
                                 for i, s in enumerate(stages)])
@@ -558,7 +607,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                         conn, s.spec, s.name, data_dir / "models")
                 else:
                     meta = (finetuner or _default_finetuner(store, size, test_days, log,
-                                                            stopping))(
+                                                            stopping, release))(
                         conn, s.base, s.name, root, data_dir / "models")
                 publish([(data_dir / "models" / f"{s.name}{suffix}",
                           f"{prefix}models/{s.name}{suffix}") for suffix in model_files(s.kind)
@@ -587,7 +636,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         progress.data["state"] = "comparing"
         progress.save()
         comparison = evaluate.compare(conn, list(embedded), methods, test_days=test_days,
-                                      embeddings_root=root, log=log)
+                                      embeddings_root=root, release=release, log=log)
         report = data_dir / "reports" / f"compare-{comparison['comparison_id']}.json"
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(evaluate.format_report(comparison), encoding="utf-8")
@@ -598,6 +647,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
            "finetuned": {n: {k: m.get(k) for k in FINETUNE_KEYS} for n, m in finetuned.items()},
            "comparison_id": comparison["comparison_id"] if comparison else None,
            "sample_records": kept, "code_version": config.code_version(),
+           "dataset_release": cite or release_cite,
            "stages": progress.data["stages"], "finished_at": _now()}
     if not was_interrupted:
         # With a Spot notice there are two minutes: progress.json goes up at once, and
@@ -616,7 +666,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
 
 
 FINETUNE_KEYS = ("base", "trained_through", "records", "photos", "species", "steps",
-                 "minutes", "final_loss", "label_snapshot")
+                 "minutes", "final_loss", "label_snapshot", "dataset_release", "version")
 PICEK_FILES = (".pt", ".json", ".classifier.npz", ".records.csv")
 
 
@@ -648,12 +698,12 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
     return run
 
 
-def _default_finetuner(store, size, test_days, log, should_stop=None):
+def _default_finetuner(store, size, test_days, log, should_stop=None, release=None):
     def run(conn, base, name, embeddings_root, models_dir):
         from .finetune import finetune
         return finetune(conn, base, store, size, name, test_days=test_days,
                         embeddings_root=embeddings_root, out_dir=models_dir, log=log,
-                        should_stop=should_stop)
+                        should_stop=should_stop, release=release)
     return run
 
 
@@ -683,7 +733,8 @@ def run_summary(doc: dict) -> dict:
             "code_version": doc.get("code_version"), "embedded": embedded,
             "finetuned": finetuned, "missing": missing, "done": done,
             "comparison_id": doc.get("comparison_id"),
-            "sample_records": doc.get("sample_records")}
+            "sample_records": doc.get("sample_records"),
+            "dataset_release": doc.get("dataset_release")}
 
 
 def resume_request(doc: dict) -> dict:

@@ -188,6 +188,16 @@ RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sam
                    "picek", "picek_exclude_benchmarks")
 
 
+def trainer_release(args):
+    """On the instance: the release shipped with the run (no private.sqlite), checked
+    file by file and refused unless its MANIFEST.json is the one the launch recorded."""
+    if not getattr(args, "release", None):
+        return None
+    from .replications.fungitastic import dataset
+    return dataset.load(args.release, args.allow_draft, without_private=True,
+                        expect_manifest_sha256=args.release_manifest)
+
+
 def cmd_aws_train_job(conn, args) -> None:
     """Runs on the trainer instance (see aws.TRAINER_USER_DATA)."""
     from . import trainer
@@ -218,7 +228,7 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_place_cells=args.picek_place_cells,
                           picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
-                          if args.resume else None)
+                          if args.resume else None, release=trainer_release(args))
     if watcher is not None:
         watcher.stop()
     print(json.dumps(out, indent=2))
@@ -246,7 +256,8 @@ def cmd_finetune(conn, args) -> None:
                                   batch_size=args.batch_size, workers=args.workers,
                                   max_steps=args.max_steps)
     meta = finetune.finetune(conn, base, open_store(args.source, config.DATA_DIR), args.size,
-                             name, cfg, test_days=args.test_days)
+                             name, cfg, test_days=args.test_days,
+                             release=_dataset_release(args))
     print(json.dumps(meta, indent=2))
     print(f"next: mv embed --backbone {name} --size {args.size}, then mv compare "
           f"--backbones {base},{name}")
@@ -1166,6 +1177,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--picek-place-cells",
                    help="the place prior's counts the launch made from the release (shipped)")
     p.add_argument("--picek-place-cells-sha256", help="their sha256 at launch")
+    p.add_argument("--release", help="the shipped dataset release the fine-tune trains on")
+    p.add_argument("--release-manifest", help="sha256 of its MANIFEST.json at launch")
+    p.add_argument("--allow-draft", action="store_true")
     p.add_argument("--sample-records", type=int)
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
@@ -1187,6 +1201,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--max-steps", type=int)
     p.add_argument("--test-days", type=int, default=28)
+    release_options(p)
 
     from .replications.fungitastic.retrain import PRESETS
     p = sub.add_parser("picek-train", help="train the Picek group's fungi classifier recipe "

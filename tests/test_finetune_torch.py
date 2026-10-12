@@ -102,3 +102,29 @@ def test_a_fine_tune_stopped_by_the_time_limit_saves_and_registers_nothing(conn,
     assert not (tmp_path / "models" / "tiny-ft.pt").exists()
     conn.executescript(__import__("mycomap_vision.evaluate", fromlist=["x"]).FINETUNE_SCHEMA)
     assert conn.execute("select count(*) from finetunes where name = 'tiny-ft'").fetchone()[0] == 0
+
+
+def test_a_fine_tune_on_a_release_saves_its_citation_and_version(tmp_path):
+    from test_trainer_release import s3_copies
+
+    from mycomap_vision import dataset_release as dr
+    from mycomap_vision.manifest import connect
+    path = tmp_path / "data" / "manifest.sqlite"
+    conn = connect(path)
+    store, root = embedded(conn, tmp_path, "tiny", Tiny())
+    s3_copies(conn)
+    rid = dr.draft_id()
+    dr.build(name=rid, manifest_path=path, root=tmp_path / "rel", derive_photos="none",
+             val_cutoff="2026-08-24", log=lambda s: None)
+    rel = dr.load_release(rid, tmp_path / "rel", allow_draft=True)
+    cfg = finetune.FinetuneConfig(blocks=1, batch_size=4, workers=0, max_steps=2)
+    meta = finetune.finetune(conn, "tiny", store, "large", "tiny-ft", cfg, 28, root,
+                             tmp_path / "models", loader=lambda s: Tiny(), log=lambda s: None,
+                             release=rel)
+    assert meta["dataset_release"]["release_hash"] == rel.release_hash
+    assert meta["version"] == rel.snapshot_date and meta["photos"] == 6
+    saved = finetune.read_meta("tiny-ft", tmp_path / "models")
+    assert saved["dataset_release"]["dataset_release"] == rid
+    row = conn.execute("select meta_json from finetunes where name = 'tiny-ft'").fetchone()[0]
+    assert rid in row
+    rel.close()
