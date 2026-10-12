@@ -123,13 +123,34 @@ approved in advance on 2026-10-11):
 6. Report to the coordinator: the standard summary, the sanity result, box memory. Steve decides
    adoption; the coordinator builds the serving release (`mv release`) and deploys.
 
-## 5. Box memory (measured, then projected for v1)
+## 5. Box memory (measured 2026-10-12, projected for v1)
 
-Filled in by the retrain lane before adoption: the serving release's resident set with today's
-model on the box (`systemctl status`/cgroup `memory.peak`, the preload log), the share that
-scales with reference photos (vectors are float16, 768 dims: 1.5 KB per photo, memory-mapped),
-and the projection for v1's photo count, against the 4 GB box. Options for Steve if it does not
-fit: the 8 GB resize, serving from memory-mapped vectors only, or dropping a served method.
+Measured read-only on the box (Lightsail 4 GB: 3.83 GB RAM + 4 GB swap; the service's cgroup
+is capped at `MemoryMax` 3.5 GB), serving `bioclip-2-ft-20261007-165400` with
+`nearest,nearest+mean,nearest+mean+place` and the not-a-fungus gate:
+
+| | now | v1 (projected) |
+|---|---|---|
+| reference photos | 592,926 | ~660k (draft 609,527 + ~50k from the re-export) |
+| vectors (float16 x 768 = 1.5 KB per photo, memory-mapped) | 874 MiB | ~970 MiB (+~100 MB) |
+| model: base image tower (mmap) + trained tail | ~1.2 GB + 205 MB | same (same architecture; heads are not shipped) |
+| anon (Python, torch, index arrays, record tables) | 1.11 GB | ~1.17 GB (records +8%) |
+| service total now / peak | 2.99 / 3.10 GB, swap 0.74 GB (peak 1.29 GB) | ~3.15 / ~3.3 GB, more swap |
+| working set (anon + vectors + weights: what a search touches) | ~3.4 GB | ~3.6 GB, above the 3.5 GB cap |
+
+Reading: today's working set already sits at the cap, which is why the box swaps and
+preloads take 67-114 s. v1 adds ~0.15-0.2 GB. It will most likely still run (vectors and
+weights are file pages the kernel can drop and re-read), but searches slow down when vector
+pages are evicted, and the nightly index swap peaks higher. Nightly growth is small (~6 MB of
+vectors a week).
+
+Options for Steve, cheapest first:
+1. **8 GB box** (Lightsail plan change, roughly +$20 a month): the working set fits with room
+   for the gate and API sessions. Recommended once v1 is adopted.
+2. **int8 reference vectors** (code change + a check on v1's `val` that accuracy is unchanged):
+   vectors ~970 → ~490 MB, working set ~3.1 GB, under the cap.
+3. **Serve fewer methods** (drop `nearest` from `MV_METHODS`): saves little (<0.1 GB); a stopgap.
+Decide after the sanity gate, with the model's measured CPU timings.
 
 ## 6. Re-running every earlier experiment on v1
 
