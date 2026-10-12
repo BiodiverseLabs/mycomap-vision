@@ -19,7 +19,7 @@ The fine-tune changed only the last blocks, so the backbone runs the shared bloc
 and forks (models.FinetunedBackbone.encode_with_base): about 1/6 more compute a photo.
 
 Thresholds are chosen on the held-out DEV split and the not-a-fungus set only, never on
-a test split (docs/experiments/2026-10-09-not-fungus-gate.md).
+a test split (experiment entry 2026-10-09-not-fungus-gate, in the private research repo).
 
 A gated photo is left out of the observation's answer (a duck among mushroom photos
 must not sink it); when every photo is gated, the observation gets no species answer

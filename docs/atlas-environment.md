@@ -26,7 +26,7 @@ leave-`val`-out Atlas fit (~$1–8).
 | Grids | live release `draft` = 2.5′ (~5 km); `production` = 0.5′ (~1 km) | `atlas_source_resolution` |
 | Vision box | 4 GB, cgroup cap 3.5 GB; projected v1 working set ~3.1 GB with int8 vectors, so **~0.4 GB headroom** | `docs/retrain-v1.md` §5 |
 
-Where the served prior loses records (`docs/experiments/2026-10-09-prior-tuning.md`). Test
+Where the served prior loses records (experiment entry `2026-10-09-prior-tuning`). Test
 split, every truth with a DNA reference, species top-1, nearest + species average → setting
 (fixed / broken):
 

@@ -255,6 +255,57 @@ def _git_bash():
     return shutil.which("bash")
 
 
+def test_a_deploy_pulls_the_private_research_checkout_and_never_fails_on_it(tmp_path):
+    """Experiments and the paper draft live in a private repo cloned next to the app
+    (config.RESEARCH_DIR); the deploy brings it up to date, and only warns without it."""
+    import os
+    import subprocess
+
+    import pytest
+    bash = _git_bash()
+    if not bash:
+        pytest.skip("needs bash and git")
+
+    def git(cwd, *args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                        "core.autocrlf=false", *args], cwd=cwd, check=True,
+                       capture_output=True)
+
+    def repo(name, files):
+        origin = tmp_path / f"{name}-origin"
+        for rel, text in files.items():
+            (origin / rel).parent.mkdir(parents=True, exist_ok=True)
+            (origin / rel).write_bytes(text.encode())
+        git(origin, "init", "-q", "-b", "main")
+        git(origin, "add", "-A")
+        git(origin, "commit", "-q", "-m", "first")
+        return origin
+
+    code = repo("app", {"deploy/lightsail/deploy.sh": read("deploy.sh").replace("\r\n", "\n")})
+    app = tmp_path / "app"
+    git(tmp_path, "clone", "-q", str(code), str(app))
+    env_file = tmp_path / "vision.env"
+    env_file.write_text("MV_S3_BUCKET=b\n")
+    env = {**os.environ, "APP_DIR": str(app).replace("\\", "/"),
+           "ENV_FILE": str(env_file).replace("\\", "/"), "DEPLOY_STOP_AFTER_PULL": "1",
+           "HOME": str(tmp_path).replace("\\", "/")}
+
+    def deploy():
+        out = subprocess.run([bash, str(app / "deploy" / "lightsail" / "deploy.sh")],
+                             env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stdout + out.stderr
+        return out.stdout
+
+    assert "Experiments and Paper will be empty" in deploy()       # no checkout: warn only
+    research = repo("research", {"experiments/2026-10-01-a.md": "a"})
+    git(tmp_path, "clone", "-q", str(research), str(tmp_path / "app-research"))
+    (research / "experiments" / "2026-10-12-b.md").write_bytes(b"b")
+    git(research, "add", "-A")
+    git(research, "commit", "-q", "-m", "new entry")
+    assert "research pages: git pull" in deploy()
+    assert (tmp_path / "app-research" / "experiments" / "2026-10-12-b.md").read_text() == "b"
+
+
 def test_a_pull_that_changes_deploy_sh_runs_the_new_script(tmp_path):
     import subprocess
 

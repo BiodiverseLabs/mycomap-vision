@@ -1,6 +1,6 @@
 """Place and date for the served identifier (Steve, 2026-10-11): `nearest+mean+place`.
 
-The boost prior from exp/prior-tuning (docs/experiments/2026-10-09-prior-tuning.md),
+The boost prior from exp/prior-tuning (entry 2026-10-09-prior-tuning, private research repo),
 added to nearest + species average only when an identification has a place, a date, or
 both. With neither, the answer is nearest + species average's, exactly: same scores, same
 confidences (it shares that method's calibration).

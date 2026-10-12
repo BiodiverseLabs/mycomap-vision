@@ -1,8 +1,9 @@
 """The experiment registry (Steve, 2026-10-09): every experiment written down so it can be
-reviewed, in docs/experiments/YYYY-MM-DD-<slug>.md with a YAML front matter block.
+reviewed, in experiments/YYYY-MM-DD-<slug>.md with a YAML front matter block, in the private
+research checkout (config.RESEARCH_DIR, MV_RESEARCH_DIR), never in this public repo.
 
 The site lists them under Research > Experiments for signed-in members (signin.MEMBERS_ONLY):
-they hold development numbers and unpublished results. docs/experiments/README.md has the
+they hold development numbers and unpublished results. experiments/README.md there has the
 template and the rules; tests/test_experiments.py holds every entry to them.
 """
 
@@ -16,7 +17,7 @@ import yaml
 
 from . import config
 
-EXPERIMENTS_DIR = config.REPO_ROOT / "docs" / "experiments"
+EXPERIMENTS_DIR = config.RESEARCH_DIR / "experiments"
 STATUSES = ("planned", "running", "done", "adopted", "dropped")
 REQUIRED = ("title", "slug", "date", "status", "reproducibility", "question", "headline",
             "verdict", "decision")

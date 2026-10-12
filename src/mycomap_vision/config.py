@@ -61,6 +61,11 @@ DATA_DIR = Path(setting("MV_DATA_DIR")
 # command on while embeddings and models are read from the data folder.
 MANIFEST_PATH = Path(setting("MV_MANIFEST_PATH") or DATA_DIR / "manifest.sqlite")
 RAW_DIR = DATA_DIR / "raw"
+# The experiment registry (experiments/) and the paper draft (paper/draft.md) hold
+# unpublished results, so they are kept out of this public repo (Steve, 2026-10-12) in a
+# private checkout, by default next to this one; the site shows them to signed-in members.
+RESEARCH_DIR = Path(setting("MV_RESEARCH_DIR")
+                    or REPO_ROOT.parent / "mycomap-vision-research")
 PHOTOS_DIR = DATA_DIR / "photos"
 REPORTS_DIR = DATA_DIR / "reports"
 

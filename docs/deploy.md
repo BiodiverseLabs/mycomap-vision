@@ -13,6 +13,7 @@ as a **release** in S3.
 | --- | --- |
 | Instance | Lightsail, Ohio (us-east-2, the bucket's region), Ubuntu 24.04, **4 GB RAM**, 2 vCPUs, + 4 GB swap |
 | App | `/var/www/mycomap-vision`, a clone of the repo; `.venv` with CPU-only torch |
+| Research pages | `/var/www/mycomap-vision-research`, a clone of the private research repo (experiments, paper draft) |
 | Server | systemd unit `mycomap-vision`: `mv serve` on 127.0.0.1:8010 (API **and** the built site) |
 | Settings | `/etc/mycomap-vision/vision.env` (600), linked as the repo's `.env` |
 | Secrets | `/etc/mycomap-vision/session-secret` (made on the box), `signin-public.pem` (public key, not secret), `org-vision-key` (mycomap.org's `VISION_API_KEY`, typed by a person), `~/.aws/credentials` (read-only key, typed by a person) |
@@ -68,6 +69,36 @@ bash deploy/lightsail/provision.sh
 nginx, certbot and the AWS CLI. It adds swap, makes the folders and the session
 secret, installs the systemd unit, and downloads the BioCLIP 2 weights. It is
 safe to re-run.
+
+### 2b. The private research pages (Steve: a second deploy key)
+
+Research > Experiments and Paper show unpublished results, so they are not in this
+public repo. They come from the private repo `BiodiverseLabs/mycomap-vision-research`,
+cloned next to the app as `/var/www/mycomap-vision-research` (`config.RESEARCH_DIR`;
+`MV_RESEARCH_DIR` overrides it). GitHub refuses one deploy key on two repos, so the box
+gets a second key:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/id_research -N "" -C "vision box research key"
+cat ~/.ssh/id_research.pub
+```
+
+Add that key at GitHub → `BiodiverseLabs/mycomap-vision-research` → Settings → Deploy
+keys, **read access only**. Then:
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host github-research
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_research
+  IdentitiesOnly yes
+EOF
+git clone github-research:BiodiverseLabs/mycomap-vision-research.git /var/www/mycomap-vision-research
+```
+
+`deploy.sh` pulls it on every deploy. A copied folder works too (it is then left as it
+is), and without either the two pages are empty and the deploy says so.
 
 ### 3. Settings
 

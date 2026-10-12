@@ -51,7 +51,7 @@ log = logging.getLogger("mycomap_vision.api")
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
 # The working draft of the Vision paper (Paper in Progress page), served to signed-in
 # members only (signin.MEMBERS_ONLY). It ships with the code, never in the public web bundle.
-PAPER_FILE = config.REPO_ROOT / "docs" / "paper" / "draft.md"
+PAPER_FILE = config.RESEARCH_DIR / "paper" / "draft.md"   # private, never in this repo
 
 
 def open_manifest(path: Path) -> sqlite3.Connection:
@@ -718,7 +718,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     @app.get("/api/experiments")
     def experiments_list():
-        """The experiment registry (docs/experiments), front matter only. Members only."""
+        """The experiment registry (config.RESEARCH_DIR/experiments, private), front matter only. Members only."""
         from . import experiments
         found = experiments.load_all(experiments_dir or experiments.EXPERIMENTS_DIR)
         return JSONResponse({"experiments": [experiments.summary(e) for e in found]},

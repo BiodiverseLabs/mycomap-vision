@@ -1,5 +1,5 @@
-// The experiment registry as the Research > Experiments pages show it (docs/experiments in the
-// Vision repo, served to signed-in members by /api/experiments).
+// The experiment registry as the Research > Experiments pages show it (experiments/ in the
+// private research repo, served to signed-in members by /api/experiments).
 
 export const EXPERIMENT_STATUSES = ["planned", "running", "done", "adopted", "dropped"] as const;
 export type ExperimentStatus = (typeof EXPERIMENT_STATUSES)[number];
@@ -9,7 +9,7 @@ export interface ExperimentSummary {
   slug: string;
   date: string;
   status: ExperimentStatus;
-  /** "exploratory-pre-freeze", or "reproduced-on-<release>" (docs/experiments/README.md). */
+  /** "exploratory-pre-freeze", or "reproduced-on-<release>" (experiments/README.md in the private research repo). */
   reproducibility: string;
   question: string;
   headline: string;

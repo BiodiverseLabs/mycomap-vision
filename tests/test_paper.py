@@ -7,6 +7,7 @@ from test_api import open_limits
 from test_signin import ISSUER, PUBLIC_KEY, SECRET, sign_in
 from test_models_and_scoreboard import Const, seed_two_species
 
+from mycomap_vision import config
 from mycomap_vision.api import PAPER_FILE, create_app
 from mycomap_vision.signin import SigninConfig
 
@@ -58,6 +59,8 @@ def test_a_server_without_a_draft_says_so(conn, tmp_path):
     assert c.get("/api/paper").status_code == 404
 
 
-def test_the_draft_ships_with_the_code():
-    assert PAPER_FILE.is_file()
-    assert PAPER_FILE.read_text(encoding="utf-8").startswith("# ")
+def test_the_draft_is_read_from_the_private_checkout_never_from_this_repo():
+    assert PAPER_FILE == config.RESEARCH_DIR / "paper" / "draft.md"
+    assert not PAPER_FILE.resolve().is_relative_to(config.REPO_ROOT.resolve())
+    if PAPER_FILE.is_file():                  # where the private checkout is present
+        assert PAPER_FILE.read_text(encoding="utf-8").startswith("# ")

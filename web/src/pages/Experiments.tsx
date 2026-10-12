@@ -8,7 +8,7 @@ import { awaitsDecision, EXPERIMENT_STATUSES, filterExperiments, reproducibility
          statusCounts, type ExperimentStatus } from "@/lib/experiments";
 
 // Research > Experiments (Steve, 2026-10-09): every experiment recorded so it can be reviewed.
-// Members only: development numbers and unpublished results (docs/experiments/README.md).
+// Members only: development numbers and unpublished results (experiments/README.md in the private research repo).
 
 function Status({ s }: { s: ExperimentStatus }) {
   const w = STATUS_WORDS[s];

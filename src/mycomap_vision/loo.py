@@ -1,5 +1,6 @@
 """Leave-one-out scoring of the reference set, to find records whose label the photos
-dispute (experiment exp/loo-mislabel-scan, docs/experiments/2026-10-09-loo-mislabel-scan.md).
+dispute (experiment exp/loo-mislabel-scan; entry 2026-10-09-loo-mislabel-scan in the private
+research repo).
 
 Every reference record is identified by nearest+mean (methods.NearestAndMean, the site's
 default) against all the other reference records, as if it were a new upload. Left out
