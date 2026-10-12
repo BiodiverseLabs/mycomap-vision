@@ -275,3 +275,12 @@ def test_the_store_drops_the_longest_idle_session_when_full():
     with pytest.raises(session_store.Gone):
         store.get(first.id, "u1")
     assert store.get(second.id, "u2") is second
+
+
+def test_health_reports_open_sessions_and_their_memory(conn, tmp_path):
+    client = app(conn, tmp_path)
+    sid = open_session(client)["session_id"]
+    add(client, sid, 247, "p1")
+    h = client.get("/api/health").json()["sessions"]
+    assert h["open"] == 1 and h["photos"] == 1 and 0 < h["bytes"] <= h["max_bytes"]
+    assert app(conn, tmp_path / "off", sessions=False).get("/api/health").json()["sessions"] is None
