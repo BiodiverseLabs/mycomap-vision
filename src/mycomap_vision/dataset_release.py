@@ -300,6 +300,41 @@ def name_kind(name: str) -> str:
     return "provisional" if parse_name(name).code else "formal"
 
 
+REVIEW_COLUMNS = ["kind", "key", "reason", "note"]
+
+
+def loo_gate(name: str, test_for: str | None, loo_exclusions: Path | None,
+             no_loo_exclusions: str | None) -> dict:
+    """The leave-one-out gate (Steve, 2026-10-11: "review first, then build"). A frozen
+    release that can be trained on waits for the person-checked LOO exclusion list
+    (scripts/loo_exclusions.py, written against the manifest this build freezes), or for
+    Steve's explicit word that there are none (`no_loo_exclusions`: who, when). Returns
+    what the release records about it: the list's file name, rows and sha256, or the word.
+    Drafts and test releases (never trained on) need neither."""
+    if loo_exclusions is not None and no_loo_exclusions:
+        raise ReleaseError("give the LOO exclusion list or --no-loo-exclusions, not both")
+    if loo_exclusions is not None:
+        p = Path(loo_exclusions)
+        if not p.is_file():
+            raise ReleaseError(f"LOO exclusion list {p} not found")
+        with open(p, encoding="utf-8", newline="") as f:
+            rows = list(csv.reader(f, delimiter="\t"))
+        if not rows or rows[0] != REVIEW_COLUMNS:
+            raise ReleaseError(f"{p.name} is not a review list (header kind, key, reason, "
+                               "note; scripts/loo_exclusions.py writes one)")
+        return {"file": p.name, "rows": len(rows) - 1, "sha256": sha256_file(p)}
+    if no_loo_exclusions is not None:
+        if not no_loo_exclusions.strip():
+            raise ReleaseError("--no-loo-exclusions needs who said so, and when")
+        return {"none": no_loo_exclusions.strip()}
+    if is_draft(name) or test_for:
+        return {"not_required": "draft" if is_draft(name) else "test release"}
+    raise ReleaseError(
+        f"{name} waits for the LOO exclusion list (Steve, 2026-10-11: review first, then "
+        "build): pass --loo-exclusions <the TSV scripts/loo_exclusions.py wrote against this "
+        "manifest>, or --no-loo-exclusions '<Steve, date>' only on his explicit word")
+
+
 def read_review_lists(paths: list[Path]) -> tuple[dict, dict, list[dict]]:
     """TSV files with kind (record|photo), key, reason, note -> {key: 'review:<list>'}
     for records and photos, and each list's name, path and sha256."""
@@ -726,10 +761,14 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
           derive_photos: str = "all", val_cutoff: str | None = None,
           val_weeks: int = DEFAULT_VAL_WEEKS, north_america_only: bool = True,
           freeze_approved: str | None = None, test_for: str | None = None,
-          test_ids: Path | None = None, store_reader=None, log=print) -> dict:
+          test_ids: Path | None = None, store_reader=None,
+          loo_exclusions: Path | None = None, no_loo_exclusions: str | None = None,
+          log=print) -> dict:
     """Cut a release (frozen ids need freeze_approved: who gave the trigger, when) or a
     draft. `derive_photos` 'all' computes every derived hash (reads every original);
-    'none' or a number (a sample, drafts only) do less."""
+    'none' or a number (a sample, drafts only) do less. A frozen trainable release also
+    needs the LOO exclusion list or Steve's word that there is none (loo_gate); the list
+    is read like any review list and recorded with its rows and sha256."""
     root = Path(root or ROOT)
     check_id(name)
     if not is_draft(name) and not freeze_approved:
@@ -739,6 +778,10 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
         raise ReleaseError("a frozen release stores every derived hash (--derive all)")
     if (root / name).exists():
         raise ReleaseError(f"release {name} exists; a release is never rebuilt or edited")
+    loo = loo_gate(name, test_for, loo_exclusions, no_loo_exclusions)
+    review_files = list(review_files)
+    if loo_exclusions is not None and Path(loo_exclusions) not in map(Path, review_files):
+        review_files.append(Path(loo_exclusions))
     manifest_path = Path(manifest_path or config.MANIFEST_PATH)
     work = root / f".work-{name}"
     if work.exists():
@@ -768,7 +811,7 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
                             north_america_only=north_america_only, only_keys=only)
         finally:
             conn.close()
-        extra = {"freeze_approved": freeze_approved}
+        extra = {"freeze_approved": freeze_approved, "loo_exclusions": loo}
         if base is not None:
             missing = only - {r["record_key"] for r in built.records}
             if missing:

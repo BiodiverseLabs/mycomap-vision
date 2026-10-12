@@ -312,7 +312,8 @@ def test_a_frozen_release_needs_the_freeze_trigger(world):
         build(world, name="v1")
     with pytest.raises(dr.ReleaseError, match="every derived hash"):
         build(world, name="v1", freeze_approved="Steve 2026-10-20", derive_photos="1")
-    m = build(world, name="v1", freeze_approved="Steve 2026-10-20 (test)")
+    m = build(world, name="v1", freeze_approved="Steve 2026-10-20 (test)",
+              no_loo_exclusions="Steve 2026-10-20 (test)")
     assert m["draft"] is False and m["freeze_approved"].startswith("Steve")
 
 

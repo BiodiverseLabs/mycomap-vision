@@ -99,8 +99,11 @@ def test_a_frozen_release_needs_the_freeze_trigger_and_every_derived_hash():
         aws_dataset.make_request("v1", "   ")
     with pytest.raises(dr.ReleaseError, match="every derived hash"):
         aws_dataset.make_request("v1", "Steve, 2026-10-12", derive="none")
-    req = aws_dataset.make_request("v1", "Steve, 2026-10-12")
+    with pytest.raises(dr.ReleaseError, match="waits for the LOO exclusion list"):
+        aws_dataset.make_request("v1", "Steve, 2026-10-12")
+    req = aws_dataset.make_request("v1", "Steve, 2026-10-12", no_loo_exclusions="Steve, 10-12")
     assert req["derive"] == "all" and req["val_weeks"] == 8
+    assert req["loo"] == {"none": "Steve, 10-12"}
     assert aws_dataset.make_request(dr.draft_id(), None, derive="none")["name"].startswith("dry-")
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         aws_dataset.make_request("v1", "Steve", val_cutoff="Aug 10")
@@ -144,14 +147,20 @@ def test_a_launch_ships_code_manifest_and_request_and_the_instance_ends_itself(c
     launch_env(monkeypatch, tmp_path, s3, ec2)
     review = tmp_path / "loo.tsv"
     review.write_text("kind\tkey\treason\tnote\nrecord\tinat:101\tloo\tchecked\n")
+    loo = tmp_path / "loo-mislabel-2026-10-09.tsv"
+    loo.write_text("kind\tkey\treason\tnote\nrecord\tinat:102\tLOO mislabel\tSteve\n")
     out = aws_dataset.launch(conn, "v1", "Steve, 2026-10-12 (relayed by the coordinator)",
-                             review_files=[review], root=tmp_path / "rel", log=lambda s: None)
+                             review_files=[review], loo_exclusions=loo, root=tmp_path / "rel",
+                             log=lambda s: None)
     prefix = aws_dataset.build_prefix(out["build_id"])
-    for key in ("code.tar.gz", "manifest.sqlite", "request.json", "inputs/loo.tsv"):
+    for key in ("code.tar.gz", "manifest.sqlite", "request.json", "inputs/loo.tsv",
+                "inputs/" + loo.name):
         assert prefix + key in s3.objects
     req = json.loads(s3.objects[prefix + "request.json"])
     assert req["freeze_approved"].startswith("Steve, 2026-10-12") and req["name"] == "v1"
     assert req["review_files"] == ["loo.tsv"] and req["code_version"] == SHA
+    assert req["loo_exclusions"] == loo.name
+    assert req["loo"] == {"file": loo.name, "rows": 1, "sha256": dr.sha256_file(loo)}
     args = ec2.launched
     assert args["InstanceType"] == "c7i.2xlarge"
     assert args["InstanceInitiatedShutdownBehavior"] == "terminate"
@@ -171,7 +180,10 @@ def test_a_release_already_in_s3_or_here_is_refused_before_any_spend(cut, tmp_pa
     s3.objects[dataset_s3.release_prefix("v1") + dr.MANIFEST] = json.dumps(
         {"release_hash": "a" * 64}).encode()
     with pytest.raises(dr.ReleaseError, match="never reused"):
-        aws_dataset.launch(conn, "v1", "Steve", root=tmp_path / "rel", log=lambda s: None)
+        aws_dataset.launch(conn, "v1", "Steve", no_loo_exclusions="Steve (test)",
+                           root=tmp_path / "rel", log=lambda s: None)
+    with pytest.raises(dr.ReleaseError, match="waits for the LOO exclusion list"):
+        aws_dataset.launch(conn, "v2", "Steve", root=tmp_path / "rel", log=lambda s: None)
     assert ec2.launched is None and not any(k.startswith("dataset-builds/") for k in s3.objects)
 
 
@@ -206,3 +218,46 @@ def test_a_failed_build_says_so_in_its_result(cut, tmp_path):
                                   root=tmp_path / "inst", log=lambda s: None)
     doc = json.loads(s3.objects[aws_dataset.build_prefix("20261012-000002") + "result.json"])
     assert doc["state"] == "failed" and "no-such-recipe" in doc["error"]
+
+
+def test_the_instance_refuses_a_loo_list_other_than_the_one_the_launch_checked(cut, tmp_path):
+    _, path, _, _, _ = cut
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    loo = inputs / "loo.tsv"
+    loo.write_text("kind\tkey\treason\tnote\n")
+    request = aws_dataset.make_request("dry-20261012-000003", None, derive="none",
+                                       loo_exclusions=loo)
+    loo.write_text("kind\tkey\treason\tnote\nrecord\tinat:101\tswapped\tx\n")
+    s3 = BucketS3()
+    with pytest.raises(dr.ReleaseError, match="not the LOO list the launch checked"):
+        aws_dataset.run_build_job("20261012-000003", request, s3, "bkt", manifest_path=path,
+                                  root=tmp_path / "inst", inputs=inputs, log=lambda s: None)
+    doc = json.loads(s3.objects[aws_dataset.build_prefix("20261012-000003") + "result.json"])
+    assert doc["state"] == "failed"
+
+
+def test_the_build_ships_the_frozen_manifest_the_loo_list_was_written_against(cut, tmp_path,
+                                                                             monkeypatch):
+    from mycomap_vision.manifest import snapshot
+    conn, path, _, _, _ = cut
+    s3, ec2 = BucketS3(), FakeEC2()
+    launch_env(monkeypatch, tmp_path, s3, ec2)
+    frozen = snapshot(conn, tmp_path / "manifest-v1-freeze.sqlite")     # mv manifest-freeze
+    out = aws_dataset.launch(conn, "v1", "Steve", no_loo_exclusions="Steve (test)",
+                             manifest_path=frozen, root=tmp_path / "rel", log=lambda s: None)
+    prefix = aws_dataset.build_prefix(out["build_id"])
+    assert s3.objects[prefix + "manifest.sqlite"] == frozen.read_bytes()
+    req = json.loads(s3.objects[prefix + "request.json"])
+    assert req["manifest_sha256"] == dr.sha256_file(frozen) == out["manifest_sha256"]
+    assert req["manifest_file"] == frozen.name
+
+
+def test_the_instance_refuses_a_manifest_other_than_the_one_shipped(cut, tmp_path):
+    _, path, _, _, _ = cut
+    request = aws_dataset.make_request("dry-20261012-000004", None, derive="none")
+    request["manifest_sha256"] = "0" * 64
+    s3 = BucketS3()
+    with pytest.raises(dr.ReleaseError, match="not the one the launch shipped"):
+        aws_dataset.run_build_job("20261012-000004", request, s3, "bkt", manifest_path=path,
+                                  root=tmp_path / "inst", log=lambda s: None)

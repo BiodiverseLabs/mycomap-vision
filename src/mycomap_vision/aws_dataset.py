@@ -104,8 +104,12 @@ def render_user_data(build_id: str, bucket_name: str, max_hours: float,
 
 def make_request(name: str, freeze_approved: str | None, *, val_weeks: int = dr.DEFAULT_VAL_WEEKS,
                  val_cutoff: str | None = None, recipes=("original", "long500-q90"),
-                 review_files: list[Path] = (), derive: str = "all") -> dict:
-    """The build's settings, checked: what the instance reads from request.json."""
+                 review_files: list[Path] = (), derive: str = "all",
+                 loo_exclusions: Path | None = None, no_loo_exclusions: str | None = None
+                 ) -> dict:
+    """The build's settings, checked: what the instance reads from request.json. The LOO
+    gate (dataset_release.loo_gate) is checked here, before any spend: a frozen release
+    needs the LOO exclusion list or Steve's word that there is none."""
     dr.check_id(name)
     if not dr.is_draft(name):
         if not freeze_approved or not freeze_approved.strip():
@@ -115,16 +119,21 @@ def make_request(name: str, freeze_approved: str | None, *, val_weeks: int = dr.
             raise dr.ReleaseError("a frozen release stores every derived hash (derive all)")
     if val_cutoff and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", val_cutoff):
         raise ValueError(f"--val-cutoff is YYYY-MM-DD, not {val_cutoff!r}")
+    loo = dr.loo_gate(name, None, loo_exclusions, no_loo_exclusions)
     dr.read_review_lists([Path(p) for p in review_files])        # fails on a malformed list
     for r in recipes:
         dr.recipe_with_library(r)                                 # fails on an unknown recipe
     return {"name": name, "freeze_approved": freeze_approved, "val_weeks": int(val_weeks),
             "val_cutoff": val_cutoff, "recipes": list(recipes), "derive": derive,
-            "review_files": [Path(p).name for p in review_files]}
+            "review_files": [Path(p).name for p in review_files],
+            "loo_exclusions": Path(loo_exclusions).name if loo_exclusions else None,
+            "no_loo_exclusions": no_loo_exclusions, "loo": loo}
 
 
 def launch(conn, name: str, freeze_approved: str | None, *, val_weeks: int = dr.DEFAULT_VAL_WEEKS,
            val_cutoff: str | None = None, review_files: list[Path] = (),
+           loo_exclusions: Path | None = None, no_loo_exclusions: str | None = None,
+           manifest_path: Path | None = None,
            instance_type: str = BUILD_INSTANCE_TYPE, max_hours: float = 6,
            allow_dirty: bool = False, allow_unpushed: bool = False, root: Path | None = None,
            log=print) -> dict:
@@ -132,12 +141,24 @@ def launch(conn, name: str, freeze_approved: str | None, *, val_weeks: int = dr.
     from .manifest import snapshot
     from .taxonomy import cache_path
     request = make_request(name, freeze_approved, val_weeks=val_weeks, val_cutoff=val_cutoff,
-                           review_files=review_files)
-    if len({Path(p).name for p in review_files}) != len(list(review_files)):
+                           review_files=review_files, loo_exclusions=loo_exclusions,
+                           no_loo_exclusions=no_loo_exclusions)
+    uploads = list(review_files) + ([Path(loo_exclusions)] if loo_exclusions else [])
+    if len({Path(p).name for p in uploads}) != len(uploads):
         raise ValueError("two review lists share a file name")
     root = Path(root or dr.ROOT)
     if (root / name).exists():
         raise dr.ReleaseError(f"release {name} exists here ({root}); a release is never rebuilt")
+    # The manifest the release freezes: a fixed copy (`manifest_path`, the file the LOO
+    # exclusion list was written against) or, without one, a snapshot of this manifest now.
+    frozen = None
+    if manifest_path is not None:
+        import sqlite3
+        manifest_path = Path(manifest_path)
+        if not manifest_path.is_file():
+            raise ValueError(f"no manifest at {manifest_path}")
+        frozen = sqlite3.connect(f"file:{manifest_path.resolve().as_posix()}?mode=ro", uri=True)
+        conn = frozen
     sources.require_migrated(conn, "cutting a dataset release")
     photos = conn.execute("select count(*) from photo_copies where size = 'large' and "
                           "store like 's3://%'").fetchone()[0]
@@ -154,17 +175,23 @@ def launch(conn, name: str, freeze_approved: str | None, *, val_weeks: int = dr.
     build_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     prefix = build_prefix(build_id)
     s3.put_object(Bucket=b, Key=prefix + "code.tar.gz", Body=aws.code_tarball(sha))
-    snap = snapshot(conn, config.DATA_DIR / "manifest-dataset-build.sqlite")
+    if frozen is not None:
+        frozen.close()
+        snap = manifest_path                 # shipped byte for byte: the LOO list's manifest
+    else:
+        snap = snapshot(conn, config.DATA_DIR / "manifest-dataset-build.sqlite")
+    manifest_sha = dr.sha256_file(snap)
     s3.upload_file(str(snap), b, prefix + "manifest.sqlite")
     if cache_path().is_file():
         s3.upload_file(str(cache_path()), b, prefix + "taxonomy.sqlite")
     else:
         log("WARNING: no iNat taxonomy cache: the release's families would be .org's")
-    for p in review_files:
+    for p in uploads:
         s3.upload_file(str(p), b, prefix + "inputs/" + Path(p).name)
     s3.put_object(Bucket=b, Key=prefix + REQUEST_FILE,
-                  Body=json.dumps({**request, "build_id": build_id, "code_version": sha},
-                                  indent=2).encode())
+                  Body=json.dumps({**request, "build_id": build_id, "code_version": sha,
+                                   "manifest_sha256": manifest_sha,
+                                   "manifest_file": Path(snap).name}, indent=2).encode())
     log(f"Uploaded commit {sha[:10]}, the manifest and the request for build {build_id}")
     sess = aws.session()
     ec2, ssm = sess.client("ec2"), sess.client("ssm")
@@ -175,6 +202,7 @@ def launch(conn, name: str, freeze_approved: str | None, *, val_weeks: int = dr.
     return {"build_id": build_id, "release": name, "instance_id":
             resp["Instances"][0]["InstanceId"], "instance_type": instance_type,
             "estimate_hours": hours, "max_hours": max_hours, "code_version": sha,
+            "manifest_sha256": manifest_sha,
             "log": f"s3://{b}/{prefix}build.log", "result": f"s3://{b}/{prefix}{RESULT_FILE}",
             "then": f"mv dataset pull {name}"}
 
@@ -203,7 +231,18 @@ def run_build_job(build_id: str, request: dict, s3, bucket_name: str, *,
     prefix = build_prefix(build_id)
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     try:
+        want = request.get("manifest_sha256")
+        got = dr.sha256_file(Path(manifest_path or config.MANIFEST_PATH))
+        if want and got != want:
+            raise dr.ReleaseError("the manifest on the instance is not the one the launch "
+                                  "shipped (sha256 differs)")
+        loo_file = inputs / request["loo_exclusions"] if request.get("loo_exclusions") else None
+        if loo_file is not None and dr.sha256_file(loo_file) != request["loo"]["sha256"]:
+            raise dr.ReleaseError(f"{loo_file.name} on the instance is not the LOO list the "
+                                  "launch checked (sha256 differs)")
         manifest = dr.build(name=request["name"], manifest_path=manifest_path, root=root,
+                            loo_exclusions=loo_file,
+                            no_loo_exclusions=request.get("no_loo_exclusions"),
                             review_files=[inputs / f for f in request["review_files"]],
                             recipes=request["recipes"], derive_photos=request["derive"],
                             val_cutoff=request["val_cutoff"], val_weeks=request["val_weeks"],
