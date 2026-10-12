@@ -6,6 +6,7 @@ import { DataPage } from "@/pages/Data";
 import { AboutPage } from "@/pages/About";
 import { PaperPage } from "@/pages/Paper";
 import { GetInvolvedPage } from "@/pages/GetInvolved";
+import { ApiDocsPage } from "@/pages/ApiDocs";
 import { BenchmarkPage, BenchmarksPage, ForResearchersPage, ProtocolsPage,
          ResearchPage } from "@/pages/Research";
 import { ExperimentPage, ExperimentsPage } from "@/pages/Experiments";
@@ -18,6 +19,7 @@ export function App() {
         <Route path="/" component={IdentifyPage} />
         <Route path="/about" component={AboutPage} />
         <Route path="/get-involved" component={GetInvolvedPage} />
+        <Route path="/api-docs" component={ApiDocsPage} />
         <Route path="/research" component={ResearchPage} />
         <Route path="/research/results" component={ModelsPage} />
         <Route path="/research/benchmarks" component={BenchmarksPage} />
