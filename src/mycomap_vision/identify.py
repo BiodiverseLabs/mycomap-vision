@@ -27,8 +27,8 @@ import numpy as np
 from . import config, fungusgate, likely
 from .embed import normalise
 from .serving import map_embeddings
-from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, rank_scores,
-                       with_rows)
+from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, make_method,
+                       rank_scores, with_rows)
 from .licenses import photo_url
 from .placeprior import PlaceCue
 from .sources import INAT, record_url
@@ -224,7 +224,7 @@ class Identifier:
         by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()}, release=release)
         records = with_rows(by_id, row_of)
         self.index = build_index(records)
-        self.model = METHODS[method]()
+        self.model = make_method(method, backbone)
         self.uses_context = getattr(self.model, "needs_context", False)
         self.loaded_from_cache = fit_cached(
             self.model, vecs, self.index, records,
@@ -318,9 +318,13 @@ class Identifier:
         out["confidence_withheld"] = False
         if overall != fungusgate.FUNGUS:
             withhold_confidence(out)
-        out["hints"] = fungusgate.gate_hints(verdicts, overall) + (
+        like = fungusgate.find_looks_like(gate, overall)
+        out["hints"] = fungusgate.gate_hints(verdicts, overall, like) + (
             out["hints"] if overall == fungusgate.FUNGUS else [])
-        out["gate"] = {"verdict": overall, "message": fungusgate.MESSAGES.get(overall),
+        out["gate"] = {"verdict": overall,
+                       "message": (fungusgate.LOOKS_LIKE[like]["message"] if like
+                                   else fungusgate.MESSAGES.get(overall)),
+                       "looks_like": like,
                        "left_out": [i for i in range(len(query)) if i not in kept],
                        "photos": gate}
         return out

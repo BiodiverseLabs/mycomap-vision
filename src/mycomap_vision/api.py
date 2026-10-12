@@ -32,8 +32,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apiv1, config, modelcard, evaluate, fungusgate, inat, manifest, models, names, nightly,
-               permissions, serving, uploads)
+from . import (apiv1, config, evaluate, fungusgate, geocode, inat, manifest, modelcard, models,
+               names, nightly, permissions, serving, uploads)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -272,7 +272,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                introspect: "Callable[[str], dict] | None | bool" = True,
                dataset_root: Path | None = None, dataset_store: str | None = None,
                dataset_store_reader=None, dataset_allow_draft: bool = False,
-               fungus_gate: "fungusgate.FungusGate | None | bool" = True) -> FastAPI:
+               fungus_gate: "fungusgate.FungusGate | None | bool" = True,
+               place_search: "geocode.PlaceSearch | None" = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -621,6 +622,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     app.state.stats_cache = stats_cache
     if background:          # counted once at startup, so the first visitor doesn't wait
         threading.Thread(target=stats_cache.get, name="stats", daemon=True).start()
+
+    # Place search for the Identify page's map (geocode.py): Nominatim, cached and paced.
+    places = place_search or geocode.PlaceSearch()
+
+    @app.get("/api/geocode/search")
+    def geocode_search(q: str = ""):
+        try:
+            return places.search(q)
+        except geocode.GeocodeError as e:
+            headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
+            return JSONResponse({"detail": e.detail}, status_code=e.status, headers=headers)
 
     @app.get("/api/stats")
     def stats():

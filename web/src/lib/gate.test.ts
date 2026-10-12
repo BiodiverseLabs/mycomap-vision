@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, WHAT_NEXT, whatNext } from "./gate";
+import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, WHAT_NEXT, WHAT_NEXT_SLIME, whatNext } from "./gate";
 import type { FindGate, PhotoGate } from "./api";
 
 const photo = (verdict: PhotoGate["verdict"]): PhotoGate => ({ verdict, p_fungus: 0.5, message: null });
@@ -51,6 +51,16 @@ test("the page doesn't repeat the gate's verdict as a hint under its own banner"
   assert.deepEqual(pageHints({ gate: find("fungus"), hints: left }), left);   // no banner: kept
 });
 
+test("a find that looks like a slime mould says so, with the names and no chance", () => {
+  const g = { ...find("unsure", "This looks like a slime mould."), looks_like: "slime" };
+  const b = gateBanner({ gate: g });
+  assert.equal(b?.title, "This looks like a slime mould.");
+  assert.match(b!.body, /aren't fungi, but MycoMap holds some DNA-verified ones/);
+  assert.equal(chanceWithheld({ gate: g }), true);
+  const hints = ["This looks like a slime mould. Slime moulds aren't fungi, …", "Add more photos."];
+  assert.deepEqual(pageHints({ gate: g, hints }), ["Add more photos."]);
+});
+
 test("the next steps compare with specimens only when there are specimens to compare", () => {
   assert.equal(whatNext([{ gate: find("fungus") }]), WHAT_NEXT.fungus);
   assert.equal(whatNext([{ gate: null }]), WHAT_NEXT.fungus, "no gate deployed");
@@ -72,4 +82,17 @@ test("\"not a fungus\" never points at specimens above, and \"not sure\" calls t
   for (const k of ["fungus", "unsure", "not_fungus"] as const) {
     assert.equal(text(k).split("{sequencing}").length, 2, `${k}: one sequencing link`);
   }
+});
+
+test("a find that looks like a slime mould gets next steps for a slime mould", () => {
+  const slime = { ...find("unsure", "This looks like a slime mould."), looks_like: "slime" };
+  assert.equal(whatNext([{ gate: slime }]), WHAT_NEXT_SLIME);
+  assert.equal(whatNext([{ gate: { ...slime, verdict: "not_fungus" } }]), WHAT_NEXT_SLIME);
+  // A side-by-side model that calls it a fungus wins, as for any other verdict.
+  assert.equal(whatNext([{ gate: slime }, { gate: find("fungus") }]), WHAT_NEXT.fungus);
+  const text = WHAT_NEXT_SLIME.steps.join(" ");
+  assert.match(WHAT_NEXT_SLIME.title, /slime mould/i);
+  assert.match(text, /slime moulds aren't fungi/i);
+  assert.doesNotMatch(text, /closest specimens above/);     // no chance, so not "specimens"
+  assert.equal(text.split("{sequencing}").length, 2, "one sequencing link");
 });

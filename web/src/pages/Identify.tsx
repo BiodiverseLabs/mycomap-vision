@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode, type RefObject,
-         type SetStateAction } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode,
+         type RefObject, type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
 import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, ImagePlus, Lightbulb,
-         Loader2, LocateFixed, Lock, MapPin, Microscope, RotateCcw, X } from "lucide-react";
+         Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,6 +28,10 @@ import {
 import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, whatNext, type GateBanner } from "@/lib/gate";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
+import { applyPick } from "@/lib/mapPick";
+
+// The map (Leaflet) loads only when someone opens it: the Identify page stays light.
+const LocationPicker = lazy(() => import("@/components/LocationPicker"));
 import {
   identifyGate, LIKELY_COPY, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
 } from "@/lib/publicView";
@@ -424,6 +428,19 @@ function WhereWhen({ where, setWhere, noPlace }: {
 }) {
   const [locating, setLocating] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
+  // The map sheet; focus goes back to the button that opened it, or to the one by the
+  // fields when that's gone (the offer box closes once a place is set).
+  const [picking, setPicking] = useState(false);
+  const opener = useRef<HTMLElement | null>(null);
+  const pickButton = useRef<HTMLButtonElement>(null);
+  const openMap = (e: { currentTarget: HTMLElement }) => {
+    opener.current = e.currentTarget;
+    setPicking(true);
+  };
+  const closeMap = () => {
+    setPicking(false);
+    setTimeout(() => (opener.current?.isConnected ? opener.current : pickButton.current)?.focus(), 0);
+  };
   const locate = () => {
     if (!navigator.geolocation) return setFailed(locateError(2));
     setLocating(true);
@@ -432,7 +449,7 @@ function WhereWhen({ where, setWhere, noPlace }: {
       (pos) => {
         // Applied to the form as it is when the position arrives, not as it was when asked.
         setWhere((w) => ({ ...w, lat: pos.coords.latitude.toFixed(4), lng: pos.coords.longitude.toFixed(4),
-                           placeFromPhoto: undefined, placeFromDevice: true }));
+                           placeFromPhoto: undefined, placeFromDevice: true, placeFromMap: undefined }));
         setLocating(false);
       },
       (err) => {
@@ -462,9 +479,13 @@ function WhereWhen({ where, setWhere, noPlace }: {
                     data-testid="button-use-current-location">
               {locating ? <Loader2 className="animate-spin" /> : <LocateFixed />} Use my current location
             </Button>
+            <Button type="button" variant="outline" className="w-full bg-white" onClick={openMap}
+                    data-testid="button-pick-on-map-offer">
+              <MapIcon /> Pick on map
+            </Button>
             <p className="text-xs text-muted-foreground">
-              Only if you're still where you found it. Otherwise type its coordinates below, or
-              leave them empty.
+              Current location only if you're still where you found it. Otherwise pick it on the
+              map, type its coordinates below, or leave them empty.
             </p>
             <p className="text-xs text-muted-foreground" data-testid="text-no-place-tip">{noPlace.tip}</p>
           </div>
@@ -472,14 +493,20 @@ function WhereWhen({ where, setWhere, noPlace }: {
         <div className="flex items-center gap-2">
           <MapPin className="h-4 w-4 text-myco-brown shrink-0" />
           <input className={`${input} min-w-0`} placeholder="Latitude" inputMode="decimal" value={where.lat ?? ""}
-                 onChange={(e) => setWhere({ ...where, lat: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined })} aria-label="Latitude" />
+                 onChange={(e) => setWhere({ ...where, lat: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined, placeFromMap: undefined })} aria-label="Latitude" />
           <input className={`${input} min-w-0`} placeholder="Longitude" inputMode="decimal" value={where.lng ?? ""}
-                 onChange={(e) => setWhere({ ...where, lng: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined })} aria-label="Longitude" />
+                 onChange={(e) => setWhere({ ...where, lng: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined, placeFromMap: undefined })} aria-label="Longitude" />
           <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={locate}
                   disabled={locating} title="Use my location" aria-label="Use my location">
             {locating ? <Loader2 className="animate-spin" /> : <LocateFixed />}
           </Button>
         </div>
+        {!noPlace && (
+          <Button ref={pickButton} type="button" variant="outline" size="sm" onClick={openMap}
+                  data-testid="button-pick-on-map">
+            <MapIcon /> Pick on map
+          </Button>
+        )}
         <div className="flex items-center gap-2">
           <CalendarDays className="h-4 w-4 text-myco-brown shrink-0" />
           <input className={input} type="date" value={where.observedOn ?? ""}
@@ -488,6 +515,16 @@ function WhereWhen({ where, setWhere, noPlace }: {
         {failed && <p className="text-xs text-destructive" data-testid="text-locate-failed">{failed}</p>}
         {note && <p className="text-xs text-muted-foreground" data-testid="text-place-source">{note}</p>}
       </CardContent>
+      {picking && (
+        <Suspense fallback={
+          <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40" role="status" aria-label="Loading the map">
+            <Loader2 className="h-8 w-8 animate-spin text-white" />
+          </div>
+        }>
+          <LocationPicker where={where} onClose={closeMap}
+                          onUse={(pin) => { setWhere((w) => applyPick(w, pin)); closeMap(); }} />
+        </Suspense>
+      )}
     </Card>
   );
 }
@@ -503,12 +540,13 @@ function ContextLine({ used, sent, placeModel }: { used: ContextUsed; sent?: Whe
     );
   }
   // Places and dates filled in from a photo reach the server as entered; say where they came from.
-  const from = (f: "entered" | "photo" | null, photo?: number, device?: boolean) => sourceWords(f, photo, device);
+  const from = (f: "entered" | "photo" | null, photo?: number, device?: boolean, map?: boolean) =>
+    sourceWords(f, photo, device, map);
   return (
     <p className="min-w-0 flex-1 text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
       {used.place_from && (
         <span className="inline-flex items-center gap-1">
-          <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from, sent?.placeFromPhoto, sent?.placeFromDevice)})
+          <MapPin className="h-3.5 w-3.5" /> near {used.latitude}, {used.longitude} ({from(used.place_from, sent?.placeFromPhoto, sent?.placeFromDevice, sent?.placeFromMap)})
         </span>
       )}
       {used.date_from && (

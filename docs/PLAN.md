@@ -815,6 +815,372 @@ account, made 2026-09-29). The downloader stays On-Demand. The weekly `mv refres
 now also asks iNat about genera new since the last taxonomy lookup (at most 20 min,
 never failing the refresh; `--no-taxonomy`).
 
+## Picek replication: their method, our data (feat/picek-replication, 2026-10-09)
+
+Code, sources, deviations and commands in one place:
+[replications/fungitastic/](../replications/fungitastic/README.md) (modules under
+`src/mycomap_vision/replications/fungitastic/`, tests under
+`tests/replications/fungitastic/`; the old module paths still resolve).
+
+**Exploratory (Steve, 2026-10-09):** every result here so far is exploratory. It will be
+re-run on the immutable Dataset release v1 before any of it counts.
+
+Steve: "replicate their model with our data". Lukas Picek's group (BVRA; a PI of the EU
+FunDive project, whose model goes into PlutoF GO) built the Atlas of Danish Fungi's
+FungiVision (DF20) and FungiTastic. Trained on exactly Vision's training records, their
+recipe is the paper's baseline. It separates method from data: if it does about as well
+as Vision on the same records, the gap to the published Danish numbers is data; if it
+does better, so is the method.
+
+**Recipe** (`replications/fungitastic/retrain.py`, its constants in `presets.py`; preset
+`fungitastic-beit-b384`; sources are the HF config of
+BVRA/beit_base_patch16_384.in1k_ft_fungitastic_384, BohemianVRA/FungiTastic
+baselines/closed_set/train.py and the fgvc library):
+- timm `beit_base_patch16_384.in22k_ft_in22k_in1k`, full fine-tune, 384 x 384, a new linear
+  head over every species.
+- SGD with momentum 0.9 and no weight decay, learning rate 0.01, ReduceLROnPlateau on the
+  validation loss (factor 0.9, patience 1, eps 1e-6). Effective batch 256 (micro-batch 16 x
+  16 accumulation steps, bf16 autocast and gradient checkpointing, so it fits 8 GB). 50
+  epochs, keeping the epoch with the best validation macro-F1.
+- Seesaw loss (p 0.8, q 2.0) on the training set's class counts. Plain cross-entropy for
+  the ViT variants.
+- Training augmentation "vit_heavy": RandomResizedCrop(384, scale 0.8-1) then
+  RandAugment(2, 20). Evaluation: resize to 384 x 384, no crop. Mean and std 0.5.
+- A record's answer: each photo's logits divided by T (fitted on validation by NLL),
+  averaged over the photos, then softmax.
+- DF20's metadata prior (paper section 5.2): p(c|x,m) ∝ p(c|x) · p(m|c)/p(m) per field.
+  This is the paper's formula; their released code multiplies p(c|x) in twice, which is not
+  repeated here.
+- Other presets, same code: `vit-b384-ce` (their ViT-B: CE, lr 0.001), `df20-vit-l384`
+  (DF20's production ViT-L/16 384: CE, lr 0.005, light augmentation, 100 epochs) and
+  `fungitastic-beit-b224` (the 224 px BEiT).
+
+**Data and protocol.** Labels are Vision's own (evaluate.load_records: green records,
+observation names, temporary codes as species). Training uses the reference records of
+a comparison: everything validated up to the cutoff, which is 28 days before the newest
+record. The last 28 days before that cutoff are the validation slice, which is never
+trained on. It picks the epoch, drives the plateau schedule and fits T; their splits are
+by year too. `trained_through` is the cutoff, so `mv compare` refuses to score the model
+on anything it saw. Benchmark records: `--picek-exclude-benchmarks match` (the default)
+leaves out exactly what every Vision model leaves out (sealed benchmarks), so the two
+train on the same records; `all` also leaves out every benchmark's records (a trainer's
+manifest carries no benchmark tables, so their ids are shipped with the run). `<name>.records.csv` lists every record trained or validated on, which is the
+follow-up the held-out section asked for.
+
+**Deviations, and why:**
+- One-word names have no species label, so they are not trained on. Their data is
+  species-level too.
+- Seesaw is formed per batch row in log space. fgvc's C x C matrix would be 1.3 GB at
+  18k species. It is the same loss (tested against the published formula).
+- Training JPEGs decode in PIL draft mode at no less than the crop size (1024 -> 512 px before the
+  384 crop), which is cheaper and leaves the 384 input essentially unchanged. Validation decodes in full, as test-time embedding does.
+- The month prior is smoothed. DF20 uses raw counts; with 43% of species known from one
+  record, raw counts remove a species outright in any month it was not yet found. p(m|c)
+  is shrunk toward its genus (beta 10 photos) and the genus toward all fungi (beta 10).
+  `classifier+month-raw` is their unsmoothed estimate, floored at 1e-12 so scores stay
+  finite. The betas are not tuned yet: tune them on heldout dev only.
+- Habitat and substrate, DF20's other fields, don't exist in our data.
+- `classifier+month+place` adds a coarse place prior (4-degree cells, the same shrinkage).
+  It is OUR extension, not their method, and is kept as its own method so the paper can
+  report "their method" and "their method + our place prior" apart.
+- A species with no class in the classifier gets probability 1e-12 when scored against an
+  index that has it. Such species are those first validated after the cutoff, or only in
+  the validation slice. Nearest-specimen methods get those records for free; this is part
+  of the method difference, and the paper should say so.
+
+**Scoring.** The model is registered like a fine-tune (data/models/<name>.json + .pt, plus
+<name>.classifier.npz with the head, T and the month and place counts). Its embedding is
+the pre-logit feature in a length-keeping unit vector (the last dimension carries |f|), so
+the head applies exactly to the stored float16 vectors and cosine still works for
+nearest. The methods are `classifier`, `classifier+month`, `classifier+month-raw` and
+`classifier+month+place`. They work in `mv compare` (other backbones skip them) and in
+`mv heldout predict`, which writes the standard heldout_runs and heldout_predictions
+rows, so `mv heldout report` gives Steve's summary tables unchanged. They are not offered
+on the website. Every comparison now reports species macro-F1 (scikit-learn's macro over
+truth ∪ predictions, as fgvc reports it); `mv compare --per-image` adds top-1 with each
+photo answered alone. The held-out report adds species macro-F1 and per-photo top-1 for
+every Vision model, and prints them under the standard summary. Public name:
+"Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records".
+
+**How to run.**
+- Laptop smoke: `mv picek-train --max-steps 50 --effective-batch 32 --val-max-photos 300`.
+- Speed: `mv picek-bench` (the loader and the GPU measured apart).
+- Full run on AWS (not launched): `mv aws-launch-trainer --backbones none --finetune none
+  --picek fungitastic-beit-b384@15 --methods
+  classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest
+  --instance-type g6.xlarge --max-hours 52` (see the launch-day runbook below). The instance trains, embeds every photo with
+  the model and compares. Then, on the laptop: `mv aws-pull-trainer`, `mv heldout predict
+  --backbone picek-... --methods classifier,classifier+month --split dev`, and
+  `mv heldout report`. Dev only: test is not scored.
+- Photo cache (`preset@epochs@440`, or `--cache-px 440`; off by default). The training
+  photos are resized once (shorter side 440, JPEG q90) onto the instance's disk, and
+  training reads them from there. Validation reads the originals, like the embedding at
+  test time. Transforms and draft decoding are unchanged (tested). It changes what the
+  crop is taken from (a 440 px copy, not the 512 px draft decode), so it is Steve's call;
+  at 384 px it gains little, because the L4 is the limit there (see below).
+
+**Speed and cost.** Measured on the laptop CPU on 2026-10-09 (local large photos; GPU idle,
+but the laptop was busy with another session's job), in photos/s for one process, and
+for 4 workers:
+
+| loader pipeline | 1 process | 4 workers |
+|---|---|---|
+| BioCLIP fine-tune (224, light aug) | 83 | 318 |
+| Picek BEiT 384, RandAugment(2,20) | 88 | 320 |
+| Picek at 224 | 147 | 452 |
+| Picek 384 from the 440 px cache | 149 | 444 |
+| evaluation at 384 (full decode) | 87 | 310 |
+
+The 440 px cache files average 76 KB, against 364 KB for the originals. Building the
+cache runs at 97 photos/s per thread.
+
+The 384 recipe's loader costs the same per photo as the BioCLIP fine-tune's. On g6.xlarge
+(4 vCPU), the BioCLIP fine-tune's loader delivered 59 photos/s with S3 reads, so the
+replication's loader should give about 59/s there. With the 440 px cache or the 224 px
+preset it should give ~100/s.
+
+GPU, measured on the laptop's RTX 4070 (8 GB) with `mv picek-bench` (random tensors,
+18,000 classes, bf16), 2026-10-09. Training photos/s, then peak VRAM:
+
+| preset | micro-batch 16, checkpointing | 16, none | 32, checkpointing | 32, none |
+|---|---|---|---|---|
+| BEiT-B 384 | 44 (1.6 GB) | 55 (4.5 GB) | 46 (2.2 GB) | 13 (7.8 GB: spills past 8 GB) |
+| BEiT-B 224 | 142 (1.3 GB) | 179 (2.2 GB) | 146 (1.4 GB) | 183 (3.3 GB) |
+
+Evaluation (inference) runs at 211 photos/s at 384 and 640 at 224. End to end, `mv embed`
+of 3,000 large photos took 18 s (165/s, decode-bound).
+
+Gradient checkpointing now turns on only when the GPU has under 12 GB: it costs ~20%, and
+an L4 (24 GB) doesn't need it.
+
+**Smoke run (2026-10-09).** It ran against a scratch copy of the manifest, with no writes
+to the shared one:
+- `mv picek-train` for 60 steps (effective batch 32) on the laptop's 29,295 local large
+  photos: 7,727 records, 4,109 species, validation 192 records.
+- 34 photos/s end to end, with micro-batch 16, checkpointing on and 4 workers; 21% of the
+  time was spent waiting for the loader.
+- The model registered, then `mv embed`, then `mv heldout predict --split dev --limit 50`
+  with classifier and classifier+month: 49 records answered. `mv heldout report` rendered
+  the standard tables and the macro-F1 / per-photo table.
+- After 60 steps the accuracy is ~0, as expected: the smoke test proves the path, not the
+  model.
+
+**Estimates for g6.xlarge** (~$0.80/h, ~580k training photos). The L4 is taken as 1.1x
+the laptop 4070 for training: an ESTIMATE, from the BioCLIP fine-tune's 83/s on the laptop
+against 106/s in its L4 rehearsal. That puts BEiT-B 384 at ~60 photos/s on the L4. Train
+hours are the slower of loader and GPU; add ~2.6 h for the cache pass, the embedding of
+every photo, setup and the comparison.
+
+| run | photos/s (limit) | 15 epochs | 50 epochs |
+|---|---|---|---|
+| BEiT-B 384, as is | ~59 (loader ≈ GPU) | ~44 h, ~$35 | ~139 h, ~$111 |
+| BEiT-B 384, 440 cache | ~60 (GPU) | ~43 h, ~$35 | ~137 h, ~$110 |
+| BEiT-B 224 | ~100 (loader) | ~27 h, ~$21 | ~83 h, ~$66 |
+| BEiT-B 224, 440 cache | ~170 (loader) | ~18 h, ~$14 | ~51 h, ~$41 |
+
+At 384 the L4 itself is the limit, so neither the cache nor a 16-vCPU g6.4xlarge buys
+much there. Only a faster GPU does: an L40S (g6e.xlarge, ~$1.86/h, roughly 2.5-3x an L4,
+an estimate) would be ~150-180/s on the GPU, but needs the cache and more vCPUs to feed it
+(g6e.2xlarge or larger).
+
+Recommendation: BEiT-B 384 (their best model) for 15 epochs on g6.xlarge without the cache
+(~44.5 h, ~$36, `--max-hours 52`), then decide on 50 from its validation curve. The 224
+preset is the cheap variant, if the paper can use it.
+
+**Decided (Steve, 2026-10-09):** their recipe as published: BEiT-B/16 384, no photo cache.
+Prepare everything, but launch only once Vision's internal labelling is fixed and final.
+
+### Launch day (runbook)
+
+**On a dataset release (2026-10-09, updated 2026-10-11; replaces the label-hash checks
+below).** The launch takes `--release <id> [--allow-draft]`: it opens the release with
+every file checked against MANIFEST.json (`mv dataset verify` semantics), and the release
+is the source of truth for records, labels, splits, photos, allowed sources and benchmark
+exclusion (v1 trains on the held-out 13,145, so `--picek-exclude-benchmarks all` is
+refused when the release trains on benchmark records). The release's `labels_hash`
+replaces our own as the identity check; the release id, MANIFEST hash and labels_hash go
+into the label snapshot and result.json, with the photo-licence policy and
+`public_trainable_only: false` (internal benchmarking: every included photo, ARR too; only
+the final public model is CC + permission-granted) and the counts by licence class.
+
+- **Splits.** v1 holds `train` + `val` only. Training: its `train` split; its `val` split
+  for the plateau, the best macro-F1 epoch and the temperature; month and place prior
+  counts from `train` only. The test set is the separate release `v1-test` (fresh
+  records, disjoint by record and photo bytes), which training refuses (SealedLeak).
+- **What ships** (`dataset.shipped_files`): every file MANIFEST.json lists except
+  private.sqlite (release.sqlite, DATASET_CARD.md, any review inputs), plus MANIFEST.json
+  and SHA256SUMS. **Never private.sqlite.** The instance opens its copy with the builder's
+  trainer mode, `load_release(id, without_private=True)`, which checks every one of those
+  files, and refuses any MANIFEST.json but the one the launch read.
+- **The place prior** (`classifier+month+place`, our extension). A release's places are in
+  private.sqlite, so the instance has none (`as_records()` gives lat/lon None there). The
+  launch makes the counts on the laptop from the release's own places (never the live
+  manifest's coordinates): per 4-degree cell, training photos per species, no coordinates
+  and no record ids. It ships them as `runs/<run>/picek-place-cells.json` with their
+  sha256, which the instance checks. A copy with neither private.sqlite nor shipped
+  counts refuses to train, rather than let `classifier+month+place` quietly equal
+  `classifier+month`. The instance's own comparison scores the methods on its manifest
+  copy; the reported numbers come from the laptop, which has the release's places.
+- **Sources.** The record-sources fix is on main (`mycomap_vision.sources`); the guard
+  uses `sources.migrated` and `sources.PHOTO_SOURCES`. On a release the allowed sources
+  are its included records' sources (`dataset.allowed_sources`: inat and mo in the drafts).
+
+Then, on the laptop: `mv compare --release v1 --test-release v1-test` (the Picek model is
+selected on v1's val, so it is reported on v1-test, against v1's train + val) and
+`mv external run --release v1` / `--release v1-test` for the published checkpoints. Code:
+replications/fungitastic/{dataset,release_eval,published_release}.py, on the builder's
+reader (mycomap_vision.dataset_release, feat/dataset-release, merged into this branch);
+dataset.py only adds what the reader lacks (the trainer copy's file list, the MANIFEST
+hash, the included sources).
+
+**Dry run on a draft (2026-10-11).** On a scratch copy of the manifest, draft
+`dry-20261011-231034` (`mv dataset build --dry-run --derive none --recipes original`;
+labels_hash 149c95f2..., MANIFEST b15ebbee...): 143,796 train + 4,672 val records
+(577,451 + 17,604 photos), 16,640 species, sources inat 143,773 and mo 4,695 (allowed:
+inat, mo), photo licences nc 388,310, open 114,063, arr 92,682; 128 place cells; estimate
+46.2 h on g6.xlarge. It shipped MANIFEST.json, SHA256SUMS, DATASET_CARD.md and
+release.sqlite (not private.sqlite) and sent nothing.
+
+**The launch waits for Steve's v1 freeze trigger.** Then: `mv dataset build --name v1
+--freeze-approved "..."` (and `v1-test`), the dry run below on `--release v1`, and the
+launch.
+
+Everything below runs on **this PC** (Steve's Windows laptop). Shell commands are **Git
+Bash**; `aws login` can run in PowerShell or Git Bash. Nothing runs on the .org boxes.
+
+**Which code goes.** `mv aws-launch-trainer` ships `git archive` of the HEAD of the
+checkout whose code is running (`config.REPO_ROOT`). The installed `mv` runs the main
+checkout's code, so it ships whatever branch that checkout has checked out. A dry run
+prints the commit and checks the archive holds the replication's code
+(src/mycomap_vision/replications/fungitastic/: `__init__.py`, presets.py, retrain.py), the
+trainer and requirements/trainer.txt (timm 1.0.30, torch 2.14.0, torchvision 0.29.0, the
+same as the laptop). feat/replications-fungitastic carries feat/picek-replication and
+feat/external-bvra-baselines together. Either:
+- (a) merge feat/replications-fungitastic to main (Steve reviews), pull main in
+  `C:\Users\info\Projects\mycomap-vision`, and use `mv` there; or
+- (b) launch from the branch worktree with
+  `cd /c/Users/info/Projects/mycomap-vision-replications && PYTHONPATH=src
+  ../mycomap-vision/.venv/Scripts/python -m mycomap_vision.cli ...`, after copying the
+  main checkout's `.env` beside it (git-ignored) and setting
+  `MV_DATA_DIR=C:/Users/info/Projects/mycomap-vision/data`.
+
+Launch refuses uncommitted changes and a commit that isn't pushed. Since 2026-10-11 only
+the Vision Coordinator merges to main; the replication branch is pushed and handed over.
+
+**On the instance.** The pinned, hashed requirements are installed. The BEiT weights
+(`timm/beit_base_patch16_384.in22k_ft_in22k_in1k`, ~350 MB) download from the Hugging
+Face hub into /opt/mv/hf. They are public, so no token is needed (the laptop downloaded
+them without one). The disk is the AMI's root size + 60 GB: ~135 GB with the 75 GB Base
+GPU AMI. `--ec2-check` reads the real size. The run needs about 3 GB for weights and
+embeddings, plus the manifest.
+
+**Preconditions:**
+1. Labels final, and frozen in Dataset release v1 (Steve's freeze trigger). The internal
+   labelling fixes are done, and Vision's manifest is refreshed with them
+   (`mv export-records` or the weekly `mv refresh`; then `mv name-spellings` and
+   `mv taxonomy` look clean enough). On a release, the release's records and labels are
+   what trains; the notes below on the live manifest are the history of the rule.
+   - **Records from the release's allowed sources only (launch guard, 2026-10-09).** The
+     label audit found 8,868 Vision reference/training records (5.8%) that are Mushroom
+     Observer, MyCoPortal or .com sequence ids fetched AS iNat ids, so they carry other
+     observations' photos (mammals, birds, plants); labels hash 27240f89 includes them.
+     The rule (Steve, 2026-10-09): train on records from the Dataset release's allowed
+     sources, iNat and MO, each with photos from its own source (DNA-validated MO records
+     are in, with MO's photos); MyCoPortal, .com sequences, GenBank and unknown are
+     excluded; Vision and the replication train on the SAME release. The record-sources
+     fix is on main (`mycomap_vision.sources`: `records.source` normalised to inat | mo |
+     mycoportal | com_sequence | genbank | unknown; `evaluate.load_records` loads only inat
+     and mo records, each with photos of its own source). The guard
+     (`retrain.require_allowed_sources`, run by `mv aws-launch-trainer --picek` and again
+     by the instance before its first stage) first asks whether the manifest is migrated:
+     the `record-sources-v1` row in `manifest_migrations` (`sources.migrated`). Before
+     that row, `records.source` is the old guess ('inat' for any numeric id) and proves
+     nothing, so a real launch is refused (the dry run only warns). Once migrated, any
+     training or validation record whose source is outside the run's allowed sources
+     refuses the launch, with the count by source. The allowed set is a parameter, at
+     most `sources.PHOTO_SOURCES` (inat, mo); without a release it is ('inat',), and a
+     release supplies its own through `retrain.allowed_sources(release=...)`. The allowed set and the breakdown go
+     into the label snapshot (`allowed_sources`, `record_sources`: picek-labels.json and
+     result.json). A dry run also reports, for information, how many training records
+     the laptop's audit file (`data/audits/record-sources-2026-10-09/org-sources-live.tsv`)
+     lists as non-iNat; that file never ships.
+   - **Photos come from each record's recorded source** (an MO record's photos from MO,
+     not from an iNat id): main's `evaluate.load_records` and the release builder both
+     take only photos whose source is the record's.
+2. The Vision model the replication is compared against is trained on the same manifest
+   state. Same `trained_through` (the cutoff 28 days before the newest record) and same
+   benchmark exclusion.
+3. Launch-day decision: `--picek-exclude-benchmarks`.
+   - `match` (the default): leave out exactly what the Vision models leave out, i.e.
+     sealed benchmarks only. The released 13,145 heldout-2026-10-08 records then train
+     both models once they are in the manifest.
+   - `all`: also leave out every benchmark's records.
+   - For a fair comparison, use what the compared Vision fine-tune used. That is `match`
+     for a fine-tune made by `mv finetune` or the trainer. The fresh ~1,000-record paper
+     set will be sealed (`mv heldout freeze --holdout`), so it is out either way.
+4. The branch is merged, or the worktree is ready (above); `git status` is clean and
+   pushed.
+5. `aws login` (profile `mycomap-vision`). The On-Demand G quota of 4 vCPU is enough for
+   g6.xlarge.
+
+**Commands** (on v1, once frozen; a draft needs `--allow-draft` and counts for nothing):
+```bash
+# 1. Dry run: builds and checks everything, sends nothing. Read the label snapshot it
+#    prints: release, records, species, sources, licences, place cells, labels hash.
+mv aws-launch-trainer --release v1 --backbones none --finetune none \
+  --picek fungitastic-beit-b384@15 \
+  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
+  --instance-type g6.xlarge --max-hours 52 --dry-run [--ec2-check]
+# 2. Launch: the same without --dry-run. Note the run id and the labels hash.
+mv aws-launch-trainer --release v1 --backbones none --finetune none \
+  --picek fungitastic-beit-b384@15 \
+  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
+  --instance-type g6.xlarge --max-hours 52
+# 3. Monitor: progress.json shows each epoch's validation loss, macro-F1, top-1 and
+#    learning rate. The log is uploaded every 15 min.
+aws s3 cp s3://<bucket>/runs/<run>/progress.json - --profile mycomap-vision
+aws s3 cp s3://<bucket>/runs/<run>/train.log - --profile mycomap-vision | tail -50
+# 4. Pull: weights, head, records list, embeddings, scoreboard rows.
+mv aws-pull-trainer --run <run>
+# 5. The test release, against v1's train + val (the model was selected on v1's val).
+mv compare --release v1 --test-release v1-test \
+  --backbones picek-fungitastic-beit-b384-<run>,<vision model> \
+  --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
+  --per-image
+```
+
+Use `--max-hours 52`, not 48. The estimate is 44.5 h, and the job stops itself 45 min
+before the limit. A Picek stage that is stopped saves nothing: the model of a cut-short
+run is not the model asked for, as with fine-tuning. The label snapshot is printed at
+launch, uploaded as `runs/<run>/picek-labels.json`, and recorded in the model's json and
+in result.json. The instance refuses to train when its labels hash differs from the
+launch's.
+
+**Expected:** ~44.5 h. That is ~42 h of training at ~59 photos/s (the L4 and the 4-vCPU
+loader are about equal) plus 1.6 h embedding plus 1 h setup and comparison, ~$36 on
+demand at $0.80/h. The speed is an estimate until progress.json shows the real
+photos/s; check it in the first hour (step 3). If it is below ~45/s, the run won't fit
+52 h: stop the instance and raise --max-hours.
+
+**Before deciding on 50 epochs** (from progress.json's per-epoch history):
+- Is validation macro-F1 still rising over the last 3-4 epochs (more than ~0.5 points an
+  epoch)? Then more epochs would pay. If it flattened by epoch ~10, 50 epochs (~$110, ~6
+  days) buys little.
+- Did the learning rate drop (ReduceLROnPlateau: x0.9 each time validation loss fails to
+  improve for 2 epochs)? A few drops by epoch 15 means it is converging; none means it is
+  still early, and a longer run would help.
+- Is the validation loss rising while macro-F1 still improves? That is overfitting in
+  confidence (the temperature fit handles calibration); is the best epoch the last one?
+- Compare with Vision on heldout dev (species top-1 and macro-F1, by reference depth)
+  before spending more.
+
+**Open launch-day decisions (Steve):** the v1 freeze trigger (the precondition);
+`--picek-exclude-benchmarks match` (on a release, the release's splits decide; `all` is
+refused when v1 trains on benchmark records); 15 epochs now, 50 later from the curve; the month-prior smoothing (betas, tune on dev
+only); whether the paper reports `classifier+month` (smoothed) or `classifier+month-raw`
+(their estimate) as "their method"; launch from main once the Vision Coordinator has
+merged the branch.
+
 ## Phase 3: the platform
 
 - Own Lightsail instance (`vision.mycomap.org`), photos and models in S3, weekly
@@ -904,3 +1270,124 @@ species strict 40.4%, s.l. 40.4%, complex 43.4%; genus strict 77.0%, s.l. 80.0%.
 Gender folding changed none of them. 42 of the 99 true names are temporary codes
 (13 named exactly, 31%).
 
+## External baselines: DF20 / FungiTastic (2026-10-09, feat/external-bvra-baselines)
+
+Code, sources, deviations and commands in one place:
+[replications/fungitastic/](../replications/fungitastic/README.md) (modules under
+`src/mycomap_vision/replications/fungitastic/`, tests under
+`tests/replications/fungitastic/`; the old module paths still resolve).
+
+**Exploratory (Steve, 2026-10-09):** every result here so far is exploratory. It will be
+re-run on the immutable Dataset release v1 before any of it counts.
+
+Steve (2026-10-09): the Picek group's published classifiers go beside iNat's computer
+vision as outside, zero-retraining baselines in the paper. `replications/fungitastic/`
+`published.py`, `published_report.py`; `mv external labels | coverage | predict |
+baseline | report`, `mv heldout import-external`.
+
+- **Models** (timm checkpoints, public Hugging Face repos, no login; weights under
+  `data/external/bvra/<repo>/`, git-ignored): `external:fungitastic-beit-b384`
+  (BVRA/beit_base_patch16_384.in1k_ft_fungitastic_384, 2,829 classes; its config.yaml
+  calls the dataset DF24), `external:fungitastic-vit-b384`
+  (BVRA/vit_base_patch16_384.in1k_ft_fungitastic_384, 2,829) and `external:df20-vit-l384`
+  (BVRA/vit_large_patch16_384.ft_df20_384, DF20 "Production", 1,604). Each config.json
+  is checked against the architecture, class count and 384 px input before loading.
+- **Licence: CC BY-NC 4.0** (weights and DF20 / FungiTastic data alike): research use
+  only, never inside a commercial product. Cite Picek et al. 2022 (WACV, DF20) and
+  Picek et al. 2024 (FungiTastic, arXiv:2408.13632).
+- **Label map.** None ships with the weights. Rebuilt from the public training metadata
+  (`data/external/metadata/`, no login): FungiTastic-Train.csv `category_id` (from
+  cmp.felk.cvut.cz's FungiTastic metadata.zip, as BohemianVRA/FungiTastic dataset/fungi.py
+  reads it; 433,702 rows, 2,829 ids) and DanishFungi2024-train.csv `class_id` (266,273 rows,
+  the "DF20_FIX" set the DF20 Production model's config.yaml names; DF20-train_metadata_
+  PROD-2.csv gives the identical id -> species map). Ids are the training rows'
+  `scientificName` in alphabetical order; a class is that name without its author
+  ('Gliophorus perplexus'), GBIF's accepted name (`species`) kept beside it (248
+  FungiTastic and 147 DF20 classes differ). `build_labels` refuses anything but one name
+  per id, ids 0..N-1. **Verified** on CPU with 11 Vision reference records of common
+  species shared with Denmark (Trametes versicolor, Laetiporus sulphureus, Pleurotus
+  ostreatus, Hypholoma fasciculare, Lycoperdon perlatum, Stereum hirsutum, Schizophyllum
+  commune, Armillaria mellea, Mycena galericulata, Fomitopsis betulina, Boletus edulis):
+  top-1 right for 8 / 7 / 8 of 11 (BEiT / ViT-B / DF20), and every miss a plausible
+  confuser with the right species in the top 3 (T. versicolor -> T. hirsuta, A. mellea
+  -> A. lutea, B. edulis -> Calocybe gambosa / B. reticulatus); a shifted map would give
+  unrelated names.
+- **Names.** A class takes Vision's label of its own name when Vision knows it, else of its
+  accepted name (DF20's 'Piptoporus betulinus' -> Fomitopsis betulina), else its own name;
+  classes on one Vision name are one candidate (probabilities summed); genus is the
+  label's first word, family Vision's (iNat's) for the genus. FungiTastic: 1,254 classes
+  are Vision names as they are, 47 by their accepted name, 1,528 are not Vision names.
+  DF20: 877, 24, 703.
+- **GBIF synonym crosswalk** (coordinator for Steve, 2026-10-09: yes; `crosswalk.py`).
+  Scoring only, never Vision's labels. Every formal species name a report compares (answer
+  keys, answers, classes; never a temporary code or a one-word name) is matched exactly, no
+  fuzzy matching, in the GBIF Backbone (`/v1/species/match`, strict) and in the Catalogue
+  of Life eXtended Release through GBIF (`/v2/species/match`, checklistKey COL XR); the
+  Backbone alone lacks recent combinations such as 'Collybia nuda' (= Danish 'Lepista
+  nuda'). Two names are one species when they share an accepted key in either. Cached in
+  `data/external/gbif/match.sqlite` (`mv external crosswalk`, 4 requests a second, the
+  project's User-Agent; no iNat call); reports read the cache only. Every table is given
+  twice, by exact names and with the crosswalk, and one judge scores every model in a
+  table, Vision included, so a synonym can make a Vision answer right too.
+- **Protocol.** Photo only: their metadata prior is Danish habitat, substrate and month
+  frequencies, and a month prior learnt from Danish records says nothing about a North
+  American season, so none is used (coordinator, 2026-10-09). Each
+  photo resized to 384 x 384, no crop, mean = std = 0.5 (model cards); a record's answer is
+  the softmax of its photos' mean logits (the authors' observation rule), temperature 1:
+  fitting it on dev would tune a baseline on our labels. Each photo's own top-1 is kept for
+  their per-image metric. `mv external predict` reads the manifest only and writes JSONL
+  (logits cached in the benchmark's folder); `mv heldout import-external` stores it as
+  heldout_predictions with a heldout_runs row keyed by the checkpoint id (weights + class
+  map hashes), so `mv heldout report` scores it like any model (its run is never taken as
+  the breakdowns' reference). `mv external baseline --comparison <id>` adds an eval_runs row
+  on a scoreboard comparison's test records, with the standard top 1/3/5/10 block in
+  feat/compare-approaches' shape (its constants are imported from evaluate once that
+  branch is merged). Scoring, since these models have no temporary codes: (i) genus and
+  family on all records; (ii) species on records whose true name is formal; (iii) same
+  vocabulary: on records whose true name is in model C's vocabulary, C, Vision as served
+  and Vision restricted to C's names (Vision's stored list re-ranked, never predicted
+  again; a list left shorter than k makes top-k a lower bound, and the table says on how
+  many records); (iv) coverage. `mv external report` refuses a sealed test split.
+- **Coverage (iv)**, true names read by Vision's labels (heldout-2026-10-08 dev, 3,000
+  records; and Vision's 159,388 North American records, guests left out):
+
+  | | FungiTastic (both) dev | DF20 dev | FungiTastic NA | DF20 NA |
+  |---|---|---|---|---|
+  | temporary code | 36.8% | 36.8% | 41.4% | 41.4% |
+  | formal, in vocabulary | 17.0% (509) | 13.8% (414) | 16.2% | 13.1% |
+  | formal, s.l. only | 0.0% | 0.2% | 0.0% | 0.1% |
+  | formal, not in vocabulary | 43.9% | 46.9% | 41.5% | 44.6% |
+  | one word | 2.4% | 2.4% | 0.9% | 0.9% |
+  | genus in vocabulary | 87.8% | 82.4% (+2.0% s.l.) | 91.1% | 85.4% (+1.9% s.l.) |
+
+  So at most 17% of our DNA-verified records (28% of those with a formal name) are names a
+  Danish model can say at all; distinct species in its vocabulary: 253 of 1,860 on dev and
+  1,224 of 18,600 North American (FungiTastic), 197 and 853 (DF20).
+
+- **Dev results (2026-10-09, full 3,000-record dev split; 2,989 answered by the outside
+  models, 12,206 photos; GPU wall 194 / 188 / 285 s).** Photo only, temperature 1. Top 1 / 3
+  / 5 / 10 strict; "x" = with the GBIF crosswalk (8,987 of 9,730 names matched; it applies
+  to every model). Vision = bioclip-2-ft-20261007-165400 as stored (10 deep).
+
+  | | (i) genus, all (n 2,966) | (i) family | (ii) formal species (n 1,818) | (ii) x |
+  |---|---|---|---|---|
+  | FungiTastic BEiT-B | 54.6 / 68.6 / 73.8 / 78.7 | 66.8 / 81.0 / 86.1 / 91.3 | 14.0 / 20.0 / 21.7 / 23.3 | 15.8 / 22.3 / 24.4 / 26.4 |
+  | FungiTastic ViT-B | 50.8 / 66.0 / 71.6 / 77.7 | 61.8 / 79.1 / 84.3 / 89.9 | 13.5 / 18.0 / 19.7 / 22.5 | 15.3 / 20.3 / 22.2 / 25.2 |
+  | DF20 ViT-L | 52.4 / 65.7 / 69.2 / 73.7 | 64.7 / 80.4 / 84.6 / 89.6 | 12.6 / 17.0 / 18.1 / 19.5 | 14.7 / 19.9 / 21.3 / 23.0 |
+  | Vision nearest | 79.0 / 90.5 / 93.3 / 95.7 | 86.4 / 94.7 / 96.4 / 98.1 | 54.4 / 72.9 / 79.5 / 85.6 | 54.5 / 73.1 / 79.7 / 85.8 |
+  | Vision nearest+prior@org | 79.5 / 91.1 / 93.7 / 95.8 | 86.7 / 94.8 / 96.8 / 98.2 | 57.1 / 74.2 / 80.0 / 85.6 | 57.2 / 74.4 / 80.2 / 85.6 |
+
+  (iii) Same vocabulary, species top 1 / 3 / 5 / 10 and macro-F1 (exact names; with the
+  crosswalk n rises to 575 FungiTastic, 483 DF20 and the numbers move by about a point):
+
+  | | FungiTastic records (n 508) | DF20 records (n 413) |
+  |---|---|---|
+  | the outside model | BEiT 50.0 / 71.7 / 77.6 / 83.5, F1 49.7; ViT-B 48.2 / 64.4 / 70.5 / 80.5, F1 45.4 | 55.5 / 74.8 / 79.7 / 86.0, F1 54.9 |
+  | Vision nearest | 60.4 / 79.7 / 84.1 / 88.6, F1 57.9 | 60.5 / 78.7 / 83.5 / 87.4, F1 58.7 |
+  | Vision nearest+prior@org | 63.2 / 78.5 / 83.9 / 89.0, F1 61.2 | 63.2 / 78.0 / 83.8 / 88.6, F1 62.0 |
+  | Vision nearest, restricted | 77.2 / 87.8 / 88.2 / 88.6, F1 70.5 | 78.5 / 87.2 / 87.4 / 87.4, F1 72.4 |
+
+  Restricted top 3+ are lower bounds: Vision's stored list keeps under 3 of the model's
+  names on about 45% of those records (top 1 on 11-15). Per-image species top 1 (their
+  metric), formal species: BEiT 10.5%, ViT-B 9.8%, DF20 9.2% of 7,206 photos. Full tables:
+  `mv external report --name heldout-2026-10-08` (both scorers) and `mv heldout report`.
