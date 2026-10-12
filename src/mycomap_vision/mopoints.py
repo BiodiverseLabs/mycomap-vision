@@ -36,6 +36,7 @@ create table if not exists mo_public_points (
   latitude real, longitude real,         -- MO's shown GPS; null when absent or hidden
   gps_hidden       integer,
   box_north real, box_south real, box_east real, box_west real,   -- MO's location box
+  location_name    text,                 -- MO's public location name (its country: placefallback.py)
   status           text not null,        -- 'ok' | 'missing' (MO has no such observation)
   fetched_at       text not null
 );
@@ -44,6 +45,9 @@ create table if not exists mo_public_points (
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("pragma table_info(mo_public_points)")}
+    if "location_name" not in cols:              # a table written before 2026-10-12
+        conn.execute("alter table mo_public_points add column location_name text")
 
 
 def _num(v):
@@ -63,7 +67,8 @@ def parse(obs: dict) -> dict:
     return {"mo_id": int(obs["id"]), "latitude": lat, "longitude": lng,
             "gps_hidden": int(hidden),
             "box_north": _num(loc.get("latitude_north")), "box_south": _num(loc.get("latitude_south")),
-            "box_east": _num(loc.get("longitude_east")), "box_west": _num(loc.get("longitude_west"))}
+            "box_east": _num(loc.get("longitude_east")), "box_west": _num(loc.get("longitude_west")),
+            "location_name": loc.get("name") or None}
 
 
 def pending(conn: sqlite3.Connection, refresh: bool = False) -> dict[int, str]:
@@ -126,11 +131,11 @@ def save(conn: sqlite3.Connection, keys: dict[int, str], answers: list[dict],
         for n, key in keys.items():
             p = got.get(n)
             conn.execute(
-                "insert or replace into mo_public_points values (?,?,?,?,?,?,?,?,?,?)",
+                "insert or replace into mo_public_points values (?,?,?,?,?,?,?,?,?,?,?)",
                 (key, *(p[k] for k in ("latitude", "longitude", "gps_hidden", "box_north",
-                                       "box_south", "box_east", "box_west")),
+                                       "box_south", "box_east", "box_west", "location_name")),
                  "ok", fetched_at) if p else (key, None, None, None, None, None, None, None,
-                                              "missing", fetched_at))
+                                              None, "missing", fetched_at))
     return {"ok": len(got), "missing": len(keys) - len(got)}
 
 

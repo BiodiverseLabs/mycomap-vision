@@ -105,19 +105,27 @@ build as `--loo-exclusions`. "No LOO exclusions" counts only on Steve's explicit
 recorded with `--no-loo-exclusions "<Steve, date>"`. The build refuses a frozen release with
 neither, and the release's MANIFEST.json records which (file, rows, sha256, or the word).
 
-1. Full re-export into the shared manifest (the ~15.5k new records incl. the 13,145; renames).
-   Back up `data/manifest.sqlite` first. (It can run before the LOO review is finished.)
-2. $ Fetch the new records' photos to S3: `mv aws-launch-downloader` (t3.small, self-terminating;
-   ~50k photos ≈ 21 GB, 3-4 GB from the all-rights-reserved host, within its 20 GB/day cap),
-   then `mv aws-pull-manifest`. (Also covers the 3 photos of the newest MO record that the
-   record-sources migration left for a normal download.)
-   Then `mv fetch-mo-points`: each MO record's PUBLIC point (its shown GPS, else the centre
-   of its location box), read anonymously at MO's pace (~7.2k records, ~8 min). Steve,
-   2026-10-12 (D1, docs/atlas-environment.md): v1's `private.sqlite` freezes every record's
-   public point in `record_public_places` (iNat: the point the anonymous API showed, obscured
-   where iNat obscures it; never .org's true point), so the later `v1-env` sidecar samples
-   Atlas layers only there. A frozen build refuses an included record whose public point was
-   never read; `public_kind = 'none'` (private on iNat, no MO GPS or box) is an explicit answer.
+1. Full re-export into the shared manifest (`mv export-records`: at the 2026-10-12 audit,
+   15,398 new records incl. all 13,145 held-out, 100 removed, 6,943 renamed). Back up
+   `data/manifest.sqlite` first.
+2. Read what the sources say, all read-only and at each source's pace:
+   - `mv fetch-place-fallback`: records .org gives no place (892 at the audit) get their region
+     from their own source (iNat `place_ids`, MO's location name); North American ones then
+     count like any other (Steve, 2026-10-12). It also runs `fetch-mo-points` for every MO
+     record: its PUBLIC point (shown GPS, else the centre of its location box). Steve,
+     2026-10-12 (D1, docs/atlas-environment.md): v1's `private.sqlite` freezes every record's
+     public point in `record_public_places` (iNat: the point the anonymous API showed, obscured
+     where iNat obscures it; never .org's true point), so the later `v1-env` sidecar samples
+     Atlas layers only there. A frozen build refuses an included record whose public point
+     was never read; `public_kind = 'none'` is an explicit answer.
+   - `mv fetch-inat` (new and newly North American iNat records) and `mv fetch-mo` (753 MO
+     records at the audit), then `mv fetch-mo-points` again for MO records the export added.
+   $ Then the photos into S3: `mv aws-launch-downloader` (t3.small, self-terminating) for the
+   iNat photos with no S3 copy (58,563 at the audit, incl. 54,066 of the held-out records',
+   which exist only as the local benchmark copy; ~25 GB, ~4.6 GB from the all-rights-reserved
+   host, inside its 20 GB/day cap; ~2 h), and the new MO records' photos at MO's pace
+   (~3,400, ~4-5 h; or a zip from MO), then `mv aws-pull-manifest`. A record counts only with
+   a kept original in S3: skipping this would drop the held-out records from v1.
 3. Freeze the manifest: `mv manifest-freeze --out data/manifest-v1-freeze.sqlite` (a consistent
    copy; prints its sha256). With its path and sha256, the retrain owner runs
    `scripts/loo_exclusions.py --manifest data/manifest-v1-freeze.sqlite` once Steve's review is

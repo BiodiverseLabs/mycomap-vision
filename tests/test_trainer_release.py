@@ -25,8 +25,8 @@ VAL_PHOTOS = {1006, 1007}
 
 
 def s3_copies(conn, ids=range(1000, 1008), store="s3://bkt/"):
-    conn.executemany("insert into photo_copies values (?, ?, 'large', ?, 1, 'h', 't')",
-                     [(i, store, f"large/{i}.jpg") for i in ids])
+    conn.executemany("insert into photo_copies values (?, ?, 'large', ?, 1, ?, 't')",
+                     [(i, store, f"large/{i}.jpg", f"h{i}") for i in ids])   # as the local copies
     conn.commit()
 
 

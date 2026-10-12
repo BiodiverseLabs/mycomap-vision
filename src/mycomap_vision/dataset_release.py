@@ -57,7 +57,7 @@ RECORD_REASONS = ("source_mycoportal", "source_com_sequence", "source_genbank",
                   "missing_at_source",
                   "label_conflict", "no_label", "guest", "review", "no_photos", "ok")
 PHOTO_REASONS = ("record_excluded", "other_source", "no_original", "permission_withdrawn",
-                 "mo_not_for_use", "review", "ok")
+                 "mo_not_for_use", "review", "shared_other_label", "copy_in_train", "ok")
 
 MANIFEST = "MANIFEST.json"
 SUMS = "SHA256SUMS"
@@ -626,6 +626,7 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             sid = stores.setdefault(copy[0], len(stores) + 1)
             photo_stores.append({"photo_key": pkey, "store_id": sid})
 
+    drop_shared_other_label(photos, keep)
     unknown = (set(review_records) - set(keep)) | (set(review_photos) - seen)
     if unknown:
         raise ReleaseError(f"{len(unknown)} review-list keys are not in the manifest "
@@ -636,13 +637,58 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             rec["reason"] = "no_photos"
         rec["included"] = int(rec["reason"] == "ok")
     exported = [r["label_exported_at"] for r in records if r["label_exported_at"]]
+    from .placefallback import from_source_place
     info = {"label_snapshot_at": max(exported) if exported else None,
-            "north_america_only": north_america_only}
+            "north_america_only": north_america_only,
+            # Placeless on .org, North American by their source's own place (2026-10-12).
+            "north_america_from_source_place": from_source_place(conn)}
     have_point = {p["record_key"] for p in public_places}
     missing = [r["record_key"] for r in records if r["included"] and r["record_key"]
                not in have_point]
     return Built(records, photos, places, owners, stores, photo_stores, info,
                  public_places, missing)
+
+
+def drop_shared_other_label(photos: list[dict], records: dict[str, dict]) -> int:
+    """Steve, 2026-10-12: the same image (identical bytes) on records with different labels
+    is left out of every one of them (`shared_other_label`). It is one observer's photo of
+    two organisms in one frame (a parasite and its host, two finds in one shot), and each
+    copy would teach the model another name for the same image. The records keep their
+    other photos; one left with none becomes `no_photos`. Returns the photos dropped."""
+    groups: dict[str, list[dict]] = {}
+    for p in photos:
+        if p["included"] and p["original_sha256"]:
+            groups.setdefault(p["original_sha256"], []).append(p)
+    dropped = 0
+    for group in groups.values():
+        labels = {records[p["record_key"]]["label"] for p in group}
+        if len({p["record_key"] for p in group}) > 1 and len(labels) > 1:
+            for p in group:
+                p.update(included=0, reason="shared_other_label")
+                dropped += 1
+    return dropped
+
+
+def drop_val_copies_of_train(built: "Built") -> int:
+    """Steve, 2026-10-12: an image (identical bytes) that is also in a `train` record is left
+    out of its `val` records (`copy_in_train`), so the model is never scored on a photo it
+    learnt from. A `val` record left with no photo leaves the release (`no_photos`).
+    Returns the photos dropped."""
+    split = {r["record_key"]: r["split"] for r in built.records if r["included"]}
+    in_train = {p["original_sha256"] for p in built.photos
+                if p["included"] and split.get(p["record_key"]) == "train"}
+    dropped = 0
+    for p in built.photos:
+        if p["included"] and split.get(p["record_key"]) == "val" and \
+                p["original_sha256"] in in_train:
+            p.update(included=0, reason="copy_in_train")
+            dropped += 1
+    if dropped:
+        has_photo = {p["record_key"] for p in built.photos if p["included"]}
+        for r in built.records:
+            if r["included"] and r["record_key"] not in has_photo:
+                r.update(included=0, reason="no_photos", split=None)
+    return dropped
 
 
 def assign_splits(records: list[dict], *, val_cutoff: str | None = None,
@@ -922,6 +968,7 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
         extra["public_places_missing"] = len(built.public_missing)
         rules = assign_splits(built.records, val_cutoff=val_cutoff, val_weeks=val_weeks,
                               test_only=base is not None)
+        extra["val_copies_of_train_dropped"] = drop_val_copies_of_train(built)
         derived = derive_all(built, recipes, derive_photos, store_reader, log=log)
         extra["derived_complete"] = derive_photos == "all"
         inputs = {"manifest": snap, "review_lists": lists,
