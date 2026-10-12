@@ -284,3 +284,16 @@ def test_health_reports_open_sessions_and_their_memory(conn, tmp_path):
     h = client.get("/api/health").json()["sessions"]
     assert h["open"] == 1 and h["photos"] == 1 and 0 < h["bytes"] <= h["max_bytes"]
     assert app(conn, tmp_path / "off", sessions=False).get("/api/health").json()["sessions"] is None
+
+
+def test_an_unknown_session_is_session_gone_never_not_found(conn, tmp_path):
+    # The app reads 404 not_found on these routes as "sessions are switched off here" and
+    # session_gone as "open a new one and resend" (Mobile Coordinator, 2026-10-12).
+    client = app(conn, tmp_path)
+    sid = "s_never-opened"
+    for res in (add(client, sid, 247, "p1"),
+                client.patch(f"/api/v1/sessions/{sid}", headers=APP, json={}),
+                client.get(f"/api/v1/sessions/{sid}", headers=APP),
+                client.delete(f"/api/v1/sessions/{sid}/photos/p1", headers=APP),
+                client.delete(f"/api/v1/sessions/{sid}", headers=APP)):
+        assert res.status_code == 404 and res.json()["code"] == "session_gone", res.request.url
