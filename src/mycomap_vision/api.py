@@ -33,8 +33,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apidocs, apiv1, config, evaluate, fungusgate, geocode, inat, manifest, modelcard,
-               models, names, nightly, permissions, quotas as quota_rules, serving,
+from . import (apidocs, apiv1, config, evaluate, fastsearch, fungusgate, geocode, inat, manifest,
+               modelcard, models, names, nightly, permissions, quotas as quota_rules, serving,
                sessions as session_store, uploads, workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
@@ -535,6 +535,22 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                gate=fungus_gate)
         finally:
             own.close()
+        # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
+        # thread, after taking the one packed slot from the index serving now.
+        if config.setting("MV_SEARCH_INT8") == "1":
+            ref = getattr(getattr(getattr(ident, "nearest", None), "scorer", None), "ref", None)
+            if not hasattr(ref, "use_int8"):
+                fastsearch.SLOT.last_error = ("the reference vectors aren't memory-mapped here "
+                                              "(on a GPU?): the plain search answers")
+            else:
+                try:
+                    start = time.monotonic()
+                    ref.use_int8(int(_setting_number("MV_SEARCH_REFINE") or fastsearch.REFINE))
+                    note(f"[search] {backbone}/{method}: int8 search packed, "
+                         f"{ref.packed.nbytes / 2**20:.0f} MB in {time.monotonic() - start:.0f} s")
+                except Exception as e:  # noqa: BLE001 - the mapped search keeps answering
+                    fastsearch.SLOT.last_error = f"{type(e).__name__}: {e}"
+                    note(f"[search] int8 search off, mapped search kept: {fastsearch.SLOT.last_error}")
         ident.warm()
         return ident
 
@@ -592,6 +608,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
                 "queue": model_queue.state(),
+                "search": fastsearch.SLOT.state(),
                 "quotas": {"mode": quotas.mode},
                 "sessions": (app.state.sessions.state()
                              if getattr(app.state, "sessions", None) else None),

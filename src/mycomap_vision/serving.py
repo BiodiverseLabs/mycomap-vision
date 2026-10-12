@@ -104,6 +104,24 @@ class MappedVectors:
                     out[here] = shard[local].astype(np.float32) * scale[local][:, None]
         return out
 
+    def int8_rows(self, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Those rows as int8 codes and a float32 scale each (quantize.py's rule): an int8
+        shard's codes as stored, float rows quantized. For the fast search (fastsearch.py)."""
+        from .quantize import quantize_int8
+        rows = np.asarray(rows)
+        codes = np.empty((len(rows), self.shape[1]), dtype=np.int8)
+        scales = np.empty(len(rows), dtype=np.float32)
+        for shard, scale, lo, hi in zip(self.shards, self.scales, self.offsets[:-1],
+                                        self.offsets[1:]):
+            here = (rows >= lo) & (rows < hi)
+            if here.any():
+                local = rows[here] - lo
+                if scale is None:
+                    codes[here], scales[here] = quantize_int8(shard[local])
+                else:
+                    codes[here], scales[here] = shard[local], scale[local]
+        return codes, scales
+
     def select(self, cols: np.ndarray) -> "MappedSelection":
         return MappedSelection(self, cols)
 
@@ -120,6 +138,10 @@ class MappedSelection:
         self.shape = (len(self.cols), vectors.shape[1])
         self.dtype = vectors.dtype
         self.ndim = 2
+        # The fast int8 search (fastsearch.py, MV_SEARCH_INT8), when packed; else the
+        # mapped search below.
+        self.packed = None
+        self.refine = 0
         # Per shard: which of its rows are wanted (in file order, for sequential reads)
         # and where each goes in the output. None = every row, in order.
         self.plan = []
@@ -143,7 +165,45 @@ class MappedSelection:
         out = self.vectors[self.cols]
         return out if dtype is None else out.astype(dtype, copy=False)
 
+    def use_int8(self, refine: int, slot=None) -> None:
+        """Pack these rows for the fast int8 search, after taking the process's one packed
+        slot (the index serving now drops its copy and searches mapped until the swap)."""
+        from . import fastsearch
+        slot = slot or fastsearch.SLOT
+        slot.take(self)
+        self.drop_packed()
+        packed = fastsearch.PackedInt8.build(
+            lambda lo, hi: self.vectors.int8_rows(self.cols[lo:hi]), len(self.cols))
+        self.packed, self.refine = packed, refine
+        slot.hold(self)
+
+    def drop_packed(self) -> None:
+        self.packed = None
+
+    def exact(self, query: np.ndarray, positions: np.ndarray) -> np.ndarray:
+        """Scores of `query` against the rows at these positions, computed exactly as
+        sims() does without the fast search ((q . codes) x scale for int8 rows), so a
+        refined column scores the same either way."""
+        q = np.asarray(query, dtype=np.float32)
+        positions = np.asarray(positions, dtype=np.int64)
+        rows = self.cols[positions]
+        vec = self.vectors
+        which = np.searchsorted(vec.offsets, rows, side="right") - 1
+        out = np.empty((len(q), len(positions)), dtype=np.float32)
+        for i in np.unique(which):
+            here = which == i
+            local = rows[here] - vec.offsets[i]
+            part = q @ vec.shards[i][local].astype(np.float32).T
+            if vec.scales[i] is not None:
+                part *= vec.scales[i][local][None, :]
+            out[:, here] = part
+        return out
+
     def sims(self, query: np.ndarray) -> np.ndarray:
+        packed = self.packed                    # one read: a concurrent drop can't split it
+        if packed is not None:
+            from .fastsearch import search
+            return search(packed, query, self.refine, exact=self.exact)
         q = np.asarray(query, dtype=np.float32)
         out = np.empty((len(q), len(self.cols)), dtype=np.float32)
         for shard, local, pos, scale in self.plan:
