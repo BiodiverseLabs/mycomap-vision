@@ -15,6 +15,7 @@ from test_api import open_limits, post_photos  # noqa: E402
 from test_models_and_scoreboard import Const, seed_two_species  # noqa: E402
 from torchvision import transforms as T  # noqa: E402
 
+from test_public_health import HEALTH_KEY, full_health
 from mycomap_vision import finetune, onnxtower  # noqa: E402
 from mycomap_vision.api import create_app  # noqa: E402
 from mycomap_vision.embed import embed_photos, photos_to_embed  # noqa: E402
@@ -115,9 +116,10 @@ def test_the_server_embeds_with_onnx_when_turned_on(conn, tmp_path, monkeypatch)
     conn.commit()
     client = TestClient(create_app(tmp_path / "manifest.sqlite", root,
                                    backbone_loader=lambda n: Const(n), limits=open_limits(),
-                                   background=False, fungus_gate=None, note=lambda s: None))
+                                   background=False, fungus_gate=None, note=lambda s: None,
+                                   server_key=HEALTH_KEY))
     assert post_photos(client, [247], "m1/nearest").status_code == 200
-    assert client.get("/api/health").json()["embed"]["m1"]["mode"] == "onnx-fp32"
+    assert full_health(client)["embed"]["m1"]["mode"] == "onnx-fp32"
 
 
 def test_the_fp32_tower_gives_torchs_vectors_and_an_unknown_precision_is_refused(tmp_path):
