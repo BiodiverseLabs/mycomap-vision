@@ -1099,7 +1099,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def v1_identify(request: Request, photos: list[UploadFile] = File(...),
                         latitude: float | None = Form(None), longitude: float | None = Form(None),
                         observed_on: str | None = Form(None), model: str | None = Form(None),
-                        top_k: int = Form(5)):
+                        top_k: int = Form(5), client_ref: str | None = Form(None)):
             timer = apiv1.Timer()
             cred: apiv1.Credential = request.state.credential
             if not 1 <= len(photos) <= MAX_PHOTOS:
@@ -1111,7 +1111,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
             check_context(latitude, longitude, observed_on or None)
             backbone, method = v1_model(model)
-            quotas.check(cred)                      # before the photo window is spent
+            if client_ref is not None and not (
+                    1 <= len(client_ref) <= session_store.MAX_REF_LENGTH):
+                raise apiv1.V1Error(400, "bad_request", "client_ref is 1 to "
+                                    f"{session_store.MAX_REF_LENGTH} characters")
+            # The same find counted in the last day (its session, before signal dropped)
+            # is free here too: the app finishes a find this way after saving it.
+            same_find = quotas.counted_before(cred, client_ref)
+            if not same_find:
+                quotas.check(cred)                  # before the photo window is spent
             take_photos(cred, len(photos))
             if not in_flight.enter():
                 raise apiv1.V1Error(503, "busy", "busy identifying other photos",
@@ -1128,7 +1136,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     timer, top_k, interactive=cred.interactive, higher=True)
             finally:
                 in_flight.leave()
-            quotas.count(cred, 1, len(photos))
+            quotas.count(cred, 0 if same_find else 1, len(photos))
+            if not same_find:
+                quotas.remember_counted(cred, client_ref)
             body = v1_result(result, backbone, method, used, timer)
             body["usage"] = quotas.usage(cred)
             return JSONResponse(body, headers={"Cache-Control": "no-store",

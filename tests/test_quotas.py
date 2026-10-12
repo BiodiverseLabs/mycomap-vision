@@ -276,3 +276,29 @@ def test_a_reopened_session_for_the_same_find_is_not_counted_again(conn, tmp_pat
     assert res.status_code == 429 and res.json()["code"] == "quota_exceeded"
     # A session without a find id always counts.
     assert add(session(None), 245, "p1").status_code == 429
+
+
+def test_identify_with_the_finds_client_ref_is_free_after_its_session_was_counted(conn, tmp_path):
+    # Signal drops mid-find: the session counted the first photo; after saving, the app
+    # sends all the photos to /identify with the same client_ref (integration testing).
+    client = app(conn, tmp_path)
+    headers = member(limit=1)
+    sid = client.post("/api/v1/sessions", json={"client_ref": "app-1760000000"},
+                      headers=headers).json()["session_id"]
+    assert client.post(f"/api/v1/sessions/{sid}/photos", headers=headers,
+                       files={"photo": ("p.png", png(247), "image/png")},
+                       data={"photo_ref": "p1"}).json()["usage"]["used"] == 1
+    finish = identify(client, headers, reds=(247, 245), client_ref="app-1760000000")
+    assert finish.status_code == 200 and finish.json()["usage"]["used"] == 1
+    # Another find, or none named, is a new identification.
+    assert identify(client, headers, client_ref="app-1760009999").status_code == 429
+    assert identify(client, headers).status_code == 429
+    # And an /identify counted first makes the find's later session free.
+    other = bearer(app_token(sub="u_member0003", limit=1))
+    assert identify(client, other, client_ref="obs-9").json()["usage"]["used"] == 1
+    sid = client.post("/api/v1/sessions", json={"client_ref": "obs-9"},
+                      headers=other).json()["session_id"]
+    assert client.post(f"/api/v1/sessions/{sid}/photos", headers=other,
+                       files={"photo": ("p.png", png(247), "image/png")},
+                       data={"photo_ref": "p1"}).status_code == 200
+    assert identify(client, headers, client_ref="x" * 65).json()["code"] == "bad_request"
