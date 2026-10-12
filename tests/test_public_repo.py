@@ -47,6 +47,14 @@ def test_no_tracked_file_carries_a_secret_or_private_operating_detail():
     assert not found, "\n".join(found)
 
 
+def test_unpublished_results_stay_out_of_the_repo():
+    """The experiment registry and the paper draft live in the private research checkout
+    (config.RESEARCH_DIR); the site shows them to members (Steve, 2026-10-12)."""
+    out = subprocess.run(["git", "ls-files", "docs/experiments", "docs/paper"],
+                         cwd=config.REPO_ROOT, capture_output=True, check=True).stdout
+    assert not out.decode().split(), "move these to the research checkout: " + out.decode()
+
+
 def test_the_scan_sees_the_files_it_must_guard():
     files = {rel for rel, _ in tracked_text_files()}
     assert {"README.md", "CLAUDE.md", "docs/deploy.md", "docs/PLAN.md", ".env.example"} <= files

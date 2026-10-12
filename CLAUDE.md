@@ -32,6 +32,10 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
 - **Never expose coordinates.** Records can carry true locations of observations
   that are obscured on iNat (often rare or sensitive species). No API response,
   page, export or model may reveal them.
+- **Unpublished results stay out of this public repo.** Experiment entries and the paper
+  draft live in the private research checkout (`config.RESEARCH_DIR`: `MV_RESEARCH_DIR`, or
+  `../mycomap-vision-research`), under `experiments/` and `paper/`; the site shows them to
+  signed-in members. `tests/test_public_repo.py` refuses `docs/experiments/` and `docs/paper/`.
 - **No secrets in the repo.** Settings come from the environment or the
   git-ignored `.env` (see `.env.example`). No keys, hostnames of private
   services or bucket names in code.

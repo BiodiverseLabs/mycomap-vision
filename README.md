@@ -30,7 +30,7 @@ changing, see below):
 
 Accuracy follows how many DNA-verified references a species has: on a sample,
 genera with 100+ references matched iNaturalist's model, and the gap was in genera
-with few or none ([genus gap](docs/experiments/2026-10-07-genus-gap.md)). A full
+with few or none. A full
 comparison with iNaturalist's computer vision is still to come.
 
 **In progress:** a frozen, versioned **dataset release (v1)** so anyone can reproduce
@@ -56,9 +56,10 @@ are development numbers, not final results.
    random) and records held out of everything, and are reported by how many
    references each species has.
 
-More: [docs/PLAN.md](docs/PLAN.md) (the working plan and findings),
-[docs/experiments/](docs/experiments/README.md) (one entry per experiment) and the
-paper draft ([docs/paper/draft.md](docs/paper/draft.md)).
+More: [docs/PLAN.md](docs/PLAN.md) (the working plan and findings). The experiment
+write-ups and the paper draft hold unpublished results, so they are not in this repo:
+signed-in mycomap.org members read them on the site under
+[Research](https://vision.mycomap.org/research).
 
 ## Run it yourself
 
@@ -98,7 +99,7 @@ shadows the Unix `mv` in an activated venv.
 | `src/mycomap_vision/` | the Python package: data pipeline, models, evaluation, API server (`api.py`), CLI (`cli.py`) |
 | `web/` | the vision.mycomap.org site (Vite, React, Tailwind) |
 | `tests/` | the pytest suite (runs without data) |
-| `docs/` | plan, data rules, CLI, deployment, dataset releases, experiments, paper draft |
+| `docs/` | plan, data rules, CLI, deployment, dataset releases |
 | `replications/fungitastic/` | scoring and retraining the FungiTastic and Danish Fungi 2020 classifiers on our records |
 | `deploy/aws/`, `deploy/lightsail/` | self-terminating GPU and download instances; the web server |
 | `scripts/` | analysis scripts for the label audit (leave-one-out scan) |
@@ -111,11 +112,9 @@ shadows the Unix `mv` in an activated venv.
 | [docs/data.md](docs/data.md) | everyone | which records are used; labels, photos, licences, photographer permissions |
 | [docs/cli.md](docs/cli.md) | developers | the pipeline and every `mv` command |
 | [docs/PLAN.md](docs/PLAN.md) | researchers, developers | the working plan, decisions and findings, newest phase first |
-| [docs/experiments/](docs/experiments/README.md) | researchers | one entry per experiment: question, setup, results, decision |
 | [docs/dataset-release.md](docs/dataset-release.md) | researchers | frozen, verifiable dataset releases |
 | [docs/retrain-v1.md](docs/retrain-v1.md) | researchers | the pre-declared evaluation for the v1 retrain |
 | [replications/fungitastic/](replications/fungitastic/README.md) | researchers | comparison with the Picek group's classifiers |
-| [docs/paper/draft.md](docs/paper/draft.md) | researchers | manuscript draft |
 | [docs/deploy.md](docs/deploy.md), [deploy/aws/](deploy/aws/README.md) | operators | the server and the cloud instances |
 | [SECURITY.md](SECURITY.md) | everyone | reporting problems; what stays private |
 | [CLAUDE.md](CLAUDE.md) | contributors | project rules (written for AI coding assistants, binding on everyone) |
@@ -158,4 +157,7 @@ tests. Report security problems privately (see [SECURITY.md](SECURITY.md)). Cont
 
 ## Licence
 
-No licence has been chosen yet, so for now all rights are reserved.
+The code is released under the [MIT License](LICENSE). The licence covers this
+repository's code and documentation only. It does not cover the photos, records or
+trained models, which are not in the repository (see [Data and privacy](#data-and-privacy)).
+If you use MycoMap Vision in research, please cite it ([CITATION.cff](CITATION.cff)).

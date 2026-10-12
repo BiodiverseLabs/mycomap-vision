@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use MycoMap Vision, please cite it as below."
+title: "MycoMap Vision: fungal photo identification trained on DNA-validated records"
+type: software
+authors:
+  - given-names: Stephen
+    family-names: Russell
+    affiliation: MycoMap.org
+  - name: "MycoMap contributors"
+license: MIT
+url: "https://vision.mycomap.org"
+repository-code: "https://github.com/BiodiverseLabs/mycomap-vision"
+keywords:
+  - fungi
+  - mycology
+  - computer vision
+  - biodiversity
+  - DNA barcoding

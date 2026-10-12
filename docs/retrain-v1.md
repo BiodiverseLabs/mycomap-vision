@@ -148,7 +148,8 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
    (the reference re-embedded with the new model), the weights, the heads, the run's own
    comparison.
 4. Section 2's comparison and summary; section 3's sanity gate.
-5. Write the registry entry `docs/experiments/<date>-v1-finetune.md`:
+5. Write the registry entry `experiments/<date>-v1-finetune.md` in the private research
+   checkout (`config.RESEARCH_DIR`, never this repo):
    `reproducibility: reproduced-on-v1`, `dataset_release`, `reference_hash` and `code_commit`
    from the comparison's `dataset_release` block, `reproduce_command` = section 2's commands.
 6. Report to the coordinator: the standard summary, the sanity result, box memory. Steve decides

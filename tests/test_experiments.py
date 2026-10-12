@@ -1,5 +1,7 @@
-"""The experiment registry (docs/experiments): every entry follows the rules in its README, and
-the site shows it to signed-in members only (Steve, 2026-10-09)."""
+"""The experiment registry: every entry follows the rules in its README, the site shows it to
+signed-in members only (Steve, 2026-10-09), and it lives in the private research checkout,
+never in this public repo (Steve, 2026-10-12). The entry checks run where that checkout is
+present (MV_RESEARCH_DIR, or ../mycomap-vision-research); CI has none."""
 
 import re
 
@@ -9,14 +11,21 @@ from test_api import open_limits
 from test_models_and_scoreboard import Const, seed_two_species
 from test_signin import ISSUER, PUBLIC_KEY, SECRET, sign_in
 
-from mycomap_vision import experiments
+from mycomap_vision import config, experiments
 from mycomap_vision.api import create_app
 from mycomap_vision.signin import SigninConfig
 
 ENTRIES = experiments.load_all()
 IDS = [e.slug for e in ENTRIES]
+HAVE_REGISTRY = experiments.EXPERIMENTS_DIR.is_dir()
 
 
+def test_the_registry_is_read_from_the_private_checkout_not_this_repo():
+    assert experiments.EXPERIMENTS_DIR == config.RESEARCH_DIR / "experiments"
+    assert not experiments.EXPERIMENTS_DIR.resolve().is_relative_to(config.REPO_ROOT.resolve())
+
+
+@pytest.mark.skipif(not HAVE_REGISTRY, reason="no private research checkout here")
 def test_the_registry_has_entries_and_every_one_parses():
     assert len(ENTRIES) >= 18
     assert len(set(IDS)) == len(IDS)

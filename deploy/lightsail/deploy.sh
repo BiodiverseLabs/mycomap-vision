@@ -42,7 +42,22 @@ if [ -z "${DEPLOY_REEXEC:-}" ] && [ "$(sha256sum "$SELF" 2>/dev/null || true)" !
   echo "    deploy.sh changed in this pull: running the new one"
   DEPLOY_REEXEC=1 exec bash "$SELF" "$@"
 fi
-if [ -n "${DEPLOY_STOP_AFTER_PULL:-}" ]; then exit 0; fi   # tests: the pull step only
+
+# The private research pages (experiment registry, paper draft) are not in this public
+# repo: they live next to the app (config.RESEARCH_DIR). A clone of the private repo is
+# pulled; a copied folder is left as it is; neither stops the deploy.
+RESEARCH_DIR="${RESEARCH_DIR:-${APP_DIR}-research}"
+if [ -d "$RESEARCH_DIR/.git" ]; then
+  echo "==> research pages: git pull"
+  if git -C "$RESEARCH_DIR" pull --ff-only --quiet; then
+    echo "    now at $(git -C "$RESEARCH_DIR" log --oneline -1)"
+  else
+    echo "!!  could not update $RESEARCH_DIR; the site keeps the research pages it has"
+  fi
+elif [ ! -d "$RESEARCH_DIR" ]; then
+  echo "!!  no $RESEARCH_DIR: Research > Experiments and Paper will be empty (docs/deploy.md)"
+fi
+if [ -n "${DEPLOY_STOP_AFTER_PULL:-}" ]; then exit 0; fi   # tests: the pull steps only
 
 echo "==> Python packages"
 .venv/bin/pip install -q --require-hashes -r requirements/box.txt

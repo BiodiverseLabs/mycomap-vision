@@ -3,7 +3,7 @@ import { PageHeader } from "@/components/Layout";
 import { Markdown } from "@/components/Markdown";
 import { api, ApiError, signInUrl } from "@/lib/api";
 
-// The working draft of the Vision paper (docs/paper/draft.md), for signed-in mycomap.org
+// The working draft of the Vision paper (paper/draft.md in the private research repo), for signed-in mycomap.org
 // members only. Display only: comments come by email (Steve, 2026-10-09).
 
 
