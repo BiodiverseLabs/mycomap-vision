@@ -26,6 +26,7 @@ import numpy as np
 
 from . import config, fungusgate, likely, taxonomy
 from .embed import normalise
+from .methods import rows_at
 from .serving import map_embeddings
 from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_records, make_method,
                        rank_scores, with_rows)
@@ -281,6 +282,32 @@ class Identifier:
         self.rank_counts = {rank: Counter(dict(zip(names.tolist(), n.tolist())))
                             for rank, (names, n) in counts.items()}
 
+    def can_leave_out(self) -> bool:
+        """Whether this method can answer with reference columns left out (hidden=)."""
+        return self.model is self.nearest or hasattr(self.model, "leave_out")
+
+    def left_out(self, source: str, source_id: str, photo_ids=()) -> tuple[np.ndarray, np.ndarray]:
+        """(columns to leave out, the record's own columns) for an observation identified
+        by its number: the reference record(s) it is (source + id at the source), and any
+        column holding one of its photos, those records' or `photo_ids` (the same photo
+        filed under another observation). Both empty when it is in no way part of the
+        reference."""
+        recs = self.col_record
+        mine = np.flatnonzero((recs.source == source) & (recs.source_id == str(source_id)))
+        own = (np.flatnonzero(np.isin(recs.rec, mine)) if len(mine)
+               else np.empty(0, dtype=np.int64))
+        ids = np.concatenate([np.asarray([int(p) for p in photo_ids],
+                                         dtype=self.col_photo.dtype), self.col_photo[own]])
+        same = (np.flatnonzero(np.isin(self.col_photo, ids)) if len(ids)
+                else np.empty(0, dtype=np.int64))
+        return np.union1d(own, same).astype(np.int64), own.astype(np.int64)
+
+    def reference_vectors(self, cols: np.ndarray) -> np.ndarray:
+        """(len(cols), dim) unit float32 vectors of these reference columns, as served
+        (an int8 row as its codes x scale)."""
+        v = rows_at(self.nearest.scorer.ref, cols)
+        return v / np.linalg.norm(v, axis=1, keepdims=True).clip(1e-12)
+
     def vector_storage(self) -> dict:
         """How the reference vectors are held: int8 and float rows (serving.MappedVectors),
         or all float when they are an ordinary array."""
@@ -304,17 +331,20 @@ class Identifier:
                          photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
                          may_show: Callable[[PhotoInfo], bool] = only_open_licences,
                          n_photo_specimens: int = 3, gate: list[dict] | None = None,
-                         higher_ranks: bool = False, sims: np.ndarray | None = None) -> dict:
+                         higher_ranks: bool = False, sims: np.ndarray | None = None,
+                         hidden: np.ndarray | None = None) -> dict:
         """identify_vectors_ungated, behind the fungus gate (fungusgate.py) when `gate`
         holds a verdict per photo. A photo judged not a fungus is left out of the answer
         (a duck among mushroom photos doesn't sink the find); when every photo is, there
         is no answer at all. When no photo is clearly a fungus, the names are given but
         no stated chance: calibration holds only for fungus photos. `result["gate"]` is
         None when the gate didn't run. `higher_ranks` and `sims` as in
-        identify_vectors_ungated (only the kept photos' rows of `sims` are used)."""
+        identify_vectors_ungated (only the kept photos' rows of `sims` are used), and
+        `hidden`."""
         kw = dict(top_k=top_k, n_specimens=n_specimens, context=context,
                   photo_lookup=photo_lookup, may_show=may_show,
-                  n_photo_specimens=n_photo_specimens, higher_ranks=higher_ranks)
+                  n_photo_specimens=n_photo_specimens, higher_ranks=higher_ranks,
+                  hidden=hidden)
         if gate is None:
             return {**self.identify_vectors_ungated(query, sims=sims, **kw), "gate": None,
                     "confidence_withheld": False}
@@ -375,12 +405,16 @@ class Identifier:
                                  photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
                                  may_show: Callable[[PhotoInfo], bool] = only_open_licences,
                                  n_photo_specimens: int = 3, higher_ranks: bool = False,
-                                 sims: np.ndarray | None = None) -> dict:
+                                 sims: np.ndarray | None = None,
+                                 hidden: np.ndarray | None = None) -> dict:
         """Query photo vectors (already normalised) -> ranks, specimens, hints.
         `context` (place and date) is used by methods with a range-and-season score.
         `higher_ranks` adds order, class and phylum (higher.py) to the combined and
         per-photo ranks. `sims`: the photos' similarities to every reference photo, when
-        the caller already has them (a batch scored together, workqueue.py).
+        the caller already has them (a batch scored together, workqueue.py). `hidden`:
+        reference columns left out of this answer, as if never there (left_out: an
+        observation that is itself a reference record must not match itself); only for
+        methods that can (can_leave_out), and with no context.
 
         The main answer uses all the photos together. `per_photo` gives what the same
         model says from each photo on its own, so a person can see which photo pulled
@@ -393,6 +427,15 @@ class Identifier:
         n_q = int(query.shape[0])
         if sims is None:
             sims = self.nearest.photo_sims(query)             # (q, reference photos)
+        leaving_out = hidden is not None and len(hidden) > 0
+        if leaving_out:
+            if not self.can_leave_out():
+                raise ValueError(f"{self.method} can't leave reference records out")
+            if context is not None and (context.latitude is not None
+                                        or context.observed_on):
+                raise ValueError("a left-out record's own place and date are in the prior")
+            unmasked, sims = sims, np.array(sims, dtype=np.float32, copy=True)
+            sims[:, hidden] = -np.inf
         if self.model is self.nearest:
             # The nearest-specimen score is the mean of each photo's own scores, so
             # both come from the one similarity matrix.
@@ -402,7 +445,9 @@ class Identifier:
             # nearest + species average with place and date: the same shared path, plus
             # the prior's shift on every photo when a place or date is given. Without
             # them, exactly nearest + species average.
-            per_photo = self.model.per_photo_scores(sims, query)
+            per_photo = self.model.per_photo_scores(unmasked if leaving_out else sims, query)
+            if leaving_out:
+                per_photo = self.model.leave_out(per_photo, unmasked, query, hidden)
             photo_only = per_photo.mean(axis=0)
             shift = self.model.place_shift(context)
             if shift is not None:
@@ -412,7 +457,9 @@ class Identifier:
             # nearest + species average (the default): its specimen half comes from the
             # same similarities, so nothing is computed twice; the record's score is the
             # mean of each photo's own, exactly as species_scores gives it.
-            per_photo = self.model.per_photo_scores(sims, query)
+            per_photo = self.model.per_photo_scores(unmasked if leaving_out else sims, query)
+            if leaving_out:
+                per_photo = self.model.leave_out(per_photo, unmasked, query, hidden)
             scores = per_photo.mean(axis=0)
         else:
             scores = self._species_scores(query, context)

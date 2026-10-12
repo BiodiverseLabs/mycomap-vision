@@ -79,21 +79,40 @@ answered from a proxy's cache.
 ### 3.2 By observation number
 
 `POST /api/v1/identify/inat/123456789` or `/mo/567890`, optional JSON
-`{"model", "top_k", "use_place": true, "use_date": true}`.
+`{"model", "top_k", "use_place": true, "use_date": true, "client_ref"}`.
 
-- Vision fetches the observation and its medium photos from iNat or MO, keeps them in
-  memory only, and stays within those sites' limits (iNat ≤ 1 API request/s and the media
-  caps in CLAUDE.md; MO its own pacer). One fetch at a time across all callers, so expect
-  seconds in `timing.fetch_ms`.
-- Place and date are the observation's **public** ones. An obscured iNat location is
-  used as iNat publishes it, never a true location Vision may hold.
+- Vision reads the observation and up to 10 of its photos (iNat's in position order,
+  MO's primary image first) at the size the reference was embedded from (iNat large,
+  1024 px; MO 960 px), keeps them in memory only, and stays within those sites' limits:
+  iNat's API one request a second, MO 5 s between every request, photos included (its
+  20 a minute), and at least MO's reported run time. One observation at a time across
+  all callers, at most 3 waiting behind it (more: 503 `busy`), so expect seconds in
+  `timing.fetch_ms` (MO: about 5 s a photo). The caller's photo window and the queue
+  are checked once the observation is read and before any photo is: a refused caller
+  costs those sites no photo reads.
+- Place and date are the observation's **public** ones: iNat's published location
+  (obscured as iNat obscures it), MO's GPS unless hidden, else the centre of MO's named
+  place when its box is at most 0.5° across. Never a true location Vision may hold.
+  `use_place`/`use_date: false` leave them out.
 - **Its own record is left out.** When the observation is one of Vision's DNA-validated
-  references, it is removed from the reference set for this answer, and
-  `excluded_reference: {"source", "source_id"}` says so. Otherwise it would match
-  itself. If Vision already holds that record's vectors, it uses them and fetches
-  nothing (`timing.photos_reused`).
-- Refusals: 404 `observation_not_found`, 422 `no_usable_photos`, 502
-  `source_unavailable` (with `Retry-After`).
+  references, it is removed from the reference set for this answer (its photos from
+  the nearest matches and from its species' average, exactly as a reference built
+  without it), and `excluded_reference: {"source", "source_id"}` says so. Otherwise it
+  would match itself. Vision uses that record's stored vectors and fetches nothing
+  (`timing.photos_reused`, `fetch_ms` 0). Its place and date aren't used either: the
+  record is part of the range and season data. The same applies to any reference photo
+  that is one of the observation's own (one photo filed under two observations).
+  `left_out_photos` counts the reference photos left out.
+- The answer adds `observation`: `{"source", "id", "url", "photos"` (at the source),
+  `"photos_used", "place"` (`coordinates`, `obscured`, `area` or null), `"name_at_source",
+  "rank_at_source"}` (the source's current name, for comparison; null for a reused
+  reference record, which isn't read).
+- Counting: one identification, behind interactive calls in the queue. `client_ref`
+  defaults to `inat:<id>` / `mo:<id>`, so the same observation for the same pool within a
+  day is counted once (§6.4).
+- Refusals: 404 `observation_not_found` (and `not_found` for a source other than `inat`
+  or `mo`), 422 `no_usable_photos`, 502 `source_unavailable` (with `Retry-After`), 503
+  `busy`.
 
 ### 3.3 Sessions (the app)
 
@@ -560,6 +579,7 @@ upper bound, and expect fewer `confident` answers in the field.
 |---|---|
 | `MV_API_V1=1` | `POST /api/v1/identify`: credentials, timing, errors, `confident`/`answer`, higher ranks |
 | `MV_SESSIONS=1` | the observation sessions (§3.3) |
+| `MV_BY_OBSERVATION=1` | identify by iNat or MO observation number (§3.2); needs `MV_API_V1=1` |
 | `MV_QUOTAS=off\|count\|enforce` | §6: `count` counts and reports use without refusing, for a trial |
 | `MV_TAXON_COUNTS=1` | `GET /api/v1/taxon-counts` (§7) |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
