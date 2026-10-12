@@ -58,6 +58,7 @@ answered from a proxy's cache.
 | `observed_on` | `YYYY-MM-DD`, optional | the day it was found |
 | `model` | string, optional | one of `GET /api/v1/models`; default the served default. One model per request |
 | `top_k` | int 1–10, optional | candidates per rank, default 5 |
+| `client_ref` | string 1–64, optional | the caller's id for the find: the same find counted in the last 24 h (by its session or an earlier call) isn't counted again (§6.4) |
 
 **Input guidance** (also on the developer page):
 
@@ -430,7 +431,8 @@ or `{"active": false, "reason": "unknown|pending|disabled|revoked|account_inacti
   24 hours of the counted one is free: not counted and not refused at the limit. The app
   re-opens one after a restart, the 30-minute idle end or the 2-hour cap (Steve,
   2026-10-12). Its photos still count as photos. Without a `client_ref`, every session
-  counts.
+  counts. The same rule holds for `POST /identify` with a `client_ref`: the app finishes a
+  find that way when signal dropped mid-session.
   Modes (`MV_QUOTAS`): `off`; `count` (counted, shown in `usage`, reported, never refused);
   `enforce`. A credential with no limit gets `MV_QUOTA_DEFAULT_MONTHLY` (100); `null` is
   unlimited. Built on Vision branch feat/api-v1-quotas.
