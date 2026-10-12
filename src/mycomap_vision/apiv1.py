@@ -101,6 +101,26 @@ def _unb64(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
+def limit_of(source: dict) -> dict | None:
+    """The monthly limit a token or an introspection answer gives: {"monthly": n}, or
+    {"monthly": None} for unlimited (an explicit null, e.g. staff), or None when it gives
+    none at all (quotas.py then applies its default)."""
+    if "limit" not in source:
+        return None
+    limit = source["limit"]
+    if limit is None:
+        return {"monthly": None}
+    if isinstance(limit, bool):
+        return None
+    if isinstance(limit, int):
+        return {"monthly": limit}
+    if isinstance(limit, dict) and "monthly" in limit:
+        m = limit["monthly"]
+        return {**limit, "monthly": m if m is None or (isinstance(m, int)
+                                                        and not isinstance(m, bool)) else 0}
+    return None
+
+
 class AppTokens:
     """App tokens: `mvt.<base64url body>.<base64url Ed25519 signature over the body>`, made
     by mycomap.org with the sign-in bridge's key (docs/api.md §6.3). Only a body with
@@ -136,12 +156,8 @@ class AppTokens:
         if (claims["exp"] < now - CLOCK_SKEW_SECONDS
                 or claims.get("iat", 0) > now + CLOCK_SKEW_SECONDS):
             raise V1Error(401, "token_expired", "The app token has expired; get a new one.")
-        limit = claims.get("limit")
-        if isinstance(limit, int):
-            limit = {"monthly": limit}
         return Credential("app", subject=claims["sub"], plan=claims.get("plan"),
-                          limit=limit if isinstance(limit, dict) else None,
-                          limit_source="plan")
+                          limit=limit_of(claims), limit_source="plan")
 
 
 class Introspector:
@@ -202,11 +218,9 @@ class Introspector:
         if answer.get("service") != "vision":
             raise V1Error(403, "key_inactive", "This token is for another service.",
                           reason="wrong_service")
-        limit = answer.get("limit")
         return Credential("key", subject=answer.get("subject") or None,
                           key_id=str(answer.get("keyId")), plan=answer.get("plan"),
-                          limit=limit if isinstance(limit, dict) else None,
-                          limit_source=answer.get("limit_source") or "plan")
+                          limit=limit_of(answer), limit_source=answer.get("limit_source") or "plan")
 
 
 def org_introspection(base_url: str, secret: str, timeout: float = 5.0) -> Callable[[str], dict]:
