@@ -309,6 +309,16 @@ every reference). **Decided: B (Steve, 2026-10-12).**
   area-of-applicability dissimilarity index (or an inside/outside flag at the model's own
   threshold). Prediction only, no refit: about 400 models on the 20 km grid; the CPU cost is
   small next to the fits (to be measured on the pilot).
+- **Trust signals (added 2026-10-12, for the trust weight in section 1).** In the export of
+  both `R_train` and `R_main`, add:
+  - `map_strength` per taxon in `taxa.tsv` (for an ensemble, the member-weighted value
+    Atlas already computes);
+  - per cell: the number of strong models judging it, and the standard deviation of their
+    ranks;
+  - each model's area-of-applicability threshold, beside the per-cell dissimilarity index;
+  - optionally, weak maps in a separate file flagged `weak`, for a secondary look only.
+    They are never in the primary arm and never served: weak ≈ fail by Atlas's own null
+    calibration.
 - **Output:** never promoted, pulled to the box, served or archived. Its prior export (ranks,
   taxa, grid, and the continent-wide table) and its trained-ids list stay private.
 - Check: `trained-ids(R_train) ∩ (val ∪ v1-test) = 0`, with a positive control
