@@ -6,6 +6,9 @@ import { showsPaper } from "./publicView";
 
 export interface NavItem { href: string; label: string; blurb?: string }
 
+/** The developer API's page (it was /api-docs, which still leads here). */
+export const API_PATH = "/research/api";
+
 export const PUBLIC_NAV: NavItem[] = [
   { href: "/", label: "Identify" },
   { href: "/about", label: "How it works" },
@@ -27,6 +30,9 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
     blurb: "The living draft of the Mycologia paper (mycomap.org members)." },
   { href: "/research/for-researchers", label: "For researchers",
     blurb: "How to cite, and how to test your own model against ours." },
+  // Last (Steve, 2026-10-12): the developer API was linked only from the footer.
+  { href: API_PATH, label: "API",
+    blurb: "Identify fungi from your own app or site: access, requests and the answer, field by field." },
 ];
 
 /** The Research menu for this visitor: the paper only for signed-in members. */
@@ -39,7 +45,20 @@ export const MOVED: Record<string, string> = {
   "/models": "/research/results",
   "/data": "/research/data",
   "/paper": "/research/paper",
+  "/api-docs": API_PATH,
 };
+
+/** Pages a signed-out visitor may read when the site needs sign-in (signin.PUBLIC_PAGES). */
+export const PUBLIC_PAGES = [API_PATH, "/api-docs"];
+
+/** Whether this visitor must sign in before seeing `path`: only when every page needs it
+ * (signin "all"), they aren't signed in, and it isn't one of PUBLIC_PAGES. The server
+ * already sends them to sign in on a full page load; this covers moving on inside the site.
+ * Never for the sign-in pages themselves, or a page shown at one would loop. */
+export function mustSignIn(me: Me | null | undefined, path: string): boolean {
+  return !!me && me.signin === "all" && !me.user && !PUBLIC_PAGES.includes(path)
+    && !path.startsWith("/auth/");
+}
 
 export const isResearchPath = (path: string) => path === "/research" || path.startsWith("/research/");
 

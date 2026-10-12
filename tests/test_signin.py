@@ -250,3 +250,40 @@ def test_on_an_https_site_the_cookies_are_secure_and_http_only(conn, tmp_path):
     cookie = start.headers["set-cookie"].lower()
     assert cookie.startswith(NONCE_COOKIE) and "secure" in cookie and "httponly" in cookie
     assert "samesite=lax" in cookie
+
+
+def gated_site_with_pages(conn, tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>site</title>")
+    (dist / "assets" / "index-abc123.js").write_text("console.log('shell')")
+    (dist / "favicon.png").write_bytes(b"\x89PNG")
+    store = seed_two_species(conn, tmp_path)
+    root = tmp_path / "emb"
+    embed_photos(conn, store, Const("m1"), photos_to_embed(conn, "m1", "large", store.location,
+                                                           "local"), root / "m1", log=lambda s: None)
+    conn.commit()
+    signin = SigninConfig(mode="all", origin=HERE, issuer=ISSUER, public_key=PUBLIC_KEY,
+                          secret=SECRET)
+    return TestClient(create_app(tmp_path / "manifest.sqlite", root,
+                                 backbone_loader=lambda n: Const(n), limits=open_limits(),
+                                 signin=signin, web_dist=dist), follow_redirects=False)
+
+
+def test_the_api_page_is_open_to_all_while_every_other_page_needs_sign_in(conn, tmp_path):
+    c = gated_site_with_pages(conn, tmp_path)
+    # The API page, its old address and the shell's files load signed out.
+    for path in ("/research/api", "/api-docs", "/assets/index-abc123.js", "/favicon.png"):
+        res = c.get(path)
+        assert res.status_code == 200, path
+    assert "<title>site</title>" in c.get("/research/api").text
+    assert c.head("/research/api").status_code in (200, 405)       # never sent to sign in
+    assert c.get("/api/docs/v1.json").status_code == 200           # the page's only data
+    # Everything else still sends people to sign in, or refuses.
+    for path in ("/", "/research", "/research/results", "/research/paper", "/models",
+                 "/research/api/extra", "/api-docsx", "/assetsx.js"):
+        res = c.get(path)
+        assert res.status_code == 302 and res.headers["location"].startswith("/auth/signin"), path
+    assert c.post("/research/api").status_code == 302
+    for api_path in ("/api/stats", "/api/models", "/api/paper", "/api/experiments"):
+        assert c.get(api_path).status_code == 401, api_path

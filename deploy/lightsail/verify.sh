@@ -39,6 +39,7 @@ if [ "$SIGNIN" = "all" ]; then
   check "API refuses before sign-in"      status_is 401 "$BASE/api/stats"
   check "identify refuses before sign-in" status_is 401 -X POST "$BASE/api/identify"
   check "pages send people to sign in"    redirects_to "$BASE/auth/signin?returnTo=" "$BASE/models"
+  check "the API page is open to all"     status_is 200 "$BASE/research/api"
 fi
 if [ "$SIGNIN" = "identify" ]; then
   check "site open"                       body_has '"records":' "$BASE/api/stats"

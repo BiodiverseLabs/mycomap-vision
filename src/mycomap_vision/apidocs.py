@@ -1,6 +1,6 @@
 """The public outline of the MycoMap Vision API (v1), as data.
 
-One source for every page that documents the API: the Vision site's /api-docs page and the
+One source for every page that documents the API: the Vision site's API page (Research > API) and the
 "MycoMap Vision API" tab on mycomap.org/api-docs both render GET /api/docs/v1.json, which
 `outline()` builds. Each endpoint says whether this server has it turned on, so neither
 page promises what isn't there. docs/api.md is the full contract; this is what a developer
@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 
 BASE_URL = "https://vision.mycomap.org/api/v1"
-PAGE_URL = "https://vision.mycomap.org/api-docs"
+PAGE_URL = "https://vision.mycomap.org/research/api"   # /api-docs leads there too
 STATUSES = ("available", "planned")
 
 ANSWER_EXAMPLE = {

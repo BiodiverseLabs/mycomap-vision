@@ -1,4 +1,5 @@
-import { Redirect, Route, Switch } from "wouter";
+import { useQuery } from "@tanstack/react-query";
+import { Redirect, Route, Switch, useLocation } from "wouter";
 import { Layout, PageHeader } from "@/components/Layout";
 import { IdentifyPage } from "@/pages/Identify";
 import { ModelsPage } from "@/pages/Models";
@@ -10,16 +11,24 @@ import { ApiDocsPage } from "@/pages/ApiDocs";
 import { BenchmarkPage, BenchmarksPage, ForResearchersPage, ProtocolsPage,
          ResearchPage } from "@/pages/Research";
 import { ExperimentPage, ExperimentsPage } from "@/pages/Experiments";
-import { MOVED } from "@/lib/research";
+import { api, signInUrl } from "@/lib/api";
+import { API_PATH, MOVED, mustSignIn } from "@/lib/research";
 
 export function App() {
+  const [location] = useLocation();
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
+  // A signed-out visitor on the public API page who moves on to any other page signs in
+  // first, as a full page load would make them (signin.PUBLIC_PAGES).
+  if (mustSignIn(me.data, location)) {
+    window.location.assign(signInUrl());
+    return null;
+  }
   return (
     <Layout>
       <Switch>
         <Route path="/" component={IdentifyPage} />
         <Route path="/about" component={AboutPage} />
         <Route path="/get-involved" component={GetInvolvedPage} />
-        <Route path="/api-docs" component={ApiDocsPage} />
         <Route path="/research" component={ResearchPage} />
         <Route path="/research/results" component={ModelsPage} />
         <Route path="/research/benchmarks" component={BenchmarksPage} />
@@ -34,6 +43,7 @@ export function App() {
         </Route>
         <Route path="/research/paper" component={PaperPage} />
         <Route path="/research/for-researchers" component={ForResearchersPage} />
+        <Route path={API_PATH} component={ApiDocsPage} />
         {Object.entries(MOVED).map(([from, to]) => (
           <Route key={from} path={from}><Redirect to={to} replace /></Route>
         ))}

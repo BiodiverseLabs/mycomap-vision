@@ -51,6 +51,23 @@ MEMBERS_ONLY = ("/api/paper", "/api/experiments")
 
 def members_only(path: str) -> bool:
     return any(path == p or path.startswith(p + "/") for p in MEMBERS_ONLY)
+
+
+# Open to anyone even when every page needs sign-in (Steve, 2026-10-12): the developer API
+# page (and its old address) and the files the page shell loads. The shell holds code and
+# the site's own text only; every page's data comes from /api/, which stays signed-in, and
+# the API page reads only the public outline (/api/docs/v1.json). The site sends a
+# signed-out visitor to sign in when they move on to any other page (web/src/App.tsx).
+PUBLIC_PAGES = ("/research/api", "/api-docs")
+PUBLIC_FILES = ("/favicon.png", "/mycomap-logo.png")
+PUBLIC_FILE_DIRS = ("/assets/",)
+
+
+def public_page(method: str, path: str) -> bool:
+    """A page or shell file anyone may read (GET or HEAD only)."""
+    return method in ("GET", "HEAD") and (
+        path in PUBLIC_PAGES or path in PUBLIC_FILES
+        or any(path.startswith(d) for d in PUBLIC_FILE_DIRS))
 SESSION_COOKIE = "mv_session"
 NONCE_COOKIE = "mv_signin"
 NONCE_TTL_SECONDS = 600
@@ -232,6 +249,8 @@ class SigninConfig:
         # The public API answers its own credentials, never the site's cookie (apiv1.py),
         # and its outline is public (apidocs.py; mycomap.org/api-docs shows it too).
         if path.startswith("/api/v1/") or path == "/api/v1" or path.startswith("/api/docs/"):
+            return False
+        if public_page(method, path):
             return False
         # The public dataset release's CC images (dataset_api.py), when Steve opens them.
         if self.dataset_public and method in ("GET", "HEAD") and path.startswith("/api/dataset/"):

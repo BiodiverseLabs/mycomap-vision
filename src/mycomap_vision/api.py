@@ -1078,7 +1078,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     by_observation_on = v1_on and bool(by_observation if by_observation is not None
                                        else config.setting("MV_BY_OBSERVATION") == "1")
 
-    # The API's public outline (apidocs.py): the Vision site's /api-docs page and the tab
+    # The API's public outline (apidocs.py): the Vision site's API page (Research > API) and the tab
     # on mycomap.org/api-docs both render it. Open to anyone, from any site.
     v1_parts = {"identify": v1_on, "sessions": sessions_on,
                 "by_observation": by_observation_on,
