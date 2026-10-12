@@ -105,7 +105,7 @@ def seed_two_species(conn, tmp_path):
         Image.new("RGB", (8, 8), (REDS[i], 0, 0)).save(buf, "PNG")
         rel = f"p/{1000 + i}.png"
         store.put(rel, buf.getvalue())
-        save_result(conn, Result(1000 + i, "done", rel, 1, "h"), "large", "now", store.location)
+        save_result(conn, Result(1000 + i, "done", rel, 1, f"h{1000 + i}"), "large", "now", store.location)
     return store
 
 

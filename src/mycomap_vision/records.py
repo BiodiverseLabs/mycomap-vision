@@ -228,6 +228,9 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
         "renamed": sum(r["observation_id"] in before
                        and before[r["observation_id"]] != r["scientific_name"] for r in records),
     }
+    # Records .org gives no place but whose own source puts in North America (placefallback.py).
+    from . import placefallback
+    placefallback.apply(conn)
     if held_out:
         out["held_out"] = held_out
     if migration:

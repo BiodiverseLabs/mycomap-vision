@@ -743,6 +743,17 @@ def cmd_serve(conn, args) -> None:
     serve(args.host, args.port)
 
 
+def cmd_fetch_place_fallback(conn, args) -> None:
+    """Placeless records' region from their own source (placefallback.py): iNat place_ids,
+    MO location names (mopoints reads every MO record's point and name first)."""
+    from . import mopoints, placefallback
+    out = placefallback.fetch_inat(conn)
+    out["mo_points"] = mopoints.fetch_all(conn)
+    out.update(placefallback.decide_mo(conn))
+    out["records_marked_north_america"] = placefallback.apply(conn)
+    print(json.dumps(out, indent=2))
+
+
 def cmd_fetch_mo_points(conn, args) -> None:
     """MO records' public points (mopoints.py), read anonymously at MO's pace."""
     from . import mopoints
@@ -1583,6 +1594,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8010)
 
+    sub.add_parser("fetch-place-fallback", help="records .org gives no place: ask iNat (place "
+                                                "ids) and MO (location name) whether they are "
+                                                "North American; read-only, polite pace")
+
     p = sub.add_parser("fetch-mo-points", help="each MO record's public point (shown GPS, else "
                                                "its location box) for dataset releases; "
                                                "anonymous, MO's pace (~5 s a request)")
@@ -1889,6 +1904,7 @@ def main(argv: list[str] | None = None) -> int:
         "aws-train-job": cmd_aws_train_job,
         "standard-summary": cmd_standard_summary,
         "fetch-mo-points": cmd_fetch_mo_points,
+        "fetch-place-fallback": cmd_fetch_place_fallback,
         "int8-check": cmd_int8_check,
         "export-onnx": cmd_export_onnx,
         "aws-launch-dataset-build": cmd_aws_launch_dataset_build,

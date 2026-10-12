@@ -149,7 +149,17 @@ than its record's), `no_original` (no kept original with a sha256), `permission_
 (ARR, owner withdrew on mycomap.org), `mo_not_for_use` (MO marks it not for export, or ARR
 while MO ARR use is off: `permissions.MO_EXCLUDED_FROM_USE_SQL`); these are the rules of
 `evaluate.load_records`, read from permissions.py. Then `review:<list>` (non-fungus scan,
-wrong-photo lists, after a person's check), `ok`.
+wrong-photo lists, after a person's check); `shared_other_label` (Steve, 2026-10-12: the same
+image, identical bytes, on records with different labels is left out of all of them: one
+observer's photo of two organisms in one frame would teach two names for one image);
+`copy_in_train` (after the splits: an image also in a `train` record is left out of its `val`
+records, so the model is never scored on a photo it learnt from; a `val` record left with no
+photo leaves as `no_photos`); `ok`.
+
+A record .org gives no place at all (no continent, country or coordinates) counts as North
+American when its own source places it there (placefallback.py: iNat's public `place_ids`,
+MO's location name; Steve, 2026-10-12). MANIFEST.json counts them
+(`north_america_from_source_place`).
 
 Wrong-photo records need no reason of their own: a build refuses a manifest without the
 `record-sources-v1` migration, which deleted each wrongly keyed record (an MO number taken for
