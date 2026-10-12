@@ -46,7 +46,16 @@ class FakeOrg:
         return self.answers.get(token, {"active": False, "reason": "unknown"})
 
 
-def v1_app(conn, tmp_path, monkeypatch=None, api_v1=True, org=None, photos_per_minute=None):
+def built_site(tmp_path):
+    """A web/dist as the box has one: the site's catch-all route is then mounted."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html><title>site</title>")
+    return dist
+
+
+def v1_app(conn, tmp_path, monkeypatch=None, api_v1=True, org=None, photos_per_minute=None,
+           web_dist=None):
     if monkeypatch and photos_per_minute:
         monkeypatch.setenv("MV_PHOTOS_PER_MINUTE", str(photos_per_minute))
     store = seed_two_species(conn, tmp_path)
@@ -57,7 +66,7 @@ def v1_app(conn, tmp_path, monkeypatch=None, api_v1=True, org=None, photos_per_m
     app = create_app(tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
                      limits=open_limits(), background=False, server_key=SERVER_KEY,
                      api_v1=api_v1, app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE),
-                     introspect=org or FakeOrg(), note=lambda s: None)
+                     introspect=org or FakeOrg(), note=lambda s: None, web_dist=web_dist)
     return TestClient(app)
 
 
@@ -149,8 +158,21 @@ def test_a_file_that_isnt_an_image_is_415_and_no_photos_is_400(conn, tmp_path):
 
 
 def test_v1_identify_is_off_unless_turned_on(conn, tmp_path):
-    client = v1_app(conn, tmp_path, api_v1=False)
-    assert identify(client, bearer(app_token())).status_code == 404
+    # With the built site mounted, as on the box: its catch-all must not answer v1 paths.
+    client = v1_app(conn, tmp_path, api_v1=False, web_dist=built_site(tmp_path))
+    res = identify(client, bearer(app_token()))
+    assert res.status_code == 404 and res.json()["code"] == "not_found"
+
+
+def test_an_unknown_v1_path_is_a_json_404_by_any_method(conn, tmp_path):
+    client = v1_app(conn, tmp_path, web_dist=built_site(tmp_path))
+    for method in ("get", "post", "put", "patch", "delete"):
+        res = client.request(method.upper(), "/api/v1/no-such-route", headers=bearer(app_token()))
+        assert res.status_code == 404 and res.json()["code"] == "not_found", method
+    # Still a credential first: no route list for strangers.
+    assert client.post("/api/v1/no-such-route").status_code == 401
+    # The site itself is untouched.
+    assert client.get("/some/page").text.startswith("<!doctype html>")
 
 
 # --- app tokens -----------------------------------------------------------------------
