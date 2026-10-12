@@ -21,6 +21,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 import requests
@@ -448,3 +449,54 @@ def run_downloads(conn: sqlite3.Connection, rows, store: PhotoStore, size: str,
         if checkpoint:
             checkpoint()
     return totals
+
+
+def adopt_benchmark_photos(conn: sqlite3.Connection, benchmark: str, log=print) -> dict:
+    """Register the photos a development benchmark already downloaded (heldout.py keeps
+    them in its own heldout_photos table and folder) as ordinary photo copies, so
+    `mv copy-photos` can put them into the main store and nothing is fetched from iNat a
+    second time (2026-10-12: the 13,145 held-out records join v1 with these photos).
+
+    Only a photo the manifest knows (a `photos` row) and that has no copy in that folder
+    yet; its file must exist with the size the benchmark recorded (copy_photos checks the
+    sha256 again before anything leaves the machine). A sealed benchmark's photos are
+    refused: its records are never trained on or indexed. Returns counts."""
+    sealed = conn.execute("select sealed from heldout_sets where name = ?",
+                          (benchmark,)).fetchone()
+    if sealed is None:
+        raise ValueError(f"no benchmark {benchmark!r}")
+    if sealed[0]:
+        raise ValueError(f"{benchmark} is sealed: its photos never join the reference")
+    rows = conn.execute("""
+        select h.photo_id, h.store, h.size, h.path, h.bytes, h.sha256, h.downloaded_at
+        from heldout_photos h join photos p on p.photo_id = h.photo_id
+        where h.benchmark = ? and h.status = 'done' and h.store is not null
+          and h.path is not null and h.sha256 is not null
+          and not exists (select 1 from photo_copies c where c.photo_id = h.photo_id
+                          and c.store = h.store and c.size = h.size)
+        order by h.photo_id""", (benchmark,)).fetchall()
+    out = {"benchmark": benchmark, "candidates": len(rows), "adopted": 0, "missing_file": 0,
+           "size_differs": 0, "stores": []}
+    keep, seen = [], set()
+    for pid, store, size, path, nbytes, sha, at in rows:
+        if (pid, store, size) in seen:            # one photo on two benchmark observations
+            continue
+        seen.add((pid, store, size))
+        f = Path(store) / path
+        if not f.is_file():
+            out["missing_file"] += 1
+            continue
+        if nbytes is not None and f.stat().st_size != nbytes:
+            out["size_differs"] += 1
+            continue
+        keep.append((pid, store, size, path, nbytes, sha, at))
+        if store not in out["stores"]:
+            out["stores"].append(store)
+    with conn:
+        conn.executemany("insert into photo_copies (photo_id, store, size, path, bytes, sha256, "
+                         "downloaded_at) values (?, ?, ?, ?, ?, ?, ?)", keep)
+    out["adopted"] = len(keep)
+    log(f"{benchmark}: {len(keep):,} of {len(rows):,} photos registered as copies in "
+        f"{', '.join(out['stores']) or '-'}; next: mv copy-photos --source <that folder> "
+        "--dest s3://<bucket>/ --size large")
+    return out
