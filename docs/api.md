@@ -254,8 +254,9 @@ model's result, not a `results` list.
   the website's answer headline (2026-10-11), so web and app always agree. Ranks without
   a fitted confidence (order and above, for now) are never `confident`. The top-level
   **`answer`** is `{"rank", "name", "confidence"}` for the finest rank that is
-  `confident`, or `null`. On held-out records it was right 96% of the time at species and
-  at genus (§8). A one-name `likely` set was tried as the rule and was right only 65% of
+  `confident`, or `null`. On held-out records the species `answer` was right about
+  **92–93%** of the time through the app's path on the served setup, and 96–97% in the
+  earlier offline scoring (sources in §8). A one-name `likely` set was tried as the rule and was right only 65% of
   the time at species, so it isn't used. The threshold may change on Vision; callers don't
   change.
 - **Place and date** (prior lane, branch feat/place-date-boost-and-far-cue fc96fff, not
@@ -536,6 +537,14 @@ overall 51%, genus 81%.
 | genus top ≥ 0.7, species below (**`answer` at genus**) | 52.2% | 96% |
 | neither (answer at family or none) | 38.2% | |
 | *one-name species likely set (rejected rule)* | *9.9%* | *61%* |
+
+These are offline numbers: the stored answers of the 2026-10-09 benchmark run (scored by
+`mv heldout`), before the not-a-fungus gate, single-photo embedding and int8 serving.
+
+**Through the app's path** (integration testing lane, 2026-10-12): the same dev records
+sent through the live serving setup as the app sends them (POST /identify, gate on): the
+species `answer` (confident at species) was right about **92–93%** of the time. Quote
+that range, not the offline 96%, as what people get.
 
 The benchmark's photos are DNA-validated records' own iNat photos: all fungi, often
 taken with care. App photos at a foray will score lower. So treat these shares as an
