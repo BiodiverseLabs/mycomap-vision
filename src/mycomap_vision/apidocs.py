@@ -130,21 +130,35 @@ def outline(enabled: dict[str, bool]) -> dict:
                  "status": status("by_observation"),
                  "summary": "Identify an iNaturalist observation from its photos.",
                  "auth": "Vision token",
-                 "fields": [["use_place", "boolean", "no", "Use the observation's public place (default true)."],
+                 "fields": [["use_place", "boolean", "no", "Use the observation's public place (default true). An obscured location is used as iNaturalist publishes it."],
                             ["use_date", "boolean", "no", "Use its date (default true)."],
-                            ["top_k", "1–10", "no", "Candidates per rank."]],
-                 "notes": ["Vision fetches the photos politely, one observation at a time, so "
-                           "expect a few seconds more (`timing.fetch_ms`).",
+                            ["top_k", "1–10", "no", "Candidates per rank."],
+                            ["client_ref", "string ≤ 64", "no", "Defaults to inat:<id>, so the same observation within a day is counted once."]],
+                 "request": ("curl -X POST " + BASE_URL + "/identify/inat/123456789 \\\n"
+                             "  -H 'Authorization: Bearer YOUR_TOKEN' \\\n"
+                             "  -H 'Content-Type: application/json' -d '{\"top_k\": 5}'"),
+                 "notes": ["Send JSON or no body. Vision reads up to 10 of the observation's "
+                           "photos politely, one observation at a time, so expect a few "
+                           "seconds more (`timing.fetch_ms`). Photos are kept in memory only.",
+                           "The answer is the usual one plus `observation` (the source, its "
+                           "link, photos read, whether a place was used, and the source's "
+                           "current name for comparison).",
                            "If the observation is itself one of Vision's DNA-verified "
-                           "references, it is left out of the comparison and "
-                           "`excluded_reference` says so."]},
+                           "references, it is left out of the comparison, its place and date "
+                           "aren't used, nothing is fetched, and `excluded_reference` says so. "
+                           "`left_out_photos` counts the reference photos left out.",
+                           "Refusals: 404 `observation_not_found`, 422 `no_usable_photos`, "
+                           "502 `source_unavailable` (try again after `Retry-After`)."]},
                 {"type": "endpoint", "method": "POST", "path": "/identify/mo/{observation_id}",
                  "status": status("by_observation"),
                  "summary": "Identify a Mushroom Observer observation from its photos.",
                  "auth": "Vision token",
-                 "fields": [["use_place", "boolean", "no", "As above."],
+                 "fields": [["use_place", "boolean", "no", "As above: Mushroom Observer's GPS unless hidden, else a small named place's centre."],
                             ["use_date", "boolean", "no", "As above."],
-                            ["top_k", "1–10", "no", "Candidates per rank."]]},
+                            ["top_k", "1–10", "no", "Candidates per rank."],
+                            ["client_ref", "string ≤ 64", "no", "Defaults to mo:<id>."]],
+                 "notes": ["Mushroom Observer asks for one request every 5 seconds, photos "
+                           "included, so expect about 5 seconds a photo."]},
             ]},
             {"id": "sessions", "title": "Observation sessions", "blocks": [
                 {"type": "p", "text": "For apps that send photos one at a time as they are "

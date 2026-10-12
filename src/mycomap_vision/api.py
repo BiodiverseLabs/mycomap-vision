@@ -33,9 +33,10 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apidocs, apiv1, config, evaluate, fastsearch, fungusgate, geocode, inat, manifest,
+from . import (apidocs, apiv1, byobservation, config, evaluate, fastsearch, fungusgate, geocode, inat, manifest,
                modelcard, models, names, nightly, onnxtower, permissions,
-               quotas as quota_rules, serving, sessions as session_store, uploads, workqueue)
+               quotas as quota_rules, serving, sessions as session_store, sources, uploads,
+               workqueue)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -271,6 +272,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                taxon_counts: bool | None = None,
                api_v1: bool | None = None,
                sessions: bool | None = None,
+               by_observation: bool | None = None,
+               observation_fetcher: "byobservation.Fetcher | None" = None,
                quotas: "quota_rules.Quotas | None" = None,
                usage_post: Callable[[dict], None] | None = None,
                app_tokens: "apiv1.AppTokens | None | bool" = True,
@@ -842,8 +845,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
                         may_show, timer: "apiv1.Timer", top_k: int = 5,
-                        interactive: bool = True, higher: bool = False) -> dict:
-        """One model's answer through the queue, timed: waiting, embedding, scoring."""
+                        interactive: bool = True, higher: bool = False,
+                        hidden: np.ndarray | None = None) -> dict:
+        """One model's answer through the queue, timed: waiting, embedding, scoring.
+        `hidden`: reference columns left out (Identifier.identify_vectors)."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
             parts = [embed_one(ident, model, im) for im in images]
@@ -854,7 +859,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def finish(vecs, sims):
             return ident.identify_vectors(vecs, top_k, context=context, sims=sims,
                                           photo_lookup=photo_lookup, may_show=may_show,
-                                          gate=verdicts[0], higher_ranks=higher)
+                                          gate=verdicts[0], higher_ranks=higher,
+                                          hidden=hidden)
         verdicts: list = []
         return model_queue.run(workqueue.Job(
             key=id(ident), photos=len(images), embed=embed, search=ident.nearest.photo_sims,
@@ -1069,10 +1075,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     v1_on = bool(api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1")
     sessions_on = bool(sessions if sessions is not None
                        else config.setting("MV_SESSIONS") == "1")
+    by_observation_on = v1_on and bool(by_observation if by_observation is not None
+                                       else config.setting("MV_BY_OBSERVATION") == "1")
 
     # The API's public outline (apidocs.py): the Vision site's /api-docs page and the tab
     # on mycomap.org/api-docs both render it. Open to anyone, from any site.
     v1_parts = {"identify": v1_on, "sessions": sessions_on,
+                "by_observation": by_observation_on,
                 "taxon_counts": bool(taxon_counts if taxon_counts is not None
                                      else config.setting("MV_TAXON_COUNTS") == "1")}
 
@@ -1103,8 +1112,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 except (TypeError, ValueError):
                     raise apiv1.V1Error(400, "bad_request", "observed_on is YYYY-MM-DD") from None
 
-        def take_photos(cred: "apiv1.Credential", n: int) -> None:
-            """The caller's photos-per-minute window, then room in the queue, or refuse."""
+        def take_photos(cred: "apiv1.Credential", n: int,
+                        interactive: bool | None = None) -> None:
+            """The caller's photos-per-minute window, then room in the queue, or refuse.
+            `interactive` overrides the credential's (by-observation calls never are)."""
             if cred.kind != "server" and n:
                 wait = photo_window.take(cred.rate_key, n)
                 if wait:
@@ -1112,7 +1123,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise apiv1.V1Error(429, "rate_limited", "too many photos in the last "
                                         "minute", retry_after=int(wait) + 1)
             try:
-                model_queue.admit(interactive=cred.interactive)
+                model_queue.admit(interactive=cred.interactive if interactive is None
+                                  else interactive)
             except workqueue.Busy as e:
                 quotas.refused(cred, "busy")
                 wait = int(e.wait_seconds) + 1
@@ -1218,6 +1230,163 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
         if v1_on:
             app.post("/api/v1/identify")(v1_identify)
+
+        # POST /api/v1/identify/{inat|mo}/{number} (docs/api.md §3.2): an observation's own
+        # photos, place and date, read politely from iNat or MO (byobservation.py) and kept
+        # in memory only. An observation that is itself a DNA reference record is answered
+        # from its stored vectors with that record left out of the reference, and without
+        # its place and date (the record is part of the place prior); so is one whose
+        # photo is filed under a reference record. Behind interactive calls in the queue.
+        if by_observation_on:
+            fetcher = observation_fetcher or byobservation.Fetcher()
+
+            def flag(payload: dict, name: str) -> bool:
+                v = payload.get(name, True)
+                if not isinstance(v, bool):
+                    raise apiv1.V1Error(400, "bad_request", f"{name} is true or false")
+                return v
+
+            def v1_identify_observation(request: Request, source: str, observation_id: str,
+                                        payload: dict | None = Body(None)):
+                timer = apiv1.Timer()
+                timer.ms["fetch_ms"] = 0
+                cred: apiv1.Credential = request.state.credential
+                if source not in byobservation.SOURCES:
+                    raise apiv1.V1Error(404, "not_found", "identify by observation takes "
+                                        "inat or mo")
+                number = byobservation.valid_id(observation_id)
+                if number is None:
+                    raise apiv1.V1Error(400, "bad_request", "the observation number is digits")
+                payload = {} if payload is None else payload
+                if not isinstance(payload, dict):
+                    raise apiv1.V1Error(400, "bad_request", "send a JSON object")
+                top_k = payload.get("top_k", 5)
+                if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 10:
+                    raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
+                use_place, use_date = flag(payload, "use_place"), flag(payload, "use_date")
+                model = payload.get("model")
+                if model is not None and not isinstance(model, str):
+                    raise apiv1.V1Error(400, "bad_request", "model is a string")
+                # The same observation for the same pool within a day is the same find.
+                client_ref = payload.get("client_ref") or f"{source}:{number}"
+                if not isinstance(client_ref, str) or not (
+                        1 <= len(client_ref) <= session_store.MAX_REF_LENGTH):
+                    raise apiv1.V1Error(400, "bad_request", "client_ref is 1 to "
+                                        f"{session_store.MAX_REF_LENGTH} characters")
+                backbone, method = v1_model(model)
+                same_find = quotas.counted_before(cred, client_ref)
+                if not same_find:
+                    quotas.check(cred)
+                view = permission_view()
+                ident = v1_index(backbone, method, view, timer)
+                with_own, own = ident.left_out(source, number)
+                if len(own) and not ident.can_leave_out():
+                    raise apiv1.V1Error(400, "bad_request", "this model can't leave the "
+                                        "observation's own reference record out")
+                none_used = {"latitude": None, "longitude": None, "observed_on": None,
+                             "place_from": None, "date_from": None}
+                about = {"source": source, "id": number,
+                         "url": sources.record_url(source, number),
+                         "photos": None, "photos_used": 0, "place": None,
+                         "name_at_source": None, "rank_at_source": None}
+                if len(own):
+                    # A DNA reference record: its stored vectors, nothing fetched.
+                    cols = own[:MAX_PHOTOS]
+                    take_photos(cred, len(cols), interactive=False)
+                    vecs = ident.reference_vectors(cols)
+                    hidden, context, used = with_own, None, none_used
+                    about["photos_used"] = n_photos = len(cols)
+                else:
+                    def admit(obs) -> int:
+                        n = min(MAX_PHOTOS, len(obs.photo_urls))
+                        if n == 0:
+                            raise apiv1.V1Error(422, "no_usable_photos", "the observation has "
+                                                "no photos Vision can read")
+                        take_photos(cred, n, interactive=False)
+                        return n
+                    start = time.monotonic()
+                    try:
+                        obs, bodies = fetcher.fetch(source, number, MAX_PHOTOS, admit=admit)
+                    except byobservation.NotFound as e:
+                        raise apiv1.V1Error(404, "observation_not_found", str(e)) from None
+                    except byobservation.Unavailable as e:
+                        raise apiv1.V1Error(502, "source_unavailable", str(e),
+                                            retry_after=e.retry_after) from None
+                    except byobservation.Busy as e:
+                        raise apiv1.V1Error(503, "busy", "busy fetching other observations",
+                                            retry_after=e.retry_after,
+                                            estimated_wait_seconds=e.retry_after) from None
+                    finally:
+                        timer.add("fetch_ms", time.monotonic() - start)
+                    start = time.monotonic()
+                    side = uploads.kept_side(list(backbones.values()))
+                    images = []
+                    for photo_body in bodies:
+                        try:
+                            images.append(uploads.decode_upload(photo_body, side)[0])
+                        except Exception:               # not an image we can read: skip
+                            continue
+                    timer.add("decode_ms", time.monotonic() - start)
+                    if not images:
+                        raise apiv1.V1Error(422, "no_usable_photos", "none of the "
+                                            "observation's photos could be read")
+                    about.update(photos=len(obs.photo_urls), photos_used=len(images),
+                                 name_at_source=obs.name_at_source,
+                                 rank_at_source=obs.rank_at_source)
+                    hidden, _ = ident.left_out(source, number, obs.photo_ids)
+                    if len(hidden) and not ident.can_leave_out():
+                        raise apiv1.V1Error(400, "bad_request", "this model can't leave "
+                                            "the observation's photos out of the reference")
+                    if len(hidden):
+                        context, used = None, none_used
+                    else:
+                        lat, lng = ((obs.latitude, obs.longitude) if use_place
+                                    else (None, None))
+                        context, used = fill_context(
+                            Context(lat, lng, obs.observed_on if use_date else None), [])
+                        used = {**used,
+                                "place_from": "observation" if used["place_from"] else None,
+                                "date_from": "observation" if used["date_from"] else None}
+                        if used["place_from"]:
+                            about["place"] = obs.place
+                    n_photos = len(images)
+                if not in_flight.enter():
+                    raise apiv1.V1Error(503, "busy", "busy identifying other photos",
+                                        retry_after=10, estimated_wait_seconds=10)
+                try:
+                    def may_show(info) -> bool:
+                        return view.may_show(info.license_class, info.owner_user_id)
+                    if len(own):
+                        def finish(v, sims):
+                            return ident.identify_vectors(
+                                v, top_k, context=None, sims=sims, photo_lookup=photo_lookup,
+                                may_show=may_show, gate=None, higher_ranks=True,
+                                hidden=hidden)
+                        result = model_queue.run(workqueue.Job(
+                            key=id(ident), photos=0, embed=lambda: vecs,
+                            search=ident.nearest.photo_sims, finish=finish,
+                            interactive=False, timer=timer))
+                    else:
+                        result = embed_and_score(ident, backbone, images, context or Context(),
+                                                 may_show, timer, top_k, interactive=False,
+                                                 higher=True,
+                                                 hidden=hidden if len(hidden) else None)
+                finally:
+                    in_flight.leave()
+                quotas.count(cred, 0 if same_find else 1, n_photos)
+                if not same_find:
+                    quotas.remember_counted(cred, client_ref)
+                body = v1_result(result, backbone, method, used, timer)
+                body["observation"] = about
+                body["excluded_reference"] = ({"source": source, "source_id": number}
+                                              if len(own) else None)
+                body["left_out_photos"] = int(len(hidden))
+                body["usage"] = quotas.usage(cred)
+                return JSONResponse(body, headers={
+                    "Cache-Control": "no-store",
+                    "Server-Timing": apiv1.Timer.header(body["timing"])})
+
+            app.post("/api/v1/identify/{source}/{observation_id}")(v1_identify_observation)
 
     # The app's observation sessions (docs/api.md §3.3, sessions.py): photos sent one at a
     # time as they're taken; each answer is the combined answer over all of them,

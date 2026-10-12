@@ -71,6 +71,19 @@ def reference_rows(vectors, index):
     return select(index.cols) if select is not None else vectors[index.cols]
 
 
+def rows_at(ref, positions) -> np.ndarray:
+    """float32 copies of the reference rows at these column positions, from whatever a
+    Scorer holds: memory-mapped (serving.MappedSelection, read as its build read them), a
+    tensor on the GPU, or an array."""
+    positions = np.asarray(positions, dtype=np.int64)
+    if hasattr(ref, "vectors") and hasattr(ref, "cols"):
+        return np.asarray(ref.vectors[ref.cols[positions]], dtype=np.float32)
+    if hasattr(ref, "cpu"):
+        import torch
+        return ref[torch.as_tensor(positions, device=ref.device)].float().cpu().numpy()
+    return np.asarray(ref[positions], dtype=np.float32)
+
+
 def species_scores(sims: np.ndarray, index) -> np.ndarray:
     """(n_species,): mean over query photos of each photo's best match within the species."""
     return np.maximum.reduceat(sims, index.starts, axis=1).mean(axis=0)
@@ -323,6 +336,33 @@ class NearestAndMean:
         so the record's score is exactly these averaged over its photos."""
         nearest = top_k_species_scores_per_photo(photo_sims, self.index, self.k)
         return self.weight * nearest + (1 - self.weight) * self.means.sims(query)
+
+    def leave_out(self, per_photo: np.ndarray, photo_sims: np.ndarray, query: np.ndarray,
+                  hidden: np.ndarray) -> np.ndarray:
+        """`per_photo` (per_photo_scores, from unmasked `photo_sims`) as if the reference
+        columns `hidden` had never been there: each species they belong to gets its two
+        best matches and its average taken again without them, and -inf when nothing of
+        it is left. Equal to a NearestAndMean fitted without those columns (tests), with
+        no refit: only the few species touched are recomputed."""
+        starts = self.index.starts
+        n_cols = len(self.index.cols)
+        hidden = np.unique(np.asarray(hidden, dtype=np.int64))
+        q = np.asarray(query, dtype=np.float32)
+        out = np.array(per_photo, dtype=np.float32, copy=True)
+        for u in np.unique(np.searchsorted(starts, hidden, side="right") - 1).tolist():
+            lo = int(starts[u])
+            hi = int(starts[u + 1]) if u + 1 < len(starts) else n_cols
+            keep = np.setdiff1d(np.arange(lo, hi), hidden)
+            if not len(keep):
+                out[:, u] = -np.inf
+                continue
+            best = -np.sort(-photo_sims[:, keep], axis=1)[:, :self.k]
+            nearest = best.sum(axis=1, dtype=np.float32) / np.float32(best.shape[1])
+            mean = rows_at(self.scorer.ref, keep).sum(axis=0)
+            mean = (mean / max(float(np.linalg.norm(mean)), 1e-12)).astype(np.float16)
+            out[:, u] = (self.weight * nearest
+                         + (1 - self.weight) * (q @ mean.astype(np.float32)))
+        return out
 
     def species_scores(self, query: np.ndarray) -> np.ndarray:
         return self.per_photo_scores(self.scorer.sims(query), query).mean(axis=0)

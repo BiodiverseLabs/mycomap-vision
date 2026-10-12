@@ -148,6 +148,11 @@ class NearestMeanPlace:
         """Photos only (nearest + species average's own), for identify's shared path."""
         return self.base.per_photo_scores(photo_sims, query)
 
+    def leave_out(self, per_photo, photo_sims, query, hidden):
+        """nearest + species average's (photos only: a caller leaving a reference record
+        out sends no place or date, since that record is part of the prior)."""
+        return self.base.leave_out(per_photo, photo_sims, query, hidden)
+
     def species_scores(self, query: np.ndarray, context: Context | None = None) -> np.ndarray:
         scores = self.base.species_scores(query)
         shift = self.place_shift(context)
