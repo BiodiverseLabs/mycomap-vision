@@ -2,6 +2,8 @@
 the combined answer over all of them, exactly as identifying them together would give,
 from stored vectors (never re-embedded) and with no photo kept."""
 
+from collections.abc import Mapping
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -14,8 +16,29 @@ from mycomap_vision import apiv1, sessions as session_store
 from mycomap_vision.api import create_app
 from mycomap_vision.embed import embed_photos, photos_to_embed
 
-APP = bearer(app_token())
-OTHER = bearer(app_token(sub="u_someone_else"))
+class Fresh(Mapping):
+    """Authorization headers whose app token is minted when read. A token minted once at
+    import lives 60 s (+30 s skew), and on a slow, loaded run the last tests of this file
+    started later than that and got 401 token_expired."""
+
+    def __init__(self, **claims):
+        self.claims = claims
+
+    def _headers(self) -> dict:
+        return bearer(app_token(**self.claims))
+
+    def __getitem__(self, key):
+        return self._headers()[key]
+
+    def __iter__(self):
+        return iter(self._headers())
+
+    def __len__(self):
+        return 1
+
+
+APP = Fresh()
+OTHER = Fresh(sub="u_someone_else")
 
 
 class FakeGate:
@@ -328,3 +351,13 @@ def test_a_photo_gets_the_same_vector_alone_or_with_others(conn, tmp_path):
     together = identify(client, APP, reds=(247, 120, 12)).json()
     assert last["combined"]["ranks"] == together["ranks"]           # scores to the last digit
     assert last["combined"]["specimens"] == together["specimens"]
+
+
+def test_the_shared_headers_are_minted_when_read():
+    # However late in a slow run a test starts, its app token is issued then, not at import.
+    import base64
+    import json
+    import time
+    body = APP["Authorization"].split(" ", 1)[1][len("mvt."):].split(".")[0]
+    claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    assert abs(claims["iat"] - time.time()) < 5
