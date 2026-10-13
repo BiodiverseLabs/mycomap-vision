@@ -444,3 +444,14 @@ def test_the_reviewed_crosswalk_credits_only_pairs_marked_credit(world, tmp_path
     assert full("Fomes fomentarius", "Fomes excavatus")                   # the row beside
     with pytest.raises(ValueError, match="the config pins"):
         paper_score.crosswalk_rule({**spec, "review_sha256": "0" * 64}, set(keys), world["conn"])
+
+
+def test_each_photo_alone_is_a_per_photo_table_beside_the_finds(world, tmp_path):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"].append({"id": "each", "kind": "vision", "backbone": "m1",
+                               "method": "nearest", "photos": "each"})
+    rep = run(world, tmp_path, "val", cfg)
+    t = rep["per_photo"]["each"]["species_strict@1"]
+    assert t["photos"] == 2 and t["right"] == 2                # one photo per val record here
+    assert rep["inputs"]["each"]["photo_answers"] == 2
+    assert "each" not in rep["errors"]["comparators"]           # not a per-find answer

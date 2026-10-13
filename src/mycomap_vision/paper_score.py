@@ -45,6 +45,7 @@ import numpy as np
 
 from . import config as cfgmod
 from . import paper_outcomes as po
+from . import paper_stats as ps
 from . import paper_tables as pt
 
 TAG = "paper-analysis-freeze-v1"
@@ -553,7 +554,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                         read_attrs(attrs_path) if attrs_path else None)
     out.mkdir(parents=True, exist_ok=True)
     (out / "predictions").mkdir(exist_ok=True)
-    outcomes, inputs, calib, top1 = {}, {}, {}, {}
+    outcomes, inputs, calib, top1, per_photo = {}, {}, {}, {}, {}
     public = None
     for comp in config["comparators"]:
         answers = None
@@ -590,6 +591,19 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             if comp.get("photos") == "first":            # E19: the first photo only
                 from dataclasses import replace
                 scored = [replace(r, photo_rows=r.photo_rows[:1]) for r in scored]
+            if comp.get("photos") == "each":             # E19: every photo on its own
+                from dataclasses import replace
+                singles = [replace(r, observation_id=f"{r.observation_id}#{i}",
+                                   photo_rows=[row_])
+                           for r in scored for i, row_ in enumerate(r.photo_rows)]
+                ans_each = vision_answers(vecs, ref, singles, comp["method"], b,
+                                          int(config.get("top_k", 10)))
+                per_photo[comp["id"]] = per_photo_table(finds, ans_each, reps, seed)
+                outcomes[comp["id"]], inputs[comp["id"]] = {}, {
+                    "kind": "vision", "backbone": b, "method": comp["method"],
+                    "photos": "each", "photo_answers": len(ans_each)}
+                top1[comp["id"]] = {}
+                continue
             kw = {"top_k": int(config.get("top_k", 10)), "calibration": comp.get("calibration"),
                   "truths": truths}
             answers = (vision_answers_leave_out(vecs, ref, scored, comp["method"], b,
@@ -641,6 +655,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             outcomes, reps, seed)} for name, flt in (config.get("subsets") or {}).items()},
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   float(config.get("alpha", 0.05))),
+        "per_photo": per_photo,
         "calibration": calibration_report(finds, calib, outcomes,
                                           config.get("calibration_metrics", {}), reps, seed),
         "errors": errors_report(finds, top1, config.get("errors", {}), base, scored_rel),
@@ -655,6 +670,26 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     log(f"paper-score: {len(finds):,} finds; report in {out}"
         + ("  *** POST HOC ***" if g["post_hoc"] else ""))
     return report
+
+
+def per_photo_table(finds, answers_each: dict, reps: int, seed: int) -> dict:
+    """E19, each photo alone: top-1 and top-5 per photo (species strict, genus strict) with
+    the observer-clustered interval, primary scope; a photo counts toward its find's
+    observer, so a find with many photos weighs more, as a photo-level number does."""
+    by_key = {f.key: f for f in pt.in_scope(finds)}
+    outs = {}
+    for pk, a in answers_each.items():
+        f = by_key.get(pk.split("#", 1)[0])
+        if f is not None:
+            outs[pk] = (f, po.from_ranked(a["species"], a["genus"], f))
+    table = {}
+    for cell in ("species_strict@1", "species_strict@5", "genus_strict@1", "genus_strict@5"):
+        vals = [(f.observer, o[cell]) for f, o in outs.values() if o[cell] is not None]
+        n, k = len(vals), sum(1 for _w, v in vals if v)
+        table[cell] = {"photos": n, "right": k, "rate": k / n if n else None,
+                       "ci95": ps.cluster_ci([v for _w, v in vals], [w for w, _v in vals],
+                                             reps, seed) if n else None}
+    return table
 
 
 def top_answers(comp: dict, answers: dict | None) -> dict[str, str]:
