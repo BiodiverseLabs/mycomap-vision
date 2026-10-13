@@ -212,3 +212,29 @@ def test_the_band_bound_is_a_paired_bootstrap_lower_bound():
     out = pt.band_lower_bound(a, b, np.ones(700, bool), np.arange(700) % 5, n_boot=2000)
     assert out["delta"] < 0 and out["lower95"] < out["delta"]
     assert out["passes_margin"] is (out["lower95"] > -pt.MARGIN)
+
+
+def test_the_papers_bound_resamples_whole_observers():
+    # 30 broken records: all from one observer (30 records), or one each from 30 observers.
+    # Resampling observers whole, the first is far less certain.
+    n = 700
+    a = np.ones(n, bool)
+    observers = ["big"] * 30 + [f"o{i}" for i in range(670)]
+    lumpy = a.copy()
+    lumpy[:30] = False
+    spread = a.copy()
+    spread[[30 + i * 20 for i in range(30)]] = False
+    lo = pt.band_lower_bound_clustered(a, lumpy, np.ones(n, bool), observers, 4000)
+    sp = pt.band_lower_bound_clustered(a, spread, np.ones(n, bool), observers, 4000)
+    assert lo["delta"] == sp["delta"] == pytest.approx(-30 / 700)
+    assert lo["observers"] == 671
+    assert lo["lower95"] < sp["lower95"]
+
+
+def test_bands_can_be_the_papers_labels():
+    a = np.array([True, True, False, True])
+    b = np.array([False, True, True, True])
+    labels = np.array(["<100", "300-1500", "300-1500", "no point"])
+    rows = {r["band"]: r for r in pt.label_table(a, b, labels, np.ones(4, bool), pt.PAPER_BANDS)}
+    assert rows["<100"]["broken"] == 1 and rows["300-1500"]["fixed"] == 1
+    assert rows["no point"]["n"] == 1 and rows[">1500"]["n"] == 0

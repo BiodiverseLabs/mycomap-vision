@@ -268,21 +268,48 @@ def cmd_tune(args) -> None:
     sp, ge = pt.score_all(c, grid)
     p0_sp, p0_ge = pt.top1(c, pt.combine(c, pt.NONE))
     p1 = 0                                               # grid[0] is the served setting
-    km = meta["truth_km"]
-    rule = pt.band_of(km, *pt.RULE_BAND) & c.has_sp
+    km = meta["truth_km"]                 # true .org points (the lane's own; extra detail)
+    observers = meta["observer"].tolist()
+    paper = None
+    if args.paper_attrs:
+        # The paper's distance_band (E8: public points, the release's own species), read
+        # from `mv paper-attrs`, so a find gets the paper's band here too.
+        import csv
+        with open(args.paper_attrs, encoding="utf-8", newline="") as f:
+            by_key = {r["record_key"]: r["distance_band"] for r in csv.DictReader(f, delimiter="\t")}
+        keys = meta["record_key"].tolist()
+        missing = [k for k in keys if k not in by_key]
+        if missing:
+            raise SystemExit(f"{len(missing)} scored records have no paper band "
+                             f"(e.g. {missing[:3]}): wrong --paper-attrs file?")
+        paper = np.array([by_key[k] for k in keys], dtype=str)
+        rule = (paper == pt.PAPER_RULE_BAND) & c.has_sp
+    else:
+        rule = pt.band_of(km, *pt.RULE_BAND) & c.has_sp
     print(f"{n:,} records ({int(c.has_sp.sum()):,} with a species answer, "
-          f"{int(rule.sum()):,} in the 300-1,500 km band); scored {len(grid)} settings "
-          f"[{time.time() - t0:.0f}s]", flush=True)
+          f"{int(rule.sum()):,} in the 300-1,500 km band, "
+          f"{'paper bands' if paper is not None else 'true-point bands'}); "
+          f"scored {len(grid)} settings [{time.time() - t0:.0f}s]", flush=True)
 
     def summary_of(cv_sp, cv_ge):
-        return {"species_top1": round(float(cv_sp[c.has_sp].mean()), 4),
-                "genus_top1": round(float(cv_ge.mean()), 4),
-                "vs_photos_only": pt.fixed_broken(p0_sp, cv_sp, np.flatnonzero(c.has_sp)),
-                "vs_served": pt.fixed_broken(sp[p1], cv_sp, np.flatnonzero(c.has_sp)),
-                "bands_vs_photos_only": pt.band_table(p0_sp, cv_sp, km, c.has_sp),
-                "bands_vs_served": pt.band_table(sp[p1], cv_sp, km, c.has_sp),
-                "rule_band_vs_photos_only": pt.band_lower_bound(p0_sp, cv_sp, rule, folds),
-                "rule_band_vs_served": pt.band_lower_bound(sp[p1], cv_sp, rule, folds)}
+        out = {"species_top1": round(float(cv_sp[c.has_sp].mean()), 4),
+               "genus_top1": round(float(cv_ge.mean()), 4),
+               "vs_photos_only": pt.fixed_broken(p0_sp, cv_sp, np.flatnonzero(c.has_sp)),
+               "vs_served": pt.fixed_broken(sp[p1], cv_sp, np.flatnonzero(c.has_sp)),
+               "bands_vs_photos_only": pt.band_table(p0_sp, cv_sp, km, c.has_sp),
+               "bands_vs_served": pt.band_table(sp[p1], cv_sp, km, c.has_sp),
+               "rule_band_vs_photos_only": pt.band_lower_bound(p0_sp, cv_sp, rule, folds),
+               "rule_band_vs_served": pt.band_lower_bound(sp[p1], cv_sp, rule, folds),
+               "rule_band_vs_photos_only_cluster": pt.band_lower_bound_clustered(
+                   p0_sp, cv_sp, rule, observers),
+               "rule_band_vs_served_cluster": pt.band_lower_bound_clustered(
+                   sp[p1], cv_sp, rule, observers)}
+        if paper is not None:
+            out["paper_bands_vs_photos_only"] = pt.label_table(p0_sp, cv_sp, paper, c.has_sp,
+                                                               pt.PAPER_BANDS)
+            out["paper_bands_vs_served"] = pt.label_table(sp[p1], cv_sp, paper, c.has_sp,
+                                                          pt.PAPER_BANDS)
+        return out
 
     picks = {}
     slope = np.array([s["pen_slope"] for s in grid])
@@ -411,6 +438,8 @@ def main(argv=None) -> None:
     ap.add_argument("--heldout-dir")
     ap.add_argument("--store", help="occurrence store (default: data/occurrence's)")
     ap.add_argument("--named-case", action="append", help="a record_key to report by name")
+    ap.add_argument("--paper-attrs", help="`mv paper-attrs` TSV: use the paper's distance_band "
+                    "(public points) for the bands and the 300-1,500 km rule")
     args = ap.parse_args(argv)
     {"score": cmd_score, "components": cmd_components, "tune": cmd_tune}[args.step](args)
 

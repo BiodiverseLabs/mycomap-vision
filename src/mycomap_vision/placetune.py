@@ -339,6 +339,44 @@ def band_lower_bound(a: np.ndarray, b: np.ndarray, in_band: np.ndarray, folds: n
             "passes_margin": bool(np.quantile(boots, 0.05) > -MARGIN)}
 
 
+def band_lower_bound_clustered(a: np.ndarray, b: np.ndarray, in_band: np.ndarray,
+                               observers: list, n_boot: int = 10_000,
+                               seed: int = SEED) -> dict:
+    """The paper's version (E8): the same bound by a paired CLUSTER bootstrap, observers
+    resampled with replacement (each with all its band records); the ratio of sums."""
+    rng = np.random.default_rng(seed)
+    rows = np.flatnonzero(in_band)
+    if not len(rows):
+        return {"n": 0, "delta": None, "lower95": None}
+    d = b[rows].astype(np.int64) - a[rows].astype(np.int64)
+    keys = [o if o not in (None, "", "None") else f"record:{i}"
+            for i, o in zip(rows.tolist(), np.asarray(observers, dtype=object)[rows].tolist())]
+    _, cluster = np.unique(np.array(keys, dtype=str), return_inverse=True)
+    sums = np.bincount(cluster, weights=d)
+    sizes = np.bincount(cluster)
+    k = len(sums)
+    boots = np.empty(n_boot)
+    for i in range(n_boot):
+        pick = rng.integers(0, k, k)
+        boots[i] = sums[pick].sum() / sizes[pick].sum()
+    lb = float(np.quantile(boots, 0.05))
+    return {"n": int(len(rows)), "observers": int(k), "delta": float(d.mean()),
+            "lower95": lb, "passes_margin": bool(lb > -MARGIN)}
+
+
+def label_table(a: np.ndarray, b: np.ndarray, labels: np.ndarray, keep: np.ndarray,
+                order: tuple[str, ...]) -> list[dict]:
+    """fixed / broken of b against a per band label (the paper's distance_band)."""
+    labels = np.asarray(labels, dtype=str)
+    return [{"band": lab, **fixed_broken(a, b, np.flatnonzero(keep & (labels == lab)))}
+            for lab in order]
+
+
+PAPER_BANDS = ("<100", "100-300", "300-1500", ">1500", "no reference", "no point",
+               "no reference point")
+PAPER_RULE_BAND = "300-1500"
+
+
 # --- confidence and answers for the standard tables ----------------------------------------
 
 T_GRID = np.geomspace(0.05, 20.0, 80)       # on the combined (log-probability) scale
