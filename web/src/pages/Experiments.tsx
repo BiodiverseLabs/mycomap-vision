@@ -4,8 +4,9 @@ import { Link } from "wouter";
 import { PageHeader } from "@/components/Layout";
 import { Markdown } from "@/components/Markdown";
 import { api, ApiError, signInUrl } from "@/lib/api";
-import { awaitsDecision, EXPERIMENT_STATUSES, filterExperiments, reproducibilityWords, STATUS_WORDS,
-         statusCounts, type ExperimentStatus } from "@/lib/experiments";
+import { awaitsDecision, EXPERIMENT_STATUSES, filterExperiments, REPRO_KIND_WORDS, REPRO_KINDS, reproCounts,
+         reproducibilityWords, STATUS_WORDS, statusCounts, type ExperimentStatus,
+         type ReproKind } from "@/lib/experiments";
 
 // Research > Experiments (Steve, 2026-10-09): every experiment recorded so it can be reviewed.
 // Members only: development numbers and unpublished results (experiments/README.md in the private research repo).
@@ -15,12 +16,13 @@ function Status({ s }: { s: ExperimentStatus }) {
   return <span className={`rounded px-2 py-0.5 text-xs font-medium ${w.tone}`}>{w.label}</span>;
 }
 
-function Repro({ r }: { r: string }) {
-  const w = reproducibilityWords(r);
+function Repro({ r, on }: { r: string; on?: string }) {
+  const w = reproducibilityWords(r, on);
   return (
     <span title={w.note}
           className={`rounded px-2 py-0.5 text-xs ${w.provisional ? "border border-dashed border-[#A87146]/50 text-[#7a5a3a]"
-                                                               : "bg-myco-green/10 text-myco-green"}`}>
+                                                   : on ? "bg-gray-100 text-gray-600"
+                                                        : "bg-myco-green/10 text-myco-green"}`}>
       {w.label}
     </span>
   );
@@ -42,9 +44,11 @@ function SignInNote({ error }: { error: unknown }) {
 export function ExperimentsPage() {
   const q = useQuery({ queryKey: ["experiments"], queryFn: api.experiments, retry: false });
   const [status, setStatus] = useState<ExperimentStatus | null>(null);
+  const [repro, setRepro] = useState<ReproKind | null>(null);
   const all = q.data?.experiments ?? [];
   const counts = statusCounts(all);
-  const shown = filterExperiments(all, status);
+  const rCounts = reproCounts(all);
+  const shown = filterExperiments(all, status, repro);
   const chip = (on: boolean) => `rounded-full border px-3 py-1 text-sm ${
     on ? "border-myco-green bg-myco-green/10 text-myco-green" : "border-[#A87146]/30 bg-white text-gray-700 hover:bg-myco-green/5"}`;
   return (
@@ -52,7 +56,8 @@ export function ExperimentsPage() {
       <PageHeader title="Experiments">
         Every experiment on MycoMap Vision: the question, everything tried, the numbers, and what
         was decided. Development results, for mycomap.org members. Results from before the dataset
-        freeze are exploratory; each will be re-run on dataset release v1 so anyone can rebuild it.
+        freeze are exploratory; each is being re-run on dataset release v1 so anyone can rebuild it.
+        Once re-run, the old entry stays as method history and links to its re-run.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-4xl space-y-4">
         {q.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
@@ -68,13 +73,24 @@ export function ExperimentsPage() {
             ))}
           </div>
         )}
+        {all.length > 0 && (
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by reproducibility">
+            <button className={chip(repro === null)} onClick={() => setRepro(null)}>Any data</button>
+            {REPRO_KINDS.map((k) => (
+              <button key={k} className={chip(repro === k)} onClick={() => setRepro(k)}
+                      disabled={!rCounts[k]}>
+                {REPRO_KIND_WORDS[k]} ({rCounts[k]})
+              </button>
+            ))}
+          </div>
+        )}
         {shown.map((e) => (
           <Link key={e.slug} href={`/research/experiments/${e.slug}`}
                 className="block rounded-lg border border-[#A87146]/20 bg-white p-4 hover:border-myco-green/50 hover:bg-myco-green/5">
             <span className="flex flex-wrap items-center gap-2">
               <span className="font-semibold text-[#4a3728]">{e.title}</span>
               <Status s={e.status} />
-              <Repro r={e.reproducibility} />
+              <Repro r={e.reproducibility} on={e.reproduced_on} />
               {awaitsDecision(e) && <span className="text-xs text-[#7a5a3a]">decision pending</span>}
               <span className="text-xs text-muted-foreground ml-auto">{e.date}</span>
             </span>
@@ -107,10 +123,20 @@ export function ExperimentPage({ slug }: { slug: string }) {
         {e && (
           <>
             <p className="flex flex-wrap items-center gap-2 text-sm">
-              <Status s={e.status} /> <Repro r={e.reproducibility} />
+              <Status s={e.status} /> <Repro r={e.reproducibility} on={e.reproduced_on} />
               <span className="text-muted-foreground">{e.date}</span>
             </p>
-            <p className="mt-2 text-sm text-muted-foreground">{reproducibilityWords(e.reproducibility).note}</p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              {reproducibilityWords(e.reproducibility, e.reproduced_on).note}
+            </p>
+            {e.reproduced_by && (
+              <p className="mt-2 text-sm" data-testid="reproduced-by">
+                Re-run on release {e.reproduced_on}:{" "}
+                <Link href={`/research/experiments/${e.reproduced_by}`} className="text-myco-green underline">
+                  {e.reproduced_by}
+                </Link>
+              </p>
+            )}
             <dl className="mt-4 grid grid-cols-[8rem_1fr] gap-x-4 gap-y-1 text-sm">
               {facts.filter(([, v]) => v).map(([k, v]) => (
                 <div key={k} className="contents">
