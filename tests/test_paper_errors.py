@@ -60,3 +60,22 @@ def test_a_listed_species_matches_its_gender_variant_spelling():
     assert pe.deadly_match("Cortinarius orellanus", {"species": ["Cortinarius orellanus"]})
     assert pe.deadly_match("Cortinarius orellana", {"species": ["Cortinarius orellanus"]})
     assert pe.deadly_match("Cortinarius violaceus", {"species": ["Cortinarius orellanus"]}) is None
+
+
+def test_the_deadly_list_is_read_from_its_pinned_file(tmp_path):
+    import hashlib
+    import pytest
+    path = tmp_path / "deadly.csv"
+    path.write_text("scientific_name\nAmanita bisporigera\nGalerina\n", encoding="utf-8")
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    d = pe.read_deadly({"file": str(path), "sha256": sha, "match": ["strict"]})
+    assert d["species"] == ["Amanita bisporigera"] and d["genera"] == ["Galerina"]
+    assert pe.deadly_match("Galerina marginata", d) == "Galerina"
+    with pytest.raises(ValueError, match="not this list"):
+        pe.read_deadly({"file": str(path), "sha256": "0" * 64})
+
+
+def test_strict_only_matching_drops_the_gender_variant():
+    strict = {"species": ["Cortinarius orellanus"], "match": ["strict"]}
+    assert pe.deadly_match("Cortinarius orellanus", strict)
+    assert pe.deadly_match("Cortinarius orellana", strict) is None

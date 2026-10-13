@@ -574,13 +574,14 @@ def errors_report(finds, top1: dict, cfg: dict, base, scored_rel) -> dict:
     from . import paper_errors as pe
     base_finds = pt.in_scope(finds)
     ranks, tax_sha = taxonomy_ranks(base, scored_rel, cfg.get("taxonomy"))
+    deadly = pe.read_deadly(cfg["deadly"]) if cfg.get("deadly") else None
     out = {"taxonomy_sha256": tax_sha, "comparators": {}}
     for cid in cfg.get("comparators") or [c for c, t in top1.items() if t]:
         t = top1.get(cid) or {}
         row = {"confused_pairs": pe.confused_pairs(base_finds, t, int(cfg.get("pairs", 20))),
                "distance": pe.mistake_distance(base_finds, t, ranks)}
-        if cfg.get("deadly"):
-            row["deadly"] = pe.deadly_taxa(base_finds, t, cfg["deadly"])
+        if deadly:
+            row["deadly"] = pe.deadly_taxa(base_finds, t, deadly)
         out["comparators"][cid] = row
     return out
 

@@ -65,15 +65,36 @@ def mistake_distance(finds, top1: dict[str, str], ranks: dict[str, dict]) -> dic
                for d in DISTANCES}}
 
 
+def read_deadly(spec: dict) -> dict:
+    """The deadly list from its pinned file ({"file", "sha256", "match"}): a CSV with a
+    `scientific_name` column; a one-word name is a genus. Refused when the file's sha256 is
+    not the one pinned. An inline {"species": [...], "genera": [...]} is taken as given."""
+    import csv
+    import hashlib
+    from pathlib import Path
+    if "file" not in spec:
+        return {"species": list(spec.get("species", [])), "genera": list(spec.get("genera", [])),
+                "match": list(spec.get("match", ["strict", "sl"]))}
+    body = Path(spec["file"]).read_bytes()
+    got = hashlib.sha256(body).hexdigest()
+    if got != spec.get("sha256"):
+        raise ValueError(f"deadly list {spec['file']}: sha256 {got[:12]}, the config pins "
+                         f"{str(spec.get('sha256'))[:12]}: not this list")
+    names = [r["scientific_name"].strip() for r in csv.DictReader(
+        body.decode("utf-8-sig").splitlines()) if (r.get("scientific_name") or "").strip()]
+    return {"species": [n for n in names if " " in n], "genera": [n for n in names if " " not in n],
+            "match": list(spec.get("match", ["strict", "sl"])), "file_sha256": got}
+
+
 def deadly_match(name: str, deadly: dict) -> str | None:
-    """The listed deadly taxon `name` falls in (a listed species, strict or s.l.; else a
-    listed genus), or None."""
+    """The listed deadly taxon `name` falls in (a listed species, strict, or s.l. when the
+    list's `match` includes it; else a listed genus), or None."""
     from . import name_equiv
     if not name:
         return None
+    loose = "sl" in deadly.get("match", ["strict", "sl"])
     for sp in deadly.get("species", []):
-        m = name_equiv.species_match(name, sp)
-        if name == sp or m.get("sl"):
+        if name == sp or (loose and name_equiv.species_match(name, sp).get("sl")):
             return sp
     g = genus_of(name)
     return g if g in set(deadly.get("genera", [])) else None
