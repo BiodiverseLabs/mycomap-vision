@@ -434,6 +434,13 @@ def _dataset_release(args):
     print(f"dataset release {rel.id} (release_hash {rel.release_hash[:12]}, "
           f"reference_hash {rel.reference_hash[:12]})"
           + (" DRAFT" if rel.manifest["draft"] else ""))
+    if getattr(args, "errata", None):
+        from pathlib import Path
+
+        from . import errata
+        e = errata.read(Path(args.errata))
+        rel.use_errata(e)
+        print(f"erratum {e.file} (sha256 {e.sha256[:12]}): {len(e.keys):,} records left out")
     return rel
 
 
@@ -473,6 +480,19 @@ def cmd_dataset(args) -> None:
         path = dhash.save_index(index, Path(args.out) if args.out else dhash.index_path(args.id))
         print(json.dumps({"release": args.id, "photos": index["photos"], "index": str(path),
                           "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "errata":
+        from . import errata
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            rows = errata.mo_twin_rows(rel)
+            included = {r[0] for r in rel.db.execute("select record_key from records "
+                                                     "where included = 1")}
+        finally:
+            rel.close()
+        path = errata.write(rows, Path(args.out))
+        print(json.dumps({"release": args.id, "reason": "mo_twin_as_inat", "records": len(rows),
+                          "included": sum(r["key"] in included for r in rows),
+                          "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "pull-dhash-index":
         from . import aws, aws_dataset
         path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
@@ -1207,12 +1227,16 @@ def loo_options(p) -> None:
                    help="instead of the list: Steve's explicit word that there are none")
 
 
-def release_options(p) -> None:
+def release_options(p, errata: bool = True) -> None:
     p.add_argument("--release", metavar="ID",
                    help="read records, labels, photos and splits from this dataset release "
                         "(docs/dataset-release.md), not the live manifest")
     p.add_argument("--allow-draft", action="store_true",
                    help="accept a draft (dry-run) release: exploratory only")
+    if errata:                # not yet on the AWS launchers: the instance would not apply it
+        p.add_argument("--errata", metavar="TSV",
+                       help="the release's erratum (errata.py): leave its records out of every "
+                            "split; its sha256 goes into the outputs")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1329,7 +1353,7 @@ def main(argv: list[str] | None = None) -> int:
                         "exactly what the Vision models leave out (sealed benchmarks), so "
                         "both train on the same records; all = every benchmark's records. "
                         "With --release the release's splits decide, and a mismatch is refused")
-    release_options(p)        # the Picek stage trains on it; shipped without private.sqlite
+    release_options(p, errata=False)  # the Picek stage trains on it; shipped without private.sqlite
     p.add_argument("--dry-run", action="store_true",
                    help="check and build everything locally (code archive, instance script, "
                         "manifest copy, label snapshot, EC2 request) and send nothing")
@@ -1422,7 +1446,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude-benchmarks", default="match", choices=["match", "all"],
                    help="match (default): leave out what the Vision models leave out "
                         "(sealed benchmarks); all: every benchmark's records")
-    release_options(p)
+    release_options(p, errata=False)      # reads the release by id (retrain.py), not here
     p.add_argument("--cache-px", type=int,
                    help="resize the training photos once to this shorter side on local disk "
                         "(e.g. 440) and train from those; off by default")
@@ -1728,6 +1752,10 @@ def main(argv: list[str] | None = None) -> int:
     q = dsub.add_parser("pull-dhash-index", help="download a release's dHash index from s3 "
                                                  "and check its sha256")
     q.add_argument("id")
+    q = dsub.add_parser("errata", help="write a release's erratum TSV for mo_twin_as_inat "
+                                       "(errata.py): MO finds held as iNat records")
+    q.add_argument("id")
+    q.add_argument("--out", required=True, help="the TSV to write (never overwritten)")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
