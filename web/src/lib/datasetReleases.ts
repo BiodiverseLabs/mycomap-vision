@@ -18,7 +18,25 @@ export interface DatasetRelease {
   codeCommit: string;
   /** The Zenodo DOI of its public (Creative Commons) variant, once deposited. */
   doi: string | null;
+  /** The erratum in use (docs/dataset-release.md, Errata): records found faulty after the cut,
+   *  left out of references, training and scoring. The release itself never changes. */
+  erratum: Erratum | null;
 }
+
+export type ErratumReason = "mo_twin_as_inat" | "nonfungal_label";
+
+export interface Erratum { id: string; records: number; byReason: Record<ErratumReason, number> }
+
+/** Each reason in plain words, for a count of records. */
+export const ERRATUM_REASON: Record<ErratumReason, string> = {
+  mo_twin_as_inat: "Mushroom Observer finds held as iNaturalist records",
+  nonfungal_label: "labels that name no fungus",
+};
+
+/** An erratum's records by reason, in words: "72 Mushroom Observer finds held as …, 103 …". */
+export const erratumReasons = (e: Erratum): string =>
+  (Object.entries(e.byReason) as [ErratumReason, number][])
+    .map(([why, n]) => `${n.toLocaleString("en-US")} ${ERRATUM_REASON[why]}`).join(", ");
 
 export const V1: DatasetRelease = {
   id: "v1",
@@ -34,9 +52,26 @@ export const V1: DatasetRelease = {
   referenceHash: "5e59b79a40987a3bb62405732062f8d74f016798184cba991d2fb785268d7457",
   codeCommit: "f38b82b344511eb0c882cde11afc43b6816e0449",
   doi: null,
+  erratum: { id: "r3", records: 175, byReason: { mo_twin_as_inat: 72, nonfungal_label: 103 } },
 };
 
 export const DATASET_RELEASES: DatasetRelease[] = [V1];
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
+                "September", "October", "November", "December"];
+
+/** A date as the Research pages write it, in UTC: "17 August 2026". */
+export function utcDay(iso: string): string {
+  const d = new Date(iso.length === 10 ? `${iso}T00:00:00Z` : iso);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+/** A moment to the minute, in UTC: "12 October 2026, 13:17 UTC". */
+export function utcMinute(iso: string): string {
+  const d = new Date(iso);
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${utcDay(iso)}, ${two(d.getUTCHours())}:${two(d.getUTCMinutes())} UTC`;
+}
 
 /** A hash as people quote it: the first 12 characters. */
 export const shortHash = (h: string) => h.slice(0, 12);

@@ -155,6 +155,14 @@ export interface HeldoutBar { key: string; backbone: string; method: string; val
 export const onRelease = (b: PublishedBenchmark) =>
   (b.reproducibility ?? "").startsWith("reproduced-on-");
 
+/** Whether no result on a dataset release is published yet, neither as a scoreboard comparison
+ *  nor as an imported benchmark (`mv benchmark-export --comparison`): the Results page then
+ *  says the release's numbers are still to come, rather than letting development history
+ *  stand in for them. */
+export function releaseResultsPending(runs: ScoreRun[], benchmarks: PublishedBenchmark[]): boolean {
+  return !comparisons(runs).some((g) => groupRelease(g) !== null) && !benchmarks.some(onRelease);
+}
+
 /** The benchmarks in the order the picker offers them: on a release first (a sealed test
  *  before its validation split), then development history; otherwise newest import first. */
 export function orderBenchmarks(list: PublishedBenchmark[]): PublishedBenchmark[] {

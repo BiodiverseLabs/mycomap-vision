@@ -7,6 +7,8 @@ import { PageHeader } from "@/components/Layout";
 import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
 import { modelName } from "@/lib/publicView";
 import { CompareApproaches } from "@/components/CompareApproaches";
+import { releaseResultsPending } from "@/lib/compareView";
+import { utcDay, V1 } from "@/lib/datasetReleases";
 
 const BUCKET_ORDER = ["all", "names iNat knows", "novel (0 refs)", "1 ref", "2 refs", "3-5 refs",
                       "6-30 refs", "31+ refs"];
@@ -14,17 +16,26 @@ const BUCKET_ORDER = ["all", "names iNat knows", "novel (0 refs)", "1 ref", "2 r
 export function ModelsPage() {
   const board = useQuery({ queryKey: ["scoreboard"], queryFn: api.scoreboard });
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
+  const benchmarks = useQuery({ queryKey: ["benchmarks"], queryFn: api.benchmarks });
   const [open, setOpen] = useState<number | null>(null);
   const groups = groupBy(board.data?.runs ?? [], (r) => r.comparison_id);
 
   return (
     <>
       <PageHeader title="Results">
-        Every comparison scores its models on exactly the same records: those that turned green
-        in the newest weeks, identified from the older ones. Top-1 means the first answer was
-        right.
+        Every comparison scores its models on exactly the same records, identified from the
+        records validated before them: on dataset release {V1.id}, its validation split (first
+        validated after {utcDay(V1.valCutoff)}); before the release, the newest weeks of the live
+        data. Top-1 means the first answer was right.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+        {board.data && benchmarks.data
+          && releaseResultsPending(board.data.runs, benchmarks.data.benchmarks) && (
+          <p className="text-sm text-[#7a5a3a] max-w-3xl" data-testid="text-release-pending">
+            Results on dataset release {V1.id} are not published here yet. Until they are, the tests
+            below are development history from before the release was frozen.
+          </p>
+        )}
         {board.data && board.data.runs.length > 0 && (
           <CompareApproaches runs={board.data.runs} served={models.data?.ready ?? []}
                              servedMethod={models.data?.default_method ?? "nearest"} />

@@ -1,12 +1,12 @@
 # MycoMap Vision public API (v1)
 
-Status, 2026-10-12: the contract mycomap.org, the MycoMap app and Vision build against.
-Steve decided its open items on 2026-10-11 (§10). Built and deployed, each behind its own
-setting (§9): identify by photos, observation sessions, quotas, taxon counts, the
-higher ranks, the queue and the fast int8 search. Not built yet: identify by iNat / MO
-observation number, `GET /models`, `GET /usage`. A developer-facing outline of the same
-API is served at `/api/docs/v1.json` and shown at vision.mycomap.org/api-docs and on
-mycomap.org/api-docs.
+Status, 2026-10-13: the contract mycomap.org, the MycoMap app and Vision build against.
+Steve decided its open items on 2026-10-11 (§10). Live on vision.mycomap.org, each behind its
+own setting (§9): identify by photos and by iNat / MO observation number, observation
+sessions, `GET /models`, `GET /usage`, taxon counts, the higher ranks, the queue, the fast
+int8 search, and quotas (enforced). A developer-facing outline of the same API is served at
+`/api/docs/v1.json` and shown at vision.mycomap.org/research/api (`/api-docs` leads there)
+and on mycomap.org/api-docs.
 
 Everything is under `https://vision.mycomap.org/api/v1/`. The website's routes
 (`/api/identify`, `/api/models`, …) stay as they are. They gain only the `timing` block.
@@ -165,9 +165,9 @@ Why sessions rather than stateless calls:
   and dropped in that call; **no photo bytes are kept**. Re-scoring after a new photo,
   a removed one or a place/date change runs `identify_vectors` over the stored vectors
   and never re-embeds. Place and date move the scores only with the
-  `nearest+mean+place` method (the place/date prior). With today's default (nearest+mean) they add
-  the per-name `place` cue and are echoed, so a `PATCH` returns a re-scored answer
-  either way.
+  `nearest+mean+place` method (the place/date prior), the served default (`MV_DEFAULT_METHOD`;
+  docs/retrain-v1.md §2). Under a default without the prior they would only add the per-name
+  `place` cue and be echoed, so a `PATCH` returns a re-scored answer either way.
 - **Lifetime.** 30 min after the last call, 2 h at most from creation (Steve). A
   session gone to expiry or a restart answers 404 `session_gone`. The app opens a new
   one and resends the photos it keeps locally anyway. Sessions belong to the credential's
@@ -283,7 +283,9 @@ model's result, not a `results` list.
   answer or refusal (tested), and `prior` carries only `applied`. Today's served model:
   `version` 2026-10-06 (the 10-08 release packaged the 10-06 export; its fine-tune learned
   from the validations through 09-07 in that export), 160,173 records, 18,688 species,
-  1,620 genera.
+  1,620 genera. The v1 model (trained 2026-10-13 on dataset release v1's `train` split) is
+  adopted and replaces it at the switch; its `version` is v1's label snapshot date,
+  2026-10-12 (docs/retrain-v1.md §1).
 - **Combined and per-photo, at every rank.** Top-level `ranks`/`likely`/`specimens` are
   the combined answer over the photos the gate kept. `per_photo[i]` is photo *i* alone,
   with `overall_top`: where the combined top name places in that photo's own ranking.
@@ -460,7 +462,8 @@ No new secret on the Vision box: it reuses `MV_ORG_VISION_KEY` and the bridge pu
 - .org adds `vision` to `SERVICE_INTROSPECTION_SECRET_ENV`, mapped to `VISION_API_KEY`
   (the key Vision already presents). Tokens are `vision_<base64url>`, hashed, created
   with a purpose, approved, disabled and revoked exactly like `atlas_` tokens, on member
-  and admin pages beside the Atlas ones.
+  and admin pages beside the Atlas ones: members request theirs at mycomap.org/vision-keys,
+  and admins approve, issue and set limits under Admin → API Keys (`/admin/api-keys`).
 
 ### 6.2 Introspection for `vision`
 
@@ -597,7 +600,11 @@ stay in front of the monthly numbers.
 
 ## 8. Reading reference depth and confidence
 
-Species top-1 by the true species' reference records (fine-tuned BioCLIP 2,
+Pre-v1 numbers (exploratory, measured before dataset release v1 was frozen). The v1 model's
+numbers on v1's `val` split are published on the site's Results page
+(vision.mycomap.org/research/results) through `mv benchmark-export --comparison`, not here.
+
+Species top-1 by the true species' reference records (the model served then, pre-v1,
 nearest+mean, newest 28 days, 1,152 test records, comparison 20261008-012435-4ef7b0):
 
 | reference records | 0 | 1–4 | 5–19 | 20–99 | 100+ |
@@ -650,6 +657,7 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_BY_OBSERVATION=1` | identify by iNat or MO observation number (§3.2); needs `MV_API_V1=1` |
 | `MV_QUOTAS=off\|count\|enforce` | §6: `count` counts and reports use without refusing, for a trial |
 | `MV_TAXON_COUNTS=1` | `GET /api/v1/taxon-counts` (§7) |
+| `MV_DEFAULT_METHOD` | the method an identification uses (default `nearest+mean`; the box serves `nearest+mean+place`, which answers as `nearest+mean` without a place or date) |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |
 | `MV_PHOTOS_PER_MINUTE`, `MV_QUEUE_MAX_WAIT`, `MV_SESSIONS_MAX_MB`, `MV_QUOTA_DEFAULT_MONTHLY`, `MV_USAGE_REPORT_SECONDS` | limits, defaults in .env.example |

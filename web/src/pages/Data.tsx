@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/Layout";
 import { api, num, pct } from "@/lib/api";
 import { modelName } from "@/lib/publicView";
-import { shortHash, V1, type DatasetRelease } from "@/lib/datasetReleases";
+import { erratumReasons, shortHash, V1, type DatasetRelease } from "@/lib/datasetReleases";
 
 const LICENSE_LABEL: Record<string, string> = {
   open: "Open",
@@ -11,10 +11,9 @@ const LICENSE_LABEL: Record<string, string> = {
   arr: "All rights reserved",
 };
 
-/** Names that are temporary codes (species known from DNA, not yet described). The server
- *  adds the count in the site-copy work (feat/site-standards-copy); until then it is absent. */
-const provisional = (s: object): number | null =>
-  (s as { names_provisional?: number }).names_provisional ?? null;
+/** Names that are temporary codes (species known from DNA, not yet described); absent from
+ *  a server older than the count. */
+const provisional = (s: { names_provisional?: number }): number | null => s.names_provisional ?? null;
 
 export function DataPage() {
   const q = useQuery({ queryKey: ["stats"], queryFn: api.stats, refetchInterval: 30_000 });
@@ -23,7 +22,7 @@ export function DataPage() {
     <>
       <PageHeader title="The reference data">
         Only records marked green (DNA-validated) in a MycoMap project are used, with every photo
-        of each record from iNaturalist.
+        of each record from iNaturalist or Mushroom Observer.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         <ReleaseCard r={V1} />
@@ -150,14 +149,22 @@ function ReleaseCard({ r }: { r: DatasetRelease }) {
           America, a guest organism, no usable name). Results from before this release are kept as
           development history.
         </p>
+        {r.erratum && (
+          <p className="text-xs text-muted-foreground" data-testid={`text-erratum-${r.id}`}>
+            Erratum {r.erratum.id}: {num(r.erratum.records)} records found faulty after the cut are left
+            out of the references and of scoring ({erratumReasons(r.erratum)}). The release itself is
+            unchanged.
+          </p>
+        )}
       </CardContent>
     </Card>
   );
 }
 
 /** How anyone gets exactly the images a model saw (Steve, 2026-10-09): originals are kept, each
- *  model input is derived by a published recipe and checked by its hash. CC photos only. The
- *  derive service comes with dataset release v1 (the release builder); until then this says so. */
+ *  model input is derived by a published recipe and checked by its hash. CC photos only. Release
+ *  v1 lists the recipe and hashes (`mv dataset derive`); the public address comes with its
+ *  Creative Commons files, so until then this says so. */
 function GetTheImages() {
   return (
     <Card data-testid="card-get-images">
@@ -178,7 +185,8 @@ function GetTheImages() {
           owners reserve all rights are used with their permission and are not redistributed.
         </p>
         <p className="text-muted-foreground">
-          Available with dataset release v1. The address and an example will appear here then.
+          Dataset release v1 lists the recipe and checksums. The download address and an example
+          will appear here with its public (Creative Commons) files.
         </p>
       </CardContent>
     </Card>

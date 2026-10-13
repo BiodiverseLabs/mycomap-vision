@@ -85,3 +85,16 @@ test("nobody else is sent to sign in by the site itself", () => {
   assert.equal(mustSignIn(me("all", null), "/auth/signin"), false);
   assert.equal(mustSignIn(me("all", null), "/auth/signed-out"), false);
 });
+
+test("the sealed test says when its records start and publishes nothing before it is opened", () => {
+  const t = BENCHMARKS.find((b) => b.slug === "sealed-test")!;
+  assert.equal(t.status, "planned");
+  assert.equal(t.results, undefined);
+  assert.match(t.records, /after dataset release v1's label snapshot \(12 October 2026, 13:17 UTC\)/);
+  assert.match(t.records, /at least 3,000 records/);
+  assert.match(t.records, /no numbers are published before it is opened/);
+});
+
+test("the v1 benchmark's split starts at the release's own cutoff", () => {
+  assert.match(BENCHMARKS[0].records, /eight weeks after 17 August 2026/);
+});

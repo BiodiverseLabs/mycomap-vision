@@ -104,3 +104,34 @@ def test_the_outline_uses_only_the_blocks_both_pages_render():
                     assert len(f) == 4
             if b["type"] == "table":
                 assert all(len(r) == len(b["columns"]) for r in b["rows"])
+
+
+def answer_table(doc: dict) -> set[str]:
+    """The fields "The answer" section describes (its first column, without backticks)."""
+    sec = next(s for s in doc["sections"] if s["id"] == "answer")
+    table = next(b for b in sec["blocks"] if b["type"] == "table")
+    return {row[0].strip("`") for row in table["rows"]}
+
+
+# Top-level answer fields the outline leaves to the example rather than the table.
+SELF_EVIDENT = {"request_id", "photos", "reference", "confidence_note"}
+
+
+def test_every_field_of_a_real_answer_is_in_the_example_and_described(conn, tmp_path):
+    from test_api_v1_identify import app_token, bearer, identify, v1_app
+    client = v1_app(conn, tmp_path)
+    body = identify(client, bearer(app_token()), latitude="40.1", longitude="-83.0",
+                    observed_on="2026-10-11").json()
+    doc = apidocs.outline({"identify": True})
+    described = answer_table(doc) | SELF_EVIDENT
+    assert set(body) - set(apidocs.ANSWER_EXAMPLE) - SELF_EVIDENT == set(), "missing from the example"
+    assert set(body) - described == set(), "missing from The answer table"
+    for name in ("prior", "photo_only_top", "place"):
+        assert name in described
+
+
+def test_the_outline_sends_members_to_the_vision_keys_page():
+    doc = apidocs.outline({})
+    access = next(s for s in doc["sections"] if s["id"] == "access")
+    text = " ".join(b.get("text", "") for b in access["blocks"])
+    assert "(https://mycomap.org/vision-keys)" in text

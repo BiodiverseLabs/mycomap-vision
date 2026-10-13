@@ -3,6 +3,7 @@
 
 import type { Me } from "./api";
 import { showsMembersPages } from "./publicView";
+import { V1, utcDay, utcMinute } from "./datasetReleases";
 
 export interface NavItem { href: string; label: string; blurb?: string }
 
@@ -85,14 +86,14 @@ export const BENCHMARKS: Benchmark[] = [
   { slug: "newest-weeks", name: "Newest weeks: the dataset release v1 validation split", status: "running",
     summary: "Identify the newest validated records from the records validated before them, on a frozen dataset release.",
     whyItMatters: "It is how a new find meets the identifier: the answer can only come from records verified earlier. Every setting is chosen here, never on the sealed test, and anyone can rebuild the numbers from the release.",
-    records: "Dataset release v1's validation split: the records first validated in the eight weeks after 17 August 2026, identified against the records validated before. Earlier runs on the newest four weeks of the live data are development history.",
+    records: `Dataset release v1's validation split: the records first validated in the eight weeks after ${utcDay(V1.valCutoff)}, identified against the records validated before. Earlier runs on the newest four weeks of the live data are development history.`,
     scoring: "Top 1, 3, 5 and 10 at species, genus and family, on all photos of a find and on the first photo alone; species by how many reference records the true species has.",
     results: { href: "/research/results", label: "Results: dataset release v1" },
     elsewhere: "Chronological shift in FungiTastic." },
   { slug: "sealed-test", name: "Sealed test (v1-test)", status: "planned",
     summary: "Fresh DNA-verified records, validated after release v1 was cut, scored once after every choice is frozen.",
     whyItMatters: "The paper's numbers. Nothing is tuned on these records and no model output exists for them until the analysis plan is frozen, so they measure the identifier as a new find would meet it.",
-    records: "North American records first validated after dataset release v1 was cut, kept apart from v1 by record and by photo, and never trained on.",
+    records: `North American records first validated after dataset release v1's label snapshot (${utcMinute(V1.labelSnapshot)}), kept apart from v1 by record and by photo, and never trained on. The set closes once it holds at least 3,000 records (expected around 26 October 2026) and is frozen around 30 October; no numbers are published before it is opened.`,
     scoring: "The standard summary with 95% intervals clustered by observer; iNaturalist's computer vision on the same photos and the same public place; tests declared before the records are opened.",
     elsewhere: "The sealed test sets of FungiCLEF." },
   { slug: "held-out", name: "Held-out records (development history)", status: "history",
@@ -117,7 +118,7 @@ export const BENCHMARKS: Benchmark[] = [
     elsewhere: "Few-shot learning in FungiTastic and FungiCLEF 2025." },
   { slug: "unknown-species", name: "Unknown species", status: "planned",
     summary: "How the identifier behaves when the species is not in its references at all.",
-    whyItMatters: "About one find in eight belongs to a species with no DNA-verified record yet. The identifier should say so rather than name a look-alike with confidence.",
+    whyItMatters: "In dataset release v1's validation split, 666 finds belong to a species with no record in the training split. The identifier should say so rather than name a look-alike with confidence.",
     records: "Finds whose true species has no reference record, against those whose species does.",
     scoring: "How well the top score separates known from unknown species (AUROC, and true negatives at 95% true positives), and how often the identifier holds back.",
     elsewhere: "Open-set classification in FungiTastic and FungiCLEF." },

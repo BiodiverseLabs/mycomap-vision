@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import { PageHeader } from "@/components/Layout";
 import { api } from "@/lib/api";
 import { BENCHMARKS, researchNav, STATUS_LABEL, type Benchmark } from "@/lib/research";
+import { erratumReasons, shortHash, V1 } from "@/lib/datasetReleases";
 
 // The Research section (Steve, 2026-10-09): everything detailed, one level below the tool.
 
@@ -95,6 +96,7 @@ export function BenchmarkPage({ slug }: { slug: string }) {
 
 const METRICS: [string, string][] = [
   ["Top 1, 3, 5 and 10", "The right name is the first answer, or among the first 3, 5 or 10. Reported at species, genus and family, for all photos of a find together, and for the first photo alone."],
+  ["Photos only, and with place and date", "Reported apart: the photos alone, and the photos with the find's public place and date, so what place and date add is visible."],
   ["Species strict", "The answer names exactly the DNA-verified species, written either way (a temporary code counts like a published name; spellings of the same code are one name)."],
   ["Species sensu lato", "Also right when the genus was split recently (Cortinarius s.l., Inocybe s.l.) or only the gender ending differs. Beside strict, never instead of it."],
   ["Species complex (beta)", "Also right within the same species complex. Shown for context while the rule is tested."],
@@ -119,6 +121,14 @@ export function ProtocolsPage() {
           review, not the name of a linked sequence. Records whose DNA name is an organism living
           inside the photographed fungus are left out, because the photos show the host.
         </p>
+        {V1.erratum && (
+          <p className="mt-2" data-testid="text-protocols-erratum">
+            A record found faulty after a dataset release was cut is listed in its erratum and left
+            out of the references and of scoring; the release itself never changes. Release{" "}
+            {V1.id}'s erratum {V1.erratum.id} lists {V1.erratum.records.toLocaleString("en-US")}{" "}
+            ({erratumReasons(V1.erratum)}).
+          </p>
+        )}
         <h2 className={h2}>What is reported, every time</h2>
         <div className="overflow-x-auto rounded-lg border border-[#A87146]/20 my-3">
           <table className="w-full text-sm">
@@ -164,10 +174,11 @@ export function ForResearchersPage() {
         </p>
         <h2 className={h2}>Test your model on our records</h2>
         <p>
-          We are considering releasing the benchmark record lists (iNaturalist observation ids,
-          DNA-verified names and splits), so other models can be scored on the same records with
-          the same protocols. Photos would come from iNaturalist under their own licences. If this
-          would help your work, tell us at{" "}
+          Every result now comes from dataset release {V1.id}, frozen with release hash{" "}
+          <span className="font-mono">{shortHash(V1.releaseHash)}…</span> (see{" "}
+          <Link href="/research/data" className="text-myco-green underline">Reference data</Link>). Its
+          public variant (Creative Commons photos only) is planned on Zenodo with a DOI, so other
+          models can be scored on the same records with the same protocols. If this would help your work, tell us at{" "}
           <a href="mailto:info@mycomap.org" className="text-myco-green underline">info@mycomap.org</a>.
         </p>
         <h2 className={h2}>Where the references come from</h2>

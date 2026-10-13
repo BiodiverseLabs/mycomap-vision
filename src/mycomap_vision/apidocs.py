@@ -36,14 +36,20 @@ ANSWER_EXAMPLE = {
     "gate": {"verdict": "fungus", "message": None, "left_out": [],
              "photos": [{"verdict": "fungus", "p_fungus": 0.98, "message": None}]},
     "answer": {"rank": "genus", "name": "Amanita", "confidence": 0.91},
+    "confidence_withheld": False,
+    "species_url": "https://mycomap.org/species/Amanita%20muscaria",
     "ranks": {
         "species": [{"name": "Amanita muscaria", "score": 0.81, "confidence": 0.62,
                      "confident": False, "reference_records": 412,
                      "place": {"nearest_record_km": 20, "in_season": True,
                                "far_from_known": False, "note": None}}],
         "genus": [{"name": "Amanita", "confidence": 0.91, "confident": True,
-                   "reference_records": 3120}],
+                   "reference_records": 3120,
+                   "place": {"nearest_record_km": 10, "in_season": True,
+                             "far_from_known": False, "note": None}}],
         "family": ["…"], "order": ["…"], "class": ["…"], "phylum": ["…"]},
+    "prior": {"applied": True},
+    "photo_only_top": {},
     "likely": {"species": {"coverage": 0.9, "checked_coverage": 0.6, "names": ["…"]}},
     "specimens": [{"name": "Amanita muscaria", "similarity": 0.83, "matched_query_photo": 1,
                    "photo_url": "https://…/medium.jpg", "photo_owner": "…",
@@ -76,8 +82,8 @@ def outline(enabled: dict[str, bool]) -> dict:
 
     photo_fields = [
         ["photos", "file, 1–10", "yes", "Photos of ONE find, several angles. JPEG preferred; PNG and WebP work."],
-        ["latitude, longitude", "number", "no", "Decimal degrees, sent together. Used for scoring only, never stored."],
-        ["observed_on", "YYYY-MM-DD", "no", "The day it was found. Read from the photo's EXIF date when not sent."],
+        ["latitude, longitude", "number", "no", "Decimal degrees, sent together. Used to weigh the names and for each name's place cue, never stored."],
+        ["observed_on", "YYYY-MM-DD", "no", "The day it was found, used like the place. Read from the photo's EXIF date when not sent."],
         ["top_k", "1–10", "no", "Candidates per rank (default 5)."],
         ["client_ref", "string ≤ 64", "no", "Your id for the find. The same find identified again within a day (or after its session) isn't counted twice."],
     ]
@@ -93,7 +99,9 @@ def outline(enabled: dict[str, bool]) -> dict:
                 {"type": "p", "text": "Send photos of a find; get back the most likely species, "
                  "genus and higher groups, the DNA-verified specimens that look most alike, "
                  "and how confident Vision is. Every answer also says, photo by photo, what "
-                 "each photo suggests on its own."},
+                 "each photo suggests on its own. Send the find's place and date too: Vision "
+                 "uses them to weigh the names, and says how near and how in season each "
+                 "name's DNA-verified records are."},
                 {"type": "p", "text": f"Base URL: `{BASE_URL}`. Everything is JSON over HTTPS. "
                  "The API is opening in stages: endpoints marked **available** answer now; "
                  "**planned** ones are agreed and coming."},
@@ -105,9 +113,10 @@ def outline(enabled: dict[str, bool]) -> dict:
                 ]},
             ]},
             {"id": "access", "title": "Getting access", "blocks": [
-                {"type": "p", "text": "Use a **Vision token**: create one on mycomap.org "
-                 "([API keys](https://mycomap.org/api-docs)) with a short note on what it is "
-                 "for; it works once approved. Send it on every call:"},
+                {"type": "p", "text": "Use a **Vision token**: request one on mycomap.org "
+                 "([Vision API keys](https://mycomap.org/vision-keys)) with a short note on what "
+                 "it is for; it works once a mycomap.org admin approves it. Send it on every "
+                 "call:"},
                 {"type": "code", "lang": "http", "text": "Authorization: Bearer vision_…"},
                 {"type": "p", "text": "`X-API-Key: vision_…` works too. Keep tokens secret; "
                  "revoke one on mycomap.org at any time (Vision stops accepting it within a "
@@ -240,11 +249,15 @@ def outline(enabled: dict[str, bool]) -> dict:
                     ["`confidence`", "How likely the name is to be right, from 0 to 1, calibrated weekly on newly verified records. `null` when it can't be stated (see `gate`)."],
                     ["`confident`", "`true` for a rank's top name when its confidence is at least 0.70 and the photos show a fungus. In testing with photos prepared as the app sends them, a confident species answer was right about 92–93% of the time; expect less with field photos."],
                     ["`reference_records`", "How many DNA-verified records Vision has of that name. Under 5, Vision is rarely right at species."],
-                    ["`place`", "When you send a place or date: distance to the nearest verified record of that name (rounded to 10 km), whether the date is in its known season, and a note when the find would be far from known records."],
+                    ["`place`", "On species and genus names, when you send a place or date: distance to the nearest verified record of that name (rounded to 10 km), whether the date is in its known season, and a `note` when the find would be far from known records or out of season."],
                     ["`confused_with`", "On a species name that people often get wrong: what DNA said instead on mycomap.org's DNA-checked iNaturalist finds called that name (up to 3 names with their number of finds), how many finds were called it and how many DNA said were something else, and a one-line `note` to show under the name. Absent otherwise. Rebuilt nightly from [mycomap.org/misid](https://mycomap.org/misid)."],
+                    ["`prior`", "`{applied}`: `true` when the place or date you sent moved the scores."],
+                    ["`photo_only_top`", "The ranks where place and date changed the top name, with the name the photos alone would have put first (`{}` when they changed none)."],
                     ["`likely`", "A short list per rank that held the right name about the stated share of the time in testing."],
                     ["`specimens`", "The DNA-verified records that look most alike, with a photo when its licence or its photographer allows, and a link to the record."],
                     ["`per_photo`", "What each photo says on its own, so you can see which photo pulled the answer which way."],
+                    ["`species_url`", "The top species' page on mycomap.org, or `null`."],
+                    ["`confidence_withheld`", "`true` when no photo clearly shows a fungus, so every `confidence` is `null` and nothing is `confident`."],
                     ["`gate`", "Whether each photo shows a fungus (`fungus`, `unsure`, `not_fungus`). A photo that isn't one is left out; when none clearly is, names are given without a confidence."],
                     ["`hints`", "Short suggestions, such as which photo would help most."],
                     ["`model`", "`{name, version, data, calibrated_on}`. `version` names the DNA-verified data the model learned from: the date it was exported from mycomap.org, then .2, .3 for later builds on it. Store it with a suggestion to know which model made it. `data` gives that snapshot's date and size (records, species, genera)."],
