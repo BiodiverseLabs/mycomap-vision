@@ -22,7 +22,8 @@ def test_aggregated_answers_are_split_by_rank_with_both_scores():
                         result(100, "Russulaceae", "family", 99, 99),
                         result(999, "Fungi", "kingdom", 100, 100)]}
     got = parse_aggregated(body)
-    assert got["species"][1] == {"name": "Russula emetica", "vision": 60.0, "combined": 80.0}
+    assert got["species"][1] == {"name": "Russula emetica", "vision": 60.0, "combined": 80.0,
+                                 "combined_raw": 0.0}      # no raw combined_score sent here
     assert list(got["genus"]) == [10] and list(got["family"]) == [100]
 
 

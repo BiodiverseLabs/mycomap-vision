@@ -61,6 +61,8 @@ def parse_aggregated(body: dict) -> dict[str, dict[int, dict]]:
             "name": taxon["name"],
             "vision": float(r.get("vision_score") or 0),
             "combined": float(r.get("normalized_combined_score", r.get("combined_score")) or 0),
+            # iNat's raw combined score (vision x place), not rescaled per photo
+            "combined_raw": float(r.get("combined_score") or 0),
         }
     return out
 
@@ -162,6 +164,9 @@ class InatClient:
         self.session.headers["User-Agent"] = config.USER_AGENT
         self.pace = MinInterval(interval, sleep=sleep)
         self.calls = 0
+        self.statuses: Counter = Counter()    # answers by HTTP status
+        self.seconds: list[float] = []         # each answered request's duration
+        self.last_headers: dict = {}
 
     def _cached(self, key: str, fetch: Callable[[], dict]) -> dict:
         path = self.cache_dir / f"{hashlib.sha1(key.encode()).hexdigest()}.json"
@@ -176,8 +181,12 @@ class InatClient:
         for attempt in range(5):
             self.pace.wait()
             self.calls += 1
+            t0 = time.monotonic()
             try:
                 r = self.session.request(method, url, timeout=60, **kw)
+                self.seconds.append(time.monotonic() - t0)
+                self.statuses[r.status_code] += 1
+                self.last_headers = dict(getattr(r, "headers", {}) or {})
             except requests.RequestException:
                 # Dropped connections and TLS resets happen; back off and try again.
                 self.pace.pause(10 * (attempt + 1))
@@ -193,20 +202,26 @@ class InatClient:
             raise RuntimeError(f"iNat answered {r.status_code}: {r.text[:200]}")
         raise RuntimeError("iNat kept failing; stopped. Rerun to resume (answers are cached).")
 
-    def score_image(self, photo_id: int, image, lat: float | None,
-                    lng: float | None) -> dict:
+    def score_image(self, photo_id: int | str, image, lat: float | None,
+                    lng: float | None, observed_on: str | None = None) -> dict:
         """iNat's vision answer for one photo. `image` is the photo's bytes, or a function
-        giving them: then it is read only when the answer is not cached already."""
+        giving them: then it is read only when the answer is not cached already.
+        `observed_on` (YYYY-MM-DD) is sent when given, and is then part of the cache key
+        (answers cached without a date keep their old keys)."""
         loc = f"{lat:.4f},{lng:.4f}" if lat is not None and lng is not None else "none"
         data = {"aggregated": "true"}
         if loc != "none":
             data.update(lat=str(lat), lng=str(lng))
+        if observed_on:
+            data["observed_on"] = observed_on
+            loc = f"{loc}:{observed_on}"
 
         def fetch():
             body = image() if callable(image) else image
-            return self._request("POST", f"{API}/computervision/score_image", data=data,
-                                 files={"image": (f"{photo_id}.jpg", body, "image/jpeg")},
-                                 headers={"Authorization": self.jwt})
+            answer = self._request("POST", f"{API}/computervision/score_image", data=data,
+                                   files={"image": (f"{photo_id}.jpg", body, "image/jpeg")},
+                                   headers={"Authorization": self.jwt})
+            return {**answer, "_scored_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         return self._cached(f"score:{photo_id}:{loc}", fetch)
 
     def get(self, path: str, params: dict | None = None) -> dict:
