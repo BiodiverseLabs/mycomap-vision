@@ -127,10 +127,15 @@ def paired(finds: list[Find], a: dict, b: dict, cell: str, alternative: str, rep
 def select(finds: list[Find], spec: dict, outcomes: dict[str, dict]) -> list[Find]:
     """The finds a hypothesis is tested on: its scope and denominator, then its filters:
     `name_kind` (e.g. formal), `has` (comparators that must have a non-None outcome at the
-    cell, e.g. experts who named a species), and `attr` {name: value}."""
+    cell, e.g. experts who named a species), `attr` {name: value}, and `depth_band` (the
+    true species' reference-record band, one of BANDS; "band" is the iut place band)."""
     out = in_scope(finds, spec.get("scope", "primary"), spec.get("denominator", "all"))
     if spec.get("name_kind"):
         out = [f for f in out if f.name_kind == spec["name_kind"]]
+    if spec.get("depth_band"):
+        if spec["depth_band"] not in BANDS:
+            raise ValueError(f"depth_band {spec['depth_band']!r}: one of {BANDS}")
+        out = [f for f in out if band(f.depth) == spec["depth_band"]]
     for cid in spec.get("has", []):
         cell = spec["cell"]
         out = [f for f in out if (outcomes[cid].get(f.key) or {}).get(cell) is not None]

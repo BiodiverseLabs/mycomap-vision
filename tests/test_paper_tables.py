@@ -180,6 +180,14 @@ def test_families_are_holm_adjusted_and_a_missing_input_is_reported_not_tested()
     assert res["H3"]["dropped_covariates"] == ["provisional_name", "photos"]
 
 
+def test_a_test_can_be_limited_to_one_reference_band_and_a_bad_band_is_refused():
+    finds = [find(str(i), depth=d) for i, d in enumerate([0, 2, 3, 10, 50, 150])]
+    assert [f.depth for f in pt.select(finds, {"depth_band": "1-4"}, {})] == [2, 3]
+    assert [f.depth for f in pt.select(finds, {"depth_band": "100+"}, {})] == [150]
+    with pytest.raises(ValueError, match="depth_band"):
+        pt.select(finds, {"depth_band": "1-5"}, {})
+
+
 def test_the_place_band_is_one_intersection_union_test():
     finds, out = world(400, seed=5)
     for i, f in enumerate(finds):
