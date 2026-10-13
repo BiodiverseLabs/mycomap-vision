@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .dataset_release import MANIFEST, PRIVATE_DB, ReleaseError, check_id, sha256_file
+from .dataset_release import MANIFEST, PRIVATE_DB, SUMS, ReleaseError, check_id, sha256_file
 
 PREFIX = "research-releases/"
 
@@ -68,6 +68,11 @@ def upload_release(rid: str, root: Path, s3, bucket: str, log=print) -> dict:
                                "never edited (cut the next one)")
         s3.upload_file(str(local), bucket, key, ExtraArgs={"Metadata": {"sha256": f["sha256"]}})
         sent += 1
+    # SHA256SUMS is not in MANIFEST.json's file list (it lists them); MANIFEST pins its hash.
+    if sha256_file(folder / SUMS) != manifest["sums_sha256"]:
+        raise ReleaseError(f"{rid}: local {SUMS} does not match {MANIFEST}")
+    s3.upload_file(str(folder / SUMS), bucket, prefix + SUMS,
+                   ExtraArgs={"Metadata": {"sha256": manifest["sums_sha256"]}})
     s3.upload_file(str(folder / MANIFEST), bucket, prefix + MANIFEST)
     log(f"release {rid}: {sent} files uploaded, {skipped} already there -> s3://{bucket}/{prefix}")
     return {"id": rid, "uploaded": sent, "already_there": skipped,
@@ -105,6 +110,9 @@ def fetch_release(rid: str, dest_root: Path, s3, bucket: str, *, include_private
         s3.download_file(bucket, prefix + f["path"], str(dest))
         if dest.stat().st_size != f["bytes"] or sha256_file(dest) != f["sha256"]:
             raise ReleaseError(f"{rid}: downloaded {f['path']} does not match {MANIFEST}")
+    s3.download_file(bucket, prefix + SUMS, str(folder / SUMS))
+    if sha256_file(folder / SUMS) != manifest["sums_sha256"]:
+        raise ReleaseError(f"{rid}: downloaded {SUMS} does not match {MANIFEST}")
     if not include_private and (folder / PRIVATE_DB).exists():
         raise ReleaseError(f"{rid}: a trainer copy must not hold {PRIVATE_DB}")
     log(f"release {rid}: {'full release' if include_private else 'trainer copy'} fetched "
