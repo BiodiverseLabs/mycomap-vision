@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -88,6 +90,12 @@ def check_config(doc: dict) -> None:
             raise ValueError(f"comparator {c.get('id')}: kind is one of {KINDS}")
         if c["kind"] == "vision" and not (c.get("backbone") and c.get("method")):
             raise ValueError(f"comparator {c['id']}: a vision comparator names backbone and method")
+        if c.get("place_setting"):
+            if "place" not in str(c.get("method", "")):
+                raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "
+                                 f"not {c.get('method')!r}")
+            from . import placeprior
+            placeprior.place_setting(c["place_setting"])   # refuses an unknown name
         if c["kind"] in ("published", "inat", "expert") and not c.get("file"):
             raise ValueError(f"comparator {c['id']}: needs its input file")
     gate = doc.get("gate")
@@ -303,9 +311,32 @@ def near_duplicates(scored_photos: dict[str, list[dict]], ref_shas: set[str],
 
 # --- Vision's answers -----------------------------------------------------------------------------
 
+@contextmanager
+def place_setting_used(name: str | None):
+    """The named place setting (placeprior.PLACE_SETTINGS) in force while a place method is
+    built: MV_PLACE_SETTING set to it, then restored. An unknown name is refused; None
+    leaves the environment's own (recorded by the caller)."""
+    if not name:
+        yield
+        return
+    from . import placeprior
+    placeprior.place_setting(name)                    # refuses an unknown name
+    env = placeprior.SETTING_ENV
+    before = os.environ.get(env)
+    os.environ[env] = name
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop(env, None)
+        else:
+            os.environ[env] = before
+
+
 def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list, method: str,
                    backbone: str, top_k: int = 10, calibration: dict | None = None,
-                   truths: dict[str, dict] | None = None) -> dict[str, dict]:
+                   truths: dict[str, dict] | None = None, place_setting: str | None = None,
+                   info: dict | None = None) -> dict[str, dict]:
     """Each scored record's ranked species and genus names from `method` fitted on the
     reference records (evaluate.fit_method; the records' photo_rows index `vectors`).
 
@@ -313,9 +344,18 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
     each answer also carries, per calibrated rank, `conf` (the top name's probability),
     `p_true` (the true name's, from `truths` {key: {rank: name}}; 0 when the reference
     lacks it), `sumsq` (for the multiclass Brier score) and `set` (the likely set at the
-    floor, likely.likely_set; None without a floor)."""
+    floor, likely.likely_set; None without a floor).
+
+    `place_setting` names the place setting a place method is built with; `info` gets the
+    setting the fitted method actually uses."""
     from . import evaluate, likely
-    index, model = evaluate.fit_method(vectors, ref_records, method, backbone)
+    with place_setting_used(place_setting):
+        index, model = evaluate.fit_method(vectors, ref_records, method, backbone)
+    used = getattr(getattr(model, "prior", None), "setting_name", None)
+    if place_setting and used != place_setting:
+        raise ValueError(f"{method} was built with place setting {used!r}, not {place_setting!r}")
+    if info is not None and used is not None:
+        info["place_setting"] = used
     uses_context = getattr(model, "needs_context", False)
     out = {}
     for rec in scored_records:
@@ -677,8 +717,10 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                     "photos": "each", "photo_answers": len(ans_each)}
                 top1[comp["id"]] = {}
                 continue
+            place_info: dict = {}
             kw = {"top_k": int(config.get("top_k", 10)), "calibration": comp.get("calibration"),
-                  "truths": truths}
+                  "truths": truths, "place_setting": comp.get("place_setting"),
+                  "info": place_info}
             answers = (vision_answers_leave_out(vecs, ref, scored, comp["method"], b,
                                                 comp["leave_out"], **kw)
                        if comp.get("leave_out") else
@@ -699,6 +741,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                       place=bool(comp.get("place")),
                                       reference_records=len(ref),
                                       reference=comp.get("reference", "every included photo"),
+                                      **({"place_setting": place_info["place_setting"]}
+                                         if place_info.get("place_setting") else {}),
                                       finds_without_vectors=len(finds) - len(answers),
                                       predictions_sha256=sha256_file(path))
     gate_report = None

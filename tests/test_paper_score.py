@@ -517,3 +517,35 @@ def test_the_report_names_the_code_that_started_the_run_not_a_later_commit(world
     monkeypatch.setattr(cfgmod, "code_version", lambda: next(seen))
     rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))
     assert rep["code_commit"] == "a" * 40
+
+
+def test_a_place_setting_is_built_into_the_place_method_recorded_and_an_unknown_one_refused(
+        world, tmp_path, monkeypatch):
+    """place_setting: the served place scoring, exactly. The method is built with it (the
+    fitted prior's own setting is checked), the report records it, the environment is
+    left as it was, and a name that is not a place setting is refused before any read."""
+    from mycomap_vision import evaluate, placeprior
+    monkeypatch.delenv(placeprior.SETTING_ENV, raising=False)
+    built = []
+    real_fit = evaluate.fit_method
+
+    def fit(vectors, ref, method, backbone=None):
+        index, model = real_fit(vectors, ref, "nearest+mean", backbone)
+        model.prior = placeprior.PlaceBoost(store=None)       # reads the setting in force
+        built.append(model.prior.setting_name)
+        return index, model
+    monkeypatch.setattr(evaluate, "fit_method", fit)
+    name = "penalty-500-2026-10-13"
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"] = [{"id": "vision-place", "kind": "vision", "backbone": "m1",
+                           "method": "nearest+mean+place", "place_setting": name}]
+    cfg["hypotheses"] = {}
+    rep = run(world, tmp_path, "val", cfg)
+    assert built == [name]
+    assert rep["inputs"]["vision-place"]["place_setting"] == name
+    assert placeprior.SETTING_ENV not in __import__("os").environ
+    for bad in ({"method": "nearest+mean+place", "place_setting": "penalty-501"},
+                {"method": "nearest+mean", "place_setting": name}):
+        cfg["comparators"][0].update(bad)
+        with pytest.raises(ValueError, match="place setting|place_setting|not a place"):
+            paper_score.check_config(cfg)
