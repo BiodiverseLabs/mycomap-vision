@@ -805,13 +805,15 @@ def cmd_fungus_gate(conn, args) -> None:
             if missing:
                 raise SystemExit("tune --release needs " + ", ".join(
                     "--" + m.replace("_", "-") for m in missing))
+            if not 0.0 <= args.max_lost_share < 1.0:
+                raise SystemExit("--max-lost-share is a share of DEV records, 0 <= x < 1")
             from .embed import load_embeddings
             base = args.on_served or "bioclip-2"
             report = tune.tune_release(rel, Path(args.dev), Path(args.ood),
                                        Path(args.ood_manifest), Path(args.negatives),
                                        Path(args.out), load_embeddings(conn, base),
                                        Path(args.text_from) if args.text_from else None,
-                                       args.on_served)
+                                       args.on_served, max_lost_share=args.max_lost_share)
             print(json.dumps(report["chosen"], indent=2))
             print(f"gate and report.json in {args.out}")
             return
@@ -1918,6 +1920,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--on-served", default=None, metavar="BACKBONE",
                    help="tune: the lighter gate, a probe on this served backbone's own vectors "
                         "(no second set of weights at serve time)")
+    p.add_argument("--max-lost-share", type=float, default=0.0,
+                   help="tune --release: the share of deciding DEV records allowed to lose their "
+                        "answer (the declared rule; 0 = none, paper E10 v1: 0.001)")
     p.add_argument("--text-from", help="tune: a folder with a saved gate whose text vectors to "
                                        "reuse (skips loading BioCLIP 2's text tower)")
     p.add_argument("--not-fungus", type=float, default=0.0,
