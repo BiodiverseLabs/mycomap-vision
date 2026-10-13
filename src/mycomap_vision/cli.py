@@ -797,6 +797,24 @@ def cmd_fungus_gate(conn, args) -> None:
             n = tune.embed_list(args.backbone, Path(args.list), Path(args.out))
             print(f"{n} photos embedded into {args.out}")
             return
+        rel = _dataset_release(args)
+        if rel is not None:
+            # Paper E10: re-tuned on a release (val decides), Open Images negatives only.
+            missing = [o for o in ("dev", "ood", "ood_manifest", "negatives")
+                       if not getattr(args, o)]
+            if missing:
+                raise SystemExit("tune --release needs " + ", ".join(
+                    "--" + m.replace("_", "-") for m in missing))
+            from .embed import load_embeddings
+            base = args.on_served or "bioclip-2"
+            report = tune.tune_release(rel, Path(args.dev), Path(args.ood),
+                                       Path(args.ood_manifest), Path(args.negatives),
+                                       Path(args.out), load_embeddings(conn, base),
+                                       Path(args.text_from) if args.text_from else None,
+                                       args.on_served)
+            print(json.dumps(report["chosen"], indent=2))
+            print(f"gate and report.json in {args.out}")
+            return
         missing = [o for o in ("dev", "ood", "ood_manifest", "exclude") if not getattr(args, o)]
         if missing:
             raise SystemExit("tune needs " + ", ".join("--" + m.replace("_", "-") for m in missing))
@@ -1913,6 +1931,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="which scores make p(fungus); probe and both need --probe")
     p.add_argument("--tuned-on", default="", help="where the thresholds came from (provenance)")
     p.add_argument("--note", default="")
+    release_options(p)            # with --errata: its records are never probe positives
 
     p = sub.add_parser("serve", help="run the API for the frontend")
     p.add_argument("--host", default="127.0.0.1")
