@@ -113,6 +113,7 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
     first_scored = last_scored = None
     import time
     start, calls0 = time.monotonic(), client.calls
+    probe: dict = {}
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         for n, key in enumerate(record_keys, 1):
             rec = recs.get(key)
@@ -130,7 +131,16 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
                     sent.append({"photo_key": pk, "sha256": hashlib.sha256(b).hexdigest(),
                                  "width": w, "height": h})
                     return b
+                before = client.calls
                 raw = client.score_image(pk, body, lat, lng, day)
+                if client.calls > before and "response_keys" not in probe:
+                    probe["response_keys"] = sorted(k for k in raw if k != "results")
+                    probe["result_keys"] = sorted({k for r in raw.get("results") or [] for k in r})
+                    hdr = getattr(client, "last_headers", {}) or {}
+                    probe["header_names"] = sorted(hdr)
+                    probe["version_like"] = {k: v for k, v in list(raw.items()) + list(hdr.items())
+                                             if any(w in k.lower() for w in ("version", "model"))
+                                             and k != "results"}
                 answers.append(parse_aggregated(raw))
                 stamp = raw.get("_scored_at")
                 if stamp:
@@ -167,10 +177,21 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
             "place_rule": PLACE_RULE, "px": MAX_SIDE,
             "first_scored_at": first_scored, "last_scored_at": last_scored,
             "requests_this_run": client.calls - calls0,
+            "statuses_this_run": {str(k): v for k, v in (getattr(client, "statuses", {}) or {}).items()},
+            "request_seconds": _quantiles(getattr(client, "seconds", []) or []),
+            "response_probe": probe,
             "wall_hours_this_run": round((time.monotonic() - start) / 3600, 3),
             "written_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     (d / "run.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return meta
+
+
+def _quantiles(xs: list[float]) -> dict:
+    if not xs:
+        return {"n": 0}
+    xs = sorted(xs)
+    q = lambda p: round(xs[min(len(xs) - 1, int(p * len(xs)))], 3)
+    return {"n": len(xs), "median": q(0.5), "p90": q(0.9), "max": round(xs[-1], 3)}
 
 
 def summarise(lines: list[dict]) -> dict:

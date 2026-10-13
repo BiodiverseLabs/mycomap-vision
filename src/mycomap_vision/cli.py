@@ -1191,7 +1191,7 @@ def cmd_paper_inat_cv(args) -> None:
     recs = {r["record_key"]: dict(r) for r in rel.db.execute("select * from records")}
     truths = {k: E.truth_taxa(recs[k], by_name, taxa) for k in ids}
     client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "paper-comparisons" /
-                                "inat-cv-cache")
+                                "inat-cv-cache", interval=args.interval)
     if rel.manifest.get("test_for") and not args.inat_model:
         raise SystemExit("record the iNat CV model version first: --inat-model '<version, date>'")
     model = {"version": args.inat_model, "noted_at": E.utc(datetime.now(timezone.utc).isoformat())}         if args.inat_model else None
@@ -1601,6 +1601,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--split", help="sample: only this split (val for the pilot)")
     p.add_argument("--redo", action="store_true")
     p.add_argument("--limit", type=int, help="run: only the first N finds (tests)")
+    p.add_argument("--interval", type=float, default=7.5, help="run: seconds between iNat "
+                   "requests (default 7.5: 8 a minute)")
     p.add_argument("--inat-model", help="run: iNat's CV model version and release date, as "
                    "iNat states it (required on a test release)")
 

@@ -162,6 +162,9 @@ class InatClient:
         self.session.headers["User-Agent"] = config.USER_AGENT
         self.pace = MinInterval(interval, sleep=sleep)
         self.calls = 0
+        self.statuses: Counter = Counter()    # answers by HTTP status
+        self.seconds: list[float] = []         # each answered request's duration
+        self.last_headers: dict = {}
 
     def _cached(self, key: str, fetch: Callable[[], dict]) -> dict:
         path = self.cache_dir / f"{hashlib.sha1(key.encode()).hexdigest()}.json"
@@ -176,8 +179,12 @@ class InatClient:
         for attempt in range(5):
             self.pace.wait()
             self.calls += 1
+            t0 = time.monotonic()
             try:
                 r = self.session.request(method, url, timeout=60, **kw)
+                self.seconds.append(time.monotonic() - t0)
+                self.statuses[r.status_code] += 1
+                self.last_headers = dict(getattr(r, "headers", {}) or {})
             except requests.RequestException:
                 # Dropped connections and TLS resets happen; back off and try again.
                 self.pace.pause(10 * (attempt + 1))
