@@ -1,8 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode,
          type RefObject, type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
-import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, ImagePlus, Lightbulb,
-         Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
+import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, Dna, ImagePlus,
+         Lightbulb, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,7 +39,8 @@ import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicName
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
 import {
-  answerFor, boxHints, coverageSummary, photoOnlyNote, placeCue, publicNote, usesPlace, type Answer, type Named,
+  alsoPossible, answerFor, boxHints, breakdownLabel, breakdownOpen, confusedNote, coverageSummary, listedNames,
+  photoOnlyNote, placeLines, placeWarns, publicNote, usesPlace, type Answer, type Named,
 } from "@/lib/answer";
 import { shouldScrollTo, showPinnedBar, waitingSteps, type Step } from "@/lib/phoneFlow";
 import {
@@ -796,6 +797,7 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
   // null: all photos together (the main answer). A number: that photo on its own.
   const [view, setView] = useState<number | null>(null);
   const [details, setDetails] = useState(false);
+  const [everyRank, setEveryRank] = useState(false);
   const photo = view == null ? null : (r.per_photo.find((p) => p.photo === view) ?? null);
   const ranks = photo ? photo.ranks : r.ranks;
   const specimens = photo ? photo.specimens : r.specimens;
@@ -807,78 +809,81 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
   const noRanks = gate.notFungus || (photo != null && leftOut(photo));
   const found = gate.withheld ? "look-alikes" : "specimens";
   const coverage = coverageSummary(r.likely);
+  // Every rank's list is detail once there is an answer; without one (or for one photo) it is the answer.
+  // The open/closed state is kept while switching photos.
+  const showRanks = breakdownOpen(everyRank, answer != null, noRanks);
   return (
     <Card className="overflow-hidden scroll-mt-20" data-result-card>
-      <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3 px-4 sm:px-6">
-        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-          <CardTitle className="text-base text-[#4a3728]">
-            {publicModelName(r.model.backbone)}{" "}
-            <span className="font-normal text-muted-foreground">
-              · {publicMethodLabel(r.model.method)}
-            </span>
-          </CardTitle>
-          <button type="button" className="text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-myco-green"
-                  aria-expanded={details} onClick={() => setDetails(!details)} data-testid="button-model-details">
-            {details ? "Hide details" : "Details"}
-          </button>
-        </div>
-        {details && (
-          <div className="mt-2 space-y-1 text-xs text-muted-foreground" data-testid="text-model-details">
-            <p>{publicModelName(r.model.backbone)}: {capitalize(publicMethodLabel(r.model.method))}.</p>
-            <p>
-              {num(r.reference.records)} DNA-verified records · {num(r.reference.species)} names ·{" "}
-              {num(r.reference.photos)} photos
-            </p>
-            <p>{publicNote(r.confidence_note)}</p>
-          </div>
-        )}
-      </CardHeader>
-      <CardContent className="pt-5 space-y-6 px-4 sm:px-6">
+      <CardContent className="p-0">
         {/* The gate's notice goes first, above everything else in the card. */}
-        {banner && <GateNotice banner={banner} />}
-        {answer && (
-          <div className="space-y-3">
-            <AnswerBox a={answer} r={{ ...r, hints }} photos={photos} />
-            <SafetyNote />
-          </div>
-        )}
-        {r.per_photo.length > 1 && (
-          <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} />
-        )}
-        {photo && <PhotoVerdict p={photo} />}
-        {!noRanks && (
-          <div className="space-y-5">
-            {RANKS.map((rank) => (
-              photo == null && r.likely?.[rank]?.names.length
-                ? <LikelyBlock key={rank} rank={rank} set={r.likely[rank]!} candidates={ranks[rank]} />
-                : <RankBlock key={rank} rank={rank} candidates={ranks[rank]} withheld={gate.withheld} />
-            ))}
-            <p className="text-xs text-muted-foreground" data-testid="text-coverage">
-              {photo
-                ? "One photo on its own is a rougher guide than all of them together."
-                : gate.withheld
-                  ? "No chance is stated: it is calibrated on photos of fungi only."
-                  : coverage
-                    ? `${coverage} ${LIKELY_COPY.noReference}`
-                    : publicNote(r.confidence_note)}
-            </p>
-          </div>
-        )}
-        {!photo && !answer && hints.length > 0 && <Hints hints={hints} />}
-        {specimens.length > 0 && (
-          <div>
-            <h3 className="text-sm font-semibold text-[#4a3728] mb-2">
-              {photo
-                ? `Closest DNA-verified ${found} to photo ${photo.photo + 1}`
-                : `Closest DNA-verified ${found}`}
-            </h3>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {specimens.map((s) => (
-                <SpecimenCard key={s.observation_id} s={s} urls={urls} showMatched={!photo} />
+        {banner && <div className="px-4 pt-4 sm:px-6"><GateNotice banner={banner} /></div>}
+        {answer && <AnswerHero a={answer} r={{ ...r, hints }} photos={photos} />}
+        <div className="space-y-6 px-4 py-5 sm:px-6">
+          {answer && <SafetyNote />}
+          {r.per_photo.length > 1 && (
+            <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} />
+          )}
+          {photo && <PhotoVerdict p={photo} />}
+          <div className="space-y-4">
+          {!noRanks && answer && (
+            <button type="button" onClick={() => setEveryRank(!everyRank)} aria-expanded={everyRank}
+                    className="flex w-full items-center justify-between rounded-md border border-[#A87146]/20 px-3 py-2 text-sm text-[#5c4a3a] hover:bg-[#faf9f7]"
+                    data-testid="button-every-rank">
+              <span>{breakdownLabel(r.per_photo.length, photo?.photo ?? null)}</span>
+              <ChevronRight className={`h-4 w-4 transition-transform ${everyRank ? "rotate-90" : ""}`} aria-hidden />
+            </button>
+          )}
+          {showRanks && (
+            <div className="space-y-5">
+              {RANKS.map((rank) => (
+                photo == null && r.likely?.[rank]?.names.length
+                  ? <LikelyBlock key={rank} rank={rank} set={r.likely[rank]!} candidates={ranks[rank]} />
+                  : <RankBlock key={rank} rank={rank} candidates={ranks[rank]} withheld={gate.withheld} />
               ))}
+              <p className="text-xs text-muted-foreground" data-testid="text-coverage">
+                {photo
+                  ? "One photo on its own is a rougher guide than all of them together."
+                  : gate.withheld
+                    ? "No chance is stated: it is calibrated on photos of fungi only."
+                    : coverage
+                      ? `${coverage} ${LIKELY_COPY.noReference}`
+                      : publicNote(r.confidence_note)}
+              </p>
             </div>
+          )}
           </div>
-        )}
+          {!photo && !answer && hints.length > 0 && <Hints hints={hints} />}
+          {specimens.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-[#4a3728] mb-2">
+                {photo
+                  ? `Closest DNA-verified ${found} to photo ${photo.photo + 1}`
+                  : `Closest DNA-verified ${found}`}
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {specimens.map((s) => (
+                  <SpecimenCard key={s.observation_id} s={s} urls={urls} showMatched={!photo} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-t border-[#A87146]/10 bg-[#faf9f7] px-4 py-2.5 text-xs text-muted-foreground sm:px-6">
+          <span>{publicModelName(r.model.backbone)} · {publicMethodLabel(r.model.method)}</span>
+          <button type="button" className="underline decoration-dotted underline-offset-2 hover:text-myco-green"
+                  aria-expanded={details} onClick={() => setDetails(!details)} data-testid="button-model-details">
+            {details ? "Hide details" : "About this answer"}
+          </button>
+          {details && (
+            <div className="w-full space-y-1 pt-1" data-testid="text-model-details">
+              <p>
+                {num(r.reference.records)} DNA-verified records · {num(r.reference.species)} names ·{" "}
+                {num(r.reference.photos)} photos
+              </p>
+              <p>{publicNote(r.confidence_note)}</p>
+            </div>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -917,86 +922,126 @@ function Hints({ hints }: { hints: string[] }) {
   );
 }
 
-/** A name with the place lane's far-find cue under it, when the response carries one. */
-function Cues({ n, extra }: { n: Named; extra?: string | null }) {
-  const lines = [...placeCue(n.place), ...(extra ? [extra] : [])];
-  if (!lines.length) return null;
+/** What we know about one name, one line each, strongest first: what DNA says it is often
+ *  confused with, then the place cue. `size` "xs": a name still in play (smaller, warnings only). */
+function Facts({ n, extra, size = "sm" }: { n: Named; extra?: string | null; size?: "sm" | "xs" }) {
+  const confused = n.rank === "species" ? confusedNote(n) : null;
+  const far = placeWarns(n.place);
+  const place = placeLines(n.place, size === "xs");
+  if (!confused && !place.length && !extra) return null;
+  const text = size === "sm" ? "text-sm" : "text-xs";
   return (
-    <span className="flex flex-wrap gap-x-3 text-xs text-muted-foreground" data-testid={`text-cue-${n.rank}`}>
-      {lines.map((l) => (
-        <span key={l} className="inline-flex items-center gap-1"><MapPin className="h-3 w-3" aria-hidden />{l}</span>
+    <ul className={`mt-2 space-y-1 ${text}`} data-testid={`facts-${n.rank}`}>
+      {confused && (
+        <li className="flex items-start gap-2 text-[#8a4b0f]" data-testid="text-confused-with">
+          <Dna className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+          <span>
+            {confused}{" "}
+            <a href="https://mycomap.org/misid" target="_blank" rel="noreferrer"
+               className="whitespace-nowrap underline decoration-dotted underline-offset-2">how we know</a>
+          </span>
+        </li>
+      )}
+      {place.map((l) => (
+        <li key={l} className={`flex items-start gap-2 ${far ? "text-[#8a4b0f]" : "text-[#5c4a3a]"}`}>
+          <MapPin className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />{l}
+        </li>
       ))}
-    </span>
+      {extra && (
+        <li className="flex items-start gap-2 text-[#5c4a3a]">
+          <Camera className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />{extra}
+        </li>
+      )}
+    </ul>
   );
 }
 
-/** First in each result: the finest settled rank, what's above it, what's still in play. */
-function AnswerBox({ a, r, photos }: { a: Answer; r: IdentifyResult; photos: number }) {
+/** The top of each result, and the first thing the eye should land on: the finest settled
+ *  rank's name, its chance, the ranks above it, what we know about it, and what is still in play. */
+function AnswerHero({ a, r, photos }: { a: Answer; r: IdentifyResult; photos: number }) {
   const italic = (rank: Rank) => (rank !== "family" ? "sci" : "");
   const h = a.headline;
   return (
-    <div className="rounded-lg border border-[#A87146]/25 bg-[#faf9f7] p-4 scroll-mt-20 text-[#5c4a3a]"
-         data-answer-box data-testid="box-answer">
-      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
+    <section className="border-b border-[#4f7a43]/15 bg-[#f1f6ec] px-4 py-5 sm:px-6 scroll-mt-20 text-[#4a3728]"
+             data-answer-box data-testid="box-answer">
+      <p className="text-xs font-semibold uppercase tracking-wider text-[#4f7a43]">
         {a.lookAlike
           ? "Closest DNA-verified look-alike"
           : `Best answer from your ${photos === 1 ? "photo" : `${photos} photos`}`}
       </p>
       {h ? (
         <>
-          <div className="mt-0.5 flex items-baseline justify-between gap-3">
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <NameLink rank={h.rank} name={h.name}
-                      className={`text-2xl font-semibold text-[#4a3728] leading-tight ${italic(h.rank)}`} />
+                      className={`text-3xl font-semibold leading-tight text-[#2f2419] ${italic(h.rank)}`} />
             {h.confidence != null && (
-              <span className="text-2xl font-semibold text-myco-green tabular-nums" data-testid="text-answer-chance">
+              <span className="rounded-full bg-[#4f7a43] px-3 py-1 text-lg font-semibold text-white tabular-nums"
+                    data-testid="text-answer-chance">
                 {pct(h.confidence)}
               </span>
             )}
           </div>
-          <p className="text-sm">
-            {RANK_LABEL[h.rank]}.
+          <p className="mt-1 text-sm text-[#5c4a3a]">
+            {RANK_LABEL[h.rank]}
             {a.above.map((n) => (
               <span key={n.rank}>
-                {" "}{RANK_LABEL[n.rank]} <span className={italic(n.rank)}>{n.name}</span>{" "}
-                {n.confidence != null && pct(n.confidence)}.
+                {" · "}{RANK_LABEL[n.rank]} <span className={italic(n.rank)}>{n.name}</span>
+                {n.confidence != null && ` ${pct(n.confidence)}`}
               </span>
             ))}
-            {a.lookAlike && " No chance is stated for these photos."}
+            {a.lookAlike && " · no chance is stated for these photos"}
           </p>
-          <Cues n={h} extra={photoOnlyNote(r, h)} />
+          <Facts n={h} extra={photoOnlyNote(r, h)} />
         </>
       ) : (
-        <p className="mt-0.5 text-lg font-semibold text-[#4a3728]">No firm answer at any rank yet</p>
+        <p className="mt-1 text-2xl font-semibold text-[#2f2419]">No firm answer at any rank yet</p>
       )}
       {a.inPlay && (
-        <div className={`text-sm ${h ? "mt-3 border-t border-[#A87146]/20 pt-3" : "mt-1"}`} data-testid="text-in-play">
-          <span className="font-semibold text-[#4a3728]">
-            {h ? `${RANK_LABEL[a.inPlay.rank]} not settled:` : `${RANK_LABEL[a.inPlay.rank]} most likely:`}
-          </span>{" "}
-          {a.inPlay.names.map((n, i) => (
-            <span key={n.name}>
-              {i > 0 && " or "}
-              <span className={italic(n.rank)}>{n.name}</span>
-              {n.confidence != null && ` ${pct(n.confidence)}`}
-              {placeCue(n.place).length > 0 && (
-                <span className="text-xs text-muted-foreground"> ({placeCue(n.place).join("; ").toLowerCase()})</span>
-              )}
-            </span>
-          ))}
-          {a.inPlay.more > 0 && `, and ${a.inPlay.more} more below`}
+        <div className={h ? "mt-4 border-t border-[#4f7a43]/15 pt-4" : "mt-3"} data-testid="text-in-play">
+          <p className="text-sm font-semibold text-[#4a3728]">
+            {h ? `${RANK_LABEL[a.inPlay.rank]} not settled. Most likely:` : `${RANK_LABEL[a.inPlay.rank]} most likely:`}
+          </p>
+          <ul className="mt-2 space-y-3">
+            {a.inPlay.names.map((n) => (
+              <li key={n.name}>
+                <div className="flex items-baseline justify-between gap-3">
+                  <NameLink rank={n.rank} name={n.name}
+                            className={`text-lg font-medium text-[#2f2419] ${italic(n.rank)}`} />
+                  {n.confidence != null && (
+                    <span className="text-base font-semibold text-[#4f7a43] tabular-nums">{pct(n.confidence)}</span>
+                  )}
+                </div>
+                <Facts n={n} size="xs" />
+              </li>
+            ))}
+          </ul>
+          {a.inPlay.more > 0 && (
+            <p className="mt-2 text-xs text-muted-foreground">and {a.inPlay.more} more in the full breakdown</p>
+          )}
         </div>
       )}
       {r.hints.length > 0 && (
-        <div className="mt-3 space-y-1.5" data-testid="list-hints">
+        <div className="mt-4 space-y-1.5 rounded-md bg-white/70 p-3 text-sm text-[#5c4a3a]" data-testid="list-hints">
           {boxHints(r.hints, a.inPlay?.rank === "species").map((t) => (
-            <p key={t} className="flex gap-2 text-sm">
+            <p key={t} className="flex gap-2">
               <Lightbulb className="h-4 w-4 mt-0.5 shrink-0 text-myco-tan" aria-hidden />
               {t}
             </p>
           ))}
         </div>
       )}
-    </div>
+    </section>
+  );
+}
+
+/** "Often confused with …" under a species name in the lists. */
+function ConfusedLine({ c }: { c: { confused_with?: Candidate["confused_with"] } }) {
+  const note = confusedNote(c);
+  if (!note) return null;
+  return (
+    <p className="mt-0.5 flex items-start gap-1 text-xs text-[#8a4b0f]" data-testid="text-confused-with">
+      <Dna className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />{note}
+    </p>
   );
 }
 
@@ -1121,16 +1166,20 @@ function PhotoVerdict({ p }: { p: PhotoResult }) {
 
 /** A rank's likely list first: every name worth considering with its calibrated chance,
  *  and how often such a list held the right name in testing. */
-function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; candidates: Candidate[] }) {
+/** One rank in the full breakdown: the names worth considering, each with its bar (the top one
+ *  strongest), then the rest in one line. `fitted`: the list is the model's likely set (its
+ *  coverage was measured); otherwise the names at 5% or more. Names under 1% are left out. */
+function LikelyBlock({ rank, set, candidates, fitted = true }: {
+  rank: Rank; set: LikelySet; candidates: Candidate[]; fitted?: boolean;
+}) {
   const italic = rank !== "family";
-  const listed = new Set(set.names.map((n) => n.name));
-  const others = candidates.filter((c) => !listed.has(c.name)).slice(0, 3);
+  const others = alsoPossible(candidates, set.names);
   const plural = set.names.length > 1;
   return (
     <div data-testid={`likely-${rank}`}>
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-xs uppercase tracking-wider text-muted-foreground">
-          {RANK_LABEL[rank]}{plural ? ": likely names" : ""}
+          {RANK_LABEL[rank]}{plural ? (fitted ? ": likely names" : ": most likely") : ""}
         </span>
         <span className="text-xs text-muted-foreground">calibrated chance</span>
       </div>
@@ -1145,6 +1194,7 @@ function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; ca
               </span>
             </div>
             <Bar value={n.confidence} strong={i === 0} />
+            {rank === "species" && <ConfusedLine c={n} />}
           </div>
         ))}
       </div>
@@ -1156,7 +1206,7 @@ function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; ca
           {others.map((c, i) => (
             <span key={c.name}>
               {i > 0 && ", "}
-              <span className={italic ? "sci" : ""}>{c.name}</span> {pct(c.confidence)}
+              <span className={italic ? "sci" : ""}>{c.name}</span> {pct(c.confidence ?? 0)}
             </span>
           ))}
         </p>
@@ -1165,6 +1215,9 @@ function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; ca
   );
 }
 
+/** A rank without a fitted likely set (one photo on its own, or a model not yet calibrated):
+ *  the same look as LikelyBlock, listing the top name and any others at 5% or more. With the
+ *  chance withheld (the gate isn't sure it's a fungus), names only. */
 function RankBlock({ rank, candidates, withheld }: {
   rank: Rank;
   candidates: Candidate[];
@@ -1174,6 +1227,10 @@ function RankBlock({ rank, candidates, withheld }: {
   const [top, ...rest] = candidates;
   if (!top) return null;
   const italic = rank !== "family";
+  if (!withheld && top.confidence != null) {
+    return <LikelyBlock rank={rank} candidates={candidates} fitted={false}
+                        set={{ coverage: 0, checked_coverage: null, capped: false, names: listedNames(candidates) }} />;
+  }
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
@@ -1184,26 +1241,15 @@ function RankBlock({ rank, candidates, withheld }: {
       </div>
       <div className="flex items-baseline justify-between gap-3">
         <NameLink rank={rank} name={top.name} className={`text-lg font-semibold text-[#4a3728] ${italic ? "sci" : ""}`} />
-        {withheld || top.confidence == null ? (
-          <span className="text-xs text-muted-foreground">closest look-alike</span>
-        ) : (
-          <span className="text-lg font-semibold text-myco-green tabular-nums">{pct(top.confidence)}</span>
-        )}
+        <span className="text-xs text-muted-foreground">closest look-alike</span>
       </div>
-      {!withheld && top.confidence != null && <Bar value={top.confidence} strong />}
+      {rank === "species" && <ConfusedLine c={top} />}
       <div className="mt-2 space-y-1">
         {rest.slice(0, 3).map((c) => (
-          withheld || c.confidence == null ? (
-            <div key={c.name} className="text-sm">
-              <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
-            </div>
-          ) : (
-            <div key={c.name} className="grid grid-cols-[1fr_72px_40px] items-center gap-2 text-sm">
-              <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
-              <Bar value={c.confidence} />
-              <span className="text-right text-xs text-muted-foreground tabular-nums">{pct(c.confidence)}</span>
-            </div>
-          )
+          <div key={c.name} className="text-sm">
+            <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
+            {rank === "species" && <ConfusedLine c={c} />}
+          </div>
         ))}
       </div>
     </div>

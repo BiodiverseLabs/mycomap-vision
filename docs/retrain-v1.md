@@ -76,7 +76,7 @@ must print PASS before the model is proposed for serving. Thresholds are fixed i
 | depth order | the 100+ band above the 1-4 band |
 | classes | no species is the top answer for > 2% of `val`; ≥ 30% of `val`'s true species appear as a top answer |
 | calibration | no rank's temperature at the edge of the searched grid (ranks with ≥ 50 records) |
-| cpu | with no GPU (`CUDA_VISIBLE_DEVICES=-1`, 2 threads, `--cpu-photos 20`): ≤ 3.0 s per photo to embed, ≤ 5.0 s per search of the whole index, every photo answered |
+| cpu | with no GPU (`CUDA_VISIBLE_DEVICES=-1`, 2 threads, `--cpu-photos 20`) and the box's search (`MV_SEARCH_INT8=1`: the int8 search is packed as the server does, and the detail says "int8 search"): ≤ 3.0 s per photo to embed, ≤ 5.0 s per search of the whole index, every photo answered. On Windows the CPU-only path can crash in numpy; run it in the Linux image with the box's packages (`docker run --cpus=2 --memory=3500m …`, data mounted read-only, a private manifest copy) |
 
 Then, by hand, before the coordinator deploys:
 - **Box memory** fits (section 5); the coordinator's call with Steve.
@@ -165,7 +165,8 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
    comparison.
 4. Section 2's comparison and summary; section 3's sanity gate. Every v1 command takes
    `--errata data/research-release-extras/v1/v1-errata.tsv` (dataset-release.md §4,
-   Errata: 41 MO finds held as iNat records, left out as references); record the file's
+   Errata; r3 leaves out 42 included MO finds held as iNat records and 96 included records whose
+   label names no fungus); record the file's
    sha256 and the count of masked ft-head classes (`errata.masked_head_labels`) in the
    registry entry.
 5. Write the registry entry `experiments/<date>-v1-finetune.md` in the private research

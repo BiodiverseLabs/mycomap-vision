@@ -66,6 +66,16 @@ def notes(block: dict | None, now: datetime | None = None,
             out.append(("warn", f"{backbone}: the nights added {size.get('nightly_photos', 0):,} "
                                 f"photos, {size.get('share', 0):.0%} of the release's: time for "
                                 "a new release"))
+    cw = block.get("confused_with")
+    if isinstance(cw, dict):
+        failed = int(cw.get("failures_in_a_row") or 0)
+        held = (f"table built {cw.get('built_at')}, {cw.get('prompting') or 0:,} names prompt"
+                if cw.get("cached") else "no table yet")
+        if failed >= 2:     # one missed night is made good by the next
+            out.append(("warn", f"often confused with: the last {failed} reads of mycomap.org "
+                                f"failed; {held}"))
+        else:
+            out.append(("ok", f"often confused with: {held}"))
     return out
 
 

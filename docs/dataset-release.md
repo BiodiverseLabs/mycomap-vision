@@ -187,11 +187,16 @@ carries `errata` (file, sha256, records, by reason), so every report and registr
 names it. A key the release lacks refuses the erratum. The AWS launchers do not take it yet
 (the instance would not apply it).
 
+v1's erratum in use is **r3**: 175 rows, 72 `mo_twin_as_inat` and 103 `nonfungal_label`. The
+included records it drops: 42 MO twins, plus 91 `train` and 5 `val` records with a non-fungal
+label.
+
 - `mo_twin_as_inat` (v1, found 2026-10-13): mycomap.org holds 71 iNaturalist rows that share
   their number and a validation project with an 'MO Observations' row (OMDL1/OMDL2, made by
   the .com sync); their name and photos are the unrelated iNat observation with that number
-  (a duck, a panda...). v1 holds all 71, 41 included in `train` (62 photos), each beside its
-  correct `mo:` twin. `mv dataset errata v1 --out <file>` writes the erratum from the rule
+  (a duck, a panda...). With one more, 509733, a twin known only on the legacy .com site, the
+  erratum lists 72 (r3); 42 of them are included in v1, each beside its correct `mo:` twin.
+  `mv dataset errata v1 --out <file>` writes the erratum from the rule
   (`sources.mo_twins`), sorted, so the same release gives the same bytes. The fine-tune
   trained on those photos; a class only they taught can no longer be answered, since
   methods answer with the reference's labels (`errata.masked_head_labels` counts them).
@@ -204,9 +209,9 @@ names it. A key the release lacks refuses the erratum. The AWS launchers do not 
   rank so that slime moulds and a fungal subgenus written as a genus (Telamonia) stay. In
   v1: 96 included beyond the MO twins (91 train, 5 val; a record that is also a twin keeps
   `mo_twin_as_inat`). The 5 val records leave the scoring too: their answer keys are not
-  fungi. The second erratum file (`--reasons` both, the default) is written from the v1
-  release and the taxonomy cache, whose sha256 the command prints; the first file stays as
-  it was. From now on loading records leaves them out (evaluate.load_records: references,
+  fungi. r3 lists 103 such labels. The erratum file (`--reasons` both, the default) is
+  written from the v1 release and the taxonomy cache, whose sha256 the command prints;
+  earlier revisions stay as they were. From now on loading records leaves them out (evaluate.load_records: references,
   training, the served index), the builder lists them as `nonfungal_label` (v1-test, v2),
   and `mv fetch-taxonomy` (and the nightly's taxonomy step) asks iNat the kingdoms of
   every taxon named like a genus that has no fungal genus (`outside_fungi`); a night that

@@ -17,6 +17,18 @@ export interface PlaceCue {
   note?: string | null;
 }
 
+/** Often confused with (docs/api.md §4): on a species name people often get wrong, what DNA
+ *  said instead on mycomap.org's DNA-checked iNat finds called that name. Absent otherwise. */
+export interface ConfusedWith {
+  /** At most 3, most finds first. */
+  names: { name: string; finds: number }[];
+  /** DNA-checked finds called this name, and how many DNA said were another species. */
+  called: number;
+  wrong: number;
+  /** The line to show under the name, worded by the server. */
+  note: string;
+}
+
 export interface Candidate {
   name: string;
   score: number;
@@ -24,6 +36,7 @@ export interface Candidate {
   confidence: number | null;
   reference_records: number;
   place?: PlaceCue;
+  confused_with?: ConfusedWith;
 }
 
 export interface Specimen {
@@ -99,7 +112,8 @@ export interface LikelySet {
   coverage: number;
   /** The same, measured on records the list was not fitted on. */
   checked_coverage: number | null;
-  names: { name: string; confidence: number; reference_records: number; place?: PlaceCue }[];
+  names: { name: string; confidence: number; reference_records: number; place?: PlaceCue;
+           confused_with?: ConfusedWith }[];
   /** True when more names qualified than are listed. */
   capped: boolean;
 }

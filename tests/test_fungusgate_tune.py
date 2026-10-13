@@ -115,3 +115,23 @@ def test_only_val_records_outside_the_former_held_out_decide():
         id, db = "r", Db()
     recs, decide = tune.release_dev_records(Rel(), ["11", "12", "13"])
     assert recs == ["a", "a", "b"] and decide == {"a"}
+
+
+def test_the_cli_passes_the_declared_lost_share_to_the_release_tune(monkeypatch, tmp_path):
+    from mycomap_vision import cli, embed
+    seen = {}
+
+    def fake_tune(*args, max_lost_share=0.0, **kw):
+        seen["max_lost_share"] = max_lost_share
+        return {"chosen": {}}
+    monkeypatch.setattr(tune, "tune_release", fake_tune)
+    monkeypatch.setattr(cli, "_dataset_release", lambda args: object())
+    monkeypatch.setattr(embed, "load_embeddings", lambda conn, name: (None, None))
+    files = ["--dev", "d.npz", "--ood", "o.npz", "--ood-manifest", "m.csv",
+             "--negatives", "n.npz", "--out", str(tmp_path)]
+    cli.main(["fungus-gate", "tune", "--release", "v1", *files, "--max-lost-share", "0.001"])
+    assert seen["max_lost_share"] == 0.001
+    cli.main(["fungus-gate", "tune", "--release", "v1", *files])
+    assert seen["max_lost_share"] == 0.0                  # the default: none may lose it
+    with pytest.raises(SystemExit, match="max-lost-share"):
+        cli.main(["fungus-gate", "tune", "--release", "v1", *files, "--max-lost-share", "1.5"])

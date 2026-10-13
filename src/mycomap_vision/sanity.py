@@ -231,12 +231,15 @@ def cpu_check(conn: sqlite3.Connection, backbone: str, release, images: list,
               method: str = DEFAULT_METHOD, threads: int = CPU_THREADS) -> dict:
     """Load the model with no GPU, as the box does, embed `images` (PIL images) and search
     the whole reference index for each one: seconds per photo and per search. Refused when
-    a GPU is visible (set CUDA_VISIBLE_DEVICES=-1 before starting)."""
+    a GPU is visible (set CUDA_VISIBLE_DEVICES=-1 before starting). With MV_SEARCH_INT8=1
+    (the box's setting since v1) the index packs the fast int8 search as the server does
+    (api.py, fastsearch.py) before the searches are timed, so the timing is the box's;
+    without it the plain search is timed. The detail says which."""
     import time
 
     import torch
 
-    from . import models
+    from . import config, fastsearch, models
     from .identify import Identifier
     if torch.cuda.is_available():
         raise RuntimeError("a GPU is visible: start with CUDA_VISIBLE_DEVICES=-1 so the "
@@ -244,6 +247,14 @@ def cpu_check(conn: sqlite3.Connection, backbone: str, release, images: list,
     torch.set_num_threads(threads)
     model = models.load_backbone(backbone)
     ident = Identifier(conn, backbone, method, photo_info=False, release=release, train=False)
+    search = "plain search"
+    if config.setting("MV_SEARCH_INT8") == "1":
+        ref = getattr(getattr(getattr(ident, "nearest", None), "scorer", None), "ref", None)
+        if not hasattr(ref, "use_int8"):
+            raise RuntimeError("MV_SEARCH_INT8=1 but the reference vectors aren't memory-"
+                               "mapped here: the box's int8 search can't be timed")
+        ref.use_int8(fastsearch.REFINE)
+        search = "int8 search"
     t0 = time.monotonic()
     vecs, _ = ident.embed(model, images)
     embed_s = (time.monotonic() - t0) / max(len(images), 1)
@@ -256,7 +267,7 @@ def cpu_check(conn: sqlite3.Connection, backbone: str, release, images: list,
     ok = embed_s <= MAX_EMBED_SECONDS and search_s <= MAX_SEARCH_SECONDS and \
         answered == len(vecs)
     return check("cpu", ok, f"{embed_s:.2f} s/photo to embed (max {MAX_EMBED_SECONDS}), "
-                            f"{search_s:.2f} s per search (max {MAX_SEARCH_SECONDS}), "
+                            f"{search_s:.2f} s per search (max {MAX_SEARCH_SECONDS}, {search}), "
                             f"{answered}/{len(vecs)} answered, {threads} threads")
 
 

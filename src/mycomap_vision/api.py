@@ -33,7 +33,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apidocs, apiv1, byobservation, config, evaluate, fastsearch, fungusgate, geocode, inat, manifest,
+from . import (apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, fungusgate, geocode, inat, manifest,
                modelcard, models, names, nightly, onnxtower, permissions,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue)
@@ -281,7 +281,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                dataset_root: Path | None = None, dataset_store: str | None = None,
                dataset_store_reader=None, dataset_allow_draft: bool = False,
                fungus_gate: "fungusgate.FungusGate | None | bool" = True,
-               place_search: "geocode.PlaceSearch | None" = None) -> FastAPI:
+               place_search: "geocode.PlaceSearch | None" = None,
+               confused_with: "confusions.Served | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -309,7 +310,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     `fungus_gate`: the not-a-fungus gate every identification passes (fungusgate.py).
     True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
-    gate); a FungusGate uses that one; None or False runs ungated."""
+    gate); a FungusGate uses that one; None or False runs ungated.
+
+    `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
+    `confused_with` field on species candidates. True reads the cache beside the manifest
+    (the nightly fills it); a confusions.Served uses that one; None or False: no field."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     # The image tower as int8 ONNX (onnxtower.py, MV_EMBED_ONNX=1), where the release ships
     # it for the served weights; torch otherwise.
@@ -482,6 +487,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     manifest_path = manifest_path or config.MANIFEST_PATH
     conn = open_manifest(manifest_path)
+    if confused_with is True:
+        confused_with = confusions.Served(confusions.cache_path(manifest_path), note=note)
+    confused_with = confused_with or None
+    app.state.confused_with = confused_with
+    if confused_with is not None and background:    # read at startup, not by the first caller
+        threading.Thread(target=confused_with.reload, name="confused-with", daemon=True).start()
+
+    def confused_table() -> "confusions.Table | None":
+        return confused_with.table() if confused_with is not None else None
     # Before anything is built: a new release's manifest may hold an older list of who
     # withdrew than the one this box last read (permissions.py).
     permissions.restore_last_good(conn, note=note)
@@ -658,7 +672,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if not layer:
             return {"enabled": False}
         with db_lock:
-            return nightly.health(conn, nightly_settings, nightly_zone)
+            out = nightly.health(conn, nightly_settings, nightly_zone)
+        out["confused_with"] = confusions.health(confusions.cache_path(manifest_path))
+        return out
 
     def ready_backbones() -> list[str]:
         return [b for b, n in embedded_counts().items() if n and b in limits.allowed_backbones]
@@ -920,6 +936,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             except serving.Updating as e:
                 raise HTTPException(503, str(e), headers={"Retry-After": "30"}) from e
             results.append(embed_and_score(ident, backbone, images, context, may_show, timer))
+        table = confused_table()
+        for result in results:
+            confusions.annotate(result, table)
         return {"results": results, "context_used": used}
 
     def backbone_model(backbone: str):
@@ -1041,6 +1060,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                       steps=nightly_steps, log=note)
         finally:
             own.close()
+        if confused_with is not None:          # tonight's table, if the read took
+            confused_with.reload()
         if report["changed"]:
             for spec in warm.models:
                 backbone, _, method = spec.partition("/")
@@ -1234,6 +1255,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                    "gate": result.get("gate"),
                    "usage": None}
             apiv1.mark_confident(out)
+            confusions.annotate(out, confused_table())
             out["timing"] = timer.block()
             return out
 

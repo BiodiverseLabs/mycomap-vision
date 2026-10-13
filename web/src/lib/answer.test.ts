@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { answerFor, boxHints, coverageSummary, photoOnlyNote, placeCue, publicNote, usesPlace } from "./answer";
+import {
+  alsoPossible, answerFor, boxHints, breakdownLabel, breakdownOpen, confusedAside, confusedNote, coverageSummary, listedNames,
+  photoOnlyNote, placeCue, placeLines, placeWarns, publicNote, usesPlace,
+} from "./answer";
 import type { Candidate, IdentifyResult, LikelySet, Rank } from "./api";
 
 const c = (name: string, confidence: number, extra: Partial<Candidate> = {}): Candidate =>
@@ -157,4 +160,82 @@ test("the answer box keeps the advice but not a repeat of the species in play", 
   assert.deepEqual(boxHints([settled], false), [settled], "kept whole when the box lists no species");
   const single = "The best species match, A b, rests on a single DNA-verified specimen, so treat it with caution.";
   assert.deepEqual(boxHints([single], true), [single]);
+});
+
+// --- often confused with (docs/api.md §4) ---------------------------------------------
+
+const confused = {
+  names: [{ name: "Gymnopilus subspectabilis", finds: 8 }], called: 86, wrong: 29,
+  note: "Often confused with G. subspectabilis · 9% of DNA-checked finds",
+};
+
+test("the confused-with note is the server's own line, and nothing without one", () => {
+  assert.equal(confusedNote({ confused_with: confused }), "Often confused with G. subspectabilis · 9% of DNA-checked finds");
+  assert.equal(confusedNote({}), null);
+  assert.equal(confusedNote(null), null);
+  assert.equal(confusedNote({ confused_with: { ...confused, note: " " } }), null);
+  assert.equal(confusedAside({ confused_with: confused }), "often confused with G. subspectabilis · 9% of DNA-checked finds",
+    "only the first letter is lowered: species names keep their capitals");
+});
+
+test("the answer box carries the confused-with field of its headline and the names in play", () => {
+  const r = result(
+    { family: [c("Hymenogastraceae", 0.95)], genus: [c("Gymnopilus", 0.9)],
+      species: [c("Gymnopilus luteus", 0.4, { confused_with: confused }), c("Gymnopilus junonius", 0.3)] },
+  );
+  const a = answerFor(r, fungus)!;
+  assert.equal(a.headline?.rank, "genus");
+  assert.deepEqual(a.inPlay?.names.map((n) => confusedNote(n)), [confused.note, null]);
+  const species = answerFor(result({ family: [c("Hymenogastraceae", 0.95)], genus: [c("Gymnopilus", 0.95)],
+    species: [c("Gymnopilus luteus", 0.8, { confused_with: confused })] }), fungus)!;
+  assert.equal(confusedNote(species.headline), confused.note);
+  const lookAlike = answerFor(r, { notFungus: false, withheld: true })!;
+  assert.equal(confusedNote(lookAlike.headline), confused.note, "kept when the chance is withheld");
+});
+
+// --- the full breakdown -----------------------------------------------------------------
+
+const gym = [c("Gymnopilus luteus", 0.81), c("Gymnopilus subspectabilis", 0.11), c("Gymnopilus sapineus", 0.05),
+  c("Gymnopilus penetrans", 0.02), c("Gymnopilus junonius", 0.004)];
+
+test("one photo on its own lists the top name and any at 5% or more, at most three", () => {
+  assert.deepEqual(listedNames(gym).map((n) => n.name), ["Gymnopilus luteus", "Gymnopilus subspectabilis", "Gymnopilus sapineus"]);
+  assert.deepEqual(listedNames([c("A b", 0.3), c("A c", 0.04)]).map((n) => n.name), ["A b"], "under 5%: not listed");
+  assert.deepEqual(listedNames([c("A b", 0.02)]).map((n) => n.name), ["A b"], "the top name always is");
+  assert.deepEqual(listedNames([{ ...c("A b", 0), confidence: null }]), [], "nothing when the chance is withheld");
+  const many = [c("A a", 0.3), c("A b", 0.2), c("A c", 0.2), c("A d", 0.1), c("A e", 0.08), c("A f", 0.06), c("A g", 0.06)];
+  assert.equal(listedNames(many).length, 3, "at most three with a bar");
+  assert.deepEqual(alsoPossible(many, listedNames(many)).map((n) => n.name), ["A d", "A e", "A f"], "and three more in words");
+});
+
+test("a name under 1% never shows in the breakdown, so nothing reads 0%", () => {
+  assert.deepEqual(alsoPossible(gym, [{ name: "Gymnopilus luteus" }]).map((n) => n.name),
+    ["Gymnopilus subspectabilis", "Gymnopilus sapineus", "Gymnopilus penetrans"]);
+  assert.deepEqual(alsoPossible(gym, listedNames(gym)).map((n) => n.name), ["Gymnopilus penetrans"],
+    "listed names aren't repeated; 0.4% is left out");
+});
+
+test("the breakdown is folded when there is an answer and open when there is none", () => {
+  assert.equal(breakdownOpen(false, true, false), false);
+  assert.equal(breakdownOpen(true, true, false), true);
+  assert.equal(breakdownOpen(false, false, false), true, "without an answer the breakdown is the answer");
+  assert.equal(breakdownOpen(true, false, true), false, "never when there are no ranks (not a fungus)");
+});
+
+test("the breakdown's button says which view it breaks down", () => {
+  assert.equal(breakdownLabel(2, null), "Full breakdown: all 2 photos · every rank, with its chances");
+  assert.equal(breakdownLabel(2, 0), "Full breakdown: photo 1 on its own · every rank, with its chances");
+  assert.equal(breakdownLabel(1, null), "Full breakdown · every rank, with its chances");
+});
+
+test("names still in play show only a place cue that warns", () => {
+  const near = { nearest_record_km: 20, in_season: true, far_from_known: false };
+  const far = { nearest_record_km: 310, in_season: true, far_from_known: true };
+  const late = { nearest_record_km: 20, in_season: false, far_from_known: false };
+  assert.deepEqual(placeLines(near, true), []);
+  assert.deepEqual(placeLines(near, false), placeCue(near), "the headline keeps every line");
+  assert.deepEqual(placeLines(far, true), placeCue(far));
+  assert.deepEqual(placeLines(late, true), placeCue(late));
+  assert.equal(placeWarns(near), false);
+  assert.equal(placeWarns(null), false);
 });

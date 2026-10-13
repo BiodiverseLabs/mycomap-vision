@@ -25,7 +25,9 @@ Most commands need the private data under `data/` and the settings in `.env`
    Full runs (every photo, plus fine-tuning) go to a GPU instance with
    `mv aws-launch-trainer` and come back with `mv aws-pull-trainer`.
 5. `mv compare --backbones a,b --methods nearest,nearest+mean`: score models on the
-   same photos (newest 28 days vs older records); `mv scoreboard` lists results;
+   same photos (newest 28 days vs older records; with `--release v1 [--errata FILE]`, a
+   frozen dataset release's `val` split against its `train`, the erratum's records left
+   out, see [dataset-release.md](dataset-release.md)); `mv scoreboard` lists results;
    `mv models` lists backbones and methods.
 6. `mv release --backbones <model> --make-current`: publish what the public site
    serves to S3; the server pulls it with `mv pull-release`
@@ -57,6 +59,9 @@ when iNat is down; `--no-taxonomy` skips it.
 | `download-photos` | download photos within iNat's limits |
 | `copy-photos` | copy photos already held from one store to another, hash-checked |
 | `fetch-taxonomy` / `taxonomy` | iNat's family, order, class, phylum per genus; what it changes |
+| `fetch-place-fallback` | for records mycomap.org gives no place: ask iNat and MO whether they are North American (read-only, polite pace) |
+| `fetch-mo-points` | each MO record's public point (shown GPS, else its location box) for dataset releases; MO's pace |
+| `adopt-benchmark-photos` | register a development benchmark's downloaded photos so `copy-photos` can put them in S3 |
 | `name-spellings` | names written more than one way (read-only) |
 | `guests` | records whose DNA name is a yeast or parasite of the fungus in the photo |
 | `permissions` | photographers' answers from mycomap.org |
@@ -77,7 +82,9 @@ when iNat is down; `--no-taxonomy` skips it.
 | `standard-summary` | the standard tables (top 1/3/5/10, species in the broad sense, depth bands) |
 | `calibrate-sets` | fit "likely" name lists that hold the right name about 9 times in 10 |
 | `inat-baseline` | add iNat's computer vision to a comparison, on the same records |
-| `fungus-gate` | the not-a-fungus gate in front of Identify |
+| `fungus-gate` | the not-a-fungus gate in front of Identify (`tune --release` re-tunes it on a dataset release) |
+| `ood-set` | build the sealed not-a-fungus test set (CC0 / CC BY photos the gate never saw) |
+| `export-onnx` | the image tower as ONNX, checked against torch (`MV_EMBED_ONNX` on the server) |
 | `int8-check` | score a release with float16 vs int8 reference vectors |
 | `model-sanity` | the pre-declared sanity gate for a new model ([retrain-v1.md](retrain-v1.md)) |
 | `candidates` / `predict-pending` / `prospective` | predict records still waiting for DNA, and check later |
@@ -88,7 +95,11 @@ when iNat is down; `--no-taxonomy` skips it.
 | --- | --- |
 | `holdout`, `heldout` | records held out of everything; held-out benchmarks (freeze, fetch, predict, report) |
 | `backbone-screen` | frozen backbones on a release's seeded subset: `subset` (drawn once), `embed`, `score` |
-| `dataset`, `manifest-freeze` | frozen, verifiable dataset releases ([dataset-release.md](dataset-release.md)) |
+| `dataset`, `manifest-freeze` | frozen, verifiable dataset releases ([dataset-release.md](dataset-release.md)); `dataset errata` writes a release's erratum, `dataset derive` regenerates one derived image and checks its hash, `dataset diff` compares two releases |
+| `aws-launch-dhash-index` | a release's dHash index (every included photo) on a self-terminating instance |
+| `learning-curve` | accuracy against reference records per species, on a dataset release (`mv learning-curve -h`) |
+| `paper-inat-cv`, `expert-ids` | iNat's computer vision on a release's finds; iNat identifications made before the DNA was visible, scored against it |
+| `experiments-check` | check the experiment registry's entries (private research checkout) before committing |
 | `external`, `picek-train`, `picek-bench` | published fungi classifiers and their recipe ([replications/fungitastic](../replications/fungitastic/README.md)) |
 | `build-occurrence`, `occurrence-names`, `occurrence-exclusions`, `tune-occurrence` | the occurrence prior from iNat open data |
 | `scoreboard-export` / `-import`, `benchmark-export` / `-import` | move aggregate results to the server (no record ids, names, observers or places); `benchmark-export --comparison <id> [--split val\|test] [--sealed]` publishes a comparison on a frozen dataset release, marked `reproduced-on-<release>` |

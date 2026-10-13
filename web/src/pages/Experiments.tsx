@@ -4,9 +4,8 @@ import { Link } from "wouter";
 import { PageHeader } from "@/components/Layout";
 import { Markdown } from "@/components/Markdown";
 import { api, ApiError, signInUrl } from "@/lib/api";
-import { awaitsDecision, EXPERIMENT_STATUSES, filterExperiments, REPRO_KIND_WORDS, REPRO_KINDS, reproCounts,
-         reproducibilityWords, STATUS_WORDS, statusCounts, type ExperimentStatus,
-         type ReproKind } from "@/lib/experiments";
+import { awaitsDecision, datasetChoices, datasetOf, defaultDataset, EXPERIMENT_STATUSES, filterExperiments,
+         PRE_V1, reproducibilityWords, STATUS_WORDS, statusCounts, type ExperimentStatus } from "@/lib/experiments";
 
 // Research > Experiments (Steve, 2026-10-09): every experiment recorded so it can be reviewed.
 // Members only: development numbers and unpublished results (experiments/README.md in the private research repo).
@@ -21,8 +20,7 @@ function Repro({ r, on }: { r: string; on?: string }) {
   return (
     <span title={w.note}
           className={`rounded px-2 py-0.5 text-xs ${w.provisional ? "border border-dashed border-[#A87146]/50 text-[#7a5a3a]"
-                                                   : on ? "bg-gray-100 text-gray-600"
-                                                        : "bg-myco-green/10 text-myco-green"}`}>
+                                                              : "bg-myco-green/10 text-myco-green"}`}>
       {w.label}
     </span>
   );
@@ -44,20 +42,22 @@ function SignInNote({ error }: { error: unknown }) {
 export function ExperimentsPage() {
   const q = useQuery({ queryKey: ["experiments"], queryFn: api.experiments, retry: false });
   const [status, setStatus] = useState<ExperimentStatus | null>(null);
-  const [repro, setRepro] = useState<ReproKind | null>(null);
+  const [picked, setDataset] = useState<string | null>(null);
   const all = q.data?.experiments ?? [];
-  const counts = statusCounts(all);
-  const rCounts = reproCounts(all);
-  const shown = filterExperiments(all, status, repro);
+  const choices = datasetChoices(all);
+  const dataset = picked ?? defaultDataset(all);
+  const inDataset = all.filter((e) => datasetOf(e) === dataset);
+  const counts = statusCounts(inDataset);
+  const shown = filterExperiments(all, status, dataset);
   const chip = (on: boolean) => `rounded-full border px-3 py-1 text-sm ${
     on ? "border-myco-green bg-myco-green/10 text-myco-green" : "border-[#A87146]/30 bg-white text-gray-700 hover:bg-myco-green/5"}`;
   return (
     <>
       <PageHeader title="Experiments">
         Every experiment on MycoMap Vision: the question, everything tried, the numbers, and what
-        was decided. Development results, for mycomap.org members. Results from before the dataset
-        freeze are exploratory; each is being re-run on dataset release v1 so anyone can rebuild it.
-        Once re-run, the old entry stays as method history and links to its re-run.
+        was decided. Development results, for mycomap.org members. Results come from dataset release
+        v1, which anyone can rebuild; the earlier experiments on the pre-v1 exploratory data are
+        kept, one choice away, as the record of how we got here.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-4xl space-y-4">
         {q.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
@@ -69,23 +69,25 @@ export function ExperimentsPage() {
           </p>
         )}
         {all.length > 0 && (
+          <label className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Dataset:</span>
+            <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1 max-w-full min-w-0"
+                    value={dataset} data-testid="experiments-dataset"
+                    onChange={(ev) => { setDataset(ev.target.value); setStatus(null); }}>
+              {choices.map((c) => <option key={c.id} value={c.id}>{c.label} ({c.n})</option>)}
+              {choices.every((c) => c.id === PRE_V1) && (
+                <option value="v1" disabled>Dataset release v1 (first entries coming)</option>
+              )}
+            </select>
+          </label>
+        )}
+        {inDataset.length > 0 && (
           <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by status">
-            <button className={chip(status === null)} onClick={() => setStatus(null)}>All ({all.length})</button>
+            <button className={chip(status === null)} onClick={() => setStatus(null)}>All ({inDataset.length})</button>
             {EXPERIMENT_STATUSES.map((s) => (
               <button key={s} className={chip(status === s)} onClick={() => setStatus(s)}
                       disabled={!counts[s]}>
                 {STATUS_WORDS[s].label} ({counts[s]})
-              </button>
-            ))}
-          </div>
-        )}
-        {all.length > 0 && (
-          <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by reproducibility">
-            <button className={chip(repro === null)} onClick={() => setRepro(null)}>Any data</button>
-            {REPRO_KINDS.map((k) => (
-              <button key={k} className={chip(repro === k)} onClick={() => setRepro(k)}
-                      disabled={!rCounts[k]}>
-                {REPRO_KIND_WORDS[k]} ({rCounts[k]})
               </button>
             ))}
           </div>

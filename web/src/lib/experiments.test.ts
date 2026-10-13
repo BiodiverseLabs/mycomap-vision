@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { awaitsDecision, filterExperiments, reproCounts, reproducibilityWords, reproKind, statusCounts,
+import { awaitsDecision, datasetChoices, datasetOf, defaultDataset, filterExperiments, reproducibilityWords, statusCounts,
          type ExperimentSummary } from "./experiments";
 
 const e = (slug: string, date: string, status: ExperimentSummary["status"], decision = "pending"): ExperimentSummary => ({
@@ -21,12 +21,12 @@ test("the filter shows how many entries each status has", () => {
   assert.deepEqual(statusCounts(LIST), { planned: 0, running: 1, done: 1, adopted: 1, dropped: 1 });
 });
 
-test("a pre-freeze result reads as exploratory and provisional; a reproduced one names its release", () => {
+test("a pre-v1 result is labelled with its dataset; a reproduced one names its release", () => {
   const before = reproducibilityWords("exploratory-pre-freeze");
-  assert.equal(before.provisional, true);
-  assert.match(before.note, /provisional until re-run on dataset release v1/);
+  assert.deepEqual([before.label, before.provisional], ["Pre-v1 exploratory dataset", true]);
+  assert.match(before.note, /re-checked on dataset release v1/);
   const after = reproducibilityWords("reproduced-on-v1");
-  assert.deepEqual([after.provisional, after.label], [false, "Reproducible on release v1"]);
+  assert.deepEqual([after.provisional, after.label], [false, "Dataset release v1"]);
 });
 
 test("an entry whose decision is pending is flagged as waiting", () => {
@@ -35,22 +35,21 @@ test("an entry whose decision is pending is flagged as waiting", () => {
   assert.equal(awaitsDecision(e("x", "2026-10-09", "running", "pending (launch after relabel)")), true);
 });
 
-test("an exploratory entry re-run on v1 reads as method history, not provisional", () => {
+test("an exploratory entry re-run on v1 stays pre-v1 and points at its re-run", () => {
   const w = reproducibilityWords("exploratory-pre-freeze", "v1");
-  assert.equal(w.provisional, false);
-  assert.match(w.label, /Method history · re-run on release v1/);
-  assert.match(w.note, /re-run's numbers are the ones that count/);
-  // A reproduced entry's own words don't change with the argument.
-  assert.equal(reproducibilityWords("reproduced-on-v1", "v1").label, "Reproducible on release v1");
+  assert.equal(w.label, "Pre-v1 exploratory dataset · re-run on v1");
+  assert.match(w.note, /re-run on dataset release v1 holds the numbers that count/);
+  assert.equal(reproducibilityWords("reproduced-on-v1", "v1").label, "Dataset release v1");
 });
 
-test("the list filters to v1 entries, method history or still-exploratory ones", () => {
+test("the page shows one dataset at a time: v1 first once it has entries, pre-v1 one choice away", () => {
   const rerun = { ...e("r", "2026-10-13", "done"), reproducibility: "reproduced-on-v1" };
   const old = { ...e("o", "2026-10-09", "adopted", "Steve: yes"), reproduced_by: "r", reproduced_on: "v1" };
   const list = [rerun, old, e("x", "2026-10-08", "done")];
-  assert.deepEqual([reproKind(rerun), reproKind(old), reproKind(list[2])], ["release", "history", "exploratory"]);
-  assert.deepEqual(reproCounts(list), { release: 1, history: 1, exploratory: 1 });
-  assert.deepEqual(filterExperiments(list, null, "release").map((x) => x.slug), ["r"]);
-  assert.deepEqual(filterExperiments(list, "adopted", "history").map((x) => x.slug), ["o"]);
-  assert.deepEqual(filterExperiments(list, "adopted", "release"), []);
+  assert.deepEqual([datasetOf(rerun), datasetOf(old)], ["v1", "pre-v1"]);
+  assert.deepEqual(datasetChoices(list).map((c) => [c.id, c.n]), [["v1", 1], ["pre-v1", 2]]);
+  assert.equal(defaultDataset(list), "v1");
+  assert.equal(defaultDataset([old]), "pre-v1", "until v1 has an entry");
+  assert.deepEqual(filterExperiments(list, null, "pre-v1").map((x) => x.slug), ["o", "x"]);
+  assert.deepEqual(filterExperiments(list, "adopted", "v1"), []);
 });

@@ -57,6 +57,10 @@ class FinetuneConfig:
     workers: int = 6
     seed: int = 0
     max_steps: int | None = None    # cap, for smoke tests
+    # Photos per forward pass; None = the whole batch. A batch the GPU can't hold (a larger
+    # input size) is split, halving on an out-of-memory error; the loss is the same sum
+    # over the batch either way, so the recipe doesn't change (`micro_batch` in the meta).
+    micro_batch: int | None = None
 
 
 @dataclass
@@ -443,6 +447,29 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             pin_memory=dev == "cuda")
 
     use_bf16 = dev == "cuda" and torch.cuda.is_bf16_supported()
+    micro = {"n": cfg.micro_batch or cfg.batch_size}
+
+    def batch_loss(x, y, n: int) -> torch.Tensor:
+        """Zero the gradients, then forward and backward the batch `n` photos at a time:
+        each rank's loss is summed over the chunks and divided by the batch's labelled
+        photos, so the gradient is the whole batch's mean, whatever `n` is. Returns the
+        batch loss (detached)."""
+        opt.zero_grad(set_to_none=True)
+        labelled = [(y[:, k] >= 0).sum().clamp(min=1) for k in range(len(heads))]
+        total = torch.zeros((), device=x.device)
+        for s in range(0, len(x), n):
+            xs, ys = x[s:s + n], y[s:s + n]
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+                f = backbone.forward_features(xs)
+            f = F.normalize(f.float(), dim=1)
+            part = sum(w * F.cross_entropy(cfg.scale * f @ F.normalize(h, dim=1).T,
+                                           ys[:, k], ignore_index=-1, reduction="sum")
+                       / labelled[k]
+                       for k, (w, h) in enumerate(zip(cfg.rank_weights, heads)))
+            part.backward()
+            total += part.detach()
+        return total
+
     step, seen, t0, losses = 0, 0, time.monotonic(), []
     fallback = {"at_step": None}
 
@@ -458,14 +485,18 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
         if batch is None:
             continue
         x, y = batch[0].to(dev, non_blocking=True), batch[1].to(dev)
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
-            f = backbone.forward_features(x)
-        f = F.normalize(f.float(), dim=1)
-        loss = sum(w * F.cross_entropy(cfg.scale * f @ F.normalize(h, dim=1).T, y[:, k],
-                                       ignore_index=-1)
-                   for k, (w, h) in enumerate(zip(cfg.rank_weights, heads)))
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
+        while True:
+            try:
+                loss = batch_loss(x, y, micro["n"])
+                break
+            except torch.cuda.OutOfMemoryError:
+                if micro["n"] <= 1:
+                    raise
+                opt.zero_grad(set_to_none=True)
+                torch.cuda.empty_cache()
+                micro["n"] = max(1, micro["n"] // 2)
+                log(f"[{name}] out of GPU memory at step {step:,}: {micro['n']} photos per "
+                    "pass from now on (same loss, same batch)")
         torch.nn.utils.clip_grad_norm_([p for _, p in tail] + list(heads), 1.0)
         opt.step()
         sched.step()
@@ -490,7 +521,7 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             "species": len(ts.names["species"]), "steps": step, "photos_seen": seen,
             "final_loss": round(float(np.mean(losses[-100:])), 4) if losses else None,
             "blocks_trained": cfg.blocks, "of_blocks": n_blocks, "size": size,
-            "loader_fallback_at_step": fallback["at_step"],
+            "loader_fallback_at_step": fallback["at_step"], "micro_batch": micro["n"],
             "config": asdict(cfg), "seed": cfg.seed,
             "minutes": round((time.monotonic() - started) / 60, 1),
             **({"train_photos": ts.photo_policy} if ts.photo_policy else {}),

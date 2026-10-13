@@ -191,3 +191,64 @@ def test_the_cpu_check_refuses_to_run_with_a_gpu(monkeypatch, cut):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     with pytest.raises(RuntimeError, match="CUDA_VISIBLE_DEVICES"):
         sanity.cpu_check(cut[0], "base", cut[3], [])
+
+
+class _Ref:
+    """Memory-mapped reference vectors stand-in: records the int8 packing."""
+
+    def __init__(self):
+        self.packed_with = None
+
+    def use_int8(self, refine):
+        self.packed_with = refine
+
+
+class _Ident:
+    def __init__(self, *a, **k):
+        from types import SimpleNamespace
+        self.ref = _Ref()
+        self.nearest = SimpleNamespace(scorer=SimpleNamespace(ref=self.ref))
+        _Ident.last = self
+
+    def embed(self, model, images):
+        import numpy as np
+        return np.zeros((len(images), 1), dtype=np.float32), None
+
+    def identify_vectors(self, v, photo_lookup):
+        return {"ranks": {"species": [{"name": "A x"}]}}
+
+
+def test_the_cpu_check_times_the_boxs_int8_search_when_it_is_on(monkeypatch, cut):
+    """The box serves with MV_SEARCH_INT8=1 (v1): the check packs the int8 search as the
+    server does before timing, and says which search it timed; v1's gate otherwise timed
+    the float fallback (15 s) instead of the box's search (0.3 s)."""
+    torch = pytest.importorskip("torch")
+    from mycomap_vision import fastsearch, identify, models
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(models, "load_backbone", lambda name: object())
+    monkeypatch.setattr(identify, "Identifier", _Ident)
+    monkeypatch.setenv("MV_SEARCH_INT8", "1")
+    r = sanity.cpu_check(cut[0], "base", cut[3], [object()] * 3)
+    assert _Ident.last.ref.packed_with == fastsearch.REFINE
+    assert r["ok"] and "int8 search" in r["detail"] and "3/3 answered" in r["detail"]
+    monkeypatch.delenv("MV_SEARCH_INT8")
+    r = sanity.cpu_check(cut[0], "base", cut[3], [object()] * 3)
+    assert _Ident.last.ref.packed_with is None and "plain search" in r["detail"]
+
+
+def test_the_cpu_check_refuses_int8_timing_it_cannot_do(monkeypatch, cut):
+    torch = pytest.importorskip("torch")
+    from types import SimpleNamespace
+
+    from mycomap_vision import identify, models
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(models, "load_backbone", lambda name: object())
+
+    class InMemory(_Ident):
+        def __init__(self, *a, **k):
+            super().__init__()
+            self.nearest = SimpleNamespace(scorer=SimpleNamespace(ref=object()))
+    monkeypatch.setattr(identify, "Identifier", InMemory)
+    monkeypatch.setenv("MV_SEARCH_INT8", "1")
+    with pytest.raises(RuntimeError, match="memory-mapped"):
+        sanity.cpu_check(cut[0], "base", cut[3], [object()])

@@ -3,7 +3,7 @@
  * whose top name reaches 70%, the coarser ranks under it, and the names still in play one
  * rank finer. Also the small text rules around it, so the page itself holds no logic.
  */
-import { RANKS, type IdentifyResult, type PlaceCue, type Rank } from "@/lib/api";
+import { RANKS, type Candidate, type ConfusedWith, type IdentifyResult, type PlaceCue, type Rank } from "@/lib/api";
 import { coverageWords } from "@/lib/publicView";
 
 /** A rank counts as settled when its top name reaches this calibrated chance. The same
@@ -22,6 +22,7 @@ export interface Named {
   /** null when the chance is withheld (photos may not show a fungus). */
   confidence: number | null;
   place?: PlaceCue;
+  confused_with?: ConfusedWith;
 }
 
 export interface Answer {
@@ -43,7 +44,7 @@ type Result = Pick<IdentifyResult, "ranks" | "likely">;
 function top(r: Result, rank: Rank): Named | null {
   const fromLikely = r.likely?.[rank]?.names[0];
   const c = fromLikely ?? r.ranks[rank]?.[0];
-  return c ? { rank, name: c.name, confidence: c.confidence, place: c.place } : null;
+  return c ? { rank, name: c.name, confidence: c.confidence, place: c.place, confused_with: c.confused_with } : null;
 }
 
 /** Names worth considering at a rank: its likely list, else the ranking's top few. */
@@ -52,7 +53,7 @@ function contenders(r: Result, rank: Rank): Named[] {
   const list = likely?.length
     ? likely
     : (r.ranks[rank] ?? []).filter((c, i) => i === 0 || (c.confidence ?? 0) >= IN_PLAY_FLOOR);
-  return list.map((c) => ({ rank, name: c.name, confidence: c.confidence, place: c.place }));
+  return list.map((c) => ({ rank, name: c.name, confidence: c.confidence, place: c.place, confused_with: c.confused_with }));
 }
 
 /**
@@ -117,6 +118,21 @@ export function placeCue(place: PlaceCue | undefined | null): string[] {
   return out;
 }
 
+/**
+ * "Often confused with G. subspectabilis · 9% of DNA-checked finds" under a species name that
+ * people often get wrong (mycomap.org/misid), as the server words it; null otherwise.
+ */
+export function confusedNote(n: { confused_with?: ConfusedWith | null } | null | undefined): string | null {
+  const note = n?.confused_with?.note;
+  return typeof note === "string" && note.trim() ? note : null;
+}
+
+/** The same note inside a sentence, in brackets after a name: "often confused with …". */
+export function confusedAside(n: { confused_with?: ConfusedWith | null } | null | undefined): string | null {
+  const note = confusedNote(n);
+  return note ? note[0].toLowerCase() + note.slice(1) : null;
+}
+
 /** "From the photos alone: X" when the place and date changed the top name at a rank. */
 export function photoOnlyNote(r: Pick<IdentifyResult, "photo_only_top">, headline: Named | null): string | null {
   if (!headline) return null;
@@ -167,4 +183,52 @@ export function boxHints(hints: string[], speciesInPlay: boolean): string[] {
     const m = /^The genus looks settled, but .+? are close\.\s+(.+)$/s.exec(h);
     return m ? m[1].charAt(0).toUpperCase() + m[1].slice(1) : h;
   });
+}
+
+// --- the full breakdown (Steve, 2026-10-13: the answer first, every rank one click away) --
+
+/** Names under this chance are left out of the breakdown: they would read "0%". */
+export const BREAKDOWN_FLOOR = 0.01;
+/** Without a fitted likely set (one photo on its own), names at this chance or more get a bar. */
+export const LISTED_FLOOR = 0.05;
+/** At most this many names with a bar, and this many in the "also possible" line. */
+export const BREAKDOWN_MAX = 3;
+
+/** The names with a bar at one rank when there is no likely set: the top name, then any at
+ *  LISTED_FLOOR or more. Empty when the chance is withheld. */
+export function listedNames(candidates: Candidate[]): (Candidate & { confidence: number })[] {
+  const [top, ...rest] = candidates;
+  if (!top || top.confidence == null) return [];
+  return [top, ...rest.filter((c) => (c.confidence ?? 0) >= LISTED_FLOOR)]
+    .slice(0, BREAKDOWN_MAX)
+    .map((c) => ({ ...c, confidence: c.confidence ?? 0 }));
+}
+
+/** "Also possible, less likely": the names not listed, at BREAKDOWN_FLOOR or more. */
+export function alsoPossible(candidates: Candidate[], listed: { name: string }[]): Candidate[] {
+  const shown = new Set(listed.map((n) => n.name));
+  return candidates.filter((c) => !shown.has(c.name) && (c.confidence ?? 0) >= BREAKDOWN_FLOOR)
+    .slice(0, BREAKDOWN_MAX);
+}
+
+/** Whether the breakdown shows: when asked for, and always when there is no answer to lead with. */
+export function breakdownOpen(asked: boolean, hasAnswer: boolean, noRanks: boolean): boolean {
+  return !noRanks && (asked || !hasAnswer);
+}
+
+/** The breakdown's button, saying which view it breaks down. `photo`: 0-based, or null for all. */
+export function breakdownLabel(photos: number, photo: number | null): string {
+  const which = photos > 1 ? (photo == null ? `: all ${photos} photos` : `: photo ${photo + 1} on its own`) : "";
+  return `Full breakdown${which} · every rank, with its chances`;
+}
+
+/** Whether a place cue warns (far from known records, or out of season). */
+export function placeWarns(place: PlaceCue | undefined | null): boolean {
+  return place?.far_from_known === true || place?.in_season === false;
+}
+
+/** The place lines under a name: under the names still in play only a warning ("known
+ *  nearby" there is noise); under the headline everything placeCue says. */
+export function placeLines(place: PlaceCue | undefined | null, inPlay: boolean): string[] {
+  return inPlay && !placeWarns(place) ? [] : placeCue(place);
 }
