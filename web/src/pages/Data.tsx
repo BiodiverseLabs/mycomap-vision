@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/Layout";
 import { api, num, pct } from "@/lib/api";
 import { modelName } from "@/lib/publicView";
+import { shortHash, V1, type DatasetRelease } from "@/lib/datasetReleases";
 
 const LICENSE_LABEL: Record<string, string> = {
   open: "Open",
@@ -25,9 +26,13 @@ export function DataPage() {
         of each record from iNaturalist.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+        <ReleaseCard r={V1} />
         {q.isError && <p className="text-destructive text-sm">The API isn't answering.</p>}
         {s && (
           <>
+            <h2 className="font-semibold text-lg text-[#4a3728]" data-testid="heading-live">
+              Live reference set <span className="text-sm font-normal text-muted-foreground">(changes every night)</span>
+            </h2>
             <div className="grid gap-4 grid-cols-2 lg:grid-cols-3">
               <Tile label="DNA-validated records" value={num(s.records)}
                     sub={`${num(s.records_north_america)} in North America`} />
@@ -98,6 +103,55 @@ export function DataPage() {
         <GetTheImages />
       </div>
     </>
+  );
+}
+
+const day = (iso: string) => new Date(iso).toLocaleDateString("en-US",
+  { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+
+/** A frozen dataset release: the records and photos research numbers come from. It never
+ *  changes; a correction makes the next release. */
+function ReleaseCard({ r }: { r: DatasetRelease }) {
+  const l = r.photos.byLicence;
+  return (
+    <Card data-testid={`card-release-${r.id}`}>
+      <CardHeader>
+        <CardTitle className="text-base">Dataset release {r.id} (frozen)</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm text-[#5c4a3a]">
+        <p>
+          The fixed snapshot every research result now comes from: labels as of {day(r.labelSnapshot)},
+          cut {day(r.created)}. It never changes, so anyone can rebuild a result from it with the
+          code and the one command each result names.
+        </p>
+        <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
+          <Tile label="Records" value={num(r.records.included)}
+                sub={`${num(r.records.bySource.inat)} iNaturalist, ${num(r.records.bySource.mo)} Mushroom Observer`} />
+          <Tile label="Training split" value={num(r.records.train)}
+                sub={`validation split ${num(r.records.val)}: first validated after ${day(r.valCutoff)}`} />
+          <Tile label="Photos" value={num(r.photos.included)}
+                sub={`open ${pct(l.open / r.photos.included)}, non-commercial ${pct(l.nc / r.photos.included)}, all rights reserved ${pct(l.arr / r.photos.included)}`} />
+          <Tile label="Names" value={num(r.labels)} sub="North America" />
+        </div>
+        <dl className="grid grid-cols-[9rem_1fr] gap-x-4 gap-y-1 text-xs">
+          <dt className="text-muted-foreground">Release hash</dt>
+          <dd className="font-mono break-all" title={r.releaseHash}>{shortHash(r.releaseHash)}…</dd>
+          <dt className="text-muted-foreground">Reference hash</dt>
+          <dd className="font-mono break-all" title={r.referenceHash}>{shortHash(r.referenceHash)}…</dd>
+          <dt className="text-muted-foreground">Cut by code</dt>
+          <dd className="font-mono break-all">{r.codeCommit.slice(0, 7)}</dd>
+          <dt className="text-muted-foreground">Public files</dt>
+          <dd>{r.doi ? <a href={`https://doi.org/${r.doi}`} className="text-myco-green underline">{r.doi}</a>
+                     : "On Zenodo with a DOI (Creative Commons photos only), coming with the paper"}</dd>
+        </dl>
+        <p className="text-xs text-muted-foreground">
+          {num(r.records.candidates - r.records.included)} of the {num(r.records.candidates)} candidate
+          records were left out, each with a recorded reason (no photos of the specimen, outside North
+          America, a guest organism, no usable name). Results from before this release are kept as
+          development history.
+        </p>
+      </CardContent>
+    </Card>
   );
 }
 
