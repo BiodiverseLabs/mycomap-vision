@@ -64,13 +64,16 @@ class Choice:
 
 
 def choose_thresholds(record_scores: list[np.ndarray], grid=GRID,
-                      max_unsure_share: float = MAX_UNSURE_SHARE) -> Choice:
-    """The declared rule on p(fungus) per photo, grouped by DEV record. None when no grid
-    value keeps every DEV record's answer."""
+                      max_unsure_share: float = MAX_UNSURE_SHARE,
+                      max_lost_share: float = 0.0) -> Choice:
+    """The declared rule on p(fungus) per photo, grouped by DEV record: "not a fungus" is
+    the largest grid value at which at most `max_lost_share` of DEV records lose their
+    answer (every photo below it; 0 = none may), "not sure" the largest at which at most
+    `max_unsure_share` are shown without a chance. None when no grid value qualifies."""
     best = np.array([s.max() for s in record_scores])
     worst = np.array([s.min() for s in record_scores])
     n = len(best)
-    a = max((t for t in grid if (best < t).sum() == 0), default=None)
+    a = max((t for t in grid if (best < t).sum() <= max_lost_share * n), default=None)
     if a is None:
         return Choice(None, None, n, 0, 0, 0)
     b = max(t for t in grid if t >= a and ((best >= a) & (best < t)).sum() <= max_unsure_share * n)
@@ -221,39 +224,134 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
     extra = unit(np.load(negatives_npz)[field]) if negatives_npz else None
     X, y, prov = probe_training_set(conn, exclude, embeddings_root or config.DATA_DIR /
                                     "embeddings" / base, extra, base=base)
+    dev, ood = np.load(dev_npz), np.load(ood_npz)
+    keys = [str(k) for k in dev["keys"]]
+    recs = dev_records(conn, benchmark, keys)
+    return _tune_core(X, y, prov, dev, ood, keys, recs, None, ood_manifest, out_dir, field,
+                      base, served, gate_dir, {"benchmark": benchmark, "split": "dev",
+                                               "reproducibility": "exploratory-pre-freeze"},
+                      f"{benchmark} dev + not-a-fungus set", log=log)
+
+
+def release_probe_set(rel, ids: np.ndarray, vecs: np.ndarray, extra_negatives: np.ndarray,
+                      seed: int = SEED):
+    """(X, y, provenance) for the probe on a dataset release: positives are the included
+    photos of POSITIVE_RECORDS random `train` records (an erratum given to the release,
+    Release.use_errata, leaves its records out of rel.records); the
+    negatives are `extra_negatives` only (the Open Images test-split photos): no record of
+    the release is ever a negative, since a label fault may well be a fungus."""
+    row = {int(p): i for i, p in enumerate(ids.tolist())}
+    photos: dict[str, list[int]] = defaultdict(list)
+    train = {str(r["record_key"]) for r in rel.records("train")}
+    for key, pid in rel.db.execute("select record_key, manifest_photo_id from photos "
+                                   "where included = 1"):
+        if str(key) in train and int(pid) in row:
+            photos[str(key)].append(row[int(pid)])
+    good = sorted(photos)
+    rng = np.random.default_rng(seed)
+    pos_obs = [good[i] for i in rng.permutation(len(good))[:POSITIVE_RECORDS]]
+    pos = [i for o in pos_obs for i in photos[o]]
+    X = unit(np.concatenate([vecs[pos], extra_negatives]))
+    y = np.r_[np.ones(len(pos)), np.zeros(len(extra_negatives))]
+    h = hashlib.sha256("".join(sorted(pos_obs)).encode())
+    return X, y, {"positive_records": len(pos_obs), "positive_photos": len(pos),
+                  "negative_records": 0, "negative_photos": 0,
+                  "extra_negatives": int(len(extra_negatives)), "reference_photos": int(len(ids)),
+                  "training_records_sha256": h.hexdigest(), "seed": seed,
+                  "release": rel.id}
+
+
+def release_dev_records(rel, keys: list[str]) -> tuple[list[str], set[str]]:
+    """Each DEV photo key's record (keys are the release's manifest photo ids) and the
+    records that decide: val records outside the former held-out benchmark. A photo of
+    any split but val is refused (a test release is never read here)."""
+    of = {str(p): (str(k), split, bench) for p, k, split, bench in rel.db.execute(
+        "select p.manifest_photo_id, r.record_key, r.split, r.benchmark from photos p "
+        "join records r using (record_key) where p.included = 1 and r.included = 1")}
+    bad = [k for k in keys if k not in of or of[k][1] != "val"]
+    if bad:
+        raise ValueError(f"{len(bad):,} DEV photos are not val photos of {rel.id} (e.g. "
+                         f"{bad[:3]}): only val tunes the gate")
+    recs = [of[k][0] for k in keys]
+    decide = {of[k][0] for k in keys if not of[k][2]}
+    return recs, decide
+
+
+def tune_release(rel, dev_npz: Path, ood_npz: Path, ood_manifest: Path, negatives_npz: Path,
+                 out_dir: Path, embeddings: tuple[np.ndarray, np.ndarray],
+                 gate_dir: Path | None = None, served: str | None = None,
+                 max_lost_share: float = 0.0, log=print) -> dict:
+    """The gate re-tuned on a dataset release (paper E10): the probe's positives from its
+    train split, Open Images test-split negatives only, thresholds by the declared rule on
+    its val records outside the former held-out benchmark (all of val reported beside),
+    scored on the earlier not-a-fungus set. `embeddings`: (photo ids, vectors) of the
+    probe's base (frozen BioCLIP 2, or the served model's own with `served`)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    field, base = ("ft", served) if served else ("frozen", "bioclip-2")
+    ids, vecs = embeddings
+    X, y, prov = release_probe_set(rel, ids, vecs, unit(np.load(negatives_npz)[field]))
+    prov.update(negatives_sha256=sha256_file(negatives_npz))
+    dev, ood = np.load(dev_npz), np.load(ood_npz)
+    keys = [str(k) for k in dev["keys"]]
+    recs, decide = release_dev_records(rel, keys)
+    about = {"dataset_release": rel.cite(), "split": "val",
+             "reproducibility": f"reproduced-on-{rel.id}",
+             "dev_sha256": sha256_file(dev_npz), "ood_vectors_sha256": sha256_file(ood_npz)}
+    return _tune_core(X, y, prov, dev, ood, keys, recs, decide, ood_manifest, out_dir, field,
+                      base, served, gate_dir, about,
+                      f"{rel.id} val (excluding the former held-out) + the earlier "
+                      "not-a-fungus set", max_lost_share=max_lost_share, log=log)
+
+
+def _tune_core(X, y, prov, dev, ood, keys, recs, decide, ood_manifest, out_dir, field, base,
+               served, gate_dir, about: dict, tuned_on: str, max_lost_share: float = 0.0,
+               log=print) -> dict:
+    """Fit the probe, score every mode, choose thresholds by the rule on the DEV records in
+    `decide` (all of them when None; the others are reported beside), save the gate."""
     log(f"probe: {int(y.sum()):,} fungus, {int((1 - y).sum()):,} not-fungus photos")
     w, b = fungusgate.fit_logistic(X, y)
     del X
     text = fungusgate.FungusGate.load(gate_dir) if gate_dir else None
     if text is None:
         text = fungusgate.build(fungusgate.Thresholds(0.0, 0.0))
-    dev, ood = np.load(dev_npz), np.load(ood_npz)
-    keys = [str(k) for k in dev["keys"]]
-    recs = dev_records(conn, benchmark, keys)
     meta = {r["file"]: r for r in csv.DictReader(open(ood_manifest, encoding="utf-8"))}
     cat = np.array([meta[str(k)]["category"] for k in ood["keys"]])
     groups = [meta[str(k)]["group"] for k in ood["keys"]]
     everyday = np.isin(cat, EVERYDAY)
-    report = {"benchmark": benchmark, "split": "dev", "reproducibility": "exploratory-pre-freeze",
-              "code_version": config.code_version(), "probe": prov, "vectors": base,
+    report = {**about, "code_version": config.code_version(), "probe": prov, "vectors": base,
               "dev": {"photos": len(keys), "records": len(set(recs))},
               "not_a_fungus": {"photos": int(len(cat)), "everyday": int(everyday.sum()),
                                "manifest_sha256": sha256_file(ood_manifest)},
-              "rule": {"grid": list(GRID), "max_unsure_share": MAX_UNSURE_SHARE},
+              "rule": {"grid": list(GRID), "max_unsure_share": MAX_UNSURE_SHARE,
+                       "max_lost_share": max_lost_share,
+                       "decided_on": "every DEV record" if decide is None else
+                       f"{len(decide):,} DEV records (the rest reported beside)"},
               "created_at": datetime.now(timezone.utc).isoformat(), "modes": {}}
     by_rec = defaultdict(list)
     for i, r in enumerate(recs):
         by_rec[r].append(i)
+    deciding = {r: ix for r, ix in by_rec.items() if decide is None or r in decide}
+    beside = {r: ix for r, ix in by_rec.items() if decide is not None and r not in decide}
     chosen = None
     for mode in (("probe",) if served else fungusgate.MODES):
         g = fungusgate.FungusGate(text.classes, text.sides, text.vectors, text.scale,
                                   fungusgate.Thresholds(0, 0), probe_w=w, probe_b=b, mode=mode)
         pd, po = g.p_fungus(dev[field]), g.p_fungus(ood[field])
-        c = choose_thresholds([pd[ix] for ix in by_rec.values()])
+        c = choose_thresholds([pd[ix] for ix in deciding.values()],
+                              max_lost_share=max_lost_share)
         entry = {"auroc_everyday": fungusgate.auroc(pd, po[everyday]),
                  "auroc_all": fungusgate.auroc(pd, po), "choice": c.__dict__,
                  "fpr_at_95_tpr_everyday": fungusgate.rates_at(
                      fungusgate.threshold_for_pass_rate(pd, 0.95), pd, po[everyday])["fpr"]}
+        if c.not_fungus is not None and by_rec:
+            # The same thresholds on every DEV record and on the records not deciding.
+            for name, part in (("dev_all", by_rec), ("dev_beside", beside)):
+                if part:
+                    best_ = np.array([pd[ix].max() for ix in part.values()])
+                    entry[name] = {"records": len(part),
+                                   "lost": int((best_ < c.not_fungus).sum()),
+                                   "not_sure": int(((best_ >= c.not_fungus)
+                                                    & (best_ < c.unsure)).sum())}
         if c.not_fungus is not None:
             m = po[everyday]
             entry["everyday"] = {"not_a_fungus": float((m < c.not_fungus).mean()),
@@ -295,8 +393,8 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
             report["lift"]["dev_photos_lifted"] = sum(1 for v in pd_dev if v.get("lifted_by"))
     gate = fungusgate.FungusGate(text.classes, text.sides, text.vectors, text.scale,
                                  fungusgate.Thresholds(c.not_fungus, c.unsure), base,
-                                 {"tuned_on": f"{benchmark} dev + not-a-fungus set",
-                                  "reproducibility": "exploratory-pre-freeze",
+                                 {"tuned_on": tuned_on,
+                                  "reproducibility": about.get("reproducibility"),
                                   "code_version": report["code_version"],
                                   "training_records_sha256": prov["training_records_sha256"]},
                                  w, b, mode, lift, looks)

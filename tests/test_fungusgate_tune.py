@@ -44,3 +44,74 @@ def test_the_not_a_fungus_manifest_keeps_licence_and_a_checksum_for_every_photo(
                         tmp_path, out)
     row = out.read_text(encoding="utf-8").splitlines()[1].split(",")
     assert "cc0" in row and row[-1] == tune.sha256_file(tmp_path / "a.jpg")
+
+
+# --- re-tuned on a dataset release (paper E10) ---------------------------------------------
+
+def test_a_lost_share_above_zero_allows_that_share_of_dev_records_to_lose_their_answer():
+    scores = [np.array([0.5])] * 199 + [np.array([0.12])]
+    assert tune.choose_thresholds(scores).not_fungus == 0.1          # none may lose it
+    assert tune.choose_thresholds(scores, max_lost_share=0.005).not_fungus == 0.5
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent / "replications" / "fungitastic"))
+    from release_fixture import BASE, release_world
+
+    from mycomap_vision.replications.fungitastic import dataset
+    w = release_world(tmp_path, monkeypatch, test_release=False)
+    return {**w, "rel": dataset.load(BASE, True)}
+
+
+def test_the_release_probe_takes_train_positives_and_only_the_given_negatives(world, monkeypatch):
+    rel = world["rel"]
+    ids = np.array([int(p) for (p,) in rel.db.execute("select manifest_photo_id from photos")])
+    vecs = np.eye(len(ids), 4, dtype=np.float32) + 0.1
+    neg = np.ones((3, 4), np.float32)
+    monkeypatch.setattr(tune, "POSITIVE_RECORDS", 100)
+    X, y, prov = tune.release_probe_set(rel, ids, vecs, neg)
+    train = {r["record_key"] for r in rel.records("train")}
+    assert prov["positive_records"] == len(train) == 5               # never val
+    assert int(y.sum()) == prov["positive_photos"] and int((1 - y).sum()) == 3
+    assert prov["negative_records"] == 0                             # no record is a negative
+
+
+def test_the_release_probe_leaves_an_erratum_out(world, monkeypatch, tmp_path):
+    from mycomap_vision import errata
+    rel = world["rel"]
+    path = tmp_path / "e.tsv"
+    path.write_text("kind\tkey\treason\tnote\nrecord\t1\tmo_twin_as_inat\t\n", encoding="utf-8")
+    rel.use_errata(errata.read(path))
+    ids = np.array([int(p) for (p,) in rel.db.execute("select manifest_photo_id from photos")])
+    monkeypatch.setattr(tune, "POSITIVE_RECORDS", 100)
+    _X, _y, prov = tune.release_probe_set(rel, ids, np.ones((len(ids), 4), np.float32),
+                                          np.ones((1, 4), np.float32))
+    assert prov["positive_records"] == 4
+
+
+def test_dev_photos_must_be_val_and_the_former_held_out_does_not_decide(world):
+    rel = world["rel"]
+    val = [str(p) for (p,) in rel.db.execute(
+        "select p.manifest_photo_id from photos p join records r using (record_key) "
+        "where r.split = 'val'")]
+    recs, decide = tune.release_dev_records(rel, val)
+    assert set(recs) == {"5", "6"} and decide == {"5", "6"}          # no benchmark records here
+    train = str(rel.db.execute("select p.manifest_photo_id from photos p join records r "
+                               "using (record_key) where r.split = 'train'").fetchone()[0])
+    with pytest.raises(ValueError, match="only val tunes the gate"):
+        tune.release_dev_records(rel, val + [train])
+
+
+def test_only_val_records_outside_the_former_held_out_decide():
+    class Db:
+        def execute(self, *_):
+            return [(11, "a", "val", None), (12, "a", "val", None),
+                    (13, "b", "val", "heldout-2026-10-08"), (14, "c", "train", None)]
+
+    class Rel:
+        id, db = "r", Db()
+    recs, decide = tune.release_dev_records(Rel(), ["11", "12", "13"])
+    assert recs == ["a", "a", "b"] and decide == {"a"}
