@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bars, comparisons, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth, heldoutKs,
+import { bars, comparisons, releaseResultsPending, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth, heldoutKs,
          onRelease, orderBenchmarks,
          kChoices, splitModelKey, type PublishedBenchmark } from "./compareView";
 import type { RunReport, ScoreRun } from "./api";
@@ -159,4 +159,15 @@ test("a comparison measured on a release is shown first, over a newer pre-freeze
   assert.equal(groupRelease(preFreeze), null);
   assert.equal(defaultComparison([preFreeze, v1], ["ft"]), 1);
   assert.equal(defaultComparison([preFreeze], ["ft"]), 0, "no release yet: as before");
+});
+
+test("the Results page says release results are still to come until one is published", () => {
+  const preFreeze = [run(1, "ft", "nearest"), run(2, "ft", "nearest+mean")];
+  const old = { ...bench(true), reproducibility: "exploratory-pre-freeze" };
+  const val = { ...bench(true), benchmark: "v1", split: "val", reproducibility: "reproduced-on-v1" };
+  assert.equal(releaseResultsPending([], []), true);
+  assert.equal(releaseResultsPending(preFreeze, [old]), true, "development history only");
+  assert.equal(releaseResultsPending(preFreeze, [old, val]), false, "an imported v1 benchmark");
+  const onV1 = [run(3, "ft-v1", "nearest", { record_set: "rs2", dataset_release: "v1" })];
+  assert.equal(releaseResultsPending([...preFreeze, ...onV1], []), false, "a v1 comparison");
 });

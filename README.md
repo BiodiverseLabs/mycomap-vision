@@ -16,8 +16,10 @@ open to anyone with a mycomap.org account.
 
 **Live:** the Identify site, answering from about 600,000 photos of DNA-validated
 records with a fine-tuned model; a not-a-fungus check in front of it; "likely" name
-lists; an optional place-and-date prior; nightly updates as new records are
-validated on mycomap.org; and a versioned API for mycomap.org and its mobile app.
+lists; a place-and-date prior, used whenever a find has a place or date; nightly
+updates as new records are validated on mycomap.org; and a public API (v1) for
+developers, mycomap.org and its mobile app, with keys from mycomap.org
+([docs/api.md](docs/api.md), [vision.mycomap.org/research/api](https://vision.mycomap.org/research/api)).
 
 **Accuracy so far** (top-1; exploratory, measured on a dataset that was still
 changing, see below):
@@ -33,10 +35,14 @@ genera with 100+ references matched iNaturalist's model, and the gap was in gene
 with few or none. A full
 comparison with iNaturalist's computer vision is still to come.
 
-**In progress:** a frozen, versioned **dataset release (v1)** so anyone can reproduce
-every result, then a retrain and every experiment re-run on it under a pre-declared
-evaluation ([docs/retrain-v1.md](docs/retrain-v1.md)). Until then, all numbers here
-are development numbers, not final results.
+**Dataset release v1** was frozen on 12 October 2026: 169,135 records (155,781 train,
+13,354 validation) and 680,047 photos, so anyone can reproduce every result
+([docs/dataset-release.md](docs/dataset-release.md)). The model retrained on it under a
+pre-declared evaluation ([docs/retrain-v1.md](docs/retrain-v1.md)) is adopted and goes
+live shortly; its official numbers on v1's validation split will be on the site's
+Results page, and every earlier experiment is being re-run on v1. The numbers above are
+development numbers, not final results. A sealed test set (`v1-test`, records validated
+after v1 was cut) is scored once, after it closes.
 
 ## How it works
 
@@ -111,6 +117,7 @@ shadows the Unix `mv` in an activated venv.
 | --- | --- | --- |
 | [docs/data.md](docs/data.md) | everyone | which records are used; labels, photos, licences, photographer permissions |
 | [docs/cli.md](docs/cli.md) | developers | the pipeline and every `mv` command |
+| [docs/api.md](docs/api.md) | developers | the public API (v1): credentials, requests, the answer, errors, quotas |
 | [docs/PLAN.md](docs/PLAN.md) | researchers, developers | the working plan, decisions and findings, newest phase first |
 | [docs/dataset-release.md](docs/dataset-release.md) | researchers | frozen, verifiable dataset releases |
 | [docs/retrain-v1.md](docs/retrain-v1.md) | researchers | the pre-declared evaluation for the v1 retrain |

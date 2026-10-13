@@ -2,7 +2,7 @@
 // results, and waiting in line instead of an error when the server is busy.
 
 import type { Me, ScoreRun } from "./api";
-import { publicModelName } from "./publicNames";
+import { publicMethodLabel, publicModelName } from "./publicNames";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
@@ -67,6 +67,11 @@ export function headline(runs: ScoreRun[], served: string[], method = "nearest")
   return { comparisonId: ours.comparison_id, cutoff: ours.cutoff, nTest: ours.n_test,
            nReference: ours.n_reference, ours, inat };
 }
+
+/** The model and method behind the headline's numbers, as the How it works page names them:
+ *  the method of the run shown (the served default), never a fixed one. */
+export const headlineModel = (h: Headline): string =>
+  `${publicModelName(h.ours.backbone)}, ${publicMethodLabel(h.ours.method)}`;
 
 /** The likely list's wording, in one place: Steve has not ruled on it yet. */
 export const LIKELY_COPY = {

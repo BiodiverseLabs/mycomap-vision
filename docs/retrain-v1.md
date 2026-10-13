@@ -165,7 +165,8 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
    comparison.
 4. Section 2's comparison and summary; section 3's sanity gate. Every v1 command takes
    `--errata data/research-release-extras/v1/v1-errata.tsv` (dataset-release.md §4,
-   Errata: 41 MO finds held as iNat records, left out as references); record the file's
+   Errata; r3 leaves out 42 included MO finds held as iNat records and 96 included records whose
+   label names no fungus); record the file's
    sha256 and the count of masked ft-head classes (`errata.masked_head_labels`) in the
    registry entry.
 5. Write the registry entry `experiments/<date>-v1-finetune.md` in the private research
