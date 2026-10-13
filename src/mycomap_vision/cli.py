@@ -1073,14 +1073,14 @@ def cmd_backbone_screen(conn, args) -> None:
         raise SystemExit("backbone-screen needs --release <id>")
     out = bs.results_dir(rel.id)
     if args.action == "subset":
-        doc = bs.make_subset(rel, out, errata_path=args.errata, seed=args.seed,
+        doc = bs.make_subset(rel, out, seed=args.seed,
                              reference_records=args.reference_records, cap=args.cap,
                              queries=args.queries)
         print(json.dumps({"subset": str(out / "subset.json"), "species": len(doc["species"]),
                           "species_sha256": doc["species_sha256"],
                           "references": len(doc["references"]), "photos": len(doc["photos"]),
                           "queries": {h: q["by_band"] for h, q in doc["queries"].items()},
-                          "errata": doc["errata"]}, indent=2))
+                          "errata": doc["dataset_release"].get("errata")}, indent=2))
         return
     subset = bs.load_subset(rel.id)
     backbones = _split(args.backbones)
@@ -2080,8 +2080,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--backbones", default="bioclip-2",
                    help="comma list (embed, score)")
     p.add_argument("--methods", default="nearest,species-mean,nearest+mean")
-    p.add_argument("--errata", help="the release's errata TSV: its records are left out "
-                                    "(subset; the file's sha256 is recorded)")
     p.add_argument("--seed", type=int, default=20261013)
     p.add_argument("--reference-records", type=int, default=16000)
     p.add_argument("--cap", type=int, default=50, help="train records per species, at most")

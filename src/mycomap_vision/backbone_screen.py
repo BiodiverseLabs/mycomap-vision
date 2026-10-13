@@ -14,8 +14,8 @@ GPU, so the screen runs on a subset drawn once, seeded, from the release itself:
   `queries` records from val excluding the former held-out benchmark (the half that
   decides, docs/retrain-v1.md) and `queries` from the former held-out, each stratified by
   the standard depth band of its species' capped reference count (largest remainder).
-- Records in `errata` (a release's errata list: records that are not what the release
-  says) are left out of both, and the file's sha256 is recorded.
+- An erratum given to the release (`--errata`, errata.py; Release.use_errata) leaves its
+  records out of both, as for every other report, and its sha256 is in the cited release.
 
 The subset (`subset.json`: parameters, species list and its sha256, record keys, photo
 ids) is written once and every later step reads it, so every backbone is scored on
@@ -51,26 +51,6 @@ def band_of(n: int) -> str:
     return standard_band(n)
 
 
-def read_errata(path: str | Path | None) -> tuple[set[str], str | None]:
-    """Record keys listed in a release's errata TSV and the file's sha256; (set(), None)
-    without a file. The keys are read from the `key` column (`mv dataset errata`'s
-    review-list format: kind, key, reason, note) or a `record_key` column; a file with
-    neither header is refused rather than guessed."""
-    if not path:
-        return set(), None
-    body = Path(path).read_bytes()
-    rows = list(csv.reader(body.decode("utf-8-sig").splitlines(), delimiter="\t"))
-    head = [h.strip() for h in rows[0]] if rows else []
-    col = next((head.index(c) for c in ("key", "record_key") if c in head), None)
-    if col is None:
-        raise ValueError(f"{path}: no 'key' or 'record_key' column in {head}: not an "
-                         "errata list")
-    kind = head.index("kind") if "kind" in head else None
-    keys = {r[col].strip() for r in rows[1:] if len(r) > col and r[col].strip()
-            and (kind is None or r[kind].strip() == "record")}
-    return keys, hashlib.sha256(body).hexdigest()
-
-
 def allocate(sizes: dict[str, int], total: int) -> dict[str, int]:
     """Proportional allocation of `total` over strata of `sizes` (largest remainder,
     ties broken by stratum name), never more than a stratum holds."""
@@ -86,14 +66,13 @@ def allocate(sizes: dict[str, int], total: int) -> dict[str, int]:
 
 
 def draw(records: list[dict], seed: int = SEED, reference_records: int = REFERENCE_RECORDS,
-         cap: int = CAP, queries: int = QUERIES, errata: set[str] | None = None) -> dict:
+         cap: int = CAP, queries: int = QUERIES) -> dict:
     """The subset from a release's included records (dicts with record_key, split, species,
     benchmark). Deterministic for the same records and parameters."""
-    errata = errata or set()
     rng = random.Random(seed)
     train: dict[str, list[str]] = defaultdict(list)
     for r in records:
-        if r["split"] == "train" and r.get("species") and r["record_key"] not in errata:
+        if r["split"] == "train" and r.get("species"):
             train[r["species"]].append(str(r["record_key"]))
     species = sorted(train)
     rng.shuffle(species)
@@ -113,7 +92,6 @@ def draw(records: list[dict], seed: int = SEED, reference_records: int = REFEREN
         pool: dict[str, list[str]] = defaultdict(list)
         for r in records:
             if (r["split"] == "val" and r.get("species") in depth
-                    and r["record_key"] not in errata
                     and bool(r.get("benchmark")) == want_held):
                 pool[band_of(depth[r["species"]])].append(str(r["record_key"]))
         take = allocate({b: len(v) for b, v in pool.items()}, queries)
@@ -127,32 +105,30 @@ def draw(records: list[dict], seed: int = SEED, reference_records: int = REFEREN
                        "queries_per_half": queries},
             "species": species_list,
             "species_sha256": hashlib.sha256("\n".join(species_list).encode()).hexdigest(),
-            "references": sorted(refs), "queries": halves,
-            "errata_records_left_out": len(errata & {str(r["record_key"]) for r in records})}
+            "references": sorted(refs), "queries": halves}
 
 
-def make_subset(rel, out: Path, errata_path=None, **params) -> dict:
+def make_subset(rel, out: Path, **params) -> dict:
     """Draw the subset for release `rel` and write subset.json under `out` (refused if one
-    is there with other parameters or another release: the subset is drawn once)."""
+    is there with other parameters, another release or another erratum: the subset is
+    drawn once). An erratum the release was given (Release.use_errata) has already left
+    its records out of rel.records: nothing is filtered twice."""
     from .replications.fungitastic import dataset
-    errata, errata_sha = read_errata(errata_path)
     rows = [dict(r) for r in rel.records(("train", "val"))]
-    doc = draw(rows, errata=errata, **params)
+    doc = draw(rows, **params)
     keys = set(doc["references"]) | {k for h in doc["queries"].values() for k in h["records"]}
     photos = sorted(int(r[0]) for r in rel.db.execute(
         "select manifest_photo_id, record_key from photos where included = 1")
         if str(r[1]) in keys)
-    doc.update(dataset_release=dataset.cite(rel), errata={"file": str(errata_path) if
-                                                          errata_path else None,
-                                                          "sha256": errata_sha},
-               photos=photos)
+    cited = dataset.cite(rel)
+    doc.update(dataset_release=cited, photos=photos)
     path = out / "subset.json"
     if path.is_file():
         old = json.loads(path.read_text(encoding="utf-8"))
         same = (old.get("params") == doc["params"]
-                and old.get("dataset_release", {}).get("release_hash")
-                == doc["dataset_release"]["release_hash"]
-                and old.get("errata", {}).get("sha256") == errata_sha)
+                and old.get("dataset_release", {}).get("release_hash") == cited["release_hash"]
+                and (old.get("dataset_release", {}).get("errata") or {}).get("sha256")
+                == (cited.get("errata") or {}).get("sha256"))
         if not same:
             raise ValueError(f"{path} holds a subset drawn with other parameters, release or "
                              "errata; a screen's subset is drawn once (move it aside first)")

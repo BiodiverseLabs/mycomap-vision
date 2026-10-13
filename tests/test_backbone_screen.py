@@ -88,30 +88,6 @@ def test_the_draw_is_seeded_and_the_species_list_hashed():
     assert a["species_sha256"] == hashlib.sha256("\n".join(a["species"]).encode()).hexdigest()
 
 
-def test_errata_records_are_left_out_of_references_and_queries(tmp_path):
-    rows = world_records()
-    first = bs.draw(rows, reference_records=300, queries=20)
-    bad = set(first["references"][:5]) | set(first["queries"]["val-excl-former-heldout"]
-                                             ["records"][:3])
-    path = tmp_path / "v1-errata.tsv"
-    path.write_text("record_key\treason\n" + "".join(f"{k}\tnot this record\n" for k in bad),
-                    encoding="utf-8")
-    keys, sha = bs.read_errata(path)
-    assert keys == bad and len(sha) == 64
-    # mv dataset errata's own format: kind, key, reason, note (the key is not column 1).
-    review = tmp_path / "review.tsv"
-    review.write_text("kind\tkey\treason\tnote\n" + "".join(
-        f"record\t{k}\tmo twin\t\n" for k in sorted(bad)), encoding="utf-8")
-    assert bs.read_errata(review)[0] == bad
-    other = tmp_path / "other.tsv"
-    other.write_text("kind\tid\nrecord\t1\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="not an errata list"):
-        bs.read_errata(other)
-    doc = bs.draw(rows, reference_records=300, queries=20, errata=keys)
-    used = set(doc["references"]) | {k for h in doc["queries"].values() for k in h["records"]}
-    assert not used & bad and doc["errata_records_left_out"] == len(bad)
-
-
 # --- on a real release (release_fixture) -------------------------------------------------------
 
 @pytest.fixture
@@ -169,3 +145,17 @@ def test_a_subset_from_another_release_is_refused(world):
     doc["dataset_release"]["release_hash"] = "0" * 64
     with pytest.raises(ValueError, match="another release"):
         bs.score(conn, rel, doc, ["m1"], ["nearest"], log=lambda s: None)
+
+
+def test_an_erratum_given_to_the_release_leaves_the_subset_and_is_recorded(world, tmp_path):
+    from mycomap_vision import errata
+    rel = dataset.load(BASE, True)
+    path = tmp_path / "e.tsv"
+    path.write_text("kind\tkey\treason\tnote\nrecord\t1\tmo_twin_as_inat\t\n", encoding="utf-8")
+    rel.use_errata(errata.read(path))
+    doc = bs.make_subset(rel, bs.results_dir(rel.id), reference_records=100, queries=10)
+    assert "1" not in doc["references"] and set(doc["references"]) == {"2", "3", "4", "mo:9"}
+    assert doc["dataset_release"]["errata"]["sha256"] == errata.read(path).sha256
+    plain = dataset.load(BASE, True)                       # the same draw without it: refused
+    with pytest.raises(ValueError, match="drawn once"):
+        bs.make_subset(plain, bs.results_dir(rel.id), reference_records=100, queries=10)
