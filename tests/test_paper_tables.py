@@ -72,8 +72,9 @@ def e31_line(key, ids, status="ok", observer_named=False, community=None):
                                        "species_right": False, "genus_right": True}}
 
 
-def ident(tier="1", before=True, species_right=None, genus_right=None, role="identifier"):
-    return {"role": role, "tier": tier, "before_cutoff": before,
+def ident(tier="1", before=True, species_right=None, genus_right=None, role="identifier",
+          made_at="2025-01-01T00:00:00Z"):
+    return {"role": role, "tier": tier, "before_cutoff": before, "made_at": made_at,
             "species_right": species_right, "genus_right": genus_right}
 
 
@@ -82,14 +83,14 @@ def test_experts_score_only_identifiers_of_the_tier_before_the_dna_was_visible()
                           ident(species_right=True, genus_right=True, before=False),
                           ident(species_right=True, role="validator"),
                           ident(tier="2", species_right=True)])
-    o = po.expert_outcome(line)
+    o = po.expert_outcome(line, view="best")
     assert o["species_strict@1"] is False                # the right ones came after or weren't tier 1
     assert o["genus_strict@1"] is True
     assert o["species_strict@3"] is None                 # one name: only top-1 cells
     best = po.expert_outcome(e31_line("6", [ident(species_right=False),
-                                            ident(species_right=True)]))
+                                            ident(species_right=True)]), view="best")
     assert best["species_strict@1"] is True              # "best tier-1": any of them right
-    genus_only = po.expert_outcome(e31_line("7", [ident(genus_right=True)]))
+    genus_only = po.expert_outcome(e31_line("7", [ident(genus_right=True)]), view="best")
     assert genus_only["species_strict@1"] is None        # stopping at genus is coverage
     assert po.expert_outcome(e31_line("8", [], status="no_cutoff")) is None
     assert po.expert_outcome(e31_line("9", [ident(species_right=True)], observer_named=True),
@@ -199,3 +200,15 @@ def test_slices_give_intervals_only_and_pool_small_groups():
     assert set(s["source"]) == {"inat", "(small)"}
     cell = s["source"]["inat"]["a"]["species_strict@1"]
     assert set(cell) == {"n", "right", "rate", "ci95"}          # no p-values in slices
+
+def test_the_primary_expert_view_is_the_first_tier_one_species_id_before_the_cutoff():
+    line = e31_line("10", [
+        ident(species_right=True, made_at="2025-03-02T10:00:00Z"),
+        ident(species_right=False, genus_right=True, made_at="2025-03-01T09:00:00Z"),
+        ident(genus_right=False, made_at="2025-02-01T00:00:00Z"),          # genus-only, earlier
+        ident(species_right=True, before=False, made_at="2025-01-01T00:00:00Z")])
+    first = po.expert_outcome(line)                      # view="first" is the default
+    assert first["species_strict@1"] is False            # the earliest species-level ID
+    assert first["genus_strict@1"] is False              # the earliest genus-scorable ID
+    assert po.expert_outcome(line, view="best")["species_strict@1"] is True
+    assert po.expert_outcome(e31_line("11", [ident(genus_right=True)]))["species_strict@1"] is None

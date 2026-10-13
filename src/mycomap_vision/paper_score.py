@@ -121,10 +121,13 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
     tagged = _git(research_dir, "show", f"{TAG}:{CONFIG_IN_REPO}")
     if tagged.returncode:
         raise FrozenError(f"tag {TAG} has no {CONFIG_IN_REPO}")
-    if tagged.stdout.replace(b"\r\n", b"\n") != config_bytes.replace(b"\r\n", b"\n"):
+    if tagged.stdout != config_bytes:
+        crlf = tagged.stdout.replace(b"\r", b"") == config_bytes.replace(b"\r", b"")
         raise FrozenError(f"the config given is not the one tagged {TAG} "
-                          f"(sha256 {sha256_bytes(config_bytes)[:12]} vs "
-                          f"{sha256_bytes(tagged.stdout)[:12]})")
+                          + ("(line endings differ: give the tagged bytes, as "
+                             f"git show {TAG}:{CONFIG_IN_REPO} prints them)" if crlf else
+                             f"(sha256 {sha256_bytes(config_bytes)[:12]} vs "
+                             f"{sha256_bytes(tagged.stdout)[:12]})"))
     if code_commit.endswith("-dirty") or code_commit == "unknown":
         raise FrozenError(f"the sealed test is scored only by committed code (this is "
                           f"{code_commit})")

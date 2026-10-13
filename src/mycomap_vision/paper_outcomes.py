@@ -115,15 +115,18 @@ def inat_outcome(line: dict, find: Find, score: str) -> dict:
     return out
 
 
-EXPERT_VIEWS = ("best", "community")
+EXPERT_VIEWS = ("first", "best", "community")
 
 
-def expert_outcome(line: dict, tier: str = "1", view: str = "best", strict: bool = False
+def expert_outcome(line: dict, tier: str = "1", view: str = "first", strict: bool = False
                    ) -> dict | None:
     """The experts' outcome on a find from an E31 scores.jsonl line, or None when the line
     is not scored (status not ok; with `strict`, the observer had named a species before
-    the cutoff). `best`: any identifier of `tier` with a before-cutoff ID right at that
-    rank (None at a rank no such identifier reached); `community`: the community taxon as
+    the cutoff). `first` (primary, one opinion per find): at species, the earliest
+    before-cutoff species-level ID by an identifier of `tier` (by made_at); at genus, the
+    earliest such ID that can be scored at genus. `best`: any identifier of `tier` with a
+    before-cutoff ID right at that rank. Either is None at a rank no such identifier
+    reached (stopping at genus is coverage, not error). `community`: the community taxon as
     it stood at the cutoff. Experts give one name, so only the @1 cells are set; s.l. and
     complex equal strict (the lane scores taxa, not spellings)."""
     if view not in EXPERT_VIEWS:
@@ -142,10 +145,15 @@ def expert_outcome(line: dict, tier: str = "1", view: str = "best", strict: bool
         ids = [i for i in line.get("ids") or [] if i.get("role") == "identifier"
                and i.get("before_cutoff") and str(i.get("tier")) == str(tier)]
         out["answered"] = bool(ids)
+        ids = sorted(ids, key=lambda i: str(i.get("made_at") or ""))
         sp_ids = [i["species_right"] for i in ids if i.get("species_right") is not None]
         ge_ids = [i["genus_right"] for i in ids if i.get("genus_right") is not None]
-        sp = any(sp_ids) if sp_ids else None
-        ge = any(ge_ids) if ge_ids else None
+        if view == "first":
+            sp = sp_ids[0] if sp_ids else None
+            ge = ge_ids[0] if ge_ids else None
+        else:
+            sp = any(sp_ids) if sp_ids else None
+            ge = any(ge_ids) if ge_ids else None
     for rank, v in (("species", sp), ("genus", ge)):
         if v is None:
             continue
