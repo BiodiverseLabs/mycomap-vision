@@ -71,16 +71,49 @@ class TrainSet:
     # Per item: its record's group (a species, or a one-word name, which has no species
     # label but still trains at genus and family). Photos are drawn by group.
     units: np.ndarray = field(repr=False, default=None)
+    # Which photos the model may learn from, and how many of each licence class it got
+    # (train_photo_policy); None without a release.
+    photo_policy: dict | None = None
+
+
+PHOTO_POLICIES = ("all", "public_trainable")
+
+
+def train_photo_policy(release, photo_ids, public_trainable_only: bool, left_out: int) -> dict:
+    """What a model trained on `release` learnt from: the policy ('all' included photos, or
+    'public_trainable': CC including NC, plus all-rights-reserved photos whose owner granted
+    permission), the photos and their licence classes, and the photos the policy left out."""
+    from .dataset_release import CC_CLASSES
+    want = set(int(p) for p in photo_ids)
+    by: dict[str, int] = {}
+    for pid, lclass, pt in release.db.execute(
+            "select manifest_photo_id, license_class, public_trainable from photos "
+            "where included = 1"):
+        if pid in want:
+            key = lclass if lclass in CC_CLASSES else (
+                f"{lclass}_permission_granted" if pt else lclass)
+            by[key] = by.get(key, 0) + 1
+    return {"policy": PHOTO_POLICIES[int(public_trainable_only)], "photos": len(want),
+            "photos_by_licence_class": dict(sorted(by.items())),
+            "photos_left_out_by_policy": left_out}
 
 
 def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, size: str,
-                   test_days: int = 28, embeddings_root=None, release=None) -> TrainSet:
+                   test_days: int = 28, embeddings_root=None, release=None,
+                   public_trainable_only: bool = False) -> TrainSet:
     """Every photo of the reference records a comparison of `base` would use, with its
     labels. The base must be embedded: its vectors seed the classifier.
 
     With a dataset `release` (dataset_release.load_release) those are the release's
     `train` records only: never `val` (what the model is judged on), never a test
-    release, never an excluded record; trained_through is the release's val cutoff."""
+    release, never an excluded record; trained_through is the release's val cutoff.
+    `public_trainable_only` (a release only; the public model, paper E23): only the
+    photos the released weights may learn from (photos.public_trainable: CC including
+    NC, or permission granted); a record left with none is left out, and so is a class
+    no photo is left for. The policy and the licence classes go into photo_policy."""
+    if public_trainable_only and release is None:
+        raise ValueError("public-trainable-only training reads each photo's licence from a "
+                         "dataset release: give --release")
     if release is not None:
         release.training_records()      # raises SealedLeak for a test release
         if not release.val_cutoff:
@@ -88,6 +121,17 @@ def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, siz
                              "which records the model may not see")
     shared = evaluate.shared_records(conn, [base], test_days, embeddings_root=embeddings_root,
                                      release=release)
+    left_out = 0
+    if public_trainable_only:
+        allowed = set(release.photo_ids(("train",), public_trainable_only=True))
+        kept_ref = []
+        for rec in shared.ref:
+            before = len(rec.photo_rows)
+            rec.photo_rows = [p for p in rec.photo_rows if p in allowed]
+            left_out += before - len(rec.photo_rows)
+            if rec.photo_rows:
+                kept_ref.append(rec)
+        shared.ref = kept_ref
     ids, vecs = shared.loaded[base]
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     paths = dict(conn.execute("select photo_id, path from photo_copies where store = ? and "
@@ -108,9 +152,11 @@ def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, siz
                 units.append(unit_pos[rec.unit])
     if not items:
         raise ValueError(f"no {size} photos of reference records in {store_location}")
+    policy = (train_photo_policy(release, [pid for pid, _ in items], public_trainable_only,
+                                 left_out) if release is not None else None)
     return TrainSet(items, np.asarray(labels, dtype=np.int64).reshape(-1, 3), names,
                     np.asarray(rows, dtype=np.int64), shared.cutoff, len(shared.ref), vecs,
-                    np.asarray(units, dtype=np.int64))
+                    np.asarray(units, dtype=np.int64), policy)
 
 
 def class_prototypes(vectors: np.ndarray, labels: np.ndarray, n_classes: int) -> np.ndarray:
@@ -330,12 +376,14 @@ def batches_with_fallback(make_loader, workers: int, steps: int, seed: int, curr
 def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
              cfg: FinetuneConfig | None = None, test_days: int = 28, embeddings_root=None,
              out_dir: Path | None = None, loader=None, log=print, should_stop=None,
-             release=None) -> dict:
+             release=None, public_trainable_only: bool = False) -> dict:
     """Train, save <name>.pt, <name>.heads.npz and <name>.json in out_dir, register;
     returns the metadata. `should_stop()` is asked before each step; when it says stop,
     screening.Stopped is raised and nothing is saved (a half-trained model is not the
     model asked for). `release`: train on a dataset release's train split (build_trainset);
-    the model then carries the release's citation and its snapshot date as `version`."""
+    the model then carries the release's citation and its snapshot date as `version`, and
+    `train_photos` (the photo policy and licence classes; `public_trainable_only` for the
+    public model). The seed is cfg.seed, kept in `config` and as `seed`."""
     import torch
     import torch.nn.functional as F
 
@@ -344,9 +392,12 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
     cfg = cfg or FinetuneConfig()
     out_dir = out_dir or models_dir()
     started = time.monotonic()
-    ts = build_trainset(conn, base, store.location, size, test_days, embeddings_root, release)
+    ts = build_trainset(conn, base, store.location, size, test_days, embeddings_root, release,
+                        public_trainable_only)
     log(f"[{name}] {len(ts.items):,} photos of {ts.records:,} records, "
-        f"{len(ts.names['species']):,} species, trained through {ts.trained_through}")
+        f"{len(ts.names['species']):,} species, trained through {ts.trained_through}, "
+        f"seed {cfg.seed}" + (f", photos: {ts.photo_policy['policy']}" if ts.photo_policy
+                              else ""))
     backbone = (loader or models.load_backbone)(base)
     module = backbone.image_module()
     dev = backbone.device
@@ -440,7 +491,9 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
             "final_loss": round(float(np.mean(losses[-100:])), 4) if losses else None,
             "blocks_trained": cfg.blocks, "of_blocks": n_blocks, "size": size,
             "loader_fallback_at_step": fallback["at_step"],
-            "config": asdict(cfg), "minutes": round((time.monotonic() - started) / 60, 1),
+            "config": asdict(cfg), "seed": cfg.seed,
+            "minutes": round((time.monotonic() - started) / 60, 1),
+            **({"train_photos": ts.photo_policy} if ts.photo_policy else {}),
             "code_version": config.code_version(),
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             **release_fields(release)}
