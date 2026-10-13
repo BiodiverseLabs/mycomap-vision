@@ -18,8 +18,9 @@ freeze. Nothing is ever written to the manifest: outputs go to `--out`.
 Per find (paper_outcomes.Find): the release's answer key; depth = reference records of
 the true species in the reference used (val: train; the test: train + val), errata records
 left out; observer (clusters); name kind; photos; slice attributes; near-duplicate flags
-(a photo byte-identical to a reference photo, listed in the dHash flags file, or at cosine
->= the config's threshold to a reference photo on the frozen backbone). Comparators:
+(a photo byte-identical to a reference photo, flagged in the test release's near_base
+table by its dHash, or at cosine >= the config's threshold to a reference photo on the
+frozen backbone). Comparators:
 
 - `vision`: a backbone and method scored here from the stored vectors (photos embedded by
   this command if missing; place methods see only the record's public point);
@@ -224,8 +225,8 @@ def max_cosine(query: np.ndarray, ref: np.ndarray, q_chunk: int = 2048,
 def near_duplicates(scored_photos: dict[str, list[dict]], ref_shas: set[str],
                     dhash_keys: set[str], cosine_of: dict[int, float] | None,
                     threshold: float) -> dict[str, dict]:
-    """Per find: bytes (a photo's original sha256 is a reference photo's), dhash (listed in
-    the flags file, by record key or photo key), cosine (a photo at or above `threshold`)."""
+    """Per find: bytes (a photo's original sha256 is a reference photo's), dhash (a photo
+    the test build flagged as a near-copy of a base photo, by photo key; or the record), cosine (a photo at or above `threshold`)."""
     out = {}
     for key, ph in scored_photos.items():
         flags = {"bytes": any(p.get("original_sha256") in ref_shas for p in ph),
@@ -434,7 +435,7 @@ def outcomes_for(comp: dict, finds: list[po.Find], answers: dict | None = None) 
 
 
 def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
-        errata_path=None, dhash_path=None, attrs_path=None, allow_code: str | None = None,
+        errata_path=None, attrs_path=None, allow_code: str | None = None,
         research_dir: Path | None = None, embed_missing=None, log=print) -> dict:
     """Score every comparator of `config` on `test` ("val" or a test release of `base`)
     and write report.json, report.md and the Vision predictions under `out`."""
@@ -459,9 +460,10 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "select manifest_photo_id, original_sha256, record_key from photos where included = 1")
         if str(p["record_key"]) in ref_keys]
     ref_shas = {p["original_sha256"] for p in ref_photo_rows if p["original_sha256"]}
-    dhash = set()
-    if dhash_path:
-        dhash, _ = read_errata(dhash_path)
+    # dHash near-copy flags: the test release's own near_base table (part of its
+    # release_hash), the one source; empty for val and for a build made without them.
+    near_base = scored_rel.near_base() if scored_rel is not base else {}
+    dhash = {pk for pk, v in near_base.items() if v.get("base_photo_key")}
     nd_cfg = config.get("near_duplicates", {})
     cosine_of = None
     if nd_cfg.get("backbone"):
@@ -552,8 +554,10 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "errata": {"file": str(errata_path) if errata_path else None, "sha256": errata_sha,
                    "reference_records_left_out": len(errata & {str(r["record_key"]) for r in
                                                                base.records(ref_splits)})},
-        "dhash_flags": {"file": str(dhash_path) if dhash_path else None,
-                        "sha256": sha256_file(dhash_path) if dhash_path else None},
+        "dhash_flags": {"source": "the scored release's near_base table",
+                        "photos_hashed": len(near_base), "photos_flagged": len(dhash),
+                        "near_base": (scored_rel.manifest.get("near_base")
+                                      if scored_rel is not base else None)},
         "bootstrap": {"reps": reps, "seed": seed, "clusters": "observer"},
         "inputs": inputs,
         "finds": {"scored": len(finds), "by_name_kind": dict(Counter(f.name_kind for f in finds))},

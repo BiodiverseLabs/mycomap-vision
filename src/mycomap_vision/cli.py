@@ -1068,7 +1068,7 @@ def cmd_paper_score(conn, args) -> None:
         if args.embed_missing:
             paper_score.ensure_embedded(conn, backbone, photo_ids, px)
     report = paper_score.run(conn, base, test, config_doc, body, out, errata_path=args.errata,
-                             dhash_path=args.dhash_flags, attrs_path=args.attrs,
+                             attrs_path=args.attrs,
                              allow_code=args.allow_code, embed_missing=embed_missing)
     print(json.dumps({"out": str(out), "finds": report["finds"], "post_hoc": report["post_hoc"],
                       "hypotheses": {f: {h: {k: r.get(k) for k in ("p_test", "p_holm", "reject")}
@@ -1955,7 +1955,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", required=True, help="the analysis plan (paper/analysis-v1.json)")
     p.add_argument("--out", help="default: research-results/<release>/paper-score/<test>")
     p.add_argument("--errata", help="the release's errata TSV (reference records left out)")
-    p.add_argument("--dhash-flags", help="near-copy flags of the test build (record or photo keys)")
     p.add_argument("--attrs", help="extra per-find attributes (TSV with record_key)")
     p.add_argument("--embed-missing", action="store_true",
                    help="embed scored photos a backbone lacks, from copies on this machine")

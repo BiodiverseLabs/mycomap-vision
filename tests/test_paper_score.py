@@ -383,3 +383,16 @@ def test_first_photo_and_photo_count_options(world, tmp_path):
     rep = run(world, tmp_path, "val", cfg)
     assert rep["standard"]["comparators"]["first"]["primary"]["all"]["finds"] == 2
     assert set(rep["slices"]["photos"]) == {"1"}
+
+
+def test_dhash_flags_come_from_the_test_releases_near_base_table(world, tmp_path, monkeypatch):
+    test = world["test"]
+    key7 = test.db.execute("select photo_key from photos where record_key = '7'").fetchone()[0]
+    rep = run(world, tmp_path, test, config(tmp_path, ["7", "8"]))
+    assert rep["dhash_flags"]["photos_flagged"] == 0          # a build without flags: empty
+    monkeypatch.setattr(type(test), "near_base", lambda self: {
+        key7: {"dhash": "ab", "base_photo_key": "base-1", "distance": 2}})
+    rep = run(world, tmp_path, test, config(tmp_path, ["7", "8"]))
+    assert rep["dhash_flags"]["photos_flagged"] == 1
+    assert rep["standard"]["near_duplicates"]["by_kind"]["dhash"] == 1
+    assert rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]["finds"] == 1
