@@ -126,7 +126,7 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
             photos = rel.db.execute("select photo_key, manifest_photo_id from photos where "
                                     "record_key = ? and included = 1 order by position, photo_key",
                                     (key,)).fetchall()
-            answers, sent = [], []
+            answers, sent, versions = [], [], set()
             for pk, _ in photos:
                 def body(pk=pk):
                     b, w, h = at_most_1024(read_photo(pk))
@@ -134,7 +134,9 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
                                  "width": w, "height": h})
                     return b
                 before = client.calls
-                raw = client.score_image(pk, body, lat, lng, day)
+                raw = client.score_image(pk, body, lat, lng, day,
+                                         model=(model or {}).get("version"))
+                versions.add(raw.get("_inat_model"))
                 if client.calls > before and "response_keys" not in probe:
                     probe["response_keys"] = sorted(k for k in raw if k != "results")
                     probe["result_keys"] = sorted({k for r in raw.get("results") or [] for k in r})
@@ -151,6 +153,8 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
                 stats["photos"] += 1
             t = truths[key]
             line = {"format": FORMAT, "record_key": key, "photos": len(photos),
+                    "inat_model": sorted(versions, key=str)[0] if len(versions) == 1
+                    else sorted(versions, key=str),
                     "photo_ids": [mid for _, mid in photos], "px": MAX_SIDE,
                     "place_sent": lat is not None, "date_sent": day is not None,
                     "truth": {"species": t.species, "genus": t.genus,
@@ -169,6 +173,7 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
             line["answered"] = {s: any(line[s][r] for r in RANKS) for s in ("vision", "combined")}
             stats["no_suggestion"] += not line["answered"]["vision"]
             stats["finds"] += 1
+            stats[f"model:{line['inat_model']}"] += 1
             f.write(json.dumps(line, sort_keys=True) + "\n")
             if n % 25 == 0:
                 log(f"  {n:,}/{len(record_keys):,} finds, {client.calls:,} iNat calls")
@@ -177,6 +182,8 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
             "finds_with_no_suggestion": stats["no_suggestion"],
             "ids_sha256": E.ids_sha256(record_keys), "finds_sha256": E.sha256_file(out),
             "inat_cv_model": model or {"version": None, "note": "not recorded"},
+            "finds_by_inat_model": {k[6:]: v for k, v in stats.items() if k.startswith("model:")},
+            "token_swaps_this_run": getattr(client, "token_swaps", 0),
             "place_rule": PLACE_RULE, "px": MAX_SIDE,
             "first_scored_at": first_scored, "last_scored_at": last_scored,
             "requests_this_run": client.calls - calls0,
