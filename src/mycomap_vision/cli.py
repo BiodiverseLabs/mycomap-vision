@@ -1064,6 +1064,25 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_paper_attrs(conn, args) -> None:
+    """Per-find attributes for paper-score's slices and the place band (paper_attrs.py):
+    data, not model output, from public points and dates only."""
+    from pathlib import Path
+
+    from . import paper_attrs
+    from .dataset_release import load_release
+    base = _dataset_release(args)
+    if base is None:
+        raise SystemExit("paper-attrs needs --release <id>")
+    test = "val" if args.test == "val" else load_release(args.test, allow_draft=args.allow_draft)
+    attrs = paper_attrs.for_release(base, test)
+    out = paper_attrs.write(Path(args.out), attrs)
+    from collections import Counter
+    print(json.dumps({"out": str(out), "finds": len(attrs),
+                      "distance_band": Counter(a["distance_band"] for a in attrs.values()),
+                      "in_season": Counter(a["in_season"] for a in attrs.values())}, indent=2))
+
+
 def cmd_paper_score(conn, args) -> None:
     """Every table of the paper's sealed-test analysis from one command (paper_score.py).
     The sealed test opens only under the freeze tag, the tagged config and the frozen code."""
@@ -2103,6 +2122,12 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--redo", action="store_true", help="replace answers stored before")
     release_options(q)
 
+    p = sub.add_parser("paper-attrs", help="per-find attributes for paper-score: distance band "
+                                           "and season, from public points (paper_attrs.py)")
+    release_options(p)
+    p.add_argument("--test", required=True, help="a test release of --release, or 'val'")
+    p.add_argument("--out", required=True, help="the TSV to write (paper-score --attrs)")
+
     p = sub.add_parser("paper-score", help="every table of the paper's sealed-test analysis, "
                                            "one command (paper_score.py)")
     release_options(p)
@@ -2286,6 +2311,7 @@ def main(argv: list[str] | None = None) -> int:
         "contributors": cmd_contributors,
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
+        "paper-attrs": cmd_paper_attrs,
         "paper-score": cmd_paper_score,
         "backbone-screen": cmd_backbone_screen,
         "external": cmd_external,
