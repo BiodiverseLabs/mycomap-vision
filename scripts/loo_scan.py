@@ -3,6 +3,13 @@
     python scripts/loo_scan.py prep  --out DIR      # reference -> DIR (vectors, layout)
     python scripts/loo_scan.py score --out DIR --workers 8
 
+On a dataset release (paper E17, the flag rate on v1): prep reads the release's train + val
+records (the served reference), an erratum left out, the given backbone's vectors and the
+species temperature fitted on the release's val (stated, never looked up):
+
+    python scripts/loo_scan.py prep --out DIR --release v1 --errata <file>
+        --backbone bioclip-2-ft-<run> --temperature <T>
+
 Run with MV_MANIFEST_PATH pointing at a COPY of the manifest (the shared one changes
 during the day) and OPENBLAS_NUM_THREADS=1. torch is never imported: in the shared
 .venv, numpy's OpenBLAS segfaults on big products once torch is loaded.
@@ -89,6 +96,66 @@ def prep(out: Path, embeddings: Path | None = None) -> None:
         pickle.dump({"layout": layout, "records": recs, "labels": labels, "meta": meta}, f)
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))
+
+
+def prep_release(out: Path, release: str, backbone: str, temperature: float,
+                 errata: Path | None = None, embeddings: Path | None = None,
+                 allow_draft: bool = False) -> dict:
+    """prep() on a dataset release: every included train + val record (the reference the
+    site serves), an erratum's records left out (Release.use_errata), the backbone's stored
+    vectors, and the species temperature given (fitted on the release's val)."""
+    from mycomap_vision import config, evaluate, loo
+    from mycomap_vision.replications.fungitastic import dataset
+    from mycomap_vision.serving import map_embeddings
+    rel = dataset.load(release, allow_draft)
+    if errata is not None:
+        from mycomap_vision import errata as errata_mod
+        rel.use_errata(errata_mod.read(Path(errata)))
+    conn = sqlite3.connect(Path(config.MANIFEST_PATH).resolve().as_uri() + "?mode=ro", uri=True)
+    ids, vecs = map_embeddings(conn, backbone, embeddings)
+    row_of = {int(p): i for i, p in enumerate(ids.tolist())}
+    records = rel.as_records(("train", "val"), row_of)
+    index = evaluate.build_index(records)
+    layout, ordered = loo.build_layout(records, index)
+    ref32 = np.lib.format.open_memmap(out / "ref32.npy", mode="w+", dtype=np.float32,
+                                      shape=(len(layout.col_rows), vecs.shape[1]))
+    step = 65_536
+    for s0 in range(0, len(layout.col_rows), step):
+        ref32[s0:s0 + step] = np.asarray(vecs[layout.col_rows[s0:s0 + step]], dtype=np.float32)
+    ref32.flush()
+    np.save(out / "sums.npy", loo.unit_sums(ref32, layout))
+    cite = dataset.cite(rel)
+    meta = {
+        "backbone": backbone, "method": METHOD, "reference_hash": cite["reference_hash"],
+        "dataset_release": cite, "records": len(ordered),
+        "photos": int(len(layout.col_rows)), "units": len(layout.units),
+        "species": len(index.labels["species"]),
+        "temperature": {"species": float(temperature)},
+        "calibration_comparison": "given (fitted on the release's val)",
+        "leave_out_groups": len(layout.group_recs),
+        "rows_in_two_columns": len(layout.same_row_cols),
+        "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "code_version_prep": config.code_version(),
+        "reproducibility": f"reproduced-on-{rel.id}",
+        "embeddings_root": str(embeddings or config.DATA_DIR / "embeddings" / backbone),
+    }
+    recs = {"observation_id": [r.observation_id for r in ordered],
+            "species": [r.species for r in ordered], "genus": [r.genus for r in ordered],
+            "family": [r.family for r in ordered], "unit": [r.unit for r in ordered],
+            "observer": [r.observer or "" for r in ordered],
+            "observed_on": [r.observed_on or "" for r in ordered],
+            "projects": [list(r.projects) for r in ordered],
+            "photo_ids": [ids[r.photo_rows].tolist() for r in ordered]}
+    labels = {"species": index.labels["species"], "genus": index.labels["genus"],
+              "family": index.labels["family"],
+              "unit_species": index.label_of["species"].tolist(),
+              "unit_genus": index.label_of["genus"].tolist(),
+              "unit_family": index.label_of["family"].tolist()}
+    with open(out / "layout.pkl", "wb") as f:
+        pickle.dump({"layout": layout, "records": recs, "labels": labels, "meta": meta}, f)
+    (out / "meta.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+    return meta
 
 
 def file_digest(path: Path) -> dict:
@@ -241,11 +308,25 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="score only the first N chunks")
     ap.add_argument("--embeddings", type=Path, default=None,
                     help="the backbone's embedding shards (default: data/embeddings/<backbone>)")
+    ap.add_argument("--release", help="prep on a dataset release (e.g. v1): train + val")
+    ap.add_argument("--allow-draft", action="store_true")
+    ap.add_argument("--errata", type=Path, help="with --release: its erratum")
+    ap.add_argument("--backbone", default=BACKBONE, help="with --release: the model's vectors")
+    ap.add_argument("--temperature", type=float,
+                    help="with --release: the species temperature fitted on its val")
     a = ap.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     if os.environ.get("OPENBLAS_NUM_THREADS") != "1":
         print("note: set OPENBLAS_NUM_THREADS=1 (one BLAS thread per worker)", flush=True)
-    prep(a.out, a.embeddings) if a.step == "prep" else score(a.out, a.workers, a.limit)
+    if a.step == "prep" and a.release:
+        if a.temperature is None:
+            raise SystemExit("--release needs --temperature (the species one fitted on its val)")
+        prep_release(a.out, a.release, a.backbone, a.temperature, a.errata, a.embeddings,
+                     a.allow_draft)
+    elif a.step == "prep":
+        prep(a.out, a.embeddings)
+    else:
+        score(a.out, a.workers, a.limit)
 
 
 if __name__ == "__main__":
