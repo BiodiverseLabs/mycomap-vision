@@ -34,6 +34,9 @@ class Alias:
 ALIASES: dict[str, Alias] = {
     "bioclip-2": Alias("open_clip:hf-hub:imageomics/bioclip-2",
                        "Tree-of-life CLIP (includes fungi), 224 px"),
+    # BioCLIP 2's predecessor (ViT-B/16, 224 px): the ablation beside it in the screen.
+    "bioclip": Alias("open_clip:hf-hub:imageomics/bioclip",
+                     "BioCLIP (v1), tree-of-life CLIP, ViT-B/16, 224 px"),
     "dinov2-b14": Alias("timm:vit_base_patch14_dinov2.lvd142m",
                         "Self-supervised, fine detail, 518 px, base size"),
     "dinov2-l14": Alias("timm:vit_large_patch14_dinov2.lvd142m",
