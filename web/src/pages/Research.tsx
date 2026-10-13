@@ -168,7 +168,7 @@ export function ForResearchersPage() {
       <div className={body}>
         <h2 className={h2}>How to cite</h2>
         <p>
-          A paper describing the method and its tests is in preparation for <em>Mycologia</em>. Until
+          A paper describing the method and its tests is in preparation. Until
           it is published, please cite the site: MycoMap Vision, https://vision.mycomap.org,
           accessed (date).
         </p>

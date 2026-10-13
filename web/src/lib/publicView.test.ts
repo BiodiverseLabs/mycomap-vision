@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, identifyGate, LIKELY_COPY, longDate, modelName, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
+import { coverageWords, headline, headlineModel, identifyGate, LIKELY_COPY, longDate, modelName, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -144,4 +144,15 @@ test("the newest week's count is said only when there is one", () => {
   assert.equal(recentWeekLine({ records: 0, through: "2026-10-06" }), null);
   assert.equal(recentWeekLine(null), null);
   assert.equal(recentWeekLine(undefined), null, "an older server sends no count");
+});
+
+test("the headline names the method its numbers come from: the served default", () => {
+  const runs = [
+    run(9, "new", "bioclip-2-ft-x", "nearest", 0.30),
+    run(8, "new", "bioclip-2-ft-x", "nearest+mean+place", 0.41),
+  ];
+  const h = headline(runs, ["bioclip-2-ft-x"], "nearest+mean+place")!;
+  assert.equal(h.ours.species_top1, 0.41);
+  assert.match(headlineModel(h), /closest specimens \+ species average \+ place and date$/);
+  assert.match(headlineModel(headline(runs, ["bioclip-2-ft-x"], "nearest")!), /, closest specimens?$/);
 });

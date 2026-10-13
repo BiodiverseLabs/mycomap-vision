@@ -3,9 +3,10 @@ import { ArrowUpRight, Check } from "lucide-react";
 import { PageHeader } from "@/components/Layout";
 import { SafetyNote } from "@/components/SafetyNote";
 import { api, num, pct, type Stats } from "@/lib/api";
-import { publicMethodLabel, publicModelName } from "@/lib/publicNames";
+import { publicModelName } from "@/lib/publicNames";
 import {
   headline, JOIN_URL, recentWeekLine, releaseNote, SEQUENCING_URL, shareWords,
+  headlineModel,
 } from "@/lib/publicView";
 
 const DANISH_STUDY_URL = "https://pmc.ncbi.nlm.nih.gov/articles/PMC8779018/";
@@ -162,7 +163,8 @@ function Contributors({ s }: { s?: Stats }) {
         )}
       </p>
       <p className="mt-3">
-        The photos come from iNaturalist, where the finds were posted, and stay their
+        The photos come from iNaturalist and Mushroom Observer, where the finds were posted, and
+        stay their
         photographers' own.
         {s && s.permissions.granted > 0 && (
           <> Thank you to the {num(s.permissions.granted)} photographers who gave permission for
@@ -281,7 +283,7 @@ function HowGood() {
             </p>
           )}
           <p className="mt-3 text-sm text-muted-foreground">
-            Model: {publicModelName(h.ours.backbone)}, {publicMethodLabel("nearest")}. Measured on
+            Model: {headlineModel(h)}. Measured on
             the newest DNA-verified weeks; every test is on the{" "}
             <a className="underline" href="/research/results">Results page</a>.
           </p>

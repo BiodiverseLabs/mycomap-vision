@@ -117,16 +117,26 @@ def answer_table(doc: dict) -> set[str]:
 SELF_EVIDENT = {"request_id", "photos", "reference", "confidence_note"}
 
 
+# Fields of a candidate name that need no row of their own.
+CANDIDATE_SELF_EVIDENT = {"name", "score"}
+
+
 def test_every_field_of_a_real_answer_is_in_the_example_and_described(conn, tmp_path):
     from test_api_v1_identify import app_token, bearer, identify, v1_app
+    from test_confusions import A_X, B_Y, write_table
     client = v1_app(conn, tmp_path)
-    body = identify(client, bearer(app_token()), latitude="40.1", longitude="-83.0",
-                    observed_on="2026-10-11").json()
+    write_table(tmp_path, A_X, B_Y)          # "A x" prompts, so it carries confused_with
+    body = identify(client, bearer(app_token()), reds=(247, 245), latitude="40.1",
+                    longitude="-83.0", observed_on="2026-10-11").json()
     doc = apidocs.outline({"identify": True})
     described = answer_table(doc) | SELF_EVIDENT
     assert set(body) - set(apidocs.ANSWER_EXAMPLE) - SELF_EVIDENT == set(), "missing from the example"
     assert set(body) - described == set(), "missing from The answer table"
-    for name in ("prior", "photo_only_top", "place"):
+    # And every field a species or genus name can carry, confused_with included.
+    fields = {k for rank in ("species", "genus") for c in body["ranks"][rank] for k in c}
+    assert {"place", "confused_with"} <= fields, "the fixture shows both"
+    assert fields - CANDIDATE_SELF_EVIDENT - described == set(), "a name's field is undescribed"
+    for name in ("prior", "photo_only_top", "place", "confused_with"):
         assert name in described
 
 
