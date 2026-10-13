@@ -61,6 +61,8 @@ def parse_aggregated(body: dict) -> dict[str, dict[int, dict]]:
             "name": taxon["name"],
             "vision": float(r.get("vision_score") or 0),
             "combined": float(r.get("normalized_combined_score", r.get("combined_score")) or 0),
+            # iNat's raw combined score (vision x place), not rescaled per photo
+            "combined_raw": float(r.get("combined_score") or 0),
         }
     return out
 

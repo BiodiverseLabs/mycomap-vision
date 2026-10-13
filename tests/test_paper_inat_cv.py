@@ -21,7 +21,8 @@ def jpeg(w, h):
 def answer(*taxa):
     """score_image body: (rank, taxon id, vision, combined) rows."""
     return {"results": [{"taxon": {"id": t, "rank": r, "name": f"T{t}"}, "vision_score": v,
-                         "combined_score": c} for r, t, v, c in taxa]}
+                         "normalized_combined_score": c, "combined_score": c / 10}
+                        for r, t, v, c in taxa]}
 
 
 class FakeClient:
@@ -100,6 +101,7 @@ def test_best_photo_wins_and_photo_only_and_combined_stay_apart(run):
     assert a["vision"]["species"][0] == [101, "T101", 60.0]  # photo only: the wrong one leads
     assert a["combined"]["species"][0] == [100, "T100", 70.0]  # with place: the right one
     assert a["answered"] == {"vision": True, "combined": True} and a["px"] == 1024
+    assert a["combined_raw"]["species"][0] == [100, "T100", 7.0]   # the raw score kept too
     assert a["vision_hits"]["species"]["top1"] is False and a["vision_hits"]["species"]["top3"]
     assert a["combined_hits"]["species"]["top1"] is True
     assert a["first_photo"]["combined"]["species"][0][0] == 101

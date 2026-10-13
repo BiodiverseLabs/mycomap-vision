@@ -6,7 +6,9 @@ on the long side at most: our kept originals (iNat 'large' is 1024 px, MO 960 px
 are, any larger one cut down. Photos only, with the record's PUBLIC point (obscured where
 iNat obscures; an MO box centre) and its observed date: never a true coordinate, never the
 observation id, so iNat sees no community ID. Each photo keeps `vision_score` (photo only)
-and `combined_score` (with iNat's place model); a find's answer per rank is the best score
+and the combined score (with iNat's place model) twice: `combined` is iNat's
+normalized_combined_score (rescaled to 0-100 on each photo, what iNat ranks by, so
+comparable across photos) and `combined_raw` its raw combined_score; a find's answer per rank is the best score
 on any photo, matched to the truth by iNat taxon id; a find with no suggestion is wrong.
 
 On a sealed test release nothing is sent before the analysis freeze tag; the fallback
@@ -156,10 +158,11 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
                               "has_genus": bool(rec.get("genus"))},
                     "vision": find_answer(answers, "vision"),
                     "combined": find_answer(answers, "combined"),
+                    "combined_raw": find_answer(answers, "combined_raw"),
                     "first_photo": {"vision": find_answer(answers[:1], "vision"),
                                     "combined": find_answer(answers[:1], "combined")},
                     "sent_now": sent}
-            for score in ("vision", "combined"):
+            for score in ("vision", "combined", "combined_raw"):
                 line[f"{score}_hits"] = {
                     "species": hits(line[score]["species"], t.species) if t.formal_species else None,
                     "genus": hits(line[score]["genus"], t.genus) if rec.get("genus") else None}
