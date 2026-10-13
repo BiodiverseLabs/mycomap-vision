@@ -165,9 +165,11 @@ Why sessions rather than stateless calls:
   and dropped in that call; **no photo bytes are kept**. Re-scoring after a new photo,
   a removed one or a place/date change runs `identify_vectors` over the stored vectors
   and never re-embeds. Place and date move the scores only with the
-  `nearest+mean+place` method (the place/date prior). With today's default (nearest+mean) they add
-  the per-name `place` cue and are echoed, so a `PATCH` returns a re-scored answer
-  either way.
+  `nearest+mean+place` method (the place/date prior), the served default whenever a place
+  or a date is given (`prior.applied` true). Under a method without the prior they still
+  add the per-name `place` cue and are echoed, so a `PATCH` returns a re-scored answer
+  either way. A session that never sends a place or a date gets photos-only scores
+  (`prior.applied` false): send them at `POST` or by `PATCH` as soon as they are known.
 - **Lifetime.** 30 min after the last call, 2 h at most from creation (Steve). A
   session gone to expiry or a restart answers 404 `session_gone`. The app opens a new
   one and resends the photos it keeps locally anyway. Sessions belong to the credential's
