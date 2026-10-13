@@ -58,6 +58,18 @@ NO_EXTRAS = {"shrink": 3.0, "pen_slope": 0.0, "pen_start_km": 300.0, "pen_cap": 
              "pen_known": "dna", "damp_k": 0.0, "season_penalty": 0.0}
 PLACE_SETTINGS: dict[str, dict] = {
     DEFAULT_SETTING: dict(NO_EXTRAS),
+    # The candidates from the v1 re-tune (experiment place-penalty, 2026-10-13; v1 val,
+    # bioclip-2-ft-20261013-003428, nested 5-fold CV by observer, out of fold), for
+    # Steve's pick. Species top-1: photos only 54.9%, served 57.1%.
+    # Picked under Steve's band rule (the 300-1,500 km band within 2% of photos only on
+    # the training folds): 57.7%, the band -1.8% against photos only (served -2.6%).
+    "penalty-500-2026-10-13": {"shrink": 10.0, "pen_slope": 2.0, "pen_start_km": 500.0,
+                               "pen_cap": 8.0, "pen_known": "dna", "season_penalty": 1.0},
+    # Best overall, no band rule: 57.8%, the band -3.6% against photos only.
+    "penalty-300-2026-10-13": {"shrink": 10.0, "pen_slope": 2.0, "pen_start_km": 300.0,
+                               "pen_cap": 8.0, "pen_known": "dna", "season_penalty": 1.0},
+    # Boost shrinkage alone (the sparse-species fix; no new penalty): 57.0%.
+    "shrink-2026-10-13": {"shrink": 10.0},
 }
 
 

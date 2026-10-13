@@ -238,3 +238,16 @@ def test_bands_can_be_the_papers_labels():
     rows = {r["band"]: r for r in pt.label_table(a, b, labels, np.ones(4, bool), pt.PAPER_BANDS)}
     assert rows["<100"]["broken"] == 1 and rows["300-1500"]["fixed"] == 1
     assert rows["no point"]["n"] == 1 and rows[">1500"]["n"] == 0
+
+
+def test_the_v1_candidates_are_served_by_name_and_the_default_is_unchanged(monkeypatch):
+    monkeypatch.delenv(pp.SETTING_ENV, raising=False)
+    assert pp.place_setting()[0] == "boost-2026-10-11"
+    assert pp.place_setting()[1] == pp.NO_EXTRAS
+    banded = pp.place_setting("penalty-500-2026-10-13")[1]
+    assert banded == {**pp.NO_EXTRAS, "shrink": 10.0, "pen_slope": 2.0, "pen_start_km": 500.0,
+                      "pen_cap": 8.0, "season_penalty": 1.0}
+    # Each candidate is a setting of the declared grid, so it was scored as tuned.
+    grid = [{k: s[k] for k in pp.NO_EXTRAS} for s in pt.settings()]
+    for name in ("penalty-500-2026-10-13", "penalty-300-2026-10-13", "shrink-2026-10-13"):
+        assert pp.place_setting(name)[1] in grid, name

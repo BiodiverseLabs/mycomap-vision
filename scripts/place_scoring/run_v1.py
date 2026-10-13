@@ -331,12 +331,22 @@ def cmd_tune(args) -> None:
     for name, kw in families.items():
         res = pt.nested_cv(sp, ge, folds, grid, **kw)
         allowed = kw.get("allowed")
-        full = pt.choose(sp, ge, np.arange(n), grid, allowed)
+        # The setting the same procedure picks on all of val (what would ship): with the
+        # band rule when the family has one, as each fold's pick did.
+        ok_all = np.ones(len(grid), bool) if allowed is None else allowed.copy()
+        if "band" in kw:
+            ok_all &= pt.holds_band(sp, kw["base"], np.arange(n), kw["band"])
+        full = (pt.choose(sp, ge, np.arange(n), grid, ok_all) if ok_all.any()
+                else None)
         picks[name] = {
             "fold_picks": [None if j is None else pt.describe(grid[j]) for j in res["chosen"]],
-            "fold_pick_ids": res["chosen"], "all_val_pick": pt.describe(grid[full]),
+            "fold_pick_ids": res["chosen"],
+            "all_val_pick": "photos only (no setting holds the band)" if full is None
+            else pt.describe(grid[full]),
             "all_val_pick_id": full,
-            "all_val_pick_in_sample_species_top1": round(float(sp[full][c.has_sp].mean()), 4),
+            "all_val_pick_setting": None if full is None else grid[full],
+            "all_val_pick_in_sample_species_top1": None if full is None
+            else round(float(sp[full][c.has_sp].mean()), 4),
             "out_of_fold": summary_of(res["species_right"], res["genus_right"])}
         oof = picks[name]["out_of_fold"]
         print(f"  {name}: out of fold {oof['species_top1']:.4f} / {oof['genus_top1']:.4f}; "
