@@ -1083,10 +1083,27 @@ def cmd_paper_attrs(conn, args) -> None:
                "sha256": paper_attrs.sha256_file(Path(args.ecoregions)),
                "dbf_sha256": paper_attrs.sha256_file(Path(args.ecoregions).with_suffix(".dbf"))}
     attrs = paper_attrs.for_release(base, test, regions)
+    vocab = None
+    if args.vocab:
+        # E15's same-vocabulary finds: <column>=<published model short name>.
+        column, short = args.vocab.split("=", 1)
+        classes = paper_attrs.model_classes(conn, short)
+        credited = (paper_attrs.credited_pairs(Path(args.vocab_review))
+                    if args.vocab_review else set())
+        from .paper_score import scored_and_reference
+        scored_rel, split, _r, _s = scored_and_reference(base, test)
+        species = {str(r["record_key"]): r["species"] or "" for r in scored_rel.records(split)}
+        for k, a in attrs.items():
+            a[column] = "yes" if paper_attrs.in_vocabulary(species.get(k, ""), classes,
+                                                           credited) else "no"
+        vocab = {"column": column, "model": short, "classes": len(classes),
+                 "review": args.vocab_review,
+                 "review_sha256": paper_attrs.sha256_file(Path(args.vocab_review))
+                 if args.vocab_review else None}
     out = paper_attrs.write(Path(args.out), attrs)
     Path(str(out) + ".json").write_text(json.dumps({
         "dataset_release": base.cite(), "test": args.test, "finds": len(attrs),
-        "ecoregions": eco, "season_days": paper_attrs.SEASON_DAYS,
+        "ecoregions": eco, "vocabulary": vocab, "season_days": paper_attrs.SEASON_DAYS,
         "core_share": paper_attrs.CORE_SHARE, "bands_km": [b for _, b in paper_attrs.BANDS_KM],
         "tsv_sha256": paper_attrs.sha256_file(out)}, indent=2), encoding="utf-8")
     from collections import Counter
@@ -2141,6 +2158,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--test", required=True, help="a test release of --release, or 'val'")
     p.add_argument("--out", required=True, help="the TSV to write (paper-score --attrs)")
     p.add_argument("--ecoregions", help="CEC Level I ecoregions shapefile (NA_CEC_Eco_Level1.shp)")
+    p.add_argument("--vocab", help="COLUMN=MODEL: yes/no, is the true species one of the "
+                                   "published model's classes (e.g. beit_vocab=fungitastic-beit-b384)")
+    p.add_argument("--vocab-review", help="the reviewed crosswalk: credited pairs count too")
 
     p = sub.add_parser("paper-score", help="every table of the paper's sealed-test analysis, "
                                            "one command (paper_score.py)")

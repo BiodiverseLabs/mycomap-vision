@@ -32,6 +32,7 @@ BANDS_KM = ((100, "<100"), (300, "100-300"), (1500, "300-1500"), (math.inf, ">15
 SEASON_DAYS = 30
 CORE_SHARE = 0.5
 FIELDS = ("record_key", "distance_band", "distance_km", "in_season", "ecoregion")
+# Optional columns, written when computed (e.g. beit_vocab for E15).
 
 
 def km_to_nearest(lat: float, lon: float, lats: np.ndarray, lons: np.ndarray) -> float:
@@ -107,6 +108,36 @@ def attributes(scored: list[dict], refs: list[dict], public: dict[str, tuple],
     return out
 
 
+def in_vocabulary(species: str, classes: set[str], credited: set[tuple[str, str]]) -> bool:
+    """A true species (taken at species rank) is in a published model's vocabulary when it
+    is one of the model's classes by name (heldout.name_key), or a credited pair of the
+    reviewed crosswalk joins one of its classes to it (the same rule E15 scores by)."""
+    from .heldout import name_key
+    from .paper_outcomes import species_rank
+    sp = species_rank(species)
+    if not sp:
+        return False
+    if name_key(sp) in classes:
+        return True
+    return any(our in (species, sp) and name_key(theirs) in classes
+               for theirs, our in credited)
+
+
+def model_classes(conn, short: str) -> set[str]:
+    """A published model's species classes as Vision names them (name_key)."""
+    from .heldout import Labeller, name_key
+    from .replications.fungitastic import published as external
+    m = external.model_for(short)
+    cn = external.vision_names(external.read_labels(m), Labeller(conn))
+    return {name_key(n) for n in cn.species if n and len(n.split()) > 1}
+
+
+def credited_pairs(review: Path) -> set[tuple[str, str]]:
+    with open(review, encoding="utf-8") as fh:
+        return {(r["their_answer"], r["our_label"]) for r in csv.DictReader(fh, delimiter="\t")
+                if (r.get("review") or "").strip().lower() == "credit"}
+
+
 def public_points(rel) -> dict[str, tuple]:
     if not rel.has_private:
         raise ValueError(f"{rel.id} has no private.sqlite here: no public points")
@@ -144,11 +175,13 @@ def sha256_file(path: Path) -> str:
 
 
 def write(path: Path, attrs: dict[str, dict]) -> Path:
+    extra = sorted({c for a in attrs.values() for c in a} - set(FIELDS))
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
-        w.writerow(FIELDS)
+        w.writerow([*FIELDS, *extra])
         for k in sorted(attrs):
             a = attrs[k]
             w.writerow([k, a["distance_band"], "" if a["distance_km"] is None else a["distance_km"],
-                        a["in_season"], a.get("ecoregion", "not computed")])
+                        a["in_season"], a.get("ecoregion", "not computed"),
+                        *[a.get(c, "") for c in extra]])
     return path

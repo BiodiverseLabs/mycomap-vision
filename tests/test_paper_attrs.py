@@ -79,3 +79,24 @@ def test_attributes_of_a_release_split(tmp_path, monkeypatch):
     assert set(val) == {"5", "6"} and val["5"]["distance_band"] == "<100"
     t = pa.for_release(base, test)
     assert set(t) == {"7", "8"}
+
+
+def test_vocabulary_membership_by_name_or_a_credited_crosswalk_pair():
+    from mycomap_vision.heldout import name_key
+    classes = {name_key("Amanita muscaria"), name_key("Trametes cinnabarina")}
+    credited = {("Hydnum repandum", "Hydnum washingtonianum")}
+    assert pa.in_vocabulary("Amanita muscaria var. guessowii", classes, set())   # species rank
+    assert pa.in_vocabulary("Trametes cinnabarina", classes, set())
+    assert not pa.in_vocabulary("Hydnum washingtonianum", classes, credited)      # Hydnum repandum is no class
+    classes.add(name_key("Hydnum repandum"))
+    assert pa.in_vocabulary("Hydnum washingtonianum", classes, credited)
+    assert not pa.in_vocabulary("Hydnum washingtonianum", classes, set())
+    assert not pa.in_vocabulary("", classes, credited)
+
+
+def test_extra_columns_are_written_and_read_back(tmp_path):
+    from mycomap_vision import paper_score
+    path = pa.write(tmp_path / "a.tsv", {"k": {"distance_band": "<100", "distance_km": 1.0,
+                                              "in_season": "core", "ecoregion": "TAIGA",
+                                              "beit_vocab": "yes"}})
+    assert paper_score.read_attrs(path)["k"]["beit_vocab"] == "yes"
