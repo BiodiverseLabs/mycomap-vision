@@ -97,7 +97,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     cache beside the manifest answers it (taxonomy.py), else .org's. A record left
     with no label at any rank ("Unknown", "Agaricales") is left out, and so is a record
     whose DNA name is a guest of the fungus in the photo (a yeast inside a puffball;
-    guests.py).
+    guests.py), or names no fungus at all (a bee, a host plant: taxonomy.nonfungal).
 
     A record frozen into a benchmark (holdouts.py) is never loaded here, even if the
     records table holds it: no reference set, comparison, fine-tune or served index
@@ -154,7 +154,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
             respelled = label != clean(name)
             # A merged label names its own genus: the genus column may be as old as the spelling.
             lab = taxonomy.labels_for(label, genus, family, respelled, tax)
-            if not (lab.species or lab.genus or lab.family) or guests.excluded(lab.genus):
+            if not (lab.species or lab.genus or lab.family) or guests.excluded(lab.genus) \
+                    or taxonomy.nonfungal(tax, lab.genus):
                 unlabelled.add(oid)
                 continue
             rec = recs[oid] = Record(oid, lab.species, lab.genus, lab.family,

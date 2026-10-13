@@ -184,13 +184,14 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         picek_exclude=args.picek_exclude_benchmarks,
                                         dry_run=args.dry_run, ec2_check=args.ec2_check,
                                         release=_dataset_release(args),
-                                        allow_draft=args.allow_draft),
+                                        allow_draft=args.allow_draft, seed=args.seed,
+                                        public_trainable_only=args.public_trainable_only),
                      indent=2))
 
 
 # What a resumed run takes from the run itself, not from the command line.
 RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records",
-                   "picek", "picek_exclude_benchmarks")
+                   "picek", "picek_exclude_benchmarks", "seed", "public_trainable_only")
 
 
 def trainer_release(args):
@@ -233,7 +234,8 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_place_cells=args.picek_place_cells,
                           picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
-                          if args.resume else None, release=trainer_release(args))
+                          if args.resume else None, release=trainer_release(args),
+                          seed=args.seed, public_trainable_only=args.public_trainable_only)
     if watcher is not None:
         watcher.stop()
     print(json.dumps(out, indent=2))
@@ -481,18 +483,36 @@ def cmd_dataset(args) -> None:
         print(json.dumps({"release": args.id, "photos": index["photos"], "index": str(path),
                           "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "errata":
-        from . import errata
+        from collections import Counter
+
+        from . import errata, taxonomy
+        reasons = dr.parse_list(args.reasons)
+        unknown = set(reasons) - set(errata.REASONS)
+        if unknown:
+            raise SystemExit(f"unknown reasons {sorted(unknown)}; known: {errata.REASONS}")
+        cache = taxonomy.cache_path()
         rel = dr.load_release(args.id, root, allow_draft=True)
         try:
-            rows = errata.mo_twin_rows(rel)
+            rows = errata.mo_twin_rows(rel) if "mo_twin_as_inat" in reasons else []
+            if "nonfungal_label" in reasons:
+                tax = taxonomy.load(cache)
+                if tax is None or not tax.outside:
+                    raise SystemExit(f"{cache} holds no kingdoms yet: run `mv fetch-taxonomy`")
+                rows += errata.nonfungal_rows(rel, tax, {r["key"] for r in rows})
             included = {r[0] for r in rel.db.execute("select record_key from records "
                                                      "where included = 1")}
+            split = dict(rel.db.execute("select record_key, split from records"))
         finally:
             rel.close()
         path = errata.write(rows, Path(args.out))
-        print(json.dumps({"release": args.id, "reason": "mo_twin_as_inat", "records": len(rows),
-                          "included": sum(r["key"] in included for r in rows),
-                          "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
+        print(json.dumps({
+            "release": args.id, "records": len(rows),
+            "by_reason": dict(Counter(r["reason"] for r in rows)),
+            "included_by_reason_split": dict(Counter(
+                f"{r['reason']}/{split.get(r['key'])}" for r in rows if r["key"] in included)),
+            "taxonomy_cache_sha256": dr.sha256_file(cache)
+            if "nonfungal_label" in reasons else None,
+            "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "pull-dhash-index":
         from . import aws, aws_dataset
         path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
@@ -1375,7 +1395,8 @@ def cmd_paper_inat_cv(args) -> None:
     recs = {r["record_key"]: dict(r) for r in rel.db.execute("select * from records")}
     truths = {k: E.truth_taxa(recs[k], by_name, taxa) for k in ids}
     client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "paper-comparisons" /
-                                "inat-cv-cache", interval=args.interval)
+                                "inat-cv-cache", interval=args.interval,
+                                jwt_path=inat_cv.JWT_FILE)
     if rel.manifest.get("test_for") and not args.inat_model:
         raise SystemExit("record the iNat CV model version first: --inat-model '<version, date>'")
     model = {"version": args.inat_model, "noted_at": E.utc(datetime.now(timezone.utc).isoformat())}         if args.inat_model else None
@@ -1571,6 +1592,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="continue that run (stopped, interrupted or killed) under its own run "
                         "id: its finished stages are restored, only the rest run; it keeps "
                         "its own backbones, fine-tunes, methods, size and manifest")
+    p.add_argument("--seed", type=int, default=0,
+                   help="the fine-tune's random seed (default 0; a second seed measures the "
+                        "spread between runs)")
+    p.add_argument("--public-trainable-only", action="store_true",
+                   help="with --release and --finetune: train only on photos the released "
+                        "weights may learn from (CC including NC, or permission granted); "
+                        "the run records the policy and the photos by licence class")
     p.set_defaults(parser_defaults={k: p.get_default(k) for k in RUN_OWN_OPTIONS})
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
@@ -1598,6 +1626,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--release-manifest", help="sha256 of its MANIFEST.json at launch")
     p.add_argument("--allow-draft", action="store_true")
     p.add_argument("--sample-records", type=int)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--public-trainable-only", action="store_true")
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
                         "finished; set by the launcher to leave time before the hard limit")
@@ -1989,10 +2019,13 @@ def main(argv: list[str] | None = None) -> int:
     q = dsub.add_parser("pull-dhash-index", help="download a release's dHash index from s3 "
                                                  "and check its sha256")
     q.add_argument("id")
-    q = dsub.add_parser("errata", help="write a release's erratum TSV for mo_twin_as_inat "
-                                       "(errata.py): MO finds held as iNat records")
+    q = dsub.add_parser("errata", help="write a release's erratum TSV (errata.py): MO finds "
+                                       "held as iNat records, labels that are no fungus")
     q.add_argument("id")
     q.add_argument("--out", required=True, help="the TSV to write (never overwritten)")
+    q.add_argument("--reasons", default="mo_twin_as_inat,nonfungal_label",
+                   help="which rules (default both; mo_twin_as_inat alone remakes v1's first "
+                        "erratum)")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")

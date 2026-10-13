@@ -55,7 +55,8 @@ DEFAULT_VAL_WEEKS = 8
 RECORD_REASONS = ("source_mycoportal", "source_com_sequence", "source_genbank",
                   "source_unknown", "held_out", "not_north_america", "not_fetched",
                   "missing_at_source",
-                  "label_conflict", "no_label", "guest", "review", "no_photos", "ok")
+                  "label_conflict", "no_label", "guest", "nonfungal_label", "review",
+                  "no_photos", "ok")
 PHOTO_REASONS = ("record_excluded", "other_source", "no_original", "permission_withdrawn",
                  "mo_not_for_use", "review", "shared_other_label", "copy_in_train",
                  "copy_in_base", "ok")
@@ -546,6 +547,8 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             reason = "no_label"
         elif guests.excluded(lab.genus):
             reason = "guest"
+        elif taxonomy.nonfungal(tax, lab.genus):
+            reason = "nonfungal_label"          # a bee, a host plant (Steve, 2026-10-13)
         elif key in review_records:
             reason = review_records[key]
         else:
