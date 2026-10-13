@@ -128,7 +128,7 @@ def test_errata_records_leave_the_reference(world, tmp_path):
 
 
 def test_a_near_duplicate_find_leaves_the_primary_numbers(world, tmp_path):
-    cfg = config(tmp_path, ["5", "6"], near_duplicates={"backbone": "m1", "cosine": 0.999})
+    cfg = config(tmp_path, ["5", "6"], near_duplicates={"backbone": "m1", "cosine": 0.99})
     rep = run(world, tmp_path, "val", cfg)
     # Const vectors depend only on colour: each val photo has a near-identical train photo.
     assert rep["standard"]["near_duplicates"]["near_duplicate_finds"] == 2
@@ -235,3 +235,31 @@ def test_a_sealed_test_release_is_refused_before_anything_is_read(world, tmp_pat
     with pytest.raises(paper_score.FrozenError):
         run(world, tmp_path, world["test"], cfg, research_dir=repo)
     assert not called and not (tmp_path / "out").exists()
+
+
+class SeesPlace:
+    """A place method stand-in that records the point it is given for each find."""
+    needs_context = True
+    seen: list = []
+
+    def fit(self, vectors, index, records=None):
+        self.n = len(index.species)
+
+    def species_scores(self, query, context=None):
+        SeesPlace.seen.append((context.latitude, context.longitude))
+        return np.zeros(self.n, dtype=np.float32)
+
+
+def test_a_place_method_is_given_the_public_point_never_the_true_one(world, tmp_path,
+                                                                     monkeypatch):
+    from mycomap_vision import evaluate
+    monkeypatch.setitem(evaluate.METHODS, "sees-place", SeesPlace)
+    monkeypatch.setattr(paper_score, "public_points",
+                        lambda rel: {"5": (47.5, -122.5), "6": (None, None)})
+    SeesPlace.seen = []
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"].append({"id": "vision-place", "kind": "vision", "backbone": "m1",
+                               "method": "sees-place", "place": True})
+    run(world, tmp_path, "val", cfg)
+    # The release's true point is (47.0, -122.0) for every record of the fixture.
+    assert sorted(SeesPlace.seen, key=str) == sorted([(47.5, -122.5), (None, None)], key=str)

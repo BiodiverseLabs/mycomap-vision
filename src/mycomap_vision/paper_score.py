@@ -480,14 +480,15 @@ def format_report(report: dict, config: dict) -> str:
             if "not_tested" in h:
                 lines.append(f"| {hid} | - | not tested: {h['not_tested']} | - | - | - |")
                 continue
+            pts = lambda v: "-" if v is None else f"{100 * v:.1f}"  # noqa: E731
             if "slope" in h:
                 eff, n = f"{h['slope']['estimate']:.3f} (se {h['slope']['se_robust']:.3f})", h["n"]
             elif "superiority" in h:
-                eff = (f"{100 * h['superiority']['difference']:.1f} pts; band lower bound "
-                       f"{100 * h['noninferiority']['lower_bound']:.1f}")
+                eff = (f"{pts(h['superiority']['difference'])} pts; band lower bound "
+                       f"{pts(h['noninferiority']['lower_bound'])}")
                 n = h["superiority"]["n"]
             else:
-                eff, n = f"{100 * h['difference']:.1f} pts", h["n"]
+                eff, n = f"{pts(h['difference'])} pts", h["n"]
             lines.append(f"| {hid} | {n:,} | {eff} | {h['p_test']:.4g} | {h['p_holm']:.4g} | "
                          f"{'yes' if h['reject'] else 'no'} |")
         lines.append("")
