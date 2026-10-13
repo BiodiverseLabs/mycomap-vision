@@ -32,7 +32,8 @@ export function ResearchPage() {
 
 function StatusBadge({ b }: { b: Benchmark }) {
   const tone = b.status === "running" ? "bg-myco-green/10 text-myco-green"
-    : b.status === "partial" ? "bg-[#f3eee6] text-[#7a5a3a]" : "bg-gray-100 text-gray-600";
+    : b.status === "partial" ? "bg-[#f3eee6] text-[#7a5a3a]"
+    : b.status === "history" ? "border border-dashed border-gray-300 text-gray-500" : "bg-gray-100 text-gray-600";
   return <span className={`rounded px-2 py-0.5 text-xs font-medium ${tone}`}>{STATUS_LABEL[b.status]}</span>;
 }
 
