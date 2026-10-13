@@ -52,18 +52,23 @@ def band_of(n: int) -> str:
 
 
 def read_errata(path: str | Path | None) -> tuple[set[str], str | None]:
-    """Record keys listed in an errata TSV (a `record_key` column, else the first column)
-    and the file's sha256; (set(), None) without a file."""
+    """Record keys listed in a release's errata TSV and the file's sha256; (set(), None)
+    without a file. The keys are read from the `key` column (`mv dataset errata`'s
+    review-list format: kind, key, reason, note) or a `record_key` column; a file with
+    neither header is refused rather than guessed."""
     if not path:
         return set(), None
     body = Path(path).read_bytes()
-    rows = list(csv.reader(body.decode("utf-8").splitlines(), delimiter="\t"))
-    if not rows:
-        return set(), hashlib.sha256(body).hexdigest()
-    col = rows[0].index("record_key") if "record_key" in rows[0] else 0
-    start = 1 if rows[0][col] == "record_key" else 0
-    return ({r[col].strip() for r in rows[start:] if len(r) > col and r[col].strip()},
-            hashlib.sha256(body).hexdigest())
+    rows = list(csv.reader(body.decode("utf-8-sig").splitlines(), delimiter="\t"))
+    head = [h.strip() for h in rows[0]] if rows else []
+    col = next((head.index(c) for c in ("key", "record_key") if c in head), None)
+    if col is None:
+        raise ValueError(f"{path}: no 'key' or 'record_key' column in {head}: not an "
+                         "errata list")
+    kind = head.index("kind") if "kind" in head else None
+    keys = {r[col].strip() for r in rows[1:] if len(r) > col and r[col].strip()
+            and (kind is None or r[kind].strip() == "record")}
+    return keys, hashlib.sha256(body).hexdigest()
 
 
 def allocate(sizes: dict[str, int], total: int) -> dict[str, int]:

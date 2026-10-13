@@ -98,6 +98,15 @@ def test_errata_records_are_left_out_of_references_and_queries(tmp_path):
                     encoding="utf-8")
     keys, sha = bs.read_errata(path)
     assert keys == bad and len(sha) == 64
+    # mv dataset errata's own format: kind, key, reason, note (the key is not column 1).
+    review = tmp_path / "review.tsv"
+    review.write_text("kind\tkey\treason\tnote\n" + "".join(
+        f"record\t{k}\tmo twin\t\n" for k in sorted(bad)), encoding="utf-8")
+    assert bs.read_errata(review)[0] == bad
+    other = tmp_path / "other.tsv"
+    other.write_text("kind\tid\nrecord\t1\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not an errata list"):
+        bs.read_errata(other)
     doc = bs.draw(rows, reference_records=300, queries=20, errata=keys)
     used = set(doc["references"]) | {k for h in doc["queries"].values() for k in h["records"]}
     assert not used & bad and doc["errata_records_left_out"] == len(bad)
