@@ -311,6 +311,11 @@ def cmd_tune(args) -> None:
               f"(lb {oof['rule_band_vs_photos_only']['lower95']:+.4f}); "
               f"pick {picks[name]['all_val_pick']}", flush=True)
     refs = {"P0 photos only": (p0_sp, p0_ge), "P1 served": (sp[p1], ge[p1])}
+    for name, (a, b) in refs.items():
+        v = summary_of(a, b)
+        nb = v["rule_band_vs_photos_only"]
+        print(f"  {name}: {v['species_top1']:.4f} / {v['genus_top1']:.4f}; band vs P0 "
+              f"{nb['delta']:+.4f} (lb {nb['lower95']:+.4f})", flush=True)
     report = {"records": n, "grid_size": len(grid), "grid_declared": pt.GRID_DECLARED,
               "fold_sizes": np.bincount(folds).tolist(),
               "references": {k: summary_of(*v) for k, v in refs.items()},
