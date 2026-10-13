@@ -51,10 +51,38 @@ PRESETS: dict[str, Preset] = {
 }
 
 
+@dataclass(frozen=True)
+class EpochRule:
+    """How long the recipe trains when the epoch count is not fixed (spec `preset@15-50`).
+    Pre-declared on 2026-10-13, before any run, so that their classifier is not compared
+    undertrained: at least `min_epochs`; then blocks of `block` epochs. At the end of each
+    block the best validation macro-F1 so far is compared with the best at the end of the
+    previous block: training goes on when it rose by at least `min_gain` (absolute), and
+    stops when a block adds less, or at `max_epochs` (their published length), whichever
+    comes first. The model kept is still the best-macro-F1 epoch overall, and the plateau
+    schedule runs unchanged across blocks. Decided on the release's val split only."""
+    min_epochs: int = 15
+    max_epochs: int = 50
+    block: int = 5
+    min_gain: float = 0.005
+
+    def __post_init__(self):
+        if not (0 < self.min_epochs <= self.max_epochs and self.block > 0
+                and self.min_gain >= 0):
+            raise ValueError(f"bad epoch rule {self}: need 0 < min <= max, block > 0, "
+                             "min_gain >= 0")
+
+    def boundaries(self) -> list[int]:
+        """The epochs after which the rule decides: min, min + block, ..., and max."""
+        out = list(range(self.min_epochs, self.max_epochs + 1, self.block))
+        return out if out[-1] == self.max_epochs else out + [self.max_epochs]
+
+
 @dataclass
 class PicekConfig:
     preset: str = "fungitastic-beit-b384"
-    epochs: int | None = None          # None: the preset's
+    epochs: int | None = None          # None: the preset's (with epoch_rule: its max_epochs)
+    epoch_rule: EpochRule | None = None   # None: exactly `epochs` epochs
     lr: float | None = None            # None: the preset's
     effective_batch: int = 256
     micro_batch: int = 16              # photos per forward pass; accumulated to effective_batch
@@ -103,7 +131,8 @@ class PicekConfig:
 
     def resolved(self) -> "PicekConfig":
         p = PRESETS[self.preset]
-        return replace(self, epochs=self.epochs or p.epochs, lr=self.lr or p.lr)
+        epochs = self.epoch_rule.max_epochs if self.epoch_rule else self.epochs or p.epochs
+        return replace(self, epochs=epochs, lr=self.lr or p.lr)
 
 
 # Augmentation and evaluation normalisation (their model cards): mean = std = 0.5.
