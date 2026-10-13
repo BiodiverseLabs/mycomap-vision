@@ -226,9 +226,13 @@ def test_the_sealed_test_opens_only_with_the_tagged_config_and_the_frozen_code(r
 
 
 def test_a_config_differing_only_in_line_endings_is_refused_and_says_so(research):
-    repo, body = research
+    repo, _ = research
+    body = json.dumps({"format": 1, "code_commit": "abcdef1234567"}, indent=1).encode()
+    (repo / "paper" / "analysis-v1.json").write_bytes(body)
+    git(repo, "commit", "-q", "-am", "multi-line plan")
     git(repo, "tag", paper_score.TAG)
-    crlf = body.replace(b",", b",\r\n")                       # the same text, CRLF endings
+    crlf = body.replace(b"\n", b"\r\n")                       # the same text, CRLF endings
+    assert crlf != body
     with pytest.raises(paper_score.FrozenError, match="line endings differ"):
         paper_score.guard(True, crlf, json.loads(crlf), repo, "abcdef1")
 
