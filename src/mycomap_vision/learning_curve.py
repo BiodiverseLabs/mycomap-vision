@@ -350,21 +350,6 @@ def score(args) -> None:
                 records, ref_hash, bb, bad_ids, both, skipped)
 
 
-def read_errata(path) -> tuple[set[str], str]:
-    """A release's errata keys (`mv dataset errata`'s list: the `key` column, rows of kind
-    'record'; or a `record_key` column) and the file's sha256. A file with neither column
-    is refused rather than guessed."""
-    import csv
-    body = Path(path).read_bytes()
-    rows = list(csv.DictReader(body.decode("utf-8-sig").splitlines(), delimiter="\t"))
-    col = next((c for c in ("key", "record_key") if rows and c in rows[0]), None)
-    if rows and col is None:
-        raise ValueError(f"{path}: no 'key' or 'record_key' column: not an errata list")
-    keys = {r[col].strip() for r in rows if (r.get(col) or "").strip()
-            and (r.get("kind") or "record").strip() == "record"}
-    return keys, hashlib.sha256(body).hexdigest()
-
-
 def score_release(args) -> None:
     """The learning curve on a dataset release: its val records (queries) against its
     train records (the reference), errata records (--errata) left out of the reference,
@@ -383,21 +368,23 @@ def score_release(args) -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     rel = dataset.load(args.release, getattr(args, "allow_draft", False))
-    errata, errata_sha = set(), None
     if getattr(args, "errata", None):
-        errata, errata_sha = read_errata(args.errata)
+        # The release leaves the erratum's records out of every split it reads.
+        from . import errata
+        rel.use_errata(errata.read(Path(args.errata)))
+    left_out = rel.errata.keys if rel.errata is not None else frozenset()
     conn = sqlite3.connect(Path(args.manifest or config.MANIFEST_PATH).resolve().as_uri()
                            + "?mode=ro", uri=True)
     bb = args.backbone
     ids, vecs = load_embeddings(conn, bb)
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     rel.check_photos_match(conn)
-    records = [r for r in rel.as_records("train", row_of) if r.observation_id not in errata]
+    records = rel.as_records("train", row_of)
     index = build_index(records)
     lay = build_layout(records, index)
     ref_hash = reference_hash(bb, records)
     log(f"release {rel.id} train reference {ref_hash}: {len(records):,} records, "
-        f"{len(lay.cols):,} photos ({len(errata):,} errata keys left out)")
+        f"{len(lay.cols):,} photos ({len(left_out):,} erratum records left out)")
     clean = np.ones(len(lay.rec_obs), bool)
     is_bad = ~clean
     cache = Path(args.cache) if args.cache else None
@@ -438,7 +425,8 @@ def score_release(args) -> None:
     args.benchmark, args.split = f"release {rel.id}", "val"
     _score_core(args, log, out_dir, lay, clean, is_bad, ref, rec_sums, cache, tag, queries,
                 records, ref_hash, bb, set(), 0, skipped,
-                extra={"dataset_release": rel.cite(), "errata_sha256": errata_sha,
+                extra={"dataset_release": rel.cite(),
+                       "errata_sha256": (rel.cite().get("errata") or {}).get("sha256"),
                        "benchmark_of": {q[0]: benchmark.get(q[0]) for q in queries}})
 
 

@@ -61,13 +61,6 @@ def test_errata_records_leave_the_reference(world, tmp_path):
     assert R["records"] == 4 and R["errata_sha256"]
 
 
-def test_an_errata_file_without_a_key_column_is_refused(tmp_path):
-    bad = tmp_path / "bad.tsv"
-    bad.write_text("kind\tid\nrecord\t1\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="not an errata list"):
-        lc.read_errata(bad)
-
-
 def test_the_report_can_leave_the_former_held_out_queries_out(world, tmp_path):
     lc.score_release(args_for(tmp_path, world))
     full = lcr.report(tmp_path / "scores", tmp_path / "all")
