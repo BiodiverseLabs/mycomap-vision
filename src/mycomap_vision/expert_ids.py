@@ -593,18 +593,23 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
             "ids_after_cutoff_by_others": after}
 
 
-def summarise(lines: list[dict], tier: str = "1") -> dict:
+def summarise(lines: list[dict], tier: str = "1", count_push_accounts: bool = False,
+              drop_ambiguous: bool = False) -> dict:
     """Descriptive per-find accuracy (E31b): best tier-N, each tier-N ID, community taxon;
     species over formal truths with a species-level ID, genus over finds with a genus ID;
-    coverage over all scored finds. `strict` drops finds the observer had named at species."""
+    coverage over all scored finds. `strict` drops finds the observer had named at species.
+    Sensitivities: `count_push_accounts` scores MycoMap's push account where it did not
+    validate the find; `drop_ambiguous` leaves out IDs withdrawn at an unknown time."""
+    roles = {"identifier", "push_account"} if count_push_accounts else {"identifier"}
     def block(rows):
         c = Counter()
         for r in rows:
             if r["status"] != "ok":
                 continue
             c["finds"] += 1
-            mine = [i for i in r["ids"] if i["role"] == "identifier" and i["tier"] == tier
-                    and i["before_cutoff"]]
+            mine = [i for i in r["ids"] if i["role"] in roles and i["tier"] == tier
+                    and i["before_cutoff"]
+                    and not (drop_ambiguous and i.get("withdrawal_ambiguous"))]
             for rank in ("species", "genus"):
                 got = [i[f"{rank}_right"] for i in mine if i[f"{rank}_right"] is not None]
                 if got:
@@ -793,6 +798,11 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
     by_name = name_index(taxa)
     resolver = TaxonResolver(taxa)
     ours, validators = read_ours(ours_csv), read_validators(validators_csv)
+    unresolved = 0
+    if validators_csv:
+        with open(validators_csv, encoding="utf-8", newline="") as f:
+            unresolved = sum(1 for r in csv.DictReader(f)
+                             if r.get("kind") == "human" and not r.get("inat_user_id"))
     key = hasher(load_salt(salt_path))
     mo_ids = {r[0] for r in rel.db.execute("select source_id from records where source = 'mo'")}
     lines = []
@@ -820,7 +830,17 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                "scores_sha256": sha256_file(out), "finds": len(lines),
                "validator_lists": bool(validators_csv), "our_dates": bool(ours_csv),
                "push_accounts_excluded": len(push_accounts),
-               "tier1": summarise(lines, "1"), "tier2": summarise(lines, "2")}
+               "tier1": summarise(lines, "1"), "tier2": summarise(lines, "2"),
+               "sensitivity": {
+                   "push_account_counted_where_not_validator": {
+                       t: summarise(lines, t, count_push_accounts=True) for t in ("1", "2")},
+                   "without_withdrawal_ambiguous": {
+                       t: summarise(lines, t, drop_ambiguous=True) for t in ("1", "2")},
+                   "withdrawal_ambiguous_ids": sum(
+                       1 for l in lines if l["status"] == "ok" for i in l["ids"]
+                       if i["role"] == "identifier" and i["before_cutoff"]
+                       and i.get("withdrawal_ambiguous")),
+                   "unresolved_validator_rows": unresolved}}
     (d / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 

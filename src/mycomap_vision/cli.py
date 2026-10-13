@@ -1169,6 +1169,7 @@ def cmd_paper_inat_cv(args) -> None:
     from . import expert_ids as E
     from . import inat_cv
     from . import paper_inat_cv as P
+    from datetime import datetime, timezone
     rel = dr.load_release(args.release, allow_draft=args.allow_draft)
     d = P.work_dir(args.name)
     ids_path = d / "ids.txt"
@@ -1191,7 +1192,11 @@ def cmd_paper_inat_cv(args) -> None:
     truths = {k: E.truth_taxa(recs[k], by_name, taxa) for k in ids}
     client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "paper-comparisons" /
                                 "inat-cv-cache")
-    meta = P.run(rel, args.name, ids, client, lambda pk: rel.derive(pk, "original").body, truths)
+    if rel.manifest.get("test_for") and not args.inat_model:
+        raise SystemExit("record the iNat CV model version first: --inat-model '<version, date>'")
+    model = {"version": args.inat_model, "noted_at": E.utc(datetime.now(timezone.utc).isoformat())}         if args.inat_model else None
+    meta = P.run(rel, args.name, ids, client, lambda pk: rel.derive(pk, "original").body, truths,
+                 model=model)
     lines = [json.loads(l) for l in (d / "finds.jsonl").open(encoding="utf-8")]
     print(json.dumps({**meta, "summary": P.summarise(lines)}, indent=2))
 
@@ -1596,6 +1601,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--split", help="sample: only this split (val for the pilot)")
     p.add_argument("--redo", action="store_true")
     p.add_argument("--limit", type=int, help="run: only the first N finds (tests)")
+    p.add_argument("--inat-model", help="run: iNat's CV model version and release date, as "
+                   "iNat states it (required on a test release)")
 
     p = sub.add_parser("expert-ids", help="(paper E31) iNat identifications made before the DNA "
                                           "was visible, by high-volume identifiers, against "

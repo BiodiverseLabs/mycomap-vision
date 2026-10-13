@@ -351,3 +351,13 @@ def test_sql_runner_strips_comments_batches_ids_and_parses_tabs():
                      [str(i) for i in range(1, 8)] + ["1; drop"], batch=3, runner=runner)
     assert len(seen) == 3 and not any("--" in q or "drop" in q for q in seen)
     assert [r["inat_observation_id"] for r in rows] == [str(i) for i in range(1, 8)]
+
+
+def test_sensitivities_count_the_push_account_or_drop_ambiguous_withdrawals():
+    o = obs([ident(2, 100, "2023-01-01"),
+             ident(3, 101, "2023-01-02", current=False, updated="2025-01-01")],
+            counts={2: 20000, 3: 20000})
+    line = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), set(), key, {2})
+    assert E.summarise([line])["all"]["each_species"]["n"] == 1             # h3 only
+    assert E.summarise([line], count_push_accounts=True)["all"]["each_species"]["n"] == 2
+    assert E.summarise([line], drop_ambiguous=True)["all"]["each_species"]["n"] == 0

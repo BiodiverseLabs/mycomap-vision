@@ -68,15 +68,19 @@ def real_day(observed_on: str | None) -> str | None:
 
 
 def find_answer(photo_answers: list[dict], score: str, top: int = TOP) -> dict:
-    """Per rank, the find's taxa ranked by their best `score` on any photo (top `top`)."""
+    """Per rank, the find's taxa ranked by their best `score` on any photo (top `top`), as
+    [taxon_id, name, score]: names let species s.l./complex be scored by name too."""
     best = best_per_rank(photo_answers, score) if photo_answers else {r: [] for r in RANKS}
-    return {rank: [[tid, round(s, 4)] for tid, s in best.get(rank, [])[:top]] for rank in RANKS}
+    names = {rank: {tid: t["name"] for a in photo_answers for tid, t in a.get(rank, {}).items()}
+             for rank in RANKS}
+    return {rank: [[tid, names[rank].get(tid), round(s, 4)] for tid, s in best.get(rank, [])[:top]]
+            for rank in RANKS}
 
 
 def hits(ranked: list, want: int | None) -> dict:
     """top-1/3/5/10 hits of a ranked [[taxon_id, score], ...] list; no truth or no
     suggestion is a miss."""
-    ids = [t for t, _ in ranked]
+    ids = [r[0] for r in ranked]
     return {f"top{k}": want is not None and want in ids[:k] for k in (1, 3, 5, 10)}
 
 
@@ -86,8 +90,14 @@ def draw_fallback(ids: list[str], n: int, seed: int) -> list[str]:
     return E.draw_sample(ids, n, seed)
 
 
+PLACE_RULE = ("the release's frozen public point (private.sqlite record_public_places): iNat's "
+              "public coordinates, obscured where iNat obscures; an MO box centre; none sent "
+              "where none is frozen")
+
+
 def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[str], bytes],
-        truths: dict[str, E.TruthTaxa], sealed_ok: bool = False, log=print) -> dict:
+        truths: dict[str, E.TruthTaxa], sealed_ok: bool = False, log=print,
+        model: dict | None = None) -> dict:
     """Score `record_keys` of `rel`; writes one JSON line per find to finds.jsonl. Resumable:
     every photo's answer is cached by the client. `read_photo(photo_key)` -> original bytes."""
     if rel.manifest.get("test_for") and not (sealed_ok or E.freeze_tagged()):
@@ -110,10 +120,11 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
                 raise RuntimeError(f"{key} is not an included record of {rel.id}")
             lat, lng = public_point(places.get(key))
             day = real_day(rec.get("observed_on"))
-            photos = rel.db.execute("select photo_key from photos where record_key = ? and "
-                                    "included = 1 order by position, photo_key", (key,)).fetchall()
+            photos = rel.db.execute("select photo_key, manifest_photo_id from photos where "
+                                    "record_key = ? and included = 1 order by position, photo_key",
+                                    (key,)).fetchall()
             answers, sent = [], []
-            for (pk,) in photos:
+            for pk, _ in photos:
                 def body(pk=pk):
                     b, w, h = at_most_1024(read_photo(pk))
                     sent.append({"photo_key": pk, "sha256": hashlib.sha256(b).hexdigest(),
@@ -128,6 +139,7 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
                 stats["photos"] += 1
             t = truths[key]
             line = {"format": FORMAT, "record_key": key, "photos": len(photos),
+                    "photo_ids": [mid for _, mid in photos], "px": MAX_SIDE,
                     "place_sent": lat is not None, "date_sent": day is not None,
                     "truth": {"species": t.species, "genus": t.genus,
                               "formal_species": t.formal_species,
@@ -141,7 +153,8 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
                 line[f"{score}_hits"] = {
                     "species": hits(line[score]["species"], t.species) if t.formal_species else None,
                     "genus": hits(line[score]["genus"], t.genus) if rec.get("genus") else None}
-            stats["no_suggestion"] += not any(line["vision"][r] for r in RANKS)
+            line["answered"] = {s: any(line[s][r] for r in RANKS) for s in ("vision", "combined")}
+            stats["no_suggestion"] += not line["answered"]["vision"]
             stats["finds"] += 1
             f.write(json.dumps(line, sort_keys=True) + "\n")
             if n % 25 == 0:
@@ -150,6 +163,8 @@ def run(rel, name: str, record_keys: list[str], client, read_photo: Callable[[st
             "finds": stats["finds"], "photos": stats["photos"],
             "finds_with_no_suggestion": stats["no_suggestion"],
             "ids_sha256": E.ids_sha256(record_keys), "finds_sha256": E.sha256_file(out),
+            "inat_cv_model": model or {"version": None, "note": "not recorded"},
+            "place_rule": PLACE_RULE, "px": MAX_SIDE,
             "first_scored_at": first_scored, "last_scored_at": last_scored,
             "requests_this_run": client.calls - calls0,
             "wall_hours_this_run": round((time.monotonic() - start) / 3600, 3),

@@ -45,11 +45,12 @@ class FakeRelease:
         self.db.execute("create table records (record_key text, included integer, genus text, "
                         "observed_on text)")
         self.db.execute("create table photos (photo_key text, record_key text, included integer, "
-                        "position integer)")
+                        "position integer, manifest_photo_id integer)")
         self.db.executemany("insert into records values (?,?,?,?)",
                             [("a", 1, "Russula", "2025-09-01"), ("b", 1, "Russula", None)])
-        self.db.executemany("insert into photos values (?,?,?,?)",
-                            [("a1", "a", 1, 0), ("a2", "a", 1, 1), ("a3", "a", 0, 2), ("b1", "b", 1, 0)])
+        self.db.executemany("insert into photos values (?,?,?,?,?)",
+                            [("a1", "a", 1, 0, 11), ("a2", "a", 1, 1, 12), ("a3", "a", 0, 2, 13),
+                             ("b1", "b", 1, 0, 21)])
 
     def public_places(self):
         return {"a": {"public_lat_micro": 39_100_000, "public_lon_micro": -86_500_000}}
@@ -88,13 +89,17 @@ def test_only_included_photos_go_at_1024_px_with_the_public_point_and_date(run):
     assert (sent["a1"]["lat"], sent["a1"]["lng"], sent["a1"]["date"]) == (39.1, -86.5, "2025-09-01")
     assert sent["b1"]["lat"] is None and sent["b1"]["date"] is None   # none frozen: none sent
     assert meta["photos"] == 3 and meta["first_scored_at"] == "2026-11-01T00:00:00Z"
+    assert meta["place_rule"].startswith("the release's frozen public point")
+    _, _, lines = run()
+    assert lines["a"]["photo_ids"] == [11, 12]               # what iNat saw, in order
 
 
 def test_best_photo_wins_and_photo_only_and_combined_stay_apart(run):
     _, _, lines = run()
     a = lines["a"]
-    assert a["vision"]["species"][0] == [101, 60.0]          # photo only: the wrong one leads
-    assert a["combined"]["species"][0] == [100, 70.0]        # with place: the right one
+    assert a["vision"]["species"][0] == [101, "T101", 60.0]  # photo only: the wrong one leads
+    assert a["combined"]["species"][0] == [100, "T100", 70.0]  # with place: the right one
+    assert a["answered"] == {"vision": True, "combined": True} and a["px"] == 1024
     assert a["vision_hits"]["species"]["top1"] is False and a["vision_hits"]["species"]["top3"]
     assert a["combined_hits"]["species"]["top1"] is True
     assert a["first_photo"]["combined"]["species"][0][0] == 101
@@ -105,6 +110,7 @@ def test_no_suggestion_is_wrong_and_species_waits_for_a_formal_name(run):
     b = lines["b"]
     assert b["vision_hits"]["species"] is None               # provisional truth: genus only
     assert b["vision_hits"]["genus"]["top10"] is False       # nothing suggested = a miss
+    assert b["answered"] == {"vision": False, "combined": False}
     assert meta["finds_with_no_suggestion"] == 1
     s = P.summarise(list(lines.values()))
     assert s["vision_genus"]["n"] == 2 and s["vision_genus"]["top1"] == 0.5
@@ -112,7 +118,7 @@ def test_no_suggestion_is_wrong_and_species_waits_for_a_formal_name(run):
 
 
 def test_a_truth_inat_does_not_know_stays_in_as_a_miss():
-    line = {"vision_hits": {"species": P.hits([[5, 90.0]], None), "genus": None},
+    line = {"vision_hits": {"species": P.hits([[5, "X y", 90.0]], None), "genus": None},
             "combined_hits": {"species": None, "genus": None}}
     assert P.summarise([line])["vision_species"] == {"n": 1, "top1": 0.0, "top3": 0.0,
                                                      "top5": 0.0, "top10": 0.0}
