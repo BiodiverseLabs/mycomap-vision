@@ -1044,6 +1044,38 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_paper_score(conn, args) -> None:
+    """Every table of the paper's sealed-test analysis from one command (paper_score.py).
+    The sealed test opens only under the freeze tag, the tagged config and the frozen code."""
+    from pathlib import Path
+
+    from . import backbone_screen, paper_score
+    from .dataset_release import load_release
+    base = _dataset_release(args)
+    if base is None:
+        raise SystemExit("paper-score needs --release <id>")
+    test = "val" if args.test == "val" else load_release(args.test, allow_draft=args.allow_draft)
+    config_doc, body = paper_score.load_config(args.config)
+    scored_id = "val" if test == "val" else test.id
+    out = Path(args.out) if args.out else (config.DATA_DIR / "research-results" / base.id
+                                           / "paper-score" / scored_id)
+    sealed = test != "val" and not test.manifest.get("draft")
+    if sealed and (out / "report.json").exists():
+        raise SystemExit(f"{out / 'report.json'} exists: the sealed test is scored once; "
+                         "later additions go to a new --out, labelled post hoc")
+
+    def embed_missing(backbone, photo_ids):
+        if args.embed_missing:
+            backbone_screen.embed(conn, {"photos": photo_ids}, [backbone])
+    report = paper_score.run(conn, base, test, config_doc, body, out, errata_path=args.errata,
+                             dhash_path=args.dhash_flags, attrs_path=args.attrs,
+                             allow_code=args.allow_code, embed_missing=embed_missing)
+    print(json.dumps({"out": str(out), "finds": report["finds"], "post_hoc": report["post_hoc"],
+                      "hypotheses": {f: {h: {k: r.get(k) for k in ("p_test", "p_holm", "reject")}
+                                         for h, r in hs.items()}
+                                     for f, hs in report["hypotheses"].items()}}, indent=2))
+
+
 def cmd_external(conn, args) -> None:
     """Published fungi classifiers as outside baselines (replications/fungitastic/published*.py)."""
     from pathlib import Path
@@ -1887,6 +1919,21 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--redo", action="store_true", help="replace answers stored before")
     release_options(q)
 
+    p = sub.add_parser("paper-score", help="every table of the paper's sealed-test analysis, "
+                                           "one command (paper_score.py)")
+    release_options(p)
+    p.add_argument("--test", required=True,
+                   help="a test release of --release (e.g. v1-test), or 'val'")
+    p.add_argument("--config", required=True, help="the analysis plan (paper/analysis-v1.json)")
+    p.add_argument("--out", help="default: research-results/<release>/paper-score/<test>")
+    p.add_argument("--errata", help="the release's errata TSV (reference records left out)")
+    p.add_argument("--dhash-flags", help="near-copy flags of the test build (record or photo keys)")
+    p.add_argument("--attrs", help="extra per-find attributes (TSV with record_key)")
+    p.add_argument("--embed-missing", action="store_true",
+                   help="embed scored photos a backbone lacks, from copies on this machine")
+    p.add_argument("--allow-code", metavar="COMMIT",
+                   help="score the sealed test from this commit, not the frozen one: POST HOC")
+
     p = sub.add_parser("external", help="published fungi classifiers (DF20, FungiTastic) as "
                                         "outside baselines (replications/fungitastic/)")
     xsub = p.add_subparsers(dest="action", required=True)
@@ -2037,6 +2084,7 @@ def main(argv: list[str] | None = None) -> int:
         "contributors": cmd_contributors,
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
+        "paper-score": cmd_paper_score,
         "external": cmd_external,
     }[args.command]
     handler(conn, args)

@@ -97,7 +97,9 @@ def inat_outcome(line: dict, find: Find, score: str) -> dict:
     names = {rank: [r[1] for r in ranked.get(rank) or []] for rank in ("species", "genus")}
     formal = bool(line["truth"].get("formal_species"))
     out = from_ranked(names["species"], names["genus"], find, species_scorable=formal)
-    out["answered"] = bool((line.get("answered") or {}).get(score))
+    answered = line.get("answered") or {}
+    # combined_raw is the same answer as combined, on iNat's raw place-aware scale.
+    out["answered"] = bool(answered.get(score, answered.get(score.split("_")[0])))
     for rank in ("species", "genus"):
         h = hits.get(rank)
         if h is None:
