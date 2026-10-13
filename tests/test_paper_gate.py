@@ -152,8 +152,35 @@ def test_paper_score_serves_through_the_gate_beside_the_gate_off_numbers(world, 
     assert json.loads((tmp_path / "out" / "report.json").read_text())["gate"]["gate"]["fingerprint"] == fp
 
 
-def test_a_gate_block_without_its_test_vectors_is_refused(tmp_path):
+def test_a_gate_block_names_exactly_one_source_of_test_vectors(tmp_path):
     from mycomap_vision import paper_score
-    cfg = config(tmp_path, ["5"], gate={"dir": "g", "fingerprint": "x"})
-    with pytest.raises(ValueError, match="test_vectors"):
-        paper_score.check_config(cfg)
+    for extra in ({}, {"test_vectors": {"file": "v", "sha256": "x"}, "embed_with": "m1"}):
+        cfg = config(tmp_path, ["5"], gate={"dir": "g", "fingerprint": "x", **extra})
+        with pytest.raises(ValueError, match="test_vectors"):
+            paper_score.check_config(cfg)
+
+
+def test_a_sealed_run_embeds_the_gate_vectors_itself_and_records_them(world, tmp_path):
+    """embed_with: the run lists every scored photo's local copy, embeds them through the
+    served model's fork, keeps the vectors beside the report and records their sha256."""
+    d, fp = saved_gate(tmp_path)
+    keys = {str(p): str(k) for p, k in world["base"].db.execute(
+        "select manifest_photo_id, record_key from photos where included = 1")}
+    listed = {}
+
+    def fake_embed(backbone, lst, out):
+        rows = [l.split("\t") for l in Path(lst).read_text(encoding="utf-8").splitlines()]
+        listed.update(backbone=backbone, keys={k for k, _ in rows},
+                      paths=all(Path(p).is_file() for _, p in rows))
+        vectors_file(out, {k: (BIRD_V if keys[k] == "5" else FUNGUS_V) for k, _ in rows})
+        return len(rows)
+    cfg = config(tmp_path, ["5", "6"], gate={"dir": str(d), "fingerprint": fp,
+                                             "embed_with": "served-model"})
+    rep = run(world, tmp_path, "val", cfg, gate_embed=fake_embed)
+    val_photos = {p for p, k in keys.items() if k in ("5", "6")}
+    assert listed["backbone"] == "served-model" and listed["paths"]
+    assert listed["keys"] == val_photos                       # every scored photo, no other
+    tv = rep["gate"]["test_vectors"]
+    assert tv["sha256"] == sha256_file(tmp_path / "out" / "gate" / "gate-vectors.npz")
+    assert tv["made_by"].startswith("embedded by this run")
+    assert rep["gate"]["test"]["lost"]["count"] == 1

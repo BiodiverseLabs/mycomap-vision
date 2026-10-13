@@ -92,9 +92,12 @@ def check_config(doc: dict) -> None:
             raise ValueError(f"comparator {c['id']}: needs its input file")
     gate = doc.get("gate")
     if gate:
-        for k in ("dir", "fingerprint", "test_vectors"):
+        for k in ("dir", "fingerprint"):
             if not gate.get(k):
                 raise ValueError(f"gate: names {k}")
+        if bool(gate.get("test_vectors")) == bool(gate.get("embed_with")):
+            raise ValueError("gate: names one of test_vectors (a file) or embed_with "
+                             "(the served backbone whose fork the run embeds through)")
         # The gate's served twins ("<id> served") may be named by a hypothesis.
         ids = ids + [f"{c['id']} served" for c in doc.get("comparators", [])
                      if c.get("kind") == "vision"]
@@ -567,7 +570,8 @@ def outcomes_for(comp: dict, finds: list[po.Find], answers: dict | None = None,
 
 def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         attrs_path=None, allow_code: str | None = None,
-        research_dir: Path | None = None, embed_missing=None, log=print) -> dict:
+        research_dir: Path | None = None, embed_missing=None, gate_embed=None,
+        log=print) -> dict:
     """Score every comparator of `config` on `test` ("val" or a test release of `base`)
     and write report.json, report.md and the Vision predictions under `out`."""
     from .embed import load_embeddings
@@ -702,7 +706,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         gate_report, twins = paper_gate.run_gate(
             config["gate"], finds, photos, outcomes,
             [c["id"] for c in config["comparators"] if c["kind"] == "vision"],
-            resolve, reps, seed)
+            resolve, reps, seed, out=out / "gate", conn=conn, embed_list=gate_embed)
         outcomes.update(twins)
         for cid in twins:
             inputs[cid] = {"kind": "vision served", "of": cid.rsplit(" served", 1)[0]}

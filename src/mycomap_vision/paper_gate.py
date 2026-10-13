@@ -1,9 +1,13 @@
 """The not-a-fungus gate in the paper's scoring (paper E10; PLAN section 7).
 
-The config's "gate" block names the tuned gate (its folder and fingerprint), the gate's
-vectors for the scored photos (`mv fungus-gate embed`: keys are the release's manifest
-photo ids) and, optionally, the sealed OOD set (its vectors and manifest). Every file is
-pinned by sha256; the gate by its fingerprint (FungusGate.fingerprint).
+The config's "gate" block names the tuned gate (its folder and fingerprint), where the
+gate's vectors for the scored photos come from, and, optionally, the sealed OOD set (its
+vectors and manifest). The scored photos' vectors are either a file made beforehand
+(`test_vectors`, `mv fungus-gate embed`: keys are the release's manifest photo ids), or
+made by the run itself through the served model's fork (`embed_with`: the backbone), so a
+sealed test is never embedded before the run that scores it; the vectors are then kept
+beside the report and their sha256 recorded. Every file is pinned by sha256; the gate by
+its fingerprint (FungusGate.fingerprint).
 
 - Each scored find is judged as the server judges it: every photo by FungusGate.judge,
   the find by observation_verdict (a fungus when any photo is one). A find judged "not a
@@ -170,15 +174,48 @@ def ood_report(gate, rows: list[dict], vectors: dict[str, np.ndarray],
     return report
 
 
+def photo_list(conn, photos: dict[str, list[dict]], path: Path) -> Path:
+    """key<TAB>path of every scored photo's local large copy (never S3), for
+    `fungusgate_tune.embed_list`; a photo with no local copy is refused."""
+    from .backbone_screen import photos_to_embed
+    ids = [int(p["manifest_photo_id"]) for ph in photos.values() for p in ph]
+    todo = photos_to_embed(conn, "(gate list: every photo)", ids)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        for where, items in todo.items():
+            for pid, rel_path in items:
+                fh.write(f"{pid}\t{(Path(where) / rel_path).as_posix()}\n")
+    return path
+
+
+def gate_vectors(block: dict, photos, resolve, out: Path | None, conn=None,
+                 embed_list=None) -> Path:
+    """The scored photos' gate vectors: the pinned `test_vectors` file, or made now through
+    `embed_with`'s fork into `out` (embed_list: fungusgate_tune.embed_list)."""
+    if block.get("test_vectors"):
+        return pinned(block["test_vectors"], resolve)
+    if out is None or conn is None:
+        raise ValueError("gate: embed_with needs the run's output folder and manifest")
+    if embed_list is None:
+        from .fungusgate_tune import embed_list
+    out.mkdir(parents=True, exist_ok=True)
+    lst = photo_list(conn, photos, out / "gate-vectors.list")
+    npz = out / "gate-vectors.npz"
+    embed_list(block["embed_with"], lst, npz)
+    return npz
+
+
 def run_gate(block: dict, finds, photos, outcomes: dict[str, dict], vision_ids: list[str],
-             resolve, reps: int, seed: int) -> tuple[dict, dict[str, dict]]:
+             resolve, reps: int, seed: int, out: Path | None = None, conn=None,
+             embed_list=None) -> tuple[dict, dict[str, dict]]:
     """(report, served outcomes to add) for the config's gate block."""
     gate = load_gate(block, resolve)
-    tv = pinned(block["test_vectors"], resolve)
+    tv = gate_vectors(block, photos, resolve, out, conn, embed_list)
     verdicts = judge_finds(gate, photos, read_vectors(tv))
     claims = block.get("claims") or {}
     report = {"gate": {**gate.summary(), "dir": str(block["dir"])},
-              "test_vectors_sha256": sha256_file(tv),
+              "test_vectors": {"file": str(tv), "sha256": sha256_file(tv),
+                               "made_by": "pinned" if block.get("test_vectors")
+                               else f"embedded by this run through {block['embed_with']}"},
               "test": test_report(finds, verdicts, reps, seed,
                                   float(claims.get("max_lost_share", 0.005)))}
     if block.get("ood"):
