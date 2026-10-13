@@ -292,8 +292,8 @@ def report(conn: sqlite3.Connection, sealed_after=_SEAL) -> list[dict]:
         # answer to check, and family is iNat's for the genus when the cache has it.
         lab = taxonomy.labels_for(label(name) or "", genus, family,
                                   (label(name) or "").strip() != (name or "").strip(), tax)
-        if guests.excluded(lab.genus):       # the DNA name is a guest, not the photo's fungus
-            continue
+        if guests.excluded(lab.genus) or taxonomy.nonfungal(tax, lab.genus):
+            continue                         # a guest, or no fungus: not the photo's fungus
         species = lab.species
         truth = {"species": species, "genus": lab.genus, "family": lab.family}
         c["resolved"] += 1

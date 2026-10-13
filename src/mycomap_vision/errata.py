@@ -19,6 +19,12 @@ Reasons:
   record's name and photos are the unrelated iNat observation with that number (a duck, a
   panda...). Rule: sources.mo_twins. The nightly drops such records from the live
   manifest (records.save_records), so no later release or served index holds them.
+- `nonfungal_label` (v1, Steve 2026-10-13): a record whose label's genus is no fungus
+  (taxonomy.nonfungal: no fungal genus of that name on iNat, every taxon of that name in
+  Animalia, Plantae or Bacteria): a bee from a bee project, the host plant of a pooled
+  sample. Loading records leaves them out from now on (evaluate.load_records), and the
+  builder lists them as `nonfungal_label`. A record that is also an MO twin keeps that
+  reason. The rule reads the taxonomy cache, whose sha256 the erratum's writer reports.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from pathlib import Path
 
 from .dataset_release import REVIEW_COLUMNS, ReleaseError, sha256_file
 
-REASONS = ("mo_twin_as_inat",)
+REASONS = ("mo_twin_as_inat", "nonfungal_label")
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,21 @@ def mo_twin_rows(release) -> list[dict]:
                         & set(json.loads(twin["green_projects"] or "[]")))
         out.append({"kind": "record", "key": key, "reason": "mo_twin_as_inat",
                     "note": f"twin {twin['record_key']}; projects {', '.join(shared)}"})
+    return out
+
+
+def nonfungal_rows(release, tax, skip: set[str] = frozenset()) -> list[dict]:
+    """The erratum rows for `nonfungal_label`: every record of the release (included or
+    not) whose genus taxonomy.nonfungal names no fungus, but those in `skip` (already
+    listed for another reason)."""
+    from .taxonomy import nonfungal
+    out = []
+    for key, genus, label in release.db.execute(
+            "select record_key, genus, label from records order by record_key"):
+        kingdom = nonfungal(tax, genus or "")
+        if kingdom and key not in skip:
+            out.append({"kind": "record", "key": key, "reason": "nonfungal_label",
+                        "note": f"{label}: genus {genus} is {kingdom} on iNat, no fungus"})
     return out
 
 

@@ -610,6 +610,9 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
                                                             log=log), "iNat details", log)
             report["taxonomy"] = _step(lambda: steps.taxonomy(
                 conn, max_minutes=5.0, cache=layer.taxonomy_cache, log=log), "taxonomy", log)
+            # Kingdoms learnt for names that are no fungus take records out of the index
+            # (taxonomy.nonfungal): a change, so the index is rebuilt.
+            changed = changed or bool((report["taxonomy"] or {}).get("outside_asked"))
             report["photos"], report["embedded"] = {}, {}
             store = LocalStore(layer.photos)
             served = [b for b in _layer_backbones(conn) if b in backbones]

@@ -141,6 +141,7 @@ Every candidate gets exactly one reason (the first that applies), so the counts 
 | `label_conflict` | .org holds more than one name |
 | `no_label` | no usable rank ("Unknown", "Agaricales") |
 | `guest` | DNA name is a guest of the fungus in the photo (guests.py) |
+| `nonfungal_label` | the label's genus is no fungus: iNat has no fungal genus of that name, and every taxon of that name in Animalia, Plantae or Bacteria (taxonomy.nonfungal; a bee, a host plant). Slime moulds and a fungal subgenus written as a genus stay in (Steve, 2026-10-13) |
 | `review:<list>` | listed by a person-checked review list (label audit, LOO scan, …): `inputs/<list>.tsv` |
 | `no_photos` | no included photo left after the photo rules |
 | `ok` | in |
@@ -197,6 +198,19 @@ names it. A key the release lacks refuses the erratum. The AWS launchers do not 
   The feed now never stores such a record (records.save_records, nightly.changes:
   `mo_twins_dropped`), so the next nightly removes them from the served index and no later
   release holds them; an iNat and an MO record numbered alike in different projects stay.
+- `nonfungal_label` (v1, found 2026-10-13; Steve: erratum, live index and future cuts):
+  records whose label's genus is no fungus by taxonomy.nonfungal (a bee from a bee
+  project, the host plant of a pooled sample, a bacterium), checked by iNat kingdom at any
+  rank so that slime moulds and a fungal subgenus written as a genus (Telamonia) stay. In
+  v1: 96 included beyond the MO twins (91 train, 5 val; a record that is also a twin keeps
+  `mo_twin_as_inat`). The 5 val records leave the scoring too: their answer keys are not
+  fungi. The second erratum file (`--reasons` both, the default) is written from the v1
+  release and the taxonomy cache, whose sha256 the command prints; the first file stays as
+  it was. From now on loading records leaves them out (evaluate.load_records: references,
+  training, the served index), the builder lists them as `nonfungal_label` (v1-test, v2),
+  and `mv fetch-taxonomy` (and the nightly's taxonomy step) asks iNat the kingdoms of
+  every taxon named like a genus that has no fungal genus (`outside_fungi`); a night that
+  learns some marks itself changed, so the served index is rebuilt.
 
 ## 5. Splits
 
