@@ -278,6 +278,61 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
     return out
 
 
+def sized_name(backbone: str, px: int) -> str:
+    """The storage name of a backbone's vectors of photos sent at `px` (E30)."""
+    return f"{backbone}-px{int(px)}"
+
+
+class Resized:
+    """A backbone that sees each photo as an app would send it at `px`: the longer side
+    scaled down to `px` (never up), saved as JPEG at `quality`, decoded again."""
+
+    def __init__(self, backbone, px: int, quality: int = 90):
+        self.base, self.px, self.quality = backbone, int(px), quality
+        self.name, self.dim = sized_name(backbone.name, px), backbone.dim
+        self.device = getattr(backbone, "device", None)
+
+    def prepare(self, image):
+        import io
+
+        from PIL import Image
+        w, h = image.size
+        scale = self.px / max(w, h)
+        if scale < 1:
+            image = image.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                                 Image.BICUBIC)
+        buf = io.BytesIO()
+        image.save(buf, "JPEG", quality=self.quality)
+        image = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
+        base = getattr(self.base, "prepare", None)
+        return base(image) if base else image
+
+    def encode(self, items):
+        return self.base.encode(items)
+
+
+def ensure_embedded(conn, spec: str, photo_ids: list[int], px: int | None = None,
+                    loader=None, log=print) -> int:
+    """Embed the photos `spec` (at `px`, Resized) has no vector for, from copies on this
+    machine (backbone_screen.photos_to_embed: never S3). Returns how many were embedded."""
+    from . import backbone_screen, models
+    from .embed import embed_photos
+    from .storage import open_store
+    loader = loader or models.load_backbone
+    name = sized_name(models.storage_name(spec), px) if px else models.storage_name(spec)
+    todo = backbone_screen.photos_to_embed(conn, name, photo_ids)
+    n = sum(len(v) for v in todo.values())
+    if not n:
+        return 0
+    bb = loader(spec)
+    if px:
+        bb = Resized(bb, px)
+    for where, items in todo.items():
+        embed_photos(conn, open_store(where, cfgmod.DATA_DIR), bb, items,
+                     cfgmod.DATA_DIR / "embeddings" / name, log=log)
+    return n
+
+
 def with_public_points(records: list, public: dict[str, tuple]) -> list:
     """The scored records with their public point only (paper rule: obscured where iNat
     obscures, MO's box centre), never the release's true point; none when there is none."""
@@ -358,10 +413,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         int(config.get("bootstrap", {}).get("seed", 0))
     ref_rows = [dict(r) for r in base.records(ref_splits) if str(r["record_key"]) not in errata]
     scored_rows = [dict(r) for r in scored_rel.records(split)]
-    photos: dict[str, list[dict]] = defaultdict(list)
+    scored_keys = {str(r["record_key"]) for r in scored_rows}
+    photos: dict[str, list[dict]] = defaultdict(list)      # the scored finds' photos only
     for p in scored_rel.db.execute("select * from photos where included = 1 order by "
                                    "record_key, position, photo_key"):
-        photos[str(p["record_key"])].append(dict(p))
+        if str(p["record_key"]) in scored_keys:
+            photos[str(p["record_key"])].append(dict(p))
     ref_keys = {str(r["record_key"]) for r in ref_rows}
     ref_photo_rows = [dict(p) for p in base.db.execute(
         "select manifest_photo_id, original_sha256, record_key from photos where included = 1")
@@ -376,7 +433,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         b = nd_cfg["backbone"]
         want = [int(p["manifest_photo_id"]) for ph in photos.values() for p in ph]
         if embed_missing is not None:
-            embed_missing(b, want)
+            embed_missing(b, want, None)
         ids, vecs = load_embeddings(conn, b)
         row = {int(p): i for i, p in enumerate(ids.tolist())}
         q = [p for p in want if p in row]
@@ -396,13 +453,27 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         answers = None
         if comp["kind"] == "vision":
             b = comp["backbone"]
+            px = comp.get("photo_px")
+            wanted = [int(p["manifest_photo_id"]) for ph in photos.values() for p in ph]
             if embed_missing is not None:
-                embed_missing(b, [int(p["manifest_photo_id"]) for ph in photos.values()
-                                  for p in ph])
+                embed_missing(b, wanted, None)
             ids, vecs = load_embeddings(conn, b)
             row = {int(p): i for i, p in enumerate(ids.tolist())}
             ref = [r for r in base.as_records(ref_splits, row) if r.observation_id not in errata]
-            scored = scored_rel.as_records(split, row)
+            if comp.get("reference_as_of"):           # E7b: the reference as it stood then
+                ref = [r for r in ref if r.validated_on and r.validated_on <= comp["reference_as_of"]]
+            if px:
+                # E30: the scored photos as sent at `px` (references stay as stored).
+                qname = sized_name(b, px)
+                if embed_missing is not None:
+                    embed_missing(b, wanted, px)
+                qids, qvecs = load_embeddings(conn, qname)
+                offset = len(vecs)
+                vecs = np.concatenate([vecs, qvecs]) if len(qvecs) else vecs
+                scored = scored_rel.as_records(split, {int(p): offset + i
+                                                       for i, p in enumerate(qids.tolist())})
+            else:
+                scored = scored_rel.as_records(split, row)
             if comp.get("place"):
                 public = public if public is not None else public_points(scored_rel)
                 scored = with_public_points(scored, public)

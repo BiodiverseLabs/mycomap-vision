@@ -307,3 +307,54 @@ def test_deadly_taxa_come_from_the_config_list(world, tmp_path):
     # iNat answered "A x" for both: A x right; B y (deadly genus) called a deadly A x.
     assert d["predicted_from"]["A x"]["same_taxon"] == 1
     assert d["predicted_from"]["B"]["other_deadly"] == 1
+
+
+def test_photos_sent_at_640_px_are_embedded_apart_and_scored_against_the_stored_reference(
+        world, tmp_path):
+    seen = []
+
+    def embed(b, ids, px):
+        seen.append(px)
+        paper_score.ensure_embedded(world["conn"], b, ids, px, loader=lambda s: Const(s),
+                                    log=lambda m: None)
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"].append({"id": "vision-640", "kind": "vision", "backbone": "m1",
+                               "method": "nearest", "photo_px": 640})
+    rep = run(world, tmp_path, "val", cfg, embed_missing=embed)
+    assert 640 in seen and None in seen
+    n = world["conn"].execute("select count(*) from embeddings where backbone = 'm1-px640'"
+                              ).fetchone()[0]
+    assert n == 2                                      # only the two scored val photos
+    t = rep["standard"]["comparators"]["vision-640"]["primary"]["all"]
+    assert t["table"]["species strict"]["top1"]["n"] == 2
+    # Nothing to embed the second time.
+    assert paper_score.ensure_embedded(world["conn"], "m1", [1005, 1006], 640,
+                                       loader=lambda s: Const(s)) == 0
+
+
+def test_the_resized_backbone_never_enlarges_and_keeps_the_aspect():
+    from PIL import Image
+
+    class Seen:
+        name, dim = "b", 2
+
+        def prepare(self, im):
+            return im.size
+    r = paper_score.Resized(Seen(), 640)
+    assert r.name == "b-px640"
+    assert r.prepare(Image.new("RGB", (1024, 768))) == (640, 480)
+    assert r.prepare(Image.new("RGB", (300, 200))) == (300, 200)
+
+
+def test_a_reference_as_of_a_date_leaves_later_records_out(world, tmp_path):
+    cfg = config(tmp_path, ["7", "8"])
+    cfg["comparators"].append({"id": "as-of", "kind": "vision", "backbone": "m1",
+                               "method": "nearest", "reference_as_of": "2026-01-01"})
+    rep = run(world, tmp_path, world["test"], cfg)
+    # By 2026-01-01 only records 1 (A x) and 3 (B y) were validated: both still answered.
+    assert rep["standard"]["comparators"]["as-of"]["primary"]["all"]["table"][
+        "species strict"]["top1"]["rate"] == 1.0
+    cfg["comparators"][-1]["reference_as_of"] = "2025-12-31"          # before any record
+    rep = run(world, tmp_path, world["test"], cfg)
+    assert rep["standard"]["comparators"]["as-of"]["primary"]["all"]["table"][
+        "species strict"]["top1"]["rate"] == 0.0

@@ -1049,7 +1049,7 @@ def cmd_paper_score(conn, args) -> None:
     The sealed test opens only under the freeze tag, the tagged config and the frozen code."""
     from pathlib import Path
 
-    from . import backbone_screen, paper_score
+    from . import paper_score
     from .dataset_release import load_release
     base = _dataset_release(args)
     if base is None:
@@ -1064,9 +1064,9 @@ def cmd_paper_score(conn, args) -> None:
         raise SystemExit(f"{out / 'report.json'} exists: the sealed test is scored once; "
                          "later additions go to a new --out, labelled post hoc")
 
-    def embed_missing(backbone, photo_ids):
+    def embed_missing(backbone, photo_ids, px=None):
         if args.embed_missing:
-            backbone_screen.embed(conn, {"photos": photo_ids}, [backbone])
+            paper_score.ensure_embedded(conn, backbone, photo_ids, px)
     report = paper_score.run(conn, base, test, config_doc, body, out, errata_path=args.errata,
                              dhash_path=args.dhash_flags, attrs_path=args.attrs,
                              allow_code=args.allow_code, embed_missing=embed_missing)
