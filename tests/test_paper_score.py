@@ -549,3 +549,33 @@ def test_a_place_setting_is_built_into_the_place_method_recorded_and_an_unknown_
         cfg["comparators"][0].update(bad)
         with pytest.raises(ValueError, match="place setting|place_setting|not a place"):
             paper_score.check_config(cfg)
+
+
+class SeesUuid(SeesPlace):
+    """A place method stand-in that records the iNat uuid it is given for each find."""
+    uuids: list = []
+
+    def species_scores(self, query, context=None):
+        SeesUuid.uuids.append(context.uuid)
+        return np.zeros(self.n, dtype=np.float32)
+
+
+def test_a_place_method_is_given_each_finds_own_inat_uuid_so_it_can_leave_it_out(
+        world, tmp_path, monkeypatch):
+    """The occurrence prior leaves a find's own iNaturalist observation out of its counts
+    (OccurrenceStore.own_contribution) only if it is told the find's uuid: paper-score
+    passes it, through the public-point substitution, for every scored find."""
+    from mycomap_vision import evaluate
+    monkeypatch.setitem(evaluate.METHODS, "sees-uuid", SeesUuid)
+    monkeypatch.setattr(paper_score, "public_points",
+                        lambda rel: {"5": (47.5, -122.5), "6": (None, None)})
+    expected = sorted(u for (u,) in world["base"].db.execute(
+        "select inat_uuid from records where split = 'val' and included = 1"))
+    assert expected == ["uuid-5", "uuid-6"]                    # the release carries them
+    SeesUuid.uuids = []
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"] = [{"id": "vision-place", "kind": "vision", "backbone": "m1",
+                           "method": "sees-uuid", "place": True}]
+    cfg["hypotheses"] = {}
+    run(world, tmp_path, "val", cfg)
+    assert sorted(SeesUuid.uuids) == expected
