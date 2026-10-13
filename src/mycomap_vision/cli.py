@@ -1112,6 +1112,26 @@ def cmd_backbone_screen(conn, args) -> None:
                          indent=2))
 
 
+def cmd_ood_set(conn, args) -> None:
+    """Build the sealed not-a-fungus test set (oodset.py): CC0 / CC BY photos from sources
+    the earlier gate never saw, with licences, sources and sha256s in manifest.csv."""
+    from pathlib import Path
+
+    from . import oodset
+    rel = _dataset_release(args)
+    labels = set()
+    if rel is not None:
+        for sp, g in rel.db.execute("select species, genus from records where included = 1"):
+            labels.update(x for x in (sp, g) if x)
+    # Every iNat observation that is a MycoMap record (its id at iNat), never drawn.
+    mycomap = {str(r[0]) for r in conn.execute(
+        "select coalesce(nullif(source_id, ''), observation_id) from records "
+        "where source = 'inat'")}
+    print(json.dumps(oodset.build(Path(args.out), Path(args.openimages) if args.openimages
+                                  else None, [Path(p) for p in _split(args.exclude)],
+                                  mycomap, labels), indent=2))
+
+
 def cmd_external(conn, args) -> None:
     """Published fungi classifiers as outside baselines (replications/fungitastic/published*.py)."""
     from pathlib import Path
@@ -2119,6 +2139,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--queries", type=int, default=2000, help="val queries per half")
     p.add_argument("--batch-size", type=int, default=16)
 
+    p = sub.add_parser("ood-set", help="build the sealed not-a-fungus test set (oodset.py)")
+    release_options(p)
+    p.add_argument("--out", required=True)
+    p.add_argument("--openimages", help="folder with Open Images V5 train label and image CSVs")
+    p.add_argument("--exclude", default="", help="comma list of earlier sets' manifests")
+
     p = sub.add_parser("external", help="published fungi classifiers (DF20, FungiTastic) as "
                                         "outside baselines (replications/fungitastic/)")
     xsub = p.add_subparsers(dest="action", required=True)
@@ -2276,6 +2302,7 @@ def main(argv: list[str] | None = None) -> int:
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
         "backbone-screen": cmd_backbone_screen,
+        "ood-set": cmd_ood_set,
         "external": cmd_external,
     }[args.command]
     handler(conn, args)
