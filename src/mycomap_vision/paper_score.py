@@ -90,6 +90,14 @@ def check_config(doc: dict) -> None:
             raise ValueError(f"comparator {c['id']}: a vision comparator names backbone and method")
         if c["kind"] in ("published", "inat", "expert") and not c.get("file"):
             raise ValueError(f"comparator {c['id']}: needs its input file")
+    gate = doc.get("gate")
+    if gate:
+        for k in ("dir", "fingerprint", "test_vectors"):
+            if not gate.get(k):
+                raise ValueError(f"gate: names {k}")
+        # The gate's served twins ("<id> served") may be named by a hypothesis.
+        ids = ids + [f"{c['id']} served" for c in doc.get("comparators", [])
+                     if c.get("kind") == "vision"]
     for fam, hyps in (doc.get("hypotheses") or {}).items():
         for h in hyps:
             for k in ("a", "b", "comparator"):
@@ -686,6 +694,18 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                       reference=comp.get("reference", "every included photo"),
                                       finds_without_vectors=len(finds) - len(answers),
                                       predictions_sha256=sha256_file(path))
+    gate_report = None
+    if config.get("gate"):
+        # E10: the gate on the scored finds and the OOD set; each Vision comparator gets a
+        # "<id> served" twin where a refused find is wrong (the plain row is gate-off).
+        from . import paper_gate
+        gate_report, twins = paper_gate.run_gate(
+            config["gate"], finds, photos, outcomes,
+            [c["id"] for c in config["comparators"] if c["kind"] == "vision"],
+            resolve, reps, seed)
+        outcomes.update(twins)
+        for cid in twins:
+            inputs[cid] = {"kind": "vision served", "of": cid.rsplit(" served", 1)[0]}
     report = {
         "post_hoc": g["post_hoc"],
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -718,6 +738,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   float(config.get("alpha", 0.05))),
         "per_photo": per_photo,
+        "gate": gate_report,
         "calibration": calibration_report(finds, calib, outcomes,
                                           config.get("calibration_metrics", {}), reps, seed),
         "errors": errors_report(finds, top1, {**config.get("errors", {}), **(
@@ -845,8 +866,11 @@ def format_report(report: dict, config: dict) -> str:
               "", f"Near-duplicates: {report['standard']['near_duplicates']}", ""]
     groups = {"photos only": [], "photos + place and date": []}
     for c in config["comparators"]:
-        groups["photos + place and date" if c.get("place") or str(c.get("score", "")).startswith("combined")
-               else "photos only"].append(c["id"])
+        group = groups["photos + place and date" if c.get("place") or str(
+            c.get("score", "")).startswith("combined") else "photos only"]
+        group.append(c["id"])
+        if f"{c['id']} served" in report["standard"]["comparators"]:
+            group.append(f"{c['id']} served")         # the gate on: a refusal is wrong
     for label, cids in groups.items():
         if not cids:
             continue
@@ -867,6 +891,8 @@ def format_report(report: dict, config: dict) -> str:
                     lines.append(f"| {b} | {_pct(r['top1'])} | {_pct(r['top5'])} | "
                                  f"{r['top1']['n']:,} |")
                 lines.append("")
+    if report.get("gate"):
+        lines += _gate_lines(report["gate"])
     lines += ["## Hypotheses", ""]
     for fam, hyps in report["hypotheses"].items():
         lines += [f"### Family {fam} (Holm within the family)", "",
@@ -888,3 +914,38 @@ def format_report(report: dict, config: dict) -> str:
                          f"{'yes' if h['reject'] else 'no'} |")
         lines.append("")
     return "\n".join(lines) + "\n"
+
+
+def _gate_lines(gr: dict) -> list[str]:
+    """E10: the gate on the scored finds, and the OOD set's rows."""
+    def share(x):
+        if not x or x.get("share") is None:
+            return "-"
+        ci = x.get("ci95")
+        return (f"{100 * x['share']:.1f}% ({x['count']:,}/{x['n']:,}"
+                + (f"; {100 * ci[0]:.1f}-{100 * ci[1]:.1f}" if ci else "") + ")")
+    t = gr["test"]
+    g = gr["gate"]
+    lines = ["## Not-a-fungus gate", "",
+             f"Gate {g['mode']} {g['fingerprint']}, thresholds {g['thresholds']['not_fungus']}"
+             f" / {g['thresholds']['unsure']}.", "",
+             f"Scored finds: {t['finds']:,}; lose their answer {share(t['lost'])}; not sure "
+             f"{share(t['not_sure'])}. Claim (at most {100 * t['claim']['max_lost_share']:.1f}% "
+             f"lose their answer): {'stands' if t['claim']['stands'] else 'FAILS'}.", ""]
+    ood = gr.get("ood")
+    if ood:
+        lines += ["| OOD photos | n | named | not sure | refused | TNR @ 95% TPR | AUROC |",
+                  "|---|---|---|---|---|---|---|"]
+        rows = [("everyday + non-fungal near-OOD", ood["headline"]),
+                ("everyday", ood["everyday"]), ("non-fungal near-OOD", ood["near_ood_nonfungal"]),
+                *ood["in_scope"].items()]
+        for name, r in rows:
+            tnr, au = r.get("tnr_at_95_tpr"), r.get("auroc")
+            lines.append(f"| {name} | {r['photos']:,} | {share(r['named'])} | "
+                         f"{share(r['not_sure'])} | {share(r['refused'])} | "
+                         f"{'-' if tnr is None else f'{100 * tnr:.1f}%'} | "
+                         f"{'-' if au is None else f'{au:.3f}'} |")
+        chk = ood["everyday"]["check"]
+        lines += ["", f"Everyday let-through at most {100 * chk['let_through_at_most']:.0f}%: "
+                      f"{'holds' if chk['holds'] else 'does NOT hold'}.", ""]
+    return lines
