@@ -167,7 +167,7 @@ def test_an_advance_prediction_of_a_one_word_record_is_checked_at_genus_only(con
     conn.execute("insert into predictions values ('102', 'm1', 'nearest', '2025-12-01', 'x', "
                  "5, 1, ?)", (json.dumps(result),))
     conn.commit()
-    [row] = prospective.report(conn)
+    [row] = prospective.report(conn, sealed_after=None)    # the seed's dates are placeholders
     assert row["resolved"] == 1
     assert (row["species_top1"], row["genus_top1"], row["family_top1"]) == (None, 1.0, 1.0)
     assert row["mean_species_confidence"] is None

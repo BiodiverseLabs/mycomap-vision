@@ -731,7 +731,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def prospective_report():
         from . import prospective
         with db_lock:
-            return {"models": prospective.report(conn)}
+            return {"models": prospective.report(conn), "sealed_after": prospective.seal_time()}
 
     @app.get("/api/benchmarks")
     def benchmarks():
