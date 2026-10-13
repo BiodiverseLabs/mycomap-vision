@@ -1064,6 +1064,34 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_backbone_screen(conn, args) -> None:
+    """The frozen-backbone screen on a release's seeded subset (backbone_screen.py):
+    subset (drawn once), embed (only the subset's photos a backbone lacks), score."""
+    from . import backbone_screen as bs
+    rel = _dataset_release(args)
+    if rel is None:
+        raise SystemExit("backbone-screen needs --release <id>")
+    out = bs.results_dir(rel.id)
+    if args.action == "subset":
+        doc = bs.make_subset(rel, out, errata_path=args.errata, seed=args.seed,
+                             reference_records=args.reference_records, cap=args.cap,
+                             queries=args.queries)
+        print(json.dumps({"subset": str(out / "subset.json"), "species": len(doc["species"]),
+                          "species_sha256": doc["species_sha256"],
+                          "references": len(doc["references"]), "photos": len(doc["photos"]),
+                          "queries": {h: q["by_band"] for h, q in doc["queries"].items()},
+                          "errata": doc["errata"]}, indent=2))
+        return
+    subset = bs.load_subset(rel.id)
+    backbones = _split(args.backbones)
+    if args.action == "embed":
+        print(json.dumps(bs.embed(conn, subset, backbones, batch_size=args.batch_size),
+                         indent=2))
+    else:
+        print(json.dumps(bs.score(conn, rel, subset, backbones, _split(args.methods)),
+                         indent=2))
+
+
 def cmd_external(conn, args) -> None:
     """Published fungi classifiers as outside baselines (replications/fungitastic/published*.py)."""
     from pathlib import Path
@@ -2044,6 +2072,22 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--redo", action="store_true", help="replace answers stored before")
     release_options(q)
 
+    p = sub.add_parser("backbone-screen", help="frozen backbones on a release's seeded "
+                                               "subset: subset, embed, score "
+                                               "(backbone_screen.py)")
+    p.add_argument("action", choices=["subset", "embed", "score"])
+    release_options(p)
+    p.add_argument("--backbones", default="bioclip-2",
+                   help="comma list (embed, score)")
+    p.add_argument("--methods", default="nearest,species-mean,nearest+mean")
+    p.add_argument("--errata", help="the release's errata TSV: its records are left out "
+                                    "(subset; the file's sha256 is recorded)")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--reference-records", type=int, default=16000)
+    p.add_argument("--cap", type=int, default=50, help="train records per species, at most")
+    p.add_argument("--queries", type=int, default=2000, help="val queries per half")
+    p.add_argument("--batch-size", type=int, default=16)
+
     p = sub.add_parser("external", help="published fungi classifiers (DF20, FungiTastic) as "
                                         "outside baselines (replications/fungitastic/)")
     xsub = p.add_subparsers(dest="action", required=True)
@@ -2200,6 +2244,7 @@ def main(argv: list[str] | None = None) -> int:
         "contributors": cmd_contributors,
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
+        "backbone-screen": cmd_backbone_screen,
         "external": cmd_external,
     }[args.command]
     handler(conn, args)
