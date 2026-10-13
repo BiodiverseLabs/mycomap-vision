@@ -313,6 +313,11 @@ export interface ProspectiveModel {
   genus_top1: number | null;
   species_top1: number | null;
   mean_species_confidence: number | null;
+  /** Predictions whose records were first validated after the paper's sealed-test cut:
+   *  counted, but how they fared stays hidden until the test is opened. */
+  sealed?: number;
+  model_version?: string | null;
+  serving_release?: string | null;
 }
 
 export interface Me {
@@ -332,7 +337,7 @@ export const api = {
     const body = await res.json().catch(() => ({}));
     return typeof body.next === "string" ? body.next : "/";
   },
-  prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
+  prospective: () => getJson<{ models: ProspectiveModel[]; sealed_after?: string | null }>("/api/prospective"),
   /** Held-out benchmark results imported on the server (aggregates only). */
   benchmarks: () => getJson<{ benchmarks: PublishedBenchmark[] }>("/api/benchmarks"),
   /** The experiment registry, for signed-in members only. */

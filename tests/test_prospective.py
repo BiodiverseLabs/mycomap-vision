@@ -153,3 +153,77 @@ def test_an_occurrence_prior_that_cannot_leave_the_candidates_find_out_skips_it(
     assert stats == {"predicted": 1,
                      "skipped: occurrence prior can't leave its own find out": 1}
     assert ident.model.asked == [["uuid-10"], ["uuid-20"]]
+
+
+# --- the v1 model's advance predictions: provenance, and the paper's sealed test ----------
+
+def predicted(conn, oid, answer):
+    """A prediction made on 9/1."""
+    conn.executescript(prospective.SCHEMA)
+    conn.execute("insert into predictions values (?, 'm1', 'hybrid', "
+                 "'2026-09-01T00:00:00+00:00', 'v', 1, 1, ?)",
+                 (oid, json.dumps({"species": [{"name": answer, "confidence": 0.6}]})))
+
+
+def green_list(conn, oids, when):
+    """The green list as of `when` (a record keeps the time it was first listed)."""
+    save_records(conn, build_records([{"source": "iNaturalist", "observation_id": oid,
+                                       "scientific_name": "A x", "genus": "A", "family": "F",
+                                       "continent": "North America",
+                                       "validation_status_1": "yes"} for oid in oids], when))
+
+
+def test_each_prediction_records_the_served_model_version_and_release(conn):
+    prospective.save_candidates(conn, [candidate("10")], "t0")
+    fetcher = FakeFetcher({"10": inat_obs(10, photos=[(0, 1, "cc0", "x")])})
+    prospective.predict_pending(conn, FakeIdentifier(), object(), ["10"], fetcher,
+                                log=lambda s: None, provenance=("2026-10-12", "20261014-090000"))
+    assert [tuple(r) for r in conn.execute(
+        "select observation_id, backbone, method, model_version, serving_release "
+        "from prediction_provenance")] == [
+        ("10", "m1", "hybrid", "2026-10-12", "20261014-090000")]
+
+
+def test_the_served_provenance_comes_from_the_models_metadata_and_the_current_release(
+        tmp_path, monkeypatch):
+    from mycomap_vision import config, finetune
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "ft-v1.json").write_text(json.dumps({"version": "2026-10-12"}))
+    monkeypatch.setattr(finetune, "models_dir", lambda: models)
+    root = tmp_path / "releases"
+    root.mkdir()
+    (root / "current.txt").write_text("20261014-090000")
+    monkeypatch.setattr(config, "RELEASE_ROOT", root)
+    assert prospective.served_provenance("ft-v1") == ("2026-10-12", "20261014-090000")
+    monkeypatch.setattr(config, "RELEASE_ROOT", None)
+    assert prospective.served_provenance("older-model") == (None, None)
+
+
+def test_records_validated_after_v1s_snapshot_stay_hidden_until_the_seal_is_lifted(
+        conn, monkeypatch):
+    monkeypatch.delenv("MV_PROSPECTIVE_SEAL", raising=False)
+    assert prospective.seal_time() == "2026-10-12T13:17:51+00:00"
+    predicted(conn, "70", "A x")
+    predicted(conn, "71", "A y")
+    green_list(conn, ["70"], "2026-10-01T00:00:00+00:00")          # before the snapshot: counts
+    green_list(conn, ["70", "71"], "2026-10-20T00:00:00+00:00")    # a v1-test record: hidden
+    [m] = prospective.report(conn)
+    assert (m["resolved"], m["sealed"], m["species_top1"]) == (1, 1, 1.0)
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")                         # after the freeze tag
+    [m] = prospective.report(conn)
+    assert (m["resolved"], m["sealed"], m["species_top1"]) == (2, 0, 0.5)
+
+
+def test_the_site_says_when_its_advance_predictions_are_sealed(conn, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from test_api import open_limits
+    from test_models_and_scoreboard import Const, seed_two_species
+    from mycomap_vision.api import create_app
+    monkeypatch.delenv("MV_PROSPECTIVE_SEAL", raising=False)
+    seed_two_species(conn, tmp_path)
+    conn.commit()
+    c = TestClient(create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
+                              backbone_loader=lambda n: Const(n), limits=open_limits(),
+                              background=False))
+    assert c.get("/api/prospective").json()["sealed_after"] == "2026-10-12T13:17:51+00:00"
