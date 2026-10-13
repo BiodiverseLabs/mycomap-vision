@@ -455,3 +455,39 @@ def test_each_photo_alone_is_a_per_photo_table_beside_the_finds(world, tmp_path)
     assert t["photos"] == 2 and t["right"] == 2                # one photo per val record here
     assert rep["inputs"]["each"]["photo_answers"] == 2
     assert "each" not in rep["errors"]["comparators"]           # not a per-find answer
+
+
+def test_the_configs_erratum_is_pinned_and_a_different_cli_one_is_refused(world, tmp_path):
+    from mycomap_vision import errata
+    path = tmp_path / "errata.tsv"
+    path.write_text("kind\tkey\treason\tnote\nrecord\t1\tmo_twin_as_inat\t\n", encoding="utf-8")
+    block = {"file": str(path), "sha256": paper_score.sha256_file(path)}
+    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"], errata=block))
+    assert rep["errata"]["sha256"] == block["sha256"]
+    assert rep["errata"]["reference_records_left_out"] == 1
+    with pytest.raises(ValueError, match="the config pins"):
+        run(world, tmp_path, "val", config(tmp_path, ["5", "6"],
+                                           errata={**block, "sha256": "0" * 64}))
+    other = tmp_path / "other.tsv"
+    other.write_text("kind\tkey\treason\tnote\nrecord\t2\tmo_twin_as_inat\t\n", encoding="utf-8")
+    world["base"].use_errata(errata.read(other))              # as a differing --errata would
+    with pytest.raises(ValueError, match="carries erratum"):
+        run(world, tmp_path, "val", config(tmp_path, ["5", "6"], errata=block))
+
+
+def test_config_paths_resolve_under_the_data_folder_and_the_research_repo():
+    from mycomap_vision import config as cfg
+    assert paper_score.resolve("data/x/y.tsv") == cfg.DATA_DIR / "x" / "y.tsv"
+    assert paper_score.resolve("paper/e21.csv") == cfg.RESEARCH_DIR / "paper" / "e21.csv"
+    assert paper_score.resolve("C:/abs/z.tsv").is_absolute()
+
+
+def test_the_cc_reference_row_uses_only_photos_a_public_model_may_learn_from(world, tmp_path):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"].append({"id": "cc-reference", "kind": "vision", "backbone": "m1",
+                               "method": "nearest", "reference": "public_trainable_only"})
+    rep = run(world, tmp_path, "val", cfg)
+    full = rep["inputs"]["vision-photos"]["reference_records"]
+    cc = rep["inputs"]["cc-reference"]["reference_records"]
+    want = sum(1 for r in world["base"].as_records("train", None, public_trainable_only=True))
+    assert cc == want and cc < full                 # the fixture's ARR photos leave

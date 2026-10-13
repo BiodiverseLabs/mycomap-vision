@@ -97,6 +97,43 @@ def check_config(doc: dict) -> None:
                     raise ValueError(f"{fam}/{h.get('id')}: unknown comparator {h[k]!r}")
 
 
+def resolve(path: str | Path) -> Path:
+    """A path in the config: absolute as given; `data/...` under the data folder
+    (config.DATA_DIR); `paper/...` and `experiments/...` under the research repo."""
+    p = Path(str(path))
+    if p.is_absolute():
+        return p
+    parts = p.parts
+    if parts and parts[0] == "data":
+        return cfgmod.DATA_DIR.joinpath(*parts[1:])
+    if parts and parts[0] in ("paper", "experiments"):
+        return cfgmod.RESEARCH_DIR / p
+    return p
+
+
+def apply_errata(base, block: dict | None) -> dict | None:
+    """The config's erratum (file + sha256) on the base release: refused when the file's
+    sha256 is not the one pinned, or when the release already carries another erratum
+    (a CLI --errata that differs). An erratum the release already carries, the same, is
+    kept; without a block, whatever the release carries is used."""
+    if not block:
+        return None
+    from . import errata as errata_mod
+    path = resolve(block["file"])
+    got = sha256_file(path)
+    if got != block.get("sha256"):
+        raise ValueError(f"erratum {path}: sha256 {got[:12]}, the config pins "
+                         f"{str(block.get('sha256'))[:12]}")
+    carried = getattr(base, "errata", None)
+    if carried is not None:
+        if carried.sha256 != got:
+            raise ValueError(f"the release carries erratum {carried.sha256[:12]} (--errata), "
+                             f"the config names {got[:12]}: give the config's or none")
+        return block
+    base.use_errata(errata_mod.read(path))
+    return block
+
+
 # --- the freeze guard -------------------------------------------------------------------------
 
 def _git(repo: Path, *args) -> subprocess.CompletedProcess:
@@ -406,7 +443,7 @@ def crosswalk_rule(spec: dict, names, conn) -> tuple:
     mode = spec.get("mode", "reviewed")
     if mode not in CROSSWALK_MODES:
         raise ValueError(f"crosswalk mode is one of {CROSSWALK_MODES}")
-    cache = Path(spec["cache"])
+    cache = resolve(spec["cache"])
     got = sha256_file(cache)
     if spec.get("cache_sha256") and got != spec["cache_sha256"]:
         raise ValueError(f"crosswalk cache {cache}: sha256 {got[:12]}, the config pins "
@@ -415,11 +452,11 @@ def crosswalk_rule(spec: dict, names, conn) -> tuple:
     if mode == "reviewed":
         if not spec.get("review"):
             raise ValueError("a reviewed crosswalk needs its review list")
-        rev_sha = sha256_file(spec["review"])
+        rev_sha = sha256_file(resolve(spec["review"]))
         if spec.get("review_sha256") and rev_sha != spec["review_sha256"]:
             raise ValueError(f"crosswalk review {spec['review']}: sha256 {rev_sha[:12]}, the "
                              f"config pins {spec['review_sha256'][:12]}")
-        with open(spec["review"], encoding="utf-8") as fh:
+        with open(resolve(spec["review"]), encoding="utf-8") as fh:
             for r in csv.DictReader(fh, delimiter="\t"):
                 if (r.get("review") or "").strip().lower() == "credit":
                     credited.add((r["their_answer"], r["our_label"]))
@@ -451,8 +488,9 @@ def outcomes_for(comp: dict, finds: list[po.Find], answers: dict | None = None,
         collapse = bool(comp.get("collapse_infraspecific"))
         return {k: po.from_ranked(a["species"], a["genus"], by_key[k], collapse=collapse)
                 for k, a in (answers or {}).items() if k in by_key}, info
-    lines = po.read_jsonl(comp["file"])
-    info.update(file=str(comp["file"]), sha256=sha256_file(comp["file"]), lines=len(lines))
+    path = resolve(comp["file"])
+    lines = po.read_jsonl(path)
+    info.update(file=str(comp["file"]), sha256=sha256_file(path), lines=len(lines))
     out = {}
     if comp["kind"] == "published":
         same, uncredited = None, None
@@ -512,6 +550,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     scored_rel, split, ref_splits, sealed = scored_and_reference(base, test)
     g = guard(sealed, config_bytes, config, research_dir or cfgmod.RESEARCH_DIR,
               cfgmod.code_version(), allow_code)
+    apply_errata(base, config.get("errata"))
     # An erratum given to the base release (--errata; Release.use_errata) has already left
     # its records out of every split base reads: references and depth alike.
     errata = set(base.errata.keys) if getattr(base, "errata", None) is not None else set()
@@ -566,7 +605,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 embed_missing(b, wanted, None)
             ids, vecs = load_embeddings(conn, b)
             row = {int(p): i for i, p in enumerate(ids.tolist())}
-            ref = base.as_records(ref_splits, row)
+            ref = base.as_records(ref_splits, row, public_trainable_only=(
+                comp.get("reference") == "public_trainable_only"))
             if comp.get("reference_as_of"):           # E7b: the reference as it stood then
                 ref = [r for r in ref if r.validated_on and r.validated_on <= comp["reference_as_of"]]
             if px:
@@ -620,10 +660,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         top1[comp["id"]] = top_answers(comp, answers)
         if comp["kind"] == "inat" and comp.get("calibration_from_score", True):
             calib[comp["id"]] = {str(line["record_key"]): po.inat_confidence(
-                line, comp.get("score", "vision")) for line in po.read_jsonl(comp["file"])}
+                line, comp.get("score", "vision")) for line in po.read_jsonl(resolve(comp["file"]))}
         if answers is not None:
             inputs[comp["id"]].update(backbone=comp["backbone"], method=comp["method"],
                                       place=bool(comp.get("place")),
+                                      reference_records=len(ref),
+                                      reference=comp.get("reference", "every included photo"),
                                       finds_without_vectors=len(finds) - len(answers),
                                       predictions_sha256=sha256_file(path))
     report = {
@@ -658,7 +700,9 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "per_photo": per_photo,
         "calibration": calibration_report(finds, calib, outcomes,
                                           config.get("calibration_metrics", {}), reps, seed),
-        "errors": errors_report(finds, top1, config.get("errors", {}), base, scored_rel),
+        "errors": errors_report(finds, top1, {**config.get("errors", {}), **(
+            {"deadly": config["deadly_taxa"]} if config.get("deadly_taxa")
+            and not (config.get("errors") or {}).get("deadly") else {})}, base, scored_rel),
         "slices": pt.slices(finds, outcomes, config.get("slices", {}).get("attrs", []),
                             config.get("slices", {}).get("cells", ["species_strict@1",
                                                                    "genus_strict@1"]),
@@ -700,11 +744,11 @@ def top_answers(comp: dict, answers: dict | None) -> dict[str, str]:
     if comp["kind"] == "published":
         return {str(line["observation_id"]): ((line["result"].get("species") or [{}])[0]
                                               .get("name") or "")
-                for line in po.read_jsonl(comp["file"])}
+                for line in po.read_jsonl(resolve(comp["file"]))}
     if comp["kind"] == "inat":
         sc = comp.get("score", "vision")
         return {str(line["record_key"]): ((line.get(sc) or {}).get("species") or [[0, ""]])[0][1]
-                for line in po.read_jsonl(comp["file"])}
+                for line in po.read_jsonl(resolve(comp["file"]))}
     return {}
 
 
@@ -731,7 +775,9 @@ def errors_report(finds, top1: dict, cfg: dict, base, scored_rel) -> dict:
     from . import paper_errors as pe
     base_finds = pt.in_scope(finds)
     ranks, tax_sha = taxonomy_ranks(base, scored_rel, cfg.get("taxonomy"))
-    deadly = pe.read_deadly(cfg["deadly"]) if cfg.get("deadly") else None
+    deadly = pe.read_deadly({**cfg["deadly"], **({"file": str(resolve(cfg["deadly"]["file"]))}
+                                                if "file" in cfg["deadly"] else {})}
+                            ) if cfg.get("deadly") else None
     out = {"taxonomy_sha256": tax_sha, "comparators": {}}
     for cid in cfg.get("comparators") or [c for c, t in top1.items() if t]:
         t = top1.get(cid) or {}
