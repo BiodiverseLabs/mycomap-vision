@@ -1375,8 +1375,19 @@ def cmd_expert_ids(args) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else list(argv)
+    if args_in[:1] == ["learning-curve"]:
+        # Its own command line (release / run / score / report); it reads the manifest and
+        # stored embeddings only.
+        from . import learning_curve
+        learning_curve.main(args_in[1:])
+        return 0
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("learning-curve", add_help=False,
+                   help="accuracy against reference records per species (release / run / "
+                        "score / report; see mv learning-curve -h)")
 
     sub.add_parser("export-records", help="pull green records from mycomap.org (read-only)")
 
