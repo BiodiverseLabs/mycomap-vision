@@ -706,7 +706,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         gate_report, twins = paper_gate.run_gate(
             config["gate"], finds, photos, outcomes,
             [c["id"] for c in config["comparators"] if c["kind"] == "vision"],
-            resolve, reps, seed, out=out / "gate", conn=conn, embed_list=gate_embed)
+            resolve, reps, seed, out=out / "gate", conn=conn, embed_list=gate_embed,
+            sealed_open=bool(g["sealed"]))
         outcomes.update(twins)
         for cid in twins:
             inputs[cid] = {"kind": "vision served", "of": cid.rsplit(" served", 1)[0]}
@@ -937,7 +938,9 @@ def _gate_lines(gr: dict) -> list[str]:
              f"{share(t['not_sure'])}. Claim (at most {100 * t['claim']['max_lost_share']:.1f}% "
              f"lose their answer): {'stands' if t['claim']['stands'] else 'FAILS'}.", ""]
     ood = gr.get("ood")
-    if ood:
+    if ood and "not_scored" in ood:
+        lines += [f"OOD set: not scored ({ood['not_scored']}).", ""]
+    elif ood:
         lines += ["| OOD photos | n | named | not sure | refused | TNR @ 95% TPR | AUROC |",
                   "|---|---|---|---|---|---|---|"]
         rows = [("everyday + non-fungal near-OOD", ood["headline"]),

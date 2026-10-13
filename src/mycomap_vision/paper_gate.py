@@ -35,6 +35,7 @@ from .fungusgate_tune import sha256_file
 
 HEADLINE = ("everyday", "near-ood")        # manifest "kind": the non-fungal OOD photos
 IN_SCOPE = ("fungal-pathogen", "near-ood-fungus")
+SEALED_BY = "the tag paper-analysis-freeze-v1"
 VERDICT_WORDS = {fungusgate.FUNGUS: "named", fungusgate.UNSURE: "not_sure",
                  fungusgate.NOT_FUNGUS: "refused"}
 
@@ -206,8 +207,9 @@ def gate_vectors(block: dict, photos, resolve, out: Path | None, conn=None,
 
 def run_gate(block: dict, finds, photos, outcomes: dict[str, dict], vision_ids: list[str],
              resolve, reps: int, seed: int, out: Path | None = None, conn=None,
-             embed_list=None) -> tuple[dict, dict[str, dict]]:
-    """(report, served outcomes to add) for the config's gate block."""
+             embed_list=None, sealed_open: bool = False) -> tuple[dict, dict[str, dict]]:
+    """(report, served outcomes to add) for the config's gate block. The OOD set is scored
+    only when `sealed_open` (the freeze guard opened the sealed test for this run)."""
     gate = load_gate(block, resolve)
     tv = gate_vectors(block, photos, resolve, out, conn, embed_list)
     verdicts = judge_finds(gate, photos, read_vectors(tv))
@@ -218,7 +220,11 @@ def run_gate(block: dict, finds, photos, outcomes: dict[str, dict], vision_ids: 
                                else f"embedded by this run through {block['embed_with']}"},
               "test": test_report(finds, verdicts, reps, seed,
                                   float(claims.get("max_lost_share", 0.005)))}
-    if block.get("ood"):
+    if block.get("ood") and not sealed_open:
+        # The OOD set is sealed like the test: no verdict, rate or even a read of its
+        # vectors until the run that opens the sealed test (the freeze guard passed).
+        report["ood"] = {"not_scored": f"sealed until the sealed test run ({SEALED_BY})"}
+    elif block.get("ood"):
         ov = pinned(block["ood"]["vectors"], resolve)
         om = pinned(block["ood"]["manifest"], resolve)
         report["ood"] = {"vectors_sha256": sha256_file(ov), "manifest_sha256": sha256_file(om),

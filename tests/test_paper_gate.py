@@ -130,11 +130,12 @@ def test_paper_score_serves_through_the_gate_beside_the_gate_off_numbers(world, 
         w.writerows([{"file": "e.jpg", "kind": "everyday", "category": "object",
                       "in_v1_labels": "no", "owner": "u"}])
     ov = vectors_file(tmp_path / "ood.npz", {"e.jpg": BIRD_V})
+    ood_spec = {"vectors": {"file": str(ov), "sha256": sha256_file(ov)},
+                "manifest": {"file": str(man), "sha256": sha256_file(man)}}
+    ov.unlink()                          # val never opens the sealed OOD set's vectors
     cfg = config(tmp_path, ["5", "6"], gate={
         "dir": str(d), "fingerprint": fp,
-        "test_vectors": {"file": str(tv), "sha256": sha256_file(tv)},
-        "ood": {"vectors": {"file": str(ov), "sha256": sha256_file(ov)},
-                "manifest": {"file": str(man), "sha256": sha256_file(man)}}})
+        "test_vectors": {"file": str(tv), "sha256": sha256_file(tv)}, "ood": ood_spec})
     cfg["hypotheses"]["B"] = [{"id": "gate", "kind": "mcnemar", "a": "vision-photos",
                                "b": "vision-photos served", "cell": "species_strict@1"}]
     rep = run(world, tmp_path, "val", cfg)
@@ -144,11 +145,12 @@ def test_paper_score_serves_through_the_gate_beside_the_gate_off_numbers(world, 
     assert (off["right"], on["right"], on["n"]) == (2, 1, 2)       # find 5 refused
     assert rep["gate"]["test"]["lost"]["count"] == 1
     assert rep["gate"]["test"]["claim"]["stands"] is False
-    assert rep["gate"]["ood"]["everyday"]["refused"]["count"] == 1
+    assert "sealed" in rep["gate"]["ood"]["not_scored"] and "headline" not in rep["gate"]["ood"]
     assert rep["hypotheses"]["B"]["gate"]["only_a"] == 1
     assert set(rep["gate"]["served_comparators"]) == {"vision-photos served", "vision-mean served"}
     md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
     assert "## Not-a-fungus gate" in md and "### vision-photos served" in md
+    assert "OOD set: not scored" in md
     assert json.loads((tmp_path / "out" / "report.json").read_text())["gate"]["gate"]["fingerprint"] == fp
 
 
@@ -184,3 +186,42 @@ def test_a_sealed_run_embeds_the_gate_vectors_itself_and_records_them(world, tmp
     assert tv["sha256"] == sha256_file(tmp_path / "out" / "gate" / "gate-vectors.npz")
     assert tv["made_by"].startswith("embedded by this run")
     assert rep["gate"]["test"]["lost"]["count"] == 1
+
+
+def test_the_sealed_ood_set_is_scored_only_when_the_sealed_test_is_open(tmp_path):
+    d, fp = saved_gate(tmp_path)
+    photos = {"5": [{"manifest_photo_id": 1}]}
+    tv = vectors_file(tmp_path / "tv.npz", {"1": FUNGUS_V})
+    man = tmp_path / "ood.csv"
+    man.write_text("file,kind,category,in_v1_labels,owner\ne.jpg,everyday,object,no,u\n",
+                   encoding="utf-8")
+    ov = vectors_file(tmp_path / "ood.npz", {"e.jpg": BIRD_V})
+    block = {"dir": str(d), "fingerprint": fp,
+             "test_vectors": {"file": str(tv), "sha256": sha256_file(tv)},
+             "ood": {"vectors": {"file": str(ov), "sha256": sha256_file(ov)},
+                     "manifest": {"file": str(man), "sha256": sha256_file(man)}}}
+    finds = [find("5")]
+    opened, _ = paper_gate.run_gate(block, finds, photos, {}, [], Path, REPS, 1,
+                                    sealed_open=True)
+    assert opened["ood"]["everyday"]["refused"]["count"] == 1
+    shut, _ = paper_gate.run_gate(block, finds, photos, {}, [], Path, REPS, 1)
+    assert set(shut["ood"]) == {"not_scored"}
+
+
+def test_the_tuner_refuses_a_sealed_ood_set_before_reading_any_vectors(tmp_path, monkeypatch):
+    from mycomap_vision import fungusgate_tune as tune
+    man = tmp_path / "sealed.csv"
+    man.write_text("file,group,category\n", encoding="utf-8")
+    monkeypatch.setattr(tune, "SEALED_OOD_MANIFESTS", {sha256_file(man)})
+    missing = tmp_path / "never-read.npz"                 # absent: any read would fail first
+    with pytest.raises(ValueError, match="sealed"):
+        tune.tune_release(None, missing, missing, man, missing, tmp_path / "out",
+                          (None, None))
+    with pytest.raises(ValueError, match="sealed"):
+        tune.tune(None, missing, missing, man, missing, tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_real_sealed_set_is_on_the_tuners_refusal_list():
+    from mycomap_vision import fungusgate_tune as tune
+    assert any(h.startswith("88c978ca") for h in tune.SEALED_OOD_MANIFESTS)
