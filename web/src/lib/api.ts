@@ -336,8 +336,6 @@ export const api = {
   /** The experiment registry, for signed-in members only. */
   experiments: () => getJson<{ experiments: ExperimentSummary[] }>("/api/experiments"),
   experiment: (slug: string) => getJson<Experiment>(`/api/experiments/${encodeURIComponent(slug)}`),
-  /** The paper draft (Markdown), for signed-in members only. */
-  paper: () => getJson<{ markdown: string }>("/api/paper"),
   models: () => getJson<ModelsInfo>("/api/models"),
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),

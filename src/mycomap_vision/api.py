@@ -50,7 +50,7 @@ from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConf
 
 log = logging.getLogger("mycomap_vision.api")
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
-# The working draft of the Vision paper (Paper in Progress page), served to signed-in
+# The working draft of the Vision paper (no page on the site since 2026-10-12), served to signed-in
 # members only (signin.MEMBERS_ONLY). It ships with the code, never in the public web bundle.
 PAPER_FILE = config.RESEARCH_DIR / "paper" / "draft.md"   # private, never in this repo
 
