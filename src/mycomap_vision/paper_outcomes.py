@@ -50,12 +50,32 @@ def empty(answered: bool = False) -> dict:
     return {**{c: False for c in CELLS}, "answered": answered}
 
 
+def species_rank(name: str) -> str:
+    """A species name with any infraspecific part dropped ('Amanita muscaria var.
+    guessowii' -> 'Amanita muscaria'; a trinomial without a marker likewise)."""
+    return " ".join((name or "").split()[:2])
+
+
 def from_ranked(species: list[str], genus: list[str], find: Find,
-                species_scorable: bool = True) -> dict:
+                species_scorable: bool = True, same=None, collapse: bool = False) -> dict:
     """Outcome from ranked name lists (best first). A cell's level is hit at k when any of
     the top k answers matches the truth at that level or a stricter one; strict is the
-    exact name (as the standard table's strict row)."""
+    exact name (as the standard table's strict row), or `same(answer, truth)` when given
+    (a published model scored through the reviewed GBIF crosswalk). With `collapse`, truth
+    and answers are both taken at species rank (species_rank): how the published models
+    and Vision are compared like for like (E15)."""
     from . import name_equiv
+    if collapse:
+        find = Find(find.key, find.observer, species_rank(find.species), find.genus,
+                    find.family, find.name_kind, find.depth, find.photos, find.attrs,
+                    find.near_duplicate)
+        seen, collapsed = set(), []
+        for a in species:                       # one entry per species, in order
+            c = species_rank(a)
+            if c not in seen:
+                seen.add(c)
+                collapsed.append(c)
+        raw_species, species = species, collapsed
     out = empty(answered=bool(species or genus))
     for rank, answers, truth, match in (
             ("species", species, find.species, name_equiv.species_match),
@@ -69,7 +89,8 @@ def from_ranked(species: list[str], genus: list[str], find: Find,
         first = {lv: None for lv in levels}
         for i, answer in enumerate(answers[:max(K)]):
             m = match(answer, truth)
-            m["strict"] = answer == truth
+            m["strict"] = answer == truth or (same is not None and bool(answer)
+                                              and same(answer, truth))
             for j, lv in enumerate(levels):
                 if first[lv] is None and any(m[x] for x in levels[:j + 1]):
                     first[lv] = i
@@ -172,12 +193,13 @@ def expert_outcome(line: dict, tier: str = "1", view: str = "first", strict: boo
     return out
 
 
-def published_outcome(line: dict, find: Find) -> dict:
+def published_outcome(line: dict, find: Find, same=None, collapse: bool = False) -> dict:
     """A published classifier's outcome from `mv external run`'s <model>.jsonl (its answer
-    already in Vision's names, published.vision_names)."""
+    already in Vision's names, published.vision_names); `same`: the crosswalk rule."""
     res = line["result"]
     return from_ranked([a["name"] for a in res.get("species") or []],
-                       [a["name"] for a in res.get("genus") or []], find)
+                       [a["name"] for a in res.get("genus") or []], find, same=same,
+                       collapse=collapse)
 
 
 def check_format(lines: list[dict], what: str) -> None:

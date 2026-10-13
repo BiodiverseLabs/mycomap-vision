@@ -385,21 +385,92 @@ def public_points(rel) -> dict[str, tuple]:
 
 # --- the run --------------------------------------------------------------------------------------
 
-def outcomes_for(comp: dict, finds: list[po.Find], answers: dict | None = None) -> tuple[dict, dict]:
+CROSSWALK_MODES = ("reviewed", "full")
+
+
+def crosswalk_rule(spec: dict, names, conn) -> tuple:
+    """same(answer, truth) for a published model scored through the GBIF crosswalk.
+
+    The frozen cache (`cache`, sha256 pinned) gives each name's accepted keys (Vision's
+    label of it first, heldout.Labeller). `mode` "reviewed" (the primary score): a join
+    counts only when its (their answer, our label) pair is marked "credit" in the reviewed
+    list (`review`, sha256 pinned); any other join, including one never reviewed (first
+    met on the sealed test), is scored by exact names and counted. `mode` "full": every
+    join counts (the row beside). Returns (same, info, counter of uncredited joins)."""
+    import csv
+    from collections import Counter
+
+    from . import heldout
+    from .replications.fungitastic import crosswalk as gbif
+    mode = spec.get("mode", "reviewed")
+    if mode not in CROSSWALK_MODES:
+        raise ValueError(f"crosswalk mode is one of {CROSSWALK_MODES}")
+    cache = Path(spec["cache"])
+    got = sha256_file(cache)
+    if spec.get("cache_sha256") and got != spec["cache_sha256"]:
+        raise ValueError(f"crosswalk cache {cache}: sha256 {got[:12]}, the config pins "
+                         f"{spec['cache_sha256'][:12]}")
+    credited, rev_sha = set(), None
+    if mode == "reviewed":
+        if not spec.get("review"):
+            raise ValueError("a reviewed crosswalk needs its review list")
+        rev_sha = sha256_file(spec["review"])
+        if spec.get("review_sha256") and rev_sha != spec["review_sha256"]:
+            raise ValueError(f"crosswalk review {spec['review']}: sha256 {rev_sha[:12]}, the "
+                             f"config pins {spec['review_sha256'][:12]}")
+        with open(spec["review"], encoding="utf-8") as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                if (r.get("review") or "").strip().lower() == "credit":
+                    credited.add((r["their_answer"], r["our_label"]))
+    labeller = heldout.Labeller(conn, extra=list(names))
+    matcher = gbif.Matcher(cache)
+    try:
+        cw = gbif.Crosswalk.from_cache(matcher, {labeller.label(n) for n in names if n})
+    finally:
+        matcher.close()
+    uncredited = Counter()
+
+    def same(a: str, t: str) -> bool:
+        if not cw.same(labeller.label(a), labeller.label(t)):
+            return False
+        if mode == "full" or (a, t) in credited:
+            return True
+        uncredited[(a, t)] += 1
+        return False
+    return same, {"mode": mode, "cache_sha256": got, "review_sha256": rev_sha,
+                  "credited_pairs": len(credited)}, uncredited
+
+
+def outcomes_for(comp: dict, finds: list[po.Find], answers: dict | None = None,
+                 conn=None) -> tuple[dict, dict]:
     """(outcomes by record key, input info) for one comparator."""
     by_key = {f.key: f for f in finds}
     info: dict = {"kind": comp["kind"]}
     if comp["kind"] == "vision":
-        return {k: po.from_ranked(a["species"], a["genus"], by_key[k])
+        collapse = bool(comp.get("collapse_infraspecific"))
+        return {k: po.from_ranked(a["species"], a["genus"], by_key[k], collapse=collapse)
                 for k, a in (answers or {}).items() if k in by_key}, info
     lines = po.read_jsonl(comp["file"])
     info.update(file=str(comp["file"]), sha256=sha256_file(comp["file"]), lines=len(lines))
     out = {}
     if comp["kind"] == "published":
+        same, uncredited = None, None
+        if comp.get("crosswalk"):
+            names = {a["name"] for line in lines for rank in ("species", "genus")
+                     for a in line["result"].get(rank) or []}
+            names |= {x for f in finds for x in (f.species, f.genus) if x}
+            same, info["crosswalk"], uncredited = crosswalk_rule(comp["crosswalk"], names, conn)
         for line in lines:
             k = str(line["observation_id"])
             if k in by_key:
-                out[k] = po.published_outcome(line, by_key[k])
+                out[k] = po.published_outcome(line, by_key[k], same,
+                                              bool(comp.get("collapse_infraspecific")))
+        if uncredited is not None:
+            # Joins the review did not credit (excluded, or never reviewed): exact names.
+            info["crosswalk"]["uncredited_joins"] = {
+                "pairs": len(uncredited), "answers": sum(uncredited.values()),
+                "top": [{"their_answer": a, "our_label": t, "answers": n}
+                        for (a, t), n in uncredited.most_common(30)]}
     elif comp["kind"] == "inat":
         po.check_format(lines, "e14")
         disagree = 0
@@ -531,7 +602,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             with open(path, "w", encoding="utf-8") as fh:
                 for k in sorted(answers):
                     fh.write(json.dumps({"record_key": k, **answers[k]}) + "\n")
-        outcomes[comp["id"]], inputs[comp["id"]] = outcomes_for(comp, finds, answers)
+        outcomes[comp["id"]], inputs[comp["id"]] = outcomes_for(comp, finds, answers, conn)
         top1[comp["id"]] = top_answers(comp, answers)
         if comp["kind"] == "inat" and comp.get("calibration_from_score", True):
             calib[comp["id"]] = {str(line["record_key"]): po.inat_confidence(

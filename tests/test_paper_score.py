@@ -409,3 +409,38 @@ def test_named_subsets_get_their_own_tables(world, tmp_path):
     assert rep["subsets"]["excl-former-heldout"]["comparators"]["vision-photos"]["primary"][
         "all"]["finds"] == 2                                   # no benchmark records here
     assert rep["subsets"]["only-heldout"]["near_duplicates"]["finds"] == 0
+
+
+def test_the_reviewed_crosswalk_credits_only_pairs_marked_credit(world, tmp_path, monkeypatch):
+    from mycomap_vision.replications.fungitastic import crosswalk as gbif
+    keys = {"Hydnum repandum": {"k1"}, "Hydnum washingtonianum": {"k1"},
+            "Pycnoporus cinnabarinus": {"k2"}, "Trametes cinnabarina": {"k2"},
+            "Fomes fomentarius": {"k3"}, "Fomes excavatus": {"k3"}}
+
+    class NoMatcher:
+        def __init__(self, path):
+            pass
+
+        def close(self):
+            pass
+    monkeypatch.setattr(gbif, "Matcher", NoMatcher)
+    monkeypatch.setattr(gbif.Crosswalk, "from_cache", classmethod(
+        lambda cls, m, names: cls({n: frozenset(v) for n, v in keys.items()})))
+    cache = tmp_path / "gbif.sqlite"
+    cache.write_bytes(b"cache")
+    review = tmp_path / "review.tsv"
+    review.write_text("their_answer\tour_label\treview\n"
+                      "Pycnoporus cinnabarinus\tTrametes cinnabarina\tcredit\n"
+                      "Hydnum repandum\tHydnum washingtonianum\texclude\n", encoding="utf-8")
+    spec = {"cache": str(cache), "cache_sha256": paper_score.sha256_file(cache),
+            "review": str(review), "review_sha256": paper_score.sha256_file(review)}
+    same, info, uncredited = paper_score.crosswalk_rule(spec, set(keys), world["conn"])
+    assert same("Pycnoporus cinnabarinus", "Trametes cinnabarina")        # credited
+    assert not same("Hydnum repandum", "Hydnum washingtonianum")          # excluded
+    assert not same("Fomes fomentarius", "Fomes excavatus")               # never reviewed
+    assert dict(uncredited) == {("Hydnum repandum", "Hydnum washingtonianum"): 1,
+                                ("Fomes fomentarius", "Fomes excavatus"): 1}
+    full, _, _ = paper_score.crosswalk_rule({**spec, "mode": "full"}, set(keys), world["conn"])
+    assert full("Fomes fomentarius", "Fomes excavatus")                   # the row beside
+    with pytest.raises(ValueError, match="the config pins"):
+        paper_score.crosswalk_rule({**spec, "review_sha256": "0" * 64}, set(keys), world["conn"])

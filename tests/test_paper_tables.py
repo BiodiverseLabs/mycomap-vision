@@ -212,3 +212,15 @@ def test_the_primary_expert_view_is_the_first_tier_one_species_id_before_the_cut
     assert first["genus_strict@1"] is False              # the earliest genus-scorable ID
     assert po.expert_outcome(line, view="best")["species_strict@1"] is True
     assert po.expert_outcome(e31_line("11", [ident(genus_right=True)]))["species_strict@1"] is None
+
+
+def test_collapsing_to_species_rank_scores_a_variety_label_by_its_species():
+    f = find("20", species="Amanita muscaria var. guessowii")
+    plain = po.from_ranked(["Amanita muscaria"], ["Amanita"], f)
+    both = po.from_ranked(["Amanita muscaria"], ["Amanita"], f, collapse=True)
+    assert plain["species_strict@1"] is False and both["species_strict@1"] is True
+    # Answers that collapse to one species count once in the ranking.
+    two = po.from_ranked(["Amanita muscaria var. alba", "Amanita muscaria", "Amanita flavoconia"],
+                         ["Amanita"], find("21", species="Amanita flavoconia"), collapse=True)
+    assert two["species_strict@1"] is False and two["species_strict@3"] is True
+    assert po.species_rank("Collybiopsis confluens ssp. campanulata") == "Collybiopsis confluens"
