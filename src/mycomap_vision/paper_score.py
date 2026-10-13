@@ -390,7 +390,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                         read_attrs(attrs_path) if attrs_path else None)
     out.mkdir(parents=True, exist_ok=True)
     (out / "predictions").mkdir(exist_ok=True)
-    outcomes, inputs, calib = {}, {}, {}
+    outcomes, inputs, calib, top1 = {}, {}, {}, {}
     public = None
     for comp in config["comparators"]:
         answers = None
@@ -420,6 +420,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 for k in sorted(answers):
                     fh.write(json.dumps({"record_key": k, **answers[k]}) + "\n")
         outcomes[comp["id"]], inputs[comp["id"]] = outcomes_for(comp, finds, answers)
+        top1[comp["id"]] = top_answers(comp, answers)
         if comp["kind"] == "inat" and comp.get("calibration_from_score", True):
             calib[comp["id"]] = {str(line["record_key"]): po.inat_confidence(
                 line, comp.get("score", "vision")) for line in po.read_jsonl(comp["file"])}
@@ -449,6 +450,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                   float(config.get("alpha", 0.05))),
         "calibration": calibration_report(finds, calib, outcomes,
                                           config.get("calibration_metrics", {}), reps, seed),
+        "errors": errors_report(finds, top1, config.get("errors", {}), base, scored_rel),
         "slices": pt.slices(finds, outcomes, config.get("slices", {}).get("attrs", []),
                             config.get("slices", {}).get("cells", ["species_strict@1",
                                                                    "genus_strict@1"]),
@@ -460,6 +462,56 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     log(f"paper-score: {len(finds):,} finds; report in {out}"
         + ("  *** POST HOC ***" if g["post_hoc"] else ""))
     return report
+
+
+def top_answers(comp: dict, answers: dict | None) -> dict[str, str]:
+    """Each find's top species name from a comparator ({} for the experts: one name per
+    identifier, judged by the lane; no answer names are carried)."""
+    if comp["kind"] == "vision":
+        return {k: (a["species"] or [""])[0] for k, a in (answers or {}).items()}
+    if comp["kind"] == "published":
+        return {str(line["observation_id"]): ((line["result"].get("species") or [{}])[0]
+                                              .get("name") or "")
+                for line in po.read_jsonl(comp["file"])}
+    if comp["kind"] == "inat":
+        sc = comp.get("score", "vision")
+        return {str(line["record_key"]): ((line.get(sc) or {}).get("species") or [[0, ""]])[0][1]
+                for line in po.read_jsonl(comp["file"])}
+    return {}
+
+
+def taxonomy_ranks(base, scored_rel, path=None) -> tuple[dict[str, dict], str | None]:
+    """genus -> {family, order}: iNat's taxonomy cache (taxonomy.py) where it has the genus,
+    else the releases' own family with no order; and the cache file's sha256."""
+    from . import taxonomy
+    ranks: dict[str, dict] = {}
+    for rel in {id(base): base, id(scored_rel): scored_rel}.values():
+        for g, fam in rel.db.execute("select distinct genus, family from records "
+                                     "where included = 1 and genus is not null"):
+            if g and fam:
+                ranks.setdefault(g, {"family": fam, "order": ""})
+    cache = Path(path) if path else taxonomy.cache_path()
+    tax = taxonomy.load(cache)
+    if tax is not None:
+        for g, r in tax.genera.items():
+            ranks[g] = {"family": r.get("family", ""), "order": r.get("order", "")}
+    return ranks, (sha256_file(cache) if cache.is_file() else None)
+
+
+def errors_report(finds, top1: dict, cfg: dict, base, scored_rel) -> dict:
+    """E29 and E21 for the comparators named (default: every one with answer names)."""
+    from . import paper_errors as pe
+    base_finds = pt.in_scope(finds)
+    ranks, tax_sha = taxonomy_ranks(base, scored_rel, cfg.get("taxonomy"))
+    out = {"taxonomy_sha256": tax_sha, "comparators": {}}
+    for cid in cfg.get("comparators") or [c for c, t in top1.items() if t]:
+        t = top1.get(cid) or {}
+        row = {"confused_pairs": pe.confused_pairs(base_finds, t, int(cfg.get("pairs", 20))),
+               "distance": pe.mistake_distance(base_finds, t, ranks)}
+        if cfg.get("deadly"):
+            row["deadly"] = pe.deadly_taxa(base_finds, t, cfg["deadly"])
+        out["comparators"][cid] = row
+    return out
 
 
 def calibration_report(finds, calib: dict, outcomes: dict, cfg: dict, reps: int,

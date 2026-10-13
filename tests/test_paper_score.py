@@ -102,6 +102,9 @@ def test_scoring_val_against_train_end_to_end(world, tmp_path):
     md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
     assert "| species strict |" in md and "## photos only" in md and "Family A" in md
     assert set(rep["slices"]) == {"season", "source"}
+    err = rep["errors"]["comparators"]
+    assert set(err) == {"vision-photos", "vision-mean", "inat-vision"}   # experts carry no names
+    assert err["vision-photos"]["confused_pairs"]["wrong_answers"] == 0
 
 
 def test_a_draft_test_release_is_scored_against_train_and_val(world, tmp_path):
@@ -294,3 +297,13 @@ def test_calibration_uses_the_val_temperature_given_never_a_refit(world, tmp_pat
     assert "unknown_species" in sharp
     assert "vision-mean" not in reports[0]["calibration"]             # no calibration given
     assert reports[0]["calibration"]["inat-vision"]["species"]["n"] == 2   # iNat's own score
+
+
+def test_deadly_taxa_come_from_the_config_list(world, tmp_path):
+    cfg = config(tmp_path, ["5", "6"], errors={"comparators": ["inat-vision"],
+                                                 "deadly": {"genera": ["B"], "species": ["A x"]}})
+    rep = run(world, tmp_path, "val", cfg)
+    d = rep["errors"]["comparators"]["inat-vision"]["deadly"]
+    # iNat answered "A x" for both: A x right; B y (deadly genus) called a deadly A x.
+    assert d["predicted_from"]["A x"]["same_taxon"] == 1
+    assert d["predicted_from"]["B"]["other_deadly"] == 1
