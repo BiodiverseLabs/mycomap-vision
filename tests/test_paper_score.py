@@ -225,6 +225,14 @@ def test_the_sealed_test_opens_only_with_the_tagged_config_and_the_frozen_code(r
     assert late["post_hoc"] is True
 
 
+def test_a_config_differing_only_in_line_endings_is_refused_and_says_so(research):
+    repo, body = research
+    git(repo, "tag", paper_score.TAG)
+    crlf = body.replace(b",", b",\r\n")                       # the same text, CRLF endings
+    with pytest.raises(paper_score.FrozenError, match="line endings differ"):
+        paper_score.guard(True, crlf, json.loads(crlf), repo, "abcdef1")
+
+
 def test_a_sealed_test_release_is_refused_before_anything_is_read(world, tmp_path, monkeypatch,
                                                                   research):
     repo, _ = research
