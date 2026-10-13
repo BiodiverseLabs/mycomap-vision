@@ -1243,7 +1243,8 @@ def cmd_paper_inat_cv(args) -> None:
     recs = {r["record_key"]: dict(r) for r in rel.db.execute("select * from records")}
     truths = {k: E.truth_taxa(recs[k], by_name, taxa) for k in ids}
     client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "paper-comparisons" /
-                                "inat-cv-cache", interval=args.interval)
+                                "inat-cv-cache", interval=args.interval,
+                                jwt_path=inat_cv.JWT_FILE)
     if rel.manifest.get("test_for") and not args.inat_model:
         raise SystemExit("record the iNat CV model version first: --inat-model '<version, date>'")
     model = {"version": args.inat_model, "noted_at": E.utc(datetime.now(timezone.utc).isoformat())}         if args.inat_model else None

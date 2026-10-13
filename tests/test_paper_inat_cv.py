@@ -27,14 +27,19 @@ def answer(*taxa):
 
 class FakeClient:
     def __init__(self, answers):
-        self.answers, self.calls, self.sent = answers, 0, []
+        self.answers, self.calls, self.sent, self.cache = answers, 0, [], {}
 
-    def score_image(self, pk, image, lat, lng, observed_on=None):
+    def score_image(self, pk, image, lat, lng, observed_on=None, model=None):
+        key = (pk, model)
+        if key in self.cache:
+            return self.cache[key]
         body = image() if callable(image) else image
         self.calls += 1
         self.sent.append({"photo": pk, "lat": lat, "lng": lng, "date": observed_on,
                           "size": Image.open(io.BytesIO(body)).size})
-        return {**self.answers[pk], "_scored_at": "2026-11-01T00:00:00Z"}
+        self.cache[key] = {**self.answers[pk], "_scored_at": "2026-11-01T00:00:00Z",
+                           **({"_inat_model": model} if model else {})}
+        return self.cache[key]
 
 
 class FakeRelease:
@@ -146,3 +151,20 @@ def test_photos_at_or_under_1024_px_are_sent_untouched():
     assert P.at_most_1024(small)[0] == small
     big, w, h = P.at_most_1024(jpeg(3000, 1000))
     assert (w, h) == (1024, 341) and big != small
+
+
+def test_every_line_carries_the_model_it_was_scored_under_and_a_new_version_rescores(tmp_path, monkeypatch):
+    monkeypatch.setattr(P.config, "DATA_DIR", tmp_path)
+    client = FakeClient(ANSWERS)
+    read = lambda pk: jpeg(800, 600)
+    m1 = P.run(FakeRelease(), "t", ["a", "b"], client, read, TRUTH, log=lambda *a: None,
+               model={"version": "2.34"})
+    assert client.calls == 3 and m1["finds_by_inat_model"] == {"2.34": 2}
+    P.run(FakeRelease(), "t", ["a", "b"], client, read, TRUTH, log=lambda *a: None,
+          model={"version": "2.34"})
+    assert client.calls == 3                         # resume: nothing sent twice
+    m2 = P.run(FakeRelease(), "t", ["a", "b"], client, read, TRUTH, log=lambda *a: None,
+               model={"version": "2.35"})
+    assert client.calls == 6 and m2["finds_by_inat_model"] == {"2.35": 2}
+    lines = [json.loads(l) for l in (tmp_path / "paper-comparisons/e14/t/finds.jsonl").open()]
+    assert {l["inat_model"] for l in lines} == {"2.35"}

@@ -197,3 +197,54 @@ def test_a_dropped_connection_is_retried_not_fatal(tmp_path):
                                 sleep=lambda s: None)
     assert client.get("/taxa/1") == {"results": []}
     assert client.calls == 2
+
+
+
+class _Resp:
+    def __init__(self, code, body=None):
+        self.status_code, self._body, self.text, self.headers = code, body, "", {}
+
+    def json(self):
+        return self._body
+
+
+class _Session:
+    def __init__(self, answers):
+        self.answers, self.auth, self.headers = list(answers), [], {}
+
+    def request(self, method, url, timeout=None, **kw):
+        self.auth.append((kw.get("headers") or {}).get("Authorization"))
+        return self.answers.pop(0)
+
+
+def test_a_fresh_token_saved_mid_run_is_taken_up_after_a_401(tmp_path):
+    from mycomap_vision.inat_cv import InatClient
+    tok = tmp_path / "jwt.txt"
+    tok.write_text("old", encoding="utf-8")
+    s = _Session([_Resp(401), _Resp(200, {"results": []})])
+    c = InatClient("old", tmp_path / "cache", session=s, sleep=lambda d: None, jwt_path=tok)
+    tok.write_text("new", encoding="utf-8")
+    c.score_image("p1", b"jpg", None, None)
+    assert s.auth == ["old", "new"] and c.token_swaps == 1
+
+
+def test_a_401_with_no_new_token_still_stops_the_run(tmp_path):
+    import pytest
+    from mycomap_vision.inat_cv import InatClient
+    tok = tmp_path / "jwt.txt"
+    tok.write_text("old", encoding="utf-8")
+    c = InatClient("old", tmp_path / "cache", session=_Session([_Resp(401)]),
+                   sleep=lambda d: None, jwt_path=tok)
+    with pytest.raises(RuntimeError, match="401"):
+        c.score_image("p1", b"jpg", None, None)
+
+
+def test_the_model_version_is_part_of_the_cache_key_and_stamped_on_the_answer(tmp_path):
+    from mycomap_vision.inat_cv import InatClient
+    s = _Session([_Resp(200, {"results": []}), _Resp(200, {"results": []})])
+    c = InatClient("t", tmp_path, session=s, sleep=lambda d: None)
+    a = c.score_image("p1", b"jpg", 1.0, 2.0, "2025-09-01", model="2.34")
+    c.score_image("p1", b"jpg", 1.0, 2.0, "2025-09-01", model="2.34")
+    b = c.score_image("p1", b"jpg", 1.0, 2.0, "2025-09-01", model="2.35")
+    assert c.calls == 2 and a["_inat_model"] == "2.34" and b["_inat_model"] == "2.35"
+    assert not list(tmp_path.glob("*.tmp"))
