@@ -62,6 +62,12 @@ export function ExperimentsPage() {
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-4xl space-y-4">
         {q.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
         <SignInNote error={q.error} />
+        {(q.data?.skipped ?? 0) > 0 && (
+          <p className="text-xs text-[#7a5a3a]" data-testid="experiments-skipped">
+            {q.data!.skipped} {q.data!.skipped === 1 ? "entry is" : "entries are"} not shown: still
+            being written, or not yet meeting the registry's rules.
+          </p>
+        )}
         {all.length > 0 && (
           <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by status">
             <button className={chip(status === null)} onClick={() => setStatus(null)}>All ({all.length})</button>
