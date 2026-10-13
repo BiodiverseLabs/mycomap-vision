@@ -508,3 +508,12 @@ def test_the_attrs_file_is_pinned_by_the_config(world, tmp_path):
     with pytest.raises(ValueError, match="the config pins"):
         run(world, tmp_path, "val", config(tmp_path, ["5", "6"],
                                            attrs={**block, "sha256": "0" * 64}))
+
+
+def test_the_report_names_the_code_that_started_the_run_not_a_later_commit(world, tmp_path,
+                                                                          monkeypatch):
+    from mycomap_vision import config as cfgmod
+    seen = iter(["a" * 40, "b" * 40, "b" * 40, "b" * 40])
+    monkeypatch.setattr(cfgmod, "code_version", lambda: next(seen))
+    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))
+    assert rep["code_commit"] == "a" * 40

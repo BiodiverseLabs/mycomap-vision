@@ -577,8 +577,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     from .embed import load_embeddings
     from .replications.fungitastic import dataset
     scored_rel, split, ref_splits, sealed = scored_and_reference(base, test)
+    # The code that runs is the code checked out now: read once, here, so a commit made
+    # while the run is going never relabels its report.
+    code_commit = cfgmod.code_version()
     g = guard(sealed, config_bytes, config, research_dir or cfgmod.RESEARCH_DIR,
-              cfgmod.code_version(), allow_code)
+              code_commit, allow_code)
     apply_errata(base, config.get("errata"))
     attrs_path = attrs_file(config.get("attrs"), attrs_path)
     # An erratum given to the base release (--errata; Release.use_errata) has already left
@@ -714,7 +717,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     report = {
         "post_hoc": g["post_hoc"],
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "guard": g, "code_commit": cfgmod.code_version(),
+        "guard": g, "code_commit": code_commit,
         "config_sha256": sha256_bytes(config_bytes),
         "dataset_release": dataset.cite(base),
         "scored": {"release": scored_rel.id, "split": split, "reference_splits": list(ref_splits),
