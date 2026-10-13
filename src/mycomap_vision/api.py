@@ -740,21 +740,29 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             return {"benchmarks": benchmark_io.published(conn)}
 
+    from . import experiments
+
+    def good_experiments() -> tuple[list, int]:
+        """The registry's good entries, and how many were left out. A bad entry (one an author
+        is still writing, say) is logged and skipped, never a 500 for the whole page."""
+        found, problems = experiments.load_checked(experiments_dir or experiments.EXPERIMENTS_DIR)
+        for name, why in problems:
+            log.warning("[experiments] bad entry %s: %s", name, why)
+        return found, len(problems)
+
     @app.get("/api/experiments")
     def experiments_list():
         """The experiment registry (config.RESEARCH_DIR/experiments, private), front matter only. Members only."""
-        from . import experiments
-        found = experiments.load_all(experiments_dir or experiments.EXPERIMENTS_DIR)
-        return JSONResponse({"experiments": [experiments.summary(e) for e in found]},
+        found = good_experiments()
+        return JSONResponse({"experiments": [experiments.summary(e) for e in found[0]],
+                             "skipped": found[1]},
                             headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/experiments/{slug}")
     def experiment(slug: str):
-        from . import experiments
         if not experiments.SLUG.match(slug):
             raise HTTPException(404, "no such experiment")
-        found = {e.slug: e for e in experiments.load_all(experiments_dir
-                                                         or experiments.EXPERIMENTS_DIR)}
+        found = {e.slug: e for e in good_experiments()[0]}
         if slug not in found:
             raise HTTPException(404, "no such experiment")
         e = found[slug]

@@ -652,6 +652,23 @@ def cmd_benchmark_export(conn, args) -> None:
         print(text)
 
 
+def cmd_experiments_check(args) -> int:
+    """Check every experiment entry against the registry's rules; exit 1 on any bad one.
+    Run it in the private research checkout before committing an entry: the site skips a
+    bad entry (and logs it) rather than failing the whole list."""
+    from pathlib import Path
+    from . import experiments
+    directory = Path(args.dir) if args.dir else experiments.EXPERIMENTS_DIR
+    if not directory.is_dir():
+        print(f"no experiments folder at {directory}", file=sys.stderr)
+        return 1
+    found, problems = experiments.load_checked(directory)
+    for name, why in problems:
+        print(f"BAD {name}: {why}")
+    print(f"{len(found)} entries ok, {len(problems)} bad ({directory})")
+    return 1 if problems else 0
+
+
 def cmd_benchmark_import(conn, args) -> None:
     """(server box) A benchmark export into the manifest the site serves; '-' reads stdin."""
     from . import benchmark_io
@@ -1595,6 +1612,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("benchmark-import", help="(server box) add a benchmark-export to the "
                        "site; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
+    p = sub.add_parser("experiments-check", help="check the experiment registry's entries "
+                       "(the private research checkout) before committing; exit 1 on any bad one")
+    p.add_argument("dir", nargs="?", help="the experiments folder (default: the research "
+                                         "checkout's experiments/)")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
     p = sub.add_parser("fungus-gate", help="the not-a-fungus gate in front of Identify: build "
@@ -1925,6 +1946,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "aws-launch-dhash-index":  # reads the release's kept copy, no manifest
         cmd_aws_launch_dhash_index(args)
         return 0
+    if args.command == "experiments-check":   # the private registry only: no manifest
+        return cmd_experiments_check(args)
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0
