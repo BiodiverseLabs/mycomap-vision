@@ -517,6 +517,14 @@ def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
     return int(math.ceil(total))
 
 
+def picek_checkpoint_gb(picek: list[str] | None) -> int:
+    """Disk for the epoch rule's block checkpoint (preset@min-max): weights, optimizer
+    momentum and the best epoch's weights, ~1.2 GB for BEiT-B with ~18,000 classes, twice
+    while the new one is written; 4 GB per rule run."""
+    from .replications.fungitastic.retrain import epoch_rule_of
+    return 4 * sum(epoch_rule_of(spec) is not None for spec in picek or [])
+
+
 def spot_market_options(max_price: float | None = None) -> dict:
     """RunInstances' InstanceMarketOptions for a one-time Spot instance that AWS
     terminates (never stops or hibernates) when it takes the capacity back. With no
@@ -649,6 +657,23 @@ def photos_for_estimate(conn, photos: int, size: str, store_location: str,
     return round(photos * min(1.0, sample_records / max(records, 1)))
 
 
+def check_resume_release(run_id: str, prev: dict, rel) -> None:
+    """A run that trained on a dataset release resumes only on that same release (named
+    again with --release, the laptop's verified copy), and a run that did not, without one:
+    the instance's block checkpoint is refused anyway if its labels differ, but this says
+    so before anything is paid for."""
+    ran_on = (prev.get("dataset_release") or {}).get("release_hash")
+    if ran_on and rel is None:
+        raise ValueError(f"run {run_id} trained on dataset release "
+                         f"{prev['dataset_release'].get('dataset_release')} (release_hash "
+                         f"{ran_on[:12]}): resume it with --release "
+                         f"{prev['dataset_release'].get('dataset_release')}")
+    if rel is not None and ran_on != rel.release_hash:
+        raise ValueError(f"run {run_id} did not train on release {rel.id} (release_hash "
+                         f"{rel.release_hash[:12]}; the run's: {str(ran_on)[:12] or 'none'}): "
+                         "a run resumes only on its own release")
+
+
 def check_run_time(est: dict, max_hours: float, allow_over_time: bool = False,
                    log=print) -> None:
     """Refuse a run the time limit would cut short, unless allowed; warn when it's tight."""
@@ -731,14 +756,12 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         from .replications.fungitastic import dataset
         if not isinstance(release, str):          # already opened (cli._dataset_release)
             release = release.id
-        if not picek and not finetune:
+        if not picek and not finetune and not resume:
             raise ValueError("--release trains from a dataset release: name --finetune "
                              "and/or a --picek preset")
         if sample_records:
             raise ValueError("--release trains on the whole release; for a rehearsal cut a "
                              "small draft release and pass --allow-draft")
-        if resume:
-            raise ValueError("--release with --resume is not supported yet: launch a new run")
         rel = dataset.load(release, allow_draft)          # mv dataset verify, first of all
         log(f"Dataset release {rel.id}{' (DRAFT)' if rel.manifest.get('draft') else ''}: "
             f"verified (MANIFEST {dataset.manifest_sha256(rel)[:12]}, "
@@ -764,6 +787,10 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             f"{prev.get('updated_at')}): its own backbones {', '.join(backbones)}, "
             f"fine-tune {', '.join(finetune) or 'none'}, methods {', '.join(methods)}, "
             f"{size} photos and its own manifest")
+        check_resume_release(resume, prev, rel)
+        if rel is not None and not picek and not finetune:
+            raise ValueError(f"run {resume} trains nothing from a release: resume it without "
+                             "--release")
     photos = check_trainer_request(conn, backbones, methods, size, f"s3://{b}/", finetune,
                                    picek)
     if rel is not None and finetune:
@@ -781,7 +808,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         log(f"  already done, restored on the instance: "
             f"{', '.join(f'{k} {n}' for k, n in sorted(done))}")
     est = trainer.estimate(left, photos_for_estimate(conn, photos, size, f"s3://{b}/",
-                                                     sample_records))
+                                                     sample_records),
+                           epochs_done=trainer.checkpoint_epochs(prev) if prev else None)
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
     labels, exclude_ids, place_doc = (picek_launch_labels(conn, f"s3://{b}/", size,
@@ -857,7 +885,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                          if rel else None)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price,
-                                                     extra_gb=picek_cache_gb(picek, photos)),
+                                                     extra_gb=picek_cache_gb(picek, photos)
+                                                     + picek_checkpoint_gb(picek)),
                           run_id)
     return {"run_id": run_id, "instance_id": resp["Instances"][0]["InstanceId"],
             "instance_type": instance_type, "market": "spot" if spot else "on-demand",
@@ -952,7 +981,8 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
         snapshot_gb = next((m["Ebs"]["VolumeSize"] for m in image["BlockDeviceMappings"]
                             if m.get("DeviceName") == root and "Ebs" in m), 100)
     args = trainer_instance_args(run_id, ami, user_data, instance_type, root, snapshot_gb, spot,
-                                 spot_max_price, extra_gb=picek_cache_gb(picek, photos))
+                                 spot_max_price, extra_gb=picek_cache_gb(picek, photos)
+                                 + picek_checkpoint_gb(picek))
     shown = {**args, "UserData": f"<{len(user_data):,} characters: user-data.sh>"}
     (dest / "ec2-request.json").write_text(json.dumps(shown, indent=2), encoding="utf-8")
     ec2_result = "not sent (pass --ec2-check, after aws login, to ask EC2 with DryRun=True)"

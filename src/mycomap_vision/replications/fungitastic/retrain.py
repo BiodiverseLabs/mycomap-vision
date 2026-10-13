@@ -80,22 +80,81 @@ LOG_FLOOR = math.log(1e-12)    # a species the classifier has no class for
 
 from ... import sources  # noqa: E402  (record sources: MIGRATION, INAT, PHOTO_SOURCES)
 # The recipe's presets and hyperparameters live in presets.py; read here as retrain.X too.
-from .presets import EXCLUDE_MODES, MEAN, PRESETS, STD, PicekConfig, Preset  # noqa: E402,F401
+from .presets import (EXCLUDE_MODES, MEAN, PRESETS, STD, EpochRule, PicekConfig,  # noqa: E402,F401
+                      Preset)
+
+# The epoch rule's pre-declared block and gain (EpochRule). A spec names
+# only the minimum and the cap ('preset@15-50'); these two are not free parameters.
+RULE_BLOCK_EPOCHS = 5
+RULE_MIN_GAIN = 0.005
 
 
 def parse_spec(spec: str) -> tuple[str, int]:
     """'fungitastic-beit-b384@15' -> (preset, 15 epochs); no '@': the preset's epochs.
-    A third part, 'preset@15@440', is the photo cache (cache_of)."""
+    'preset@15-50' trains by the epoch rule (epoch_rule_of): 15 to 50 epochs, and 50 is
+    returned (the most it can take). A third part, 'preset@15@440', is the photo cache
+    (cache_of)."""
     preset, _, rest = spec.partition("@")
     epochs, _, cache = rest.partition("@")
     if preset not in PRESETS:
         raise ValueError(f"unknown Picek preset {preset!r}: {', '.join(sorted(PRESETS))}")
-    if epochs and not (epochs.isdigit() and int(epochs) > 0):
-        raise ValueError(f"bad epoch count in {spec!r}: use preset@epochs, e.g. {preset}@15")
+    lo, dash, hi = epochs.partition("-")
+    ok = (lo.isdigit() and int(lo) > 0 and (not dash or (hi.isdigit() and int(hi) >= int(lo))))
+    if epochs and not ok:
+        raise ValueError(f"bad epoch count in {spec!r}: use preset@epochs, e.g. {preset}@15, "
+                         f"or preset@min-max for the epoch rule, e.g. {preset}@15-50")
     if cache and not (cache.isdigit() and int(cache) >= PRESETS[preset].image_size):
         raise ValueError(f"bad photo cache size in {spec!r}: preset@epochs@px, px at least "
                          f"the input size ({PRESETS[preset].image_size}), e.g. {preset}@15@440")
-    return preset, int(epochs) if epochs else PRESETS[preset].epochs
+    return preset, int(hi or lo) if epochs else PRESETS[preset].epochs
+
+
+def epoch_rule_of(spec: str) -> EpochRule | None:
+    """The epoch rule a spec asks for ('preset@15-50' -> min 15, max 50, blocks of
+    RULE_BLOCK_EPOCHS, gain RULE_MIN_GAIN), else None (a fixed count)."""
+    parse_spec(spec)
+    epochs = spec.split("@")[1] if "@" in spec else ""
+    if "-" not in epochs:
+        return None
+    lo, hi = epochs.split("-")
+    return EpochRule(int(lo), int(hi), RULE_BLOCK_EPOCHS, RULE_MIN_GAIN)
+
+
+def block_decision(rule: EpochRule, val_macro_f1: list, epoch: int) -> dict | None:
+    """The epoch rule's decision after `epoch` (1-based), from the validation macro-F1 of
+    every epoch so far (`val_macro_f1[0]` is epoch 1's; None counts as no score). None when
+    `epoch` is not one of the rule's block boundaries. Otherwise a record of the decision,
+    written to progress.json and the model's metadata so it can be audited later:
+    the best macro-F1 so far, the best at the previous boundary, the gain, continue or stop,
+    and why. The first boundary (the minimum) has nothing to compare with and continues."""
+    bounds = rule.boundaries()
+    if epoch not in bounds:
+        return None
+    scores = [-1.0 if f is None else float(f) for f in val_macro_f1[:epoch]]
+    best = max(scores)
+    at = bounds.index(epoch)
+    previous = max(scores[:bounds[at - 1]]) if at else None
+    gain = None if previous is None else best - previous
+    # The gain is a difference of fractions: 1e-9 keeps 0.305 - 0.300 a gain of 0.005.
+    enough = gain is None or gain >= rule.min_gain - 1e-9
+    if epoch >= rule.max_epochs:
+        decision, reason = "stop", (f"reached the cap of {rule.max_epochs} epochs"
+                                    + ("" if gain is None else f" (this block's gain {gain:+.4f})"))
+    elif gain is None:
+        decision, reason = "continue", (f"the minimum of {rule.min_epochs} epochs is done; "
+                                        f"blocks of {rule.block} epochs follow")
+    elif enough:
+        decision, reason = "continue", (f"best val macro-F1 rose {gain:+.4f} over the block "
+                                        f"(at least {rule.min_gain})")
+    else:
+        decision, reason = "stop", (f"best val macro-F1 rose only {gain:+.4f} over the block "
+                                    f"(under {rule.min_gain})")
+    return {"epoch": epoch, "best_val_macro_f1": round(best, 6),
+            "best_epoch": 1 + scores.index(best),
+            "previous_best_val_macro_f1": None if previous is None else round(previous, 6),
+            "gain": None if gain is None else round(gain, 6), "decision": decision,
+            "reason": reason,
+            "decided_on": "validation macro-F1 (the release's val split; never a test split)"}
 
 
 def cache_of(spec: str) -> int | None:
@@ -980,13 +1039,25 @@ def models_dir() -> Path:
     return md()
 
 
+CHECKPOINT_SUFFIX = ".block.pt"       # the epoch rule's block checkpoint, beside the model
+
+
 def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
           test_days: int = 28, out_dir: Path | None = None, model_factory=None, log=print,
-          should_stop=None, data: PicekData | None = None) -> dict:
+          should_stop=None, data: PicekData | None = None, on_block=None,
+          resume_from: Path | None = None, time_left=None) -> dict:
     """Train the preset's classifier on the reference records (build_data), keep the epoch
     with the best validation macro-F1, fit its temperature, save and register it. Returns
-    the metadata. `should_stop()` is asked between steps: when it says stop, the best
-    epoch so far is NOT saved (screening.Stopped), as for a fine-tune.
+    the metadata. `should_stop()` is asked between steps: when it says stop, the run ends
+    with screening.Stopped and no model is saved, as for a fine-tune.
+
+    With `cfg.epoch_rule` (EpochRule) the run trains until the rule stops it
+    (block_decision). After every block boundary it writes `<name>.block.pt` (weights,
+    optimizer, plateau schedule, the best epoch's weights, the curve and the decisions) and
+    calls `on_block(path, state)` (the trainer uploads it and progress.json) BEFORE the next
+    block starts. A stop between boundaries loses at most that block: `resume_from` (such a
+    file) carries on from it. At a boundary, `time_left()` (seconds, optional) that cannot
+    fit another block stops the run there rather than mid-block.
 
     Every refusal comes before torch is imported, so they hold (and are tested) without it."""
     cfg = (cfg or PicekConfig()).resolved()
@@ -1080,7 +1151,52 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
     step, seen, train_seconds, wait_seconds = 0, 0, 0.0, 0.0
     stopped_early = False
     fallback = {"at": None}
-    for epoch in range(cfg.epochs):
+    rule = cfg.epoch_rule
+    blocks: list[dict] = []
+    start_epoch, resumed_from = 0, None
+    stop_reason = None
+    epoch_seconds: list[float] = []      # this attempt's epochs, validation included
+    ckpt_path = out_dir / f"{name}{CHECKPOINT_SUFFIX}"
+    ckpt_identity = {"name": name, "preset": cfg.preset, "labels_hash": snapshot["labels_hash"],
+                     "epoch_rule": asdict(rule) if rule else None, "seed": cfg.seed}
+    if resume_from is not None and Path(resume_from).is_file():
+        if rule is None:
+            raise ValueError("a block checkpoint resumes only a run with an epoch rule")
+        ck = torch.load(resume_from, map_location="cpu", weights_only=True)
+        if ck.get("identity") != ckpt_identity:
+            raise ValueError(f"{resume_from} is not a checkpoint of this run "
+                             f"({ck.get('identity')} vs {ckpt_identity}): not resuming")
+        model.load_state_dict(ck["model"])
+        opt.load_state_dict(ck["optimizer"])
+        plateau.load_state_dict(ck["plateau"])
+        scaler.load_state_dict(ck["scaler"])
+        best = {"macro_f1": ck["best_macro_f1"], "epoch": ck["best_epoch"],
+                "state": ck["best_state"]}            # its validation pass is redone at the end
+        history, blocks = list(ck["history"]), list(ck["blocks"])
+        step, seen = int(ck["step"]), int(ck["seen"])
+        start_epoch = resumed_from = int(ck["epoch"])
+        log(f"[{name}] RESUMED from the block checkpoint after epoch {start_epoch} (best "
+            f"val macro-F1 {best['macro_f1']:.4f} at epoch {best['epoch']})")
+        if blocks and blocks[-1]["decision"] == "stop":
+            stop_reason = blocks[-1]["reason"]
+            start_epoch = cfg.epochs                # the rule had already stopped it
+
+    def save_block(epoch: int) -> None:
+        """The block checkpoint (written whole, then renamed), then on_block."""
+        tmp = ckpt_path.with_suffix(".tmp")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        torch.save({"identity": ckpt_identity, "epoch": epoch, "step": step, "seen": seen,
+                    "model": model.state_dict(), "optimizer": opt.state_dict(),
+                    "plateau": plateau.state_dict(), "scaler": scaler.state_dict(),
+                    "best_state": best["state"], "best_epoch": best["epoch"],
+                    "best_macro_f1": best["macro_f1"], "history": history,
+                    "blocks": blocks}, tmp)
+        tmp.replace(ckpt_path)
+        if on_block is not None:
+            on_block(ckpt_path, {"epochs_done": epoch, "best_epoch": best["epoch"],
+                                 "best_val_macro_f1": best["macro_f1"], "blocks": blocks,
+                                 "history": history})
+    for epoch in range(start_epoch, cfg.epochs):
         order = torch.randperm(len(data.train), generator=torch.Generator().manual_seed(
             cfg.seed + epoch)).tolist()
         micro_steps = steps_per_epoch * accum
@@ -1105,8 +1221,10 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
                                            lambda: micro, fell_back):
             wait_seconds += time.monotonic() - t_wait
             if should_stop is not None and should_stop():
+                kept = (f"the block checkpoint after epoch {blocks[-1]['epoch']} is kept; "
+                        "resume the run to carry on from it" if blocks else "not saved")
                 raise Stopped(f"stopped in epoch {epoch + 1} at step {step:,} (time limit); "
-                              "not saved")
+                              + kept)
             if batch is None:
                 micro += 1
                 t_wait = time.monotonic()
@@ -1150,10 +1268,33 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
                     "epoch": epoch + 1, "val": v,
                     "state": {k: t.detach().to("cpu", copy=True)
                               for k, t in model.state_dict().items()}}
+        epoch_seconds.append(time.monotonic() - t_epoch)
         if stopped_early:
+            stop_reason = f"stopped at max_steps ({cfg.max_steps:,} optimizer steps)"
             break
+        decision = block_decision(rule, [h["val_macro_f1"] for h in history],
+                                  epoch + 1) if rule else None
+        if decision is not None:
+            blocks.append(decision)
+            log(f"[{name}] epoch rule after epoch {epoch + 1}: {json.dumps(decision)}")
+            save_block(epoch + 1)
+            if decision["decision"] == "stop":
+                stop_reason = decision["reason"]
+                break
+            if time_left is not None:
+                needed = rule.block * float(np.mean(epoch_seconds))
+                left = time_left()
+                if left is not None and left < needed:
+                    raise Stopped(f"stopped at the block boundary after epoch {epoch + 1} "
+                                  f"(time limit: {left / 3600:.1f} h left, a block needs "
+                                  f"~{needed / 3600:.1f} h); the block checkpoint is kept: "
+                                  "resume the run to carry on from it")
+    if stop_reason is None:
+        stop_reason = f"fixed length: {cfg.epochs} epochs"
     model.load_state_dict(best["state"])
-    v = best["val"]
+    v = best.get("val")
+    if v is None:            # the best epoch came before a resume: score it again
+        v = run_validation(model, val_loader, device, n_classes, loss_fn, amp_dtype)
     groups = np.array([val_items[i][3] for i in v["rows"]]) if len(v["rows"]) else None
     temperature = fit_temperature(v["logits"], v["labels"], groups)
     scale = float(20.0 * np.median(v["norms"])) if len(v["norms"]) else 20.0
@@ -1188,6 +1329,8 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
             "steps": step, "photos_seen": seen, "epochs_run": len(history),
             "best_epoch": best.get("epoch"), "best_val_macro_f1": best["macro_f1"],
             "temperature": temperature, "feature_scale": scale, "history": history,
+            "epoch_rule": asdict(rule) if rule else None, "blocks": blocks,
+            "stop_reason": stop_reason, "resumed_from_epoch": resumed_from,
             "train_photos_per_second": round(seen / train_seconds, 2) if train_seconds else None,
             "loader_wait_share": round(wait_seconds / train_seconds, 3) if train_seconds else None,
             "stopped_at_max_steps": stopped_early, "loader_fallback": fallback["at"],
