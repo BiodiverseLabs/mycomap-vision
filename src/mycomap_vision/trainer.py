@@ -490,7 +490,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             picek_place_cells: str | None = None, picek_place_cells_sha256: str | None = None,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, release=None,
-            log=print) -> dict:
+            seed: int = 0, public_trainable_only: bool = False, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
     key)` copies one file to the bucket. `finetuner(conn, base, name, embeddings_root,
     models_dir)` fine-tunes (default: finetune.finetune with its default settings) and
@@ -503,7 +503,12 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     `release` (a trainer copy, dataset_release.load_release(..., without_private=True)):
     the run sees only the release's included records (restrict_to_release), fine-tunes on
     its train split, compares on train vs val, and cites the release in progress.json,
-    result.json and every model it trains."""
+    result.json and every model it trains. `seed` (the fine-tune's FinetuneConfig.seed:
+    a second seed for the paper's spread, E22) and `public_trainable_only` (the public
+    model, E23: only photos the released weights may learn from; needs `release`) are
+    recorded in progress.json and result.json, and kept by a resumed attempt."""
+    if public_trainable_only and release is None:
+        raise ValueError("public-trainable-only training needs the shipped release")
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
@@ -571,6 +576,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     progress = Progress(data_dir / PROGRESS_FILE, prefix + PROGRESS_FILE, upload,
                         run_id=run_id, code_version=config.code_version(), size=size,
                         methods=methods, test_days=test_days, sample_records=kept,
+                        seed=seed, public_trainable_only=public_trainable_only,
                         attempts=attempts, picek_exclude_benchmarks=picek_exclude,
                         picek_labels_hash=picek_labels_hash,
                         dataset_release=cite or release_cite,
@@ -674,7 +680,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                         conn, s.spec, s.name, data_dir / "models")
                 else:
                     meta = (finetuner or _default_finetuner(store, size, test_days, log,
-                                                            stopping, release))(
+                                                            stopping, release, seed,
+                                                            public_trainable_only))(
                         conn, s.base, s.name, root, data_dir / "models")
                 publish([(data_dir / "models" / f"{s.name}{suffix}",
                           f"{prefix}models/{s.name}{suffix}") for suffix in model_files(s.kind)
@@ -714,6 +721,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
            "finetuned": {n: {k: m.get(k) for k in FINETUNE_KEYS} for n, m in finetuned.items()},
            "comparison_id": comparison["comparison_id"] if comparison else None,
            "sample_records": kept, "code_version": config.code_version(),
+           "seed": seed, "public_trainable_only": public_trainable_only,
            "dataset_release": cite or release_cite,
            "stages": progress.data["stages"], "finished_at": _now()}
     if not was_interrupted:
@@ -736,7 +744,9 @@ FINETUNE_KEYS = ("base", "trained_through", "records", "photos", "species", "ste
                  "minutes", "final_loss", "label_snapshot", "dataset_release", "version",
                  # a Picek run's curve and, with the epoch rule, its block decisions
                  "epochs_run", "best_epoch", "best_val_macro_f1", "history", "epoch_rule",
-                 "blocks", "stop_reason", "resumed_from_epoch")
+                 "blocks", "stop_reason", "resumed_from_epoch",
+                 # a fine-tune's seed and the photos it learnt from (policy, licence classes)
+                 "seed", "train_photos")
 PICEK_FILES = (".pt", ".json", ".classifier.npz", ".records.csv")
 
 
@@ -787,12 +797,14 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
     return run
 
 
-def _default_finetuner(store, size, test_days, log, should_stop=None, release=None):
+def _default_finetuner(store, size, test_days, log, should_stop=None, release=None,
+                       seed: int = 0, public_trainable_only: bool = False):
     def run(conn, base, name, embeddings_root, models_dir):
-        from .finetune import finetune
-        return finetune(conn, base, store, size, name, test_days=test_days,
-                        embeddings_root=embeddings_root, out_dir=models_dir, log=log,
-                        should_stop=should_stop, release=release)
+        from .finetune import FinetuneConfig, finetune
+        return finetune(conn, base, store, size, name, cfg=FinetuneConfig(seed=seed),
+                        test_days=test_days, embeddings_root=embeddings_root,
+                        out_dir=models_dir, log=log, should_stop=should_stop, release=release,
+                        public_trainable_only=public_trainable_only)
     return run
 
 
@@ -841,6 +853,8 @@ def resume_request(doc: dict) -> dict:
             "methods": list(doc.get("methods") or []), "size": doc.get("size") or "large",
             "test_days": int(doc.get("test_days") or 28),
             "sample_records": doc.get("sample_records"),
+            "seed": int(doc.get("seed") or 0),
+            "public_trainable_only": bool(doc.get("public_trainable_only")),
             "done": {(s["kind"], s["name"]) for s in stages if s.get("status") == "done"}}
 
 

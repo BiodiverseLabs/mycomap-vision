@@ -240,6 +240,15 @@ Each re-run ships one command taking `--release v1` (code in this repo) and a re
 revisited and the entry says so. Order (PLAN §3: what defines the benchmarks first). Owners
 are suggestions for the coordinator; times are the laptop's unless marked AWS.
 
+Two trainer options serve the paper's extra fine-tunes (each launch needs Steve's cost OK):
+`--seed N` (a second seed for the spread between runs; default 0) and
+`--public-trainable-only` (the public model: with `--release` and `--finetune`, it learns only
+from CC photos including NC, and all-rights-reserved photos whose owner granted permission;
+a record or class left with none drops out). Both are recorded in progress.json, result.json
+and the model's json (`seed`, `train_photos`: the policy and the photos by licence class, which
+every fine-tune on a release records), and kept by `--resume`. Every model trained on v1 trains
+on v1 as cut and is scored and served with its erratum (dataset-release.md §4, Errata).
+
 | # | Re-run | Registry entries | Suggested owner | Estimate |
 |---|---|---|---|---|
 | 1 | Scoring definitions: name-equivalence rule check, the time splits, the likely-list protocol; cut `v1-test` when Steve's records are validated | name-equivalence, likely-sets | retrain owner | 1 h; v1-test cut ~1 h + photo fetch |

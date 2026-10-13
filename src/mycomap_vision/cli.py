@@ -184,13 +184,14 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         picek_exclude=args.picek_exclude_benchmarks,
                                         dry_run=args.dry_run, ec2_check=args.ec2_check,
                                         release=_dataset_release(args),
-                                        allow_draft=args.allow_draft),
+                                        allow_draft=args.allow_draft, seed=args.seed,
+                                        public_trainable_only=args.public_trainable_only),
                      indent=2))
 
 
 # What a resumed run takes from the run itself, not from the command line.
 RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records",
-                   "picek", "picek_exclude_benchmarks")
+                   "picek", "picek_exclude_benchmarks", "seed", "public_trainable_only")
 
 
 def trainer_release(args):
@@ -233,7 +234,8 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_place_cells=args.picek_place_cells,
                           picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
-                          if args.resume else None, release=trainer_release(args))
+                          if args.resume else None, release=trainer_release(args),
+                          seed=args.seed, public_trainable_only=args.public_trainable_only)
     if watcher is not None:
         watcher.stop()
     print(json.dumps(out, indent=2))
@@ -1463,6 +1465,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="continue that run (stopped, interrupted or killed) under its own run "
                         "id: its finished stages are restored, only the rest run; it keeps "
                         "its own backbones, fine-tunes, methods, size and manifest")
+    p.add_argument("--seed", type=int, default=0,
+                   help="the fine-tune's random seed (default 0; a second seed measures the "
+                        "spread between runs)")
+    p.add_argument("--public-trainable-only", action="store_true",
+                   help="with --release and --finetune: train only on photos the released "
+                        "weights may learn from (CC including NC, or permission granted); "
+                        "the run records the policy and the photos by licence class")
     p.set_defaults(parser_defaults={k: p.get_default(k) for k in RUN_OWN_OPTIONS})
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
@@ -1490,6 +1499,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--release-manifest", help="sha256 of its MANIFEST.json at launch")
     p.add_argument("--allow-draft", action="store_true")
     p.add_argument("--sample-records", type=int)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--public-trainable-only", action="store_true")
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
                         "finished; set by the launcher to leave time before the hard limit")
