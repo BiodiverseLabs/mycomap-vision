@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bars, comparisons, defaultComparison, depthRows, heat, heldoutBars, heldoutDepth, heldoutKs,
+import { bars, comparisons, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth, heldoutKs,
+         onRelease, orderBenchmarks,
          kChoices, splitModelKey, type PublishedBenchmark } from "./compareView";
 import type { RunReport, ScoreRun } from "./api";
 
@@ -138,4 +139,24 @@ test("held-out bars rank models, carry the interval, and offer top 3/10 only whe
 test("held-out depth rows use the standard bands", () => {
   const rows = heldoutDepth(bench(false));
   assert.deepEqual(rows[0].cells.map((c) => c?.rate ?? null), [null, 0.14, null, null, null]);
+});
+
+test("v1 results come first; pre-freeze benchmarks follow as development history", () => {
+  const old = { ...bench(true), benchmark: "heldout-2026-10-08", reproducibility: "exploratory-pre-freeze" };
+  const legacy = { ...bench(true), benchmark: "heldout-older" };          // imported before the field existed
+  const val = { ...bench(true), benchmark: "v1", split: "val", reproducibility: "reproduced-on-v1" };
+  const test_ = { ...bench(true), benchmark: "v1-test", sealed: true, reproducibility: "reproduced-on-v1-test" };
+  assert.deepEqual([old, legacy, val, test_].map(onRelease), [false, false, true, true]);
+  assert.deepEqual(orderBenchmarks([old, val, legacy, test_]).map((b) => b.benchmark),
+    ["v1-test", "v1", "heldout-2026-10-08", "heldout-older"]);
+});
+
+test("a comparison measured on a release is shown first, over a newer pre-freeze one", () => {
+  const preFreeze = [run(1, "ft", "nearest"), run(2, "ft", "nearest+mean")];
+  const v1 = [run(3, "ft-v1", "nearest", { record_set: "rs2", dataset_release: "v1" }),
+              run(4, "ft-v1", "nearest+mean", { record_set: "rs2", dataset_release: null })];
+  assert.equal(groupRelease(v1), "v1");
+  assert.equal(groupRelease(preFreeze), null);
+  assert.equal(defaultComparison([preFreeze, v1], ["ft"]), 1);
+  assert.equal(defaultComparison([preFreeze], ["ft"]), 0, "no release yet: as before");
 });

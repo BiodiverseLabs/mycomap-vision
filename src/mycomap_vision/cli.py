@@ -641,10 +641,21 @@ def cmd_benchmark_export(conn, args) -> None:
     """A held-out report's aggregates as JSON, for mv benchmark-import on the server box."""
     from pathlib import Path
     from . import benchmark_io
-    path = Path(args.report)
-    report = json.loads(path.read_text(encoding="utf-8"))
-    text = json.dumps(benchmark_io.export_summary(report, path.name, args.reproducibility),
-                      indent=1)
+    comparison = getattr(args, "comparison", None)
+    if bool(getattr(args, "report", None)) == bool(comparison):
+        raise SystemExit("give --report (a held-out report) or --comparison (on a release)")
+    if comparison:
+        try:
+            payload = benchmark_io.export_comparison(conn, comparison,
+                                                     getattr(args, "split", "val"),
+                                                     sealed=getattr(args, "sealed", False))
+        except ValueError as e:
+            raise SystemExit(f"not exported: {e}")
+    else:
+        path = Path(args.report)
+        report = json.loads(path.read_text(encoding="utf-8"))
+        payload = benchmark_io.export_summary(report, path.name, args.reproducibility)
+    text = json.dumps(payload, indent=1)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"wrote {args.out}", file=sys.stderr)
@@ -1603,9 +1614,16 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("scoreboard-import", help="(server box) add rows from scoreboard-export "
                        "to a comparison this machine has; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
-    p = sub.add_parser("benchmark-export", help="a held-out report's aggregates (no record "
-                       "ids, names, observers or places) for the server box's Models page")
-    p.add_argument("--report", required=True, help="a report-*.json from mv heldout report")
+    p = sub.add_parser("benchmark-export", help="a held-out report's, or a release "
+                       "comparison's, aggregates (no record ids, names, observers or places) "
+                       "for the server box's Results page")
+    p.add_argument("--report", help="a report-*.json from mv heldout report")
+    p.add_argument("--comparison", help="a comparison on a frozen dataset release (mv compare "
+                   "--release); its reproducibility is reproduced-on-<release>")
+    p.add_argument("--split", choices=("val", "test"), default="val",
+                   help="with --comparison: val (the release's own) or test (a test release)")
+    p.add_argument("--sealed", action="store_true",
+                   help="with --comparison: a sealed test release, scored once")
     p.add_argument("--out", help="write to this file (default: standard output)")
     p.add_argument("--reproducibility", default="exploratory-pre-freeze",
                    help="exploratory-pre-freeze (default) or reproduced-on-<release>")

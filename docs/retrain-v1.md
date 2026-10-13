@@ -170,6 +170,9 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
    from the comparison's `dataset_release` block, `reproduce_command` = section 2's commands.
 6. Report to the coordinator: the standard summary, the sanity result, box memory. Steve decides
    adoption; the coordinator builds the serving release (`mv release`) and deploys.
+   The site's Results page gets the numbers with `mv benchmark-export --comparison <id>
+   --split val` on the laptop and `mv benchmark-import -` on the box; they show first, above
+   the pre-v1 benchmarks (development history).
 
 ## 5. Box memory (measured 2026-10-12, projected for v1)
 

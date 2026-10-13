@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { api, modelLabel, num, pct, type Rank, type RunReport, type ScoreRun } from "@/lib/api";
-import { bars, comparisons, defaultComparison, depthRows, heat, heldoutBars, heldoutDepth,
+import { bars, comparisons, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth,
+         onRelease, orderBenchmarks,
          heldoutKs, kChoices, STANDARD_BANDS, type Bar, type PublishedBenchmark } from "@/lib/compareView";
 
 // "Approaches compared" on the Results page (Research > Results) (Steve, 2026-10-09): every model and method,
@@ -114,12 +115,20 @@ function ComparisonPicker({ groups, idx, onPick }: {
       <span className="text-muted-foreground">Test records:</span>
       <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1 max-w-full min-w-0"
               value={idx} onChange={(e) => onPick(Number(e.target.value))}>
-        {groups.map((g, i) => (
-          <option key={g[0].id} value={i}>
-            {num(g[0].n_test)} records validated after {g[0].cutoff} ({g.length} approach
-            {g.length === 1 ? "" : "es"}){i === 0 ? ", most recent" : ""}
-          </option>
-        ))}
+        {[{ label: "On a dataset release", release: true }, { label: "Development history (before dataset release v1)", release: false }]
+          .map((kind) => ({ ...kind, items: groups.map((g, i) => ({ g, i }))
+                                         .filter(({ g }) => (groupRelease(g) !== null) === kind.release) }))
+          .filter((kind) => kind.items.length > 0).map((kind) => (
+            <optgroup key={kind.label} label={kind.label}>
+              {kind.items.map(({ g, i }) => (
+                <option key={g[0].id} value={i}>
+                  {groupRelease(g) ? `Release ${groupRelease(g)}: ` : ""}
+                  {num(g[0].n_test)} records validated after {g[0].cutoff} ({g.length} approach
+                  {g.length === 1 ? "" : "es"}){i === 0 ? ", most recent" : ""}
+                </option>
+              ))}
+            </optgroup>
+          ))}
       </select>
     </label>
   );
@@ -295,18 +304,18 @@ function heldoutLabel(backbone: string, method: string) {
 /** Held-out benchmarks: records no model saw in training or as references. */
 function HeldOut() {
   const q = useQuery({ queryKey: ["benchmarks"], queryFn: api.benchmarks });
-  const list = q.data?.benchmarks ?? [];
+  const list = orderBenchmarks(q.data?.benchmarks ?? []);
   const [pick, setPick] = useState(0);
   const [rank, setRank] = useState<Rank>("species");
   const [kPick, setK] = useState(1);
   const b: PublishedBenchmark | undefined = list[Math.min(pick, list.length - 1)];
   return (
     <div className="space-y-4" data-testid="chart-heldout">
-      <h3 className="font-semibold text-lg text-[#4a3728]">Held-out records</h3>
+      <h3 className="font-semibold text-lg text-[#4a3728]">Records no model saw</h3>
       <p className="text-sm text-muted-foreground max-w-3xl">
         DNA-verified records that no model here saw, in training or as a reference. Ranges in
-        brackets are 95% intervals. Results before the dataset freeze are exploratory: they will be
-        re-run on dataset release v1.
+        brackets are 95% intervals. Results on dataset release v1 come first; results from before
+        the dataset freeze are kept below them as development history.
       </p>
       {!b ? (
         <p className="text-sm text-muted-foreground">
@@ -335,14 +344,19 @@ function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
         <span className="text-muted-foreground">Benchmark:</span>
         <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1 max-w-full min-w-0" value={pick}
                 onChange={(e) => setPick(Number(e.target.value))}>
-          {list.map((x, i) => (
-            <option key={`${x.benchmark}/${x.split}`} value={i}>
-              {x.benchmark}, {x.split} split, {num(x.scored_records)} records
-              {x.sealed ? " (sealed test)" : " (development benchmark"}
-              {x.sealed ? "" : x.reproducibility?.startsWith("reproduced-on-")
-                ? `, ${x.reproducibility.replace("reproduced-on-", "release ")})` : ", exploratory, pre-freeze)"}
-            </option>
-          ))}
+          {[{ label: "On a dataset release", items: list.map((x, i) => ({ x, i })).filter(({ x }) => onRelease(x)) },
+            { label: "Development history (before dataset release v1)",
+              items: list.map((x, i) => ({ x, i })).filter(({ x }) => !onRelease(x)) }]
+            .filter((g) => g.items.length > 0).map((g) => (
+              <optgroup key={g.label} label={g.label}>
+                {g.items.map(({ x, i }) => (
+                  <option key={`${x.benchmark}/${x.split}`} value={i}>
+                    {x.benchmark}, {x.split} split, {num(x.scored_records)} records
+                    {x.sealed ? " (sealed test)" : onRelease(x) ? "" : " (development benchmark, exploratory)"}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
         </select>
       </label>
       <div className="rounded-lg border border-[#A87146]/20 bg-white p-4">
