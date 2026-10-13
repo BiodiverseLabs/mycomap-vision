@@ -230,3 +230,22 @@ def test_the_primary_test_needs_both_overall_gain_and_the_band():
     loses[:60] = False                                      # -60 of 700 in the band (8.6%)
     r = pt.primary_test(p0, loses, has, band, folds, 2000)
     assert r["overall"]["passes"] is True and r["passes"] is False
+
+
+def test_a_null_aoa_is_unknown_never_inside(tmp_path):
+    # Final export (Atlas finish version 5): aoa is null where no model has a usable
+    # threshold; grid.json counts those models.
+    cont, prior = exports(tmp_path, continent_spread=True)
+    meta = json.loads((cont / "grid.json").read_text(encoding="utf-8"))
+    (cont / "grid.json").write_text(json.dumps({**meta, "models_without_threshold": 3}),
+                                    encoding="utf-8")
+    g = ap.AtlasGrid.from_json(GRID)
+    tsv(cont / "continent.tsv.gz", ["taxon_id", "cell_id", "rank", "models", "rank_sd", "aoa"],
+        [(2, int(g.cell(*MICHIGAN)), 90, 1, "", "")], gz=True)
+    summary = ap.import_exports(cont, prior, tmp_path / "t", "R")
+    assert summary["models_without_threshold"] == 3
+    t = ap.AtlasTable(tmp_path / "t")
+    i01 = t.columns_for([IN01])[0]
+    view = t.at(*MICHIGAN)
+    assert view.aoa[i01] == ap.NO_DATA and view.rank_sd[i01] == ap.NO_DATA
+    assert ap.applicability(view.aoa[[i01]], "graded")[0] == 0.0

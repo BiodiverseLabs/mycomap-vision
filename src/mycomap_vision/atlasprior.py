@@ -181,6 +181,9 @@ def import_exports(continent_dir: Path, prior_dir: Path | None, out_dir: Path,
     summary = {"release": release, "taxa": len(keys), "cells": int(len(cells)),
                "grid": {k: v for k, v in grid.__dict__.items()},
                "map_strength_missing": int(np.isnan(ms).sum()),
+               # Models Atlas could give no area-of-applicability threshold: their cells
+               # carry no aoa (unknown, so applicability 0), never "inside".
+               "models_without_threshold": grid_meta.get("models_without_threshold"),
                "spread_from": "continent" if i_s >= 0 else (
                    "prior (in reach only)" if prior_dir is not None else "none"),
                "bytes": int(sum(a.nbytes for a in arrays.values()) + reach.nbytes)}
