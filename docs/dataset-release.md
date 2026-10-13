@@ -174,6 +174,30 @@ Review lists are TSV files: `kind` (`record`|`photo`), `key`, `reason`, `note`. 
 copies each into `inputs/` and records its sha256; a key it cannot find fails the build
 (a stale list must not silently exclude nothing).
 
+### Errata (a fault found after the cut)
+
+A frozen release is never edited or re-cut for a small fault: the fix is an erratum
+(`errata.py`), a TSV in the review-list format (`kind` = `record`, `key`, `reason`, `note`)
+kept beside the release, never in it (s3 `research-release-extras/<id>/`, here
+`data/research-release-extras/<id>/`). `--errata FILE` on `compare`, `model-sanity`,
+`int8-check`, `finetune`, `heldout predict` and `external run` leaves its records out of
+every split they read (no score, no reference, no training); the release's `cite()` then
+carries `errata` (file, sha256, records, by reason), so every report and registry entry
+names it. A key the release lacks refuses the erratum. The AWS launchers do not take it yet
+(the instance would not apply it).
+
+- `mo_twin_as_inat` (v1, found 2026-10-13): mycomap.org holds 71 iNaturalist rows that share
+  their number and a validation project with an 'MO Observations' row (OMDL1/OMDL2, made by
+  the .com sync); their name and photos are the unrelated iNat observation with that number
+  (a duck, a panda...). v1 holds all 71, 41 included in `train` (62 photos), each beside its
+  correct `mo:` twin. `mv dataset errata v1 --out <file>` writes the erratum from the rule
+  (`sources.mo_twins`), sorted, so the same release gives the same bytes. The fine-tune
+  trained on those photos; a class only they taught can no longer be answered, since
+  methods answer with the reference's labels (`errata.masked_head_labels` counts them).
+  The feed now never stores such a record (records.save_records, nightly.changes:
+  `mo_twins_dropped`), so the next nightly removes them from the served index and no later
+  release holds them; an iNat and an MO record numbered alike in different projects stay.
+
 ## 5. Splits
 
 Steve, 2026-10-09: "I will provide a new dataset for testing of new records." So:

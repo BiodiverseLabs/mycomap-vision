@@ -473,7 +473,8 @@ def fetch_pages(base_url: str, key: str, path: str, what: str,
 
 def changes(conn: sqlite3.Connection, recs: list[dict]) -> dict:
     """What saving `recs` would do: new, removed and renamed records (with examples).
-    Benchmark records (holdouts.py) are never saved, so they never count as new.
+    Benchmark records (holdouts.py) are never saved, so they never count as new; nor are
+    MO finds in disguise (sources.mo_twins), counted as `mo_twins_dropped`.
 
     On a manifest whose sources older code guessed (sources.migrated false), a record
     of another source stored under its bare id comes back under its own key ('123' ->
@@ -482,6 +483,7 @@ def changes(conn: sqlite3.Connection, recs: list[dict]) -> dict:
     then says what the migration will take off those records (sources.plan_legacy)."""
     from . import sources
     recs, held_out = holdouts.drop_held_out(conn, recs)
+    recs, mo_twins = sources.drop_mo_twins(recs)
     before = dict(conn.execute("select observation_id, scientific_name from records"))
     now = {r["observation_id"]: r["scientific_name"] for r in recs}
     rekeyed: dict[str, str] = {}
@@ -506,6 +508,9 @@ def changes(conn: sqlite3.Connection, recs: list[dict]) -> dict:
                                    "photo_links_to_unlink": plan["wrong_photos"]}
     if held_out:
         out["held_out"] = held_out
+    if mo_twins:
+        out["mo_twins_dropped"] = len(mo_twins)
+        out["examples"]["mo_twins_dropped"] = mo_twins[:10]
     return out
 
 
@@ -587,7 +592,8 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
             recs = build_records(rows, exported_at)
             plan = changes(conn, recs)
             report["records"] = {k: plan[k] for k in ("before", "after", "new", "removed",
-                                                      "renamed", "held_out") if k in plan}
+                                                      "renamed", "held_out",
+                                                      "mo_twins_dropped") if k in plan}
             limit = settings.removal_limit(plan["before"])
             if plan["removed"] > limit and not accept_removals:
                 raise NightlyRefused(
@@ -597,7 +603,9 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
             saved = save_records(conn, recs)
             changed = changed or any(saved[k] for k in ("new", "removed", "renamed"))
             log(f"[nightly] records: {saved['new']:,} new, {saved['removed']:,} removed, "
-                f"{saved['renamed']:,} renamed")
+                f"{saved['renamed']:,} renamed"
+                + (f", {saved['mo_twins_dropped']:,} MO finds held as iNat records left out"
+                   if saved.get("mo_twins_dropped") else ""))
             report["inat"] = _step(lambda: steps.fetch_inat(conn, raw_dir=layer.raw / "inat",
                                                             log=log), "iNat details", log)
             report["taxonomy"] = _step(lambda: steps.taxonomy(

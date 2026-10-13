@@ -163,7 +163,11 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
 3. `mv aws-pull-trainer --run <run>`: the frozen and fine-tuned embeddings of every v1 photo
    (the reference re-embedded with the new model), the weights, the heads, the run's own
    comparison.
-4. Section 2's comparison and summary; section 3's sanity gate.
+4. Section 2's comparison and summary; section 3's sanity gate. Every v1 command takes
+   `--errata data/research-release-extras/v1/v1-errata.tsv` (dataset-release.md §4,
+   Errata: 41 MO finds held as iNat records, left out as references); record the file's
+   sha256 and the count of masked ft-head classes (`errata.masked_head_labels`) in the
+   registry entry.
 5. Write the registry entry `experiments/<date>-v1-finetune.md` in the private research
    checkout (`config.RESEARCH_DIR`, never this repo):
    `reproducibility: reproduced-on-v1`, `dataset_release`, `reference_hash` and `code_commit`
