@@ -40,6 +40,89 @@ BOOST = {"place_km": 75.0, "place_weight": 1.0, "cap": LOG5,
          "season_days": 10.0, "season_weight": 0.5,
          "far_penalty": 2.0, "radius_km": 1500.0, "min_dna_effort": 500}
 
+# Named settings for the place prior (Steve, 2026-10-13: "place should push far species
+# down", reversing 2026-10-10). Each adds to BOOST, which every setting keeps:
+# - shrink: records' worth of weight pulling a species' place boost to its genus's
+#   (prior.RangeSeasonPrior.shrink; 3 as served). Higher damps the boost a species with
+#   few records gets from one or two of them lying nearby;
+# - distance penalty: slope nats per 1,000 km beyond start_km from the candidate's nearest
+#   known record, capped at pen_cap; known = our DNA records ("dna") or those and iNat's
+#   open-data finds ("dna+inat"); times n / (n + damp_k), n = its DNA records with a
+#   place, so a species known from a few records is pushed down less;
+# - season_penalty: nats off a species with a known season (the cue's in_season false).
+# A candidate pushed down for distance still carries the far-find cue (PlaceCue).
+# MV_PLACE_SETTING picks one; unset, the served setting of 2026-10-11 (no change).
+SETTING_ENV = "MV_PLACE_SETTING"
+DEFAULT_SETTING = "boost-2026-10-11"
+NO_EXTRAS = {"shrink": 3.0, "pen_slope": 0.0, "pen_start_km": 300.0, "pen_cap": 0.0,
+             "pen_known": "dna", "damp_k": 0.0, "season_penalty": 0.0}
+PLACE_SETTINGS: dict[str, dict] = {
+    DEFAULT_SETTING: dict(NO_EXTRAS),
+}
+
+
+def place_setting(name: str | None = None) -> tuple[str, dict]:
+    """(name, setting): `name`, else MV_PLACE_SETTING, else the served default. An unknown
+    name is refused, so a typo never serves a prior nobody chose."""
+    from . import config
+    name = name or config.setting(SETTING_ENV) or DEFAULT_SETTING
+    if name not in PLACE_SETTINGS:
+        raise ValueError(f"{SETTING_ENV}={name!r} is not a place setting "
+                         f"({', '.join(sorted(PLACE_SETTINGS))})")
+    return name, {**NO_EXTRAS, **PLACE_SETTINGS[name]}
+
+
+def distance_penalty(km: np.ndarray, start_km: float, slope: float, cap: float) -> np.ndarray:
+    """Nats taken off for lying `km` from the nearest known record: `slope` per 1,000 km
+    beyond `start_km`, at most `cap`. No known record (inf or NaN): nothing, since there is
+    no evidence of where it lives."""
+    km = np.asarray(km, dtype=np.float64)
+    known = np.isfinite(km)
+    over = np.where(known, np.maximum(np.nan_to_num(km, posinf=0.0) - start_km, 0.0), 0.0)
+    return np.minimum(slope * over / 1000.0, cap)
+
+
+def count_damping(n: np.ndarray, k: float) -> np.ndarray:
+    """n / (n + k): 1 for k = 0; a taxon known from few records is pushed down less."""
+    n = np.asarray(n, dtype=np.float64)
+    if not k:
+        return np.ones_like(n)
+    return n / (n + k)
+
+
+def off_season(near: np.ndarray, dated: np.ndarray) -> np.ndarray:
+    """A known season (MIN_DATED_FOR_SEASON+ dated records) with no record within
+    SEASON_WINDOW_DAYS of this day of the year: PlaceCue's in_season false."""
+    return (np.asarray(dated) >= MIN_DATED_FOR_SEASON) & (np.asarray(near) == 0)
+
+
+def nearest_inat_km(far, lat: float, lon: float, uuid: str | None = None) -> np.ndarray:
+    """(n_groups,) km from a place to each group's nearest iNat open-data find (cell
+    centre), inf with none. The query's own observation, when the store counted it and
+    the pair counts are kept (tuning), is taken back out. `far`: a fitted OccurrencePrior."""
+    from .prior import haversine_km
+    d = haversine_km(lat, lon, far.cell_lat, far.cell_lon)
+    dp = d[far.pair_pos]
+    n_local = len(far.total)
+    if getattr(far, "pair_count", None) is not None and uuid:
+        own = far.store.own_contribution(uuid)
+        if own:
+            at = int(far.pos_of_cell[own.cell])
+            mine = {far.local[u] for u in own.units if u in far.local}
+            lone = (far.pair_pos == at) & np.isin(far.pair_local, list(mine)) \
+                & (far.pair_count <= 1)
+            dp = np.where(lone, np.inf, dp)
+    per_local = np.full(n_local, np.inf)
+    if len(dp):
+        # Pairs are grouped by unit in order (OccurrencePrior.fit): one reduce per unit.
+        pl = np.asarray(far.pair_local)
+        starts = np.flatnonzero(np.r_[True, pl[1:] != pl[:-1]])
+        per_local[pl[starts]] = np.minimum.reduceat(dp, starts)
+    out = np.full(far.n_groups, np.inf)
+    ok = far.g_sp >= 0
+    out[ok] = per_local[far.g_sp[ok]]
+    return out
+
 # The cue.
 FAR_KM = 300.0        # beyond this a top answer was right under a third of the time on the
                       # held-out test (30.8% at 300-1,500 km vs 50.1% at 100-300 km and
@@ -66,8 +149,9 @@ class PlaceBoost:
     """The prior. `far` is None when this machine has no occurrence store; then
     `ready()` is False and the method is not offered (methods.method_ready)."""
 
-    def __init__(self, store=None):
+    def __init__(self, store=None, setting: str | None = None):
         self._store = store
+        self.setting_name, self.setting = place_setting(setting)
 
     @staticmethod
     def ready() -> bool:
@@ -77,9 +161,14 @@ class PlaceBoost:
     def fit(self, records, species: list[str]) -> None:
         from .occprior import OccParams, OccurrencePrior
         from .occurrence import OccurrenceStore
+        s = self.setting
         self.dna = RangeSeasonPrior(bandwidth_km=BOOST["place_km"],
-                                    bandwidth_days=BOOST["season_days"], cap=BOOST["cap"])
+                                    bandwidth_days=BOOST["season_days"], cap=BOOST["cap"],
+                                    shrink=s["shrink"])
         self.dna.fit(records, species)
+        self.n_groups = len(species)
+        if self.has_extras():
+            self._fit_extras(records, species)     # the default setting holds none of it
         store, own_store = self._store, False
         if store is None and self.ready():
             store, own_store = OccurrenceStore.load(), True
@@ -99,6 +188,72 @@ class PlaceBoost:
                     setattr(store, name, None)
                 store.names = []
 
+    def _fit_extras(self, records, species: list[str]) -> None:
+        """What the setting's penalties read: each group's DNA records as 0.2-degree cell
+        centres (as the cue measures), its records with a place, and its dated days."""
+        pos = {s_: i for i, s_ in enumerate(species)}
+        self.n_groups = len(species)
+        cells: dict[tuple[int, float, float], None] = {}
+        n_place = np.zeros(self.n_groups)
+        dated: list[tuple[int, int]] = []
+        for r in records:
+            g = pos.get(r.unit)
+            if g is None:
+                continue
+            if r.latitude is not None and r.longitude is not None:
+                cells[(g, *snap(r.latitude, r.longitude))] = None
+                n_place[g] += 1
+            doy = Context(observed_on=r.observed_on).day_of_year
+            if doy is not None:
+                dated.append((g, doy))
+        c = np.array(list(cells), dtype=np.float64).reshape(-1, 3)
+        self.cell_group = c[:, 0].astype(np.int64)
+        self.cell_lat, self.cell_lon = c[:, 1], c[:, 2]
+        self.n_place = n_place
+        d = np.array(dated, dtype=np.int64).reshape(-1, 2)
+        self.doy_group, self.doy = d[:, 0], d[:, 1]
+        self.dated = np.bincount(self.doy_group, minlength=self.n_groups)
+
+    def nearest_dna_km(self, ctx: Context) -> np.ndarray:
+        """(n_groups,) km to each group's nearest DNA record's cell centre (inf: none)."""
+        out = np.full(self.n_groups, np.inf)
+        if len(self.cell_group):
+            d = haversine_km(ctx.latitude, ctx.longitude, self.cell_lat, self.cell_lon)
+            np.minimum.at(out, self.cell_group, d)
+        return out
+
+    def known_km(self, ctx: Context) -> np.ndarray:
+        """Distance to the nearest known record, by the setting's `pen_known`."""
+        km = self.nearest_dna_km(ctx)
+        if self.setting["pen_known"] == "dna+inat" and self.far is not None:
+            km = np.minimum(km, nearest_inat_km(self.far, ctx.latitude, ctx.longitude,
+                                                ctx.uuid))
+        return km
+
+    def has_extras(self) -> bool:
+        s = self.setting
+        return bool((s["pen_slope"] and s["pen_cap"]) or s["season_penalty"])
+
+    def extras(self, ctx: Context | None) -> np.ndarray | None:
+        """The setting's added penalties (nats, <= 0), or None when it adds none."""
+        s = self.setting
+        if not self.has_extras():
+            return None
+        out = np.zeros(self.n_groups)
+        used = False
+        if s["pen_slope"] and s["pen_cap"] and has_place(ctx):
+            pen = distance_penalty(self.known_km(ctx), s["pen_start_km"], s["pen_slope"],
+                                   s["pen_cap"])
+            out -= pen * count_damping(self.n_place, s["damp_k"])
+            used = True
+        if s["season_penalty"] and has_date(ctx):
+            within = day_distance(ctx.day_of_year, self.doy) <= SEASON_WINDOW_DAYS
+            near = np.bincount(self.doy_group, weights=within.astype(float),
+                               minlength=self.n_groups)
+            out -= s["season_penalty"] * off_season(near, self.dated)
+            used = True
+        return out if used else None
+
     def log_prior(self, ctx: Context | None) -> np.ndarray | None:
         """(n_groups,) on the photo-score / 0.02 scale, or None without place and date."""
         place_ok, date_ok = has_place(ctx), has_date(ctx)
@@ -114,7 +269,8 @@ class PlaceBoost:
             far = parts.out(r, genus_rule=False, min_dna_effort=BOOST["min_dna_effort"])
             if far is not None:
                 out = out - BOOST["far_penalty"] * far
-        return out
+        extra = self.extras(ctx)
+        return out if extra is None else out + extra
 
 
 class NearestMeanPlace:
