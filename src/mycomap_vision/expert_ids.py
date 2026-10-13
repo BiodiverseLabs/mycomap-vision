@@ -58,6 +58,9 @@ BATCH = 200
 V2_FIELDS = ("(id:!t,community_taxon_id:!t,user:(id:!t),"
              "identifications:(id:!t,current:!t,user:(id:!t,identifications_count:!t)))")
 TIER1, TIER2 = 10_000, 1_000
+# The research fetch names itself and a contact (MycoMap's public address, not a person's).
+USER_AGENT = config.USER_AGENT.rstrip(")") + "; research; contact info@mycomap.org)"
+MAX_THROTTLES = 5          # 429s in one run before it stops and asks a person
 SNAPSHOT_FORMAT = 1
 SCORES_FORMAT = 1
 
@@ -107,8 +110,9 @@ class HistoryClient:
                  max_calls: int | None = None):
         self.cache_dir = cache_dir
         self.session = session or requests.Session()
-        self.session.headers["User-Agent"] = config.USER_AGENT
+        self.session.headers["User-Agent"] = USER_AGENT
         self.session.headers["Accept"] = "application/json"
+        self.throttles = 0
         self.pace = MinInterval(interval, sleep=sleep)
         self.calls = 0
         self.max_calls = max_calls
@@ -146,6 +150,13 @@ class HistoryClient:
                 return 200, r.json()
             if r.status_code in (404, 410):
                 return r.status_code, None  # deleted or never public: recorded as such
+            if r.status_code == 403:
+                raise Refused("iNat answered 403 (refused): stopped; tell the paper coordinator")
+            if r.status_code == 429:
+                self.throttles += 1
+                if self.throttles >= MAX_THROTTLES:
+                    raise Refused(f"iNat throttled this run {self.throttles} times (429): "
+                                  "stopped; tell the paper coordinator")
             if r.status_code == 429 or r.status_code >= 500:
                 wait = 60 * (attempt + 1)
                 try:
@@ -228,6 +239,10 @@ class HistoryClient:
 
 class CallBudgetSpent(RuntimeError):
     pass
+
+
+class Refused(RuntimeError):
+    """iNat refused (403) or kept throttling (429): stop the run and ask a person."""
 
 
 # --- the snapshot (numeric ids only) --------------------------------------------------

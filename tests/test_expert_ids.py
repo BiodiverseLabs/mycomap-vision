@@ -260,6 +260,7 @@ def test_fetcher_backs_off_on_429_then_caches_so_a_rerun_costs_nothing(tmp_path)
     c2 = E.HistoryClient(tmp_path, session=FakeSession([]), sleep=sleeps.append)
     assert c2.observation("42")["user_id"] == 1 and c2.calls == 0
     assert s.headers["User-Agent"].startswith("MycoMap-Vision")
+    assert "info@mycomap.org" in s.headers["User-Agent"]
 
 
 def test_fetcher_paces_every_request_to_at_most_one_a_second(tmp_path):
@@ -361,3 +362,14 @@ def test_sensitivities_count_the_push_account_or_drop_ambiguous_withdrawals():
     assert E.summarise([line])["all"]["each_species"]["n"] == 1             # h3 only
     assert E.summarise([line], count_push_accounts=True)["all"]["each_species"]["n"] == 2
     assert E.summarise([line], drop_ambiguous=True)["all"]["each_species"]["n"] == 0
+
+
+def test_fetcher_stops_on_403_and_on_repeated_throttling(tmp_path):
+    c = E.HistoryClient(tmp_path, session=FakeSession([FakeResponse(403)]), sleep=lambda d: None)
+    with pytest.raises(E.Refused, match="403"):
+        c.observation("1")
+    many = FakeSession([FakeResponse(429) for _ in range(E.MAX_THROTTLES)])
+    c = E.HistoryClient(tmp_path, session=many, sleep=lambda d: None)
+    with pytest.raises(E.Refused, match="throttled"):
+        c.observation("2")
+    assert c.calls == E.MAX_THROTTLES
