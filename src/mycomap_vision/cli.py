@@ -797,6 +797,24 @@ def cmd_fungus_gate(conn, args) -> None:
             n = tune.embed_list(args.backbone, Path(args.list), Path(args.out))
             print(f"{n} photos embedded into {args.out}")
             return
+        rel = _dataset_release(args)
+        if rel is not None:
+            # Paper E10: re-tuned on a release (val decides), Open Images negatives only.
+            missing = [o for o in ("dev", "ood", "ood_manifest", "negatives")
+                       if not getattr(args, o)]
+            if missing:
+                raise SystemExit("tune --release needs " + ", ".join(
+                    "--" + m.replace("_", "-") for m in missing))
+            from .embed import load_embeddings
+            base = args.on_served or "bioclip-2"
+            report = tune.tune_release(rel, Path(args.dev), Path(args.ood),
+                                       Path(args.ood_manifest), Path(args.negatives),
+                                       Path(args.out), load_embeddings(conn, base),
+                                       Path(args.text_from) if args.text_from else None,
+                                       args.on_served)
+            print(json.dumps(report["chosen"], indent=2))
+            print(f"gate and report.json in {args.out}")
+            return
         missing = [o for o in ("dev", "ood", "ood_manifest", "exclude") if not getattr(args, o)]
         if missing:
             raise SystemExit("tune needs " + ", ".join("--" + m.replace("_", "-") for m in missing))
@@ -1192,6 +1210,26 @@ def cmd_backbone_screen(conn, args) -> None:
                          indent=2))
 
 
+def cmd_ood_set(conn, args) -> None:
+    """Build the sealed not-a-fungus test set (oodset.py): CC0 / CC BY photos from sources
+    the earlier gate never saw, with licences, sources and sha256s in manifest.csv."""
+    from pathlib import Path
+
+    from . import oodset
+    rel = _dataset_release(args)
+    labels = set()
+    if rel is not None:
+        for sp, g in rel.db.execute("select species, genus from records where included = 1"):
+            labels.update(x for x in (sp, g) if x)
+    # Every iNat observation that is a MycoMap record (its id at iNat), never drawn.
+    mycomap = {str(r[0]) for r in conn.execute(
+        "select coalesce(nullif(source_id, ''), observation_id) from records "
+        "where source = 'inat'")}
+    print(json.dumps(oodset.build(Path(args.out), Path(args.openimages) if args.openimages
+                                  else None, [Path(p) for p in _split(args.exclude)],
+                                  mycomap, labels), indent=2))
+
+
 def cmd_external(conn, args) -> None:
     """Published fungi classifiers as outside baselines (replications/fungitastic/published*.py)."""
     from pathlib import Path
@@ -1455,8 +1493,19 @@ def cmd_expert_ids(args) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else list(argv)
+    if args_in[:1] == ["learning-curve"]:
+        # Its own command line (release / run / score / report); it reads the manifest and
+        # stored embeddings only.
+        from . import learning_curve
+        learning_curve.main(args_in[1:])
+        return 0
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("learning-curve", add_help=False,
+                   help="accuracy against reference records per species (release / run / "
+                        "score / report; see mv learning-curve -h)")
 
     sub.add_parser("export-records", help="pull green records from mycomap.org (read-only)")
 
@@ -1962,6 +2011,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="which scores make p(fungus); probe and both need --probe")
     p.add_argument("--tuned-on", default="", help="where the thresholds came from (provenance)")
     p.add_argument("--note", default="")
+    release_options(p)            # with --errata: its records are never probe positives
 
     p = sub.add_parser("serve", help="run the API for the frontend")
     p.add_argument("--host", default="127.0.0.1")
@@ -2222,6 +2272,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--queries", type=int, default=2000, help="val queries per half")
     p.add_argument("--batch-size", type=int, default=16)
 
+    p = sub.add_parser("ood-set", help="build the sealed not-a-fungus test set (oodset.py)")
+    release_options(p)
+    p.add_argument("--out", required=True)
+    p.add_argument("--openimages", help="folder with Open Images V5 train label and image CSVs")
+    p.add_argument("--exclude", default="", help="comma list of earlier sets' manifests")
+
     p = sub.add_parser("external", help="published fungi classifiers (DF20, FungiTastic) as "
                                         "outside baselines (replications/fungitastic/)")
     xsub = p.add_subparsers(dest="action", required=True)
@@ -2381,6 +2437,7 @@ def main(argv: list[str] | None = None) -> int:
         "paper-attrs": cmd_paper_attrs,
         "paper-score": cmd_paper_score,
         "backbone-screen": cmd_backbone_screen,
+        "ood-set": cmd_ood_set,
         "external": cmd_external,
     }[args.command]
     handler(conn, args)
