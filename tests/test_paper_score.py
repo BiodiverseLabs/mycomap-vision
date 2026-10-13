@@ -491,3 +491,20 @@ def test_the_cc_reference_row_uses_only_photos_a_public_model_may_learn_from(wor
     cc = rep["inputs"]["cc-reference"]["reference_records"]
     want = sum(1 for r in world["base"].as_records("train", None, public_trainable_only=True))
     assert cc == want and cc < full                 # the fixture's ARR photos leave
+
+
+def test_the_attrs_file_is_pinned_by_the_config(world, tmp_path):
+    attrs = tmp_path / "attrs.tsv"
+    attrs.write_text("record_key\tdistance_band\n5\t<100\n6\t>1500\n", encoding="utf-8")
+    block = {"file": str(attrs), "sha256": paper_score.sha256_file(attrs)}
+    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"], attrs=block,
+                                             slices={"attrs": ["distance_band"], "min_finds": 1}))
+    assert set(rep["slices"]["distance_band"]) == {"<100", ">1500"}       # read without --attrs
+    assert rep["attrs"]["sha256"] == block["sha256"]
+    other = tmp_path / "other.tsv"
+    other.write_text("record_key\tdistance_band\n5\tno point\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not the attrs file the config pins"):
+        run(world, tmp_path, "val", config(tmp_path, ["5", "6"], attrs=block), attrs_path=other)
+    with pytest.raises(ValueError, match="the config pins"):
+        run(world, tmp_path, "val", config(tmp_path, ["5", "6"],
+                                           attrs={**block, "sha256": "0" * 64}))

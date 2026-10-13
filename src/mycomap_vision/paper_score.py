@@ -111,6 +111,23 @@ def resolve(path: str | Path) -> Path:
     return p
 
 
+def attrs_file(block: dict | None, given) -> Path | None:
+    """The per-find attributes file: the config's "attrs" block (file + sha256) pins it; a
+    --attrs that is not the same file (by sha256) is refused. Without a block, --attrs as
+    given (or none)."""
+    if not block:
+        return Path(given) if given else None
+    path = resolve(block["file"])
+    got = sha256_file(path)
+    if got != block.get("sha256"):
+        raise ValueError(f"attrs {path}: sha256 {got[:12]}, the config pins "
+                         f"{str(block.get('sha256'))[:12]}")
+    if given and sha256_file(given) != got:
+        raise ValueError(f"--attrs {given} is not the attrs file the config pins "
+                         f"({got[:12]}): give that one or none")
+    return path
+
+
 def apply_errata(base, block: dict | None) -> dict | None:
     """The config's erratum (file + sha256) on the base release: refused when the file's
     sha256 is not the one pinned, or when the release already carries another erratum
@@ -551,6 +568,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     g = guard(sealed, config_bytes, config, research_dir or cfgmod.RESEARCH_DIR,
               cfgmod.code_version(), allow_code)
     apply_errata(base, config.get("errata"))
+    attrs_path = attrs_file(config.get("attrs"), attrs_path)
     # An erratum given to the base release (--errata; Release.use_errata) has already left
     # its records out of every split base reads: references and depth alike.
     errata = set(base.errata.keys) if getattr(base, "errata", None) is not None else set()
@@ -682,6 +700,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                            "select record_key from records where included = 1 and split in "
                            f"({','.join('?' * len(ref_splits))})", ref_splits)
                        if str(k) in errata)},
+        "attrs": {"file": str(attrs_path) if attrs_path else None,
+                  "sha256": sha256_file(attrs_path) if attrs_path else None},
         "dhash_flags": {"source": "the scored release's near_base table",
                         "photos_hashed": len(near_base), "photos_flagged": len(dhash),
                         "near_base": (scored_rel.manifest.get("near_base")
