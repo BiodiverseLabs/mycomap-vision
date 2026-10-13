@@ -1163,6 +1163,87 @@ def release_options(p) -> None:
                    help="accept a draft (dry-run) release: exploratory only")
 
 
+def cmd_paper_inat_cv(args) -> None:
+    """E14: iNat's computer vision on a release's finds (photos, public point, date)."""
+    from . import dataset_release as dr
+    from . import expert_ids as E
+    from . import inat_cv
+    from . import paper_inat_cv as P
+    rel = dr.load_release(args.release, allow_draft=args.allow_draft)
+    d = P.work_dir(args.name)
+    ids_path = d / "ids.txt"
+    if args.action == "sample":
+        if ids_path.exists() and not args.redo:
+            raise SystemExit(f"{ids_path} exists; a drawn sample is never redrawn (--redo)")
+        pool = [r["record_key"] for r in rel.db.execute(
+            "select record_key, split from records where included = 1 order by record_key")
+            if not args.split or r["split"] == args.split]
+        ids = P.draw_fallback(pool, args.n, args.seed) if args.n else pool
+        print(json.dumps(E.write_ids(ids_path, ids, {"set": args.name, **rel.cite(),
+                                                     "seed": args.seed, "n": args.n,
+                                                     "split": args.split, "pool": len(pool)}),
+                         indent=2))
+        return
+    ids = E.read_ids(ids_path)[:args.limit] if args.limit else E.read_ids(ids_path)
+    taxa = E.load_open_taxa(config.DATA_DIR / E.OPEN_TAXA)
+    by_name = E.name_index(taxa)
+    recs = {r["record_key"]: dict(r) for r in rel.db.execute("select * from records")}
+    truths = {k: E.truth_taxa(recs[k], by_name, taxa) for k in ids}
+    client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "paper-comparisons" /
+                                "inat-cv-cache")
+    meta = P.run(rel, args.name, ids, client, lambda pk: rel.derive(pk, "original").body, truths)
+    lines = [json.loads(l) for l in (d / "finds.jsonl").open(encoding="utf-8")]
+    print(json.dumps({**meta, "summary": P.summarise(lines)}, indent=2))
+
+
+def cmd_expert_ids(args) -> None:
+    """E31: iNat identifications made before the DNA was visible, scored against it."""
+    from . import dataset_release as dr
+    from . import expert_ids as E
+    rel = dr.load_release(args.release, allow_draft=args.allow_draft)
+    d = E.work_dir(args.name)
+    ids_path = d / "ids.txt"
+    if args.action == "sample":
+        if ids_path.exists() and not args.redo:
+            raise SystemExit(f"{ids_path} exists; a drawn sample is never redrawn (--redo)")
+        pool = [r["source_id"] for r in E.inat_records(rel)
+                if not args.split or r["split"] == args.split]
+        ids = E.draw_sample(pool, args.n, args.seed) if args.n else sorted(pool, key=lambda s: (len(s), s))
+        print(json.dumps(E.write_ids(ids_path, ids, {"set": args.name, **rel.cite(),
+                                                     "seed": args.seed, "n": args.n,
+                                                     "split": args.split, "pool": len(pool)}),
+                         indent=2))
+        return
+    ids = E.read_ids(ids_path)
+    client = E.HistoryClient(E.cache_dir(), max_calls=args.max_calls)
+    if args.limit:
+        ids = ids[:args.limit]
+    d_our, d_val = d / "our_dates.csv", d / "validators.csv"
+    if args.action == "dna-dates":
+        print(json.dumps(E.dna_dates(
+            args.name, ids, args.sql_dir or config.RESEARCH_DIR / "paper" / "e31" / "sql",
+            config.required("MV_ORG_SQL_SSH_HOST", "the read-only .org SQL route"),
+            args.com_host or config.required("MV_COM_SQL_SSH_HOST",
+                                             "the read-only .com SQL route")), indent=2))
+    elif args.action == "resolve-logins":
+        print(json.dumps({"validator_rows_given_an_id": E.resolve_logins(client, args.name)}))
+    elif args.action == "fetch":
+        try:
+            print(json.dumps(E.fetch(client, ids), indent=2))
+        except E.CallBudgetSpent as e:
+            print(f"{e}; rerun to continue (answers are cached)")
+    elif args.action == "snapshot":
+        print(json.dumps(E.build_snapshot(client, ids, d / "snapshot.jsonl.gz",
+                                          {"set": args.name, **rel.cite()}), indent=2))
+    elif args.action == "score":
+        push = {int(x) for x in (args.push_accounts or "").split(",") if x.strip()}
+        our = args.our_dates or (d_our if d_our.exists() else None)
+        val = args.validators or (d_val if d_val.exists() else None)
+        summary = E.score(rel, args.name, client, our, val, push,
+                          config.DATA_DIR / "secrets" / "e31_identifier_salt.txt")
+        print(json.dumps({k: summary[k] for k in ("finds", "tier1", "tier2")}, indent=2))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1501,6 +1582,45 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--size", default="medium", choices=["small", "medium", "large"])
     p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
     p.add_argument("--batch-size", type=int, default=16)
+
+    p = sub.add_parser("paper-inat-cv", help="(paper E14) iNat's computer vision on a release's "
+                                             "finds: every photo at <= 1024 px, the public point "
+                                             "and date (needs data/secrets/inat_jwt.txt)")
+    p.add_argument("action", choices=["sample", "run"])
+    p.add_argument("--release", default="v1")
+    p.add_argument("--allow-draft", action="store_true")
+    p.add_argument("--name", required=True, help="the set's folder under "
+                   "data/paper-comparisons/e14/, e.g. v1-val-pilot or v1-test")
+    p.add_argument("--n", type=int, help="sample: how many (default: every included find)")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--split", help="sample: only this split (val for the pilot)")
+    p.add_argument("--redo", action="store_true")
+    p.add_argument("--limit", type=int, help="run: only the first N finds (tests)")
+
+    p = sub.add_parser("expert-ids", help="(paper E31) iNat identifications made before the DNA "
+                                          "was visible, by high-volume identifiers, against "
+                                          "the DNA name; public API, no token")
+    p.add_argument("action", choices=["sample", "dna-dates", "fetch", "resolve-logins",
+                                      "snapshot", "score"])
+    p.add_argument("--release", default="v1")
+    p.add_argument("--allow-draft", action="store_true")
+    p.add_argument("--name", required=True, help="the set's folder under "
+                   "data/paper-comparisons/e31/, e.g. v1-random10000 or v1-test")
+    p.add_argument("--n", type=int, help="sample: how many (default: every iNat record)")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--split", help="sample: only this split")
+    p.add_argument("--redo", action="store_true", help="sample: draw again (never on a "
+                   "sample already used)")
+    p.add_argument("--limit", type=int, help="fetch/snapshot only the first N ids (tests)")
+    p.add_argument("--max-calls", type=int, help="stop after this many iNat requests")
+    p.add_argument("--our-dates", type=Path, help="score: CSV observation_id,source,at from "
+                   ".org/.com (sequence created, name push)")
+    p.add_argument("--validators", type=Path, help="score: CSV observation_id,inat_user_id")
+    p.add_argument("--push-accounts", help="score: iNat user ids of MycoMap's push accounts")
+    p.add_argument("--sql-dir", type=Path, help="dna-dates: the SQL templates (default: "
+                   "paper/e31/sql in the research checkout)")
+    p.add_argument("--com-host", help="dna-dates: ssh host of the read-only .com SQL route "
+                   "(default MV_COM_SQL_SSH_HOST)")
 
     p = sub.add_parser("inat-baseline",
                        help="add iNat's computer vision to a comparison, on the same records "
@@ -1879,6 +1999,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "aws-dataset-build-job":   # the build reads a private copy only
         cmd_aws_dataset_build_job(args)
+        return 0
+    if args.command == "expert-ids":          # reads a release and iNat; no manifest
+        cmd_expert_ids(args)
+        return 0
+    if args.command == "paper-inat-cv":
+        cmd_paper_inat_cv(args)
         return 0
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
