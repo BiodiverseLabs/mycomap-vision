@@ -358,3 +358,28 @@ def test_a_reference_as_of_a_date_leaves_later_records_out(world, tmp_path):
     rep = run(world, tmp_path, world["test"], cfg)
     assert rep["standard"]["comparators"]["as-of"]["primary"]["all"]["table"][
         "species strict"]["top1"]["rate"] == 0.0
+
+
+def test_leaving_out_the_finds_own_observer_refits_without_their_records(world, tmp_path):
+    from mycomap_vision.evaluate import Record
+    vec = np.array([[1, 0], [1, 0], [0, 1], [0.9, 0.1]], np.float32)
+    ref = [Record("r1", "A x", "A", "F", "2026-01-01", "ann", [0]),
+           Record("r2", "B y", "B", "F", "2026-01-01", "bo", [2])]
+    find_ann = Record("q1", "A x", "A", "F", None, "ann", [3], observed_on="2026-05-01")
+    find_cy = Record("q2", "A x", "A", "F", None, "cy", [1], observed_on="2026-05-01")
+    plain = paper_score.vision_answers(vec, ref, [find_ann, find_cy], "nearest", "m1")
+    left = paper_score.vision_answers_leave_out(vec, ref, [find_ann, find_cy], "nearest", "m1",
+                                                "observer")
+    assert plain["q1"]["species"][0] == "A x" and left["q1"]["species"][0] == "B y"
+    assert left["q2"]["species"][0] == "A x"           # cy's own records were never there
+    trip = paper_score.vision_answers_leave_out(vec, ref, [find_ann], "nearest", "m1", "trip")
+    assert trip["q1"]["species"][0] == "A x"           # ann's record is from another day
+
+
+def test_first_photo_and_photo_count_options(world, tmp_path):
+    cfg = config(tmp_path, ["5", "6"], slices={"attrs": ["photos"], "min_finds": 1})
+    cfg["comparators"].append({"id": "first", "kind": "vision", "backbone": "m1",
+                               "method": "nearest", "photos": "first"})
+    rep = run(world, tmp_path, "val", cfg)
+    assert rep["standard"]["comparators"]["first"]["primary"]["all"]["finds"] == 2
+    assert set(rep["slices"]["photos"]) == {"1"}

@@ -180,6 +180,7 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
             and len(r["observed_on"]) >= 7 else None
         who = r.get("observer_login")
         attrs = {"source": r.get("source"), "name_kind": r.get("name_kind"),
+                 "photos": photo_band(len(ph)),
                  "month": month, "season": SEASON.get(month, "(no date)"),
                  "licence": "arr" if any(p.get("license_class") == "arr" for p in ph)
                  else "cc",
@@ -192,6 +193,10 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
                            depth.get(species, 0) if species else 0, len(ph), attrs,
                            dict((near or {}).get(key, {}))))
     return out
+
+
+def photo_band(n: int) -> str:
+    return "1" if n <= 1 else "2" if n == 2 else "3" if n == 3 else "4-5" if n <= 5 else "6+"
 
 
 def read_attrs(path) -> dict[str, dict]:
@@ -275,6 +280,36 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
                     one["set"] = [names[i] for i in chosen]
                 ans["cal"][rank] = one
         out[rec.observation_id] = ans
+    return out
+
+
+LEAVE_OUT = ("observer", "trip")
+
+
+def leave_out_key(rec, mode: str):
+    """What a find shares with the reference records left out for it (E12): its observer,
+    or its observer and observation date (a trip)."""
+    if mode == "observer":
+        return rec.observer
+    if mode == "trip":
+        return (rec.observer, rec.observed_on)
+    raise ValueError(f"leave_out is one of {LEAVE_OUT}")
+
+
+def vision_answers_leave_out(vectors, ref_records, scored_records, method, backbone, mode,
+                             **kw) -> dict[str, dict]:
+    """vision_answers with, for each group of finds sharing a leave_out_key, the reference
+    records sharing it removed and the method fitted again: what the identifier gives a
+    find when nothing of its own observer (or trip) is in the reference. A find with no
+    observer leaves nothing out."""
+    groups: dict = defaultdict(list)
+    for r in scored_records:
+        groups[leave_out_key(r, mode) if r.observer else None].append(r)
+    out = {}
+    for key, recs in groups.items():
+        ref = ref_records if key is None else [
+            r for r in ref_records if not (r.observer and leave_out_key(r, mode) == key)]
+        out.update(vision_answers(vectors, ref, recs, method, backbone, **kw))
     return out
 
 
@@ -481,9 +516,15 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 f"{len(ref):,} reference records")
             truths = {f.key: {"species": f.species, "genus": f.genus, "family": f.family}
                       for f in finds}
-            answers = vision_answers(vecs, ref, scored, comp["method"], b,
-                                     int(config.get("top_k", 10)), comp.get("calibration"),
-                                     truths)
+            if comp.get("photos") == "first":            # E19: the first photo only
+                from dataclasses import replace
+                scored = [replace(r, photo_rows=r.photo_rows[:1]) for r in scored]
+            kw = {"top_k": int(config.get("top_k", 10)), "calibration": comp.get("calibration"),
+                  "truths": truths}
+            answers = (vision_answers_leave_out(vecs, ref, scored, comp["method"], b,
+                                                comp["leave_out"], **kw)
+                       if comp.get("leave_out") else
+                       vision_answers(vecs, ref, scored, comp["method"], b, **kw))
             if comp.get("calibration"):
                 calib[comp["id"]] = {k: a["cal"] for k, a in answers.items() if "cal" in a}
             path = out / "predictions" / f"{comp['id']}.jsonl"
