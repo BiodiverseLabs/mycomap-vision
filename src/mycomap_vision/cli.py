@@ -1075,12 +1075,25 @@ def cmd_paper_attrs(conn, args) -> None:
     if base is None:
         raise SystemExit("paper-attrs needs --release <id>")
     test = "val" if args.test == "val" else load_release(args.test, allow_draft=args.allow_draft)
-    attrs = paper_attrs.for_release(base, test)
+    regions, eco = None, None
+    if args.ecoregions:
+        from . import ecoregions
+        regions = ecoregions.Regions.load(Path(args.ecoregions))
+        eco = {"file": args.ecoregions,
+               "sha256": paper_attrs.sha256_file(Path(args.ecoregions)),
+               "dbf_sha256": paper_attrs.sha256_file(Path(args.ecoregions).with_suffix(".dbf"))}
+    attrs = paper_attrs.for_release(base, test, regions)
     out = paper_attrs.write(Path(args.out), attrs)
+    Path(str(out) + ".json").write_text(json.dumps({
+        "dataset_release": base.cite(), "test": args.test, "finds": len(attrs),
+        "ecoregions": eco, "season_days": paper_attrs.SEASON_DAYS,
+        "core_share": paper_attrs.CORE_SHARE, "bands_km": [b for _, b in paper_attrs.BANDS_KM],
+        "tsv_sha256": paper_attrs.sha256_file(out)}, indent=2), encoding="utf-8")
     from collections import Counter
     print(json.dumps({"out": str(out), "finds": len(attrs),
                       "distance_band": Counter(a["distance_band"] for a in attrs.values()),
-                      "in_season": Counter(a["in_season"] for a in attrs.values())}, indent=2))
+                      "in_season": Counter(a["in_season"] for a in attrs.values()),
+                      "ecoregion": Counter(a["ecoregion"] for a in attrs.values())}, indent=2))
 
 
 def cmd_paper_score(conn, args) -> None:
@@ -2127,6 +2140,7 @@ def main(argv: list[str] | None = None) -> int:
     release_options(p)
     p.add_argument("--test", required=True, help="a test release of --release, or 'val'")
     p.add_argument("--out", required=True, help="the TSV to write (paper-score --attrs)")
+    p.add_argument("--ecoregions", help="CEC Level I ecoregions shapefile (NA_CEC_Eco_Level1.shp)")
 
     p = sub.add_parser("paper-score", help="every table of the paper's sealed-test analysis, "
                                            "one command (paper_score.py)")

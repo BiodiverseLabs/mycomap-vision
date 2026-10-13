@@ -24,14 +24,19 @@ def test_bands_follow_the_place_test():
 def test_season_is_circular_and_within_thirty_days():
     assert pa.circular_days(5, np.array([360]))[0] == 11       # 26 Dec to 5 Jan
     refs = [{"record_key": "r1", "species": "A x", "observed_on": "2020-12-20"},
-            {"record_key": "r2", "species": "B y", "observed_on": "2021-06-01"}]
+            {"record_key": "r2", "species": "B y", "observed_on": "2021-06-01"},
+            {"record_key": "r3", "species": "D w", "observed_on": "2021-06-01"},
+            {"record_key": "r4", "species": "D w", "observed_on": "2021-09-01"},
+            {"record_key": "r5", "species": "D w", "observed_on": "2021-10-01"}]
     scored = [{"record_key": "f1", "species": "A x", "observed_on": "2026-01-10"},
               {"record_key": "f2", "species": "B y", "observed_on": "2026-08-20"},
               {"record_key": "f3", "species": "C z", "observed_on": "2026-08-20"},
-              {"record_key": "f4", "species": "A x", "observed_on": None}]
+              {"record_key": "f4", "species": "A x", "observed_on": None},
+              {"record_key": "f5", "species": "D w", "observed_on": "2026-06-10"}]
     a = pa.attributes(scored, refs, {})
-    assert [a[k]["in_season"] for k in ("f1", "f2", "f3", "f4")] == [
-        "in", "off", "no reference", "no date"]
+    # f5: 1 of D w's 3 dated references within 30 days: some, under half.
+    assert [a[k]["in_season"] for k in ("f1", "f2", "f3", "f4", "f5")] == [
+        "core", "off", "no reference", "no date", "edge"]
 
 
 def test_distance_uses_public_points_and_says_why_when_it_cannot():
@@ -53,7 +58,8 @@ def test_the_tsv_is_what_paper_score_reads(tmp_path):
     path = pa.write(tmp_path / "attrs.tsv", {"k1": {"distance_band": "<100", "distance_km": 5.0,
                                                     "in_season": "in"}})
     assert paper_score.read_attrs(path) == {"k1": {"distance_band": "<100", "distance_km": "5.0",
-                                                   "in_season": "in"}}
+                                                   "in_season": "in",
+                                                   "ecoregion": "not computed"}}
 
 
 def test_attributes_of_a_release_split(tmp_path, monkeypatch):

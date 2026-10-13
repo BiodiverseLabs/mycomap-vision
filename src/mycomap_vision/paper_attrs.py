@@ -8,9 +8,13 @@ read here.
   record of its true species (the reference used to score it: val against train, a test
   release against train + val; an erratum given to the base release leaves its records
   out): <100, 100-300, 300-1500, >1500, or "no reference" / "no point".
-- in_season: "in" when a reference record of the true species was observed within
-  SEASON_DAYS of the find's day of year (circular, any year), else "off"; "no reference" /
-  "no date" when it can't be said.
+- in_season (the leakage/stress experiment's definition, so v1 re-checks it like for
+  like): over the true species' dated references, the share observed within SEASON_DAYS of
+  the find's day of year (circular, any year): "core" when at least CORE_SHARE of them,
+  "edge" when some but fewer, "off" when none; "no reference" / "no date" when it can't
+  be said.
+- ecoregion: the CEC Level I terrestrial ecoregion holding the find's public point
+  (ecoregions.py; "(none)" outside every polygon, e.g. the Caribbean islands; "no point").
 """
 
 from __future__ import annotations
@@ -26,7 +30,8 @@ import numpy as np
 EARTH_KM = 6371.0088
 BANDS_KM = ((100, "<100"), (300, "100-300"), (1500, "300-1500"), (math.inf, ">1500"))
 SEASON_DAYS = 30
-FIELDS = ("record_key", "distance_band", "distance_km", "in_season")
+CORE_SHARE = 0.5
+FIELDS = ("record_key", "distance_band", "distance_km", "in_season", "ecoregion")
 
 
 def km_to_nearest(lat: float, lon: float, lats: np.ndarray, lons: np.ndarray) -> float:
@@ -95,7 +100,8 @@ def attributes(scored: list[dict], refs: list[dict], public: dict[str, tuple],
         elif d is None:
             season = "no date"
         else:
-            season = "in" if (circular_days(d, np.array(doys[sp])) <= season_days).any() else "off"
+            share = float((circular_days(d, np.array(doys[sp])) <= season_days).mean())
+            season = "core" if share >= CORE_SHARE else "edge" if share > 0 else "off"
         out[key] = {"distance_band": band, "distance_km": None if km is None else round(km, 1),
                     "in_season": season}
     return out
@@ -111,16 +117,30 @@ def public_points(rel) -> dict[str, tuple]:
                 "from record_public_places")}
 
 
-def for_release(base, test) -> dict[str, dict]:
+def for_release(base, test, regions=None) -> dict[str, dict]:
     """The attributes of `test` ("val": base's val against its train; or a test release
-    of base: its test split against base's train + val)."""
+    of base: its test split against base's train + val). `regions`: ecoregions.Regions."""
     from .paper_score import scored_and_reference
     scored_rel, split, ref_splits, _sealed = scored_and_reference(base, test)
     public = public_points(base)
     if scored_rel is not base:
         public.update(public_points(scored_rel))
-    return attributes([dict(r) for r in scored_rel.records(split)],
-                      [dict(r) for r in base.records(ref_splits)], public)
+    scored = [dict(r) for r in scored_rel.records(split)]
+    out = attributes(scored, [dict(r) for r in base.records(ref_splits)], public)
+    keys = [str(r["record_key"]) for r in scored]
+    with_point = [k for k in keys if public.get(k, (None, None))[0] is not None]
+    names = (regions.lookup([public[k][0] for k in with_point], [public[k][1] for k in with_point])
+             if regions is not None and with_point else [])
+    region_of = dict(zip(with_point, names))
+    for k in keys:
+        out[k]["ecoregion"] = (region_of.get(k, "no point") if regions is not None
+                               else "not computed")
+    return out
+
+
+def sha256_file(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def write(path: Path, attrs: dict[str, dict]) -> Path:
@@ -130,5 +150,5 @@ def write(path: Path, attrs: dict[str, dict]) -> Path:
         for k in sorted(attrs):
             a = attrs[k]
             w.writerow([k, a["distance_band"], "" if a["distance_km"] is None else a["distance_km"],
-                        a["in_season"]])
+                        a["in_season"], a.get("ecoregion", "not computed")])
     return path
