@@ -106,28 +106,49 @@ def parse(path: Path, freeze_date: str | None = None) -> Experiment:
     return Experiment(meta, body.strip() + "\n", path)
 
 
+def load_checked(directory: Path = EXPERIMENTS_DIR, freeze_date: str | None = None
+                 ) -> tuple[list[Experiment], list[tuple[str, str]]]:
+    """Every entry that meets the rules, newest first, and (file name, reason) for each one
+    that doesn't. Never raises on a bad entry, so one bad file can't take the site's list
+    down (the server logs and counts it; `mv experiments-check` catches it before a commit)."""
+    if not directory.is_dir():
+        return [], []
+    out: list[Experiment] = []
+    problems: list[tuple[str, str]] = []
+    for p in sorted(directory.glob("*.md")):
+        if p.name.lower() == "readme.md":
+            continue
+        try:
+            out.append(parse(p, freeze_date))
+        except BadEntry as e:
+            problems.append((p.name, str(e)))
+    slugs = [e.slug for e in out]
+    dup = {s for s in slugs if slugs.count(s) > 1}
+    for e in [e for e in out if e.slug in dup]:
+        problems.append((e.path.name, f"slug used twice: {e.slug}"))
+    out = [e for e in out if e.slug not in dup]
+    by_slug = {e.slug: e for e in out}
+    kept = []
+    for e in out:
+        by = e.meta.get("reproduced_by")
+        if by is not None:
+            target = by_slug.get(by)
+            if target is None or not REPRODUCED.match(str(target.meta["reproducibility"])):
+                problems.append((e.path.name, f"{e.path.name}: reproduced_by names {by}, which "
+                                              "is not an entry reproduced on a dataset release"))
+                continue
+            e.meta["reproduced_on"] = str(target.meta["dataset_release"])
+        kept.append(e)
+    return sorted(kept, key=lambda e: (e.meta["date"], e.slug), reverse=True), problems
+
+
 def load_all(directory: Path = EXPERIMENTS_DIR,
              freeze_date: str | None = None) -> list[Experiment]:
     """Every entry, newest first. A bad entry raises: the tests keep the registry clean."""
-    if not directory.is_dir():
-        return []
-    out = [parse(p, freeze_date) for p in directory.glob("*.md")
-           if p.name.lower() != "readme.md"]
-    slugs = [e.slug for e in out]
-    dup = {s for s in slugs if slugs.count(s) > 1}
-    if dup:
-        raise BadEntry(f"slug used twice: {', '.join(sorted(dup))}")
-    by_slug = {e.slug: e for e in out}
-    for e in out:
-        by = e.meta.get("reproduced_by")
-        if by is None:
-            continue
-        target = by_slug.get(by)
-        if target is None or not REPRODUCED.match(str(target.meta["reproducibility"])):
-            raise BadEntry(f"{e.path.name}: reproduced_by names {by}, which is not an entry "
-                           "reproduced on a dataset release")
-        e.meta["reproduced_on"] = str(target.meta["dataset_release"])
-    return sorted(out, key=lambda e: (e.meta["date"], e.slug), reverse=True)
+    found, problems = load_checked(directory, freeze_date)
+    if problems:
+        raise BadEntry(problems[0][1])
+    return found
 
 
 def summary(e: Experiment) -> dict:

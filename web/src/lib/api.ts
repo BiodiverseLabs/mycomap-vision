@@ -334,7 +334,8 @@ export const api = {
   /** Held-out benchmark results imported on the server (aggregates only). */
   benchmarks: () => getJson<{ benchmarks: PublishedBenchmark[] }>("/api/benchmarks"),
   /** The experiment registry, for signed-in members only. */
-  experiments: () => getJson<{ experiments: ExperimentSummary[] }>("/api/experiments"),
+  /** `skipped`: entries left out because they break the registry's rules (the server logs which). */
+  experiments: () => getJson<{ experiments: ExperimentSummary[]; skipped?: number }>("/api/experiments"),
   experiment: (slug: string) => getJson<Experiment>(`/api/experiments/${encodeURIComponent(slug)}`),
   /** The paper draft (Markdown), for signed-in members only. */
   paper: () => getJson<{ markdown: string }>("/api/paper"),

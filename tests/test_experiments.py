@@ -243,3 +243,53 @@ def test_members_see_which_entry_re_ran_an_old_one(conn, tmp_path):
     assert listed["good-one"]["reproduced_on"] == "v1"
     one = c.get("/api/experiments/good-one").json()
     assert (one["reproduced_by"], one["reproduced_on"]) == ("good-two", "v1")
+
+
+# --- one bad entry never takes the list down ----------------------------------------------
+
+def test_one_bad_entry_is_skipped_logged_and_counted_not_a_500(conn, tmp_path, caplog):
+    seed_two_species(conn, tmp_path)
+    conn.commit()
+    write(tmp_path, "2026-10-09-good-one.md", GOOD)
+    # Being written by another lane: exploratory and dated after the freeze.
+    d = write(tmp_path, "2026-10-13-place-penalty.md",
+              GOOD.replace("good-one", "place-penalty").replace("2026-10-09", "2026-10-13"))
+    signin = SigninConfig(mode="identify", origin="http://testserver", issuer=ISSUER,
+                          public_key=PUBLIC_KEY, secret=SECRET)
+    c = TestClient(create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
+                              backbone_loader=lambda n: Const(n), limits=open_limits(),
+                              signin=signin, background=False, experiments_dir=d),
+                   follow_redirects=False)
+    sign_in(c)
+    with caplog.at_level("WARNING", logger="mycomap_vision.api"):
+        r = c.get("/api/experiments")
+    assert r.status_code == 200
+    assert [x["slug"] for x in r.json()["experiments"]] == ["good-one"]
+    assert r.json()["skipped"] == 1
+    assert "[experiments] bad entry 2026-10-13-place-penalty.md" in caplog.text
+    assert c.get("/api/experiments/good-one").status_code == 200
+    assert c.get("/api/experiments/place-penalty").status_code == 404
+
+
+def test_load_checked_names_every_bad_file_and_keeps_the_rest(tmp_path):
+    write(tmp_path, "2026-10-09-good-one.md", HISTORY)                 # its re-run is missing
+    write(tmp_path, "2026-10-08-fine.md", GOOD.replace("good-one", "fine").replace("2026-10-09",
+                                                                                   "2026-10-08"))
+    d = write(tmp_path, "2026-10-09-broken.md", "no front matter")
+    found, problems = experiments.load_checked(d)
+    assert [e.slug for e in found] == ["fine"]
+    assert sorted(n for n, _ in problems) == ["2026-10-09-broken.md", "2026-10-09-good-one.md"]
+    with pytest.raises(experiments.BadEntry):                          # the strict loader
+        experiments.load_all(d)
+
+
+def test_experiments_check_exits_non_zero_on_a_bad_entry(tmp_path, capsys):
+    from mycomap_vision import cli
+    d = write(tmp_path, "2026-10-09-good-one.md", GOOD)
+    assert cli.main(["experiments-check", str(d)]) == 0
+    assert "1 entries ok, 0 bad" in capsys.readouterr().out
+    write(tmp_path, "2026-10-13-late.md", GOOD.replace("good-one", "late").replace("2026-10-09",
+                                                                                   "2026-10-13"))
+    assert cli.main(["experiments-check", str(d)]) == 1
+    out = capsys.readouterr().out
+    assert "BAD 2026-10-13-late.md" in out and "after the freeze" in out
