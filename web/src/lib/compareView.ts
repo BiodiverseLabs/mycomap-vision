@@ -37,10 +37,18 @@ export function comparisons(runs: ScoreRun[]): ScoreRun[][] {
     .sort((a, b) => newest(b).localeCompare(newest(a)) || b[0].n_test - a[0].n_test);
 }
 
-/** The comparison shown first: the most recently measured one that scores the model the site
- *  serves next to at least one other approach; else any with two approaches; else the first. */
+/** The release a comparison was measured on, or null: measured on the live data before the
+ *  dataset freeze, so it is development history. */
+export const groupRelease = (g: ScoreRun[]): string | null =>
+  g.find((r) => r.dataset_release)?.dataset_release ?? null;
+
+/** The comparison shown first: one measured on a dataset release, if any (the most recent);
+ *  else the most recently measured one that scores the model the site serves next to at least
+ *  one other approach; else any with two approaches; else the first. */
 export function defaultComparison(groups: ScoreRun[][], servedBackbones: string[] = [],
                                   servedMethod: string = SERVED_METHOD): number {
+  const onRelease = groups.findIndex((g) => groupRelease(g) !== null);
+  if (onRelease >= 0) return onRelease;
   const serves = (g: ScoreRun[]) => g.some((r) => r.method === servedMethod
                                               && servedBackbones.includes(r.backbone));
   let i = groups.findIndex((g) => g.length >= 2 && serves(g));
@@ -141,6 +149,19 @@ export function splitModelKey(key: string): { backbone: string; method: string }
 
 export interface HeldoutBar { key: string; backbone: string; method: string; value: number | null;
                               ci: [number, number] | null; n: number | null; external: boolean }
+
+/** A published benchmark measured on a dataset release (or a sealed test of one), not
+ *  pre-freeze development history. */
+export const onRelease = (b: PublishedBenchmark) =>
+  (b.reproducibility ?? "").startsWith("reproduced-on-");
+
+/** The benchmarks in the order the picker offers them: on a release first (a sealed test
+ *  before its validation split), then development history; otherwise newest import first. */
+export function orderBenchmarks(list: PublishedBenchmark[]): PublishedBenchmark[] {
+  const rank = (b: PublishedBenchmark) => (onRelease(b) ? (b.sealed ? 0 : 1) : 2);
+  return list.map((b, i) => ({ b, i })).sort((x, y) => rank(x.b) - rank(y.b) || x.i - y.i)
+    .map(({ b }) => b);
+}
 
 /** k values to offer: 1/3/5/10 once any model's standard summary is stored ten deep (the
  *  others show "not measured" there), else the 1 and 5 every model has. */

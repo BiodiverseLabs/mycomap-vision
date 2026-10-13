@@ -127,7 +127,7 @@ def test_a_prediction_made_before_the_record_turned_green_is_scored(box):
     # The next night: 400 has its DNA answer (the fake photo is red, like "A x").
     night(layer, seed_rows() + [row(400, "A x")], FakeOutside({400: 200}))
     conn = manifest.connect(layer.manifest)
-    [scored] = prospective.report(conn)
+    [scored] = prospective.report(conn, sealed_after=None)   # turned green today: past the seal
     conn.close()
     assert (scored["backbone"], scored["method"], scored["resolved"]) == ("m1", "nearest", 1)
     assert scored["species_top1"] == 1.0

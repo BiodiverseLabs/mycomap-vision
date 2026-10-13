@@ -128,6 +128,13 @@ function Prospective() {
         the saved answer is checked against the DNA name. Only predictions made before the
         answer existed count.
       </p>
+      {rows.some((r) => (r.sealed ?? 0) > 0) && (
+        <p className="text-xs text-[#7a5a3a] mb-3 max-w-3xl" data-testid="prospective-sealed">
+          Records validated since {q.data?.sealed_after?.slice(0, 10)} form the paper's sealed test:
+          their {rows.reduce((n, r) => n + (r.sealed ?? 0), 0).toLocaleString()} predictions are
+          counted but not scored here until that test is opened.
+        </p>
+      )}
       {q.isLoading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : !rows.length ? (

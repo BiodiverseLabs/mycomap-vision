@@ -273,6 +273,13 @@ def cmd_aws_launch_dataset_build(conn, args) -> None:
         allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
 
 
+def cmd_aws_launch_dhash_index(args) -> None:
+    from . import aws_dataset
+    print(json.dumps(aws_dataset.launch_dhash_index(
+        args.id, instance_type=args.instance_type, max_hours=args.max_hours,
+        allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
+
+
 def cmd_aws_dataset_build_job(args) -> None:
     """Runs on the dataset-build instance (aws_dataset.USER_DATA)."""
     from pathlib import Path
@@ -451,9 +458,26 @@ def cmd_dataset(args) -> None:
                      freeze_approved=args.freeze_approved, test_for=args.test_for,
                      test_ids=Path(args.ids) if args.ids else None, store_reader=reader,
                      loo_exclusions=Path(args.loo_exclusions) if args.loo_exclusions else None,
-                     no_loo_exclusions=args.no_loo_exclusions)
-        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits")},
-                         indent=2))
+                     no_loo_exclusions=args.no_loo_exclusions,
+                     base_dhash=Path(args.base_dhash) if args.base_dhash else None)
+        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits",
+                                                "photos_identical_to_base_dropped",
+                                                "near_base")}, indent=2))
+    elif args.action == "dhash-index":
+        from . import dhash
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            index = dhash.build_index(rel, dr.default_store_reader())
+        finally:
+            rel.close()
+        path = dhash.save_index(index, Path(args.out) if args.out else dhash.index_path(args.id))
+        print(json.dumps({"release": args.id, "photos": index["photos"], "index": str(path),
+                          "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "pull-dhash-index":
+        from . import aws, aws_dataset
+        path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
+        print(json.dumps({"release": args.id, "index": str(path),
+                          "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "verify":
         print(json.dumps(dr.verify(args.id, root, photos=args.photos), indent=2))
     elif args.action == "derive":
@@ -617,15 +641,43 @@ def cmd_benchmark_export(conn, args) -> None:
     """A held-out report's aggregates as JSON, for mv benchmark-import on the server box."""
     from pathlib import Path
     from . import benchmark_io
-    path = Path(args.report)
-    report = json.loads(path.read_text(encoding="utf-8"))
-    text = json.dumps(benchmark_io.export_summary(report, path.name, args.reproducibility),
-                      indent=1)
+    comparison = getattr(args, "comparison", None)
+    if bool(getattr(args, "report", None)) == bool(comparison):
+        raise SystemExit("give --report (a held-out report) or --comparison (on a release)")
+    if comparison:
+        try:
+            payload = benchmark_io.export_comparison(conn, comparison,
+                                                     getattr(args, "split", "val"),
+                                                     sealed=getattr(args, "sealed", False))
+        except ValueError as e:
+            raise SystemExit(f"not exported: {e}")
+    else:
+        path = Path(args.report)
+        report = json.loads(path.read_text(encoding="utf-8"))
+        payload = benchmark_io.export_summary(report, path.name, args.reproducibility)
+    text = json.dumps(payload, indent=1)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"wrote {args.out}", file=sys.stderr)
     else:
         print(text)
+
+
+def cmd_experiments_check(args) -> int:
+    """Check every experiment entry against the registry's rules; exit 1 on any bad one.
+    Run it in the private research checkout before committing an entry: the site skips a
+    bad entry (and logs it) rather than failing the whole list."""
+    from pathlib import Path
+    from . import experiments
+    directory = Path(args.dir) if args.dir else experiments.EXPERIMENTS_DIR
+    if not directory.is_dir():
+        print(f"no experiments folder at {directory}", file=sys.stderr)
+        return 1
+    found, problems = experiments.load_checked(directory)
+    for name, why in problems:
+        print(f"BAD {name}: {why}")
+    print(f"{len(found)} entries ok, {len(problems)} bad ({directory})")
+    return 1 if problems else 0
 
 
 def cmd_benchmark_import(conn, args) -> None:
@@ -1501,6 +1553,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--allow-unpushed", action="store_true")
 
+    p = sub.add_parser("aws-launch-dhash-index",
+                       help="write a release's dHash index (every included photo) to s3 on a "
+                            "self-terminating instance in the bucket's region")
+    p.add_argument("id", help="the release, e.g. v1 (its kept copy must be in s3)")
+    p.add_argument("--instance-type", default="c7i.2xlarge")
+    p.add_argument("--max-hours", type=float, default=4)
+    p.add_argument("--allow-dirty", action="store_true")
+    p.add_argument("--allow-unpushed", action="store_true")
+
     p = sub.add_parser("aws-dataset-build-job", help="(runs on the dataset-build instance)")
     p.add_argument("--build-id", required=True)
     p.add_argument("--request", required=True)
@@ -1682,15 +1743,26 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("scoreboard-import", help="(server box) add rows from scoreboard-export "
                        "to a comparison this machine has; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
-    p = sub.add_parser("benchmark-export", help="a held-out report's aggregates (no record "
-                       "ids, names, observers or places) for the server box's Models page")
-    p.add_argument("--report", required=True, help="a report-*.json from mv heldout report")
+    p = sub.add_parser("benchmark-export", help="a held-out report's, or a release "
+                       "comparison's, aggregates (no record ids, names, observers or places) "
+                       "for the server box's Results page")
+    p.add_argument("--report", help="a report-*.json from mv heldout report")
+    p.add_argument("--comparison", help="a comparison on a frozen dataset release (mv compare "
+                   "--release); its reproducibility is reproduced-on-<release>")
+    p.add_argument("--split", choices=("val", "test"), default="val",
+                   help="with --comparison: val (the release's own) or test (a test release)")
+    p.add_argument("--sealed", action="store_true",
+                   help="with --comparison: a sealed test release, scored once")
     p.add_argument("--out", help="write to this file (default: standard output)")
     p.add_argument("--reproducibility", default="exploratory-pre-freeze",
                    help="exploratory-pre-freeze (default) or reproduced-on-<release>")
     p = sub.add_parser("benchmark-import", help="(server box) add a benchmark-export to the "
                        "site; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
+    p = sub.add_parser("experiments-check", help="check the experiment registry's entries "
+                       "(the private research checkout) before committing; exit 1 on any bad one")
+    p.add_argument("dir", nargs="?", help="the experiments folder (default: the research "
+                                         "checkout's experiments/)")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
     p = sub.add_parser("fungus-gate", help="the not-a-fungus gate in front of Identify: build "
@@ -1775,7 +1847,16 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--test-for", metavar="RELEASE",
                    help="a test release for this one: only --ids, all 'test', disjoint from it")
     q.add_argument("--ids", help="CSV with observation_id (or record_key): the test records")
+    q.add_argument("--base-dhash", help="a test release: the --test-for release's dHash index "
+                                        "(`mv dataset pull-dhash-index <id>`); flags near-copies")
     loo_options(q)
+    q = dsub.add_parser("dhash-index", help="dHash every included photo of a release, here "
+                                            "(a large release: mv aws-launch-dhash-index)")
+    q.add_argument("id")
+    q.add_argument("--out", help="default data/research-release-extras/<id>/dhash-index.npz")
+    q = dsub.add_parser("pull-dhash-index", help="download a release's dHash index from s3 "
+                                                 "and check its sha256")
+    q.add_argument("id")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
@@ -2015,6 +2096,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "paper-inat-cv":
         cmd_paper_inat_cv(args)
         return 0
+    if args.command == "aws-launch-dhash-index":  # reads the release's kept copy, no manifest
+        cmd_aws_launch_dhash_index(args)
+        return 0
+    if args.command == "experiments-check":   # the private registry only: no manifest
+        return cmd_experiments_check(args)
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0

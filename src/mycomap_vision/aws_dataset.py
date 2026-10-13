@@ -225,8 +225,11 @@ def run_build_job(build_id: str, request: dict, s3, bucket_name: str, *,
                   manifest_path: Path | None = None, root: Path | None = None,
                   inputs: Path = Path("inputs"), store_reader=None, log=print) -> dict:
     """Build, verify, upload the kept copy, then write result.json (last: its presence
-    means the release is in S3)."""
+    means the release is in S3). A `dhash-index` request runs run_dhash_job instead."""
     from . import dataset_s3
+    if request.get("job") == DHASH_JOB:
+        return run_dhash_job(build_id, request, s3, bucket_name, root=root,
+                             store_reader=store_reader, log=log)
     root = Path(root or dr.ROOT)
     prefix = build_prefix(build_id)
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -267,3 +270,137 @@ def run_build_job(build_id: str, request: dict, s3, bucket_name: str, *,
 def _put_result(s3, bucket_name: str, prefix: str, doc: dict) -> None:
     s3.put_object(Bucket=bucket_name, Key=prefix + RESULT_FILE,
                   Body=json.dumps(doc, indent=2).encode())
+
+
+# --- a base release's dHash index (dhash.py; paper plan §4, 2026-10-13) ----------------------
+#
+# A frozen test release flags near-copies of its base's photos by dHash. The base side reads
+# every included original once (v1: 680k photos, ~290 GB): in the bucket's region that costs
+# an instance hour, on the laptop ~$25 of transfer. The index is written beside the release's
+# kept copy, never into it (a release is never edited): research-release-extras/<id>/.
+
+DHASH_JOB = "dhash-index"
+EXTRAS_PREFIX = "research-release-extras/"
+# Wall seconds per photo on the instance with 16 threads: an S3 read of a ~0.4 MB original
+# plus a 2.4 ms dHash (laptop, 2026-10-13). The v1 build read, resized and re-encoded every
+# original at ~150/s on a c7i.2xlarge; a read and a dHash are taken as no faster.
+DHASH_SECONDS_PER_PHOTO = 1 / 150
+
+
+def dhash_index_key(rid: str) -> str:
+    from .dhash import INDEX_FILE
+    return f"{EXTRAS_PREFIX}{dr.check_id(rid)}/{INDEX_FILE}"
+
+
+def estimate_dhash_hours(photos: int) -> float:
+    return round(SETUP_HOURS + 0.1 + photos * DHASH_SECONDS_PER_PHOTO / 3600, 1)
+
+
+def launch_dhash_index(rid: str, *, instance_type: str = BUILD_INSTANCE_TYPE,
+                       max_hours: float = 4, allow_dirty: bool = False,
+                       allow_unpushed: bool = False, log=print) -> dict:
+    """Start a self-terminating instance that writes <rid>'s dHash index to S3. Refused
+    before any spend when the release has no kept copy or its index is there already."""
+    from . import aws, dataset_s3
+    dr.check_id(rid)
+    b, s3 = aws.bucket(), aws.s3_client()
+    remote = dataset_s3.remote_release_hash(rid, s3, b)
+    if remote is None:
+        raise dr.ReleaseError(f"s3 holds no kept copy of {rid} (research-releases/{rid}/)")
+    try:
+        s3.head_object(Bucket=b, Key=dhash_index_key(rid))
+        raise dr.ReleaseError(f"s3 already holds {dhash_index_key(rid)}: "
+                              f"`mv dataset pull-dhash-index {rid}`")
+    except dr.ReleaseError:
+        raise
+    except Exception:  # noqa: BLE001 - not there: go on
+        pass
+    manifest = json.loads(s3.get_object(Bucket=b, Key=dataset_s3.release_prefix(rid)
+                                        + dr.MANIFEST)["Body"].read())
+    photos = int(manifest["counts"]["photos_included"])
+    hours = estimate_dhash_hours(photos)
+    log(f"Estimate: {photos:,} included photos of {rid}, {hours} h on a {instance_type} "
+        f"(--max-hours {max_hours})")
+    if hours > max_hours - 0.25:
+        raise ValueError(f"the index needs about {hours} h; raise --max-hours")
+    sha = aws.release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)
+    build_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    prefix = build_prefix(build_id)
+    s3.put_object(Bucket=b, Key=prefix + "code.tar.gz", Body=aws.code_tarball(sha))
+    request = {"job": DHASH_JOB, "name": rid, "release_hash": remote, "build_id": build_id,
+               "code_version": sha}
+    s3.put_object(Bucket=b, Key=prefix + REQUEST_FILE,
+                  Body=json.dumps(request, indent=2).encode())
+    sess = aws.session()
+    ec2, ssm = sess.client("ec2"), sess.client("ssm")
+    ami = ssm.get_parameter(Name=aws.AMI_PARAMETER)["Parameter"]["Value"]
+    resp = ec2.run_instances(**instance_args(
+        build_id, ami, render_user_data(build_id, b, max_hours, sha), instance_type))
+    return {"build_id": build_id, "job": DHASH_JOB, "release": rid, "release_hash": remote,
+            "instance_id": resp["Instances"][0]["InstanceId"], "instance_type": instance_type,
+            "estimate_hours": hours, "max_hours": max_hours, "code_version": sha,
+            "log": f"s3://{b}/{prefix}build.log", "result": f"s3://{b}/{prefix}{RESULT_FILE}",
+            "then": f"mv dataset pull-dhash-index {rid}"}
+
+
+def run_dhash_job(build_id: str, request: dict, s3, bucket_name: str, *,
+                  root: Path | None = None, store_reader=None, log=print) -> dict:
+    """On the instance: fetch the release's kept copy (private part: the stores), check it
+    is the release the launch saw, dHash every included original, upload the index, then
+    write result.json (last)."""
+    from . import dataset_s3, dhash
+    root = Path(root or dr.ROOT)
+    prefix = build_prefix(build_id)
+    rid = request["name"]
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        dataset_s3.fetch_release(rid, root, s3, bucket_name, include_private=True, log=log)
+        rel = dr.load_release(rid, root, allow_draft=True)
+        try:
+            if rel.release_hash != request["release_hash"]:
+                raise dr.ReleaseError(f"{rid} in s3 is not the release the launch saw "
+                                      "(release_hash differs)")
+            index = dhash.build_index(rel, store_reader or dr.default_store_reader(), log=log)
+        finally:
+            rel.close()
+        path = dhash.save_index(index, root.parent / "extras" / rid / dhash.INDEX_FILE)
+        sha = dr.sha256_file(path)
+        s3.upload_file(str(path), bucket_name, dhash_index_key(rid), ExtraArgs={
+            "Metadata": {"sha256": sha, "release_hash": index["release_hash"]}})
+        out = {"state": "finished", "job": DHASH_JOB, "release": rid,
+               "release_hash": index["release_hash"], "photos": index["photos"],
+               "algorithm": index["algorithm"], "pillow": index["pillow"],
+               "index_key": dhash_index_key(rid), "index_sha256": sha}
+    except Exception as e:  # noqa: BLE001 - reported in result.json, then re-raised
+        _put_result(s3, bucket_name, prefix, {"state": "failed", "job": DHASH_JOB,
+                                              "release": rid, "build_id": build_id,
+                                              "started_at": started,
+                                              "error": f"{e.__class__.__name__}: {e}"})
+        raise
+    out = {**out, "build_id": build_id, "started_at": started,
+           "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    _put_result(s3, bucket_name, prefix, out)
+    return out
+
+
+def pull_dhash_index(rid: str, s3, bucket_name: str, dest: Path | None = None,
+                     log=print) -> Path:
+    """Download <rid>'s dHash index (default dhash.index_path) and check it against the
+    sha256 the instance stored with it."""
+    from . import dhash
+    key = dhash_index_key(rid)
+    dest = Path(dest or dhash.index_path(rid))
+    want = s3.head_object(Bucket=bucket_name, Key=key)["Metadata"].get("sha256")
+    if dest.exists():
+        if dr.sha256_file(dest) == want:
+            return dest
+        raise dr.ReleaseError(f"{dest} exists with other bytes than s3 {key}")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".partial")
+    s3.download_file(bucket_name, key, str(tmp))
+    if not want or dr.sha256_file(tmp) != want:
+        tmp.unlink()
+        raise dr.ReleaseError(f"downloaded {key} does not match its stored sha256")
+    tmp.rename(dest)
+    log(f"dHash index of {rid}: {dest}")
+    return dest

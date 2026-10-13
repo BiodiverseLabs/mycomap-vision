@@ -541,8 +541,10 @@ def test_a_test_release_is_disjoint_from_its_base_and_never_trained_on(world, tm
     c.execute("pragma wal_checkpoint(truncate)")
     dup = tmp_path / "dup.csv"
     dup.write_text("observation_id\n21\n", encoding="utf-8")
-    with pytest.raises(dr.SealedLeak, match="byte-identical"):
-        build(world, name="dry-20261009-150000-test", test_for=base["id"], test_ids=dup)
+    # A copy of a base photo is left out, not a refusal (test_test_release_copies.py).
+    t = build(world, name="dry-20261009-150000-test", test_for=base["id"], test_ids=dup)
+    assert t["photos_identical_to_base_dropped"] == 1
+    assert reasons(world, t["id"])["21"] == ("no_photos", None)
 
 
 # --- experiments read the release, not the live manifest ------------------------------------
