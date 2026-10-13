@@ -97,7 +97,7 @@ export const BENCHMARKS: Benchmark[] = [
   { slug: "held-out", name: "Held-out records (development history)", status: "history",
     summary: "DNA-verified records that, before dataset release v1, no model had seen in training or as a reference.",
     whyItMatters: "The first large test with 95% intervals and paired tests between approaches. Its results guided the choices that dataset release v1 now re-checks.",
-    records: "13,145 North American records validated on MycoMap that had not reached the identifier's data; 3,000 for development, 10,145 for testing. A development benchmark, never the paper's test set: these records are ordinary training records in dataset release v1, so later models can't be scored on them.",
+    records: "13,145 North American records validated on MycoMap that had not reached the identifier's data; 3,000 for development, 10,145 for testing. A development benchmark, never the paper's test set: these records are part of dataset release v1 (5,679 in its training split, 7,381 in its validation split, 85 left out by its rules), so no later model meets them unseen.",
     scoring: "The standard summary (see Evaluation protocols), names compared strictly, sensu lato and as species complexes; iNaturalist's computer vision on part of the records.",
     results: { href: "/research/results", label: "Results: development history" },
     elsewhere: "The closed-set test in Danish Fungi 2020 and FungiTastic." },

@@ -54,7 +54,7 @@ test("dataset release v1 comes first; the held-out records are development histo
     [["newest-weeks", "running"], ["sealed-test", "planned"], ["held-out", "history"]]);
   const v1 = BENCHMARKS[0];
   assert.match(v1.name, /dataset release v1/);
-  assert.match(BENCHMARKS[2].records, /training records in dataset release v1/);
+  assert.match(BENCHMARKS[2].records, /part of dataset release v1 \(5,679 in its training split, 7,381 in its validation split/);
   assert.equal(STATUS_LABEL.history, "Development history");
 });
 
