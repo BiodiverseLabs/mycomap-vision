@@ -273,6 +273,13 @@ def cmd_aws_launch_dataset_build(conn, args) -> None:
         allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
 
 
+def cmd_aws_launch_dhash_index(args) -> None:
+    from . import aws_dataset
+    print(json.dumps(aws_dataset.launch_dhash_index(
+        args.id, instance_type=args.instance_type, max_hours=args.max_hours,
+        allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
+
+
 def cmd_aws_dataset_build_job(args) -> None:
     """Runs on the dataset-build instance (aws_dataset.USER_DATA)."""
     from pathlib import Path
@@ -451,9 +458,26 @@ def cmd_dataset(args) -> None:
                      freeze_approved=args.freeze_approved, test_for=args.test_for,
                      test_ids=Path(args.ids) if args.ids else None, store_reader=reader,
                      loo_exclusions=Path(args.loo_exclusions) if args.loo_exclusions else None,
-                     no_loo_exclusions=args.no_loo_exclusions)
-        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits")},
-                         indent=2))
+                     no_loo_exclusions=args.no_loo_exclusions,
+                     base_dhash=Path(args.base_dhash) if args.base_dhash else None)
+        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits",
+                                                "photos_identical_to_base_dropped",
+                                                "near_base")}, indent=2))
+    elif args.action == "dhash-index":
+        from . import dhash
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            index = dhash.build_index(rel, dr.default_store_reader())
+        finally:
+            rel.close()
+        path = dhash.save_index(index, Path(args.out) if args.out else dhash.index_path(args.id))
+        print(json.dumps({"release": args.id, "photos": index["photos"], "index": str(path),
+                          "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "pull-dhash-index":
+        from . import aws, aws_dataset
+        path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
+        print(json.dumps({"release": args.id, "index": str(path),
+                          "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "verify":
         print(json.dumps(dr.verify(args.id, root, photos=args.photos), indent=2))
     elif args.action == "derive":
@@ -1415,6 +1439,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--allow-unpushed", action="store_true")
 
+    p = sub.add_parser("aws-launch-dhash-index",
+                       help="write a release's dHash index (every included photo) to s3 on a "
+                            "self-terminating instance in the bucket's region")
+    p.add_argument("id", help="the release, e.g. v1 (its kept copy must be in s3)")
+    p.add_argument("--instance-type", default="c7i.2xlarge")
+    p.add_argument("--max-hours", type=float, default=4)
+    p.add_argument("--allow-dirty", action="store_true")
+    p.add_argument("--allow-unpushed", action="store_true")
+
     p = sub.add_parser("aws-dataset-build-job", help="(runs on the dataset-build instance)")
     p.add_argument("--build-id", required=True)
     p.add_argument("--request", required=True)
@@ -1646,7 +1679,16 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--test-for", metavar="RELEASE",
                    help="a test release for this one: only --ids, all 'test', disjoint from it")
     q.add_argument("--ids", help="CSV with observation_id (or record_key): the test records")
+    q.add_argument("--base-dhash", help="a test release: the --test-for release's dHash index "
+                                        "(`mv dataset pull-dhash-index <id>`); flags near-copies")
     loo_options(q)
+    q = dsub.add_parser("dhash-index", help="dHash every included photo of a release, here "
+                                            "(a large release: mv aws-launch-dhash-index)")
+    q.add_argument("id")
+    q.add_argument("--out", help="default data/research-release-extras/<id>/dhash-index.npz")
+    q = dsub.add_parser("pull-dhash-index", help="download a release's dHash index from s3 "
+                                                 "and check its sha256")
+    q.add_argument("id")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
@@ -1879,6 +1921,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "aws-dataset-build-job":   # the build reads a private copy only
         cmd_aws_dataset_build_job(args)
+        return 0
+    if args.command == "aws-launch-dhash-index":  # reads the release's kept copy, no manifest
+        cmd_aws_launch_dhash_index(args)
         return 0
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)

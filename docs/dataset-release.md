@@ -27,7 +27,8 @@ what the site serves). A serving release says which dataset release its model ca
 | Command | Does |
 |---|---|
 | `mv dataset build --name v1 --freeze-approved "<who, when>" [--exclusions F.tsv …] [--val-weeks 8 \| --val-cutoff D] [--recipes original,long500-q90]` | writes the snapshot from a private copy of the manifest (never writes to it); without `--name` (or with `--dry-run`): a draft |
-| `mv dataset build --name v1-test --test-for v1 --ids new.csv --freeze-approved …` | the test release: only those records, all `test`; refused if any record, or any photo (by bytes), is in `v1` |
+| `mv dataset build --name v1-test --test-for v1 --ids new.csv --base-dhash <index> --freeze-approved …` | the test release: only those records, all `test`; refused if any record is in `v1`; a photo byte-identical to a `v1` photo is left out (`copy_in_base`); near-copies are flagged by dHash (§5) |
+| `mv aws-launch-dhash-index v1`, then `mv dataset pull-dhash-index v1` | the dHash index of every included `v1` photo, made once in the bucket's region (`mv dataset dhash-index <id>` makes it here, for a small release) |
 | `mv dataset verify v1 [--photos N\|all]` | recomputes every file hash, every content hash and `release_hash`; with `--photos`, re-reads originals from the store and checks their sha256 |
 | `mv dataset derive v1 --photo <key> --recipe long500-q90 [--out F]` | regenerates one derived image from our original and checks it against the stored hash |
 | `mv dataset diff v1 v2` | records/photos added, removed, relabelled, re-included, moved between splits; per-component hash changes |
@@ -183,9 +184,25 @@ Steve, 2026-10-09: "I will provide a new dataset for testing of new records." So
   date written into the release: by default the newest 8 weeks of validations are `val`
   (`--val-weeks`), or `--val-cutoff` is chosen at the freeze.
 - `vN-test` holds `test`: Steve's fresh records, validated after `vN` was cut, frozen the same
-  way (labels, photos, hashes) as their own release. The build refuses it when any of its
-  records is in `vN`, or any of its photos is byte-identical to one in `vN`. It is never
-  trainable (`training_records()` raises `SealedLeak`).
+  way (labels, photos, hashes) as their own release. It is never trainable
+  (`training_records()` raises `SealedLeak`). Copies of `vN` photos (paper plan §4,
+  2026-10-13):
+  - a record already in `vN` refuses the build;
+  - a photo byte-identical (original sha256) to an included `vN` photo is left out
+    (`copy_in_base`, counted in MANIFEST as `photos_identical_to_base_dropped`); a record
+    left with no photo becomes `no_photos`;
+  - every included photo's 64-bit dHash (`dhash.py`: EXIF orientation, grey, 9 x 8 Lanczos,
+    JPEG draft decoding) is compared with the `vN` index; one within Hamming distance 4 of
+    a `vN` photo is FLAGGED in the `near_base` table (its nearest `vN` photo and the
+    distance) and kept: nothing is dropped, so the test set does not depend on the check.
+    MANIFEST's `near_base` gives the counts, the algorithm, the Pillow version and the
+    index's sha256. A frozen test release needs `--base-dhash`; the index is refused when
+    it is for another release_hash, another algorithm or Pillow, or misses a `vN` photo.
+    Scoring reads `rel.near_base()`. No model is involved, so the check runs before the seal
+    is broken.
+  - The `vN` index is kept beside the release, never in it: s3
+    `research-release-extras/<id>/dhash-index.npz` (sha256 in its metadata), here
+    `data/research-release-extras/<id>/`.
 - The development benchmark `heldout-2026-10-08` (13,145) is dated like every other record
   (Steve, 2026-10-09); its membership stays in `benchmark` / `benchmark_split`, so it can
   still be reported.
@@ -215,7 +232,8 @@ the line `"<table>:<schema version>\n"`.
 | `derived_hash` | `derived` |
 | `private_hash` | the tables of `private.sqlite` |
 | `reference_hash` | `(record_key, label, sorted original sha256s of its included photos)` over `train`+`val`: the reference index's records + labels + photos (the registry's `reference_hash`) |
-| **`release_hash`** | SHA-256 of the lines `"<name>=<hash>\n"` for the seven component hashes above, in that order |
+| `near_base_hash` | a test release only: `near_base` (§5) |
+| **`release_hash`** | SHA-256 of the lines `"<name>=<hash>\n"` for the seven component hashes above, in that order, then `near_base` where the release holds that table (a release without it, such as `v1`, keeps the hash it was cut with) |
 
 `release_hash` depends only on content: the build time, machine and file layout do not
 enter it, so building v1 twice from the same inputs gives the same hash, and any change to a
