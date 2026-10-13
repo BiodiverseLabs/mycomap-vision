@@ -820,9 +820,14 @@ def scoreboard(conn: sqlite3.Connection, comparison_id: str | None = None) -> li
     if comparison_id:
         where, params = "where comparison_id = ?", (comparison_id,)
     rows = conn.execute(
-        f"select {', '.join(SCOREBOARD_COLUMNS)} from eval_runs {where} "
-        "order by comparison_id desc, species_top1 desc", params).fetchall()
-    return [dict(zip(SCOREBOARD_COLUMNS, r)) for r in rows]
+        f"select {', '.join(SCOREBOARD_COLUMNS)}, "
+        "json_extract(report_json, '$.dataset_release.dataset_release'), "
+        "json_extract(report_json, '$.dataset_release.draft') from eval_runs "
+        f"{where} order by comparison_id desc, species_top1 desc", params).fetchall()
+    # dataset_release: the frozen release a run was measured on (None: the live manifest, or a
+    # draft), so the Results page can put pre-release comparisons under development history.
+    return [{**dict(zip(SCOREBOARD_COLUMNS, r)),
+             "dataset_release": None if r[-1] else r[-2]} for r in rows]
 
 
 def run_report(conn: sqlite3.Connection, run_id: int) -> dict | None:

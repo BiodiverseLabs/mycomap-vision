@@ -212,6 +212,8 @@ export interface ScoreRun {
   species_top1_first_photo: number | null;
   code_version: string | null;
   created_at: string;
+  /** The frozen dataset release the run was measured on; null for the live data (or a draft). */
+  dataset_release?: string | null;
 }
 
 export type BucketScores = Record<string, { n: number; top1: number; top5: number }>;
