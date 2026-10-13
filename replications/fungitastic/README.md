@@ -64,7 +64,7 @@ The recipe (preset `fungitastic-beit-b384`):
 - Seesaw loss (p 0.8, q 2.0) on the training set's class counts.
 - RandomResizedCrop (scale 0.8 to 1), then RandAugment(2, 20).
 - Effective batch 256 (micro-batch 16 x 16 accumulation steps, bf16).
-- The epoch kept is the one with the best validation macro-F1.
+- 50 epochs in their runs; the epoch kept is the one with the best validation macro-F1.
 - A record's answer: its photos' logits divided by a temperature fitted on validation,
   averaged, then softmax.
 - The month prior from DF20's paper: p(c | x, m) ∝ p(c | x) · p(m | c) / p(m).
@@ -76,6 +76,20 @@ and `df20-vit-l384` (DF20's production ViT-L).
 
 Retraining their recipe:
 
+- **How long it trains is decided by a pre-declared rule, not fixed** (spec
+  `fungitastic-beit-b384@15-50`; declared 2026-10-13 so that their classifier is not compared
+  undertrained). At least 15 epochs; then blocks of 5. After each block, the best
+  validation macro-F1 so far is compared with the best at the end of the previous block:
+  training goes on if it rose by 0.005 (half a point) or more, and stops when a block adds
+  less, or at 50 epochs (their published length), whichever comes first. The model kept is
+  still their best-macro-F1 epoch overall, and the plateau schedule runs on unchanged
+  across blocks. Only `val` decides, never a test release. Every block boundary writes a
+  checkpoint (weights, optimizer, schedule, the best epoch's weights) that goes to S3 with
+  progress.json before the next block starts; the per-epoch curve, every block's decision
+  (best so far, gain, continue or stop, why) and the stop reason are in progress.json and
+  the model's metadata. A time limit or a Spot interruption costs at most one block:
+  `mv aws-launch-trainer --release v1 --resume <run>` carries on from the last checkpoint.
+  `preset@15` still means exactly 15 epochs.
 - **Seesaw is formed per batch row.** `fgvc` builds a C x C matrix, which is 1.3 GB at
   our ~18,000 species. We form the same factors per batch row, in log space. It is the
   same loss, tested against the published formula.
@@ -156,11 +170,19 @@ Tune on `v1`'s val split; report once on `v1-test`.
    place prior's counts made on the laptop; the instance opens it with the builder's
    trainer mode (`load_release(id, without_private=True)`), and refuses another
    MANIFEST.json, other place counts or other labels than the release's labels_hash.
+   The training length follows the epoch rule above (`@15-50`). The dry run prints the
+   hours at 15 epochs (least), 25 (a guess at the usual) and 50 (most, ~3.2 h an epoch);
+   `--max-hours` must cover the most, or `--allow-over-time` lets the run stop at a block
+   boundary and be resumed.
    ```bash
    mv aws-launch-trainer --release v1 --backbones none --finetune none \
-     --picek fungitastic-beit-b384@15 \
+     --picek fungitastic-beit-b384@15-50 \
      --methods classifier,classifier+month,classifier+month-raw,classifier+month+place,nearest \
-     --instance-type g6.xlarge --max-hours 52 --dry-run
+     --instance-type g6.xlarge --max-hours 170 --dry-run
+   ```
+   If it stops early (time limit, Spot), carry on from its last block checkpoint:
+   ```bash
+   mv aws-launch-trainer --release v1 --resume <run> --max-hours <hours>
    ```
 3. Back on the laptop: pull it, and compare it with Vision on the test release against
    v1's train + val (a model is never scored on records it trained or selected on, so the

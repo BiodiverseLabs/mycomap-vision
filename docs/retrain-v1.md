@@ -163,13 +163,20 @@ neither, and the release's MANIFEST.json records which (file, rows, sha256, or t
 3. `mv aws-pull-trainer --run <run>`: the frozen and fine-tuned embeddings of every v1 photo
    (the reference re-embedded with the new model), the weights, the heads, the run's own
    comparison.
-4. Section 2's comparison and summary; section 3's sanity gate.
+4. Section 2's comparison and summary; section 3's sanity gate. Every v1 command takes
+   `--errata data/research-release-extras/v1/v1-errata.tsv` (dataset-release.md §4,
+   Errata: 41 MO finds held as iNat records, left out as references); record the file's
+   sha256 and the count of masked ft-head classes (`errata.masked_head_labels`) in the
+   registry entry.
 5. Write the registry entry `experiments/<date>-v1-finetune.md` in the private research
    checkout (`config.RESEARCH_DIR`, never this repo):
    `reproducibility: reproduced-on-v1`, `dataset_release`, `reference_hash` and `code_commit`
    from the comparison's `dataset_release` block, `reproduce_command` = section 2's commands.
 6. Report to the coordinator: the standard summary, the sanity result, box memory. Steve decides
    adoption; the coordinator builds the serving release (`mv release`) and deploys.
+   The site's Results page gets the numbers with `mv benchmark-export --comparison <id>
+   --split val` on the laptop and `mv benchmark-import -` on the box; they show first, above
+   the pre-v1 benchmarks (development history).
 
 ## 5. Box memory (measured 2026-10-12, projected for v1)
 
@@ -232,6 +239,15 @@ Each re-run ships one command taking `--release v1` (code in this repo) and a re
 `reproduced-on-v1` in the private research checkout (`config.RESEARCH_DIR`, never this repo). A decision stands if its re-run agrees within its interval; otherwise it is
 revisited and the entry says so. Order (PLAN §3: what defines the benchmarks first). Owners
 are suggestions for the coordinator; times are the laptop's unless marked AWS.
+
+Two trainer options serve the paper's extra fine-tunes (each launch needs Steve's cost OK):
+`--seed N` (a second seed for the spread between runs; default 0) and
+`--public-trainable-only` (the public model: with `--release` and `--finetune`, it learns only
+from CC photos including NC, and all-rights-reserved photos whose owner granted permission;
+a record or class left with none drops out). Both are recorded in progress.json, result.json
+and the model's json (`seed`, `train_photos`: the policy and the photos by licence class, which
+every fine-tune on a release records), and kept by `--resume`. Every model trained on v1 trains
+on v1 as cut and is scored and served with its erratum (dataset-release.md §4, Errata).
 
 | # | Re-run | Registry entries | Suggested owner | Estimate |
 |---|---|---|---|---|

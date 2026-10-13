@@ -50,7 +50,7 @@ from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConf
 
 log = logging.getLogger("mycomap_vision.api")
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
-# The working draft of the Vision paper (Paper in Progress page), served to signed-in
+# The working draft of the Vision paper (no page on the site since 2026-10-12), served to signed-in
 # members only (signin.MEMBERS_ONLY). It ships with the code, never in the public web bundle.
 PAPER_FILE = config.RESEARCH_DIR / "paper" / "draft.md"   # private, never in this repo
 
@@ -731,7 +731,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def prospective_report():
         from . import prospective
         with db_lock:
-            return {"models": prospective.report(conn)}
+            return {"models": prospective.report(conn), "sealed_after": prospective.seal_time()}
 
     @app.get("/api/benchmarks")
     def benchmarks():
@@ -740,21 +740,29 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             return {"benchmarks": benchmark_io.published(conn)}
 
+    from . import experiments
+
+    def good_experiments() -> tuple[list, int]:
+        """The registry's good entries, and how many were left out. A bad entry (one an author
+        is still writing, say) is logged and skipped, never a 500 for the whole page."""
+        found, problems = experiments.load_checked(experiments_dir or experiments.EXPERIMENTS_DIR)
+        for name, why in problems:
+            log.warning("[experiments] bad entry %s: %s", name, why)
+        return found, len(problems)
+
     @app.get("/api/experiments")
     def experiments_list():
         """The experiment registry (config.RESEARCH_DIR/experiments, private), front matter only. Members only."""
-        from . import experiments
-        found = experiments.load_all(experiments_dir or experiments.EXPERIMENTS_DIR)
-        return JSONResponse({"experiments": [experiments.summary(e) for e in found]},
+        found = good_experiments()
+        return JSONResponse({"experiments": [experiments.summary(e) for e in found[0]],
+                             "skipped": found[1]},
                             headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/experiments/{slug}")
     def experiment(slug: str):
-        from . import experiments
         if not experiments.SLUG.match(slug):
             raise HTTPException(404, "no such experiment")
-        found = {e.slug: e for e in experiments.load_all(experiments_dir
-                                                         or experiments.EXPERIMENTS_DIR)}
+        found = {e.slug: e for e in good_experiments()[0]}
         if slug not in found:
             raise HTTPException(404, "no such experiment")
         e = found[slug]

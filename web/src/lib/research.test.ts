@@ -12,23 +12,24 @@ test("the public menu leads with the tool and how to help; the numbers sit under
   assert.ok(researchNav(me("identify", null)).some((n) => n.href === "/research/results"));
 });
 
-test("the paper shows in the Research menu only to signed-in members", () => {
-  const paper = (m: Me | null | undefined) => researchNav(m).some((n) => n.href === "/research/paper");
-  assert.equal(paper(me("identify", null)), false);
-  assert.equal(paper(undefined), false);
-  assert.equal(paper(me("all", someone)), true);
-  assert.equal(paper(me("off", null)), true, "a local site without sign-in");
+test("the paper draft is off the Research menu for everyone, members included", () => {
+  for (const m of [undefined, me("identify", null), me("all", someone), me("off", null)]) {
+    assert.ok(!researchNav(m).some((n) => /paper/i.test(n.href + n.label)));
+  }
 });
 
-test("experiments, like the paper, show only to signed-in members", () => {
+test("experiments show only to signed-in members", () => {
   const has = (m: Me | null | undefined) => researchNav(m).some((n) => n.href === "/research/experiments");
   assert.equal(has(me("identify", null)), false);
+  assert.equal(has(undefined), false);
   assert.equal(has(me("all", someone)), true);
+  assert.equal(has(me("off", null)), true, "a local site without sign-in");
 });
 
 test("pages that moved under Research keep their old addresses", () => {
   assert.deepEqual(MOVED, { "/models": "/research/results", "/data": "/research/data",
-                            "/paper": "/research/paper", "/api-docs": "/research/api" });
+                            "/paper": "/research", "/research/paper": "/research",
+                            "/api-docs": "/research/api" });
   for (const to of Object.values(MOVED)) assert.ok(isResearchPath(to));
   assert.equal(isResearchPath("/researchers"), false);
 });
@@ -47,6 +48,15 @@ test("every benchmark page is complete and addressable", () => {
 test("the held-out benchmark says it is not the paper's test set", () => {
   const h = BENCHMARKS.find((b) => b.slug === "held-out")!;
   assert.match(h.records, /development benchmark/);
+});
+
+test("dataset release v1 comes first; the held-out records are development history", () => {
+  assert.deepEqual(BENCHMARKS.slice(0, 3).map((b) => [b.slug, b.status]),
+    [["newest-weeks", "running"], ["sealed-test", "planned"], ["held-out", "history"]]);
+  const v1 = BENCHMARKS[0];
+  assert.match(v1.name, /dataset release v1/);
+  assert.match(BENCHMARKS[2].records, /part of dataset release v1 \(5,679 in its training split, 7,381 in its validation split/);
+  assert.equal(STATUS_LABEL.history, "Development history");
 });
 
 test("API is the last item under Research, for visitors and members alike", () => {

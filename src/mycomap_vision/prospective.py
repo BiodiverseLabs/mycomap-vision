@@ -62,7 +62,46 @@ create table if not exists predictions (
   result_json     text not null,     -- per rank: top candidates with confidence
   primary key (observation_id, backbone, method)
 );
+-- Which served model and release made a prediction (since 2026-10-13): the model's version
+-- (its training-data snapshot date) and the serving release id, so a prospective result can
+-- be tied to the exact model the paper reports.
+create table if not exists prediction_provenance (
+  observation_id  text not null,
+  backbone        text not null,
+  method          text not null,
+  model_version   text,
+  serving_release text,
+  primary key (observation_id, backbone, method)
+);
 """
+
+# The paper's sealed test (v1-test) is every record first validated after dataset release
+# v1's label snapshot. Advance predictions keep being made for such records, but how they
+# fared stays hidden until the paper's analysis is frozen and the test is opened: until
+# then a report counts only records first green before this moment. MV_PROSPECTIVE_SEAL
+# moves it; "off" lifts it (after the paper's freeze tag).
+SEAL_DEFAULT = "2026-10-12T13:17:51+00:00"
+
+
+def seal_time() -> str | None:
+    value = (config.setting("MV_PROSPECTIVE_SEAL", SEAL_DEFAULT) or "").strip()
+    return None if value.lower() in ("", "off", "none") else value
+
+
+def served_provenance(backbone: str) -> tuple[str | None, str | None]:
+    """(model_version, serving_release) of the served model: the version from the model's
+    metadata (None for a model trained before dataset releases), and the release the box
+    serves (None off the box)."""
+    from . import finetune, release
+    meta_path = finetune.models_dir() / f"{backbone}.json"
+    version = None
+    if meta_path.is_file():
+        try:
+            version = finetune.model_version(json.loads(meta_path.read_text(encoding="utf-8")))
+        except ValueError:
+            version = None
+    serving = release.current_release(config.RELEASE_ROOT) if config.RELEASE_ROOT else None
+    return version, serving
 
 RANKS = ("family", "genus", "species")
 
@@ -153,9 +192,12 @@ def summarise(result: dict, top: int = 5) -> dict:
 
 
 def predict_pending(conn: sqlite3.Connection, identifier, backbone_model, ids: list[str],
-                    fetcher, log=print) -> dict:
-    """Identify each candidate from its iNat photos and save the prediction."""
+                    fetcher, log=print, provenance: tuple[str | None, str | None] | None = None
+                    ) -> dict:
+    """Identify each candidate from its iNat photos and save the prediction, with the served
+    model's version and release (`provenance`, default: served_provenance)."""
     conn.executescript(SCHEMA)
+    version, serving = provenance if provenance is not None         else served_provenance(identifier.backbone)
     stats = Counter()
     observations = fetcher.observations(ids)
     for i, oid in enumerate(ids, 1):
@@ -192,27 +234,46 @@ def predict_pending(conn: sqlite3.Connection, identifier, backbone_model, ids: l
                 "insert or replace into predictions values (?, ?, ?, ?, ?, ?, ?, ?)",
                 (oid, identifier.backbone, identifier.method, now_iso(), config.code_version(),
                  identifier.records, len(images), json.dumps(summarise(result))))
+            conn.execute("insert or replace into prediction_provenance values (?, ?, ?, ?, ?)",
+                         (oid, identifier.backbone, identifier.method, version, serving))
         stats["predicted"] += 1
         if i % 25 == 0:
             log(f"  {i}/{len(ids)} candidates, {stats['predicted']} predicted")
     return dict(stats)
 
 
-def report(conn: sqlite3.Connection) -> list[dict]:
+_SEAL = object()
+
+
+def report(conn: sqlite3.Connection, sealed_after=_SEAL) -> list[dict]:
     """Per model: how its advance predictions fared once the DNA answer came in.
 
     A prediction counts only if made before the record first appeared green here
     (records.first_seen_at), so the answer can't have been known. Names are compared
     by label (names.py), so an answer spelled another way than the DNA name is right.
+    Records first green at or after `sealed_after` (default seal_time(): the paper's sealed
+    test) are held back and only counted, as `sealed`.
     """
     conn.executescript(SCHEMA)
+    seal = seal_time() if sealed_after is _SEAL else sealed_after
     rows = conn.execute("""
       select p.backbone, p.method, p.result_json, r.scientific_name, r.genus, r.family,
              p.predicted_at, r.first_seen_at
       from predictions p join records r on r.observation_id = p.observation_id
       where r.first_seen_at is not null and p.predicted_at < r.first_seen_at
-        and r.label_conflict = 0
-    """).fetchall()
+        and r.label_conflict = 0 and (? is null or r.first_seen_at < ?)
+    """, (seal, seal)).fetchall()
+    sealed = Counter()
+    if seal is not None:
+        for backbone, method, n in conn.execute("""
+          select p.backbone, p.method, count(*) from predictions p
+          join records r on r.observation_id = p.observation_id
+          where r.first_seen_at is not null and p.predicted_at < r.first_seen_at
+            and r.first_seen_at >= ? group by 1, 2""", (seal,)):
+            sealed[(backbone, method)] = n
+    versions = {(b, m): (v, rel) for b, m, v, rel in conn.execute(
+        "select backbone, method, max(model_version), max(serving_release) "
+        "from prediction_provenance group by 1, 2")}
     totals = Counter()
     for backbone, method in conn.execute("select backbone, method from predictions"):
         totals[(backbone, method)] += 1
@@ -231,8 +292,8 @@ def report(conn: sqlite3.Connection) -> list[dict]:
         # answer to check, and family is iNat's for the genus when the cache has it.
         lab = taxonomy.labels_for(label(name) or "", genus, family,
                                   (label(name) or "").strip() != (name or "").strip(), tax)
-        if guests.excluded(lab.genus):       # the DNA name is a guest, not the photo's fungus
-            continue
+        if guests.excluded(lab.genus) or taxonomy.nonfungal(tax, lab.genus):
+            continue                         # a guest, or no fungus: not the photo's fungus
         species = lab.species
         truth = {"species": species, "genus": lab.genus, "family": lab.family}
         c["resolved"] += 1
@@ -251,7 +312,9 @@ def report(conn: sqlite3.Connection) -> list[dict]:
         pairs = conf.get(key, [])
         out.append({
             "backbone": key[0], "method": key[1], "predicted": totals[key],
-            "resolved": c["resolved"],
+            "resolved": c["resolved"], "sealed": sealed[key],
+            "model_version": versions.get(key, (None, None))[0],
+            "serving_release": versions.get(key, (None, None))[1],
             **{f"{rank}_top1": round(c[f"{rank}_top1"] / c[f"{rank}_n"], 4) if c[f"{rank}_n"]
                else None for rank in RANKS},
             # Calibration check: stated confidence vs how often the top species was right.

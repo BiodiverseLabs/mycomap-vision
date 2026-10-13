@@ -27,11 +27,14 @@ REQUIRED = ("title", "slug", "date", "status", "reproducibility", "question", "h
 EXPLORATORY = "exploratory-pre-freeze"
 REPRODUCED = re.compile(r"^reproduced-on-([a-z0-9][a-z0-9.-]*)$")
 REPRO_FIELDS = ("dataset_release", "reference_hash", "code_commit", "reproduce_command")
-# The day release v1 is frozen; entries dated on or after it must be reproduced on a release.
-# None until the freeze gate is passed.
-FREEZE_DATE: str | None = None
+# The day release v1 was cut (its MANIFEST `created`, 2026-10-12): entries dated on or after it
+# must be reproduced on a release.
+FREEZE_DATE: str | None = "2026-10-12"
+# An exploratory entry that has been re-run on a release names its re-run (`reproduced_by`, a
+# slug); load_all checks it and fills `reproduced_on` (the re-run's release), so the site shows
+# the old entry as method history rather than as a provisional result.
 LISTED = REQUIRED + ("branch", "commits", "benchmark", "split", "model", "methods", "related") \
-    + REPRO_FIELDS
+    + REPRO_FIELDS + ("reproduced_by", "reproduced_on")
 FILE_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$")
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -88,6 +91,14 @@ def parse(path: Path, freeze_date: str | None = None) -> Experiment:
     if freeze and meta["date"] >= freeze and not released:
         raise BadEntry(f"{path.name}: dated on or after the freeze ({freeze}), so it must be "
                        "reproduced on a dataset release")
+    by = meta.get("reproduced_by")
+    if by is not None:
+        if released:
+            raise BadEntry(f"{path.name}: reproduced_by belongs on the exploratory entry that "
+                           "was re-run, not on the re-run")
+        if not isinstance(by, str) or not SLUG.match(by):
+            raise BadEntry(f"{path.name}: reproduced_by is one slug")
+    meta.pop("reproduced_on", None)               # filled by load_all, never written by hand
     related = meta.get("related") or []
     if not isinstance(related, list) or not all(isinstance(r, str) and SLUG.match(r)
                                                 for r in related):
@@ -95,18 +106,49 @@ def parse(path: Path, freeze_date: str | None = None) -> Experiment:
     return Experiment(meta, body.strip() + "\n", path)
 
 
+def load_checked(directory: Path = EXPERIMENTS_DIR, freeze_date: str | None = None
+                 ) -> tuple[list[Experiment], list[tuple[str, str]]]:
+    """Every entry that meets the rules, newest first, and (file name, reason) for each one
+    that doesn't. Never raises on a bad entry, so one bad file can't take the site's list
+    down (the server logs and counts it; `mv experiments-check` catches it before a commit)."""
+    if not directory.is_dir():
+        return [], []
+    out: list[Experiment] = []
+    problems: list[tuple[str, str]] = []
+    for p in sorted(directory.glob("*.md")):
+        if p.name.lower() == "readme.md":
+            continue
+        try:
+            out.append(parse(p, freeze_date))
+        except BadEntry as e:
+            problems.append((p.name, str(e)))
+    slugs = [e.slug for e in out]
+    dup = {s for s in slugs if slugs.count(s) > 1}
+    for e in [e for e in out if e.slug in dup]:
+        problems.append((e.path.name, f"slug used twice: {e.slug}"))
+    out = [e for e in out if e.slug not in dup]
+    by_slug = {e.slug: e for e in out}
+    kept = []
+    for e in out:
+        by = e.meta.get("reproduced_by")
+        if by is not None:
+            target = by_slug.get(by)
+            if target is None or not REPRODUCED.match(str(target.meta["reproducibility"])):
+                problems.append((e.path.name, f"{e.path.name}: reproduced_by names {by}, which "
+                                              "is not an entry reproduced on a dataset release"))
+                continue
+            e.meta["reproduced_on"] = str(target.meta["dataset_release"])
+        kept.append(e)
+    return sorted(kept, key=lambda e: (e.meta["date"], e.slug), reverse=True), problems
+
+
 def load_all(directory: Path = EXPERIMENTS_DIR,
              freeze_date: str | None = None) -> list[Experiment]:
     """Every entry, newest first. A bad entry raises: the tests keep the registry clean."""
-    if not directory.is_dir():
-        return []
-    out = [parse(p, freeze_date) for p in directory.glob("*.md")
-           if p.name.lower() != "readme.md"]
-    slugs = [e.slug for e in out]
-    dup = {s for s in slugs if slugs.count(s) > 1}
-    if dup:
-        raise BadEntry(f"slug used twice: {', '.join(sorted(dup))}")
-    return sorted(out, key=lambda e: (e.meta["date"], e.slug), reverse=True)
+    found, problems = load_checked(directory, freeze_date)
+    if problems:
+        raise BadEntry(problems[0][1])
+    return found
 
 
 def summary(e: Experiment) -> dict:

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { awaitsDecision, filterExperiments, reproducibilityWords, statusCounts,
+import { awaitsDecision, filterExperiments, reproCounts, reproducibilityWords, reproKind, statusCounts,
          type ExperimentSummary } from "./experiments";
 
 const e = (slug: string, date: string, status: ExperimentSummary["status"], decision = "pending"): ExperimentSummary => ({
@@ -33,4 +33,24 @@ test("an entry whose decision is pending is flagged as waiting", () => {
   assert.equal(awaitsDecision(LIST[1]), true);
   assert.equal(awaitsDecision(LIST[0]), false);
   assert.equal(awaitsDecision(e("x", "2026-10-09", "running", "pending (launch after relabel)")), true);
+});
+
+test("an exploratory entry re-run on v1 reads as method history, not provisional", () => {
+  const w = reproducibilityWords("exploratory-pre-freeze", "v1");
+  assert.equal(w.provisional, false);
+  assert.match(w.label, /Method history · re-run on release v1/);
+  assert.match(w.note, /re-run's numbers are the ones that count/);
+  // A reproduced entry's own words don't change with the argument.
+  assert.equal(reproducibilityWords("reproduced-on-v1", "v1").label, "Reproducible on release v1");
+});
+
+test("the list filters to v1 entries, method history or still-exploratory ones", () => {
+  const rerun = { ...e("r", "2026-10-13", "done"), reproducibility: "reproduced-on-v1" };
+  const old = { ...e("o", "2026-10-09", "adopted", "Steve: yes"), reproduced_by: "r", reproduced_on: "v1" };
+  const list = [rerun, old, e("x", "2026-10-08", "done")];
+  assert.deepEqual([reproKind(rerun), reproKind(old), reproKind(list[2])], ["release", "history", "exploratory"]);
+  assert.deepEqual(reproCounts(list), { release: 1, history: 1, exploratory: 1 });
+  assert.deepEqual(filterExperiments(list, null, "release").map((x) => x.slug), ["r"]);
+  assert.deepEqual(filterExperiments(list, "adopted", "history").map((x) => x.slug), ["o"]);
+  assert.deepEqual(filterExperiments(list, "adopted", "release"), []);
 });

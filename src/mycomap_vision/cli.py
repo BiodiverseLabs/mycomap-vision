@@ -184,13 +184,14 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         picek_exclude=args.picek_exclude_benchmarks,
                                         dry_run=args.dry_run, ec2_check=args.ec2_check,
                                         release=_dataset_release(args),
-                                        allow_draft=args.allow_draft),
+                                        allow_draft=args.allow_draft, seed=args.seed,
+                                        public_trainable_only=args.public_trainable_only),
                      indent=2))
 
 
 # What a resumed run takes from the run itself, not from the command line.
 RUN_OWN_OPTIONS = ("backbones", "methods", "size", "test_days", "finetune", "sample_records",
-                   "picek", "picek_exclude_benchmarks")
+                   "picek", "picek_exclude_benchmarks", "seed", "public_trainable_only")
 
 
 def trainer_release(args):
@@ -233,7 +234,8 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_place_cells=args.picek_place_cells,
                           picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
-                          if args.resume else None, release=trainer_release(args))
+                          if args.resume else None, release=trainer_release(args),
+                          seed=args.seed, public_trainable_only=args.public_trainable_only)
     if watcher is not None:
         watcher.stop()
     print(json.dumps(out, indent=2))
@@ -270,6 +272,13 @@ def cmd_aws_launch_dataset_build(conn, args) -> None:
         no_loo_exclusions=args.no_loo_exclusions,
         manifest_path=Path(args.manifest) if args.manifest else None,
         instance_type=args.instance_type, max_hours=args.max_hours,
+        allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
+
+
+def cmd_aws_launch_dhash_index(args) -> None:
+    from . import aws_dataset
+    print(json.dumps(aws_dataset.launch_dhash_index(
+        args.id, instance_type=args.instance_type, max_hours=args.max_hours,
         allow_dirty=args.allow_dirty, allow_unpushed=args.allow_unpushed), indent=2))
 
 
@@ -427,6 +436,13 @@ def _dataset_release(args):
     print(f"dataset release {rel.id} (release_hash {rel.release_hash[:12]}, "
           f"reference_hash {rel.reference_hash[:12]})"
           + (" DRAFT" if rel.manifest["draft"] else ""))
+    if getattr(args, "errata", None):
+        from pathlib import Path
+
+        from . import errata
+        e = errata.read(Path(args.errata))
+        rel.use_errata(e)
+        print(f"erratum {e.file} (sha256 {e.sha256[:12]}): {len(e.keys):,} records left out")
     return rel
 
 
@@ -451,9 +467,57 @@ def cmd_dataset(args) -> None:
                      freeze_approved=args.freeze_approved, test_for=args.test_for,
                      test_ids=Path(args.ids) if args.ids else None, store_reader=reader,
                      loo_exclusions=Path(args.loo_exclusions) if args.loo_exclusions else None,
-                     no_loo_exclusions=args.no_loo_exclusions)
-        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits")},
-                         indent=2))
+                     no_loo_exclusions=args.no_loo_exclusions,
+                     base_dhash=Path(args.base_dhash) if args.base_dhash else None)
+        print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits",
+                                                "photos_identical_to_base_dropped",
+                                                "near_base")}, indent=2))
+    elif args.action == "dhash-index":
+        from . import dhash
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            index = dhash.build_index(rel, dr.default_store_reader())
+        finally:
+            rel.close()
+        path = dhash.save_index(index, Path(args.out) if args.out else dhash.index_path(args.id))
+        print(json.dumps({"release": args.id, "photos": index["photos"], "index": str(path),
+                          "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "errata":
+        from collections import Counter
+
+        from . import errata, taxonomy
+        reasons = dr.parse_list(args.reasons)
+        unknown = set(reasons) - set(errata.REASONS)
+        if unknown:
+            raise SystemExit(f"unknown reasons {sorted(unknown)}; known: {errata.REASONS}")
+        cache = taxonomy.cache_path()
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            rows = errata.mo_twin_rows(rel) if "mo_twin_as_inat" in reasons else []
+            if "nonfungal_label" in reasons:
+                tax = taxonomy.load(cache)
+                if tax is None or not tax.outside:
+                    raise SystemExit(f"{cache} holds no kingdoms yet: run `mv fetch-taxonomy`")
+                rows += errata.nonfungal_rows(rel, tax, {r["key"] for r in rows})
+            included = {r[0] for r in rel.db.execute("select record_key from records "
+                                                     "where included = 1")}
+            split = dict(rel.db.execute("select record_key, split from records"))
+        finally:
+            rel.close()
+        path = errata.write(rows, Path(args.out))
+        print(json.dumps({
+            "release": args.id, "records": len(rows),
+            "by_reason": dict(Counter(r["reason"] for r in rows)),
+            "included_by_reason_split": dict(Counter(
+                f"{r['reason']}/{split.get(r['key'])}" for r in rows if r["key"] in included)),
+            "taxonomy_cache_sha256": dr.sha256_file(cache)
+            if "nonfungal_label" in reasons else None,
+            "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "pull-dhash-index":
+        from . import aws, aws_dataset
+        path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
+        print(json.dumps({"release": args.id, "index": str(path),
+                          "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "verify":
         print(json.dumps(dr.verify(args.id, root, photos=args.photos), indent=2))
     elif args.action == "derive":
@@ -617,15 +681,43 @@ def cmd_benchmark_export(conn, args) -> None:
     """A held-out report's aggregates as JSON, for mv benchmark-import on the server box."""
     from pathlib import Path
     from . import benchmark_io
-    path = Path(args.report)
-    report = json.loads(path.read_text(encoding="utf-8"))
-    text = json.dumps(benchmark_io.export_summary(report, path.name, args.reproducibility),
-                      indent=1)
+    comparison = getattr(args, "comparison", None)
+    if bool(getattr(args, "report", None)) == bool(comparison):
+        raise SystemExit("give --report (a held-out report) or --comparison (on a release)")
+    if comparison:
+        try:
+            payload = benchmark_io.export_comparison(conn, comparison,
+                                                     getattr(args, "split", "val"),
+                                                     sealed=getattr(args, "sealed", False))
+        except ValueError as e:
+            raise SystemExit(f"not exported: {e}")
+    else:
+        path = Path(args.report)
+        report = json.loads(path.read_text(encoding="utf-8"))
+        payload = benchmark_io.export_summary(report, path.name, args.reproducibility)
+    text = json.dumps(payload, indent=1)
     if args.out:
         Path(args.out).write_text(text, encoding="utf-8")
         print(f"wrote {args.out}", file=sys.stderr)
     else:
         print(text)
+
+
+def cmd_experiments_check(args) -> int:
+    """Check every experiment entry against the registry's rules; exit 1 on any bad one.
+    Run it in the private research checkout before committing an entry: the site skips a
+    bad entry (and logs it) rather than failing the whole list."""
+    from pathlib import Path
+    from . import experiments
+    directory = Path(args.dir) if args.dir else experiments.EXPERIMENTS_DIR
+    if not directory.is_dir():
+        print(f"no experiments folder at {directory}", file=sys.stderr)
+        return 1
+    found, problems = experiments.load_checked(directory)
+    for name, why in problems:
+        print(f"BAD {name}: {why}")
+    print(f"{len(found)} entries ok, {len(problems)} bad ({directory})")
+    return 1 if problems else 0
 
 
 def cmd_benchmark_import(conn, args) -> None:
@@ -704,6 +796,24 @@ def cmd_fungus_gate(conn, args) -> None:
                 raise SystemExit("embed needs --list (key<TAB>path per line)")
             n = tune.embed_list(args.backbone, Path(args.list), Path(args.out))
             print(f"{n} photos embedded into {args.out}")
+            return
+        rel = _dataset_release(args)
+        if rel is not None:
+            # Paper E10: re-tuned on a release (val decides), Open Images negatives only.
+            missing = [o for o in ("dev", "ood", "ood_manifest", "negatives")
+                       if not getattr(args, o)]
+            if missing:
+                raise SystemExit("tune --release needs " + ", ".join(
+                    "--" + m.replace("_", "-") for m in missing))
+            from .embed import load_embeddings
+            base = args.on_served or "bioclip-2"
+            report = tune.tune_release(rel, Path(args.dev), Path(args.ood),
+                                       Path(args.ood_manifest), Path(args.negatives),
+                                       Path(args.out), load_embeddings(conn, base),
+                                       Path(args.text_from) if args.text_from else None,
+                                       args.on_served)
+            print(json.dumps(report["chosen"], indent=2))
+            print(f"gate and report.json in {args.out}")
             return
         missing = [o for o in ("dev", "ood", "ood_manifest", "exclude") if not getattr(args, o)]
         if missing:
@@ -992,6 +1102,54 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_backbone_screen(conn, args) -> None:
+    """The frozen-backbone screen on a release's seeded subset (backbone_screen.py):
+    subset (drawn once), embed (only the subset's photos a backbone lacks), score."""
+    from . import backbone_screen as bs
+    rel = _dataset_release(args)
+    if rel is None:
+        raise SystemExit("backbone-screen needs --release <id>")
+    out = bs.results_dir(rel.id)
+    if args.action == "subset":
+        doc = bs.make_subset(rel, out, seed=args.seed,
+                             reference_records=args.reference_records, cap=args.cap,
+                             queries=args.queries)
+        print(json.dumps({"subset": str(out / "subset.json"), "species": len(doc["species"]),
+                          "species_sha256": doc["species_sha256"],
+                          "references": len(doc["references"]), "photos": len(doc["photos"]),
+                          "queries": {h: q["by_band"] for h, q in doc["queries"].items()},
+                          "errata": doc["dataset_release"].get("errata")}, indent=2))
+        return
+    subset = bs.load_subset(rel.id)
+    backbones = _split(args.backbones)
+    if args.action == "embed":
+        print(json.dumps(bs.embed(conn, subset, backbones, batch_size=args.batch_size),
+                         indent=2))
+    else:
+        print(json.dumps(bs.score(conn, rel, subset, backbones, _split(args.methods)),
+                         indent=2))
+
+
+def cmd_ood_set(conn, args) -> None:
+    """Build the sealed not-a-fungus test set (oodset.py): CC0 / CC BY photos from sources
+    the earlier gate never saw, with licences, sources and sha256s in manifest.csv."""
+    from pathlib import Path
+
+    from . import oodset
+    rel = _dataset_release(args)
+    labels = set()
+    if rel is not None:
+        for sp, g in rel.db.execute("select species, genus from records where included = 1"):
+            labels.update(x for x in (sp, g) if x)
+    # Every iNat observation that is a MycoMap record (its id at iNat), never drawn.
+    mycomap = {str(r[0]) for r in conn.execute(
+        "select coalesce(nullif(source_id, ''), observation_id) from records "
+        "where source = 'inat'")}
+    print(json.dumps(oodset.build(Path(args.out), Path(args.openimages) if args.openimages
+                                  else None, [Path(p) for p in _split(args.exclude)],
+                                  mycomap, labels), indent=2))
+
+
 def cmd_external(conn, args) -> None:
     """Published fungi classifiers as outside baselines (replications/fungitastic/published*.py)."""
     from pathlib import Path
@@ -1155,17 +1313,119 @@ def loo_options(p) -> None:
                    help="instead of the list: Steve's explicit word that there are none")
 
 
-def release_options(p) -> None:
+def release_options(p, errata: bool = True) -> None:
     p.add_argument("--release", metavar="ID",
                    help="read records, labels, photos and splits from this dataset release "
                         "(docs/dataset-release.md), not the live manifest")
     p.add_argument("--allow-draft", action="store_true",
                    help="accept a draft (dry-run) release: exploratory only")
+    if errata:                # not yet on the AWS launchers: the instance would not apply it
+        p.add_argument("--errata", metavar="TSV",
+                       help="the release's erratum (errata.py): leave its records out of every "
+                            "split; its sha256 goes into the outputs")
+
+
+def cmd_paper_inat_cv(args) -> None:
+    """E14: iNat's computer vision on a release's finds (photos, public point, date)."""
+    from . import dataset_release as dr
+    from . import expert_ids as E
+    from . import inat_cv
+    from . import paper_inat_cv as P
+    from datetime import datetime, timezone
+    rel = dr.load_release(args.release, allow_draft=args.allow_draft)
+    d = P.work_dir(args.name)
+    ids_path = d / "ids.txt"
+    if args.action == "sample":
+        if ids_path.exists() and not args.redo:
+            raise SystemExit(f"{ids_path} exists; a drawn sample is never redrawn (--redo)")
+        pool = [r["record_key"] for r in rel.db.execute(
+            "select record_key, split from records where included = 1 order by record_key")
+            if not args.split or r["split"] == args.split]
+        ids = P.draw_fallback(pool, args.n, args.seed) if args.n else pool
+        print(json.dumps(E.write_ids(ids_path, ids, {"set": args.name, **rel.cite(),
+                                                     "seed": args.seed, "n": args.n,
+                                                     "split": args.split, "pool": len(pool)}),
+                         indent=2))
+        return
+    ids = E.read_ids(ids_path)[:args.limit] if args.limit else E.read_ids(ids_path)
+    taxa = E.load_open_taxa(config.DATA_DIR / E.OPEN_TAXA)
+    by_name = E.name_index(taxa)
+    recs = {r["record_key"]: dict(r) for r in rel.db.execute("select * from records")}
+    truths = {k: E.truth_taxa(recs[k], by_name, taxa) for k in ids}
+    client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "paper-comparisons" /
+                                "inat-cv-cache", interval=args.interval,
+                                jwt_path=inat_cv.JWT_FILE)
+    if rel.manifest.get("test_for") and not args.inat_model:
+        raise SystemExit("record the iNat CV model version first: --inat-model '<version, date>'")
+    model = {"version": args.inat_model, "noted_at": E.utc(datetime.now(timezone.utc).isoformat())}         if args.inat_model else None
+    meta = P.run(rel, args.name, ids, client, lambda pk: rel.derive(pk, "original").body, truths,
+                 model=model)
+    lines = [json.loads(l) for l in (d / "finds.jsonl").open(encoding="utf-8")]
+    print(json.dumps({**meta, "summary": P.summarise(lines)}, indent=2))
+
+
+def cmd_expert_ids(args) -> None:
+    """E31: iNat identifications made before the DNA was visible, scored against it."""
+    from . import dataset_release as dr
+    from . import expert_ids as E
+    rel = dr.load_release(args.release, allow_draft=args.allow_draft)
+    d = E.work_dir(args.name)
+    ids_path = d / "ids.txt"
+    if args.action == "sample":
+        if ids_path.exists() and not args.redo:
+            raise SystemExit(f"{ids_path} exists; a drawn sample is never redrawn (--redo)")
+        pool = [r["source_id"] for r in E.inat_records(rel)
+                if not args.split or r["split"] == args.split]
+        ids = E.draw_sample(pool, args.n, args.seed) if args.n else sorted(pool, key=lambda s: (len(s), s))
+        print(json.dumps(E.write_ids(ids_path, ids, {"set": args.name, **rel.cite(),
+                                                     "seed": args.seed, "n": args.n,
+                                                     "split": args.split, "pool": len(pool)}),
+                         indent=2))
+        return
+    ids = E.read_ids(ids_path)
+    client = E.HistoryClient(E.cache_dir(), max_calls=args.max_calls)
+    if args.limit:
+        ids = ids[:args.limit]
+    d_our, d_val = d / "our_dates.csv", d / "validators.csv"
+    if args.action == "dna-dates":
+        print(json.dumps(E.dna_dates(
+            args.name, ids, args.sql_dir or config.RESEARCH_DIR / "paper" / "e31" / "sql",
+            config.required("MV_ORG_SQL_SSH_HOST", "the read-only .org SQL route"),
+            args.com_host or config.required("MV_COM_SQL_SSH_HOST",
+                                             "the read-only .com SQL route")), indent=2))
+    elif args.action == "resolve-logins":
+        print(json.dumps({"validator_rows_given_an_id": E.resolve_logins(client, args.name)}))
+    elif args.action == "fetch":
+        try:
+            print(json.dumps(E.fetch(client, ids), indent=2))
+        except E.CallBudgetSpent as e:
+            print(f"{e}; rerun to continue (answers are cached)")
+    elif args.action == "snapshot":
+        print(json.dumps(E.build_snapshot(client, ids, d / "snapshot.jsonl.gz",
+                                          {"set": args.name, **rel.cite()}), indent=2))
+    elif args.action == "score":
+        push = {int(x) for x in (args.push_accounts or "").split(",") if x.strip()}
+        our = args.our_dates or (d_our if d_our.exists() else None)
+        val = args.validators or (d_val if d_val.exists() else None)
+        summary = E.score(rel, args.name, client, our, val, push,
+                          config.DATA_DIR / "secrets" / "e31_identifier_salt.txt")
+        print(json.dumps({k: summary[k] for k in ("finds", "tier1", "tier2")}, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_in = sys.argv[1:] if argv is None else list(argv)
+    if args_in[:1] == ["learning-curve"]:
+        # Its own command line (release / run / score / report); it reads the manifest and
+        # stored embeddings only.
+        from . import learning_curve
+        learning_curve.main(args_in[1:])
+        return 0
     parser = argparse.ArgumentParser(prog="mv", description="MycoMap Vision data tools")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("learning-curve", add_help=False,
+                   help="accuracy against reference records per species (release / run / "
+                        "score / report; see mv learning-curve -h)")
 
     sub.add_parser("export-records", help="pull green records from mycomap.org (read-only)")
 
@@ -1277,7 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
                         "exactly what the Vision models leave out (sealed benchmarks), so "
                         "both train on the same records; all = every benchmark's records. "
                         "With --release the release's splits decide, and a mismatch is refused")
-    release_options(p)        # the Picek stage trains on it; shipped without private.sqlite
+    release_options(p, errata=False)  # the Picek stage trains on it; shipped without private.sqlite
     p.add_argument("--dry-run", action="store_true",
                    help="check and build everything locally (code archive, instance script, "
                         "manifest copy, label snapshot, EC2 request) and send nothing")
@@ -1301,6 +1561,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="continue that run (stopped, interrupted or killed) under its own run "
                         "id: its finished stages are restored, only the rest run; it keeps "
                         "its own backbones, fine-tunes, methods, size and manifest")
+    p.add_argument("--seed", type=int, default=0,
+                   help="the fine-tune's random seed (default 0; a second seed measures the "
+                        "spread between runs)")
+    p.add_argument("--public-trainable-only", action="store_true",
+                   help="with --release and --finetune: train only on photos the released "
+                        "weights may learn from (CC including NC, or permission granted); "
+                        "the run records the policy and the photos by licence class")
     p.set_defaults(parser_defaults={k: p.get_default(k) for k in RUN_OWN_OPTIONS})
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
@@ -1328,6 +1595,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--release-manifest", help="sha256 of its MANIFEST.json at launch")
     p.add_argument("--allow-draft", action="store_true")
     p.add_argument("--sample-records", type=int)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--public-trainable-only", action="store_true")
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
                         "finished; set by the launcher to leave time before the hard limit")
@@ -1370,7 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude-benchmarks", default="match", choices=["match", "all"],
                    help="match (default): leave out what the Vision models leave out "
                         "(sealed benchmarks); all: every benchmark's records")
-    release_options(p)
+    release_options(p, errata=False)      # reads the release by id (retrain.py), not here
     p.add_argument("--cache-px", type=int,
                    help="resize the training photos once to this shorter side on local disk "
                         "(e.g. 440) and train from those; off by default")
@@ -1412,6 +1681,15 @@ def main(argv: list[str] | None = None) -> int:
                                       "snapshot of the live manifest now")
     p.add_argument("--instance-type", default="c7i.2xlarge")
     p.add_argument("--max-hours", type=float, default=6)
+    p.add_argument("--allow-dirty", action="store_true")
+    p.add_argument("--allow-unpushed", action="store_true")
+
+    p = sub.add_parser("aws-launch-dhash-index",
+                       help="write a release's dHash index (every included photo) to s3 on a "
+                            "self-terminating instance in the bucket's region")
+    p.add_argument("id", help="the release, e.g. v1 (its kept copy must be in s3)")
+    p.add_argument("--instance-type", default="c7i.2xlarge")
+    p.add_argument("--max-hours", type=float, default=4)
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--allow-unpushed", action="store_true")
 
@@ -1502,6 +1780,49 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
     p.add_argument("--batch-size", type=int, default=16)
 
+    p = sub.add_parser("paper-inat-cv", help="(paper E14) iNat's computer vision on a release's "
+                                             "finds: every photo at <= 1024 px, the public point "
+                                             "and date (needs data/secrets/inat_jwt.txt)")
+    p.add_argument("action", choices=["sample", "run"])
+    p.add_argument("--release", default="v1")
+    p.add_argument("--allow-draft", action="store_true")
+    p.add_argument("--name", required=True, help="the set's folder under "
+                   "data/paper-comparisons/e14/, e.g. v1-val-pilot or v1-test")
+    p.add_argument("--n", type=int, help="sample: how many (default: every included find)")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--split", help="sample: only this split (val for the pilot)")
+    p.add_argument("--redo", action="store_true")
+    p.add_argument("--limit", type=int, help="run: only the first N finds (tests)")
+    p.add_argument("--interval", type=float, default=7.5, help="run: seconds between iNat "
+                   "requests (default 7.5: 8 a minute)")
+    p.add_argument("--inat-model", help="run: iNat's CV model version and release date, as "
+                   "iNat states it (required on a test release)")
+
+    p = sub.add_parser("expert-ids", help="(paper E31) iNat identifications made before the DNA "
+                                          "was visible, by high-volume identifiers, against "
+                                          "the DNA name; public API, no token")
+    p.add_argument("action", choices=["sample", "dna-dates", "fetch", "resolve-logins",
+                                      "snapshot", "score"])
+    p.add_argument("--release", default="v1")
+    p.add_argument("--allow-draft", action="store_true")
+    p.add_argument("--name", required=True, help="the set's folder under "
+                   "data/paper-comparisons/e31/, e.g. v1-random10000 or v1-test")
+    p.add_argument("--n", type=int, help="sample: how many (default: every iNat record)")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--split", help="sample: only this split")
+    p.add_argument("--redo", action="store_true", help="sample: draw again (never on a "
+                   "sample already used)")
+    p.add_argument("--limit", type=int, help="fetch/snapshot only the first N ids (tests)")
+    p.add_argument("--max-calls", type=int, help="stop after this many iNat requests")
+    p.add_argument("--our-dates", type=Path, help="score: CSV observation_id,source,at from "
+                   ".org/.com (sequence created, name push)")
+    p.add_argument("--validators", type=Path, help="score: CSV observation_id,inat_user_id")
+    p.add_argument("--push-accounts", help="score: iNat user ids of MycoMap's push accounts")
+    p.add_argument("--sql-dir", type=Path, help="dna-dates: the SQL templates (default: "
+                   "paper/e31/sql in the research checkout)")
+    p.add_argument("--com-host", help="dna-dates: ssh host of the read-only .com SQL route "
+                   "(default MV_COM_SQL_SSH_HOST)")
+
     p = sub.add_parser("inat-baseline",
                        help="add iNat's computer vision to a comparison, on the same records "
                             "(needs a 24-hour token in data/secrets/inat_jwt.txt)")
@@ -1553,15 +1874,26 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("scoreboard-import", help="(server box) add rows from scoreboard-export "
                        "to a comparison this machine has; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
-    p = sub.add_parser("benchmark-export", help="a held-out report's aggregates (no record "
-                       "ids, names, observers or places) for the server box's Models page")
-    p.add_argument("--report", required=True, help="a report-*.json from mv heldout report")
+    p = sub.add_parser("benchmark-export", help="a held-out report's, or a release "
+                       "comparison's, aggregates (no record ids, names, observers or places) "
+                       "for the server box's Results page")
+    p.add_argument("--report", help="a report-*.json from mv heldout report")
+    p.add_argument("--comparison", help="a comparison on a frozen dataset release (mv compare "
+                   "--release); its reproducibility is reproduced-on-<release>")
+    p.add_argument("--split", choices=("val", "test"), default="val",
+                   help="with --comparison: val (the release's own) or test (a test release)")
+    p.add_argument("--sealed", action="store_true",
+                   help="with --comparison: a sealed test release, scored once")
     p.add_argument("--out", help="write to this file (default: standard output)")
     p.add_argument("--reproducibility", default="exploratory-pre-freeze",
                    help="exploratory-pre-freeze (default) or reproduced-on-<release>")
     p = sub.add_parser("benchmark-import", help="(server box) add a benchmark-export to the "
                        "site; '-' reads standard input")
     p.add_argument("file", help="the export, or - for standard input")
+    p = sub.add_parser("experiments-check", help="check the experiment registry's entries "
+                       "(the private research checkout) before committing; exit 1 on any bad one")
+    p.add_argument("dir", nargs="?", help="the experiments folder (default: the research "
+                                         "checkout's experiments/)")
     sub.add_parser("models", help="known backbones, photos embedded, methods")
 
     p = sub.add_parser("fungus-gate", help="the not-a-fungus gate in front of Identify: build "
@@ -1599,6 +1931,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="which scores make p(fungus); probe and both need --probe")
     p.add_argument("--tuned-on", default="", help="where the thresholds came from (provenance)")
     p.add_argument("--note", default="")
+    release_options(p)            # with --errata: its records are never probe positives
 
     p = sub.add_parser("serve", help="run the API for the frontend")
     p.add_argument("--host", default="127.0.0.1")
@@ -1646,7 +1979,23 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--test-for", metavar="RELEASE",
                    help="a test release for this one: only --ids, all 'test', disjoint from it")
     q.add_argument("--ids", help="CSV with observation_id (or record_key): the test records")
+    q.add_argument("--base-dhash", help="a test release: the --test-for release's dHash index "
+                                        "(`mv dataset pull-dhash-index <id>`); flags near-copies")
     loo_options(q)
+    q = dsub.add_parser("dhash-index", help="dHash every included photo of a release, here "
+                                            "(a large release: mv aws-launch-dhash-index)")
+    q.add_argument("id")
+    q.add_argument("--out", help="default data/research-release-extras/<id>/dhash-index.npz")
+    q = dsub.add_parser("pull-dhash-index", help="download a release's dHash index from s3 "
+                                                 "and check its sha256")
+    q.add_argument("id")
+    q = dsub.add_parser("errata", help="write a release's erratum TSV (errata.py): MO finds "
+                                       "held as iNat records, labels that are no fungus")
+    q.add_argument("id")
+    q.add_argument("--out", required=True, help="the TSV to write (never overwritten)")
+    q.add_argument("--reasons", default="mo_twin_as_inat,nonfungal_label",
+                   help="which rules (default both; mo_twin_as_inat alone remakes v1's first "
+                        "erratum)")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
@@ -1806,6 +2155,26 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--redo", action="store_true", help="replace answers stored before")
     release_options(q)
 
+    p = sub.add_parser("backbone-screen", help="frozen backbones on a release's seeded "
+                                               "subset: subset, embed, score "
+                                               "(backbone_screen.py)")
+    p.add_argument("action", choices=["subset", "embed", "score"])
+    release_options(p)
+    p.add_argument("--backbones", default="bioclip-2",
+                   help="comma list (embed, score)")
+    p.add_argument("--methods", default="nearest,species-mean,nearest+mean")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--reference-records", type=int, default=16000)
+    p.add_argument("--cap", type=int, default=50, help="train records per species, at most")
+    p.add_argument("--queries", type=int, default=2000, help="val queries per half")
+    p.add_argument("--batch-size", type=int, default=16)
+
+    p = sub.add_parser("ood-set", help="build the sealed not-a-fungus test set (oodset.py)")
+    release_options(p)
+    p.add_argument("--out", required=True)
+    p.add_argument("--openimages", help="folder with Open Images V5 train label and image CSVs")
+    p.add_argument("--exclude", default="", help="comma list of earlier sets' manifests")
+
     p = sub.add_parser("external", help="published fungi classifiers (DF20, FungiTastic) as "
                                         "outside baselines (replications/fungitastic/)")
     xsub = p.add_subparsers(dest="action", required=True)
@@ -1880,6 +2249,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "aws-dataset-build-job":   # the build reads a private copy only
         cmd_aws_dataset_build_job(args)
         return 0
+    if args.command == "expert-ids":          # reads a release and iNat; no manifest
+        cmd_expert_ids(args)
+        return 0
+    if args.command == "paper-inat-cv":
+        cmd_paper_inat_cv(args)
+        return 0
+    if args.command == "aws-launch-dhash-index":  # reads the release's kept copy, no manifest
+        cmd_aws_launch_dhash_index(args)
+        return 0
+    if args.command == "experiments-check":   # the private registry only: no manifest
+        return cmd_experiments_check(args)
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0
@@ -1951,6 +2331,8 @@ def main(argv: list[str] | None = None) -> int:
         "contributors": cmd_contributors,
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
+        "backbone-screen": cmd_backbone_screen,
+        "ood-set": cmd_ood_set,
         "external": cmd_external,
     }[args.command]
     handler(conn, args)

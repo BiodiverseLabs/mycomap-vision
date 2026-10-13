@@ -212,6 +212,8 @@ export interface ScoreRun {
   species_top1_first_photo: number | null;
   code_version: string | null;
   created_at: string;
+  /** The frozen dataset release the run was measured on; null for the live data (or a draft). */
+  dataset_release?: string | null;
 }
 
 export type BucketScores = Record<string, { n: number; top1: number; top5: number }>;
@@ -311,6 +313,11 @@ export interface ProspectiveModel {
   genus_top1: number | null;
   species_top1: number | null;
   mean_species_confidence: number | null;
+  /** Predictions whose records were first validated after the paper's sealed-test cut:
+   *  counted, but how they fared stays hidden until the test is opened. */
+  sealed?: number;
+  model_version?: string | null;
+  serving_release?: string | null;
 }
 
 export interface Me {
@@ -330,14 +337,13 @@ export const api = {
     const body = await res.json().catch(() => ({}));
     return typeof body.next === "string" ? body.next : "/";
   },
-  prospective: () => getJson<{ models: ProspectiveModel[] }>("/api/prospective"),
+  prospective: () => getJson<{ models: ProspectiveModel[]; sealed_after?: string | null }>("/api/prospective"),
   /** Held-out benchmark results imported on the server (aggregates only). */
   benchmarks: () => getJson<{ benchmarks: PublishedBenchmark[] }>("/api/benchmarks"),
   /** The experiment registry, for signed-in members only. */
-  experiments: () => getJson<{ experiments: ExperimentSummary[] }>("/api/experiments"),
+  /** `skipped`: entries left out because they break the registry's rules (the server logs which). */
+  experiments: () => getJson<{ experiments: ExperimentSummary[]; skipped?: number }>("/api/experiments"),
   experiment: (slug: string) => getJson<Experiment>(`/api/experiments/${encodeURIComponent(slug)}`),
-  /** The paper draft (Markdown), for signed-in members only. */
-  paper: () => getJson<{ markdown: string }>("/api/paper"),
   models: () => getJson<ModelsInfo>("/api/models"),
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),

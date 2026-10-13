@@ -97,7 +97,7 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     cache beside the manifest answers it (taxonomy.py), else .org's. A record left
     with no label at any rank ("Unknown", "Agaricales") is left out, and so is a record
     whose DNA name is a guest of the fungus in the photo (a yeast inside a puffball;
-    guests.py).
+    guests.py), or names no fungus at all (a bee, a host plant: taxonomy.nonfungal).
 
     A record frozen into a benchmark (holdouts.py) is never loaded here, even if the
     records table holds it: no reference set, comparison, fine-tune or served index
@@ -154,7 +154,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
             respelled = label != clean(name)
             # A merged label names its own genus: the genus column may be as old as the spelling.
             lab = taxonomy.labels_for(label, genus, family, respelled, tax)
-            if not (lab.species or lab.genus or lab.family) or guests.excluded(lab.genus):
+            if not (lab.species or lab.genus or lab.family) or guests.excluded(lab.genus) \
+                    or taxonomy.nonfungal(tax, lab.genus):
                 unlabelled.add(oid)
                 continue
             rec = recs[oid] = Record(oid, lab.species, lab.genus, lab.family,
@@ -820,9 +821,14 @@ def scoreboard(conn: sqlite3.Connection, comparison_id: str | None = None) -> li
     if comparison_id:
         where, params = "where comparison_id = ?", (comparison_id,)
     rows = conn.execute(
-        f"select {', '.join(SCOREBOARD_COLUMNS)} from eval_runs {where} "
-        "order by comparison_id desc, species_top1 desc", params).fetchall()
-    return [dict(zip(SCOREBOARD_COLUMNS, r)) for r in rows]
+        f"select {', '.join(SCOREBOARD_COLUMNS)}, "
+        "json_extract(report_json, '$.dataset_release.dataset_release'), "
+        "json_extract(report_json, '$.dataset_release.draft') from eval_runs "
+        f"{where} order by comparison_id desc, species_top1 desc", params).fetchall()
+    # dataset_release: the frozen release a run was measured on (None: the live manifest, or a
+    # draft), so the Results page can put pre-release comparisons under development history.
+    return [{**dict(zip(SCOREBOARD_COLUMNS, r)),
+             "dataset_release": None if r[-1] else r[-2]} for r in rows]
 
 
 def run_report(conn: sqlite3.Connection, run_id: int) -> dict | None:

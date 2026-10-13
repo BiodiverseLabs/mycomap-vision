@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, identifyGate, LIKELY_COPY, longDate, modelName, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsPaper } from "./publicView";
+import { coverageWords, headline, identifyGate, LIKELY_COPY, longDate, modelName, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -101,15 +101,15 @@ test("the line is given up after its tries, and the busy answer is shown then", 
   assert.equal(res.status, 503);
 });
 
-test("the Paper in Progress tab shows only to signed-in members", () => {
+test("members-only pages show only to signed-in members", () => {
   const me = (signin: Me["signin"], user: Me["user"]): Me => ({ signin, user });
   const someone = { id: "7", name: "Ann" };
-  assert.equal(showsPaper(me("identify", null)), false, "open site, signed out");
-  assert.equal(showsPaper(me("all", null)), false);
-  assert.equal(showsPaper(me("identify", someone)), true);
-  assert.equal(showsPaper(me("all", someone)), true);
-  assert.equal(showsPaper(me("off", null)), true, "local site without sign-in");
-  assert.equal(showsPaper(undefined), false, "not known yet");
+  assert.equal(showsMembersPages(me("identify", null)), false, "open site, signed out");
+  assert.equal(showsMembersPages(me("all", null)), false);
+  assert.equal(showsMembersPages(me("identify", someone)), true);
+  assert.equal(showsMembersPages(me("all", someone)), true);
+  assert.equal(showsMembersPages(me("off", null)), true, "local site without sign-in");
+  assert.equal(showsMembersPages(undefined), false, "not known yet");
 });
 
 test("dates read as written, with no time zone shift", () => {

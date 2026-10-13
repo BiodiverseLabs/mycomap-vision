@@ -50,12 +50,21 @@ INDEX_TABLES = ("embeddings", "embed_runs", "finetunes", "eval_runs")
 
 # --- how long a run takes ------------------------------------------------------
 # Photos per second at LARGE photos on the trainer instance: bioclip-2 measured on a
-# g6.xlarge (1 L4, 4 vCPU, JPEG decoding the limit) in run 20261007-165400 (embed
-# 108.3/s, its fine-tune embedded at 116.1/s; fine-tuning 586,512 photos x 2 epochs in
-# 19,822 s = 59.2/s). dinov3 is still the laptop's speed. Estimates multiply the time by
-# L4_FACTOR as a margin (a bigger release, a slower day for S3 reads).
-EMBED_RATES = {"bioclip-2": 108.0, "dinov3-l16-512": 18.8}
-FINETUNE_RATES = {"bioclip-2": 59.0}   # photos seen per second while training
+# g6.xlarge (1 L4, 4 vCPU, JPEG decoding the limit) in the v1 run 20261013-003428 (embed
+# 682,024 photos in 5,569.5 s = 122.5/s; fine-tuning 19,524 steps x 64 photos in 17,680.9 s
+# = 70.7/s; the 2026-10-07 run had 108.3/s and 59.2/s on a smaller release). dinov3 is
+# still the laptop's speed. Estimates multiply the time by L4_FACTOR as a margin (a bigger
+# release, a slower day for S3 reads).
+EMBED_RATES = {"bioclip-2": 122.5, "dinov3-l16-512": 18.8}
+FINETUNE_RATES = {"bioclip-2": 70.7}   # photos seen per second while training
+# BioCLIP 2 at a larger input (plan E24): the 224 px rates divided by the cost per photo
+# measured on the laptop's RTX 4070 (2026-10-13, synthetic batches of 16, bf16 training of
+# the last 4 blocks): (embed, fine-tune) x(2.48, 2.27) at 336 and x(5.03, 4.20) at 448. The
+# L4 run at 224 may be loader-bound, so this can only overestimate; replace with the run's own.
+INPUT_SIZE_COST = {"bioclip-2-336": (2.48, 2.27), "bioclip-2-448": (5.03, 4.20)}
+for _alias, (_embed, _train) in INPUT_SIZE_COST.items():
+    EMBED_RATES[_alias] = round(EMBED_RATES["bioclip-2"] / _embed, 1)
+    FINETUNE_RATES[_alias] = round(FINETUNE_RATES["bioclip-2"] / _train, 1)
 # The Picek replication (retrain.py), training photos per second on the instance. NOT yet
 # measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
 # (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).
@@ -148,30 +157,56 @@ def plan_stages(backbones: list[str], finetune: list[str] | None, run_id: str,
     return stages
 
 
+def checkpoint_epochs(doc: dict) -> dict[str, int]:
+    """Epochs a run's Picek stages already hold in their block checkpoints (progress.json),
+    by stage name: a resumed epoch-rule run trains only the rest."""
+    return {s["name"]: int(s["checkpoint_epoch"]) for s in doc.get("stages") or []
+            if s.get("kind") == "picek" and s.get("checkpoint_epoch")}
+
+
 def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
-             factor: float = L4_FACTOR) -> dict:
+             factor: float = L4_FACTOR, epochs_done: dict[str, int] | None = None) -> dict:
     """Hours a run should take: photos / rate per stage (EMBED_RATES, FINETUNE_RATES,
     laptop-measured) times `factor`, plus setup and the comparison. Fine-tuning counts
-    every photo `epochs` times (it trains on the reference records only, a little less)."""
+    every photo `epochs` times (it trains on the reference records only, a little less).
+    `epochs_done` (checkpoint_epochs): epochs a resumed Picek stage need not train again."""
     if epochs is None:
         from .finetune import FinetuneConfig
         epochs = FinetuneConfig.epochs
     rows, total = [], SETUP_HOURS + COMPARE_HOURS
+    rule_less = {"min": 0.0, "expected": 0.0}     # hours an epoch rule may save off `total`
     for s in stages:
         key = s.base or s.name
         if s.kind == "picek":
-            from .replications.fungitastic.retrain import parse_spec
+            from .replications.fungitastic.retrain import cache_of, epoch_rule_of, parse_spec
             preset, n_epochs = parse_spec(s.spec)
-            from .replications.fungitastic.retrain import cache_of
+            rule = epoch_rule_of(s.spec)
             cached = cache_of(s.spec)
             rate = picek_rate(preset, bool(cached))
-            hours = photos * n_epochs / (rate or UNMEASURED_FINETUNE_RATE) / 3600
+            per_epoch = photos / (rate or UNMEASURED_FINETUNE_RATE) / 3600
+            done = min((epochs_done or {}).get(s.name, 0), n_epochs)
+            hours = per_epoch * (n_epochs - done)
             if cached:
                 hours += photos / PICEK_CACHE_BUILD_RATE / 3600
             total += hours
-            rows.append({"stage": f"{s.kind} {s.name} ({n_epochs} epochs)",
-                         "photos_per_second": rate or UNMEASURED_FINETUNE_RATE,
-                         "measured": False, "hours": round(hours, 1)})
+            row = {"stage": f"{s.kind} {s.name} ({n_epochs} epochs)",
+                   "photos_per_second": rate or UNMEASURED_FINETUNE_RATE,
+                   "measured": False, "hours": round(hours, 1)}
+            if rule is not None:
+                expected = min(rule.max_epochs, rule.min_epochs + EXPECTED_RULE_BLOCKS * rule.block)
+                short = {"min": n_epochs - max(rule.min_epochs, done),
+                         "expected": n_epochs - max(expected, done)}
+                row.update(stage=f"{s.kind} {s.name} ({rule.min_epochs}-{rule.max_epochs} "
+                                 f"epochs, epoch rule"
+                                 + (f"; {done} done in its checkpoint" if done else "") + ")",
+                           epoch_hours=round(per_epoch, 2), epochs_done=done,
+                           epochs={"min": rule.min_epochs, "expected": expected,
+                                   "max": rule.max_epochs},
+                           hours_min=round(hours - per_epoch * short["min"], 1),
+                           hours_expected=round(hours - per_epoch * short["expected"], 1))
+                rule_less["min"] += per_epoch * short["min"]
+                rule_less["expected"] += per_epoch * short["expected"]
+            rows.append(row)
             continue
         if s.kind == "embed" and key.startswith("picek-"):
             hours = photos / 150.0 / 3600 * factor        # eval at 384 px, loader-bound
@@ -191,9 +226,18 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
         total += hours
         rows.append({"stage": f"{s.kind} {s.name}", "photos_per_second": rate or fallback,
                      "measured": rate is not None, "hours": round(hours, 1)})
-    return {"photos": photos, "factor": factor, "stages": rows,
-            "setup_hours": SETUP_HOURS, "compare_hours": COMPARE_HOURS,
-            "total_hours": round(total, 1)}
+    out = {"photos": photos, "factor": factor, "stages": rows,
+           "setup_hours": SETUP_HOURS, "compare_hours": COMPARE_HOURS,
+           "total_hours": round(total, 1)}           # the most: --max-hours is checked on it
+    if any("epochs" in r for r in rows):
+        out["total_hours_min"] = round(total - rule_less["min"], 1)
+        out["total_hours_expected"] = round(total - rule_less["expected"], 1)
+    return out
+
+
+# The "expected" length of an epoch-rule run, for the estimate only: the minimum plus this
+# many blocks. A guess (no run of ours has shown where macro-F1 flattens); the rule decides.
+EXPECTED_RULE_BLOCKS = 2
 
 
 def format_estimate(est: dict) -> str:
@@ -202,18 +246,41 @@ def format_estimate(est: dict) -> str:
     for r in est["stages"]:
         lines.append(f"  {r['stage']:<40} {r['hours']:>5.1f} h at {r['photos_per_second']}/s"
                      + ("" if r["measured"] else " (NOT MEASURED: assumed)"))
+        if "epochs" in r:
+            e = r["epochs"]
+            lines.append(f"    epoch rule, ~{r['epoch_hours']} h an epoch: min {e['min']} epochs "
+                         f"{r['hours_min']} h; expected (a guess) {e['expected']} epochs "
+                         f"{r['hours_expected']} h; max {e['max']} epochs {r['hours']} h")
     lines.append(f"  setup {est['setup_hours']} h + comparison {est['compare_hours']} h "
                  f"= {est['total_hours']} h in all")
+    if "total_hours_min" in est:
+        lines.append(f"  with the epoch rule: {est['total_hours_min']} h at the least, "
+                     f"{est['total_hours_expected']} h expected, {est['total_hours']} h at "
+                     "the most (--max-hours must cover the most, or the run stops at a block "
+                     "boundary and resumes with --resume)")
     return "\n".join(lines)
 
 
+class Deadline:
+    """should_stop() for a job that must stop at a time; seconds_left() says how long is
+    left (the epoch rule uses it to stop at a block boundary rather than mid-block)."""
+
+    def __init__(self, hours: float, clock: Callable[[], float] = time.monotonic):
+        self.clock, self.end = clock, clock() + hours * 3600
+
+    def __call__(self) -> bool:
+        return self.clock() >= self.end
+
+    def seconds_left(self) -> float:
+        return max(0.0, self.end - self.clock())
+
+
 def deadline(hours: float | None, clock: Callable[[], float] = time.monotonic
-             ) -> Callable[[], bool] | None:
+             ) -> Deadline | None:
     """should_stop() for a job that must stop `hours` from now (None: never)."""
     if hours is None:
         return None
-    end = clock() + hours * 3600
-    return lambda: clock() >= end
+    return Deadline(hours, clock)
 
 
 # --- on the instance -------------------------------------------------------------
@@ -432,7 +499,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             picek_place_cells: str | None = None, picek_place_cells_sha256: str | None = None,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, release=None,
-            log=print) -> dict:
+            seed: int = 0, public_trainable_only: bool = False, log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
     key)` copies one file to the bucket. `finetuner(conn, base, name, embeddings_root,
     models_dir)` fine-tunes (default: finetune.finetune with its default settings) and
@@ -445,7 +512,12 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     `release` (a trainer copy, dataset_release.load_release(..., without_private=True)):
     the run sees only the release's included records (restrict_to_release), fine-tunes on
     its train split, compares on train vs val, and cites the release in progress.json,
-    result.json and every model it trains."""
+    result.json and every model it trains. `seed` (the fine-tune's FinetuneConfig.seed:
+    a second seed for the paper's spread, E22) and `public_trainable_only` (the public
+    model, E23: only photos the released weights may learn from; needs `release`) are
+    recorded in progress.json and result.json, and kept by a resumed attempt."""
+    if public_trainable_only and release is None:
+        raise ValueError("public-trainable-only training needs the shipped release")
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
     prefix = run_prefix(run_id)
@@ -513,6 +585,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     progress = Progress(data_dir / PROGRESS_FILE, prefix + PROGRESS_FILE, upload,
                         run_id=run_id, code_version=config.code_version(), size=size,
                         methods=methods, test_days=test_days, sample_records=kept,
+                        seed=seed, public_trainable_only=public_trainable_only,
                         attempts=attempts, picek_exclude_benchmarks=picek_exclude,
                         picek_labels_hash=picek_labels_hash,
                         dataset_release=cite or release_cite,
@@ -601,14 +674,23 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         else:
             try:
                 if s.kind == "picek":
+                    from .replications.fungitastic.retrain import CHECKPOINT_SUFFIX
+                    ckpt_key = f"{prefix}checkpoints/{s.name}{CHECKPOINT_SUFFIX}"
+                    ckpt = data_dir / "models" / f"{s.name}{CHECKPOINT_SUFFIX}"
+                    if resume is not None and resume.fetch(ckpt_key, ckpt):
+                        log(f"[{s.name}] carrying on from its block checkpoint in S3")
                     meta = (picek_trainer or _default_picek_trainer(
                         store, size, test_days, log, stopping, picek_exclude, picek_ids_file,
                         picek_labels_hash, picek_release, picek_release_manifest,
-                        picek_allow_draft, picek_place_cells, picek_place_cells_sha256))(
+                        picek_allow_draft, picek_place_cells, picek_place_cells_sha256,
+                        on_block=block_uploader(i, ckpt_key, progress, upload),
+                        resume_from=ckpt if ckpt.is_file() else None,
+                        time_left=getattr(should_stop, "seconds_left", None)))(
                         conn, s.spec, s.name, data_dir / "models")
                 else:
                     meta = (finetuner or _default_finetuner(store, size, test_days, log,
-                                                            stopping, release))(
+                                                            stopping, release, seed,
+                                                            public_trainable_only))(
                         conn, s.base, s.name, root, data_dir / "models")
                 publish([(data_dir / "models" / f"{s.name}{suffix}",
                           f"{prefix}models/{s.name}{suffix}") for suffix in model_files(s.kind)
@@ -648,6 +730,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
            "finetuned": {n: {k: m.get(k) for k in FINETUNE_KEYS} for n, m in finetuned.items()},
            "comparison_id": comparison["comparison_id"] if comparison else None,
            "sample_records": kept, "code_version": config.code_version(),
+           "seed": seed, "public_trainable_only": public_trainable_only,
            "dataset_release": cite or release_cite,
            "stages": progress.data["stages"], "finished_at": _now()}
     if not was_interrupted:
@@ -667,8 +750,28 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
 
 
 FINETUNE_KEYS = ("base", "trained_through", "records", "photos", "species", "steps",
-                 "minutes", "final_loss", "label_snapshot", "dataset_release", "version")
+                 "minutes", "final_loss", "label_snapshot", "dataset_release", "version",
+                 # a Picek run's curve and, with the epoch rule, its block decisions
+                 "epochs_run", "best_epoch", "best_val_macro_f1", "history", "epoch_rule",
+                 "blocks", "stop_reason", "resumed_from_epoch",
+                 # a fine-tune's seed and the photos it learnt from (policy, licence classes)
+                 "seed", "train_photos")
 PICEK_FILES = (".pt", ".json", ".classifier.npz", ".records.csv")
+
+
+def block_uploader(i: int, key: str, progress: "Progress", upload):
+    """on_block for a Picek stage with the epoch rule: the block checkpoint goes to S3
+    first, then progress.json with the curve and every block decision so far, both before
+    the next block starts, so an interruption costs at most one block."""
+    def on_block(path: Path, state: dict) -> None:
+        upload(path, key)
+        last = state["blocks"][-1] if state["blocks"] else {}
+        progress.stage(i, checkpoint=key, checkpoint_epoch=state["epochs_done"],
+                       best_epoch=state["best_epoch"],
+                       best_val_macro_f1=state["best_val_macro_f1"],
+                       blocks=state["blocks"], history=state["history"],
+                       rule_decision=last.get("decision"))
+    return on_block
 
 
 def model_files(kind: str) -> tuple[str, ...]:
@@ -681,13 +784,16 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                            exclude: str = "match", ids_file: str | None = None,
                            labels_hash: str | None = None, release: str | None = None,
                            release_manifest: str | None = None, allow_draft: bool = False,
-                           place_cells: str | None = None, place_cells_sha256: str | None = None):
+                           place_cells: str | None = None, place_cells_sha256: str | None = None,
+                           on_block=None, resume_from: Path | None = None, time_left=None):
     def run(conn, spec, name, models_dir):
         import os
 
-        from .replications.fungitastic.retrain import PicekConfig, cache_of, parse_spec, train
+        from .replications.fungitastic.retrain import (PicekConfig, cache_of, epoch_rule_of,
+                                                       parse_spec, train)
         preset, epochs = parse_spec(spec)
-        cfg = PicekConfig(preset=preset, epochs=epochs, cache_px=cache_of(spec),
+        cfg = PicekConfig(preset=preset, epochs=epochs, epoch_rule=epoch_rule_of(spec),
+                          cache_px=cache_of(spec),
                           workers=max(2, min(6, os.cpu_count() or 4)),
                           exclude_benchmarks=exclude, exclude_ids_file=ids_file,
                           expect_labels_hash=labels_hash, release=release,
@@ -695,16 +801,19 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                           shipped_release=bool(release), place_cells_file=place_cells,
                           expect_place_cells_sha256=place_cells_sha256)
         return train(conn, store, size, name, cfg,
-                     test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop)
+                     test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop,
+                     on_block=on_block, resume_from=resume_from, time_left=time_left)
     return run
 
 
-def _default_finetuner(store, size, test_days, log, should_stop=None, release=None):
+def _default_finetuner(store, size, test_days, log, should_stop=None, release=None,
+                       seed: int = 0, public_trainable_only: bool = False):
     def run(conn, base, name, embeddings_root, models_dir):
-        from .finetune import finetune
-        return finetune(conn, base, store, size, name, test_days=test_days,
-                        embeddings_root=embeddings_root, out_dir=models_dir, log=log,
-                        should_stop=should_stop, release=release)
+        from .finetune import FinetuneConfig, finetune
+        return finetune(conn, base, store, size, name, cfg=FinetuneConfig(seed=seed),
+                        test_days=test_days, embeddings_root=embeddings_root,
+                        out_dir=models_dir, log=log, should_stop=should_stop, release=release,
+                        public_trainable_only=public_trainable_only)
     return run
 
 
@@ -753,6 +862,8 @@ def resume_request(doc: dict) -> dict:
             "methods": list(doc.get("methods") or []), "size": doc.get("size") or "large",
             "test_days": int(doc.get("test_days") or 28),
             "sample_records": doc.get("sample_records"),
+            "seed": int(doc.get("seed") or 0),
+            "public_trainable_only": bool(doc.get("public_trainable_only")),
             "done": {(s["kind"], s["name"]) for s in stages if s.get("status") == "done"}}
 
 

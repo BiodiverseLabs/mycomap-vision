@@ -87,10 +87,11 @@ when iNat is down; `--no-taxonomy` skips it.
 | Command | What it does |
 | --- | --- |
 | `holdout`, `heldout` | records held out of everything; held-out benchmarks (freeze, fetch, predict, report) |
+| `backbone-screen` | frozen backbones on a release's seeded subset: `subset` (drawn once), `embed`, `score` |
 | `dataset`, `manifest-freeze` | frozen, verifiable dataset releases ([dataset-release.md](dataset-release.md)) |
 | `external`, `picek-train`, `picek-bench` | published fungi classifiers and their recipe ([replications/fungitastic](../replications/fungitastic/README.md)) |
 | `build-occurrence`, `occurrence-names`, `occurrence-exclusions`, `tune-occurrence` | the occurrence prior from iNat open data |
-| `scoreboard-export` / `-import`, `benchmark-export` / `-import` | move aggregate results to the server (no record ids, names, observers or places) |
+| `scoreboard-export` / `-import`, `benchmark-export` / `-import` | move aggregate results to the server (no record ids, names, observers or places); `benchmark-export --comparison <id> [--split val\|test] [--sealed]` publishes a comparison on a frozen dataset release, marked `reproduced-on-<release>` |
 
 ### Cloud and serving
 

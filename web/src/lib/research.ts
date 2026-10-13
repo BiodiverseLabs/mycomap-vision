@@ -1,8 +1,8 @@
 // The site's menu and its Research section (Steve, 2026-10-09): the public sees the tool and
-// how to help first; results, benchmarks, protocols, data and the paper sit under Research.
+// how to help first; results, benchmarks, protocols and data sit under Research.
 
 import type { Me } from "./api";
-import { showsPaper } from "./publicView";
+import { showsMembersPages } from "./publicView";
 
 export interface NavItem { href: string; label: string; blurb?: string }
 
@@ -26,8 +26,6 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
     blurb: "The DNA-verified records and photos the identifier learns from." },
   { href: "/research/experiments", label: "Experiments", members: true,
     blurb: "Every experiment: the question, everything tried, the numbers, the decision (members)." },
-  { href: "/research/paper", label: "Paper in progress", members: true,
-    blurb: "The living draft of the Mycologia paper (mycomap.org members)." },
   { href: "/research/for-researchers", label: "For researchers",
     blurb: "How to cite, and how to test your own model against ours." },
   // Last (Steve, 2026-10-12): the developer API was linked only from the footer.
@@ -35,16 +33,19 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
     blurb: "Identify fungi from your own app or site: access, requests and the answer, field by field." },
 ];
 
-/** The Research menu for this visitor: the paper only for signed-in members. */
+/** The Research menu for this visitor: experiments only for signed-in members. */
 export function researchNav(me: Me | null | undefined): NavItem[] {
-  return RESEARCH_ITEMS.filter((i) => !i.members || showsPaper(me));
+  return RESEARCH_ITEMS.filter((i) => !i.members || showsMembersPages(me));
 }
 
-/** Pages that moved under Research keep working at their old address. */
+/** Pages that moved under Research keep working at their old address. The paper draft's
+ *  page was taken off the site (Steve, 2026-10-12; /api/paper still serves members), so its
+ *  addresses lead to Research. */
 export const MOVED: Record<string, string> = {
   "/models": "/research/results",
   "/data": "/research/data",
-  "/paper": "/research/paper",
+  "/paper": "/research",
+  "/research/paper": "/research",
   "/api-docs": API_PATH,
 };
 
@@ -62,7 +63,8 @@ export function mustSignIn(me: Me | null | undefined, path: string): boolean {
 
 export const isResearchPath = (path: string) => path === "/research" || path.startsWith("/research/");
 
-export type BenchmarkStatus = "running" | "partial" | "planned";
+/** "history": measured before dataset release v1 and kept as development history. */
+export type BenchmarkStatus = "running" | "partial" | "planned" | "history";
 
 export interface Benchmark {
   slug: string;
@@ -80,19 +82,25 @@ export interface Benchmark {
 }
 
 export const BENCHMARKS: Benchmark[] = [
-  { slug: "newest-weeks", name: "Newest weeks of validations", status: "running",
-    summary: "Identify the records validated in the last four weeks from the records validated before them.",
-    whyItMatters: "It is how a new find meets the identifier: the answer can only come from records verified earlier. Run again with every new model, so results over time stay comparable.",
-    records: "The newest 28 days of DNA-verified records against everything validated before them (latest: 1,152 records against 152,915).",
+  { slug: "newest-weeks", name: "Newest weeks: the dataset release v1 validation split", status: "running",
+    summary: "Identify the newest validated records from the records validated before them, on a frozen dataset release.",
+    whyItMatters: "It is how a new find meets the identifier: the answer can only come from records verified earlier. Every setting is chosen here, never on the sealed test, and anyone can rebuild the numbers from the release.",
+    records: "Dataset release v1's validation split: the records first validated in the eight weeks after 17 August 2026, identified against the records validated before. Earlier runs on the newest four weeks of the live data are development history.",
     scoring: "Top 1, 3, 5 and 10 at species, genus and family, on all photos of a find and on the first photo alone; species by how many reference records the true species has.",
-    results: { href: "/research/results", label: "Results: newest weeks" },
+    results: { href: "/research/results", label: "Results: dataset release v1" },
     elsewhere: "Chronological shift in FungiTastic." },
-  { slug: "held-out", name: "Held-out records", status: "running",
-    summary: "DNA-verified records no model has seen, in training or as a reference.",
-    whyItMatters: "The fairest single number for how the identifier does on new records, with 95% intervals and paired tests between approaches.",
-    records: "13,145 North American records validated on MycoMap that never reached the identifier's data; 3,000 for development, 10,145 for testing. A development benchmark: the paper's test set will be a fresh set of about 1,000, sealed before any model sees it.",
-    scoring: "The standard summary (see Evaluation protocols), names compared strictly, sensu lato and as species complexes; iNaturalist's computer vision on the same records.",
-    results: { href: "/research/results", label: "Results: held-out records" },
+  { slug: "sealed-test", name: "Sealed test (v1-test)", status: "planned",
+    summary: "Fresh DNA-verified records, validated after release v1 was cut, scored once after every choice is frozen.",
+    whyItMatters: "The paper's numbers. Nothing is tuned on these records and no model output exists for them until the analysis plan is frozen, so they measure the identifier as a new find would meet it.",
+    records: "North American records first validated after dataset release v1 was cut, kept apart from v1 by record and by photo, and never trained on.",
+    scoring: "The standard summary with 95% intervals clustered by observer; iNaturalist's computer vision on the same photos and the same public place; tests declared before the records are opened.",
+    elsewhere: "The sealed test sets of FungiCLEF." },
+  { slug: "held-out", name: "Held-out records (development history)", status: "history",
+    summary: "DNA-verified records that, before dataset release v1, no model had seen in training or as a reference.",
+    whyItMatters: "The first large test with 95% intervals and paired tests between approaches. Its results guided the choices that dataset release v1 now re-checks.",
+    records: "13,145 North American records validated on MycoMap that had not reached the identifier's data; 3,000 for development, 10,145 for testing. A development benchmark, never the paper's test set: these records are part of dataset release v1 (5,679 in its training split, 7,381 in its validation split, 85 left out by its rules), so they no longer form a separate held-out set: the training-split ones are trained on, and the validation-split ones are scored as part of v1's validation split.",
+    scoring: "The standard summary (see Evaluation protocols), names compared strictly, sensu lato and as species complexes; iNaturalist's computer vision on part of the records.",
+    results: { href: "/research/results", label: "Results: development history" },
     elsewhere: "The closed-set test in Danish Fungi 2020 and FungiTastic." },
   { slug: "advance-predictions", name: "Advance predictions", status: "running",
     summary: "Records with a sequence but no validation yet are identified now and scored when their DNA name arrives.",
@@ -128,5 +136,5 @@ export const BENCHMARKS: Benchmark[] = [
 ];
 
 export const STATUS_LABEL: Record<BenchmarkStatus, string> = {
-  running: "Running", partial: "Partly measured", planned: "Planned",
+  running: "Running", partial: "Partly measured", planned: "Planned", history: "Development history",
 };

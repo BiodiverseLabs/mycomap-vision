@@ -87,6 +87,32 @@ def record_key(source: str, source_id: str) -> str:
     return source_id if source == INAT else f"{source}:{source_id}"
 
 
+def _projects(r: dict) -> set[str]:
+    v = r.get("green_projects")
+    return set(json.loads(v) if isinstance(v, str) else (v or []))
+
+
+def mo_twins(records: list[dict], key: str = "observation_id") -> set[str]:
+    """Keys of iNat records that are Mushroom Observer finds in disguise (2026-10-13):
+    mycomap.org holds an iNaturalist row and an 'MO Observations' row with the same
+    number in the same validation project (71 rows, created 2025-08-31 by the .com sync,
+    OMDL1/OMDL2). The iNat row's name and photos are the unrelated iNat observation with
+    that number (a duck, a panda...); the MO row is the find. An iNat and an MO record
+    numbered alike in DIFFERENT projects are two real observations, and both stay."""
+    mo_projects: dict[str, set[str]] = {}
+    for r in records:
+        if r.get("source") == MO and r.get("source_id") not in (None, ""):
+            mo_projects.setdefault(str(r["source_id"]), set()).update(_projects(r))
+    return {r[key] for r in records
+            if r.get("source") == INAT and _projects(r) & mo_projects.get(str(r.get("source_id")), set())}
+
+
+def drop_mo_twins(records: list[dict]) -> tuple[list[dict], list[str]]:
+    """Export records without the iNat records mo_twins finds, and the keys dropped."""
+    twins = mo_twins(records)
+    return [r for r in records if r["observation_id"] not in twins], sorted(twins)
+
+
 def record_url(source: str, source_id: str | None) -> str | None:
     """The record's page at its source, or None (MyCoPortal and the rest have none here)."""
     template = RECORD_URLS.get(source)

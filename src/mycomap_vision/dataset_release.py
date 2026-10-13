@@ -55,9 +55,11 @@ DEFAULT_VAL_WEEKS = 8
 RECORD_REASONS = ("source_mycoportal", "source_com_sequence", "source_genbank",
                   "source_unknown", "held_out", "not_north_america", "not_fetched",
                   "missing_at_source",
-                  "label_conflict", "no_label", "guest", "review", "no_photos", "ok")
+                  "label_conflict", "no_label", "guest", "nonfungal_label", "review",
+                  "no_photos", "ok")
 PHOTO_REASONS = ("record_excluded", "other_source", "no_original", "permission_withdrawn",
-                 "mo_not_for_use", "review", "shared_other_label", "copy_in_train", "ok")
+                 "mo_not_for_use", "review", "shared_other_label", "copy_in_train",
+                 "copy_in_base", "ok")
 
 MANIFEST = "MANIFEST.json"
 SUMS = "SHA256SUMS"
@@ -179,6 +181,10 @@ def table_rows(conn: sqlite3.Connection, table: str, order_by: str, columns: lis
 
 # What each component hash covers, in the order release_hash lists them.
 COMPONENTS = ("records", "labels", "photos", "splits", "recipes", "derived", "private")
+# Tables only some releases hold, hashed (and part of release_hash) only where present, so
+# a release made before one existed keeps its hashes: near_base, a test release's dHash
+# flags against its base (2026-10-13).
+OPTIONAL_COMPONENTS = ("near_base",)
 
 
 def content_hashes(db: sqlite3.Connection, private: sqlite3.Connection | None,
@@ -193,6 +199,10 @@ def content_hashes(db: sqlite3.Connection, private: sqlite3.Connection | None,
         "recipes": stream_hash("recipes", table_rows(db, "recipes", "name")),
         "derived": stream_hash("derived", table_rows(db, "derived", "photo_key, recipe")),
     }
+    tables = _tables(db)
+    for name in OPTIONAL_COMPONENTS:
+        if name in tables:
+            out[name] = stream_hash(name, table_rows(db, name, "photo_key"))
     if private is None:
         out["private"] = private_hash           # not shipped: as MANIFEST.json says
     else:
@@ -210,7 +220,8 @@ def content_hashes(db: sqlite3.Connection, private: sqlite3.Connection | None,
 
 
 def release_hash(hashes: dict[str, str]) -> str:
-    return sha256_bytes("".join(f"{n}={hashes[n]}\n" for n in COMPONENTS).encode())
+    names = COMPONENTS + tuple(n for n in OPTIONAL_COMPONENTS if n in hashes)
+    return sha256_bytes("".join(f"{n}={hashes[n]}\n" for n in names).encode())
 
 
 def reference_hash(db: sqlite3.Connection) -> str:
@@ -256,6 +267,13 @@ create table recipes (name text primary key, recipe_json text not null, sha256 t
 create table derived (photo_key text not null, recipe text not null, derived_sha256 text not null,
                       pixels_sha256 text, width integer, height integer,
                       primary key (photo_key, recipe));
+"""
+
+# A test release only: each included photo's dHash and, when one is within dhash.NEAR, its
+# nearest included base photo (a flag: nothing is dropped for it).
+NEAR_BASE_SCHEMA = """
+create table near_base (photo_key text primary key, dhash text not null,
+                        base_photo_key text, distance integer);
 """
 
 PRIVATE_SCHEMA = """
@@ -432,6 +450,7 @@ class Built:
     info: dict
     public_places: list[dict] = field(default_factory=list)
     public_missing: list[str] = field(default_factory=list)   # included, point never read
+    near_base: list[dict] | None = None      # a test release with a dHash index: its flags
 
 
 def public_trainable(license_class: str, answer: str | None) -> int:
@@ -528,6 +547,8 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             reason = "no_label"
         elif guests.excluded(lab.genus):
             reason = "guest"
+        elif taxonomy.nonfungal(tax, lab.genus):
+            reason = "nonfungal_label"          # a bee, a host plant (Steve, 2026-10-13)
         elif key in review_records:
             reason = review_records[key]
         else:
@@ -818,6 +839,9 @@ def write_release(folder: Path, rid: str, built: Built, split_rules: dict, *,
         rec_rows.append({"name": name, "recipe_json": text, "sha256": sha256_bytes(text.encode())})
     _insert(db, "recipes", rec_rows)
     _insert(db, "derived", derived)
+    if built.near_base is not None:
+        db.executescript(NEAR_BASE_SCHEMA)
+        _insert(db, "near_base", built.near_base)
     _insert(priv, "record_places", built.places)
     _insert(priv, "photo_owners", built.owners)
     _insert(priv, "stores", [{"store_id": i, "location": loc} for loc, i in built.stores.items()])
@@ -904,14 +928,21 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
           freeze_approved: str | None = None, test_for: str | None = None,
           test_ids: Path | None = None, store_reader=None,
           loo_exclusions: Path | None = None, no_loo_exclusions: str | None = None,
-          log=print) -> dict:
+          base_dhash: Path | None = None, log=print) -> dict:
     """Cut a release (frozen ids need freeze_approved: who gave the trigger, when) or a
     draft. `derive_photos` 'all' computes every derived hash (reads every original);
     'none' or a number (a sample, drafts only) do less. A frozen trainable release also
     needs the LOO exclusion list or Steve's word that there is none (loo_gate); the list
-    is read like any review list and recorded with its rows and sha256."""
+    is read like any review list and recorded with its rows and sha256. A frozen test
+    release (test_for) also needs `base_dhash`, its base's dHash index (dhash.py): each
+    included test photo near a base photo is flagged in near_base."""
     root = Path(root or ROOT)
     check_id(name)
+    if base_dhash is not None and not test_for:
+        raise ReleaseError("--base-dhash is for a test release (--test-for)")
+    if test_for and not is_draft(name) and base_dhash is None:
+        raise ReleaseError(f"a frozen test release needs --base-dhash, the dHash index of "
+                           f"{test_for} (`mv aws-launch-dhash-index {test_for}`)")
     if not is_draft(name) and not freeze_approved:
         raise ReleaseError(f"{name} is a frozen release id: cut it only with "
                            "--freeze-approved '<who, when>' after Steve's freeze trigger")
@@ -958,8 +989,17 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
             if missing:
                 raise ReleaseError(f"{len(missing)} test ids are not in the manifest "
                                    f"(e.g. {sorted(missing)[:5]})")
-            check_disjoint(base, built)
+            extra["photos_identical_to_base_dropped"] = separate_from_base(base, built)
             extra.update({"test_for": base.id, "test_for_release_hash": base.release_hash})
+            if base_dhash is not None:
+                from . import dhash
+                index = dhash.load_index(base_dhash)
+                dhash.check_index(index, base)
+                index["file_sha256"] = sha256_file(Path(base_dhash))
+                extra["near_base"] = flag_near_base(built, index, store_reader, log=log)
+            else:
+                extra["near_base"] = None
+                log(f"DRAFT: no --base-dhash: near-copies of {base.id} photos are not flagged")
         if built.public_missing:
             msg = (f"{len(built.public_missing):,} included records have no public point "
                    f"read (e.g. {built.public_missing[:5]}): run `mv fetch-mo-points` (MO) "
@@ -995,17 +1035,68 @@ def read_ids(path: Path | None) -> set[str]:
     return {(r.get(col) or "").strip() for r in rows if (r.get(col) or "").strip()}
 
 
-def check_disjoint(base: "Release", built: Built) -> None:
-    """A test release shares no record and no photo (by original sha256) with its base."""
+def separate_from_base(base: "Release", built: Built) -> int:
+    """A test release shares no record with its base: one shared record refuses the build.
+    A test photo byte-identical (original sha256) to an included base photo is left out
+    (`copy_in_base`: one image cross-posted to iNat and MO, or re-posted, would be scored
+    against its own copy); a record left with no photo becomes `no_photos` (paper plan §4,
+    2026-10-13). Returns the photos dropped."""
     keys = {r["record_key"] for r in built.records}
     shared = keys & set(base.record_keys())
     if shared:
         raise SealedLeak(f"{len(shared)} test records are in {base.id} already "
                          f"(e.g. {sorted(shared)[:5]})")
-    shas = {p["original_sha256"] for p in built.photos if p["original_sha256"]}
-    same = shas & base.photo_shas()
-    if same:
-        raise SealedLeak(f"{len(same)} test photos are byte-identical to photos in {base.id}")
+    base_shas = base.photo_shas()
+    dropped = 0
+    for p in built.photos:
+        if p["included"] and p["original_sha256"] in base_shas:
+            p.update(included=0, reason="copy_in_base")
+            dropped += 1
+    if dropped:
+        has_photo = {p["record_key"] for p in built.photos if p["included"]}
+        for r in built.records:
+            if r["included"] and r["record_key"] not in has_photo:
+                r.update(included=0, reason="no_photos", split=None)
+    return dropped
+
+
+def flag_near_base(built: Built, index: dict, store_reader, log=print) -> dict:
+    """dHash each included test photo (read from the store, checked against its sha256)
+    and flag the ones within dhash.NEAR of an included base photo (`index`, checked by
+    dhash.check_index first). Sets built.near_base; drops nothing. Returns the summary
+    MANIFEST records."""
+    import numpy as np
+
+    from . import dhash
+    if store_reader is None:
+        raise ReleaseError("the dHash check needs the photo store (store_reader)")
+    inc = sorted((p for p in built.photos if p["included"]), key=lambda p: p["photo_key"])
+    store_of = {ps["photo_key"]: ps["store_id"] for ps in built.photo_stores}
+    location = {i: loc for loc, i in built.stores.items()}
+
+    def one(p):
+        body = store_reader(location[store_of[p["photo_key"]]], p["original_path"])
+        if sha256_bytes(body) != p["original_sha256"]:
+            raise ReleaseError(f"{p['photo_key']}: the original's sha256 differs from the manifest")
+        return dhash.dhash64(body)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        hashes = list(ex.map(one, inc))
+    idx, dist = dhash.nearest(np.array(hashes, dtype=np.uint64), index["dhash"])
+    built.near_base = [{"photo_key": p["photo_key"], "dhash": dhash.to_hex(h),
+                        "base_photo_key": index["photo_key"][i] if i >= 0 else None,
+                        "distance": int(d) if i >= 0 else None}
+                       for p, h, i, d in zip(inc, hashes, idx.tolist(), dist.tolist())]
+    flagged = {r["photo_key"] for r in built.near_base if r["base_photo_key"] is not None}
+    log(f"dHash: {len(flagged):,} of {len(inc):,} test photos within {dhash.NEAR} of a "
+        "base photo (flagged, not dropped)")
+    return {"rule": f"dHash Hamming distance <= {dhash.NEAR} to an included base photo: "
+                    "flagged in near_base, nothing dropped",
+            "algorithm": index["algorithm"], "pillow": index["pillow"],
+            "index_sha256": index.get("file_sha256"), "base_photos": index["photos"],
+            "photos": len(inc), "photos_flagged": len(flagged),
+            "records_flagged": len({p["record_key"] for p in inc if p["photo_key"] in flagged})}
 
 
 def derive_all(built: Built, recipes, derive_photos: str, store_reader, log=print) -> list[dict]:
@@ -1074,6 +1165,19 @@ class Release:
     manifest: dict
     db: sqlite3.Connection = field(repr=False)
     _private: sqlite3.Connection | None = field(default=None, repr=False)
+    errata: object | None = field(default=None, repr=False)     # errata.Errata
+
+    def use_errata(self, errata) -> None:
+        """Leave out an erratum's records (errata.py) from every split this release
+        reads from now on; cite() then names the erratum and its sha256."""
+        from .errata import check
+        check(errata, self)
+        self.errata = errata
+
+    def _not_errata(self, rows):
+        if self.errata is None:
+            return rows
+        return [r for r in rows if r["record_key"] not in self.errata.keys]
 
     @property
     def release_hash(self) -> str:
@@ -1130,11 +1234,23 @@ class Release:
         cols = [d[0] for d in cur.description]
         return {r[0]: dict(zip(cols, r)) for r in cur}
 
+    def near_base(self) -> dict[str, dict]:
+        """A test release: photo_key -> {dhash, base_photo_key, distance} for every included
+        photo (base_photo_key None unless flagged). Empty when the release has no flags."""
+        if "near_base" not in _tables(self.db):
+            return {}
+        return {r[0]: {"dhash": r[1], "base_photo_key": r[2], "distance": r[3]}
+                for r in self.db.execute("select photo_key, dhash, base_photo_key, distance "
+                                         "from near_base")}
+
     def cite(self) -> dict:
         """What an experiment writes into its outputs (and the registry entry)."""
-        return {"dataset_release": self.id, "release_hash": self.release_hash,
-                "reference_hash": self.reference_hash, "labels_hash": self.labels_hash,
-                "release_code_commit": self.code_commit, "draft": self.manifest["draft"]}
+        out = {"dataset_release": self.id, "release_hash": self.release_hash,
+               "reference_hash": self.reference_hash, "labels_hash": self.labels_hash,
+               "release_code_commit": self.code_commit, "draft": self.manifest["draft"]}
+        if self.errata is not None:
+            out["errata"] = self.errata.cite()
+        return out
 
     def record_keys(self) -> list[str]:
         return [r[0] for r in self.db.execute("select record_key from records")]
@@ -1149,8 +1265,9 @@ class Release:
         if bad:
             raise ReleaseError(f"unknown split {sorted(bad)}")
         q = ",".join("?" * len(splits))
-        return self.db.execute(f"select * from records where included = 1 and split in ({q}) "
-                               "order by record_key", splits).fetchall()
+        return self._not_errata(self.db.execute(
+            f"select * from records where included = 1 and split in ({q}) "
+            "order by record_key", splits).fetchall())
 
     def training_records(self, include_val: bool = False) -> list[sqlite3.Row]:
         """Records a model may learn from: train (and val when asked). Never test."""
@@ -1173,9 +1290,11 @@ class Release:
     def photo_ids(self, splits=TRAINABLE, public_trainable_only: bool = False) -> list[int]:
         q = ",".join("?" * len(splits))
         pt = " and p.public_trainable = 1" if public_trainable_only else ""
+        skip = self.errata.keys if self.errata is not None else frozenset()
         return [r[0] for r in self.db.execute(
-            f"select p.manifest_photo_id from photos p join records r using (record_key) "
-            f"where p.included = 1 and r.included = 1 and r.split in ({q}){pt}", tuple(splits))]
+            f"select p.manifest_photo_id, r.record_key from photos p join records r "
+            f"using (record_key) where p.included = 1 and r.included = 1 and r.split in ({q}){pt}",
+            tuple(splits)) if r[1] not in skip]
 
     def as_records(self, splits=TRAINABLE, photo_row: dict[int, int] | None = None,
                    public_trainable_only: bool = False) -> list:

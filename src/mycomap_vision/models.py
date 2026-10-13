@@ -34,6 +34,15 @@ class Alias:
 ALIASES: dict[str, Alias] = {
     "bioclip-2": Alias("open_clip:hf-hub:imageomics/bioclip-2",
                        "Tree-of-life CLIP (includes fungi), 224 px"),
+    # The paper's input-size arm (plan E24): BioCLIP 2 at a larger input, its position
+    # embeddings resized (resize_vit_input); only ever trained on at 224 before.
+    "bioclip-2-336": Alias("open_clip:hf-hub:imageomics/bioclip-2?img_size=336",
+                           "BioCLIP 2 at 336 px input (position embeddings resized)"),
+    "bioclip-2-448": Alias("open_clip:hf-hub:imageomics/bioclip-2?img_size=448",
+                           "BioCLIP 2 at 448 px input (position embeddings resized)"),
+    # BioCLIP 2's predecessor (ViT-B/16, 224 px): the ablation beside it in the screen.
+    "bioclip": Alias("open_clip:hf-hub:imageomics/bioclip",
+                     "BioCLIP (v1), tree-of-life CLIP, ViT-B/16, 224 px"),
     "dinov2-b14": Alias("timm:vit_base_patch14_dinov2.lvd142m",
                         "Self-supervised, fine detail, 518 px, base size"),
     "dinov2-l14": Alias("timm:vit_large_patch14_dinov2.lvd142m",
@@ -160,7 +169,8 @@ def release_memory() -> None:
 
 def open_clip_weights_file(model_name: str):
     """The local safetensors checkpoint of an open_clip `hf-hub:` model, or None (no such
-    file, or not cached while offline)."""
+    file, or not cached while offline). Options (`?img_size=336`) are not part of it."""
+    model_name = split_options(model_name)[0]
     if not model_name.startswith("hf-hub:"):
         return None
     try:
@@ -204,16 +214,55 @@ def load_open_clip_image_tower(model_name: str, pretrained: str | None):
     return tower, preprocess
 
 
+def resize_vit_input(tower, transform, size: int):
+    """An open_clip ViT tower and its preprocessing at `size` px input: the patch-grid
+    position embeddings resized by bicubic interpolation (the class token's kept), the
+    resize and centre crop set to `size`. The patch size must divide `size`."""
+    import torch
+    import torch.nn.functional as F
+    from torchvision import transforms as T
+    patch = tower.conv1.kernel_size[0]
+    if size % patch:
+        raise ValueError(f"img_size {size} is not a multiple of the patch size {patch}")
+    old = tower.positional_embedding.data
+    n = int(round((old.shape[0] - 1) ** 0.5))
+    if n * n != old.shape[0] - 1:
+        raise ValueError("the tower has no square patch grid with one class token")
+    g = size // patch
+    grid = old[1:].reshape(1, n, n, -1).permute(0, 3, 1, 2).float()
+    grid = F.interpolate(grid, size=(g, g), mode="bicubic", align_corners=False,
+                         antialias=True)
+    grid = grid.permute(0, 2, 3, 1).reshape(g * g, -1).to(old.dtype)
+    tower.positional_embedding = torch.nn.Parameter(torch.cat([old[:1], grid]))
+    tower.grid_size, tower.image_size = (g, g), (size, size)
+    steps = []
+    for t in transform.transforms:
+        if isinstance(t, T.Resize):
+            t = T.Resize(size, interpolation=t.interpolation, antialias=True)
+        elif isinstance(t, T.CenterCrop):
+            t = T.CenterCrop(size)
+        steps.append(t)
+    return tower, T.Compose(steps)
+
+
 class OpenClipBackbone(TimmBackbone):
-    """Any open_clip model: the image tower's embedding."""
+    """Any open_clip model: the image tower's embedding. `?img_size=N` runs a ViT at N px
+    input (resize_vit_input)."""
 
     def __init__(self, name: str, clip_name: str):
         import torch
         self.torch = torch
         self.name = name
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        clip_name, options = split_options(clip_name)
+        unknown = set(options) - {"img_size"}
+        if unknown:
+            raise ValueError(f"open_clip models take img_size only, not {sorted(unknown)}")
         model_name, _, pretrained = clip_name.partition("@")
         tower, self.transform = load_open_clip_image_tower(model_name, pretrained or None)
+        if options.get("img_size"):
+            tower, self.transform = resize_vit_input(tower, self.transform,
+                                                     int(options["img_size"]))
         self.model = tower.eval().to(self.device)
         release_memory()
         with torch.inference_mode():

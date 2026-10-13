@@ -20,6 +20,15 @@ beside the manifest and never inside it; a re-run skips names already answered
 (`--refresh` asks them all again, `--older-than DAYS` those answered before then).
 Labels read that file when records are loaded (evaluate.load_records), and a
 release ships it (release.py), so the site labels records the same way.
+
+Names that are no fungus (Steve, 2026-10-13): a record whose label's genus has no fungal
+genus on iNat, while every taxon of that name iNat does have (any rank) is in Animalia,
+Plantae or Bacteria (`nonfungal`), names what is in the photo or what the DNA came back
+as, not a fungus: a bee from a bee project, the host plant of a pooled sample. It is left
+out like a guest (evaluate.load_records, the dataset builder's `nonfungal_label`). Slime
+moulds (Protozoa) and water moulds (Chromista) stay in, and so does a fungal subgenus or
+section written as a genus (Telamonia). The kingdoms of every taxon of such a name are
+asked once per name (`outside_fungi`), by the same lookup.
 """
 
 from __future__ import annotations
@@ -42,6 +51,12 @@ from .ratelimit import MinInterval
 
 API = "https://api.inaturalist.org/v1"
 FUNGI = 47170
+# iNat's kingdoms: the second step of every taxon's ancestry, after Life (48460).
+KINGDOMS = {1: "Animalia", 47126: "Plantae", 47170: "Fungi", 48222: "Chromista",
+            47686: "Protozoa", 67333: "Bacteria", 151817: "Archaea", 131236: "Viruses"}
+# A genus only these kingdoms have names no fungus. Protozoa (slime moulds) and Chromista
+# (water moulds) are in Vision's scope and are not here.
+NOT_FUNGI = frozenset({"Animalia", "Plantae", "Bacteria"})
 HIGHER = ("phylum", "class", "order", "family")
 GENUS_LEVEL = 20                   # iNat's rank_level of a genus; higher ranks are larger
 CACHE = Path("taxonomy") / "inat_genera.sqlite"
@@ -89,6 +104,12 @@ create table if not exists taxa (
   ancestor_ids    text,              -- JSON, from the root down to the taxon itself
   current_ids     text,              -- JSON: current_synonymous_taxon_ids
   fetched_at      text not null
+);
+create table if not exists outside_fungi (
+  name            text primary key,  -- a genus name iNat has no fungal genus of
+  kingdoms        text not null,     -- JSON: sorted kingdoms of every taxon of that name
+  taxon_ids       text not null,     -- JSON: those taxa's iNat ids
+  asked_at        text not null
 );
 """
 
@@ -246,6 +267,28 @@ def ask_higher(client: InatTaxa, db: sqlite3.Connection, name: str) -> Answer:
     return Answer(name, "higher", "doubt", HIGHER_NOT_FOUND, homonyms=homonyms)
 
 
+def kingdom_of(t: dict) -> str:
+    """A taxon's kingdom from its ancestry ('?' when iNat's answer doesn't say)."""
+    anc = [int(a) for a in (t.get("ancestor_ids") or [])]
+    return next((KINGDOMS[a] for a in anc if a in KINGDOMS), "?")
+
+
+def ask_outside(client: InatTaxa, db: sqlite3.Connection, name: str) -> list[str]:
+    """The kingdoms of every iNat taxon named exactly `name`, at any rank (asked for a name
+    with no fungal genus on iNat); saved in outside_fungi. Returns them, sorted. Any rank,
+    because a fungal subgenus or section written as a genus is still a fungus: Telamonia is
+    a Cortinarius subgenus, while iNat's only genus of that name is a jumping spider."""
+    body = client.get("/taxa", {"q": name, "per_page": 30})
+    exact = [t for t in body.get("results") or []
+             if str(t.get("name", "")).lower() == name.lower()]
+    kingdoms = sorted({"Fungi" if in_fungi(t) else kingdom_of(t) for t in exact})
+    with db:
+        db.execute("insert or replace into outside_fungi values (?, ?, ?, ?)",
+                   (name, json.dumps(kingdoms), json.dumps(sorted(int(t["id"]) for t in exact)),
+                    now_iso()))
+    return kingdoms
+
+
 def resolve_ancestors(client: InatTaxa, db: sqlite3.Connection, log=print) -> int:
     """Fetch every taxon the answers need that isn't cached yet: the ancestors of each
     answered taxon (to read their ranks) and the replacements of inactive ones."""
@@ -392,9 +435,24 @@ def fetch(conn: sqlite3.Connection, cache: Path | None = None, client: InatTaxa 
             a = ask_higher(client, db, w)
             _save_answer(db, a, now_iso())
             stats["higher: " + (a.reason or "ok")] += 1
+        # Genus names iNat has outside Fungi only: which kingdoms (a bee, a plant)?
+        known = {r[0] for r in db.execute("select name from outside_fungi")}
+        outside = [g for g in sorted(genera)
+                   if (row := db.execute("select reason, homonyms from answers where "
+                                         "name = ? and kind = 'genus'", (g,)).fetchone())
+                   and row[0] == NOT_FOUND and row[1] and (refresh or g not in known)]
+        asked_outside = 0
+        for g in outside:
+            if out_of_time():
+                break
+            asked_outside += 1
+            kingdoms = ask_outside(client, db, g)
+            stats["outside Fungi: " + ("/".join(kingdoms) or "none")] += 1
         resolve_ancestors(client, db, log)
-        left = len(todo) - asked_genera + len(higher) - asked_higher
+        left = (len(todo) - asked_genera + len(higher) - asked_higher
+                + len(outside) - asked_outside)
         return {"genera": len(genera), "asked": asked_genera, "higher_asked": asked_higher,
+                "outside_asked": asked_outside,
                 "requests": client.calls, "answers": dict(stats), "left": left,
                 "out_of_time": bool(left)}
     finally:
@@ -412,6 +470,20 @@ class Taxonomy:
     not_genus: set[str]                        # names that are no genus (above genus, or no taxon)
     answers: dict[tuple[str, str], tuple] = field(default_factory=dict, repr=False)
     taxa: dict[int, tuple] = field(default_factory=dict, repr=False)
+    outside: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
+
+    def nonfungal(self, genus: str) -> str | None:
+        """The kingdom(s) a genus name belongs to when it names no fungus: no fungal genus
+        of that name on iNat, and every taxon of that name, at any rank, in NOT_FUNGI
+        ('Animalia', 'Plantae', 'Animalia/Plantae'...). None for a fungal genus, a name not
+        asked yet, or one iNat also has in a kingdom Vision keeps (a slime mould, a fungal
+        subgenus)."""
+        if not genus or genus in self.genus_words:
+            return None
+        kingdoms = self.outside.get(genus)
+        if kingdoms and set(kingdoms) <= NOT_FUNGI:
+            return "/".join(kingdoms)
+        return None
 
     def is_genus(self, word: str) -> bool | None:
         """True / False when iNat's answer settles it; None when it doesn't (not asked,
@@ -456,6 +528,11 @@ def load(path: Path) -> Taxonomy | None:
         answers = {(r[0], r[1]): r[2:] for r in db.execute(
             "select name, kind, status, reason, taxon_id, replacement_ids, homonyms "
             "from answers")}
+        outside = {}
+        if db.execute("select 1 from sqlite_master where type = 'table' and "
+                      "name = 'outside_fungi'").fetchone():    # a cache from before has none
+            outside = {r[0]: tuple(json.loads(r[1]))
+                       for r in db.execute("select name, kingdoms from outside_fungi")}
     finally:
         db.close()
     genera, higher, genus_words, not_genus = {}, {}, set(), set()
@@ -474,7 +551,12 @@ def load(path: Path) -> Taxonomy | None:
             r = ranks_of(taxa, int(tid))
             if r:
                 higher[name] = r
-    return Taxonomy(genera, higher, genus_words, not_genus, answers, taxa)
+    return Taxonomy(genera, higher, genus_words, not_genus, answers, taxa, outside)
+
+
+def nonfungal(tax: Taxonomy | None, genus: str) -> str | None:
+    """Taxonomy.nonfungal, or None without a taxonomy cache."""
+    return tax.nonfungal(genus) if tax is not None else None
 
 
 _LOADED: dict[str, tuple[tuple, Taxonomy | None]] = {}

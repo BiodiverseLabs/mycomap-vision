@@ -27,7 +27,8 @@ what the site serves). A serving release says which dataset release its model ca
 | Command | Does |
 |---|---|
 | `mv dataset build --name v1 --freeze-approved "<who, when>" [--exclusions F.tsv …] [--val-weeks 8 \| --val-cutoff D] [--recipes original,long500-q90]` | writes the snapshot from a private copy of the manifest (never writes to it); without `--name` (or with `--dry-run`): a draft |
-| `mv dataset build --name v1-test --test-for v1 --ids new.csv --freeze-approved …` | the test release: only those records, all `test`; refused if any record, or any photo (by bytes), is in `v1` |
+| `mv dataset build --name v1-test --test-for v1 --ids new.csv --base-dhash <index> --freeze-approved …` | the test release: only those records, all `test`; refused if any record is in `v1`; a photo byte-identical to a `v1` photo is left out (`copy_in_base`); near-copies are flagged by dHash (§5) |
+| `mv aws-launch-dhash-index v1`, then `mv dataset pull-dhash-index v1` | the dHash index of every included `v1` photo, made once in the bucket's region (`mv dataset dhash-index <id>` makes it here, for a small release) |
 | `mv dataset verify v1 [--photos N\|all]` | recomputes every file hash, every content hash and `release_hash`; with `--photos`, re-reads originals from the store and checks their sha256 |
 | `mv dataset derive v1 --photo <key> --recipe long500-q90 [--out F]` | regenerates one derived image from our original and checks it against the stored hash |
 | `mv dataset diff v1 v2` | records/photos added, removed, relabelled, re-included, moved between splits; per-component hash changes |
@@ -140,6 +141,7 @@ Every candidate gets exactly one reason (the first that applies), so the counts 
 | `label_conflict` | .org holds more than one name |
 | `no_label` | no usable rank ("Unknown", "Agaricales") |
 | `guest` | DNA name is a guest of the fungus in the photo (guests.py) |
+| `nonfungal_label` | the label's genus is no fungus: iNat has no fungal genus of that name, and every taxon of that name in Animalia, Plantae or Bacteria (taxonomy.nonfungal; a bee, a host plant). Slime moulds and a fungal subgenus written as a genus stay in (Steve, 2026-10-13) |
 | `review:<list>` | listed by a person-checked review list (label audit, LOO scan, …): `inputs/<list>.tsv` |
 | `no_photos` | no included photo left after the photo rules |
 | `ok` | in |
@@ -173,6 +175,43 @@ Review lists are TSV files: `kind` (`record`|`photo`), `key`, `reason`, `note`. 
 copies each into `inputs/` and records its sha256; a key it cannot find fails the build
 (a stale list must not silently exclude nothing).
 
+### Errata (a fault found after the cut)
+
+A frozen release is never edited or re-cut for a small fault: the fix is an erratum
+(`errata.py`), a TSV in the review-list format (`kind` = `record`, `key`, `reason`, `note`)
+kept beside the release, never in it (s3 `research-release-extras/<id>/`, here
+`data/research-release-extras/<id>/`). `--errata FILE` on `compare`, `model-sanity`,
+`int8-check`, `finetune`, `heldout predict` and `external run` leaves its records out of
+every split they read (no score, no reference, no training); the release's `cite()` then
+carries `errata` (file, sha256, records, by reason), so every report and registry entry
+names it. A key the release lacks refuses the erratum. The AWS launchers do not take it yet
+(the instance would not apply it).
+
+- `mo_twin_as_inat` (v1, found 2026-10-13): mycomap.org holds 71 iNaturalist rows that share
+  their number and a validation project with an 'MO Observations' row (OMDL1/OMDL2, made by
+  the .com sync); their name and photos are the unrelated iNat observation with that number
+  (a duck, a panda...). v1 holds all 71, 41 included in `train` (62 photos), each beside its
+  correct `mo:` twin. `mv dataset errata v1 --out <file>` writes the erratum from the rule
+  (`sources.mo_twins`), sorted, so the same release gives the same bytes. The fine-tune
+  trained on those photos; a class only they taught can no longer be answered, since
+  methods answer with the reference's labels (`errata.masked_head_labels` counts them).
+  The feed now never stores such a record (records.save_records, nightly.changes:
+  `mo_twins_dropped`), so the next nightly removes them from the served index and no later
+  release holds them; an iNat and an MO record numbered alike in different projects stay.
+- `nonfungal_label` (v1, found 2026-10-13; Steve: erratum, live index and future cuts):
+  records whose label's genus is no fungus by taxonomy.nonfungal (a bee from a bee
+  project, the host plant of a pooled sample, a bacterium), checked by iNat kingdom at any
+  rank so that slime moulds and a fungal subgenus written as a genus (Telamonia) stay. In
+  v1: 96 included beyond the MO twins (91 train, 5 val; a record that is also a twin keeps
+  `mo_twin_as_inat`). The 5 val records leave the scoring too: their answer keys are not
+  fungi. The second erratum file (`--reasons` both, the default) is written from the v1
+  release and the taxonomy cache, whose sha256 the command prints; the first file stays as
+  it was. From now on loading records leaves them out (evaluate.load_records: references,
+  training, the served index), the builder lists them as `nonfungal_label` (v1-test, v2),
+  and `mv fetch-taxonomy` (and the nightly's taxonomy step) asks iNat the kingdoms of
+  every taxon named like a genus that has no fungal genus (`outside_fungi`); a night that
+  learns some marks itself changed, so the served index is rebuilt.
+
 ## 5. Splits
 
 Steve, 2026-10-09: "I will provide a new dataset for testing of new records." So:
@@ -183,9 +222,25 @@ Steve, 2026-10-09: "I will provide a new dataset for testing of new records." So
   date written into the release: by default the newest 8 weeks of validations are `val`
   (`--val-weeks`), or `--val-cutoff` is chosen at the freeze.
 - `vN-test` holds `test`: Steve's fresh records, validated after `vN` was cut, frozen the same
-  way (labels, photos, hashes) as their own release. The build refuses it when any of its
-  records is in `vN`, or any of its photos is byte-identical to one in `vN`. It is never
-  trainable (`training_records()` raises `SealedLeak`).
+  way (labels, photos, hashes) as their own release. It is never trainable
+  (`training_records()` raises `SealedLeak`). Copies of `vN` photos (paper plan §4,
+  2026-10-13):
+  - a record already in `vN` refuses the build;
+  - a photo byte-identical (original sha256) to an included `vN` photo is left out
+    (`copy_in_base`, counted in MANIFEST as `photos_identical_to_base_dropped`); a record
+    left with no photo becomes `no_photos`;
+  - every included photo's 64-bit dHash (`dhash.py`: EXIF orientation, grey, 9 x 8 Lanczos,
+    JPEG draft decoding) is compared with the `vN` index; one within Hamming distance 4 of
+    a `vN` photo is FLAGGED in the `near_base` table (its nearest `vN` photo and the
+    distance) and kept: nothing is dropped, so the test set does not depend on the check.
+    MANIFEST's `near_base` gives the counts, the algorithm, the Pillow version and the
+    index's sha256. A frozen test release needs `--base-dhash`; the index is refused when
+    it is for another release_hash, another algorithm or Pillow, or misses a `vN` photo.
+    Scoring reads `rel.near_base()`. No model is involved, so the check runs before the seal
+    is broken.
+  - The `vN` index is kept beside the release, never in it: s3
+    `research-release-extras/<id>/dhash-index.npz` (sha256 in its metadata), here
+    `data/research-release-extras/<id>/`.
 - The development benchmark `heldout-2026-10-08` (13,145) is dated like every other record
   (Steve, 2026-10-09); its membership stays in `benchmark` / `benchmark_split`, so it can
   still be reported.
@@ -215,7 +270,8 @@ the line `"<table>:<schema version>\n"`.
 | `derived_hash` | `derived` |
 | `private_hash` | the tables of `private.sqlite` |
 | `reference_hash` | `(record_key, label, sorted original sha256s of its included photos)` over `train`+`val`: the reference index's records + labels + photos (the registry's `reference_hash`) |
-| **`release_hash`** | SHA-256 of the lines `"<name>=<hash>\n"` for the seven component hashes above, in that order |
+| `near_base_hash` | a test release only: `near_base` (§5) |
+| **`release_hash`** | SHA-256 of the lines `"<name>=<hash>\n"` for the seven component hashes above, in that order, then `near_base` where the release holds that table (a release without it, such as `v1`, keeps the hash it was cut with) |
 
 `release_hash` depends only on content: the build time, machine and file layout do not
 enter it, so building v1 twice from the same inputs gives the same hash, and any change to a

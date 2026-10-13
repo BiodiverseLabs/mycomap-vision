@@ -5,7 +5,6 @@ import { IdentifyPage } from "@/pages/Identify";
 import { ModelsPage } from "@/pages/Models";
 import { DataPage } from "@/pages/Data";
 import { AboutPage } from "@/pages/About";
-import { PaperPage } from "@/pages/Paper";
 import { GetInvolvedPage } from "@/pages/GetInvolved";
 import { ApiDocsPage } from "@/pages/ApiDocs";
 import { BenchmarkPage, BenchmarksPage, ForResearchersPage, ProtocolsPage,
@@ -41,7 +40,6 @@ export function App() {
         <Route path="/research/experiments/:slug">
           {(params) => <ExperimentPage slug={params.slug} />}
         </Route>
-        <Route path="/research/paper" component={PaperPage} />
         <Route path="/research/for-researchers" component={ForResearchersPage} />
         <Route path={API_PATH} component={ApiDocsPage} />
         {Object.entries(MOVED).map(([from, to]) => (
