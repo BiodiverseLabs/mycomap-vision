@@ -35,8 +35,14 @@ def ro(path: Path) -> sqlite3.Connection:
 
 
 def release_of(args):
+    """Release v1, with its erratum when --errata is given (Release.use_errata: its
+    records leave every split; cite() names it and its sha256)."""
     from mycomap_vision.dataset_release import load_release
-    return load_release("v1", Path(args.release_root))
+    rel = load_release("v1", Path(args.release_root))
+    if args.errata:
+        from mycomap_vision import errata
+        rel.use_errata(errata.read(Path(args.errata)))
+    return rel
 
 
 # --- score --------------------------------------------------------------------------------
@@ -438,6 +444,7 @@ def main(argv=None) -> None:
     ap.add_argument("--heldout-dir")
     ap.add_argument("--store", help="occurrence store (default: data/occurrence's)")
     ap.add_argument("--named-case", action="append", help="a record_key to report by name")
+    ap.add_argument("--errata", help="the release's erratum TSV (errata.py)")
     ap.add_argument("--paper-attrs", help="`mv paper-attrs` TSV: use the paper's distance_band "
                     "(public points) for the bands and the 300-1,500 km rule")
     args = ap.parse_args(argv)
