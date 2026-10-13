@@ -400,3 +400,12 @@ def test_dhash_flags_come_from_the_test_releases_near_base_table(world, tmp_path
     assert rep["dhash_flags"]["photos_flagged"] == 1
     assert rep["standard"]["near_duplicates"]["by_kind"]["dhash"] == 1
     assert rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]["finds"] == 1
+
+
+def test_named_subsets_get_their_own_tables(world, tmp_path):
+    cfg = config(tmp_path, ["5", "6"], subsets={"excl-former-heldout": {"former_heldout": "no"},
+                                                 "only-heldout": {"former_heldout": "yes"}})
+    rep = run(world, tmp_path, "val", cfg)
+    assert rep["subsets"]["excl-former-heldout"]["comparators"]["vision-photos"]["primary"][
+        "all"]["finds"] == 2                                   # no benchmark records here
+    assert rep["subsets"]["only-heldout"]["near_duplicates"]["finds"] == 0

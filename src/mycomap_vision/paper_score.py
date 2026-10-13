@@ -177,6 +177,7 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
         who = r.get("observer_login")
         attrs = {"source": r.get("source"), "name_kind": r.get("name_kind"),
                  "photos": photo_band(len(ph)),
+                 "former_heldout": "yes" if r.get("benchmark") else "no",
                  "month": month, "season": SEASON.get(month, "(no date)"),
                  "licence": "arr" if any(p.get("license_class") == "arr" for p in ph)
                  else "cc",
@@ -562,6 +563,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "inputs": inputs,
         "finds": {"scored": len(finds), "by_name_kind": dict(Counter(f.name_kind for f in finds))},
         "standard": pt.all_standard(finds, outcomes, reps, seed),
+        # The same tables on named subsets of the finds (config "subsets": {name: {attr:
+        # value}}), e.g. val excluding the former held-out benchmark, the half that decides.
+        "subsets": {name: {"filter": flt, **pt.all_standard(
+            [f for f in finds if all(str(f.attrs.get(k)) == str(v) for k, v in flt.items())],
+            outcomes, reps, seed)} for name, flt in (config.get("subsets") or {}).items()},
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   float(config.get("alpha", 0.05))),
         "calibration": calibration_report(finds, calib, outcomes,
