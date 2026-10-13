@@ -3,6 +3,14 @@ import pytest
 from mycomap_vision import manifest
 
 
+@pytest.fixture(autouse=True)
+def no_org_address(monkeypatch):
+    """No test reads mycomap.org: a nightly run with the default steps would read its
+    misidentifications table when a developer's .env names it. A test that needs the
+    setting sets it."""
+    monkeypatch.delenv("MV_ORG_BASE_URL", raising=False)
+
+
 @pytest.fixture
 def conn(tmp_path):
     c = manifest.connect(tmp_path / "manifest.sqlite")

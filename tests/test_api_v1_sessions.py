@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from test_confusions import A_X, A_X_FIELD, B_Y, species_candidates, write_table
 from test_api import open_limits, png
 from test_api_v1_identify import FakeOrg, SERVER_KEY, app_token, bearer, identify
 from test_models_and_scoreboard import Const, seed_two_species
@@ -361,3 +362,14 @@ def test_the_shared_headers_are_minted_when_read():
     body = APP["Authorization"].split(" ", 1)[1][len("mvt."):].split(".")[0]
     claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
     assert abs(claims["iat"] - time.time()) < 5
+
+
+def test_a_sessions_combined_answer_carries_confused_with(conn, tmp_path):
+    client = app(conn, tmp_path)
+    write_table(tmp_path, A_X, B_Y)
+    sid = open_session(client)["session_id"]
+    body = add(client, sid, 247, "cap").json()
+    listed = species_candidates(body["combined"])
+    assert any(c["name"] == "A x" for c in listed)
+    for c in listed:
+        assert c.get("confused_with") == (A_X_FIELD if c["name"] == "A x" else None)

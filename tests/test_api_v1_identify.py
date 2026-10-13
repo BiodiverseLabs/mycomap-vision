@@ -6,6 +6,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from test_api import open_limits, png, post_photos
+from test_confusions import A_X, A_X_FIELD, B_Y, all_candidates, species_candidates, write_table
 from test_models_and_scoreboard import Const, seed_two_species
 from test_signin import HERE, PUBLIC_KEY, good_claims, mint
 
@@ -129,6 +130,39 @@ def test_the_websites_identify_also_reports_timing(conn, tmp_path):
     assert res.status_code == 200
     t = res.json()["timing"]
     assert t["model_ms"] == t["embed_ms"] + t["score_ms"] and t["photos_embedded"] == 1
+
+
+# --- often confused with (docs/api.md §4) ---------------------------------------------
+
+def test_a_species_that_prompts_carries_confused_with_wherever_it_is_listed(conn, tmp_path):
+    client = v1_app(conn, tmp_path)
+    write_table(tmp_path, A_X, B_Y)
+    body = identify(client, bearer(app_token()), reds=(247, 245)).json()
+    listed = species_candidates(body)
+    assert {c["name"] for c in listed} == {"A x", "B y"}
+    for c in listed:
+        if c["name"] == "A x":
+            assert c["confused_with"] == A_X_FIELD
+        else:
+            assert "confused_with" not in c                  # known to .org, doesn't prompt
+    for rank in ("genus", "family", "order", "class", "phylum"):
+        assert all("confused_with" not in c for c in body["ranks"][rank]), rank
+    # Additive: the frozen place keys are still there, unchanged.
+    assert all("place" in c for c in body["ranks"]["species"])
+
+
+def test_without_a_table_no_name_carries_confused_with(conn, tmp_path):
+    client = v1_app(conn, tmp_path)
+    body = identify(client, bearer(app_token()), reds=(247, 245)).json()
+    assert all("confused_with" not in c for c in all_candidates(body))
+
+
+def test_the_websites_identify_shows_the_same_field(conn, tmp_path):
+    client = v1_app(conn, tmp_path)
+    write_table(tmp_path, A_X, B_Y)
+    [r] = post_photos(client, [247], "m1/nearest").json()["results"]
+    top = {c["name"]: c for c in r["ranks"]["species"]}
+    assert top["A x"]["confused_with"] == A_X_FIELD and "confused_with" not in top["B y"]
 
 
 # --- refusals -------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode,
          type RefObject, type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
-import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, ImagePlus, Lightbulb,
-         Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
+import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, Dna, ImagePlus,
+         Lightbulb, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,7 +39,8 @@ import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicName
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
 import {
-  answerFor, boxHints, coverageSummary, photoOnlyNote, placeCue, publicNote, usesPlace, type Answer, type Named,
+  answerFor, boxHints, confusedAside, confusedNote, coverageSummary, photoOnlyNote, placeCue, publicNote, usesPlace, type Answer,
+  type Named,
 } from "@/lib/answer";
 import { shouldScrollTo, showPinnedBar, waitingSteps, type Step } from "@/lib/phoneFlow";
 import {
@@ -917,16 +918,34 @@ function Hints({ hints }: { hints: string[] }) {
   );
 }
 
-/** A name with the place lane's far-find cue under it, when the response carries one. */
+/** A name with the place lane's far-find cue under it, and at species what it is often
+ *  confused with, when the response carries them. */
 function Cues({ n, extra }: { n: Named; extra?: string | null }) {
   const lines = [...placeCue(n.place), ...(extra ? [extra] : [])];
-  if (!lines.length) return null;
+  const confused = n.rank === "species" ? confusedNote(n) : null;
+  if (!lines.length && !confused) return null;
   return (
     <span className="flex flex-wrap gap-x-3 text-xs text-muted-foreground" data-testid={`text-cue-${n.rank}`}>
       {lines.map((l) => (
         <span key={l} className="inline-flex items-center gap-1"><MapPin className="h-3 w-3" aria-hidden />{l}</span>
       ))}
+      {confused && (
+        <span className="inline-flex items-center gap-1" data-testid="text-confused-with">
+          <Dna className="h-3 w-3" aria-hidden />{confused}
+        </span>
+      )}
     </span>
+  );
+}
+
+/** "Often confused with …" under a species name in the lists (same style as the place cue). */
+function ConfusedLine({ c }: { c: { confused_with?: Candidate["confused_with"] } }) {
+  const note = confusedNote(c);
+  if (!note) return null;
+  return (
+    <p className="mt-0.5 flex items-start gap-1 text-xs text-muted-foreground" data-testid="text-confused-with">
+      <Dna className="mt-0.5 h-3 w-3 shrink-0" aria-hidden />{note}
+    </p>
   );
 }
 
@@ -980,6 +999,9 @@ function AnswerBox({ a, r, photos }: { a: Answer; r: IdentifyResult; photos: num
               {n.confidence != null && ` ${pct(n.confidence)}`}
               {placeCue(n.place).length > 0 && (
                 <span className="text-xs text-muted-foreground"> ({placeCue(n.place).join("; ").toLowerCase()})</span>
+              )}
+              {n.rank === "species" && confusedAside(n) && (
+                <span className="text-xs text-muted-foreground" data-testid="text-confused-with"> ({confusedAside(n)})</span>
               )}
             </span>
           ))}
@@ -1145,6 +1167,7 @@ function LikelyBlock({ rank, set, candidates }: { rank: Rank; set: LikelySet; ca
               </span>
             </div>
             <Bar value={n.confidence} strong={i === 0} />
+            {rank === "species" && <ConfusedLine c={n} />}
           </div>
         ))}
       </div>
@@ -1191,19 +1214,23 @@ function RankBlock({ rank, candidates, withheld }: {
         )}
       </div>
       {!withheld && top.confidence != null && <Bar value={top.confidence} strong />}
+      {rank === "species" && <ConfusedLine c={top} />}
       <div className="mt-2 space-y-1">
         {rest.slice(0, 3).map((c) => (
-          withheld || c.confidence == null ? (
-            <div key={c.name} className="text-sm">
-              <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
-            </div>
-          ) : (
-            <div key={c.name} className="grid grid-cols-[1fr_72px_40px] items-center gap-2 text-sm">
-              <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
-              <Bar value={c.confidence} />
-              <span className="text-right text-xs text-muted-foreground tabular-nums">{pct(c.confidence)}</span>
-            </div>
-          )
+          <div key={c.name}>
+            {withheld || c.confidence == null ? (
+              <div className="text-sm">
+                <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
+              </div>
+            ) : (
+              <div className="grid grid-cols-[1fr_72px_40px] items-center gap-2 text-sm">
+                <NameLink rank={rank} name={c.name} className={`truncate text-[#5c4a3a] ${italic ? "sci" : ""}`} />
+                <Bar value={c.confidence} />
+                <span className="text-right text-xs text-muted-foreground tabular-nums">{pct(c.confidence)}</span>
+              </div>
+            )}
+            {rank === "species" && <ConfusedLine c={c} />}
+          </div>
         ))}
       </div>
     </div>

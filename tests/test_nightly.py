@@ -99,9 +99,15 @@ class FakeOutside:
                 self.downloads.append(pid)
         return {"done": len(rows)}
 
+    def misidentifications(self, cache, labels=None, log=print):
+        # mycomap.org's misidentifications table is never read in these tests
+        # (test_confusions.py plays it).
+        return {"skipped": "test"}
+
     def steps(self):
         return nightly.Steps(fetch_inat=self.fetch_inat, taxonomy=self.taxonomy,
-                             download=self.download)
+                             download=self.download,
+                             misidentifications=self.misidentifications)
 
 
 def night(layer, rows, outside=None, accept_removals=False, settings=None):

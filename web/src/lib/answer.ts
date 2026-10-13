@@ -3,7 +3,7 @@
  * whose top name reaches 70%, the coarser ranks under it, and the names still in play one
  * rank finer. Also the small text rules around it, so the page itself holds no logic.
  */
-import { RANKS, type IdentifyResult, type PlaceCue, type Rank } from "@/lib/api";
+import { RANKS, type ConfusedWith, type IdentifyResult, type PlaceCue, type Rank } from "@/lib/api";
 import { coverageWords } from "@/lib/publicView";
 
 /** A rank counts as settled when its top name reaches this calibrated chance. The same
@@ -22,6 +22,7 @@ export interface Named {
   /** null when the chance is withheld (photos may not show a fungus). */
   confidence: number | null;
   place?: PlaceCue;
+  confused_with?: ConfusedWith;
 }
 
 export interface Answer {
@@ -43,7 +44,7 @@ type Result = Pick<IdentifyResult, "ranks" | "likely">;
 function top(r: Result, rank: Rank): Named | null {
   const fromLikely = r.likely?.[rank]?.names[0];
   const c = fromLikely ?? r.ranks[rank]?.[0];
-  return c ? { rank, name: c.name, confidence: c.confidence, place: c.place } : null;
+  return c ? { rank, name: c.name, confidence: c.confidence, place: c.place, confused_with: c.confused_with } : null;
 }
 
 /** Names worth considering at a rank: its likely list, else the ranking's top few. */
@@ -52,7 +53,7 @@ function contenders(r: Result, rank: Rank): Named[] {
   const list = likely?.length
     ? likely
     : (r.ranks[rank] ?? []).filter((c, i) => i === 0 || (c.confidence ?? 0) >= IN_PLAY_FLOOR);
-  return list.map((c) => ({ rank, name: c.name, confidence: c.confidence, place: c.place }));
+  return list.map((c) => ({ rank, name: c.name, confidence: c.confidence, place: c.place, confused_with: c.confused_with }));
 }
 
 /**
@@ -115,6 +116,21 @@ export function placeCue(place: PlaceCue | undefined | null): string[] {
   }
   if (place.in_season === false) out.push("Outside its known season");
   return out;
+}
+
+/**
+ * "Often confused with G. subspectabilis · 9% of DNA-checked finds" under a species name that
+ * people often get wrong (mycomap.org/misid), as the server words it; null otherwise.
+ */
+export function confusedNote(n: { confused_with?: ConfusedWith | null } | null | undefined): string | null {
+  const note = n?.confused_with?.note;
+  return typeof note === "string" && note.trim() ? note : null;
+}
+
+/** The same note inside a sentence, in brackets after a name: "often confused with …". */
+export function confusedAside(n: { confused_with?: ConfusedWith | null } | null | undefined): string | null {
+  const note = confusedNote(n);
+  return note ? note[0].toLowerCase() + note.slice(1) : null;
 }
 
 /** "From the photos alone: X" when the place and date changed the top name at a rank. */

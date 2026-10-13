@@ -338,6 +338,39 @@ model's result, not a `results` list.
   the top name, `{}` otherwise. All of it is computed in
   `Identifier.identify_vectors` from vectors and context, so a session's re-scoring gets
   it with no photos.
+- **Often confused with** (`confused_with`, added 2026-10-13; additive, the place keys
+  above are unchanged). On a **species** name, wherever it appears (`ranks.species`,
+  `likely.species.names`, `per_photo[].ranks.species`), when people often get that name
+  wrong:
+
+  ```json
+  "confused_with": {"names": [{"name": "Gymnopilus subspectabilis", "finds": 8}, …],
+                    "called": 86, "wrong": 29,
+                    "note": "Often confused with G. subspectabilis · 9% of DNA-checked finds"}
+  ```
+
+  - Source: mycomap.org's "commonly misidentified as" table ([mycomap.org/misid](https://mycomap.org/misid)),
+    built nightly from every iNaturalist identification on its DNA-checked iNat records;
+    Vision reads it once a night. `called`: DNA-checked finds someone called this name;
+    `wrong`: those DNA said were another species (a synonym or a broader name is not
+    wrong). The field is present only when .org says the name **prompts**: it is 80% sure
+    DNA says something else on at least 25% of the finds called it (a Jeffreys
+    half-count; no minimum number of finds). .org owns that rule.
+  - `names`: what DNA said instead, most finds first, at most 3, other species only (a
+    narrower provisional DNA type of the same species is not listed). `finds`: finds
+    called this name that DNA said were that one.
+  - `note`: one line to show under the name, about the first of `names`: "Often confused
+    with *X* · *n*% of DNA-checked finds" (a share of `called`, rounded; "under 1%"
+    below 0.5%), or, while `called` is under 10, "*k* of *n* DNA-checked find(s)". *X*
+    has its genus abbreviated ("G. subspectabilis") only when it is the candidate's genus.
+  - Absent (the key is left out, never `null`) at genus and above, when the name doesn't
+    prompt, when .org has no record of it, and when Vision holds no table yet. A failed
+    nightly read keeps the previous night's table.
+  - Matching: .org's name key (lower case, single spaces, straight quotes,
+    " var. / subsp. / ssp. / f. " dropped) against .org's names, then against their
+    aliases (other spellings, iNat and MycoMap synonyms), then Vision's own spelling key
+    (temporary codes 'IN7' = 'IN07', quote glyphs) against both. A name .org knows that
+    doesn't prompt gets nothing, even if a synonym does.
 - **`confidence`**: a softmax with a temperature fitted per rank on the newest weekly
   comparison (by log-likelihood). It is calibrated on average, not a promise per answer.
   `checked_coverage` says how often a likely set really held the right name on unseen

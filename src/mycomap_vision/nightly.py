@@ -10,12 +10,17 @@ key in permissions.org_key()), compares the answer with what it serves, and then
                                  embedded on the box's CPU with the served model,
                                  then they join the reference set
 
+and, first and on its own, it reads mycomap.org's "commonly misidentified as" table
+(confusions.py: GET /api/misidentifications/all, public), kept beside the manifest for
+the "often confused with" notes on species candidates.
+
 What a night changes lives in a layer beside the release, never inside it
 (<MV_RELEASE_ROOT>/state/nightly/<release id>/):
 
     manifest.sqlite             the release's manifest, copied once, then kept current;
                                 the server reads and writes this copy, not the release's
     taxonomy/inat_genera.sqlite the release's taxonomy cache, plus genera new since
+    misidentifications.json.gz  mycomap.org's last good "misidentified as" table
     embeddings/<backbone>/      the shards the nights added (numbered after the
                                 release's; nightly_layer records where they start)
     photos/                     photos only until they are embedded, then deleted
@@ -58,7 +63,7 @@ from typing import Callable
 
 import requests
 
-from . import config, holdouts, inat, photos, refresh, taxonomy
+from . import confusions, config, holdouts, inat, names, photos, refresh, taxonomy
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import embed_photos, next_shard, photos_to_embed
 from .manifest import snapshot
@@ -536,6 +541,7 @@ class Steps:
     fetch_inat: Callable[..., dict] = inat.fetch_all
     taxonomy: Callable[..., dict] = refresh.new_genera_taxonomy
     download: Callable[..., dict] = photos.download_all
+    misidentifications: Callable[..., dict] = confusions.refresh_from_settings
 
 
 @dataclass
@@ -587,6 +593,12 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
     changed, ok, error, generated = False, True, None, None
     try:
         with RunLock(layer.lock):
+            # Its own step, first: a refused green list must not stop it, and its failure
+            # keeps yesterday's table (confusions.refresh) and stops nothing else.
+            report["confused_with"] = _step(lambda: steps.misidentifications(
+                confusions.cache_path(layer.manifest),
+                labels=set(names.manifest_labels(conn).values()), log=log),
+                "often confused with", log)
             rows, generated = fetch()
             exported_at = iso(now_utc())
             recs = build_records(rows, exported_at)

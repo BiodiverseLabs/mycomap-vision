@@ -660,6 +660,32 @@ def cmd_nightly(conn, args) -> None:
     print(json.dumps(nightly.status(conn, settings, zone=zone), indent=2))
 
 
+def cmd_confused_with(conn, args) -> None:
+    """mycomap.org's "misidentified as" table as the server reads it (confusions.py): its
+    state, what a name gets, or --fetch to read .org now (the server picks it up within a
+    minute). The cache sits beside the manifest the server serves."""
+    from . import confusions, names, nightly
+    cache = confusions.cache_path(nightly.served_manifest())
+    if args.fetch:
+        base_url = config.setting("MV_ORG_BASE_URL")
+        if not base_url:
+            raise SystemExit("set MV_ORG_BASE_URL")
+        report = confusions.refresh(cache, lambda: confusions.fetch_all(base_url),
+                                    labels=set(names.manifest_labels(conn).values()))
+        print(json.dumps(report, indent=2))
+        return
+    if args.names:
+        table = confusions.load(cache)
+        if table is None:
+            raise SystemExit(f"no table at {cache}: run `mv confused-with --fetch`")
+        print(json.dumps({n: table.confused_with(n) for n in args.names}, indent=2,
+                         ensure_ascii=False))
+        return
+    print(json.dumps({"cache": str(cache), **confusions.health(cache),
+                      **{k: v for k, v in confusions.read_state(cache).items()
+                         if k in ("last_attempt_at", "last_error")}}, indent=2))
+
+
 def cmd_prospective(conn, args) -> None:
     from . import prospective
     print(json.dumps(prospective.report(conn), indent=2))
@@ -1858,6 +1884,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--accept-removals", action="store_true",
                    help="with --now: take an answer that removes more records than the limit")
     sub.add_parser("prospective", help="how advance predictions fared once the DNA came in")
+    p = sub.add_parser("confused-with", help="mycomap.org's \"misidentified as\" table behind "
+                       "the \"often confused with\" notes: state, a name's note, or --fetch")
+    p.add_argument("names", nargs="*", help="species names to look up in the cached table")
+    p.add_argument("--fetch", action="store_true", help="read mycomap.org now (public, no key)")
 
     p = sub.add_parser("scoreboard", help="saved comparison results")
     p.add_argument("--comparison", help="only this comparison id")
@@ -2320,6 +2350,7 @@ def main(argv: list[str] | None = None) -> int:
         "predict-pending": cmd_predict_pending,
         "prospective": cmd_prospective,
         "nightly": cmd_nightly,
+        "confused-with": cmd_confused_with,
         "scoreboard": cmd_scoreboard,
         "scoreboard-export": cmd_scoreboard_export,
         "calibrate-sets": cmd_calibrate_sets,
