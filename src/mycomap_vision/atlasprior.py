@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import math
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,6 +90,14 @@ def _u8(s: str) -> int:
     return NO_DATA if s in ("", "NA") else min(int(round(float(s))), NO_DATA)
 
 
+def _aoa(s: str) -> int:
+    """Atlas writes aoa = 100 x dissimilarity / threshold capped at 255, and null where no
+    model has a threshold. Kept apart here: a value is capped at 254 (far outside), and
+    only null is NO_DATA (unknown)."""
+    s = s.strip()
+    return NO_DATA if s in ("", "NA") else min(int(round(float(s))), NO_DATA - 1)
+
+
 def _taxa(path: Path) -> tuple[dict[int, str], dict[str, float]]:
     """{taxon_id: name key}, {name key: map_strength} (absent: no column)."""
     header, rows = read_table(path)
@@ -139,24 +148,35 @@ def import_exports(continent_dir: Path, prior_dir: Path | None, out_dir: Path,
     i_r, i_a = column(header, "rank"), column(header, "aoa")
     i_m, i_s = column(header, "models", required=False), column(header, "rank_sd",
                                                                  required=False)
-    entries = []
+    # One streaming pass into compact columns (26M rows for ~470 taxa: a tuple per row
+    # would take gigabytes), then a vectorised fill.
+    col_by_id = {tid: col_of[k] for tid, k in c_ids.items()}
+    a_cell, a_col = array("i"), array("H")
+    a_rank, a_aoa, a_mod, a_sd = (array("B") for _ in range(4))
+    width = max(i_t, i_c, i_r, i_a, i_m, i_s) + 1
     for r in rows:
-        k = c_ids.get(int(r[i_t]))
-        if k is None:
+        if len(r) < width:
             continue
-        entries.append((int(r[i_c]), col_of[k], _u8(r[i_r]), _u8(r[i_a]),
-                        _u8(r[i_m]) if i_m >= 0 else NO_DATA,
-                        _u8(r[i_s]) if i_s >= 0 else NO_DATA))
-    cells = np.unique(np.array([e[0] for e in entries], dtype=np.int32))
-    pos = {int(c): i for i, c in enumerate(cells.tolist())}
+        j = col_by_id.get(int(r[i_t]))
+        if j is None:
+            continue
+        a_cell.append(int(r[i_c]))
+        a_col.append(j)
+        a_rank.append(_u8(r[i_r]))
+        a_aoa.append(_aoa(r[i_a]))
+        a_mod.append(_u8(r[i_m]) if i_m >= 0 else NO_DATA)
+        a_sd.append(_u8(r[i_s]) if i_s >= 0 else NO_DATA)
+    cell_v = np.frombuffer(a_cell, dtype=np.int32)
+    cells, row_i = np.unique(cell_v, return_inverse=True)
+    col_j = np.frombuffer(a_col, dtype=np.uint16).astype(np.int64)
     shape = (len(cells), len(keys))
     arrays = {name: np.full(shape, NO_DATA, np.uint8) for name in ("rank", "aoa", "models",
                                                                    "rank_sd")}
+    for name, buf in (("rank", a_rank), ("aoa", a_aoa), ("models", a_mod), ("rank_sd", a_sd)):
+        arrays[name][row_i, col_j] = np.frombuffer(buf, dtype=np.uint8)
+    del a_cell, a_col, a_rank, a_aoa, a_mod, a_sd, cell_v, row_i, col_j
+    pos = {int(c): i for i, c in enumerate(cells.tolist())}
     reach = np.zeros(shape, bool)
-    for cell, j, rank, aoa, models, sd in entries:
-        i = pos[cell]
-        arrays["rank"][i, j], arrays["aoa"][i, j] = rank, aoa
-        arrays["models"][i, j], arrays["rank_sd"][i, j] = models, sd
     for k, rows_ in reach_rows.items():
         j = col_of.get(k)
         if j is None:

@@ -249,3 +249,19 @@ def test_a_null_aoa_is_unknown_never_inside(tmp_path):
     view = t.at(*MICHIGAN)
     assert view.aoa[i01] == ap.NO_DATA and view.rank_sd[i01] == ap.NO_DATA
     assert ap.applicability(view.aoa[[i01]], "graded")[0] == 0.0
+
+
+def test_a_capped_aoa_is_far_outside_and_only_a_null_is_unknown(tmp_path):
+    # Atlas caps aoa at 255 (far outside); a null is "no threshold". They must differ.
+    cont, prior = exports(tmp_path, continent_spread=True)
+    g = ap.AtlasGrid.from_json(GRID)
+    tsv(cont / "continent.tsv.gz", ["taxon_id", "cell_id", "rank", "models", "rank_sd", "aoa"],
+        [(2, int(g.cell(*MICHIGAN)), 90, 1, "", 255), (1, int(g.cell(*MICHIGAN)), 30, 1, "", "")],
+        gz=True)
+    ap.import_exports(cont, prior, tmp_path / "t", "R")
+    t = ap.AtlasTable(tmp_path / "t")
+    i01, c01 = t.columns_for([IN01, CA01]).tolist()
+    view = t.at(*MICHIGAN)
+    assert view.aoa[i01] == 254 and view.aoa[c01] == ap.NO_DATA
+    graded = ap.applicability(view.aoa[[i01, c01]], "graded")
+    assert graded[0] == pytest.approx(np.exp(-1.54)) and graded[1] == 0.0
