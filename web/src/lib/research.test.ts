@@ -49,6 +49,15 @@ test("the held-out benchmark says it is not the paper's test set", () => {
   assert.match(h.records, /development benchmark/);
 });
 
+test("dataset release v1 comes first; the held-out records are development history", () => {
+  assert.deepEqual(BENCHMARKS.slice(0, 3).map((b) => [b.slug, b.status]),
+    [["newest-weeks", "running"], ["sealed-test", "planned"], ["held-out", "history"]]);
+  const v1 = BENCHMARKS[0];
+  assert.match(v1.name, /dataset release v1/);
+  assert.match(BENCHMARKS[2].records, /part of dataset release v1 \(5,679 in its training split, 7,381 in its validation split/);
+  assert.equal(STATUS_LABEL.history, "Development history");
+});
+
 test("API is the last item under Research, for visitors and members alike", () => {
   for (const m of [undefined, me("identify", null), me("all", null), me("all", someone)]) {
     const last = researchNav(m).at(-1)!;
