@@ -236,10 +236,17 @@ def near_duplicates(scored_photos: dict[str, list[dict]], ref_shas: set[str],
 # --- Vision's answers -----------------------------------------------------------------------------
 
 def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list, method: str,
-                   backbone: str, top_k: int = 10) -> dict[str, dict]:
+                   backbone: str, top_k: int = 10, calibration: dict | None = None,
+                   truths: dict[str, dict] | None = None) -> dict[str, dict]:
     """Each scored record's ranked species and genus names from `method` fitted on the
-    reference records (evaluate.fit_method; the records' photo_rows index `vectors`)."""
-    from . import evaluate
+    reference records (evaluate.fit_method; the records' photo_rows index `vectors`).
+
+    With `calibration` ({rank: {temperature, floor}}, fixed on val, never refitted here)
+    each answer also carries, per calibrated rank, `conf` (the top name's probability),
+    `p_true` (the true name's, from `truths` {key: {rank: name}}; 0 when the reference
+    lacks it), `sumsq` (for the multiclass Brier score) and `set` (the likely set at the
+    floor, likely.likely_set; None without a floor)."""
+    from . import evaluate, likely
     index, model = evaluate.fit_method(vectors, ref_records, method, backbone)
     uses_context = getattr(model, "needs_context", False)
     out = {}
@@ -251,6 +258,22 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
         for rank in ("species", "genus"):
             rs = evaluate.rank_scores(scores, index, rank)
             ans[rank] = evaluate.top_labels(rs, index.labels[rank], top_k) if len(rs) else []
+        if calibration:
+            ans["cal"] = {}
+            for rank, c in calibration.items():
+                rs = evaluate.rank_scores(scores, index, rank)
+                if not len(rs):
+                    continue
+                p = likely.probabilities(rs, float(c["temperature"]))
+                names = index.labels[rank]
+                truth = ((truths or {}).get(rec.observation_id) or {}).get(rank)
+                pos = {n: i for i, n in enumerate(names)}.get(truth) if truth else None
+                one = {"conf": float(p.max()), "sumsq": float((p * p).sum()),
+                       "p_true": float(p[pos]) if pos is not None else 0.0, "set": None}
+                if c.get("floor") is not None:
+                    chosen, _ = likely.likely_set(p, float(c["floor"]))
+                    one["set"] = [names[i] for i in chosen]
+                ans["cal"][rank] = one
         out[rec.observation_id] = ans
     return out
 
@@ -367,7 +390,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                         read_attrs(attrs_path) if attrs_path else None)
     out.mkdir(parents=True, exist_ok=True)
     (out / "predictions").mkdir(exist_ok=True)
-    outcomes, inputs = {}, {}
+    outcomes, inputs, calib = {}, {}, {}
     public = None
     for comp in config["comparators"]:
         answers = None
@@ -385,13 +408,21 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 scored = with_public_points(scored, public)
             log(f"[{comp['id']}] {b} / {comp['method']}: {len(scored):,} finds with vectors, "
                 f"{len(ref):,} reference records")
+            truths = {f.key: {"species": f.species, "genus": f.genus, "family": f.family}
+                      for f in finds}
             answers = vision_answers(vecs, ref, scored, comp["method"], b,
-                                     int(config.get("top_k", 10)))
+                                     int(config.get("top_k", 10)), comp.get("calibration"),
+                                     truths)
+            if comp.get("calibration"):
+                calib[comp["id"]] = {k: a["cal"] for k, a in answers.items() if "cal" in a}
             path = out / "predictions" / f"{comp['id']}.jsonl"
             with open(path, "w", encoding="utf-8") as fh:
                 for k in sorted(answers):
                     fh.write(json.dumps({"record_key": k, **answers[k]}) + "\n")
         outcomes[comp["id"]], inputs[comp["id"]] = outcomes_for(comp, finds, answers)
+        if comp["kind"] == "inat" and comp.get("calibration_from_score", True):
+            calib[comp["id"]] = {str(line["record_key"]): po.inat_confidence(
+                line, comp.get("score", "vision")) for line in po.read_jsonl(comp["file"])}
         if answers is not None:
             inputs[comp["id"]].update(backbone=comp["backbone"], method=comp["method"],
                                       place=bool(comp.get("place")),
@@ -416,6 +447,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "standard": pt.all_standard(finds, outcomes, reps, seed),
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   float(config.get("alpha", 0.05))),
+        "calibration": calibration_report(finds, calib, outcomes,
+                                          config.get("calibration_metrics", {}), reps, seed),
         "slices": pt.slices(finds, outcomes, config.get("slices", {}).get("attrs", []),
                             config.get("slices", {}).get("cells", ["species_strict@1",
                                                                    "genus_strict@1"]),
@@ -427,6 +460,18 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     log(f"paper-score: {len(finds):,} finds; report in {out}"
         + ("  *** POST HOC ***" if g["post_hoc"] else ""))
     return report
+
+
+def calibration_report(finds, calib: dict, outcomes: dict, cfg: dict, reps: int,
+                       seed: int) -> dict:
+    """E13 and E11 for every comparator with confidences (paper_calibration), primary scope."""
+    from . import paper_calibration as pc
+    base = pt.in_scope(finds)
+    return {cid: {rank: pc.summarise(base, cal, outcomes[cid], rank, cfg, reps, seed,
+                                     lambda f: pt.band(f.depth))
+                  for rank in ("species", "genus")            # the ranks with outcome cells
+                  if any(rank in (c or {}) for c in cal.values())}
+            for cid, cal in calib.items()}
 
 
 # --- the readable report --------------------------------------------------------------------------

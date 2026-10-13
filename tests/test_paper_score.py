@@ -275,3 +275,22 @@ def test_a_place_method_is_given_the_public_point_never_the_true_one(world, tmp_
     run(world, tmp_path, "val", cfg)
     # The release's true point is (47.0, -122.0) for every record of the fixture.
     assert sorted(SeesPlace.seen, key=str) == sorted([(47.5, -122.5), (None, None)], key=str)
+
+
+def test_calibration_uses_the_val_temperature_given_never_a_refit(world, tmp_path):
+    reports = []
+    for t in (0.01, 10.0):
+        cfg = config(tmp_path, ["5", "6"])
+        cfg["comparators"][0]["calibration"] = {"species": {"temperature": t, "floor": 0.2},
+                                                "genus": {"temperature": t}}
+        reports.append(run(world, tmp_path, "val", cfg))
+    sharp, flat = (r["calibration"]["vision-photos"]["species"] for r in reports)
+    assert sharp["n"] == flat["n"] == 2
+    conf = [r["rules"][0]["confident"] for r in (sharp, flat)]
+    assert conf[0] > conf[1]              # T=0.01 is near certain, T=10 near uniform
+    assert sharp["scores"]["nll"] < flat["scores"]["nll"]
+    assert "likely_sets" in sharp and "likely_sets" not in reports[0]["calibration"][
+        "vision-photos"]["genus"]                                     # no genus floor given
+    assert "unknown_species" in sharp
+    assert "vision-mean" not in reports[0]["calibration"]             # no calibration given
+    assert reports[0]["calibration"]["inat-vision"]["species"]["n"] == 2   # iNat's own score

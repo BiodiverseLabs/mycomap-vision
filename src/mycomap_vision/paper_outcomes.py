@@ -115,6 +115,16 @@ def inat_outcome(line: dict, find: Find, score: str) -> dict:
     return out
 
 
+def inat_confidence(line: dict, score: str) -> dict:
+    """iNat's own confidence in its top answer per rank (its score, 0-100, as a fraction),
+    for the risk-coverage comparison; iNat gives no probability for the true name."""
+    out = {}
+    for rank in ("species", "genus"):
+        ranked = (line.get(score) or {}).get(rank) or []
+        out[rank] = {"conf": (float(ranked[0][2]) / 100.0) if ranked else 0.0}
+    return out
+
+
 EXPERT_VIEWS = ("first", "best", "community")
 
 
