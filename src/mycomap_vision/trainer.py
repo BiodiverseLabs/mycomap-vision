@@ -50,19 +50,21 @@ INDEX_TABLES = ("embeddings", "embed_runs", "finetunes", "eval_runs")
 
 # --- how long a run takes ------------------------------------------------------
 # Photos per second at LARGE photos on the trainer instance: bioclip-2 measured on a
-# g6.xlarge (1 L4, 4 vCPU, JPEG decoding the limit) in run 20261007-165400 (embed
-# 108.3/s, its fine-tune embedded at 116.1/s; fine-tuning 586,512 photos x 2 epochs in
-# 19,822 s = 59.2/s). dinov3 is still the laptop's speed. Estimates multiply the time by
-# L4_FACTOR as a margin (a bigger release, a slower day for S3 reads).
-EMBED_RATES = {"bioclip-2": 108.0, "dinov3-l16-512": 18.8}
-FINETUNE_RATES = {"bioclip-2": 59.0}   # photos seen per second while training
-# BioCLIP 2 at a larger input (plan E24): NOT measured on an L4. The 224 px rates divided by
-# the ViT-L/14's compute per photo (tokens 577 and 1025 against 257, attention ~10% of it at
-# 224 and growing with tokens squared): x2.5 at 336, x5.2 at 448; replace with the run's own.
-INPUT_SIZE_COST = {"bioclip-2-336": 2.5, "bioclip-2-448": 5.2}
-for _alias, _cost in INPUT_SIZE_COST.items():
-    EMBED_RATES[_alias] = round(EMBED_RATES["bioclip-2"] / _cost, 1)
-    FINETUNE_RATES[_alias] = round(FINETUNE_RATES["bioclip-2"] / _cost, 1)
+# g6.xlarge (1 L4, 4 vCPU, JPEG decoding the limit) in the v1 run 20261013-003428 (embed
+# 682,024 photos in 5,569.5 s = 122.5/s; fine-tuning 19,524 steps x 64 photos in 17,680.9 s
+# = 70.7/s; the 2026-10-07 run had 108.3/s and 59.2/s on a smaller release). dinov3 is
+# still the laptop's speed. Estimates multiply the time by L4_FACTOR as a margin (a bigger
+# release, a slower day for S3 reads).
+EMBED_RATES = {"bioclip-2": 122.5, "dinov3-l16-512": 18.8}
+FINETUNE_RATES = {"bioclip-2": 70.7}   # photos seen per second while training
+# BioCLIP 2 at a larger input (plan E24): the 224 px rates divided by the cost per photo
+# measured on the laptop's RTX 4070 (2026-10-13, synthetic batches of 16, bf16 training of
+# the last 4 blocks): (embed, fine-tune) x(2.48, 2.27) at 336 and x(5.03, 4.20) at 448. The
+# L4 run at 224 may be loader-bound, so this can only overestimate; replace with the run's own.
+INPUT_SIZE_COST = {"bioclip-2-336": (2.48, 2.27), "bioclip-2-448": (5.03, 4.20)}
+for _alias, (_embed, _train) in INPUT_SIZE_COST.items():
+    EMBED_RATES[_alias] = round(EMBED_RATES["bioclip-2"] / _embed, 1)
+    FINETUNE_RATES[_alias] = round(FINETUNE_RATES["bioclip-2"] / _train, 1)
 # The Picek replication (retrain.py), training photos per second on the instance. NOT yet
 # measured on an L4: reasoned estimates for a 4-vCPU g6.xlarge, where the data loader
 # (decode + RandAugment at 384 px) and not the GPU sets the pace (docs/PLAN.md).

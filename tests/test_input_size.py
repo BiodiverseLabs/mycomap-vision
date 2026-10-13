@@ -86,7 +86,8 @@ def test_the_estimate_counts_the_larger_inputs_cost():
     small = trainer.estimate(trainer.plan_stages(["bioclip-2"], ["bioclip-2"], "r"), 100_000)
     assert est["total_hours"] > 3 * small["total_hours"]
     rates = {r["stage"].split(" ")[0]: r["photos_per_second"] for r in est["stages"]}
-    assert rates["finetune"] == round(trainer.FINETUNE_RATES["bioclip-2"] / 5.2, 1)
+    assert rates["finetune"] == round(trainer.FINETUNE_RATES["bioclip-2"] / 4.20, 1)
+    assert rates["embed"] == round(trainer.EMBED_RATES["bioclip-2"] / 5.03, 1)
 
 
 # --- the fine-tune at a size the GPU can't hold in one pass ---------------------------------
