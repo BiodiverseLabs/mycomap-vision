@@ -14,7 +14,10 @@ from mycomap_vision import apiv1, quotas as q
 from mycomap_vision.api import create_app
 from mycomap_vision.embed import embed_photos, photos_to_embed
 
-MEMBER = bearer(app_token(sub="u_member0007", limit={"monthly": 300}))
+def member() -> dict:
+    """A member's app token, minted when used: tokens live 60 s, and one minted at import
+    expired before these tests ran in a long, busy full-suite run."""
+    return bearer(app_token(sub="u_member0007", limit={"monthly": 300}))
 
 
 def app(conn, tmp_path, mode="count", org=None, api_v1=True):
@@ -35,7 +38,7 @@ def app(conn, tmp_path, mode="count", org=None, api_v1=True):
 
 def test_models_names_the_model_by_its_public_name_with_its_reference_and_limits(conn,
                                                                                    tmp_path):
-    res = app(conn, tmp_path).get("/api/v1/models", headers=MEMBER)
+    res = app(conn, tmp_path).get("/api/v1/models", headers=member())
     assert res.status_code == 200 and res.headers["cache-control"] == "private, max-age=300"
     body = res.json()
     [model] = body["models"]
@@ -49,7 +52,7 @@ def test_models_names_the_model_by_its_public_name_with_its_reference_and_limits
 
 
 def test_models_never_names_a_backbone_or_method(conn, tmp_path):
-    text = json.dumps(app(conn, tmp_path).get("/api/v1/models", headers=MEMBER).json())
+    text = json.dumps(app(conn, tmp_path).get("/api/v1/models", headers=member()).json())
     for internal in ('"m1', "nearest", "backbone", "method"):
         assert internal not in text, internal
 
@@ -58,15 +61,15 @@ def test_models_never_names_a_backbone_or_method(conn, tmp_path):
 
 def test_a_member_reads_their_months_use_and_reading_costs_nothing(conn, tmp_path):
     client = app(conn, tmp_path)
-    first = client.get("/api/v1/usage", headers=MEMBER)
+    first = client.get("/api/v1/usage", headers=member())
     assert first.status_code == 200 and first.headers["cache-control"] == "no-store"
     body = first.json()
     assert body["quotas"] == "count" and body["pool"] == "member"
     assert body["usage"]["used"] == 0 and body["usage"]["limit"] == 300
     assert body["usage"]["resets_at"].endswith("Z")
-    assert identify(client, MEMBER).status_code == 200
+    assert identify(client, member()).status_code == 200
     for _ in range(3):
-        assert client.get("/api/v1/usage", headers=MEMBER).json()["usage"]["used"] == 1
+        assert client.get("/api/v1/usage", headers=member()).json()["usage"]["used"] == 1
 
 
 def test_mycomap_orgs_server_key_has_no_pool(conn, tmp_path):
@@ -87,7 +90,7 @@ def test_a_developer_key_counts_in_its_owners_pool_unless_it_has_an_override(con
 
 
 def test_with_quotas_off_usage_is_null(conn, tmp_path):
-    body = app(conn, tmp_path, mode="off").get("/api/v1/usage", headers=MEMBER).json()
+    body = app(conn, tmp_path, mode="off").get("/api/v1/usage", headers=member()).json()
     assert body["usage"] is None and body["quotas"] == "off"
 
 
