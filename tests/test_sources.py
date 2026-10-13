@@ -79,8 +79,11 @@ def test_a_record_without_a_source_org_names_is_unknown():
 
 
 def test_an_inat_record_and_an_mo_record_with_the_same_number_stay_two_records(conn):
+    # In different projects: in the same one the iNat row is an MO find in disguise
+    # (sources.mo_twins, test_mo_twins_errata.py).
     export(conn, [org_row("500", "iNaturalist", "Russula emetica"),
-                  org_row("500", "MO Observations", "Hydnum repandum")])
+                  org_row("500", "MO Observations", "Hydnum repandum",
+                          validation_project_1="Ohio")])
     got = dict(conn.execute("select observation_id, scientific_name from records"))
     assert got == {"500": "Russula emetica", "mo:500": "Hydnum repandum"}
     assert conn.execute("select sum(label_conflict) from records").fetchone()[0] == 0
@@ -195,7 +198,8 @@ def test_the_first_export_takes_wrong_inat_photos_off_non_inat_records_with_an_a
     legacy_manifest(conn)
     assert not sources.migrated(conn)
     out = export(conn, [org_row("123", "MO Observations"), org_row("456", "iNaturalist"),
-                        org_row("789", "iNaturalist"), org_row("789", "MO Observations")])
+                        org_row("789", "iNaturalist"),
+                        org_row("789", "MO Observations", validation_project_1="Ohio")])
     assert out["source_migration"]["wrong_records"] == 1
     assert out["source_migration"]["photos_unlinked"] == 2
     assert out["source_migration"]["embeddings_removed"] == 2

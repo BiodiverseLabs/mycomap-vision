@@ -198,12 +198,18 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
     reads the records table can train on it, index it or download its photos; one
     stored by older code leaves with this export.
 
+    Nor is an iNat record that is a Mushroom Observer find in disguise (sources.mo_twins:
+    same number, same validation project as an MO record; its name and photos are an
+    unrelated iNat observation): one stored before leaves with this export, so the
+    served index loses it at the next nightly (`mo_twins_dropped` counts them).
+
     The first export into a manifest written by older code (sources guessed from the
     id) also takes the iNat photos fetched for its non-iNat records off them, with an
     audit trail, and marks the manifest migrated (sources.migrate_legacy), all in the
     same transaction as the new records.
     """
     records, held_out = holdouts.drop_held_out(conn, records)
+    records, mo_twins = sources.drop_mo_twins(records)
     sources.ensure_schema(conn)
     migration = None
     before = dict(conn.execute("select observation_id, scientific_name from records"))
@@ -233,6 +239,8 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
     placefallback.apply(conn)
     if held_out:
         out["held_out"] = held_out
+    if mo_twins:
+        out["mo_twins_dropped"] = len(mo_twins)
     if migration:
         out["source_migration"] = migration
     return out

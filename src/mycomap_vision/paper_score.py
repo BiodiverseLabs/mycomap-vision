@@ -148,11 +148,6 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
 
 # --- finds ----------------------------------------------------------------------------------------
 
-def read_errata(path) -> tuple[set[str], str | None]:
-    from .backbone_screen import read_errata as read
-    return read(path)
-
-
 def scored_and_reference(base, test):
     """(scored release, scored split, reference splits of base, sealed?) for `test`: "val"
     (base's val against its train) or a test release made for base (its test split
@@ -435,7 +430,7 @@ def outcomes_for(comp: dict, finds: list[po.Find], answers: dict | None = None) 
 
 
 def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
-        errata_path=None, attrs_path=None, allow_code: str | None = None,
+        attrs_path=None, allow_code: str | None = None,
         research_dir: Path | None = None, embed_missing=None, log=print) -> dict:
     """Score every comparator of `config` on `test` ("val" or a test release of `base`)
     and write report.json, report.md and the Vision predictions under `out`."""
@@ -444,10 +439,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     scored_rel, split, ref_splits, sealed = scored_and_reference(base, test)
     g = guard(sealed, config_bytes, config, research_dir or cfgmod.RESEARCH_DIR,
               cfgmod.code_version(), allow_code)
-    errata, errata_sha = read_errata(errata_path)
+    # An erratum given to the base release (--errata; Release.use_errata) has already left
+    # its records out of every split base reads: references and depth alike.
+    errata = set(base.errata.keys) if getattr(base, "errata", None) is not None else set()
     reps, seed = int(config.get("bootstrap", {}).get("reps", 10_000)), \
         int(config.get("bootstrap", {}).get("seed", 0))
-    ref_rows = [dict(r) for r in base.records(ref_splits) if str(r["record_key"]) not in errata]
+    ref_rows = [dict(r) for r in base.records(ref_splits)]
     scored_rows = [dict(r) for r in scored_rel.records(split)]
     scored_keys = {str(r["record_key"]) for r in scored_rows}
     photos: dict[str, list[dict]] = defaultdict(list)      # the scored finds' photos only
@@ -496,7 +493,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 embed_missing(b, wanted, None)
             ids, vecs = load_embeddings(conn, b)
             row = {int(p): i for i, p in enumerate(ids.tolist())}
-            ref = [r for r in base.as_records(ref_splits, row) if r.observation_id not in errata]
+            ref = base.as_records(ref_splits, row)
             if comp.get("reference_as_of"):           # E7b: the reference as it stood then
                 ref = [r for r in ref if r.validated_on and r.validated_on <= comp["reference_as_of"]]
             if px:
@@ -551,9 +548,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "dataset_release": dataset.cite(base),
         "scored": {"release": scored_rel.id, "split": split, "reference_splits": list(ref_splits),
                    **({"test_release": dataset.cite(scored_rel)} if scored_rel is not base else {})},
-        "errata": {"file": str(errata_path) if errata_path else None, "sha256": errata_sha,
-                   "reference_records_left_out": len(errata & {str(r["record_key"]) for r in
-                                                               base.records(ref_splits)})},
+        "errata": {**(dataset.cite(base).get("errata") or {}),
+                   "reference_records_left_out": sum(
+                       1 for (k,) in base.db.execute(
+                           "select record_key from records where included = 1 and split in "
+                           f"({','.join('?' * len(ref_splits))})", ref_splits)
+                       if str(k) in errata)},
         "dhash_flags": {"source": "the scored release's near_base table",
                         "photos_hashed": len(near_base), "photos_flagged": len(dhash),
                         "near_base": (scored_rel.manifest.get("near_base")

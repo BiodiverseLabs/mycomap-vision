@@ -1,7 +1,7 @@
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-// Markdown as the site writes it (the paper draft, experiment write-ups): headings, tables,
+// Markdown as the site writes it (experiment write-ups): headings, tables,
 // lists and links in the site's type and colours.
 
 const md: Components = {

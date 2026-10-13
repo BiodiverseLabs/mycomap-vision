@@ -344,8 +344,6 @@ export const api = {
   /** `skipped`: entries left out because they break the registry's rules (the server logs which). */
   experiments: () => getJson<{ experiments: ExperimentSummary[]; skipped?: number }>("/api/experiments"),
   experiment: (slug: string) => getJson<Experiment>(`/api/experiments/${encodeURIComponent(slug)}`),
-  /** The paper draft (Markdown), for signed-in members only. */
-  paper: () => getJson<{ markdown: string }>("/api/paper"),
   models: () => getJson<ModelsInfo>("/api/models"),
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),

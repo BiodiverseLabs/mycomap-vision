@@ -434,6 +434,13 @@ def _dataset_release(args):
     print(f"dataset release {rel.id} (release_hash {rel.release_hash[:12]}, "
           f"reference_hash {rel.reference_hash[:12]})"
           + (" DRAFT" if rel.manifest["draft"] else ""))
+    if getattr(args, "errata", None):
+        from pathlib import Path
+
+        from . import errata
+        e = errata.read(Path(args.errata))
+        rel.use_errata(e)
+        print(f"erratum {e.file} (sha256 {e.sha256[:12]}): {len(e.keys):,} records left out")
     return rel
 
 
@@ -473,6 +480,19 @@ def cmd_dataset(args) -> None:
         path = dhash.save_index(index, Path(args.out) if args.out else dhash.index_path(args.id))
         print(json.dumps({"release": args.id, "photos": index["photos"], "index": str(path),
                           "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "errata":
+        from . import errata
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            rows = errata.mo_twin_rows(rel)
+            included = {r[0] for r in rel.db.execute("select record_key from records "
+                                                     "where included = 1")}
+        finally:
+            rel.close()
+        path = errata.write(rows, Path(args.out))
+        print(json.dumps({"release": args.id, "reason": "mo_twin_as_inat", "records": len(rows),
+                          "included": sum(r["key"] in included for r in rows),
+                          "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "pull-dhash-index":
         from . import aws, aws_dataset
         path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
@@ -1067,8 +1087,7 @@ def cmd_paper_score(conn, args) -> None:
     def embed_missing(backbone, photo_ids, px=None):
         if args.embed_missing:
             paper_score.ensure_embedded(conn, backbone, photo_ids, px)
-    report = paper_score.run(conn, base, test, config_doc, body, out, errata_path=args.errata,
-                             attrs_path=args.attrs,
+    report = paper_score.run(conn, base, test, config_doc, body, out, attrs_path=args.attrs,
                              allow_code=args.allow_code, embed_missing=embed_missing)
     print(json.dumps({"out": str(out), "finds": report["finds"], "post_hoc": report["post_hoc"],
                       "hypotheses": {f: {h: {k: r.get(k) for k in ("p_test", "p_holm", "reject")}
@@ -1085,14 +1104,14 @@ def cmd_backbone_screen(conn, args) -> None:
         raise SystemExit("backbone-screen needs --release <id>")
     out = bs.results_dir(rel.id)
     if args.action == "subset":
-        doc = bs.make_subset(rel, out, errata_path=args.errata, seed=args.seed,
+        doc = bs.make_subset(rel, out, seed=args.seed,
                              reference_records=args.reference_records, cap=args.cap,
                              queries=args.queries)
         print(json.dumps({"subset": str(out / "subset.json"), "species": len(doc["species"]),
                           "species_sha256": doc["species_sha256"],
                           "references": len(doc["references"]), "photos": len(doc["photos"]),
                           "queries": {h: q["by_band"] for h, q in doc["queries"].items()},
-                          "errata": doc["errata"]}, indent=2))
+                          "errata": doc["dataset_release"].get("errata")}, indent=2))
         return
     subset = bs.load_subset(rel.id)
     backbones = _split(args.backbones)
@@ -1267,12 +1286,102 @@ def loo_options(p) -> None:
                    help="instead of the list: Steve's explicit word that there are none")
 
 
-def release_options(p) -> None:
+def release_options(p, errata: bool = True) -> None:
     p.add_argument("--release", metavar="ID",
                    help="read records, labels, photos and splits from this dataset release "
                         "(docs/dataset-release.md), not the live manifest")
     p.add_argument("--allow-draft", action="store_true",
                    help="accept a draft (dry-run) release: exploratory only")
+    if errata:                # not yet on the AWS launchers: the instance would not apply it
+        p.add_argument("--errata", metavar="TSV",
+                       help="the release's erratum (errata.py): leave its records out of every "
+                            "split; its sha256 goes into the outputs")
+
+
+def cmd_paper_inat_cv(args) -> None:
+    """E14: iNat's computer vision on a release's finds (photos, public point, date)."""
+    from . import dataset_release as dr
+    from . import expert_ids as E
+    from . import inat_cv
+    from . import paper_inat_cv as P
+    from datetime import datetime, timezone
+    rel = dr.load_release(args.release, allow_draft=args.allow_draft)
+    d = P.work_dir(args.name)
+    ids_path = d / "ids.txt"
+    if args.action == "sample":
+        if ids_path.exists() and not args.redo:
+            raise SystemExit(f"{ids_path} exists; a drawn sample is never redrawn (--redo)")
+        pool = [r["record_key"] for r in rel.db.execute(
+            "select record_key, split from records where included = 1 order by record_key")
+            if not args.split or r["split"] == args.split]
+        ids = P.draw_fallback(pool, args.n, args.seed) if args.n else pool
+        print(json.dumps(E.write_ids(ids_path, ids, {"set": args.name, **rel.cite(),
+                                                     "seed": args.seed, "n": args.n,
+                                                     "split": args.split, "pool": len(pool)}),
+                         indent=2))
+        return
+    ids = E.read_ids(ids_path)[:args.limit] if args.limit else E.read_ids(ids_path)
+    taxa = E.load_open_taxa(config.DATA_DIR / E.OPEN_TAXA)
+    by_name = E.name_index(taxa)
+    recs = {r["record_key"]: dict(r) for r in rel.db.execute("select * from records")}
+    truths = {k: E.truth_taxa(recs[k], by_name, taxa) for k in ids}
+    client = inat_cv.InatClient(inat_cv.read_jwt(), config.DATA_DIR / "paper-comparisons" /
+                                "inat-cv-cache", interval=args.interval)
+    if rel.manifest.get("test_for") and not args.inat_model:
+        raise SystemExit("record the iNat CV model version first: --inat-model '<version, date>'")
+    model = {"version": args.inat_model, "noted_at": E.utc(datetime.now(timezone.utc).isoformat())}         if args.inat_model else None
+    meta = P.run(rel, args.name, ids, client, lambda pk: rel.derive(pk, "original").body, truths,
+                 model=model)
+    lines = [json.loads(l) for l in (d / "finds.jsonl").open(encoding="utf-8")]
+    print(json.dumps({**meta, "summary": P.summarise(lines)}, indent=2))
+
+
+def cmd_expert_ids(args) -> None:
+    """E31: iNat identifications made before the DNA was visible, scored against it."""
+    from . import dataset_release as dr
+    from . import expert_ids as E
+    rel = dr.load_release(args.release, allow_draft=args.allow_draft)
+    d = E.work_dir(args.name)
+    ids_path = d / "ids.txt"
+    if args.action == "sample":
+        if ids_path.exists() and not args.redo:
+            raise SystemExit(f"{ids_path} exists; a drawn sample is never redrawn (--redo)")
+        pool = [r["source_id"] for r in E.inat_records(rel)
+                if not args.split or r["split"] == args.split]
+        ids = E.draw_sample(pool, args.n, args.seed) if args.n else sorted(pool, key=lambda s: (len(s), s))
+        print(json.dumps(E.write_ids(ids_path, ids, {"set": args.name, **rel.cite(),
+                                                     "seed": args.seed, "n": args.n,
+                                                     "split": args.split, "pool": len(pool)}),
+                         indent=2))
+        return
+    ids = E.read_ids(ids_path)
+    client = E.HistoryClient(E.cache_dir(), max_calls=args.max_calls)
+    if args.limit:
+        ids = ids[:args.limit]
+    d_our, d_val = d / "our_dates.csv", d / "validators.csv"
+    if args.action == "dna-dates":
+        print(json.dumps(E.dna_dates(
+            args.name, ids, args.sql_dir or config.RESEARCH_DIR / "paper" / "e31" / "sql",
+            config.required("MV_ORG_SQL_SSH_HOST", "the read-only .org SQL route"),
+            args.com_host or config.required("MV_COM_SQL_SSH_HOST",
+                                             "the read-only .com SQL route")), indent=2))
+    elif args.action == "resolve-logins":
+        print(json.dumps({"validator_rows_given_an_id": E.resolve_logins(client, args.name)}))
+    elif args.action == "fetch":
+        try:
+            print(json.dumps(E.fetch(client, ids), indent=2))
+        except E.CallBudgetSpent as e:
+            print(f"{e}; rerun to continue (answers are cached)")
+    elif args.action == "snapshot":
+        print(json.dumps(E.build_snapshot(client, ids, d / "snapshot.jsonl.gz",
+                                          {"set": args.name, **rel.cite()}), indent=2))
+    elif args.action == "score":
+        push = {int(x) for x in (args.push_accounts or "").split(",") if x.strip()}
+        our = args.our_dates or (d_our if d_our.exists() else None)
+        val = args.validators or (d_val if d_val.exists() else None)
+        summary = E.score(rel, args.name, client, our, val, push,
+                          config.DATA_DIR / "secrets" / "e31_identifier_salt.txt")
+        print(json.dumps({k: summary[k] for k in ("finds", "tier1", "tier2")}, indent=2))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1389,7 +1498,7 @@ def main(argv: list[str] | None = None) -> int:
                         "exactly what the Vision models leave out (sealed benchmarks), so "
                         "both train on the same records; all = every benchmark's records. "
                         "With --release the release's splits decide, and a mismatch is refused")
-    release_options(p)        # the Picek stage trains on it; shipped without private.sqlite
+    release_options(p, errata=False)  # the Picek stage trains on it; shipped without private.sqlite
     p.add_argument("--dry-run", action="store_true",
                    help="check and build everything locally (code archive, instance script, "
                         "manifest copy, label snapshot, EC2 request) and send nothing")
@@ -1482,7 +1591,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude-benchmarks", default="match", choices=["match", "all"],
                    help="match (default): leave out what the Vision models leave out "
                         "(sealed benchmarks); all: every benchmark's records")
-    release_options(p)
+    release_options(p, errata=False)      # reads the release by id (retrain.py), not here
     p.add_argument("--cache-px", type=int,
                    help="resize the training photos once to this shorter side on local disk "
                         "(e.g. 440) and train from those; off by default")
@@ -1622,6 +1731,49 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--size", default="medium", choices=["small", "medium", "large"])
     p.add_argument("--source", help="folder or s3://bucket/prefix (default: the data folder)")
     p.add_argument("--batch-size", type=int, default=16)
+
+    p = sub.add_parser("paper-inat-cv", help="(paper E14) iNat's computer vision on a release's "
+                                             "finds: every photo at <= 1024 px, the public point "
+                                             "and date (needs data/secrets/inat_jwt.txt)")
+    p.add_argument("action", choices=["sample", "run"])
+    p.add_argument("--release", default="v1")
+    p.add_argument("--allow-draft", action="store_true")
+    p.add_argument("--name", required=True, help="the set's folder under "
+                   "data/paper-comparisons/e14/, e.g. v1-val-pilot or v1-test")
+    p.add_argument("--n", type=int, help="sample: how many (default: every included find)")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--split", help="sample: only this split (val for the pilot)")
+    p.add_argument("--redo", action="store_true")
+    p.add_argument("--limit", type=int, help="run: only the first N finds (tests)")
+    p.add_argument("--interval", type=float, default=7.5, help="run: seconds between iNat "
+                   "requests (default 7.5: 8 a minute)")
+    p.add_argument("--inat-model", help="run: iNat's CV model version and release date, as "
+                   "iNat states it (required on a test release)")
+
+    p = sub.add_parser("expert-ids", help="(paper E31) iNat identifications made before the DNA "
+                                          "was visible, by high-volume identifiers, against "
+                                          "the DNA name; public API, no token")
+    p.add_argument("action", choices=["sample", "dna-dates", "fetch", "resolve-logins",
+                                      "snapshot", "score"])
+    p.add_argument("--release", default="v1")
+    p.add_argument("--allow-draft", action="store_true")
+    p.add_argument("--name", required=True, help="the set's folder under "
+                   "data/paper-comparisons/e31/, e.g. v1-random10000 or v1-test")
+    p.add_argument("--n", type=int, help="sample: how many (default: every iNat record)")
+    p.add_argument("--seed", type=int, default=20261013)
+    p.add_argument("--split", help="sample: only this split")
+    p.add_argument("--redo", action="store_true", help="sample: draw again (never on a "
+                   "sample already used)")
+    p.add_argument("--limit", type=int, help="fetch/snapshot only the first N ids (tests)")
+    p.add_argument("--max-calls", type=int, help="stop after this many iNat requests")
+    p.add_argument("--our-dates", type=Path, help="score: CSV observation_id,source,at from "
+                   ".org/.com (sequence created, name push)")
+    p.add_argument("--validators", type=Path, help="score: CSV observation_id,inat_user_id")
+    p.add_argument("--push-accounts", help="score: iNat user ids of MycoMap's push accounts")
+    p.add_argument("--sql-dir", type=Path, help="dna-dates: the SQL templates (default: "
+                   "paper/e31/sql in the research checkout)")
+    p.add_argument("--com-host", help="dna-dates: ssh host of the read-only .com SQL route "
+                   "(default MV_COM_SQL_SSH_HOST)")
 
     p = sub.add_parser("inat-baseline",
                        help="add iNat's computer vision to a comparison, on the same records "
@@ -1788,6 +1940,10 @@ def main(argv: list[str] | None = None) -> int:
     q = dsub.add_parser("pull-dhash-index", help="download a release's dHash index from s3 "
                                                  "and check its sha256")
     q.add_argument("id")
+    q = dsub.add_parser("errata", help="write a release's erratum TSV for mo_twin_as_inat "
+                                       "(errata.py): MO finds held as iNat records")
+    q.add_argument("id")
+    q.add_argument("--out", required=True, help="the TSV to write (never overwritten)")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
@@ -1954,7 +2110,6 @@ def main(argv: list[str] | None = None) -> int:
                    help="a test release of --release (e.g. v1-test), or 'val'")
     p.add_argument("--config", required=True, help="the analysis plan (paper/analysis-v1.json)")
     p.add_argument("--out", help="default: research-results/<release>/paper-score/<test>")
-    p.add_argument("--errata", help="the release's errata TSV (reference records left out)")
     p.add_argument("--attrs", help="extra per-find attributes (TSV with record_key)")
     p.add_argument("--embed-missing", action="store_true",
                    help="embed scored photos a backbone lacks, from copies on this machine")
@@ -1969,8 +2124,6 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--backbones", default="bioclip-2",
                    help="comma list (embed, score)")
     p.add_argument("--methods", default="nearest,species-mean,nearest+mean")
-    p.add_argument("--errata", help="the release's errata TSV: its records are left out "
-                                    "(subset; the file's sha256 is recorded)")
     p.add_argument("--seed", type=int, default=20261013)
     p.add_argument("--reference-records", type=int, default=16000)
     p.add_argument("--cap", type=int, default=50, help="train records per species, at most")
@@ -2050,6 +2203,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "aws-dataset-build-job":   # the build reads a private copy only
         cmd_aws_dataset_build_job(args)
+        return 0
+    if args.command == "expert-ids":          # reads a release and iNat; no manifest
+        cmd_expert_ids(args)
+        return 0
+    if args.command == "paper-inat-cv":
+        cmd_paper_inat_cv(args)
         return 0
     if args.command == "aws-launch-dhash-index":  # reads the release's kept copy, no manifest
         cmd_aws_launch_dhash_index(args)

@@ -1,5 +1,5 @@
-"""The Paper in Progress page: the draft is for signed-in mycomap.org members only, even
-when the rest of the site is open to everyone (Steve, 2026-10-09)."""
+"""The paper draft at /api/paper (no page on the site since 2026-10-12): it is for signed-in
+mycomap.org members only, even when the rest of the site is open to everyone (Steve, 2026-10-09)."""
 
 import pytest
 from fastapi.testclient import TestClient

@@ -1,8 +1,8 @@
 // The site's menu and its Research section (Steve, 2026-10-09): the public sees the tool and
-// how to help first; results, benchmarks, protocols, data and the paper sit under Research.
+// how to help first; results, benchmarks, protocols and data sit under Research.
 
 import type { Me } from "./api";
-import { showsPaper } from "./publicView";
+import { showsMembersPages } from "./publicView";
 
 export interface NavItem { href: string; label: string; blurb?: string }
 
@@ -26,8 +26,6 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
     blurb: "The DNA-verified records and photos the identifier learns from." },
   { href: "/research/experiments", label: "Experiments", members: true,
     blurb: "Every experiment: the question, everything tried, the numbers, the decision (members)." },
-  { href: "/research/paper", label: "Paper in progress", members: true,
-    blurb: "The living draft of the Mycologia paper (mycomap.org members)." },
   { href: "/research/for-researchers", label: "For researchers",
     blurb: "How to cite, and how to test your own model against ours." },
   // Last (Steve, 2026-10-12): the developer API was linked only from the footer.
@@ -35,16 +33,19 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
     blurb: "Identify fungi from your own app or site: access, requests and the answer, field by field." },
 ];
 
-/** The Research menu for this visitor: the paper only for signed-in members. */
+/** The Research menu for this visitor: experiments only for signed-in members. */
 export function researchNav(me: Me | null | undefined): NavItem[] {
-  return RESEARCH_ITEMS.filter((i) => !i.members || showsPaper(me));
+  return RESEARCH_ITEMS.filter((i) => !i.members || showsMembersPages(me));
 }
 
-/** Pages that moved under Research keep working at their old address. */
+/** Pages that moved under Research keep working at their old address. The paper draft's
+ *  page was taken off the site (Steve, 2026-10-12; /api/paper still serves members), so its
+ *  addresses lead to Research. */
 export const MOVED: Record<string, string> = {
   "/models": "/research/results",
   "/data": "/research/data",
-  "/paper": "/research/paper",
+  "/paper": "/research",
+  "/research/paper": "/research",
   "/api-docs": API_PATH,
 };
 

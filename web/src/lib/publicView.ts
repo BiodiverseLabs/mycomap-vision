@@ -118,9 +118,9 @@ export async function sendWaitingInLine(
   }
 }
 
-/** The Paper in Progress tab is for signed-in mycomap.org members only (Steve, 2026-10-09);
- *  the server refuses the draft to anyone else. An open (sign-in off) site shows it. */
-export function showsPaper(me: Me | null | undefined): boolean {
+/** Members-only pages (Experiments) show to signed-in mycomap.org members only (Steve,
+ *  2026-10-09); the server refuses their data to anyone else. An open (sign-in off) site shows them. */
+export function showsMembersPages(me: Me | null | undefined): boolean {
   return !!me && (me.signin === "off" || !!me.user);
 }
 

@@ -1162,6 +1162,19 @@ class Release:
     manifest: dict
     db: sqlite3.Connection = field(repr=False)
     _private: sqlite3.Connection | None = field(default=None, repr=False)
+    errata: object | None = field(default=None, repr=False)     # errata.Errata
+
+    def use_errata(self, errata) -> None:
+        """Leave out an erratum's records (errata.py) from every split this release
+        reads from now on; cite() then names the erratum and its sha256."""
+        from .errata import check
+        check(errata, self)
+        self.errata = errata
+
+    def _not_errata(self, rows):
+        if self.errata is None:
+            return rows
+        return [r for r in rows if r["record_key"] not in self.errata.keys]
 
     @property
     def release_hash(self) -> str:
@@ -1229,9 +1242,12 @@ class Release:
 
     def cite(self) -> dict:
         """What an experiment writes into its outputs (and the registry entry)."""
-        return {"dataset_release": self.id, "release_hash": self.release_hash,
-                "reference_hash": self.reference_hash, "labels_hash": self.labels_hash,
-                "release_code_commit": self.code_commit, "draft": self.manifest["draft"]}
+        out = {"dataset_release": self.id, "release_hash": self.release_hash,
+               "reference_hash": self.reference_hash, "labels_hash": self.labels_hash,
+               "release_code_commit": self.code_commit, "draft": self.manifest["draft"]}
+        if self.errata is not None:
+            out["errata"] = self.errata.cite()
+        return out
 
     def record_keys(self) -> list[str]:
         return [r[0] for r in self.db.execute("select record_key from records")]
@@ -1246,8 +1262,9 @@ class Release:
         if bad:
             raise ReleaseError(f"unknown split {sorted(bad)}")
         q = ",".join("?" * len(splits))
-        return self.db.execute(f"select * from records where included = 1 and split in ({q}) "
-                               "order by record_key", splits).fetchall()
+        return self._not_errata(self.db.execute(
+            f"select * from records where included = 1 and split in ({q}) "
+            "order by record_key", splits).fetchall())
 
     def training_records(self, include_val: bool = False) -> list[sqlite3.Row]:
         """Records a model may learn from: train (and val when asked). Never test."""
@@ -1270,9 +1287,11 @@ class Release:
     def photo_ids(self, splits=TRAINABLE, public_trainable_only: bool = False) -> list[int]:
         q = ",".join("?" * len(splits))
         pt = " and p.public_trainable = 1" if public_trainable_only else ""
+        skip = self.errata.keys if self.errata is not None else frozenset()
         return [r[0] for r in self.db.execute(
-            f"select p.manifest_photo_id from photos p join records r using (record_key) "
-            f"where p.included = 1 and r.included = 1 and r.split in ({q}){pt}", tuple(splits))]
+            f"select p.manifest_photo_id, r.record_key from photos p join records r "
+            f"using (record_key) where p.included = 1 and r.included = 1 and r.split in ({q}){pt}",
+            tuple(splits)) if r[1] not in skip]
 
     def as_records(self, splits=TRAINABLE, photo_row: dict[int, int] | None = None,
                    public_trainable_only: bool = False) -> list:

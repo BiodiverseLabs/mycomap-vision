@@ -118,12 +118,16 @@ def test_a_draft_test_release_is_scored_against_train_and_val(world, tmp_path):
     assert bands["1-4"]["top1"]["n"] == 2 and rep["guard"]["sealed"] is False
 
 
-def test_errata_records_leave_the_reference(world, tmp_path):
-    errata = tmp_path / "errata.tsv"
-    errata.write_text("kind\tkey\treason\tnote\nrecord\t1\tmo_twin_as_inat\t\n"
-                      "record\t2\tmo_twin_as_inat\t\nrecord\tmo:9\tx\t\n", encoding="utf-8")
-    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"]), errata_path=errata)
+def test_an_erratum_given_to_the_release_leaves_the_reference(world, tmp_path):
+    from mycomap_vision import errata
+    path = tmp_path / "errata.tsv"
+    path.write_text("kind\tkey\treason\tnote\nrecord\t1\tmo_twin_as_inat\t\n"
+                    "record\t2\tmo_twin_as_inat\t\nrecord\tmo:9\tmo_twin_as_inat\t\n",
+                    encoding="utf-8")
+    world["base"].use_errata(errata.read(path))
+    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))
     assert rep["errata"]["reference_records_left_out"] == 3
+    assert rep["errata"]["sha256"] == errata.read(path).sha256
     bands = rep["standard"]["comparators"]["vision-photos"]["primary"]["all"][
         "species_by_reference_band"]
     assert bands["0"]["top1"]["n"] == 1                 # A x has no reference left
