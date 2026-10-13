@@ -483,18 +483,36 @@ def cmd_dataset(args) -> None:
         print(json.dumps({"release": args.id, "photos": index["photos"], "index": str(path),
                           "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "errata":
-        from . import errata
+        from collections import Counter
+
+        from . import errata, taxonomy
+        reasons = dr.parse_list(args.reasons)
+        unknown = set(reasons) - set(errata.REASONS)
+        if unknown:
+            raise SystemExit(f"unknown reasons {sorted(unknown)}; known: {errata.REASONS}")
+        cache = taxonomy.cache_path()
         rel = dr.load_release(args.id, root, allow_draft=True)
         try:
-            rows = errata.mo_twin_rows(rel)
+            rows = errata.mo_twin_rows(rel) if "mo_twin_as_inat" in reasons else []
+            if "nonfungal_label" in reasons:
+                tax = taxonomy.load(cache)
+                if tax is None or not tax.outside:
+                    raise SystemExit(f"{cache} holds no kingdoms yet: run `mv fetch-taxonomy`")
+                rows += errata.nonfungal_rows(rel, tax, {r["key"] for r in rows})
             included = {r[0] for r in rel.db.execute("select record_key from records "
                                                      "where included = 1")}
+            split = dict(rel.db.execute("select record_key, split from records"))
         finally:
             rel.close()
         path = errata.write(rows, Path(args.out))
-        print(json.dumps({"release": args.id, "reason": "mo_twin_as_inat", "records": len(rows),
-                          "included": sum(r["key"] in included for r in rows),
-                          "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
+        print(json.dumps({
+            "release": args.id, "records": len(rows),
+            "by_reason": dict(Counter(r["reason"] for r in rows)),
+            "included_by_reason_split": dict(Counter(
+                f"{r['reason']}/{split.get(r['key'])}" for r in rows if r["key"] in included)),
+            "taxonomy_cache_sha256": dr.sha256_file(cache)
+            if "nonfungal_label" in reasons else None,
+            "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "pull-dhash-index":
         from . import aws, aws_dataset
         path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
@@ -1892,10 +1910,13 @@ def main(argv: list[str] | None = None) -> int:
     q = dsub.add_parser("pull-dhash-index", help="download a release's dHash index from s3 "
                                                  "and check its sha256")
     q.add_argument("id")
-    q = dsub.add_parser("errata", help="write a release's erratum TSV for mo_twin_as_inat "
-                                       "(errata.py): MO finds held as iNat records")
+    q = dsub.add_parser("errata", help="write a release's erratum TSV (errata.py): MO finds "
+                                       "held as iNat records, labels that are no fungus")
     q.add_argument("id")
     q.add_argument("--out", required=True, help="the TSV to write (never overwritten)")
+    q.add_argument("--reasons", default="mo_twin_as_inat,nonfungal_label",
+                   help="which rules (default both; mo_twin_as_inat alone remakes v1's first "
+                        "erratum)")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
