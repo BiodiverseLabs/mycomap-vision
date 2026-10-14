@@ -65,6 +65,28 @@ def test_beyond_the_wide_berth_a_species_known_elsewhere_loses_two(tmp_path):
     assert lp[occ] == pytest.approx(-pp.BOOST["far_penalty"])
 
 
+def test_a_find_never_puts_its_own_species_in_range_through_its_own_inat_observation(tmp_path):
+    """The out-of-range term reads iNaturalist's counts, which may hold the scored find's
+    own observation: given its uuid, the store takes it back out, exactly as if it had
+    never been counted (paper: the own observation is left out, on val and on the test)."""
+    from occurrence_fixtures import obs, standard_observations
+    recs = records_east_west()
+    index = build_index(recs)
+    occ = index.species.index(OCC)
+    # The only eastern occidentalis on iNaturalist is the find being scored.
+    store = build_store(tmp_path / "with", standard_observations()
+                        + [obs("self-1", 105, *EAST, date="2025-10-01")])[0]
+    prior = pp.PlaceBoost(store)
+    prior.fit(recs, index.species)
+    someone_elses = prior.log_prior(Context(*EAST, "2025-10-01"))
+    its_own = prior.log_prior(Context(*EAST, "2025-10-01", uuid="self-1"))
+    assert someone_elses[occ] > -pp.BOOST["far_penalty"]          # in range: no far penalty
+    assert its_own[occ] == pytest.approx(someone_elses[occ] - pp.BOOST["far_penalty"])
+    never = pp.PlaceBoost(build_store(tmp_path / "never")[0])
+    never.fit(recs, index.species)
+    assert np.allclose(its_own, never.log_prior(Context(*EAST, "2025-10-01")))
+
+
 def test_the_date_alone_moves_the_season_term_both_ways(tmp_path):
     prior, index = fitted_prior(tmp_path, store=False)
     lp = prior.log_prior(Context(None, None, "2026-10-03"))

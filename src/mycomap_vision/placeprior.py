@@ -277,7 +277,9 @@ class PlaceBoost:
                + BOOST["season_weight"] * np.clip(season, -cap, cap))
         if self.far is not None and place_ok:
             r = BOOST["radius_km"]
-            parts = self.far.parts(Context(ctx.latitude, ctx.longitude), (r,))
+            # Place only (out of range reads no date), but the find's uuid goes along: the
+            # store takes the find's own iNat observation back out of its counts.
+            parts = self.far.parts(Context(ctx.latitude, ctx.longitude, uuid=ctx.uuid), (r,))
             far = parts.out(r, genus_rule=False, min_dna_effort=BOOST["min_dna_effort"])
             if far is not None:
                 out = out - BOOST["far_penalty"] * far
