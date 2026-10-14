@@ -3,7 +3,6 @@ signed-in members only (Steve, 2026-10-09), and it lives in the private research
 never in this public repo (Steve, 2026-10-12). The entry checks run where that checkout is
 present (MV_RESEARCH_DIR, or ../mycomap-vision-research); CI has none."""
 
-import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +14,7 @@ from mycomap_vision import config, experiments
 from mycomap_vision.api import create_app
 from mycomap_vision.signin import SigninConfig
 
-ENTRIES = experiments.load_all()
+ENTRIES, PROBLEMS = experiments.load_checked()
 IDS = [e.slug for e in ENTRIES]
 HAVE_REGISTRY = experiments.EXPERIMENTS_DIR.is_dir()
 
@@ -26,42 +25,16 @@ def test_the_registry_is_read_from_the_private_checkout_not_this_repo():
 
 
 @pytest.mark.skipif(not HAVE_REGISTRY, reason="no private research checkout here")
-def test_the_registry_has_entries_and_every_one_parses():
+def test_the_registry_has_entries_and_every_one_meets_the_rules():
+    assert not PROBLEMS, "\n".join(why for _, why in PROBLEMS)
     assert len(ENTRIES) >= 18
     assert len(set(IDS)) == len(IDS)
 
 
 @pytest.mark.parametrize("e", ENTRIES, ids=IDS)
-def test_every_entry_has_the_required_fields_and_a_known_status(e):
-    for field in experiments.REQUIRED:
-        assert str(e.meta[field]).strip(), field
-    assert e.meta["status"] in experiments.STATUSES
-
-
-@pytest.mark.parametrize("e", ENTRIES, ids=IDS)
-def test_every_entry_has_the_template_sections(e):
-    for section in ("Question", "Why it matters", "Setup", "What we tried", "Results",
-                    "Verdict", "Decision", "Next"):
-        assert f"## {section}\n" in e.body, section
-
-
-@pytest.mark.parametrize("e", ENTRIES, ids=IDS)
-def test_related_entries_exist(e):
-    assert set(e.meta.get("related") or []) <= set(IDS)
-
-
-@pytest.mark.parametrize("e", ENTRIES, ids=IDS)
-def test_no_record_ids_coordinates_or_photo_paths_in_an_entry(e):
-    text = e.path.read_text(encoding="utf-8")
-    assert not re.search(r"(?<![\d.,-])\d{9,10}(?![\d.,-])", text), "looks like a record id"
-    assert not re.search(r"-?\d{1,3}\.\d{4,},\s*-?\d{1,3}\.\d{4,}", text), "looks like coordinates"
-    assert "observation_id" not in text and "\\photos\\" not in text and "/photos/" not in text
-
-
-@pytest.mark.parametrize("e", ENTRIES, ids=IDS)
-def test_a_decided_status_names_its_decision(e):
-    if e.meta["status"] in ("adopted", "dropped"):
-        assert e.meta["decision"] != "pending"
+def test_every_entry_meets_the_shared_content_rules(e):
+    """The same validator mv experiments-check and the site's loader use."""
+    assert experiments.entry_problems(e, set(IDS)) == []
 
 
 def write(tmp_path, name, text):
@@ -83,16 +56,14 @@ verdict: V
 decision: pending
 ---
 ## Question
+## Why it matters
+## Setup
+## What we tried
+## Results
+## Verdict
+## Decision
+## Next
 """
-
-
-@pytest.mark.parametrize("e", ENTRIES, ids=IDS)
-def test_every_entry_says_how_reproducible_it_is_and_pre_freeze_ones_are_provisional(e):
-    repro = e.meta["reproducibility"]
-    assert repro == experiments.EXPLORATORY or experiments.REPRODUCED.match(repro)
-    decided = not str(e.meta["decision"]).strip().lower().startswith("pending")
-    if repro == experiments.EXPLORATORY and decided:
-        assert "Provisional" in e.body and "dataset release v1" in e.body
 
 
 REPRODUCED = GOOD.replace("reproducibility: exploratory-pre-freeze",
@@ -293,3 +264,35 @@ def test_experiments_check_exits_non_zero_on_a_bad_entry(tmp_path, capsys):
     assert cli.main(["experiments-check", str(d)]) == 1
     out = capsys.readouterr().out
     assert "BAD 2026-10-13-late.md" in out and "after the freeze" in out
+
+
+# --- the content rules: the same validator for the CLI, the loader and the tests ----------
+
+@pytest.mark.parametrize("bad, why", [
+    (GOOD.replace("## What we tried", "## What we did"), "## What we tried"),
+    (GOOD.replace("## Results", "## Result"), "## Results"),
+    (GOOD + "Run on record 123456789.\n", "looks like a record id"),
+    (GOOD + "Found at 44.12345, -85.67890.\n", "coordinates"),
+    (GOOD + "See data/photos/large/1.jpg\n", "photo paths"),
+    (GOOD.replace("status: done", "status: adopted"), "needs its decision"),
+    (GOOD.replace("decision: pending", "decision: Steve kept it"), "Provisional"),
+    (GOOD.replace("decision: pending", "decision: pending\nrelated: [no-such-entry]"),
+     "related entries that don't exist"),
+])
+def test_experiments_check_fails_an_entry_breaking_a_content_rule(tmp_path, capsys, bad, why):
+    from mycomap_vision import cli
+    d = write(tmp_path, "2026-10-09-good-one.md", bad)
+    assert cli.main(["experiments-check", str(d)]) == 1
+    out = capsys.readouterr().out
+    assert "BAD 2026-10-09-good-one.md" in out and why in out
+    found, problems = experiments.load_checked(d)                     # the site skips it too
+    assert found == [] and len(problems) == 1
+
+
+def test_a_hash_given_whole_reads_as_a_record_id_and_a_prefix_does_not(tmp_path):
+    full = "5e59b79a40987a3bb62405732062f8d74f016798184cba991d2fb785268d7457"
+    assert experiments.load_checked(write(tmp_path, "2026-10-09-good-one.md",
+                                          GOOD + f"Hash {full}.\n"))[1]
+    assert not experiments.load_checked(write(tmp_path, "2026-10-09-good-one.md",
+                                              GOOD + f"Hash {full[:16]}.\n"))[1]
+

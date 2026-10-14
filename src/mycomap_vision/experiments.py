@@ -4,7 +4,8 @@ research checkout (config.RESEARCH_DIR, MV_RESEARCH_DIR), never in this public r
 
 The site lists them under Research > Experiments for signed-in members (signin.MEMBERS_ONLY):
 they hold development numbers and unpublished results. experiments/README.md there has the
-template and the rules; tests/test_experiments.py holds every entry to them.
+template and the rules. One validator (parse, then entry_problems) holds every entry to
+them, for the site's list, `mv experiments-check` and tests/test_experiments.py alike.
 """
 
 from __future__ import annotations
@@ -37,6 +38,16 @@ LISTED = REQUIRED + ("branch", "commits", "benchmark", "split", "model", "method
     + REPRO_FIELDS + ("reproduced_by", "reproduced_on")
 FILE_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$")
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# The template's sections (experiments/README.md), each an exact "## <name>" heading.
+SECTIONS = ("Question", "Why it matters", "Setup", "What we tried", "Results", "Verdict",
+            "Decision", "Next")
+# README rule 6, no data in an entry: a 9-10 digit run reads as a record or observation id
+# (give hashes as short prefixes), a pair of 4+-decimal numbers as coordinates.
+# A decimal or a longer run is not an id, but an id ending a sentence ("record 123456789.")
+# is: only a '.' or ',' followed by another digit continues the number.
+RECORD_ID = re.compile(r"(?<![\d.,-])\d{9,10}(?!\d|[.,]\d|-)")
+COORDINATES = re.compile(r"-?\d{1,3}\.\d{4,},\s*-?\d{1,3}\.\d{4,}")
+PHOTO_PATH_HINTS = ("observation_id", "\\photos\\", "/photos/")
 
 
 class BadEntry(ValueError):
@@ -106,6 +117,38 @@ def parse(path: Path, freeze_date: str | None = None) -> Experiment:
     return Experiment(meta, body.strip() + "\n", path)
 
 
+def entry_problems(e: Experiment, slugs: set[str] | None = None) -> list[str]:
+    """What breaks the registry's content rules in a parsed entry (empty when none): the
+    template's sections, no data (record ids, coordinates, photo paths), a decided status
+    names its decision, a decided exploratory entry says it is provisional, and (given the
+    registry's `slugs`) every related entry exists. One validator for the loader, `mv
+    experiments-check` and the tests, so they cannot drift apart."""
+    out = []
+    missing = [s for s in SECTIONS if f"## {s}\n" not in e.body]
+    if missing:
+        out.append(f"missing section(s) {', '.join('## ' + s for s in missing)}")
+    text = e.path.read_text(encoding="utf-8")
+    m = RECORD_ID.search(text)
+    if m:
+        out.append(f"'{m.group()}' looks like a record id (give hashes as short prefixes)")
+    if COORDINATES.search(text):
+        out.append("looks like coordinates")
+    hints = [h for h in PHOTO_PATH_HINTS if h in text]
+    if hints:
+        out.append(f"names photo paths or observation ids ({', '.join(hints)})")
+    if e.meta["status"] in ("adopted", "dropped") and str(e.meta["decision"]).strip() == "pending":
+        out.append(f"status {e.meta['status']} needs its decision, not 'pending'")
+    decided = not str(e.meta["decision"]).strip().lower().startswith("pending")
+    if (e.meta["reproducibility"] == EXPLORATORY and decided
+            and not ("Provisional" in e.body and "dataset release v1" in e.body)):
+        out.append("a decided exploratory entry says it is Provisional until dataset release v1")
+    if slugs is not None:
+        unknown = sorted(set(e.meta.get("related") or []) - slugs)
+        if unknown:
+            out.append(f"related entries that don't exist: {', '.join(unknown)}")
+    return out
+
+
 def load_checked(directory: Path = EXPERIMENTS_DIR, freeze_date: str | None = None
                  ) -> tuple[list[Experiment], list[tuple[str, str]]]:
     """Every entry that meets the rules, newest first, and (file name, reason) for each one
@@ -127,6 +170,15 @@ def load_checked(directory: Path = EXPERIMENTS_DIR, freeze_date: str | None = No
     for e in [e for e in out if e.slug in dup]:
         problems.append((e.path.name, f"slug used twice: {e.slug}"))
     out = [e for e in out if e.slug not in dup]
+    known = {e.slug for e in out}
+    checked = []
+    for e in out:
+        why = entry_problems(e, known)
+        if why:
+            problems.append((e.path.name, f"{e.path.name}: {'; '.join(why)}"))
+        else:
+            checked.append(e)
+    out = checked
     by_slug = {e.slug: e for e in out}
     kept = []
     for e in out:
