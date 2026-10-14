@@ -379,10 +379,13 @@ model's result, not a `results` list.
     aliases (other spellings, iNat and MycoMap synonyms), then Vision's own spelling key
     (temporary codes 'IN7' = 'IN07', quote glyphs) against both. A name .org knows that
     doesn't prompt gets nothing, even if a synonym does.
-- **`confidence`**: a softmax with a temperature fitted per rank (by log-likelihood) on the
-  served model's comparison on dataset release v1's `val` split, erratum r3 applied
-  (comparison 20261013-104759-9d963d; species and genus temperature 0.0274 for photos
-  only). It is fitted again when a new model or release is built, not weekly;
+- **`confidence`**: a softmax with a temperature fitted per rank (by log-likelihood),
+  calibrated on v1's validation split (temperature 0.0274; the place-and-date default
+  shares it): the served model's nearest+mean comparison on dataset release v1's `val`
+  split, erratum r3 applied (comparison 20261013-104759-9d963d; 0.0274 at species, genus
+  and family), which the served `nearest+mean+place` reuses
+  (`evaluate.latest_calibration(backbone, "nearest+mean")`). It is fitted again when a new
+  model or release is built, not weekly;
   `model.calibrated_on` is that comparison's date. It is calibrated on average, not a
   promise per answer.
   `checked_coverage` says how often a likely set really held the right name on unseen

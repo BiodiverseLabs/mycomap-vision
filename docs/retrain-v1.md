@@ -25,6 +25,12 @@ earlier experiment is re-run on v1 afterwards (section 6).
 - **Name**: the public name stays "MycoMap Vision"; `version` = the training-data snapshot
   date (`release.snapshot_date`: the release's `label_snapshot_at`), written into the model's
   metadata. `mv release` adds `.2`, `.3` for later builds of the same data (the API's model card).
+  **Two versions, as served (2026-10-14).** The model's own json says `version` 2026-10-12,
+  v1's label snapshot. The serving release built with `mv release` has its own version and
+  snapshot: the date of the reference export behind it, 2026-10-13 (the catch-up export
+  just before `mv release`). `GET /api/v1/models` shows the release's version, 2026-10-13,
+  and its `data` block counts the release's manifest: 176,655 records, that is v1 plus the
+  records validated and added nightly since, not v1's 169,135.
 
 ## 2. The official numbers (pre-declared)
 
