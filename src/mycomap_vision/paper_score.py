@@ -95,7 +95,14 @@ def check_config(doc: dict) -> None:
                 raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "
                                  f"not {c.get('method')!r}")
             from . import placeprior
-            placeprior.place_setting(c["place_setting"])   # refuses an unknown name
+            _, setting = placeprior.place_setting(c["place_setting"])   # refuses an unknown name
+            if "inat" in str(setting.get("pen_known", "")):
+                # PlaceBoost keeps no pair counts, so nearest_inat_km cannot take a find's
+                # own iNat observation out: such a setting would leak (score it through
+                # placetune's TermBuilder instead).
+                raise ValueError(f"comparator {c['id']}: place setting {c['place_setting']!r} "
+                                 "reads iNat distances, which cannot leave a find's own "
+                                 "observation out here")
         if c["kind"] in ("published", "inat", "expert") and not c.get("file"):
             raise ValueError(f"comparator {c['id']}: needs its input file")
     gate = doc.get("gate")

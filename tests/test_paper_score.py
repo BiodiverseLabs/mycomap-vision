@@ -579,3 +579,56 @@ def test_a_place_method_is_given_each_finds_own_inat_uuid_so_it_can_leave_it_out
     cfg["hypotheses"] = {}
     run(world, tmp_path, "val", cfg)
     assert sorted(SeesUuid.uuids) == expected
+
+
+def test_paper_scores_place_rows_leave_each_finds_own_inat_observation_out(tmp_path,
+                                                                         monkeypatch):
+    """Regression (leak found 2026-10-13): the real place method, as paper-score fits it,
+    gives a find whose own observation is the only eastern record of its species exactly
+    what it would get had that observation never been counted; scored without its uuid
+    (the leak), its species would look in range."""
+    from dataclasses import replace
+    from occurrence_fixtures import EAST, build_store, obs, standard_observations
+    from test_placeprior import OCC, records_east_west
+    from test_prior import rec
+
+    from mycomap_vision import occurrence
+    recs = records_east_west()
+    find = replace(rec("q", OCC, *EAST, "2025-10-01", rows=[12]), uuid="self-1")
+    vecs = np.random.default_rng(0).normal(size=(13, 8)).astype(np.float32)
+    cal = {"species": {"temperature": 1.0, "floor": None}}
+    truths = {"q": {"species": OCC}}
+
+    def p_true(store, f):
+        monkeypatch.setattr(occurrence, "default_store_path", lambda: store.path)
+        a = paper_score.vision_answers(vecs, recs, [f], "nearest+mean+place", "m",
+                                       calibration=cal, truths=truths,
+                                       place_setting="boost-2026-10-11")
+        return a["q"]["cal"]["species"]["p_true"]
+    with_own = build_store(tmp_path / "with", standard_observations()
+                           + [obs("self-1", 105, *EAST, date="2025-10-01")])[0]
+    never = build_store(tmp_path / "never")[0]
+    assert p_true(with_own, find) == pytest.approx(p_true(never, find))
+    assert p_true(with_own, replace(find, uuid="")) > p_true(never, find) + 1e-6
+
+
+def test_a_place_setting_that_reads_inat_distances_is_refused():
+    """PlaceBoost's served store drops the pair counts nearest_inat_km would need to take a
+    find's own observation out, so a dna+inat setting cannot be scored leak-free here."""
+    from mycomap_vision import placeprior
+    inat = [n for n, s in placeprior.PLACE_SETTINGS.items()
+            if "inat" in str({**placeprior.NO_EXTRAS, **s}["pen_known"])]
+    cfg = {"format": 1, "comparators": [{"id": "p", "kind": "vision", "backbone": "m",
+                                         "method": "nearest+mean+place",
+                                         "place_setting": "penalty-500-2026-10-13"}]}
+    paper_score.check_config(cfg)                                    # dna only: fine
+    monkeypatch_name = "test-dna-inat"
+    placeprior.PLACE_SETTINGS[monkeypatch_name] = {"pen_known": "dna+inat", "pen_slope": 2.0,
+                                                   "pen_cap": 8.0}
+    try:
+        cfg["comparators"][0]["place_setting"] = monkeypatch_name
+        with pytest.raises(ValueError, match="own observation"):
+            paper_score.check_config(cfg)
+    finally:
+        del placeprior.PLACE_SETTINGS[monkeypatch_name]
+    assert inat == []                         # none of the named settings reads them today
