@@ -249,6 +249,10 @@ a record or class left with none drops out). Both are recorded in progress.json,
 and the model's json (`seed`, `train_photos`: the policy and the photos by licence class, which
 every fine-tune on a release records), and kept by `--resume`. Every model trained on v1 trains
 on v1 as cut and is scored and served with its erratum (dataset-release.md §4, Errata).
+Since the 2026-10-14 export the live manifest no longer holds 43 v1 records (.org deleted
+the MO-number rows), and a launch from it is refused before any spend; launch v1 runs with
+`--manifest data/manifest-v1-freeze.sqlite` (a private copy is made; the file is never
+written).
 
 | # | Re-run | Registry entries | Suggested owner | Estimate |
 |---|---|---|---|---|

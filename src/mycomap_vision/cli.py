@@ -161,8 +161,36 @@ def _split(v: str) -> list[str]:
     return [x.strip() for x in v.split(",") if x.strip()]
 
 
+def launch_manifest_copy(path: str):
+    """A connection to a private copy of `path` (--manifest): the launch reads and may
+    write its own copy, never the file given (a release's frozen manifest keeps its
+    sha256). The copy is <data>/manifest-launch.sqlite, replaced at each launch."""
+    import sqlite3
+    from pathlib import Path
+    src_path = Path(path)
+    if not src_path.is_file():
+        raise SystemExit(f"--manifest: no manifest at {src_path}")
+    dest = config.DATA_DIR / "manifest-launch.sqlite"
+    for p in (dest, dest.with_name(dest.name + "-wal"), dest.with_name(dest.name + "-shm")):
+        p.unlink(missing_ok=True)
+    src = sqlite3.connect(src_path.resolve().as_uri() + "?mode=ro", uri=True)
+    out = sqlite3.connect(dest)
+    try:
+        src.backup(out)
+    finally:
+        out.close()
+        src.close()
+    return manifest.connect(dest)
+
+
 def cmd_aws_launch_trainer(conn, args) -> None:
     from . import aws
+    if getattr(args, "manifest", None):
+        if args.resume:
+            raise SystemExit("--manifest starts a run from that manifest; --resume keeps the "
+                             "run's own (leave out --manifest)")
+        conn = launch_manifest_copy(args.manifest)
+        print(f"launching from a copy of {args.manifest}")
     finetune = [] if args.finetune.strip().lower() == "none" else _split(args.finetune)
     if args.resume:
         chosen = [f"--{k.replace('_', '-')}" for k in RUN_OWN_OPTIONS
@@ -1596,6 +1624,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="with --release and --finetune: train only on photos the released "
                         "weights may learn from (CC including NC, or permission granted); "
                         "the run records the policy and the photos by licence class")
+    p.add_argument("--manifest", metavar="FILE",
+                   help="launch from a copy of this manifest instead of the live one: the one a "
+                        "dataset release was cut from (e.g. data/manifest-v1-freeze.sqlite), "
+                        "when a later export removed some of its records; the file itself is "
+                        "never written")
     p.set_defaults(parser_defaults={k: p.get_default(k) for k in RUN_OWN_OPTIONS})
 
     p = sub.add_parser("aws-train-job", help="(runs on the trainer instance) embed, compare, "
