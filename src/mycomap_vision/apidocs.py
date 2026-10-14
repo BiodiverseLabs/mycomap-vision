@@ -20,16 +20,26 @@ from __future__ import annotations
 
 import json
 
+from .apiv1 import CONFIDENT_AT
+
 BASE_URL = "https://vision.mycomap.org/api/v1"
 PAGE_URL = "https://vision.mycomap.org/research/api"   # /api-docs leads there too
 STATUSES = ("available", "planned")
 
+# The model answering on vision.mycomap.org, as GET /api/v1/models gave it when v1 went live
+# (2026-10-14). Every example below shows it, so the outline matches what a caller sees.
+LIVE_MODEL = {"name": "MycoMap Vision", "version": "2026-10-13",
+              "data": {"snapshot": "2026-10-13", "records": 176655, "species": 18944,
+                       "genera": 1543},
+              "calibrated_on": "2026-10-13"}
+LIVE_REFERENCE = {"records": 169129, "species": 17854, "photos": 684135}
+# p(fungus) below this, the gate says "not sure" (re-tuned on dataset release v1; was 0.70).
+GATE_NOT_SURE_BELOW = 0.5
+SHORT_MODEL = {"name": LIVE_MODEL["name"], "version": LIVE_MODEL["version"]}
+
 ANSWER_EXAMPLE = {
     "request_id": "r_8sK2…",
-    "model": {"name": "MycoMap Vision", "version": "2026-10-06",
-              "data": {"snapshot": "2026-10-06", "records": 160173, "species": 18688,
-                       "genera": 1620},
-              "calibrated_on": "2026-10-08"},
+    "model": LIVE_MODEL,
     "photos": 2,
     "context_used": {"latitude": 40.1, "longitude": -83.0, "observed_on": "2026-10-11",
                      "place_from": "entered", "date_from": "photo"},
@@ -183,7 +193,7 @@ def outline(enabled: dict[str, bool]) -> dict:
                             ["client_ref", "string ≤ 64", "no", "Your own id for the find."]],
                  "response": _json({"session_id": "s_7Yp2…", "expires_at": "2026-10-11T15:42:00Z",
                                     "max_photos": 10,
-                                    "model": {"name": "MycoMap Vision", "version": "2026-10-06"}})},
+                                    "model": SHORT_MODEL})},
                 {"type": "endpoint", "method": "POST", "path": "/sessions/{session_id}/photos",
                  "status": status("sessions"),
                  "summary": "Add one photo; get its own answer and the updated combined answer.",
@@ -215,18 +225,17 @@ def outline(enabled: dict[str, bool]) -> dict:
                             "species, genus and family.",
                  "auth": "Vision token",
                  "response": _json({"generated_at": "2026-10-11T12:00:00Z",
-                                    "model": {"name": "MycoMap Vision", "version": "2026-10-06"},
+                                    "model": SHORT_MODEL,
                                     "species": {"Amanita muscaria": 412},
                                     "genera": {"Amanita": 3120}, "families": {"Amanitaceae": 3300},
-                                    "totals": {"records": 152915}}),
+                                    "totals": {"records": LIVE_REFERENCE["records"]}}),
                  "notes": ["Cached for an hour; send `If-None-Match` with the last `ETag`."]},
                 {"type": "endpoint", "method": "GET", "path": "/models",
                  "status": status("models"), "summary": "The model answering now and its reference set.",
                  "auth": "Vision token",
-                 "response": _json({"models": [{"name": "MycoMap Vision", "version": "2026-10-06",
-                                                "default": True, "confident_at": 0.7,
-                                                "reference": {"records": 152915, "species": 9876,
-                                                              "photos": 593224}}],
+                 "response": _json({"models": [{**LIVE_MODEL, "default": True,
+                                                "confident_at": CONFIDENT_AT,
+                                                "reference": LIVE_REFERENCE}],
                                     "limits": {"max_photos": 10, "photos_per_minute": 20}}),
                  "notes": ["Also its data snapshot, calibration date, the ranks answered, "
                            "request limits and which parts of the API are on.",
@@ -246,8 +255,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                 {"type": "table", "columns": ["Field", "What it is"], "rows": [
                     ["`answer`", "Vision's answer in one line: the most precise rank it is confident at (`{rank, name, confidence}`), or `null` when it isn't confident even at family."],
                     ["`ranks`", "The top candidates at species, genus, family, order, class and phylum, combining all the photos. Order and above have names and scores but no confidence yet."],
-                    ["`confidence`", "How likely the name is to be right, from 0 to 1, calibrated weekly on newly verified records. `null` when it can't be stated (see `gate`)."],
-                    ["`confident`", "`true` for a rank's top name when its confidence is at least 0.70 and the photos show a fungus. In testing with photos prepared as the app sends them, a confident species answer was right about 92–93% of the time; expect less with field photos."],
+                    ["`confidence`", "How likely the name is to be right, from 0 to 1. Calibrated on the validation split of MycoMap's frozen dataset release v1 (DNA-verified records the model did not learn from), and fitted again when a new model or release is built; `model.calibrated_on` gives the date. `null` when it can't be stated (see `gate`)."],
+                    ["`confident`", f"`true` for a rank's top name when its confidence is at least {CONFIDENT_AT:.2f} and the photos show a fungus. Confident answers are calibrated on v1's validation split, whose photos are DNA-verified records' own; expect fewer of them with field photos."],
                     ["`reference_records`", "How many DNA-verified records Vision has of that name. Under 5, Vision is rarely right at species."],
                     ["`place`", "On species and genus names, when you send a place or date: distance to the nearest verified record of that name (rounded to 10 km), whether the date is in its known season, and a `note` when the find would be far from known records or out of season."],
                     ["`confused_with`", "On a species name that people often get wrong: what DNA said instead on mycomap.org's DNA-checked iNaturalist finds called that name (up to 3 names with their number of finds), how many finds were called it and how many DNA said were something else, and a one-line `note` to show under the name. Absent otherwise. Rebuilt nightly from [mycomap.org/misid](https://mycomap.org/misid)."],
@@ -258,7 +267,7 @@ def outline(enabled: dict[str, bool]) -> dict:
                     ["`per_photo`", "What each photo says on its own, so you can see which photo pulled the answer which way."],
                     ["`species_url`", "The top species' page on mycomap.org, or `null`."],
                     ["`confidence_withheld`", "`true` when no photo clearly shows a fungus, so every `confidence` is `null` and nothing is `confident`."],
-                    ["`gate`", "Whether each photo shows a fungus (`fungus`, `unsure`, `not_fungus`). A photo that isn't one is left out; when none clearly is, names are given without a confidence."],
+                    ["`gate`", f"Whether each photo shows a fungus (`fungus`, `unsure`, `not_fungus`), with `p_fungus`; below {GATE_NOT_SURE_BELOW:.2f} a photo is at best `unsure` (the gate was re-tuned on dataset release v1). A photo that isn't one is left out; when none clearly is, names are given without a confidence."],
                     ["`hints`", "Short suggestions, such as which photo would help most."],
                     ["`model`", "`{name, version, data, calibrated_on}`. `version` names the DNA-verified data the model learned from: the date it was exported from mycomap.org, then .2, .3 for later builds on it. Store it with a suggestion to know which model made it. `data` gives that snapshot's date and size (records, species, genera)."],
                     ["`context_used`", "The place (rounded to 0.1°) and date that were used, and whether each came from you or the photo."],

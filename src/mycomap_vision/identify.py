@@ -676,8 +676,8 @@ class Identifier:
                     "mv compare for this model to calibrate it.")
         n = self.calibration["n"].get("species", 0)
         return (f"Calibrated on {n:,} test records (comparison "
-                f"{self.calibration['comparison_id']}). Early and approximate: it improves as "
-                "the reference set and weekly tests grow.")
+                f"{self.calibration['comparison_id']}), DNA-verified records the model did not "
+                "learn from. Approximate, and fitted again when a new model or release is built.")
 
     def identify(self, backbone_model, images: list, top_k: int = 5, context=None,
                  photo_lookup=None, may_show: Callable[[PhotoInfo], bool] = only_open_licences) -> dict:

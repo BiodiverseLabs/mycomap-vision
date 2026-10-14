@@ -56,8 +56,9 @@ after v1 was cut) is scored once, after it closes.
    their reference photos match, blended with each species' average photo. There is
    no classifier head to retrain, so a newly validated record joins the reference
    set overnight.
-4. **Confidence per rank.** Scores are calibrated on the newest weeks of records;
-   "likely" lists hold the right name about 9 times in 10.
+4. **Confidence per rank.** Scores are calibrated on dataset release v1's validation
+   split (its newest eight weeks of records), and fitted again for each new model or
+   release; "likely" lists aim to hold the right name 9 times in 10.
 5. **Honest evaluation.** Tests use the newest records (split by time, never at
    random) and records held out of everything, and are reported by how many
    references each species has.
