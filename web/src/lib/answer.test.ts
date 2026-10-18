@@ -263,11 +263,12 @@ test("a name under 1% never shows in the breakdown, so nothing reads 0%", () => 
     "listed names aren't repeated; 0.4% is left out");
 });
 
-test("the breakdown is folded when there is an answer and open when there is none", () => {
-  assert.equal(breakdownOpen(false, true, false), false);
-  assert.equal(breakdownOpen(true, true, false), true);
+test("every rank shows under the answer by default, and the button folds it away", () => {
+  assert.equal(breakdownOpen(false, true, false), true, "open by default, even with a settled answer");
+  assert.equal(breakdownOpen(true, true, false), false, "folded when the reader folds it");
   assert.equal(breakdownOpen(false, false, false), true, "without an answer the breakdown is the answer");
-  assert.equal(breakdownOpen(true, false, true), false, "never when there are no ranks (not a fungus)");
+  assert.equal(breakdownOpen(true, false, false), true, "and can't be folded then (no button)");
+  assert.equal(breakdownOpen(false, true, true), false, "never when there are no ranks (not a fungus)");
 });
 
 test("the breakdown's button says which view it breaks down", () => {
