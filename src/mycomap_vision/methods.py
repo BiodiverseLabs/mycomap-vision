@@ -276,17 +276,39 @@ class Hybrid:
 
 def top_k_species_scores_per_photo(sims: np.ndarray, index, k: int) -> np.ndarray:
     """(n_query_photos, n_species): each photo's mean of its k best matches within each
-    species (all of them when the species has fewer than k photos)."""
+    species (all of them when the species has fewer than k photos).
+
+    No sort: k rounds of a per-species maximum (reduceat), each round adding the maximum
+    once per copy of it still needed (ties count as separate matches, as a sort would rank
+    them) and then knocking those copies out. The sum is taken in the same order as the
+    sorted version (best first) and the same dtype, so for k <= 2 (nearest+mean uses 2)
+    the scores are bit for bit the sorted version's, and for larger k equal to float
+    rounding; a full argsort of every reference column per query was ~80% of a find's
+    scoring time."""
     counts = photos_per_species(index)
-    group = np.repeat(np.arange(len(counts)), counts)
-    # Within each species, best first: sort on species, then on similarity (-1..1).
-    order = np.argsort(group * 4.0 - sims, axis=1, kind="stable")
-    ranked = np.take_along_axis(sims, order, axis=1)
+    starts = index.starts
+    sims = np.asarray(sims)
+    need = np.minimum(counts, k)
+    remaining = np.broadcast_to(need, (len(sims), len(counts))).astype(sims.dtype)
     total = np.zeros((len(sims), len(counts)), dtype=np.float32)
+    work = sims
     for j in range(k):
-        has = counts > j
-        total[:, has] += ranked[:, index.starts[has] + j]
-    return total / np.minimum(counts, k)
+        best = np.maximum.reduceat(work, starts, axis=1)
+        if j == k - 1:
+            # Last round: at most one match is still needed per species, and a species that
+            # needs one still has a photo left, so no tie bookkeeping.
+            total += np.where(remaining > 0, best, 0) * remaining
+            break
+        top = work == np.repeat(best, counts, axis=1)
+        take = np.minimum(np.add.reduceat(top, starts, axis=1).astype(sims.dtype), remaining)
+        # A tie for the j-th place adds the same value twice: best * 2 equals best + best.
+        total += np.where(take > 0, best, 0) * take
+        remaining -= take
+        if not remaining.any():
+            break
+        work = work.copy() if work is sims else work
+        np.putmask(work, top, -np.inf)
+    return total / need
 
 
 def top_k_species_scores(sims: np.ndarray, index, k: int) -> np.ndarray:

@@ -159,6 +159,42 @@ def test_top_k_species_scores_average_each_photos_k_best_matches_within_the_spec
                        np.maximum.reduceat(sims, index.starts, axis=1).mean(axis=0))
 
 
+def _top_k_sorted(sims, index, k):
+    """The sort-based version top_k_species_scores_per_photo replaced (the reference)."""
+    from mycomap_vision.methods import photos_per_species
+    counts = photos_per_species(index)
+    group = np.repeat(np.arange(len(counts)), counts)
+    order = np.argsort(group * 4.0 - sims, axis=1, kind="stable")
+    ranked = np.take_along_axis(sims, order, axis=1)
+    total = np.zeros((len(sims), len(counts)), dtype=np.float32)
+    for j in range(k):
+        has = counts > j
+        total[:, has] += ranked[:, index.starts[has] + j]
+    return total / np.minimum(counts, k)
+
+
+def test_top_k_without_a_sort_gives_the_sorted_versions_scores_ties_and_small_species_too():
+    from mycomap_vision.methods import top_k_species_scores_per_photo
+    rng = np.random.default_rng(11)
+    sizes = [1, 2, 3, 5, 8, 1, 4, 13]
+    recs = [Record(f"{s}-{j}", f"G sp{s}", "G", "F", "2026-01-01", "u", [sum(sizes[:s]) + j])
+            for s, n in enumerate(sizes) for j in range(n)]
+    index = build_index(recs)
+    for trial in range(20):
+        sims = rng.uniform(-1, 1, size=(4, sum(sizes))).astype(np.float32)
+        if trial % 2:                               # coarse values: many ties in a species
+            sims = np.round(sims * 4) / 4
+        for k in (1, 2):                            # bit for bit at the served k
+            assert np.array_equal(top_k_species_scores_per_photo(sims, index, k),
+                                  _top_k_sorted(sims, index, k))
+        for k in (3, 5, 20):                        # every photo of a small species counts
+            assert np.allclose(top_k_species_scores_per_photo(sims, index, k),
+                               _top_k_sorted(sims, index, k), atol=1e-6)
+    before = sims.copy()
+    top_k_species_scores_per_photo(sims, index, 2)
+    assert np.array_equal(sims, before)             # the caller's similarities untouched
+
+
 def test_species_means_in_blocks_match_the_species_average_vectors():
     from mycomap_vision.methods import species_means
     vecs, recs, _ = clusters([3, 1, 7, 2, 5], seed=8)
