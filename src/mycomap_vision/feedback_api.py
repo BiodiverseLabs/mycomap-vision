@@ -371,6 +371,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             f = flagged.get(key)
             out.append({**ph, "flagged": f is not None, "in_tab": key in rec["in_tab"],
                         "item_id": f and f["item_id"], "flags": f["flags"] if f else [],
+                        "suggested_reason": pr.suggested_reason(f["flags"], rec.get("tab", "all"))
+                        if f else None,
                         "status": f["status"] if f else None,
                         "decision": f["decision"] if f else None})
         return {k: v for k, v in rec.items() if k not in ("flagged", "in_tab")} | {"photos": out}

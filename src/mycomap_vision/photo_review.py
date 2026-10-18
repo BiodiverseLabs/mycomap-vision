@@ -38,15 +38,29 @@ TABS: tuple[tuple[str, str], ...] = (
 )
 TAB_CODES = tuple(c for c, _ in TABS)
 
-# Why a photo is left out; the reviewer picks one (default: the tab's own kind).
+# Why a photo is left out, one per photo (Steve, 2026-10-18: a record's photos can be of
+# several kinds). A flagged photo's reason starts at its flag's (suggested_reason).
 REASONS: tuple[tuple[str, str], ...] = (
     ("micrograph", "Micrograph or microscope"),
     ("slip", "Field slip or label"),
     ("habitat", "Habitat or scene"),
     ("people", "People"),
+    ("not_fungus", "Not a fungus"),
     ("other", "Other"),
 )
 REASON_CODES = tuple(c for c, _ in REASONS)
+REASON_OF_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat",
+                 "people": "people", "gate": "not_fungus", "other": "other"}
+
+
+def suggested_reason(flags: list[dict], tab: str = "all") -> str | None:
+    """The reason a flagged photo's picker starts at: its flag for the open tab when it has
+    one, else its strongest flag. None for a photo no rule flagged (the reviewer picks)."""
+    if not flags:
+        return None
+    here = [f for f in flags if f["tab"] == tab] or flags
+    best = max(here, key=lambda f: f.get("strength") or 0.0)
+    return REASON_OF_TAB.get(best["tab"], "other")
 
 # The zero-shot views (the miss review's s6) by the tab they belong to.
 VIEW_TABS = {"habitat": "habitat", "scene": "habitat", "landscape": "habitat",
