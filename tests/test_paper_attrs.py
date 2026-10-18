@@ -100,3 +100,12 @@ def test_extra_columns_are_written_and_read_back(tmp_path):
                                               "in_season": "core", "ecoregion": "TAIGA",
                                               "beit_vocab": "yes"}})
     assert paper_score.read_attrs(path)["k"]["beit_vocab"] == "yes"
+
+
+def test_a_species_known_only_under_its_variety_has_a_distance_and_a_season():
+    from mycomap_vision import paper_attrs as pa
+    scored = [{"record_key": "1", "species": "Pseudohydnum gelatinosum", "observed_on": "2026-09-01"}]
+    refs = [{"record_key": "r1", "species": "Pseudohydnum gelatinosum ssp. pusillum",
+             "observed_on": "2025-09-03"}]
+    a = pa.attributes(scored, refs, {"1": (45.0, -122.0), "r1": (45.1, -122.0)})["1"]
+    assert a["distance_band"] != "no reference" and a["in_season"] == "core"

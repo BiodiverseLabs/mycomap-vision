@@ -69,9 +69,12 @@ def attributes(scored: list[dict], refs: list[dict], public: dict[str, tuple],
     """{record key: {distance_band, distance_km, in_season}} for the scored rows (dicts
     with record_key, species, observed_on) against the reference rows, from `public`
     {record key: (lat, lon) or (None, None)}."""
+    # Pooled by answer key (PLAN rule 7): a species with its varieties and subspecies, a
+    # hybrid code on its own; the nearest reference and the season use every pooled record.
+    from .name_equiv import answer_key
     pts, doys, known = defaultdict(list), defaultdict(list), set()
     for r in refs:
-        sp = r.get("species")
+        sp = answer_key(r.get("species") or "")
         if not sp:
             continue
         known.add(sp)
@@ -84,7 +87,7 @@ def attributes(scored: list[dict], refs: list[dict], public: dict[str, tuple],
     arr = {sp: np.array(v, float) for sp, v in pts.items()}
     out = {}
     for r in scored:
-        key, sp = str(r["record_key"]), r.get("species") or ""
+        key, sp = str(r["record_key"]), answer_key(r.get("species") or "")
         lat, lon = public.get(key, (None, None))
         if not sp or sp not in known:
             band, km = "no reference", None

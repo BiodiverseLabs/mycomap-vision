@@ -450,3 +450,16 @@ def test_a_psathyrella_truth_is_calibrated_against_candolleomyces_with_the_taxon
     assert with_tax["calibration"]["genus"]["credit"] == ne.ANSWER_KEY + " + taxonomy"
     assert with_tax["calibration"]["species"]["credit"] == ne.ANSWER_KEY + " + taxonomy"
     assert "genus" not in without["calibration"]          # its own genus label is missing
+
+
+def test_reference_depth_pools_a_species_with_its_varieties_and_keeps_a_hybrid_apart():
+    from mycomap_vision.name_equiv import ReferenceDepth
+    d = ReferenceDepth(["Pseudohydnum gelatinosum ssp. pusillum"] * 3
+                       + ["Physisporinus sp. 'IN01'"] * 2 + ["Physisporinus sp. 'IN01 x VT01'"])
+    assert d("Pseudohydnum gelatinosum") == 3                 # variety-only species: band >= 1
+    assert d("Pseudohydnum gelatinosum ssp. pusillum") == 3
+    assert d("Physisporinus sp. 'IN01 x VT01'") == 1          # the hybrid code: its own key
+    assert d("Physisporinus sp. 'IN01'") == 2                 # a parent is not the hybrid
+    assert d("") == 0 and d(None) == 0 and not d.has("Russula emetica")
+    assert ReferenceDepth([("Amanita muscaria", 5), ("Amanita muscaria var. guessowii", 2)])(
+        "Amanita muscaria") == 7
