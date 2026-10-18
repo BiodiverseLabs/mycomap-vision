@@ -498,6 +498,74 @@ export interface FeedbackDecisionBody {
   photo_keys?: string[];
 }
 
+// --- The photo review: the "Photos that show no specimen" queue, a record at a time ---------
+
+export type PhotoReviewTab = "micrograph" | "slip" | "habitat" | "people" | "gate" | "other" | "all";
+export type PhotoReviewSort = "p" | "p_asc" | "flagged";
+
+/** Why a rule flagged a photo: its tab, the probe or view, its p, and how strongly it counts. */
+export interface PhotoFlag {
+  tab: string;
+  kind: string;
+  p: number | null;
+  strength: number;
+}
+
+/** One photo of a record, as this reviewer may see it: by its public URL, Vision's own copy
+ *  (admins only, `private`), or a placeholder (`hidden`, no URL at all). */
+export interface ReviewPhoto {
+  photo_key: string;
+  position: number | null;
+  license_class?: string;
+  shown: "public" | "private" | "hidden";
+  thumb?: string;
+  full?: string;
+  hidden_reason?: string;
+  flagged: boolean;
+  /** Flagged for the tab being shown (every flagged photo in "all"). */
+  in_tab: boolean;
+  item_id: number | null;
+  flags: PhotoFlag[];
+  status: FeedbackStatus | null;
+  decision: { decision: string; reason: string | null; by: string | null } | null;
+}
+
+export interface ReviewRecord {
+  record_key: string;
+  label: string;
+  /** The record's public page. */
+  link: string;
+  tab: PhotoReviewTab;
+  strongest: number;
+  flagged_in_tab: number;
+  photos: ReviewPhoto[];
+}
+
+export interface PhotoReviewTabCount {
+  code: Exclude<PhotoReviewTab, "all">;
+  title: string;
+  open: number;
+  decided: number;
+}
+
+export interface PhotoReviewPage {
+  tabs: PhotoReviewTabCount[];
+  total: number;
+  reasons: { code: string; label: string }[];
+  records: ReviewRecord[];
+}
+
+export interface PhotoReviewDecisionBody {
+  photos: { photo_key: string; decision: "keep" | "exclude"; reason?: string }[];
+  note?: string;
+}
+
+export interface PhotoReviewDecided {
+  decided: number;
+  added: number;
+  record: ReviewRecord | null;
+}
+
 /** The admins' change list, a TSV download (pending changes unless `all`). */
 export const feedbackChangesUrl = (applies: "org" | "vision", all = false) =>
   `/api/feedback/changes.tsv?applies=${applies}&all=${all}`;
@@ -519,6 +587,16 @@ export const feedbackApi = {
   reopen: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/reopen`),
   refresh: (id: number) =>
     postJson<{ item: FeedbackItemDetail; refreshed: RefreshedRecord[] }>(`${fbItem(id)}/refresh`),
+  photoReview: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort;
+                     min_flagged?: number; q?: string; offset?: number; limit?: number }) => {
+    const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
+                                     min_flagged: String(p.min_flagged ?? 1),
+                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 10) });
+    return getJson<PhotoReviewPage>(`/api/feedback/photo-review?${qs}`);
+  },
+  photoReviewDecide: (recordKey: string, body: PhotoReviewDecisionBody) =>
+    postJson<PhotoReviewDecided>(
+      `/api/feedback/photo-review/${encodeURIComponent(recordKey)}/decision`, body),
 };
 
 /** mycomap.org signs people in here; come back to the page they were on. */
