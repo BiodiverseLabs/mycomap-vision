@@ -566,6 +566,62 @@ export interface PhotoReviewDecided {
   record: ReviewRecord | null;
 }
 
+// --- The label review: the blind "Photos unlike the label" queue, a record at a time -------
+
+export type LabelReviewOutcome = "exclude_photos" | "hard_example" | "rename";
+
+/** One photo of a label-review card, shown by the same rule as the photo review's. */
+export interface LabelReviewPhoto {
+  photo_key: string;
+  position: number | null;
+  license_class?: string;
+  shown: "public" | "private" | "hidden";
+  thumb?: string;
+  full?: string;
+  hidden_reason?: string;
+  /** Left out of Vision by the stored decision (always false on an open card). */
+  excluded: boolean;
+}
+
+export interface LabelReviewDecision {
+  decision: string;
+  value: string | null;
+  photo_keys: string[];
+  note: string | null;
+  by: string | null;
+  at: number | string | null;
+}
+
+/** One record of the queue. An open card is masked: the record, its label and its photos
+ *  only. `rule`, `evidence` and `decision` come only on a decided card. */
+export interface LabelReviewCard {
+  item_id: number;
+  record_key: string;
+  label: string;
+  link: string;
+  status: FeedbackStatus;
+  masked: boolean;
+  rule?: string | null;
+  evidence?: Record<string, unknown>;
+  decision?: LabelReviewDecision | null;
+  photos: LabelReviewPhoto[];
+}
+
+export interface LabelReviewPage {
+  total: number;
+  reasons: { code: string; label: string }[];
+  outcomes: { code: string; label: string; applies: FeedbackApplies; needs_value: boolean }[];
+  records: LabelReviewCard[];
+}
+
+export interface LabelReviewDecisionBody {
+  outcome: LabelReviewOutcome;
+  photos: { photo_key: string; decision: "keep" | "exclude" }[];
+  reason?: string;
+  value?: string;
+  note?: string;
+}
+
 /** The admins' change list, a TSV download (pending changes unless `all`). */
 export const feedbackChangesUrl = (applies: "org" | "vision", all = false) =>
   `/api/feedback/changes.tsv?applies=${applies}&all=${all}`;
@@ -597,6 +653,14 @@ export const feedbackApi = {
   photoReviewDecide: (recordKey: string, body: PhotoReviewDecisionBody) =>
     postJson<PhotoReviewDecided>(
       `/api/feedback/photo-review/${encodeURIComponent(recordKey)}/decision`, body),
+  labelReview: (p: { status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {
+    const qs = new URLSearchParams({ status: p.status, q: p.q ?? "", offset: String(p.offset ?? 0),
+                                     limit: String(p.limit ?? 10) });
+    return getJson<LabelReviewPage>(`/api/feedback/label-review?${qs}`);
+  },
+  labelReviewDecide: (itemId: number, body: LabelReviewDecisionBody) =>
+    postJson<{ record: LabelReviewCard | null }>(
+      `/api/feedback/label-review/${encodeURIComponent(String(itemId))}/decision`, body),
 };
 
 /** mycomap.org signs people in here; come back to the page they were on. */

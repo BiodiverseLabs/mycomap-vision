@@ -8,7 +8,9 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, itemBadges,
          PAGE_SIZE, pageText, prefillValue, recordLabel, refreshVerdict, shownRule, storedVerdict,
          takesPhotoKeys, whenText, yes, type Verdict } from "@/lib/feedback";
+import { LABEL_REVIEW_TYPE } from "@/lib/labelReview";
 import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
+import { LabelReview } from "./LabelReview";
 import { PhotoReview } from "./PhotoReview";
 
 // Human Feedback (Steve, 2026-10-18): a review queue of places where Vision and the reference
@@ -84,7 +86,9 @@ export function FeedbackPage() {
             <StatCards types={types} selected={selected} onPick={setPicked} />
             {sel && (sel.type === PHOTO_REVIEW_TYPE
               ? <PhotoReview key={sel.type} summary={sel} />
-              : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data} />)}
+              : sel.type === LABEL_REVIEW_TYPE
+                ? <LabelReview key={sel.type} summary={sel} />
+                : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data} />)}
           </>
         )}
       </div>
