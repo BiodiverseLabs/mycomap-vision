@@ -367,3 +367,52 @@ def test_genus_known_says_whether_inat_can_name_a_truths_genus(gap):
     # extras never make a truth's genus known
     more = ne.Taxonomy(TAXA, ["Newgenus sp. 'C01'"], extras={30: t("Newgenus", 20, anc=[1])})
     assert not more.genus_known("Newgenus sp. 'C01'", "Newgenus")
+
+
+# --- calibration credits by the answer key too (paper PLAN P18, 2026-10-18) ----------------
+
+def test_calibration_counts_a_truth_the_key_credits_and_exact_does_not():
+    """The truth 'var.' is held in the reference as 'subsp.': under the key the record is
+    calibrated against that label (its temperature's NLL and its likely-set score); under
+    "exact" its own label is missing, so it gives no probability to calibrate."""
+    def run(key):
+        vectors = np.asarray([unit(0.0), unit(2.0), unit(0.05)], dtype=np.float32)
+        ref = [Record("1", "Amanita muscaria subsp. flavivolvata", "Amanita", "Am",
+                      "2026-01-01", "a", [0]),
+               Record("2", "Boletus edulis", "Boletus", "Bo", "2026-01-01", "a", [1])]
+        test = [Record("9", "Amanita muscaria var. flavivolvata", "Amanita", "Am",
+                       "2026-09-01", "b", [2])]
+        return evaluate.evaluate(vectors, ref, test, method="nearest", sets=False,
+                                 per_record=True, answer_key=key)
+    key, exact = run(None), run("exact")
+    assert key["calibration"]["species"]["n"] == 1
+    assert key["calibration"]["species"]["credit"] == ne.ANSWER_KEY
+    assert key["per_record"][0]["cal"]["species"]["p_true"] > 0.5
+    assert "species" not in exact["calibration"]
+    assert exact["per_record"][0]["cal"].get("species") is None
+    assert key["calibration"]["genus"]["credit"] == "exact"            # genus as before
+    assert key["calibration"]["genus"]["n"] == exact["calibration"]["genus"]["n"] == 1
+
+
+def test_the_labels_the_key_credits_include_every_writing_and_a_hybrids_parents():
+    labels = ["Amanita muscaria subsp. flavivolvata", "Amanita muscaria var. flavivolvata",
+              "Amanita muscaria", "Physisporinus sp. 'IN01'", "Boletus edulis"]
+    credited = evaluate.credited_labels(labels, ne.ANSWER_KEY)
+    # species rank: both writings of the subspecies, and the species itself
+    assert credited("Amanita muscaria flavivolvata") == [0, 1, 2]
+    assert credited("Physisporinus sp. 'IN01 x VT01'") == [3]
+    assert credited("Russula emetica") == []
+    exact = evaluate.credited_labels(labels, "exact")
+    assert exact("Amanita muscaria flavivolvata") == []
+    assert exact("Boletus edulis") == [4]
+
+
+def test_the_nll_of_several_credited_labels_is_that_of_their_summed_probability():
+    scores = np.asarray([0.9, 0.85, 0.2, -np.inf])
+    for ti in (0, 40, 89):
+        t = evaluate.T_GRID[ti]
+        z = scores[:3] / t
+        lse = z.max() + np.log(np.exp(z - z.max()).sum())
+        both = z[:2].max() + np.log(np.exp(z[:2] - z[:2].max()).sum())
+        assert evaluate.nll_of_credited(scores, [0, 1])[ti] == pytest.approx(lse - both)
+        assert evaluate.nll_of_credited(scores, [2])[ti] == pytest.approx(lse - z[2])

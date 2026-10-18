@@ -278,6 +278,41 @@ def nll_by_temperature(scores: np.ndarray, true_idx: int,
     return lse - float(scores[true_idx]) / T_GRID
 
 
+def nll_of_credited(scores: np.ndarray, credited: list[int],
+                     lse: np.ndarray | None = None) -> np.ndarray:
+    """nll_by_temperature when several labels count as the truth (the answer key): the
+    negative log of their summed probability under softmax(scores / T), for each T."""
+    if len(credited) == 1:
+        return nll_by_temperature(scores, credited[0], lse)
+    if lse is None:
+        lse = likely.logsumexp_by_temperature(scores, T_GRID)
+    return lse - likely.logsumexp_by_temperature(np.asarray(scores)[credited], T_GRID)
+
+
+def credited_labels(labels: list[str], answer_key: str):
+    """truth -> the indices of `labels` the answer key credits for it (name_equiv.
+    species_credit, without the taxonomy step: the same canonical key, or a hybrid's parent),
+    as a function. "exact": the truth's own label only."""
+    position = {n: i for i, n in enumerate(labels)}
+    if answer_key == "exact":
+        return lambda t: [position[t]] if t in position else []
+    by_key: dict[str, list[int]] = defaultdict(list)
+    for i, n in enumerate(labels):
+        k = name_equiv.canonical(n, None, answer_key)
+        if k:
+            by_key[k].append(i)
+    cache: dict[str, list[int]] = {}
+
+    def credited(t: str) -> list[int]:
+        if t not in cache:
+            keys = {name_equiv.canonical(t, None, answer_key)}
+            keys |= {name_equiv.canonical(p, None, answer_key)
+                     for p in name_equiv.hybrid_parents(t)}
+            cache[t] = sorted({i for k in keys if k for i in by_key.get(k, ())})
+        return cache[t]
+    return credited
+
+
 def bucket_of(n: int) -> str:
     for lo, hi, label in BUCKETS:
         if lo <= n <= hi:
@@ -400,7 +435,13 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     deepest = max(top_k, *STANDARD_K)
     # Calibration: summed NLL per candidate temperature, over test records whose
     # true label is in the reference set (a novel species has no probability to give).
+    # Species credit follows the answer key (paper PLAN P18): every label the key credits
+    # for the truth counts as it (the NLL of their summed probability; a likely set is right
+    # when it lists any of them, so its score is the best credited label's). Genus and
+    # family, and the "exact" key, credit the truth's own label only, as before.
     position = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
+    credited = {rank: credited_labels(names[rank], answer_key if rank == "species" else "exact")
+                for rank in RANKS}
     nll = {rank: np.zeros(len(T_GRID)) for rank in RANKS}
     n_cal = Counter()
     # Likely sets (likely.py) are fitted after the temperature, from each scored record's
@@ -432,11 +473,13 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 continue
             rs = rank_scores(scores, index, rank)
             lse = likely.logsumexp_by_temperature(rs, T_GRID)
-            if t in position[rank]:
-                nll[rank] += nll_by_temperature(rs, position[rank][t], lse)
+            cred = credited[rank](t)
+            best_cred = cred[int(np.argmax(rs[cred]))] if cred else None
+            if cred:
+                nll[rank] += nll_of_credited(rs, cred, lse)
                 n_cal[rank] += 1
             if sets:
-                kept[rank].append(likely.compact(rs, position[rank].get(t), T_GRID, lse=lse))
+                kept[rank].append(likely.compact(rs, best_cred, T_GRID, lse=lse))
             if rank == "species":
                 # answers sharing a key are one answer: rank deep enough to fill the table
                 top = name_equiv.collapse(top_labels(rs, names[rank], 4 * deepest),
@@ -448,8 +491,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             right = (lambda k, pos=pos: pos is not None and pos < k)
             if per_record:
                 mine["top"][rank] = top
-                mine["_cal"][rank] = (float(np.max(rs)), float(rs[position[rank][t]])
-                                        if t in position[rank] else None, lse)
+                mine["_cal"][rank] = (float(np.max(rs)), float(rs[best_cred])
+                                        if best_cred is not None else None, lse)
             if name_scores and rank in ("species", "genus") and top:
                 match = (name_equiv.species_match if rank == "species"
                          else name_equiv.genus_match)
@@ -526,7 +569,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
         out["per_image"] = per_image_scores(vectors, test, index, model)
     out["calibration"] = {
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
-               "nll": round(float(nll[rank].min() / n_cal[rank]), 4)}
+               "nll": round(float(nll[rank].min() / n_cal[rank]), 4),
+               "credit": answer_key if rank == "species" else "exact"}
         for rank in RANKS if n_cal[rank]}
     for rank, cal in out["calibration"].items():
         if kept[rank]:
