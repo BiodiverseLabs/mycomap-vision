@@ -207,6 +207,9 @@ model answering, by its public name only. Requests leave `model` out.
              "reference": {"records": 169129, "species": 17854, "photos": 684135},
              "ranks": ["species", "genus", "family", "order", "class", "phylum"],
              "confident_at": 0.7,
+             "confident_rule": {"species": {"outright": 0.7, "min": 0.5,
+                                            "runner_up_below": 0.2},
+                                "genus": 0.7, "family": 0.7},
              "likely_coverage": {"species": 0.8, "genus": 0.9, "family": 0.91}}],
  "limits": {"max_photos": 10, "max_file_mb": 25, "max_request_mb": 80, "top_k_max": 10,
             "photos_per_minute": 20},
@@ -327,10 +330,26 @@ model's result, not a `results` list.
   belong to the served gate and may change with it; callers read the verdict, not
   `p_fungus`.
 - **`confident`** (per candidate; Vision owns the rule, so the website, the app and
-  mycomap.org's importance score never set a threshold of their own): `true` for a rank's top name when the
-  gate verdict is `fungus` and its calibrated `confidence` is **≥ 0.70**: Steve's rule for
-  the website's answer headline (2026-10-11), so web and app always agree. Ranks without
-  a fitted confidence (order and above, for now) are never `confident`. The top-level
+  mycomap.org's importance score never set a threshold of their own): `true` for a rank's
+  top name when the gate verdict is `fungus` and the name is settled:
+  - **genus and family**: calibrated `confidence` **≥ 0.70** (Steve's rule for the
+    website's answer headline, 2026-10-11);
+  - **species**: `confidence` **≥ 0.70** outright, **or ≥ 0.50 with the runner-up species
+    below 0.20** (strictly). The runner-up is the best other species the answer lists, in
+    `ranks.species` or `likely.species` (so it is seen at `top_k` 1 too). Changed by
+    Steve, 2026-10-18: one rule with the app and .org collection importance (the app's
+    Vision card "likely" and mycomap.org's collection-importance "sure" use the same
+    numbers). Before, species needed 0.70 like the other ranks, so a species at 0.62 with
+    the next at 0.07 headlined only its genus; such a species is now `confident` and is
+    the `answer`. Between 0.50 and 0.70, `confident` at species can therefore now be
+    `true` where it was `false`; it is never `false` where it was `true`.
+
+  The website's answer headline (web/src/lib/answer.ts), this flag and the "the genus looks
+  settled" hint all follow the one rule (src/mycomap_vision/settled.py), tested on one
+  shared case table. `GET /api/v1/models` states it as `confident_rule`; `confident_at`
+  (0.70, the genus and family line and the species outright line) stays for callers that
+  read it. Ranks without a fitted confidence (order and above, for now) are never
+  `confident`. The top-level
   **`answer`** is `{"rank", "name", "confidence"}` for the finest rank that is
   `confident`, or `null`. Confident answers are calibrated on v1's validation split (see
   `confidence` below); how often a confident v1 answer is right has not been measured for
@@ -659,9 +678,9 @@ overall 51%, genus 81%.
 | | share of records | right |
 |---|---|---|
 | species top ≥ 0.9 | 2.1% | 95% |
-| species top ≥ 0.7 (**`confident` at species**) | 9.6% | 96% |
+| species top ≥ 0.7 (**`confident` at species** before 2026-10-18) | 9.6% | 96% |
 | species top ≥ 0.5 | 22.9% | 86% |
-| genus top ≥ 0.7, species below (**`answer` at genus**) | 52.2% | 96% |
+| genus top ≥ 0.7, species below (**`answer` at genus** before 2026-10-18) | 52.2% | 96% |
 | neither (answer at family or none) | 38.2% | |
 | *one-name species likely set (rejected rule)* | *9.9%* | *61%* |
 

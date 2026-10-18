@@ -163,6 +163,7 @@ def test_every_example_shows_the_live_model_card():
     assert "2026-10-06" not in text and "2026-10-08" not in text, "an older model's card"
     models = next(b for b in apidocs.endpoints(doc) if b["path"] == "/models")
     assert '"confident_at": 0.7' in models["response"]
+    assert '"runner_up_below": 0.2' in models["response"], "the species rule (2026-10-18)"
     assert apidocs.ANSWER_EXAMPLE["model"] == apidocs.LIVE_MODEL
 
 
@@ -174,5 +175,8 @@ def test_the_outline_makes_no_pre_v1_claim_about_calibration_or_the_gate():
     assert "dataset release v1" in rows["confidence"]
     assert "92" not in rows["confident"] and "%" not in rows["confident"]
     assert "calibrated on v1's validation split" in rows["confident"]
-    assert "0.70" in rows["confident"]                       # the confident rule is unchanged
+    assert "0.70" in rows["confident"]                       # genus, family, species outright
+    # Species also at 0.50 with the next below 0.20 (Steve, 2026-10-18).
+    assert "0.50" in rows["confident"] and "below 0.20" in rows["confident"]
+    assert "2026-10-18" in rows["confident"] and "confident_rule" in rows["confident"]
     assert "below 0.50" in rows["gate"] and "0.70" not in rows["gate"]

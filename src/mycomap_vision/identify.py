@@ -33,6 +33,7 @@ from .evaluate import (METHODS, RANKS, NearestSpecimen, build_index, load_record
 from .licenses import photo_url
 from .higher import HIGHER_RANKS, HigherRanks
 from .placeprior import PlaceCue
+from .settled import runner_up, settled
 from .sources import INAT, record_url
 
 CONFIDENCE_TEMPERATURE = 0.02
@@ -57,7 +58,10 @@ def improvement_hints(n_photos: int, ranks: dict[str, list[dict]],
     if n_photos == 1:
         hints.append("Add more photos: the cap from above, the underside (gills, pores or "
                      "teeth) and the stem. Most fungi need at least two views to identify.")
-    if species and sp_conf < 0.5 and ge_conf >= 0.7 and len(species) > 1:
+    # The same "settled" rule as the answer headline and the API's `confident` (settled.py),
+    # so the hint never says the species is open when the headline names it.
+    if (len(species) > 1 and settled("genus", ge_conf)
+            and not settled("species", sp_conf, runner_up(species[0]["name"], species[1:]))):
         hints.append(f"The genus looks settled, but {species[0]['name']} and "
                      f"{species[1]['name']} are close. Clear photos of the underside and stem "
                      "base, or DNA sequencing, would separate them.")

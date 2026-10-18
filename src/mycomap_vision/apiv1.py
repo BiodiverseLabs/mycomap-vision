@@ -29,6 +29,9 @@ from typing import Callable
 
 from fastapi.responses import JSONResponse
 
+from .settled import SETTLED_AT, SETTLED_RANKS, runner_up, settled
+from .settled import rule as confident_rule
+
 PREFIX = "/api/v1/"
 RANK_KEYS = {"species": "species", "genus": "genera", "family": "families"}
 APP_TOKEN_PREFIX = "mvt."
@@ -297,24 +300,33 @@ class PhotoWindow:
             return 0.0
 
 
-CONFIDENT_AT = 0.70        # Steve's answer-headline rule, 2026-10-11 (docs/api.md §4)
-CONFIDENT_RANKS = ("family", "genus", "species")     # coarse to fine
+# Steve's answer-headline rule (settled.py; docs/api.md §4): genus and family at 0.70
+# (2026-10-11); species at 0.70, or at 0.50 with the runner-up below 0.20 (Steve,
+# 2026-10-18: one rule with the app and .org collection importance).
+CONFIDENT_AT = SETTLED_AT  # genus and family; kept in GET /api/v1/models for compatibility
+CONFIDENT_RANKS = SETTLED_RANKS     # coarse to fine
 
 
-def mark_confident(result: dict, threshold: float = CONFIDENT_AT) -> dict:
+def mark_confident(result: dict) -> dict:
     """Adds `confident` to every candidate and the top-level `answer` (docs/api.md §4).
     A rank's top name is confident when the find is a fungus by the gate (or the gate
-    didn't run) and its calibrated confidence reaches `threshold`; `answer` is the finest
-    confident rank. A withheld confidence (None) is never confident, nor is any rank
-    outside CONFIDENT_RANKS."""
+    didn't run) and it is settled (settled.py): genus and family at CONFIDENT_AT; species
+    at CONFIDENT_AT, or at SPECIES_SETTLED_MIN with every other species (in `ranks` or
+    `likely`) below SPECIES_RUNNER_UP_MAX. `answer` is the finest confident rank. A
+    withheld confidence (None) is never confident, nor is any rank outside
+    CONFIDENT_RANKS."""
     gate = result.get("gate")
     fungus = gate is None or gate.get("verdict") == "fungus"
+    likely = result.get("likely") or {}
     answer = None
     for rank, cands in (result.get("ranks") or {}).items():
+        top_ok = False
+        if cands and fungus:
+            second = runner_up(cands[0]["name"], cands[1:],
+                               (likely.get(rank) or {}).get("names"))
+            top_ok = settled(rank, cands[0].get("confidence"), second)
         for i, c in enumerate(cands):
-            conf = c.get("confidence")
-            c["confident"] = bool(i == 0 and fungus and rank in CONFIDENT_RANKS
-                                  and conf is not None and conf >= threshold)
+            c["confident"] = bool(i == 0 and top_ok)
     for rank in CONFIDENT_RANKS:
         cands = (result.get("ranks") or {}).get(rank) or []
         if cands and cands[0]["confident"]:
@@ -456,6 +468,7 @@ def models_doc(model: dict, reference: dict, limits: dict, features: dict,
                                                                     "photos")},
                         "ranks": list(ANSWER_RANKS),
                         "confident_at": CONFIDENT_AT,
+                        "confident_rule": confident_rule(),
                         "likely_coverage": likely_coverage(calibration)}],
             "limits": limits,
             "features": features}

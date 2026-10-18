@@ -338,11 +338,15 @@ def result_with(conf_species, conf_genus, conf_family, gate=None):
                       "family": rank("F", conf_family)}, "gate": gate}
 
 
-def test_answer_is_the_finest_rank_at_70_percent():
-    r = apiv1.mark_confident(result_with(0.69, 0.9, 0.99))
+def test_answer_is_the_finest_settled_rank():
+    # Species settles at 0.70, or at 0.50 with the runner-up below 0.20 (Steve, 2026-10-18:
+    # one rule with the app and .org collection importance); genus and family at 0.70. The
+    # full case table is in test_settled_rule.py.
+    r = apiv1.mark_confident(result_with(0.49, 0.9, 0.99))
     assert r["answer"] == {"rank": "genus", "name": "A", "confidence": 0.9}
     assert [c["confident"] for c in r["ranks"]["species"]] == [False, False]
-    assert apiv1.mark_confident(result_with(0.70, 0.9, 0.99))["answer"]["rank"] == "species"
+    assert apiv1.mark_confident(result_with(0.50, 0.9, 0.99))["answer"]["rank"] == "species"
+    assert apiv1.mark_confident(result_with(0.3, 0.69, 0.99))["answer"]["rank"] == "family"
     assert apiv1.mark_confident(result_with(0.1, 0.2, 0.3))["answer"] is None
 
 
