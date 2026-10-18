@@ -73,6 +73,23 @@ PLACE_SETTINGS: dict[str, dict] = {
 }
 
 
+# Whose calibration the place method states its confidence and likely sets with (experiment
+# v1-place-calibration, 2026-10-18): "shared" (default, as served since 2026-10-11) =
+# nearest+mean's; "own" = its own comparison row, when one was fitted under the place
+# setting in force (else nearest+mean's still: a row from another setting is not its own).
+CALIBRATION_ENV = "MV_PLACE_CALIBRATION"
+CALIBRATIONS = ("shared", "own")
+
+
+def calibration_choice() -> str:
+    """MV_PLACE_CALIBRATION, "shared" when unset; an unknown value is refused."""
+    from . import config
+    choice = config.setting(CALIBRATION_ENV) or "shared"
+    if choice not in CALIBRATIONS:
+        raise ValueError(f"{CALIBRATION_ENV}={choice!r}: one of {', '.join(CALIBRATIONS)}")
+    return choice
+
+
 def place_setting(name: str | None = None) -> tuple[str, dict]:
     """(name, setting): `name`, else MV_PLACE_SETTING, else the served default. An unknown
     name is refused, so a typo never serves a prior nobody chose."""
@@ -308,6 +325,11 @@ class NearestMeanPlace:
     def fit(self, vectors: np.ndarray, index, records=None) -> None:
         self.base.fit(vectors, index)
         self.prior.fit(records or [], index.species)
+
+    def scoreboard_extra(self) -> dict:
+        """Saved with a comparison row (evaluate.compare): the place setting the row was
+        scored under, so an own calibration is only ever read from a row of that setting."""
+        return {"place_setting": self.prior.setting_name}
 
     def place_shift(self, context: Context | None) -> np.ndarray | None:
         """What the place and date add to every photo's score, or None (no place, no date)."""

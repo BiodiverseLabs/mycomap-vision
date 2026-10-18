@@ -526,14 +526,33 @@ def calibration_method(method: str) -> str:
     return getattr(METHODS.get(method), "calibration_from", None) or method
 
 
+def own_calibration_row(conn: sqlite3.Connection, backbone: str, method: str):
+    """For a method that shares another's calibration (calibration_from), the newest row of
+    its OWN, when MV_PLACE_CALIBRATION=own asks for it and that row was scored under the
+    place setting in force (placeprior.place_setting); else None."""
+    from . import placeprior
+    if calibration_method(method) == method or placeprior.calibration_choice() != "own":
+        return None
+    setting, _ = placeprior.place_setting()
+    for row in conn.execute("select id, comparison_id, report_json from eval_runs where "
+                            "backbone = ? and method = ? order by id desc", (backbone, method)):
+        if json.loads(row[2]).get("place_setting") == setting:
+            return row
+    return None
+
+
 def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> dict | None:
     """The newest comparison's fitted temperatures for this model (or for the method whose
-    calibration it shares), with where they came from."""
-    method = calibration_method(method)
+    calibration it shares; with MV_PLACE_CALIBRATION=own, the place method's own row of the
+    place setting in force when there is one: own_calibration_row), with where they came
+    from."""
     conn.executescript(SCOREBOARD_SCHEMA)
-    row = conn.execute("select id, comparison_id, report_json from eval_runs "
-                       "where backbone = ? and method = ? order by id desc limit 1",
-                       (backbone, method)).fetchone()
+    row = own_calibration_row(conn, backbone, method)
+    if row is None:
+        method = calibration_method(method)
+        row = conn.execute("select id, comparison_id, report_json from eval_runs "
+                           "where backbone = ? and method = ? order by id desc limit 1",
+                           (backbone, method)).fetchone()
     if not row:
         return None
     cal = json.loads(row[2]).get("all_photos", {}).get("calibration")
