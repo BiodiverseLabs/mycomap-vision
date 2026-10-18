@@ -198,23 +198,31 @@ class Index:
     # For each rank: the label names and, per species, the index of its label (-1 = blank).
     labels: dict[str, list[str]] = field(default_factory=dict)
     label_of: dict[str, np.ndarray] = field(default_factory=dict)
+    # Start offset in cols of each reference record (a record's photos are contiguous, its
+    # records inside its species' run): what the record-grouped methods group by.
+    rec_starts: np.ndarray | None = None
 
 
 def build_index(ref: list[Record]) -> Index:
-    by_species: dict[str, list[int]] = defaultdict(list)
+    by_species: dict[str, list[list[int]]] = defaultdict(list)
     taxa: dict[str, Record] = {}
     count = Counter()
     for r in ref:
-        by_species[r.unit].extend(r.photo_rows)
+        if r.photo_rows:
+            by_species[r.unit].append(list(r.photo_rows))
+        else:
+            by_species.setdefault(r.unit, [])
         taxa.setdefault(r.unit, r)
         count[r.unit] += 1
     species = sorted(by_species)
-    cols, starts = [], []
+    cols, starts, rec_starts = [], [], []
     for s in species:
         starts.append(len(cols))
-        cols.extend(by_species[s])
+        for rows in by_species[s]:
+            rec_starts.append(len(cols))
+            cols.extend(rows)
     index = Index(species, np.asarray(cols, dtype=np.int64), np.asarray(starts, dtype=np.int64),
-                  count)
+                  count, rec_starts=np.asarray(rec_starts, dtype=np.int64))
     for rank in RANKS:
         names = sorted({truth(taxa[s], rank) for s in species} - {""})
         pos = {n: i for i, n in enumerate(names)}
@@ -351,7 +359,7 @@ def occurrence_leak_check(model, test: list[Record]) -> dict | None:
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
              fitted=None, sets: bool = True, name_scores: bool = False,
-             per_image: bool = False) -> dict:
+             per_image: bool = False, per_record: bool = False) -> dict:
     """Score the test records. `fitted` (from fit_method) skips refitting, which matters
     for the trained methods. With `sets`, each rank's calibration also fits its likely
     set (likely.py): the probability floor for the highest useful coverage up to 90%,
@@ -361,7 +369,13 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
 
     Species macro-F1 (`macro_f1`) is always reported beside top-1: the Picek group's papers
     headline it (metrics.macro_f1). With `per_image`, `per_image` adds top-1 per rank and
-    species macro-F1 with every photo answered on its own, as their papers report it."""
+    species macro-F1 with every photo answered on its own, as their papers report it.
+
+    With `per_record`, `per_record` lists every test record's answer for paired analyses
+    outside (scripts/record_scoring): its observation_id, its top names per rank (up to
+    the deepest k reported) and, per calibrated rank, the top name's probability (`conf`)
+    and the true name's (`p_true`; None when the reference lacks it) at the fitted
+    temperature."""
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
@@ -385,6 +399,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     # are also kept per project and per observer at genus and species.
     groups = {"project": defaultdict(Counter), "observer": defaultdict(Counter)}
     predicted: list[tuple[str, str]] = []        # species (truth, top-1), for macro-F1
+    answers: list[dict] = []                     # per_record: each record's answer
     for rec in test:
         rows = rec.photo_rows[:1] if first_photo_only else rec.photo_rows
         if uses_context:
@@ -393,6 +408,9 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             scores = model.species_scores(vectors[rows])
         b = bucket_of(index.ref_count.get(rec.unit, 0))
         band = standard_band(index.ref_count.get(rec.unit, 0))
+        if per_record:
+            answer = {"observation_id": rec.observation_id, "top": {}, "_cal": {}}
+            answers.append(answer)
         for rank in RANKS:
             t = truth(rec, rank)
             if not t:          # e.g. species of a one-word name: not scored at that rank
@@ -405,6 +423,10 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             if sets:
                 kept[rank].append(likely.compact(rs, position[rank].get(t), T_GRID, lse=lse))
             top = top_labels(rs, names[rank], deepest)
+            if per_record:
+                answer["top"][rank] = top
+                answer["_cal"][rank] = (float(np.max(rs)), float(rs[position[rank][t]])
+                                        if t in position[rank] else None, lse)
             if name_scores and rank in ("species", "genus") and top:
                 match = (name_equiv.species_match if rank == "species"
                          else name_equiv.genus_match)
@@ -486,6 +508,19 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             fit = likely.fit_and_check(rows)
             if fit:
                 cal["sets"] = fit
+    if per_record:
+        for answer in answers:
+            stated = {}
+            for rank, (best, true_score, lse) in answer.pop("_cal").items():
+                if rank not in out["calibration"]:
+                    continue
+                ti = int(np.argmin(nll[rank]))
+                t_ = float(T_GRID[ti])
+                stated[rank] = {"conf": float(np.exp(best / t_ - lse[ti])),
+                                "p_true": None if true_score is None
+                                else float(np.exp(true_score / t_ - lse[ti]))}
+            answer["cal"] = stated
+        out["per_record"] = answers
     return out
 
 

@@ -9,8 +9,11 @@ photos. `index` is an evaluate.Index: reference photo rows grouped by species.
 - linear        a trained linear classifier (balanced softmax available, off by default)
 - hybrid        linear + nearest: the classifier where data is rich, the specimen
                 lookup keeping single-record species in play
-- nearest+mean  (experimental) the two best specimen matches, blended with the
-                species average
+- nearest+mean  the two best matching reference photos (possibly of one record),
+                blended with the species' average photo vector (served)
+- nearest+mean-records, nearest+mean-records-balanced, nearest+mean-views
+                (research, experiment record-scoring) the same blend scored by
+                reference RECORD (specimen) instead of by photo
 """
 
 from __future__ import annotations
@@ -274,19 +277,51 @@ class Hybrid:
         return self.nearest.photo_sims(query)
 
 
-def top_k_species_scores_per_photo(sims: np.ndarray, index, k: int) -> np.ndarray:
-    """(n_query_photos, n_species): each photo's mean of its k best matches within each
-    species (all of them when the species has fewer than k photos)."""
-    counts = photos_per_species(index)
+def top_k_within(values: np.ndarray, starts: np.ndarray, k: int) -> np.ndarray:
+    """(n_rows, n_groups): each row's mean of its k largest values within each group of
+    contiguous columns (`starts`: where each group begins; all of a group's values when it
+    has fewer than k). Values are similarities (-1..1), or -inf for a column left out."""
+    starts = np.asarray(starts, dtype=np.int64)
+    counts = np.diff(np.append(starts, values.shape[1]))
     group = np.repeat(np.arange(len(counts)), counts)
-    # Within each species, best first: sort on species, then on similarity (-1..1).
-    order = np.argsort(group * 4.0 - sims, axis=1, kind="stable")
-    ranked = np.take_along_axis(sims, order, axis=1)
-    total = np.zeros((len(sims), len(counts)), dtype=np.float32)
+    # Within each group, best first: sort on group, then on value (-1..1; -inf stays last).
+    order = np.argsort(group * 4.0 - np.nan_to_num(values, neginf=-3.0), axis=1, kind="stable")
+    ranked = np.take_along_axis(values, order, axis=1)
+    total = np.zeros((len(values), len(counts)), dtype=np.float32)
     for j in range(k):
         has = counts > j
-        total[:, has] += ranked[:, index.starts[has] + j]
+        total[:, has] += ranked[:, starts[has] + j]
     return total / np.minimum(counts, k)
+
+
+def top_k_species_scores_per_photo(sims: np.ndarray, index, k: int) -> np.ndarray:
+    """(n_query_photos, n_species): each photo's mean of its k best matching reference
+    PHOTOS within each species (all of them when the species has fewer than k photos).
+    Two of them may be photos of one record; top_k_record_scores_per_photo takes k
+    distinct records instead."""
+    return top_k_within(sims, index.starts, k)
+
+
+def record_scores_per_photo(sims: np.ndarray, index) -> np.ndarray:
+    """(n_query_photos, n_records): each reference record's best photo for each query photo
+    (records in index.rec_starts order)."""
+    return np.maximum.reduceat(sims, index.rec_starts, axis=1)
+
+
+def species_record_starts(index) -> np.ndarray:
+    """Where each species' run of records begins, in record order (every species starts
+    on a record boundary)."""
+    if index.rec_starts is None:
+        raise ValueError("this index carries no record boundaries (evaluate.build_index "
+                         "makes them)")
+    return np.searchsorted(index.rec_starts, index.starts).astype(np.int64)
+
+
+def top_k_record_scores_per_photo(sims: np.ndarray, index, k: int) -> np.ndarray:
+    """(n_query_photos, n_species): each photo's mean over the k best matching reference
+    RECORDS of each species, a record scoring by its best photo for that query photo (all
+    of the species' records when it has fewer than k)."""
+    return top_k_within(record_scores_per_photo(sims, index), species_record_starts(index), k)
 
 
 def top_k_species_scores(sims: np.ndarray, index, k: int) -> np.ndarray:
@@ -308,9 +343,35 @@ def species_means(vectors, index, chunk: int = 2048) -> np.ndarray:
     return out / np.linalg.norm(out, axis=1, keepdims=True).clip(1e-12)
 
 
+def _unit(x: np.ndarray) -> np.ndarray:
+    return x / np.linalg.norm(x, axis=-1, keepdims=True).clip(1e-12)
+
+
+def record_balanced_species_means(vectors, index, chunk: int = 2048) -> np.ndarray:
+    """(n_species, dim) unit-length species average in which every reference RECORD counts
+    once: each record's photo vectors averaged and made unit length, then the species'
+    records averaged (species_means weights a record by its number of photos)."""
+    counts = photos_per_species(index)
+    rec_sp = species_record_starts(index)
+    out = np.empty((len(counts), vectors.shape[1]), dtype=np.float32)
+    for s in range(0, len(counts), chunk):
+        e = min(s + chunk, len(counts))
+        lo = index.starts[s]
+        hi = index.starts[e] if e < len(counts) else len(index.cols)
+        r_lo = rec_sp[s]
+        r_hi = rec_sp[e] if e < len(counts) else len(index.rec_starts)
+        block = np.asarray(vectors[index.cols[lo:hi]], dtype=np.float32)
+        recs = _unit(np.add.reduceat(block, index.rec_starts[r_lo:r_hi] - lo, axis=0))
+        out[s:e] = np.add.reduceat(recs, rec_sp[s:e] - r_lo, axis=0)
+    return _unit(out)
+
+
 class NearestAndMean:
-    """Score = weight x (mean of the two best specimen matches) + (1 - weight) x the
-    similarity to the species' average vector. Experimental (exp/depth-bias).
+    """Score = weight x (mean of the two best matching reference PHOTOS of the species) +
+    (1 - weight) x the similarity to the species' average photo vector, per query photo,
+    averaged over the find's photos. The two photos may both belong to one reference
+    record, and the average weights each record by its number of photos: this is
+    photo-level scoring (NearestAndMeanRecords groups by record instead).
 
     Nearest alone rests on one photo per species. The species average is the
     opposite: steady for a species known from a few records (their photos averaged),
@@ -341,7 +402,7 @@ class NearestAndMean:
                   hidden: np.ndarray) -> np.ndarray:
         """`per_photo` (per_photo_scores, from unmasked `photo_sims`) as if the reference
         columns `hidden` had never been there: each species they belong to gets its two
-        best matches and its average taken again without them, and -inf when nothing of
+        best photo matches and its average taken again without them, and -inf when nothing of
         it is left. Equal to a NearestAndMean fitted without those columns (tests), with
         no refit: only the few species touched are recomputed."""
         starts = self.index.starts
@@ -369,6 +430,111 @@ class NearestAndMean:
 
     def photo_sims(self, query: np.ndarray) -> np.ndarray:
         return self.scorer.sims(query)
+
+
+class NearestAndMeanRecords(NearestAndMean):
+    """nearest+mean scored by reference record (specimen) rather than by photo (research;
+    experiment record-scoring, arm b): for each query photo, every reference record scores
+    by its best photo, and the species takes the mean of its k best RECORDS, so two photos
+    of one specimen can no longer fill both places. The species average is nearest+mean's
+    (arm c, NearestAndMeanRecordsBalanced, balances it by record too). Same k and weight,
+    not retuned."""
+    name = "nearest+mean-records"
+    balanced = False
+
+    @staticmethod
+    def ready() -> bool:
+        """Not offered on the site until the experiment adopts an arm."""
+        return False
+
+    def fit(self, vectors: np.ndarray, index) -> None:
+        self.index = index
+        self.rec_species = species_record_starts(index)
+        self.scorer = Scorer(reference_rows(vectors, index))
+        means = (record_balanced_species_means if self.balanced else species_means)(vectors, index)
+        self.means = Scorer(means.astype(np.float16))
+
+    def nearest_part(self, photo_sims: np.ndarray) -> np.ndarray:
+        """(n_query_photos, n_species): the mean of each species' k best records."""
+        return top_k_within(record_scores_per_photo(photo_sims, self.index), self.rec_species,
+                            self.k)
+
+    def per_photo_scores(self, photo_sims: np.ndarray, query: np.ndarray) -> np.ndarray:
+        return (self.weight * self.nearest_part(photo_sims)
+                + (1 - self.weight) * self.means.sims(query))
+
+    def _species_mean_without(self, keep: np.ndarray, rec_bounds: np.ndarray) -> np.ndarray:
+        """The species' average from the kept columns only (`rec_bounds`: the species'
+        record starts and its end), as fit makes it."""
+        v = rows_at(self.scorer.ref, keep)
+        if not self.balanced:
+            return _unit(v.sum(axis=0))
+        rec = np.searchsorted(rec_bounds, keep, side="right") - 1
+        firsts = np.flatnonzero(np.diff(rec, prepend=-1) != 0)
+        return _unit(_unit(np.add.reduceat(v, firsts, axis=0)).sum(axis=0))
+
+    def leave_out(self, per_photo: np.ndarray, photo_sims: np.ndarray, query: np.ndarray,
+                  hidden: np.ndarray) -> np.ndarray:
+        """`per_photo` as if the reference columns `hidden` had never been there (as
+        NearestAndMean.leave_out): a record with every photo hidden drops out, a record
+        with some keeps the rest; only the species touched are recomputed."""
+        starts, rec_starts = self.index.starts, self.index.rec_starts
+        n_cols = len(self.index.cols)
+        hidden = np.unique(np.asarray(hidden, dtype=np.int64))
+        q = np.asarray(query, dtype=np.float32)
+        out = np.array(per_photo, dtype=np.float32, copy=True)
+        for u in np.unique(np.searchsorted(starts, hidden, side="right") - 1).tolist():
+            lo = int(starts[u])
+            hi = int(starts[u + 1]) if u + 1 < len(starts) else n_cols
+            keep = np.setdiff1d(np.arange(lo, hi), hidden)
+            if not len(keep):
+                out[:, u] = -np.inf
+                continue
+            r_hi = int(self.rec_species[u + 1]) if u + 1 < len(starts) else len(rec_starts)
+            bounds = np.append(rec_starts[int(self.rec_species[u]):r_hi], hi)
+            rec = np.searchsorted(bounds, keep, side="right") - 1
+            firsts = np.flatnonzero(np.diff(rec, prepend=-1) != 0)
+            best = np.maximum.reduceat(photo_sims[:, keep], firsts, axis=1)
+            best = -np.sort(-best, axis=1)[:, :self.k]
+            nearest = best.sum(axis=1, dtype=np.float32) / np.float32(best.shape[1])
+            mean = self._species_mean_without(keep, bounds).astype(np.float16)
+            out[:, u] = (self.weight * nearest
+                         + (1 - self.weight) * (q @ mean.astype(np.float32)))
+        return out
+
+
+class NearestAndMeanRecordsBalanced(NearestAndMeanRecords):
+    """NearestAndMeanRecords with a record-balanced species average (arm c): each record's
+    photo vectors averaged and made unit length, then its records averaged, so a specimen
+    photographed twenty times weighs no more in the average than one photographed once."""
+    name = "nearest+mean-records-balanced"
+    balanced = True
+
+
+class NearestAndMeanViews(NearestAndMeanRecordsBalanced):
+    """View matching (arm d): each query photo matches its closest photo within every
+    reference record; those are averaged over the find's photos FIRST, and the species then
+    takes its k best records, so the specimens that match the find as a whole (cap, gills
+    and stem together) count, not a different record per view. Species average as arm c.
+    For one photo it equals arm c; per_photo_scores (identify's per-photo view) is arm c's."""
+    name = "nearest+mean-views"
+
+    def find_scores(self, photo_sims: np.ndarray, query: np.ndarray) -> np.ndarray:
+        """(n_species,): the find's score from its photos' similarities."""
+        rec = record_scores_per_photo(photo_sims, self.index).mean(axis=0, keepdims=True)
+        nearest = top_k_within(rec, self.rec_species, self.k)[0]
+        mean = self.means.sims(query).mean(axis=0)
+        return self.weight * nearest + (1 - self.weight) * mean
+
+    def species_scores(self, query: np.ndarray) -> np.ndarray:
+        return self.find_scores(self.scorer.sims(query), query)
+
+    def leave_out(self, *args, **kwargs):
+        raise NotImplementedError("nearest+mean-views can't leave records out yet "
+                                  "(research only)")
+
+
+RECORD_METHODS = (NearestAndMeanRecords, NearestAndMeanRecordsBalanced, NearestAndMeanViews)
 
 
 class FinetuneHead:
@@ -443,7 +609,7 @@ class FinetuneHead:
 
 
 METHODS = {m.name: m for m in (NearestSpecimen, SpeciesMean, LinearHead, Hybrid,
-                               NearestAndMean, FinetuneHead)}
+                               NearestAndMean, *RECORD_METHODS, FinetuneHead)}
 
 class AsLogProb:
     """A similarity method's scores as log-probabilities (softmax at a fixed temperature),
@@ -489,6 +655,14 @@ for _base in (NearestSpecimen, SpeciesMean):
 from .placeprior import NearestMeanPlace  # noqa: E402
 
 METHODS[NearestMeanPlace.name] = NearestMeanPlace
+
+# The record-grouped arms with the same place and date (research, experiment
+# record-scoring): each shares its own photos-only calibration, as nearest+mean+place does.
+for _base in RECORD_METHODS:
+    METHODS[f"{_base.name}+place"] = type(
+        f"{_base.__name__}Place", (NearestMeanPlace,),
+        {"name": f"{_base.name}+place", "base_method": _base.name,
+         "calibration_from": _base.name, "ready": staticmethod(_base.ready)})
 
 
 # The Picek group's classifier recipe, replicated on our data (retrain.py): the trained
