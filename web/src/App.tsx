@@ -10,8 +10,10 @@ import { ApiDocsPage } from "@/pages/ApiDocs";
 import { BenchmarkPage, BenchmarksPage, ForResearchersPage, ProtocolsPage,
          ResearchPage } from "@/pages/Research";
 import { ExperimentPage, ExperimentsPage } from "@/pages/Experiments";
+import { FeedbackPage } from "@/pages/Feedback";
 import { api, signInUrl } from "@/lib/api";
 import { API_PATH, MOVED, mustSignIn } from "@/lib/research";
+import { FEEDBACK_PATH } from "@/lib/feedback";
 
 export function App() {
   const [location] = useLocation();
@@ -42,6 +44,7 @@ export function App() {
         </Route>
         <Route path="/research/for-researchers" component={ForResearchersPage} />
         <Route path={API_PATH} component={ApiDocsPage} />
+        <Route path={FEEDBACK_PATH} component={FeedbackPage} />
         {Object.entries(MOVED).map(([from, to]) => (
           <Route key={from} path={from}><Redirect to={to} replace /></Route>
         ))}
