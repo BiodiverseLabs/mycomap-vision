@@ -341,3 +341,29 @@ def test_extras_never_override_an_entry_a_label_reaches():
     assert not ne.species_credit(100, "Amanita muscaria", taxonomy=more)
     kw = {"taxonomy": more, "truth_species": "Psathyrella candolleana"}
     assert ne.genus_match("Psathyrella", "Psathyrella", **kw)["strict"]
+
+
+def test_genus_known_says_whether_inat_can_name_a_truths_genus(gap):
+    """Paired iNat-side genus tests (H1b, H4g) leave out truths whose genus iNat can't name:
+    neither the release genus nor the label's first word is a current iNat genus, and the
+    label's species (one-to-one or not) gives none."""
+    assert gap.genus_known("Psathyrella candolleana", "Psathyrella")
+    assert gap.genus_known("Candolleomyces candolleanus", "Psathyrella")    # kept apart, still
+    assert gap.genus_known("Gyromitra caroliniana", None)          # Gyromitra is in the snapshot
+    assert gap.genus_known("Clavaria zollingeri", "Clavaria")
+    assert gap.genus_known("Amanita sp. 'NY03'", "Amanita")        # a code in a known genus
+    assert not gap.genus_known("Unheardof sp. 'X01'", "Unheardof")
+    assert not gap.genus_known("Unheardof rarus", None)
+    # a genus iNat retired: its single successor counts; a split one doesn't
+    taxa = {**TAXA, 20: t("Oldgenus", 20, active=False, anc=[1], succ=[11]),
+            21: t("Splitgenus", 20, active=False, anc=[1], succ=[11, 12])}
+    tx = ne.Taxonomy(taxa, ["Oldgenus sp. 'A01'", "Splitgenus sp. 'B01'"])
+    assert tx.genus_known("Oldgenus sp. 'A01'", "Oldgenus")
+    assert not tx.genus_known("Splitgenus sp. 'B01'", "Splitgenus")
+    # only the species can say it: a label genus word iNat lacks, a species it knows
+    nogenus = {k: v for k, v in TAXA.items() if k != 10}
+    tn = ne.Taxonomy(nogenus, ["Psathyrella candolleana"])
+    assert tn.genus_known("Psathyrella candolleana", None)        # via Candolleomyces candolleanus
+    # extras never make a truth's genus known
+    more = ne.Taxonomy(TAXA, ["Newgenus sp. 'C01'"], extras={30: t("Newgenus", 20, anc=[1])})
+    assert not more.genus_known("Newgenus sp. 'C01'", "Newgenus")

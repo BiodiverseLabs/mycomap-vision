@@ -352,6 +352,21 @@ class Taxonomy:
         left out of the iNat- and expert-paired tests (PLAN rule 7), never scored a miss."""
         return self.species_id(label) is not None
 
+    def genus_known(self, label: str, genus: str | None = None) -> bool:
+        """Can iNat name this truth's genus (Steve, PLAN rules 4 and 7, research 2d0086e)?
+        True when the release genus or the label's first word is a genus of the snapshot
+        (current, its successors followed), or the label's iNat species (one-to-one or not)
+        has a genus. A truth for which this is False leaves the paired iNat-side genus tests
+        (H1b, H4g). The truth side: the snapshot alone, extras never count."""
+        words = (label or "").strip().split()
+        for name in {genus, words[0] if words else None} - {None, ""}:
+            for tid in self.by_name.get(name.strip().lower(), []):
+                cur = self.current(tid, base_only=True)
+                if cur is not None and self.base[cur].get("rank_level") == GENUS_LEVEL:
+                    return True
+        sid = self.species_id(label, one_to_one=False)
+        return sid is not None and self._level(sid, GENUS_LEVEL, base_only=True) is not None
+
     def genus_names(self, x, base_only: bool = False) -> set[str]:
         """Genus names a name or taxon id stands for: as written, and iNat's current genus
         of it (a retired genus followed to its successor; a species' genus). A name always
