@@ -90,6 +90,13 @@ def check_config(doc: dict) -> None:
             raise ValueError(f"comparator {c.get('id')}: kind is one of {KINDS}")
         if c["kind"] == "vision" and not (c.get("backbone") and c.get("method")):
             raise ValueError(f"comparator {c['id']}: a vision comparator names backbone and method")
+        if c["kind"] == "vision":
+            # Any method the scoring code knows (an adopted E32 arm, e.g.
+            # nearest+mean-records-balanced, once it is in methods.METHODS); a typo is
+            # refused here, never first met when the sealed test is opened.
+            from .evaluate import METHODS
+            if c["method"] not in METHODS:
+                raise ValueError(f"comparator {c['id']}: unknown method {c['method']!r}")
         if c.get("place_setting"):
             if "place" not in str(c.get("method", "")):
                 raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "

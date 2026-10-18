@@ -172,6 +172,14 @@ def test_place_methods_see_the_public_point_never_the_true_one():
     assert (out[1].latitude, out[1].longitude) == (None, None)     # no public point: none
 
 
+def test_a_vision_comparator_with_an_unknown_method_is_refused_before_any_scoring():
+    with pytest.raises(ValueError, match="unknown method 'nearest+maen'"):
+        paper_score.check_config({"format": 1, "comparators": [
+            {"id": "v", "kind": "vision", "backbone": "m1", "method": "nearest+maen"}]})
+    paper_score.check_config({"format": 1, "comparators": [
+        {"id": "v", "kind": "vision", "backbone": "m1", "method": "nearest+mean"}]})
+
+
 def test_a_bad_config_is_refused():
     with pytest.raises(ValueError, match="format"):
         paper_score.check_config({"format": 2})
