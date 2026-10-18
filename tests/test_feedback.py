@@ -190,3 +190,33 @@ def test_photos_left_out_by_a_decision_leave_the_reference_at_the_next_sync(tmp_
     assert fb.sync_exclusions(s, conn)["photos"] == 0
     assert any(1000 in r.photo_rows for r in evaluate.load_records(conn, {int(p[0]): int(p[0]) for p in ids}))
     assert fb.photo_id_of("mo:45") == 1_000_000_000_045 and fb.photo_id_of("x") is None
+
+
+def test_twin_location_conflicts_seed_without_coordinates_and_decide_on_org(tmp_path, conn):
+    """One find posted to MO and iNat whose copies sit over 5 km apart: a pair item with the
+    distance, how each copy is placed and which looks wrong, and no coordinate anywhere;
+    fixing either copy is a decision for mycomap.org / MO / iNat (codes kept stable)."""
+    f = tmp_path / "twins.tsv"
+    f.write_text("distance_km\tmo_org_id\tmo_number\tmo_placement\tinat_org_id\tinat_number\t"
+                 "inat_accuracy_m\ttaxon\tlikely_wrong_copy\n"
+                 "9336.2\t180324\t324331\tMO GPS\t560948\t172307494\t20\txylodon spathulatus\t"
+                 "unclear: both look precise\n"
+                 "7.4\t1\t2\tnamed location\t3\t4\t\tagrocybe arvalis\tMO copy: named location\n",
+                 encoding="utf-8")
+    s = fb.Store(tmp_path / "f.sqlite")
+    out = fb.seed_files(s, conn, twin_locations=f)
+    assert out[0]["added"] == 2
+    items = {i["subject"]: i for i in s.items("twin_location_conflict")["items"]}
+    far = items["mo:324331 + 172307494"]
+    assert far["record_keys"] == ["mo:324331", "172307494"] and far["records"] == 2
+    assert far["evidence"]["distance_km"] == "9336" and items["mo:2 + 4"]["evidence"]["distance_km"] == "7.4"
+    assert items["mo:2 + 4"]["evidence"]["inat_accuracy_m"] == "not recorded"
+    assert set(far["evidence"]) == {"distance_km", "mo_placement", "inat_accuracy_m",
+                                    "likely_wrong_copy"}               # no coordinate field
+    assert not {"latitude", "longitude", "lat", "lon", "lng"} & {k.lower() for k in far}
+    codes = {o["code"]: o["applies"] for o in
+             next(t for t in fb.type_catalogue() if t["type"] == "twin_location_conflict")["options"]}
+    assert codes == {"fix_mo_location": "org", "fix_inat_location": "org", "both_right": "note"}
+    d = s.decide(far["id"], "fix_inat_location", ANN)
+    assert d["decisions"][-1]["applies"] == "org"
+    assert [c["subject"] for c in s.changes(applies="org")] == ["mo:324331 + 172307494"]

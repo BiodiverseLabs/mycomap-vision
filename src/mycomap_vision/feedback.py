@@ -134,6 +134,19 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
              (Option("exclude_photo", "Leave this photo out of Vision", "vision"),
               Option("keep_photo", "Keep it (it shows the specimen)", "note")),
              granularity="photo"),
+    ItemType("twin_location_conflict", "One find, two places",
+             "The same find posted to both Mushroom Observer and iNaturalist, whose two copies "
+             "are more than 5 km apart, so maps and the Atlas count it as two sites. Check "
+             "both copies' maps and fix the copy that is wrong at its source.",
+             ("both records' links", "how far apart (km)", "how each copy is placed",
+              "which copy looks wrong"),
+             # Codes kept stable: a later .org hand-off may act on them (the coordinator).
+             (Option("fix_mo_location", "The MO copy's location is wrong: fix it on MO / .org",
+                     "org"),
+              Option("fix_inat_location", "The iNat copy's location is wrong: fix it on iNat",
+                     "org"),
+              Option("both_right", "Both are right (two places)", "note")),
+             granularity="record pair"),
     ItemType("crosspost_twin", "One find posted to both iNaturalist and Mushroom Observer",
              "Two records with the same name and the same photo. Vision should count them as "
              "one specimen.",
@@ -419,6 +432,28 @@ def rows_from_crosswalk(path: Path) -> list[dict]:
     return out
 
 
+def rows_from_twin_locations(path: Path) -> list[dict]:
+    """The Atlas lane's twins whose copies are over 5 km apart (columns distance_km,
+    mo_org_id, mo_number, mo_placement, inat_org_id, inat_number, inat_accuracy_m, taxon,
+    likely_wrong_copy). No coordinates are read or kept: only the distance, how each copy
+    is placed, and which one looks wrong."""
+    out = []
+    with open(path, encoding="utf-8", newline="") as f:
+        for r in csv.DictReader(f, delimiter="	"):
+            mo, inat = f"mo:{r['mo_number']}", str(r["inat_number"])
+            km = float(r["distance_km"])
+            out.append({
+                "item_type": "twin_location_conflict", "subject": f"{mo} + {inat}",
+                "rule": "MO <-> iNat twins (same label, same photo) placed over 5 km apart",
+                "record_keys": [mo, inat], "links": [link(mo), link(inat)],
+                "current": r["taxon"], "proposed": r["likely_wrong_copy"], "records": 2,
+                "evidence": {"distance_km": f"{km:.0f}" if km >= 10 else f"{km:.1f}",
+                             "mo_placement": r["mo_placement"],
+                             "inat_accuracy_m": r["inat_accuracy_m"] or "not recorded",
+                             "likely_wrong_copy": r["likely_wrong_copy"]}})
+    return out
+
+
 def blind_sample(hits: list[dict], item_type: str, n: int, seed: int) -> list[dict]:
     """A seeded sample of finds Vision got right, queued like the model-flagged items of
     `item_type` (blind = 1), so reviewers' error rate on them can be compared."""
@@ -463,12 +498,14 @@ def with_projects(rows: list[dict], conn: sqlite3.Connection) -> list[dict]:
 
 def seed_files(store: Store, conn: sqlite3.Connection, queue: Path | None = None,
                crosswalk: Path | None = None, hits: Path | None = None,
-               blind_ratio: float = 0.25, seed: int = 20261018) -> list[dict]:
+               blind_ratio: float = 0.25, seed: int = 20261018,
+               twin_locations: Path | None = None) -> list[dict]:
     """Seed the queue from the miss review's files. With `hits`, every model-flagged type
     also gets a blind sample of finds Vision answered right: blind_ratio of its items."""
     import hashlib
     out = []
-    for path, reader in ((queue, rows_from_queue_seed), (crosswalk, rows_from_crosswalk)):
+    for path, reader in ((queue, rows_from_queue_seed), (crosswalk, rows_from_crosswalk),
+                         (twin_locations, rows_from_twin_locations)):
         if path is None:
             continue
         sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
