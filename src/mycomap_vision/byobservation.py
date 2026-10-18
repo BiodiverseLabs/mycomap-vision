@@ -37,7 +37,7 @@ SOURCES = (INAT, MO)
 INAT_API = "https://api.inaturalist.org/v2/observations"
 INAT_FIELDS = ("(id:!t,observed_on:!t,location:!t,obscured:!t,"
                "taxon:(name:!t,rank:!t),"
-               "observation_photos:(position:!t,photo:(id:!t,url:!t)))")
+               "observation_photos:(position:!t,photo:(id:!t,url:!t,license_code:!t)))")
 MO_API = "https://mushroomobserver.org/api2/observations"
 INAT_PHOTO_HOSTS = (OPEN_DATA_HOST, STATIC_HOST)
 PHOTO_SIZE = "large"            # iNat 1024 px, MO 960 px: what the reference was embedded from
@@ -84,6 +84,8 @@ class Observation:
     name_at_source: str | None = None
     rank_at_source: str | None = None
     extra: dict = field(default_factory=dict)
+    # Each photo's licence as the site states it, beside photo_urls (None: none stated).
+    photo_licenses: list[str | None] = field(default_factory=list)
 
     @property
     def url(self) -> str | None:
@@ -98,7 +100,7 @@ def valid_id(raw: str) -> str | None:
 
 def parse_inat(obs: dict) -> Observation:
     """One iNat v2 result -> Observation (photos at PHOTO_SIZE, in position order)."""
-    urls, ids = [], []
+    urls, ids, licenses = [], [], []
     for op in sorted(obs.get("observation_photos") or [], key=lambda p: p.get("position") or 0):
         p = op.get("photo") or {}
         try:
@@ -109,6 +111,7 @@ def parse_inat(obs: dict) -> Observation:
             continue
         urls.append(url)
         ids.append(int(p["id"]))
+        licenses.append(p.get("license_code") or None)
     lat = lng = None
     loc = obs.get("location")
     if loc and "," in loc:
@@ -120,7 +123,7 @@ def parse_inat(obs: dict) -> Observation:
     taxon = obs.get("taxon") or {}
     return Observation(INAT, str(obs["id"]), urls, ids, lat, lng,
                        real_date(obs.get("observed_on")), place,
-                       taxon.get("name"), taxon.get("rank"))
+                       taxon.get("name"), taxon.get("rank"), photo_licenses=licenses)
 
 
 def parse_mo(obs: dict) -> Observation:
@@ -131,7 +134,7 @@ def parse_mo(obs: dict) -> Observation:
         if img and img.get("id") and img["id"] not in seen:
             seen.add(img["id"])
             images.append(img)
-    urls, ids = [], []
+    urls, ids, licenses = [], [], []
     for img in images:
         source_url = img.get("original_url") or f"https://{MO_HOST}/images/orig/{img['id']}.jpg"
         try:
@@ -139,6 +142,7 @@ def parse_mo(obs: dict) -> Observation:
         except ValueError:
             continue
         ids.append(photo_id_of(int(img["id"])))
+        licenses.append(img.get("license") or None)
     lat = lng = None
     place = None
     if not obs.get("gps_hidden") and obs.get("latitude") is not None \
@@ -156,7 +160,25 @@ def parse_mo(obs: dict) -> Observation:
             lat, lng, place = (n + s) / 2, (e + w) / 2, "area"
     name = obs.get("consensus") or {}
     return Observation(MO, str(obs["id"]), urls, ids, lat, lng, real_date(obs.get("date")),
-                       place, name.get("name"), name.get("rank"))
+                       place, name.get("name"), name.get("rank"), photo_licenses=licenses)
+
+
+def open_licence(license: str | None) -> bool:
+    """Whether a photo's stated licence is Creative Commons or public domain: iNat's
+    license_code (cc0, cc-by, cc-by-nc, ...; none means all rights reserved) or MO's
+    licence name ("Creative Commons Wikipedia Compatible v3.0", "Public Domain", ...)."""
+    text = (license or "").strip().lower()
+    return text.startswith("cc") or "creative commons" in text or "public domain" in text
+
+
+def shown_photo_url(obs: Observation, index: int) -> str | None:
+    """The observation's photo `index` as a page may show it: only a Creative Commons or
+    public-domain photo (CLAUDE.md: identify results show a photo only if it is CC
+    licensed or its owner granted permission, which a live observation can't tell us)."""
+    if not 0 <= index < len(obs.photo_urls):
+        return None
+    licence = obs.photo_licenses[index] if index < len(obs.photo_licenses) else None
+    return obs.photo_urls[index] if open_licence(licence) else None
 
 
 class Fetcher:
@@ -180,11 +202,12 @@ class Fetcher:
     # -- one at a time ---------------------------------------------------------------
 
     def fetch(self, source: str, source_id: str, max_photos: int,
-              admit=None) -> tuple[Observation, list[bytes]]:
+              admit=None, indexed: bool = False) -> tuple[Observation, list]:
         """The observation and up to `max_photos` of its photos (bytes), or NotFound,
         Unavailable, Busy. `admit(observation)`, called before any photo is read, says
         how many to read (0: none) or raises to refuse: a caller over its limits costs
-        the photo hosts nothing."""
+        the photo hosts nothing. `indexed`: (place in photo_urls, bytes) pairs, so a
+        caller can tell which photos a skipped one leaves."""
         with self.count:
             if self.waiting > self.max_waiting:
                 raise Busy(int(self.last_seconds * self.waiting) + 1)
@@ -197,7 +220,8 @@ class Fetcher:
                     n = min(max_photos, len(obs.photo_urls))
                     if admit is not None:
                         n = min(n, admit(obs))
-                    bodies = self.photos(obs, n) if n > 0 else []
+                    pairs = self.photo_pairs(obs, n) if n > 0 else []
+                    bodies = pairs if indexed else [body for _, body in pairs]
                 finally:
                     self.last_seconds = max(1.0, self.clock() - start)
                 return obs, bodies
@@ -233,11 +257,15 @@ class Fetcher:
 
     def photos(self, obs: Observation, max_photos: int) -> list[bytes]:
         """Up to `max_photos` photos as bytes; a photo the host won't give is skipped."""
+        return [body for _, body in self.photo_pairs(obs, max_photos)]
+
+    def photo_pairs(self, obs: Observation, max_photos: int) -> list[tuple[int, bytes]]:
+        """photos(), each with its place in obs.photo_urls."""
         out = []
-        for url in obs.photo_urls[:max_photos]:
+        for i, url in enumerate(obs.photo_urls[:max_photos]):
             body = self._photo(url, obs.source)
             if body is not None:
-                out.append(body)
+                out.append((i, body))
         return out
 
     # -- HTTP ------------------------------------------------------------------------

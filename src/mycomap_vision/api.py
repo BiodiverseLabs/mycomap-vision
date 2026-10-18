@@ -33,7 +33,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
+from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
                modelcard, models, names, nightly, onnxtower, permissions,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue)
@@ -284,7 +284,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                place_search: "geocode.PlaceSearch | None" = None,
                confused_with: "confusions.Served | None | bool" = True,
                feedback_store: "feedback.Store | None" = None,
-               feedback_org: "feedback_api.OrgClient | None" = None) -> FastAPI:
+               feedback_org: "feedback_api.OrgClient | None" = None,
+               answer_cache: "answercache.AnswerCache | None" = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -520,6 +521,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             default_monthly=int(_setting_number("MV_QUOTA_DEFAULT_MONTHLY")
                                 or quota_rules.DEFAULT_MONTHLY))
     app.state.quotas = quotas
+    # Answers already given for an iNat or MO observation (answercache.py), served again
+    # while what Vision answers from is unchanged (answers_version below).
+    if answer_cache is None:
+        answer_cache = answercache.AnswerCache(
+            (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT
+             else Path(manifest_path or config.MANIFEST_PATH).parent)
+            / "observation-answers.sqlite")
+    app.state.answer_cache = answer_cache
 
     def q(sql: str, params: tuple = ()):
         with db_lock:
@@ -598,6 +607,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # Photos Human Feedback leaves out (synced at startup and before each night).
             excluded = feedback.exclusions_fingerprint(conn)
         return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded)
+
+    def answers_version(backbone: str, method: str, view: permissions.PermissionView) -> str:
+        """What this model answers from now (answercache.answers_version): the release and
+        the served index's version. A kept observation answer is served only under it."""
+        return answercache.answers_version(model_card().get("version"),
+                                           index_version(backbone, method, view))
 
     warm = Preload()
 
@@ -902,11 +917,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         finally:
             timer.add("queue_ms", time.monotonic() - start)
 
-    def run_identify(photos: list[UploadFile], models_: str, context: "Context",
-                     timer: "apiv1.Timer") -> dict:
-        read = decode_photos(photos, timer)
-        images = [img for img, _ in read]
-        context, used = fill_context(context, [found for _, found in read])
+    def site_models(models_: str) -> list[tuple[str, str]]:
+        """The site's model choice ("backbone/method,..."; empty: the default) as
+        (backbone, method) pairs, each one offered here, or an HTTPException."""
         ready = ready_backbones()
         wanted = [m.strip() for m in models_.split(",") if m.strip()]
         if not wanted:
@@ -915,12 +928,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             wanted = [f"{ready[0]}/{default_method()}"]
         if limits.max_models and len(wanted) > limits.max_models:
             raise HTTPException(400, f"compare at most {limits.max_models} models at a time here")
-        view = permission_view()
-
-        def may_show(info) -> bool:
-            return view.may_show(info.license_class, info.owner_user_id)
-
-        results = []
+        pairs = []
         for spec in wanted:
             backbone, _, method = spec.partition("/")
             method = method or default_method()
@@ -932,13 +940,33 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise HTTPException(400, f"unknown method {method!r}")
             if not limits.method_allowed(method) or not method_ready(method):
                 raise HTTPException(400, f"{method!r} is not offered here")
-            try:
-                ident = served_index(backbone, method, view, timer)
-            except NotTrainedHere as e:
-                raise HTTPException(503, f"{backbone}/{method} isn't ready on this "
-                                         f"server ({e})") from e
-            except serving.Updating as e:
-                raise HTTPException(503, str(e), headers={"Retry-After": "30"}) from e
+            pairs.append((backbone, method))
+        return pairs
+
+    def site_index(backbone: str, method: str, view, timer: "apiv1.Timer") -> Identifier:
+        """served_index() with its refusals as the site's HTTP errors."""
+        try:
+            return served_index(backbone, method, view, timer)
+        except NotTrainedHere as e:
+            raise HTTPException(503, f"{backbone}/{method} isn't ready on this "
+                                     f"server ({e})") from e
+        except serving.Updating as e:
+            raise HTTPException(503, str(e), headers={"Retry-After": "30"}) from e
+
+    def run_identify(photos: list[UploadFile], models_: str, context: "Context",
+                     timer: "apiv1.Timer") -> dict:
+        read = decode_photos(photos, timer)
+        images = [img for img, _ in read]
+        context, used = fill_context(context, [found for _, found in read])
+        wanted = site_models(models_)
+        view = permission_view()
+
+        def may_show(info) -> bool:
+            return view.may_show(info.license_class, info.owner_user_id)
+
+        results = []
+        for backbone, method in wanted:
+            ident = site_index(backbone, method, view, timer)
             results.append(embed_and_score(ident, backbone, images, context, may_show, timer))
         table = confused_table()
         for result in results:
@@ -1321,7 +1349,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 ident = v1_index(backbone, method, permission_view(), apiv1.Timer())
                 cal = (ident.calibration or {}).get("comparison_id")
                 doc = apiv1.models_doc(
-                    apiv1.public_model(model_card(), str(cal or "")),
+                    {**apiv1.public_model(model_card(), str(cal or "")),
+                     "answers_version": answers_version(backbone, method, permission_view())},
                     {"records": ident.records, "species": len(ident.index.species),
                      "photos": ident.embedded},
                     {"max_photos": MAX_PHOTOS, "max_file_mb": MAX_FILE_BYTES // 2**20,
@@ -1384,6 +1413,25 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if not same_find:
                     quotas.check(cred)
                 view = permission_view()
+                # Already answered under what Vision answers from now: the same answer,
+                # without reading the observation or scoring it again.
+                version = answers_version(backbone, method, view)
+                kept_key = answercache.answer_key(
+                    "v1", source, number, backbone, method,
+                    {"top_k": top_k, "place": use_place, "date": use_date})
+                kept = answer_cache.get(kept_key, version)
+                if kept is not None:
+                    quotas.count(cred, 0 if same_find else 1, 0)
+                    if not same_find:
+                        quotas.remember_counted(cred, client_ref)
+                    body = {**kept, "request_id": "r_" + secrets.token_urlsafe(12),
+                            "cached": True}
+                    confusions.annotate(body, confused_table())
+                    body["timing"] = timer.block()
+                    body["usage"] = quotas.usage(cred)
+                    return JSONResponse(body, headers={
+                        "Cache-Control": "no-store",
+                        "Server-Timing": apiv1.Timer.header(body["timing"])})
                 ident = v1_index(backbone, method, view, timer)
                 with_own, own = ident.left_out(source, number)
                 if len(own) and not ident.can_leave_out():
@@ -1394,7 +1442,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 about = {"source": source, "id": number,
                          "url": sources.record_url(source, number),
                          "photos": None, "photos_used": 0, "place": None,
-                         "name_at_source": None, "rank_at_source": None}
+                         "name_at_source": None, "rank_at_source": None,
+                         "photos_shown": None}
                 if len(own):
                     # A DNA reference record: its stored vectors, nothing fetched.
                     cols = own[:MAX_PHOTOS]
@@ -1412,7 +1461,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         return n
                     start = time.monotonic()
                     try:
-                        obs, bodies = fetcher.fetch(source, number, MAX_PHOTOS, admit=admit)
+                        obs, pairs = fetcher.fetch(source, number, MAX_PHOTOS, admit=admit,
+                                                   indexed=True)
                     except byobservation.NotFound as e:
                         raise apiv1.V1Error(404, "observation_not_found", str(e)) from None
                     except byobservation.Unavailable as e:
@@ -1426,19 +1476,24 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         timer.add("fetch_ms", time.monotonic() - start)
                     start = time.monotonic()
                     side = uploads.kept_side(list(backbones.values()))
-                    images = []
-                    for photo_body in bodies:
+                    images, kept = [], []
+                    for index, photo_body in pairs:
                         try:
                             images.append(uploads.decode_upload(photo_body, side)[0])
                         except Exception:               # not an image we can read: skip
                             continue
+                        kept.append(index)
                     timer.add("decode_ms", time.monotonic() - start)
                     if not images:
                         raise apiv1.V1Error(422, "no_usable_photos", "none of the "
                                             "observation's photos could be read")
+                    # Each scored photo's URL where it may be shown (Creative Commons or
+                    # public domain), in per_photo's order; null otherwise.
                     about.update(photos=len(obs.photo_urls), photos_used=len(images),
                                  name_at_source=obs.name_at_source,
-                                 rank_at_source=obs.rank_at_source)
+                                 rank_at_source=obs.rank_at_source,
+                                 photos_shown=[byobservation.shown_photo_url(obs, i)
+                                               for i in kept])
                     hidden, _ = ident.left_out(source, number, obs.photo_ids)
                     if len(hidden) and not ident.can_leave_out():
                         raise apiv1.V1Error(400, "bad_request", "this model can't leave "
@@ -1487,12 +1542,150 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 body["excluded_reference"] = ({"source": source, "source_id": number}
                                               if len(own) else None)
                 body["left_out_photos"] = int(len(hidden))
+                body["model"] = {**body["model"], "answers_version": version}
+                answer_cache.put(kept_key, version, answercache.without_confusions(
+                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")}))
+                body["cached"] = False
                 body["usage"] = quotas.usage(cred)
                 return JSONResponse(body, headers={
                     "Cache-Control": "no-store",
                     "Server-Timing": apiv1.Timer.header(body["timing"])})
 
             app.post("/api/v1/identify/{source}/{observation_id}")(v1_identify_observation)
+
+            # POST /api/identify/observation (the Identify page's "from a link"): the same
+            # polite read of an iNat or MO observation as above, for a signed-in person on
+            # the site, answered in /api/identify's shape (one result per chosen model).
+            # The observation, if it is a DNA reference record, and any reference column
+            # holding one of its photos are left out of the answer, and then its place and
+            # date are not used (the record is part of the place prior). The page is told
+            # which photos it may show: Creative Commons or public domain only
+            # (byobservation.shown_photo_url).
+            @app.post("/api/identify/observation")
+            def identify_observation(request: Request, payload: dict = Body(...)):
+                client = request.client.host if request.client else "unknown"
+                wait = rate.check(client)
+                if wait:
+                    raise HTTPException(429, "too many identifications from this address; "
+                                             f"try again in {int(wait) + 1} s",
+                                        headers={"Retry-After": str(int(wait) + 1)})
+                source = payload.get("source")
+                number = byobservation.valid_id(str(payload.get("id") or ""))
+                if source not in byobservation.SOURCES or number is None:
+                    raise HTTPException(400, "give an iNaturalist or Mushroom Observer "
+                                             "observation number")
+                models_ = payload.get("models") or ""
+                if not isinstance(models_, str):
+                    raise HTTPException(400, "models is a comma-separated string")
+                use_place, use_date = (payload.get(k, True) is not False
+                                       for k in ("use_place", "use_date"))
+                wanted = site_models(models_)
+                timer = apiv1.Timer()
+                timer.ms["fetch_ms"] = 0
+                view = permission_view()
+                versions = [answers_version(b, m, view) for b, m in wanted]
+                keys = [answercache.answer_key("site", source, number, b, m,
+                                               {"place": use_place, "date": use_date})
+                        for b, m in wanted]
+                held = [answer_cache.get(k, v) for k, v in zip(keys, versions)]
+                if held and all(h is not None for h in held):
+                    table = confused_table()
+                    for h in held:
+                        confusions.annotate(h["result"], table)
+                    return {"results": [h["result"] for h in held],
+                            "context_used": held[0]["used"],
+                            "observation": held[0]["observation"],
+                            "cached": True,
+                            "timing": timer.block()}
+                start = time.monotonic()
+                try:
+                    obs, pairs = fetcher.fetch(source, number, MAX_PHOTOS, indexed=True)
+                except byobservation.NotFound as e:
+                    raise HTTPException(404, str(e)) from None
+                except byobservation.Unavailable as e:
+                    raise HTTPException(502, f"{e}; try again shortly",
+                                        headers={"Retry-After": str(e.retry_after)}) from None
+                except byobservation.Busy as e:
+                    raise HTTPException(503, "busy reading other observations; try again "
+                                             "shortly",
+                                        headers={"Retry-After": str(e.retry_after)}) from None
+                finally:
+                    timer.add("fetch_ms", time.monotonic() - start)
+                start = time.monotonic()
+                side = uploads.kept_side(list(backbones.values()))
+                images, kept = [], []
+                for index, photo_body in pairs:
+                    try:
+                        images.append(uploads.decode_upload(photo_body, side)[0])
+                    except Exception:               # not an image we can read: skip
+                        continue
+                    kept.append(index)
+                timer.add("decode_ms", time.monotonic() - start)
+                if not images:
+                    raise HTTPException(422, "the observation has no photos Vision can read")
+
+                def may_show(info) -> bool:
+                    return view.may_show(info.license_class, info.owner_user_id)
+
+                if not in_flight.enter():
+                    raise HTTPException(503, "busy identifying other photos; try again shortly",
+                                        headers={"Retry-After": "10"})
+                try:
+                    try:
+                        model_queue.admit(interactive=True)
+                    except workqueue.Busy as e:
+                        raise HTTPException(503, "busy identifying other photos; try again "
+                                                 "shortly",
+                                            headers={"Retry-After": str(int(e.wait_seconds) + 1)}
+                                            ) from e
+                    results, used, own_any, left = [], None, False, 0
+                    for backbone, method in wanted:
+                        ident = site_index(backbone, method, view, timer)
+                        hidden, own = ident.left_out(source, number, obs.photo_ids)
+                        if len(hidden) and not ident.can_leave_out():
+                            raise HTTPException(400, f"{backbone}/{method} can't leave this "
+                                                     "observation out of its own answer")
+                        if len(hidden):
+                            context, this_used = Context(None, None, None), {
+                                "latitude": None, "longitude": None, "observed_on": None,
+                                "place_from": None, "date_from": None}
+                        else:
+                            lat, lng = ((obs.latitude, obs.longitude) if use_place
+                                        else (None, None))
+                            context, this_used = fill_context(
+                                Context(lat, lng, obs.observed_on if use_date else None), [])
+                            this_used = {
+                                **this_used,
+                                "place_from": "observation" if this_used["place_from"] else None,
+                                "date_from": "observation" if this_used["date_from"] else None}
+                        used = used or this_used
+                        own_any, left = own_any or bool(len(own)), max(left, int(len(hidden)))
+                        results.append(embed_and_score(
+                            ident, backbone, images, context, may_show, timer,
+                            hidden=hidden if len(hidden) else None))
+                finally:
+                    in_flight.leave()
+                about = {
+                        "source": source, "id": number,
+                        "url": sources.record_url(source, number),
+                        "photos": len(obs.photo_urls), "photos_used": len(images),
+                        "name_at_source": obs.name_at_source,
+                        "rank_at_source": obs.rank_at_source,
+                        # One entry per photo scored, in per_photo's order: its URL when
+                        # the page may show it, else null.
+                        "photos_shown": [byobservation.shown_photo_url(obs, i) for i in kept],
+                        "excluded_reference": own_any,
+                        "left_out_photos": left,
+                }
+                for key, version, result in zip(keys, versions, results):
+                    answer_cache.put(key, version, {
+                        "result": answercache.without_confusions(result),
+                        "used": used, "observation": about})
+                table = confused_table()
+                for result in results:
+                    confusions.annotate(result, table)
+                return {"results": results, "context_used": used, "observation": about,
+                        "cached": False, "timing": timer.block()}
 
     # The app's observation sessions (docs/api.md §3.3, sessions.py): photos sent one at a
     # time as they're taken; each answer is the combined answer over all of them,

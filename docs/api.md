@@ -105,11 +105,23 @@ answered from a proxy's cache.
   `left_out_photos` counts the reference photos left out.
 - The answer adds `observation`: `{"source", "id", "url", "photos"` (at the source),
   `"photos_used", "place"` (`coordinates`, `obscured`, `area` or null), `"name_at_source",
-  "rank_at_source"}` (the source's current name, for comparison; null for a reused
-  reference record, which isn't read).
-- Counting: one identification, behind interactive calls in the queue. `client_ref`
-  defaults to `inat:<id>` / `mo:<id>`, so the same observation for the same pool within a
-  day is counted once (§6.4).
+  "rank_at_source", "photos_shown"}` (the source's current name, for comparison; null for
+  a reused reference record, which isn't read). `photos_shown` has one entry per scored
+  photo, in `per_photo`'s order: the photo's URL when it is Creative Commons or public
+  domain, else null (null as a whole for a reused reference record).
+- **Answers are kept.** Each answer is saved on the box per observation, model and
+  options (`top_k`, `use_place`, `use_date`) and given again, without reading the
+  observation or scoring it, while `model.answers_version` is unchanged: an opaque id
+  of what Vision answers from (the release and its reference set as served), which
+  moves with a new release, a night's reference changes, a recalibration or a
+  photographer's answer. A kept answer says `"cached": true` and has a new
+  `request_id` and `timing`; a fresh one says `"cached": false`. A photo added at the
+  source after the answer is not seen until the version moves. GET /api/v1/models
+  gives the current `answers_version`, so a caller that keeps answers itself can tell
+  they still hold.
+- Counting: one identification, behind interactive calls in the queue, kept answers
+  included. `client_ref` defaults to `inat:<id>` / `mo:<id>`, so the same observation
+  for the same pool within a day is counted once (§6.4).
 - Refusals: 404 `observation_not_found` (and `not_found` for a source other than `inat`
   or `mo`), 422 `no_usable_photos`, 502 `source_unavailable` (with `Retry-After`), 503
   `busy`.
