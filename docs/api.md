@@ -245,7 +245,7 @@ model's result, not a `results` list.
     "order":   [ … ], "class": [ … ], "phylum": [ … ]
   },
   "likely": {
-    "species": {"coverage": 0.9, "checked_coverage": 0.6, "capped": false,
+    "species": {"coverage": 0.8, "checked_coverage": 0.8, "capped": false,
                 "names": [{"name": "Amanita muscaria", "confidence": 0.62,
                            "reference_records": 412}]},
     "genus": { … }, "family": { … }
@@ -388,8 +388,13 @@ model's result, not a `results` list.
   model or release is built, not weekly;
   `model.calibrated_on` is that comparison's date. It is calibrated on average, not a
   promise per answer.
-  `checked_coverage` says how often a likely set really held the right name on unseen
-  records (today 0.6 for a 0.9 target at species).
+- **`likely`**: each rank's likely set, the names at or above a probability floor fitted
+  on v1's validation split. `coverage` is how often such a set held the right name on
+  validation records held back from the fit (the fit's crosscheck): what the sets
+  achieved, not the target they aimed at, which a set cut at 15 names can fall short of.
+  `checked_coverage` is the same held-back figure (kept for older clients). Served v1
+  model, held-back halves of v1 val: species 0.80 (mean 5.0 names), genus 0.90 (1.3),
+  family 0.91 (1.0).
 - **`reference_records`**: DNA-validated records of that name in the reference set.
 - **Photos in `specimens`** follow Vision's rules: shown only if Creative Commons or the
   owner granted permission on mycomap.org, else `photo_url: null`,

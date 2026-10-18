@@ -812,9 +812,10 @@ def cmd_calibrate_sets(conn, args) -> None:
                 print(f"  {rank:8} no short enough set reaches 50%")
                 continue
             check = s.get("crosscheck") or {}
-            print(f"  {rank:8} target {s['coverage']:.0%} (asked {s['requested']:.0%}), "
-                  f"floor {s['floor']:.4f}; on held-back halves: coverage "
-                  f"{check.get('coverage')}, mean size {check.get('mean_size')}; "
+            print(f"  {rank:8} target {s.get('target', s['coverage']):.0%} (asked "
+                  f"{s['requested']:.0%}), floor {s['floor']:.4f}; on held-back halves "
+                  f"(the coverage stated): {check.get('coverage')}, mean size "
+                  f"{check.get('mean_size')}; "
                   f"true names no list could hold: {s['unlistable_share']:.1%} of {s['n']:,}")
 
 

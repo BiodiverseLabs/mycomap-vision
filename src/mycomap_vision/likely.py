@@ -24,7 +24,12 @@ the floor needs 3.7 (and 1.8 families).
 
 The fit aims for COVERAGE and steps down 5% at a time to the first target that is
 reachable and keeps sets short (MAX_MEAN_SIZE names on average, measured on held-back
-halves). It records what it chose; the page states that coverage.
+halves). The target is not what a set achieves: a set is cut at MAX_SET names, and a low
+floor (the spread-out species probabilities need one) lists more than that, so the cut
+sets can hold the truth less often than the target says (before v1, species sets aimed at
+0.9 held 0.6; on v1 val the served species target 0.80 held 0.80). What the fit reports and the page states as `coverage` is therefore the coverage
+the sets ACHIEVED on held-back halves (crosscheck), with the target beside it (`target`).
+Fits stored before this kept the target in `coverage`: stated_coverage reads either.
 """
 
 from __future__ import annotations
@@ -174,11 +179,20 @@ def crosscheck(rows: list[tuple[np.ndarray, int | None]], coverage: float,
             "mean_size": round(sum(c["mean_size"] * c["n"] for c in checks) / n, 2)}
 
 
+def stated_coverage(fit: dict) -> float:
+    """How often a fitted set held the right name, as stated to people: the coverage
+    achieved on held-back halves (crosscheck), never the target alone. A fit stored before
+    `target` existed kept the target in `coverage`; its crosscheck is read instead."""
+    check = (fit.get("crosscheck") or {}).get("coverage")
+    return check if check is not None else fit["coverage"]
+
+
 def fit_and_check(rows: list[tuple[np.ndarray, int | None]], coverage: float = COVERAGE,
                   cap: int = MAX_SET, max_mean_size: float = MAX_MEAN_SIZE) -> dict | None:
     """The highest target from `coverage` down that is reachable and keeps sets short,
-    with its floor fitted on all rows and its coverage checked on held-back halves. None
-    when no target from LOWEST up qualifies."""
+    with its floor fitted on all rows and its coverage checked on held-back halves. The
+    result's `coverage` is that checked (achieved) coverage, `target` the one aimed for
+    (module notes). None when no target from LOWEST up qualifies."""
     scores = [score(p, t, cap) for p, t in rows]
     unlistable = float(np.isinf(scores).mean()) if scores else 0.0
     target = coverage
@@ -186,7 +200,8 @@ def fit_and_check(rows: list[tuple[np.ndarray, int | None]], coverage: float = C
         floor = fit_floor(scores, target)
         check = crosscheck(rows, target, cap) if floor is not None else None
         if check and check["mean_size"] <= max_mean_size:
-            return {"method": "lac", "requested": coverage, "coverage": round(target, 2),
+            return {"method": "lac", "requested": coverage, "target": round(target, 2),
+                    "coverage": check["coverage"],      # achieved on held-back halves
                     "floor": round(floor, 6), "n": len(rows),
                     "unlistable_share": round(unlistable, 4), "crosscheck": check,
                     "in_sample": set_metrics(rows, floor, cap)}

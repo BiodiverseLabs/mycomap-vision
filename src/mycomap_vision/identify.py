@@ -569,7 +569,7 @@ class Identifier:
     def _likely(self, scores: np.ndarray) -> dict:
         """Each rank's likely set (likely.py): the names at or above the rank's fitted
         probability floor (and the top one), which held the right name about `coverage` of
-        the time in this model's newest test. Ranks without a fitted set (no comparison
+        the time on calibration records held back from the fit. Ranks without a fitted set (no comparison
         yet, or no useful target reached) are left out."""
         fitted = (self.calibration or {}).get("sets") or {}
         out = {}
@@ -582,8 +582,9 @@ class Identifier:
                                          self.temperature(rank))
             chosen, capped = likely.likely_set(probs, fit["floor"])
             out[rank] = {
-                "coverage": fit["coverage"],
-                # How often such a set held the truth on records it was not fitted on.
+                # How often such a set held the truth on records it was not fitted on
+                # (likely.stated_coverage): what was achieved, never the target alone.
+                "coverage": likely.stated_coverage(fit),
                 "checked_coverage": (fit.get("crosscheck") or {}).get("coverage"),
                 "names": [{"name": names[i], "confidence": round(float(probs[i]), 4),
                            "reference_records": self.rank_counts[rank][names[i]]}
