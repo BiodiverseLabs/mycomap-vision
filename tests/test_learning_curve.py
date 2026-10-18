@@ -238,3 +238,16 @@ def test_the_ranking_gain_comes_from_measured_cuts_only():
     assert lr.gain_of(0, curve) == 24.0 and lr.gain_of(10, curve) == 9.0
     assert 9.0 < lr.gain_of(5, curve) < 22.0                 # between the measured depths
     assert lr.gain_of(1000, curve) < 1.0                     # past 50: the deep species' fit
+
+
+def test_a_truth_is_every_species_unit_sharing_its_answer_key():
+    from mycomap_vision.learning_curve import truth_units_by_key
+    from mycomap_vision.name_equiv import answer_key
+    units = ["Pseudohydnum gelatinosum", "Pseudohydnum gelatinosum ssp. pusillum",
+             "Physisporinus sp. 'IN01'", "Physisporinus sp. 'IN01 x VT01'", "Agaricus"]
+    species_of_unit = [0, 1, 2, 3, -1]                      # the last unit is a genus
+    by_key = truth_units_by_key(units, species_of_unit)
+    assert by_key[answer_key("Pseudohydnum gelatinosum")] == [0, 1]     # pooled with ssp.
+    assert by_key[answer_key("Physisporinus sp. 'IN01 x VT01'")] == [3]  # hybrid: its own
+    assert by_key[answer_key("Physisporinus sp. 'IN01'")] == [2]
+    assert answer_key("Agaricus") not in by_key
