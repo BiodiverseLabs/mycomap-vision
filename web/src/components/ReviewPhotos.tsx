@@ -90,11 +90,16 @@ export function Placeholder({ photo, record, failed = false, large = false }: {
   );
 }
 
-export function ChoiceButtons({ choice, onChoose, disabled = false, big = false }: {
-  choice: Choice | null; onChoose: (c: Choice) => void; disabled?: boolean; big?: boolean;
+/** Keep / Exclude. `suggested`: the Exclude is only a suggestion (the photo review's "suggest"
+ *  mode), drawn lighter and outlined; clicking it confirms it, Keep turns it into a keep. */
+export function ChoiceButtons({ choice, onChoose, disabled = false, big = false, suggested = false }: {
+  choice: Choice | null; onChoose: (c: Choice) => void; disabled?: boolean; big?: boolean; suggested?: boolean;
 }) {
   const base = `inline-flex ${big ? "min-h-11 px-5" : "min-h-10 px-2"} items-center justify-center gap-1 rounded-md border text-sm font-medium disabled:opacity-40`;
   const off = "border-[#A87146]/30 bg-white text-gray-700 hover:bg-myco-green/5 dark:border-border dark:bg-card dark:text-foreground/80";
+  const excluded = suggested
+    ? "border-dashed border-red-500 bg-red-50 text-red-700 hover:bg-red-100 dark:border-red-400 dark:bg-red-950/40 dark:text-red-200"
+    : "border-red-600 bg-red-600 text-white";
   return (
     <div className={big ? "flex gap-2" : "grid grid-cols-2 gap-1"}>
       <button type="button" aria-pressed={choice === "keep"} disabled={disabled} onClick={() => onChoose("keep")}
@@ -102,7 +107,9 @@ export function ChoiceButtons({ choice, onChoose, disabled = false, big = false 
         <Check className="h-4 w-4" aria-hidden /> Keep
       </button>
       <button type="button" aria-pressed={choice === "exclude"} disabled={disabled} onClick={() => onChoose("exclude")}
-              className={`${base} ${choice === "exclude" ? "border-red-600 bg-red-600 text-white" : off}`}>
+              title={choice === "exclude" && suggested ? "Suggested: click to confirm" : undefined}
+              aria-label={choice === "exclude" && suggested ? "Exclude (suggested; click to confirm)" : undefined}
+              className={`${base} ${choice === "exclude" ? excluded : off}`}>
         <X className="h-4 w-4" aria-hidden /> Exclude
       </button>
     </div>
@@ -112,12 +119,16 @@ export function ChoiceButtons({ choice, onChoose, disabled = false, big = false 
 const BADGE: Record<Choice, string> = { keep: "Keep", exclude: "Exclude" };
 
 /** One photo as a square tile: the image (or the placeholder, also when it fails to load), its
- *  position, the private badge and the choice made. `children` go under it (labels, buttons). */
+ *  position, the private badge and the choice made. `children` go under it (labels, buttons).
+ *  `suggested`: the Exclude is only a suggestion, badged "Exclude (suggested)" in an outlined
+ *  style (the caller draws the dashed outline). */
 export function PhotoTile({ photo, record, choice, focused, outline = "border-transparent", className = "sm:w-44",
-                            badge = BADGE, onOpen, onFocus, children }: {
+                            badge = BADGE, suggested = false, onOpen, onFocus, children }: {
   photo: TilePhoto; record: TileRecord; choice: Choice | null; focused: boolean; outline?: string;
-  className?: string; badge?: Record<Choice, string>; onOpen: () => void; onFocus: () => void; children?: ReactNode;
+  className?: string; badge?: Record<Choice, string>; suggested?: boolean; onOpen: () => void; onFocus: () => void;
+  children?: ReactNode;
 }) {
+  const asSuggestion = suggested && choice === "exclude";
   // A thumb that fails to load (e.g. a private copy Vision does not hold) becomes the placeholder.
   const [failed, setFailed] = useState(false);
   const src = failed ? null : tileImage(photo, "thumb");
@@ -131,7 +142,8 @@ export function PhotoTile({ photo, record, choice, focused, outline = "border-tr
             <img src={src} alt={`Photo ${photo.position ?? ""} of ${recordLabel(record.record_key)}`}
                  loading="lazy" decoding="async" referrerPolicy="no-referrer" draggable={false}
                  onError={() => setFailed(true)}
-                 className={`h-full w-full object-cover ${choice === "exclude" ? "opacity-50" : ""}`} />
+                 className={`h-full w-full object-cover ${
+                   asSuggestion ? "opacity-75" : choice === "exclude" ? "opacity-50" : ""}`} />
           </button>
         ) : (
           <div className="h-full w-full cursor-pointer" onClick={onOpen}>
@@ -149,9 +161,10 @@ export function PhotoTile({ photo, record, choice, focused, outline = "border-tr
           </span>
         )}
         {choice && (
-          <span className={`pointer-events-none absolute bottom-1 right-1 rounded px-1.5 py-0.5 text-[11px] font-semibold text-white ${
-            choice === "keep" ? "bg-myco-green" : "bg-red-600"}`}>
-            {badge[choice]}
+          <span className={`pointer-events-none absolute bottom-1 right-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ${
+            asSuggestion ? "border border-dashed border-red-600 bg-white/90 text-red-700 dark:bg-black/70 dark:text-red-200"
+              : choice === "keep" ? "bg-myco-green text-white" : "bg-red-600 text-white"}`}>
+            {asSuggestion ? `${badge.exclude} (suggested)` : badge[choice]}
           </span>
         )}
       </div>
@@ -161,10 +174,13 @@ export function PhotoTile({ photo, record, choice, focused, outline = "border-tr
 }
 
 /** The photo viewer: one photo large, ←/→ between the record's photos, Keep / Exclude (none
- *  when `onChoose` is left out: a decided card), Esc or a click outside to close. */
-export function PhotoLightbox<P extends TilePhoto>({ record, photos, index, choices, onStep, onChoose, onClose, extra }: {
+ *  when `onChoose` is left out: a decided card), Esc or a click outside to close. `suggested`
+ *  says which exclusions are only suggestions; `hint` replaces the key line. */
+export function PhotoLightbox<P extends TilePhoto>({ record, photos, index, choices, onStep, onChoose, onClose, extra,
+                                                    suggested, hint }: {
   record: TileRecord; photos: P[]; index: number; choices: Choices; onStep: (d: 1 | -1) => void;
   onChoose?: (c: Choice) => void; onClose: () => void; extra?: (photo: P) => ReactNode;
+  suggested?: (photo: P) => boolean; hint?: string;
 }) {
   const photo = photos[index];
   const ref = useRef<HTMLDivElement>(null);
@@ -214,9 +230,9 @@ export function PhotoLightbox<P extends TilePhoto>({ record, photos, index, choi
       </div>
       <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-2" onClick={(e) => e.stopPropagation()}>
         {extra?.(photo)}
-        {onChoose && <ChoiceButtons choice={choice} onChoose={onChoose} big />}
+        {onChoose && <ChoiceButtons choice={choice} onChoose={onChoose} big suggested={!!suggested?.(photo)} />}
         <p className="text-center text-xs text-white/70">
-          {onChoose ? "← / → photos · K keep · X exclude · Esc close" : "← / → photos · Esc close"}
+          {hint ?? (onChoose ? "← / → photos · K keep · X exclude · Esc close" : "← / → photos · Esc close")}
         </p>
       </div>
     </div>
