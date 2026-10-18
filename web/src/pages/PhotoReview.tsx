@@ -107,7 +107,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
         </label>
         <input type="search" value={text} onChange={(e) => setText(e.target.value)}
                placeholder="Record or name" aria-label="Search records or names"
-               className={`${FIELD} w-full flex-1 sm:max-w-xs`} data-testid="photo-review-search" />
+               className={`${FIELD} w-full min-w-[12rem] basis-full sm:basis-auto sm:flex-1 sm:max-w-xs`} data-testid="photo-review-search" />
         <button type="button" className={BTN} aria-pressed={help} onClick={() => setHelp((h) => !h)}>
           <Keyboard className="h-4 w-4" aria-hidden /> Keys
         </button>
