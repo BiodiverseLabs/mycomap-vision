@@ -33,6 +33,7 @@ waits of 5–40 s. Vision can check the token itself, so the proxy would gain no
 | `POST /api/v1/identify` | identify from 1–10 uploaded photos in one call (developers; the app's offline-saved records) |
 | `POST /api/v1/identify/inat/{observation_id}` | identify from an iNaturalist observation's photos |
 | `POST /api/v1/identify/mo/{observation_id}` | identify from a Mushroom Observer observation's photos |
+| `GET /api/v1/answers/{inat\|mo}/{observation_id}` | the answer Vision already holds for an observation (§3.2); reads, scores and counts nothing |
 | `POST /api/v1/sessions` | open an observation session (the app, while photos are taken) |
 | `POST /api/v1/sessions/{id}/photos` | add one photo → that photo's result + the updated combined result |
 | `PATCH /api/v1/sessions/{id}` | set or change place/date (GPS often fixes after the first photo) |
@@ -125,6 +126,14 @@ answered from a proxy's cache.
 - Refusals: 404 `observation_not_found` (and `not_found` for a source other than `inat`
   or `mo`), 422 `no_usable_photos`, 502 `source_unavailable` (with `Retry-After`), 503
   `busy`.
+- **Reading a kept answer.** `GET /api/v1/answers/inat/{id}` or `/mo/{id}`, optional
+  query `model`, `top_k`, `use_place`, `use_date` (defaults as above), gives the answer
+  Vision holds under the current `answers_version` without reading, scoring or counting
+  anything: one kept by identify-by-observation (`"kept_from": "api"`), else one someone
+  got on the site's Identify page from a link (`"kept_from": "site"`; same model, place
+  and date options, put in this shape: `observation.place` is null, and order, class and
+  phylum aren't listed). `"cached": true`. 404 `not_answered` when there is none. .org's
+  Validate Records uses it so an answer got on the site shows on the record at once.
 
 ### 3.3 Sessions (the app)
 

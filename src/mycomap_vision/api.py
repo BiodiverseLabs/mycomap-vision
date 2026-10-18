@@ -1600,6 +1600,58 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
             app.post("/api/v1/identify/{source}/{observation_id}")(v1_identify_observation)
 
+            # GET /api/v1/answers/{inat|mo}/{number} (docs/api.md §3.2): the answer Vision
+            # already holds for an observation under what it answers from now, from an
+            # earlier identify-by-observation or from someone's run on the site's Identify
+            # page, in the v1 shape. Nothing is read or scored and nothing counted, so .org
+            # can show a record's answer the moment it exists. 404 `not_answered` otherwise.
+            def v1_kept_answer(request: Request, source: str, observation_id: str,
+                               model: str | None = None, top_k: int = 5,
+                               use_place: bool = True, use_date: bool = True):
+                timer = apiv1.Timer()
+                cred: apiv1.Credential = request.state.credential
+                if source not in byobservation.SOURCES:
+                    raise apiv1.V1Error(404, "not_found", "answers are kept for inat or mo")
+                number = byobservation.valid_id(observation_id)
+                if number is None:
+                    raise apiv1.V1Error(400, "bad_request", "the observation number is digits")
+                if not 1 <= top_k <= 10:
+                    raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
+                backbone, method = v1_model(model)
+                view = permission_view()
+                version = answers_version(backbone, method, view)
+                kept = answer_cache.get(answercache.answer_key(
+                    "v1", source, number, backbone, method,
+                    {"top_k": top_k, "place": use_place, "date": use_date}), version)
+                if kept is not None:
+                    body = {**kept, "request_id": "r_" + secrets.token_urlsafe(12)}
+                    confusions.annotate(body, confused_table())
+                    kept_from = "api"
+                else:
+                    # The site's Identify page keeps its own answers ("from a link"); they
+                    # answer the same photos, place and date with the same model.
+                    held = answer_cache.get(answercache.answer_key(
+                        "site", source, number, backbone, method,
+                        {"place": use_place, "date": use_date}), version)
+                    if held is None:
+                        raise apiv1.V1Error(404, "not_answered", "Vision holds no answer for "
+                                            "this observation under what it answers from now")
+                    site_about = dict(held["observation"])
+                    own = site_about.pop("excluded_reference", False)
+                    left = site_about.pop("left_out_photos", 0)
+                    body = v1_result(held["result"], backbone, method, held["used"], timer)
+                    body["observation"] = {"place": None, **site_about}
+                    body["excluded_reference"] = ({"source": source, "source_id": number}
+                                                  if own else None)
+                    body["left_out_photos"] = int(left or 0)
+                    body["model"] = {**body["model"], "answers_version": version}
+                    kept_from = "site"
+                body.update(cached=True, kept_from=kept_from, timing=timer.block(),
+                            usage=quotas.usage(cred))
+                return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+            app.get("/api/v1/answers/{source}/{observation_id}")(v1_kept_answer)
+
             # POST /api/identify/observation (the Identify page's "from a link"): the same
             # polite read of an iNat or MO observation as above, for a signed-in person on
             # the site, answered in /api/identify's shape (one result per chosen model).
