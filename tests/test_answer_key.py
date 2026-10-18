@@ -463,3 +463,19 @@ def test_reference_depth_pools_a_species_with_its_varieties_and_keeps_a_hybrid_a
     assert d("") == 0 and d(None) == 0 and not d.has("Russula emetica")
     assert ReferenceDepth([("Amanita muscaria", 5), ("Amanita muscaria var. guessowii", 2)])(
         "Amanita muscaria") == 7
+
+
+def test_a_species_held_only_as_its_variety_is_not_a_novel_find():
+    """PLAN rule 7: depth counts the reference records sharing the truth's answer key, so
+    an 'Amanita muscaria' find whose only references are 'var. guessowii' sits at depth 1
+    in the bands (it was 'novel' when counted by the exact label, as "exact" still does)."""
+    vectors = np.asarray([unit(0.0), unit(2.0), unit(0.05)], dtype=np.float32)
+    ref = [Record("1", "Amanita muscaria var. guessowii", "Amanita", "Am", "2026-01-01", "a", [0]),
+           Record("2", "Boletus edulis", "Boletus", "Bo", "2026-01-01", "a", [1])]
+    test = [Record("9", "Amanita muscaria", "Amanita", "Am", "2026-09-01", "b", [2])]
+
+    def bands(key):
+        out = evaluate.evaluate(vectors, ref, test, method="nearest", sets=False, answer_key=key)
+        return set(out["standard"]["species"]) - {"all"}, set(out["species"]) - {"all"}
+    assert bands(None) == ({"1-4"}, {"1 ref"})
+    assert bands("exact") == ({"0"}, {"novel (0 refs)"})
