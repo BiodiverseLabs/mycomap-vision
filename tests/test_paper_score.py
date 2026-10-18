@@ -1060,3 +1060,17 @@ def test_a_place_methods_leave_out_is_refitted_never_masked(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("masked")))
     paper_score.vision_answers_leave_out(None, [], [], "nearest+mean+place", "m", "observer")
     assert seen == ["nearest+mean+place"]
+def test_a_comparators_own_likely_set_target_is_printed_beside_its_achieved_coverage():
+    finds = [po.Find(str(i), f"o{i}", "A x", "A", "F", "formal", 3, 1) for i in range(4)]
+    cal = {f.key: {"species": {"conf": 0.6, "p_true": 0.6, "sumsq": 0.4, "set": ["A x"]}}
+           for f in finds}
+    outcomes = {"v": {f.key: {"species_strict@1": True} for f in finds},
+                "p": {f.key: {"species_strict@1": True} for f in finds}}
+    comps = [{"id": "v", "calibration": {"species": {"temperature": 0.03, "floor": 0.05,
+                                                     "target": 0.75}}},
+             {"id": "p", "calibration": {"species": {"temperature": 0.03, "floor": 0.03}}}]
+    rep = paper_score.calibration_report(finds, {"v": cal, "p": cal}, outcomes,
+                                         {"list_target": {"species": 0.8, "genus": 0.9}},
+                                         50, 0, comps)
+    assert rep["v"]["species"]["likely_sets"]["target"] == 0.75     # its own fit
+    assert rep["p"]["species"]["likely_sets"]["target"] == 0.8      # the config-wide one
