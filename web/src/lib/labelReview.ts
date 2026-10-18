@@ -5,9 +5,11 @@
 //
 // Blind rule: finds Vision answered right are mixed into this queue, so until a card is decided
 // it shows nothing about Vision or why the record is here, and nothing that differs between
-// cards. maskedCard is the one place that decides what an open card may show.
+// cards. maskedCard is the one place that decides what an open card may show. The one exception
+// is the reviewer's own choice: "Show Vision's answer" is the same button on every card, and an
+// answer appears only on a card this person asked to see it for (`revealed`).
 
-import type { LabelReviewCard, LabelReviewDecisionBody, LabelReviewOutcome, LabelReviewPhoto } from "./api";
+import type { LabelReviewCard, LabelReviewDecisionBody, LabelReviewOutcome, LabelReviewPhoto, Revealed } from "./api";
 import { evidenceRows, shownRule } from "./feedback";
 import type { Choice, Choices, KeyPress, KeyState } from "./photoReview";
 
@@ -45,9 +47,15 @@ const maskedPhoto = (p: LabelReviewPhoto): LabelReviewPhoto => {
   return out;
 };
 
-/** What a card may show. A masked (open) card keeps only the record, its link, its label and
- *  its photos, by an allowlist: no rule, evidence, decision or any other field, even when the
- *  server sent one. A decided card is shown as sent. */
+/** This person's own reveal, by the same allowlist: when, and Vision's answer; nothing else. */
+const maskedReveal = (r: Revealed | null | undefined): Revealed | null =>
+  r ? { at: r.at, answer: { available: !!r.answer?.available, top5: r.answer?.top5 ?? [],
+                            reason: r.answer?.reason ?? null } } : null;
+
+/** What a card may show. A masked (open) card keeps only the record, its link, its label, its
+ *  photos and this person's own reveal (null unless they chose "Show Vision's answer"), by an
+ *  allowlist: no rule, evidence, decision or any other field, even when the server sent one.
+ *  A decided card is shown as sent. */
 export function maskedCard(card: LabelReviewCard): LabelReviewCard {
   if (!isMasked(card)) return card;
   return {
@@ -57,6 +65,7 @@ export function maskedCard(card: LabelReviewCard): LabelReviewCard {
     link: card.link,
     status: card.status,
     masked: true,
+    revealed: maskedReveal(card.revealed),
     photos: (card.photos ?? []).map(maskedPhoto),
   };
 }

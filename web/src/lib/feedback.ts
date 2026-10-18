@@ -7,7 +7,7 @@
 // which items they are.
 
 import type { BlastLink, FeedbackApplies, FeedbackDecisionBody, FeedbackItem, FeedbackOption,
-              LiveSequence, Me, RefreshedRecord } from "./api";
+              FeedbackSummary, LiveSequence, Me, RefreshedRecord, Revealed, RevealedAnswer } from "./api";
 import { ApiError } from "./api";
 
 export const FEEDBACK_PATH = "/feedback";
@@ -175,3 +175,77 @@ export function pageText(offset: number, shown: number, total: number): string {
 
 /** Truthy flags from the server come as booleans or 0/1. */
 export const yes = (v: unknown) => v === true || v === 1 || v === "1";
+
+// --- the page's two sections ------------------------------------------------------------------
+
+/** The page's sections, in order (Steve, 2026-10-18): mechanical fixes a rule found, then
+ *  whether a record's label is right. */
+export const SECTIONS: { code: string; title: string; intro: string }[] = [
+  { code: "cleanup", title: "Data cleanup",
+    intro: "Fix what a rule found: photos that show no specimen, one name written several ways, "
+      + "retired or inactive names, one find posted twice or placed in two places." },
+  { code: "validation", title: "Data validation",
+    intro: "Is the record's label right? Look at the photos, its DNA and BLAST results, and decide "
+      + "as a curator. Some queues are reviewed blind: Vision's answer stays hidden unless you "
+      + "choose to see it." },
+];
+
+/** Queues in a section this page does not know yet, kept rather than dropped. */
+export const OTHER_SECTION = { code: "other", title: "Other", intro: "" };
+
+export interface SectionGroup<T> {
+  code: string;
+  title: string;
+  intro: string;
+  /** Open items across the section's queues. */
+  open: number;
+  types: T[];
+}
+
+/** The stat cards grouped by their `section`: the known sections in order, each queue in the
+ *  order the summary lists it, a section with no queues left out, and queues of an unknown
+ *  (or missing) section last under "Other". */
+export function groupBySection<T extends Pick<FeedbackSummary, "type" | "open"> & { section?: string | null }>(
+    summary: T[]): SectionGroup<T>[] {
+  const known = new Set(SECTIONS.map((s) => s.code));
+  const groups = [...SECTIONS, OTHER_SECTION].map((s) => ({
+    ...s,
+    types: summary.filter((t) => (s === OTHER_SECTION ? !known.has(t.section ?? "") : t.section === s.code)),
+  }));
+  return groups
+    .filter((g) => g.types.length > 0)
+    .map((g) => ({ ...g, open: g.types.reduce((n, t) => n + (t.open || 0), 0) }));
+}
+
+// --- "Show Vision's answer" on a blind item ----------------------------------------------------
+// The button is the same on every open blind item, so it says nothing about why an item is in
+// the queue. Seeing the answer is recorded, and the decision then stays out of the blind check.
+
+export const REVEAL_BUTTON = "Show Vision's answer";
+export const REVEAL_CONFIRM = "Your decision on this record will be counted as made with Vision's answer seen. Show it?";
+export const REVEAL_SEEN = "Seen — this decision won't count in the blind check.";
+
+/** Vision's answer in one line: "Vision's top 5: A x 0.71 · B y 0.40 …", or why there is none. */
+export function formatTop5(answer: Pick<RevealedAnswer, "available" | "top5" | "reason"> | null | undefined): string {
+  if (!answer || !answer.available) {
+    const why = (answer?.reason ?? "").trim();
+    return why ? `Vision has no answer for this record: ${why}` : "Vision has no answer for this record.";
+  }
+  const top = (answer.top5 ?? []).slice(0, 5)
+    .filter(([name]) => !!name)
+    .map(([name, score]) => (typeof score === "number" && Number.isFinite(score) ? `${name} ${score.toFixed(2)}` : name));
+  return top.length ? `Vision's top 5: ${top.join(" · ")}` : "Vision has no answer for this record.";
+}
+
+/** The note under a revealed answer; null when the answer has not been seen. */
+export const revealNote = (revealed: Revealed | null | undefined): string | null =>
+  revealed ? REVEAL_SEEN : null;
+
+/** Why "Show Vision's answer" failed, in the reviewer's words. */
+export function revealProblem(error: unknown): string {
+  if (error instanceof ApiError && error.status === 409) {
+    return "Nothing is hidden on this item any more (it may have been decided elsewhere).";
+  }
+  if (error instanceof ApiError && error.status === 401) return error.message;
+  return "Vision's answer could not be shown. Try again.";
+}
