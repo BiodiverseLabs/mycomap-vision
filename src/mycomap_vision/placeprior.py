@@ -313,9 +313,11 @@ class NearestMeanPlace:
     needs_context = True
     calibration_from = "nearest+mean"
 
+    base_method = "nearest+mean"     # the photo scoring the place shift is added to
+
     def __init__(self, store=None):
-        from .methods import NearestAndMean
-        self.base = NearestAndMean()
+        from .methods import METHODS
+        self.base = METHODS[self.base_method]()
         self.prior = PlaceBoost(store)
 
     @staticmethod

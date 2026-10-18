@@ -230,7 +230,8 @@ A "model" here is a **backbone** (frozen image model -> vector per photo) plus a
   sources (Hugging Face transformers, ONNX, an API) are one loader class each.
 - Methods: `evaluate.METHODS`. Now `nearest` (best-matching DNA-verified
   specimen) and `species-mean` (species average vector), and `nearest+mean`
-  (experimental: the two best specimen matches blended with the species average;
+  (served: the two best matching reference photos, which may be two photos of one
+  specimen, blended with the photo-weighted species average;
   see "Is nearest biased toward species with many reference photos?"); trained heads,
   multi-photo attention and the range prior plug in the same way.
 - `mv compare --backbones a,b,c --methods nearest,species-mean` scores every
