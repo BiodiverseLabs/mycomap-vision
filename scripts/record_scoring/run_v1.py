@@ -88,6 +88,10 @@ def cmd_score(args) -> None:
     from mycomap_vision import evaluate
     from mycomap_vision.placeprior import SETTING_ENV
     os.environ[SETTING_ENV] = args.place_setting
+    # The code that runs is the code checked out now: read once, so a commit made while the
+    # arms score never relabels them.
+    from mycomap_vision import config
+    code_version = config.code_version()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     conn = ro(args.manifest)
@@ -117,7 +121,7 @@ def cmd_score(args) -> None:
         res["run"] = {"method": m, "backbone": args.backbone, "record_set": shared.record_set,
                       "dataset_release": rel.cite(), "place_setting": used,
                       "place_points": "public" if place else None,
-                      "code_version": __import__("mycomap_vision.config").config.code_version(),
+                      "code_version": code_version,
                       "seconds": round(time.time() - t1)}
         (out / f"{m}.summary.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
         with open(out / f"{m}.records.jsonl", "w", encoding="utf-8") as fh:
