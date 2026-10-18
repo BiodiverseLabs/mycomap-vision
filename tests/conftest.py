@@ -38,3 +38,24 @@ def inat_obs(obs_id, user_login="alice", photos=(), **extra):
         ],
         **extra,
     }
+
+
+class _NoNetworkSession:
+    """The review pages' source fetcher in tests: refuses to reach any outside host unless a
+    test hands it a session of its own (photo_review.SourceFetcher)."""
+
+    def __init__(self):
+        self.headers = {}
+
+    def get(self, url, **kw):
+        raise AssertionError(f"tests must not fetch {url}")
+
+
+@pytest.fixture(autouse=True)
+def _review_photos_stay_offline(monkeypatch):
+    from mycomap_vision import photo_review
+    real = photo_review.SourceFetcher.__init__
+
+    def offline(self, session=None, clock=None, sleep=None):
+        real(self, session=session or _NoNetworkSession(), clock=clock, sleep=sleep)
+    monkeypatch.setattr(photo_review.SourceFetcher, "__init__", offline)

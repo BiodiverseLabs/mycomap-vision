@@ -200,8 +200,15 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.get("/api/feedback/summary")
     def fb_summary(request: Request):
+        """Per queue, open and decided items; for a photo queue also the observations they
+        are in (records_open, records_decided)."""
         _, projects = access(request)
-        return store.summary(projects)
+        out = store.summary(projects)
+        for t in out:
+            if t["granularity"] == "photo":
+                c = pr.record_counts(store.items_of(t["type"], projects))
+                t["records_open"], t["records_decided"] = c["open"], c["decided"]
+        return out
 
     @app.get("/api/feedback/items")
     def fb_items(request: Request, type: str, status: str = "open", q: str = "",
@@ -362,7 +369,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     def card(rec: dict, admin: bool) -> dict:
         rows = need_photos().of_record(rec["record_key"])
-        shown = {p["photo_key"]: p for p in need_photos().for_viewer(rows, admin)}
+        shown = {p["photo_key"]: p for p in need_photos().for_viewer(rows)}
         flagged = {f["photo_key"]: f for f in rec["flagged"]}
         out = []
         for key in [r.key for r in rows] + [k for k in flagged if k not in shown]:
@@ -412,7 +419,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         rows = need_photos().of_record(c["record_key"])
         excluded = set(((c.get("decision") or {}).get("photo_keys")) or [])
         return c | {"photos": [p | {"excluded": p["photo_key"] in excluded}
-                               for p in need_photos().for_viewer(rows, admin)]}
+                               for p in need_photos().for_viewer(rows)]}
 
     @app.get("/api/feedback/label-review")
     def fb_label_review(request: Request, status: str = "open", q: str = "", offset: int = 0,
@@ -455,27 +462,43 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                      ["records"] if c["item_id"] == item_id), None)
         return {"record": label_card(card, projects is None) if card else None}
 
+    reachable: dict[frozenset | None, tuple[float, set[str]]] = {}
+
+    def records_reachable(projects: set[str] | None) -> set[str]:
+        """The records of every queue item this reviewer can open (cached a minute)."""
+        key = None if projects is None else frozenset(projects)
+        with lock:
+            hit = reachable.get(key)
+        if hit and time.monotonic() - hit[0] < 60:
+            return hit[1]
+        out: set[str] = set()
+        for r in store._visible("select * from items", (), projects):
+            it = fb.Store._item(r)
+            out.update(it["record_keys"] or [])
+            if (k := pr.record_of_item(it)) is not None:
+                out.add(k)
+        with lock:
+            reachable[key] = (time.monotonic(), out)
+        return out
+
     @app.get("/api/feedback/photo/{photo_key}")
     def fb_photo(request: Request, photo_key: str, size: str = "thumb"):
-        """Vision's own copy of a photo, for ADMINS on the review pages only (Steve,
-        2026-10-18): private, never stored by the browser or a proxy, and never a photo whose
-        owner declined."""
+        """A photo for the review pages (Steve, 2026-10-18): to any Human Feedback reviewer
+        with access to a queued record of the photo, private, never stored by the browser or a
+        proxy, and never a photo whose owner declined. From Vision's copy or its source."""
         _, projects = access(request)
-        if projects is not None:
-            raise HTTPException(403, "admins only")
         if size not in ("thumb", "full"):
             bad(ValueError("size is thumb or full"))
         row = need_photos().one(photo_key)
         if row is None:
             raise HTTPException(404, "no such photo")
+        if not (need_photos().records_of(row) & records_reachable(projects)):
+            raise HTTPException(403, "this photo is not on a record you review")
         if need_photos().declined(row, need_photos().permission_view()):
             raise HTTPException(403, "the photo's owner declined")
-        try:
-            got = need_photos().copy_bytes(row, size)
-        except Exception:
-            got = None
+        got = need_photos().image(row, size)
         if got is None:
-            raise HTTPException(404, "Vision holds no readable copy of this photo")
+            raise HTTPException(404, "the photo could not be read just now")
         data, media = got
         return Response(data, media_type=media, headers={
             "Cache-Control": "private, no-store", "Pragma": "no-cache",

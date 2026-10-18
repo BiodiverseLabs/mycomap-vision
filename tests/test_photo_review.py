@@ -4,6 +4,8 @@ keep / leave-out decisions with a reason, and the photo rule: CC or owner-permit
 their public URL; all-rights-reserved photos to ADMINS ONLY, from Vision's own copy, private and
 never stored; never a photo whose owner declined."""
 
+import io
+
 import pytest
 from test_feedback_api import as_user, make_site
 
@@ -156,21 +158,25 @@ def test_admins_get_cards_and_see_all_rights_reserved_photos_privately(conn, tmp
     assert img.content[:2] == b"\xff\xd8"
 
 
-def test_nobody_but_admins_gets_a_private_photo(conn, tmp_path):
+def test_any_reviewer_with_access_to_the_record_sees_its_photos_and_nobody_else(conn,
+                                                                                 tmp_path):
     c, _ = site_with_photos(conn, tmp_path)
     c.cookies.clear()
     assert c.get("/api/feedback/photo/inat:1100").status_code == 401
     assert c.get("/api/feedback/photo/inat:1100",
                  headers={"Authorization": "Bearer some-v1-key"}).status_code == 401
-    as_user(c, "leader-1")
-    assert c.get("/api/feedback/photo/inat:1100").status_code == 403
+    as_user(c, "leader-1")                                    # a leader of the item's project
     card = c.get("/api/feedback/photo-review").json()["records"][0]
     arr = photo_of(card, "inat:1100")
-    assert arr["shown"] == "hidden" and arr["hidden_reason"] == "all rights reserved"
-    assert "thumb" not in arr and "full" not in arr           # a placeholder, still decidable
+    assert arr["shown"] == "private" and arr["thumb"] == "/api/feedback/photo/inat:1100?size=thumb"
+    img = c.get(arr["thumb"])
+    assert img.status_code == 200 and img.headers["cache-control"] == "private, no-store"
     as_user(c, "member-1")                                    # another project's contributor
     assert c.get("/api/feedback/photo-review").json()["records"] == []
-    assert c.get("/api/feedback/photo/inat:1100").status_code == 403
+    r = c.get("/api/feedback/photo/inat:1100")
+    assert r.status_code == 403 and "not on a record you review" in r.json()["detail"]
+    as_user(c, "admin-1")                                     # a photo on no queued record
+    assert c.get("/api/feedback/photo/inat:1003").status_code == 403
 
 
 def test_a_declined_owners_photo_is_never_served_even_to_admins(conn, tmp_path):
@@ -233,3 +239,107 @@ def test_photos_of_one_record_are_left_out_for_different_reasons(conn, tmp_path)
     assert r.status_code == 200
     reasons = {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")}
     assert reasons == {"inat:1000": "micrograph", "inat:1100": "not_fungus"}
+
+
+# --- photos the box holds no readable copy of come from their source ----------------------------
+
+class FakeResp:
+    def __init__(self, status=200, body=b"", location=None):
+        self.status_code, self.body = status, body
+        self.headers = {"Location": location} if location else {}
+
+    def iter_content(self, n):
+        for i in range(0, len(self.body), n):
+            yield self.body[i:i + n]
+
+    def close(self):
+        pass
+
+
+class FakeSession:
+    def __init__(self, answers):
+        self.answers, self.calls, self.headers = answers, [], {}
+
+    def get(self, url, **kw):
+        self.calls.append(url)
+        a = self.answers.get(url)
+        return a if a is not None else FakeResp(404)
+
+
+def png(color=(10, 200, 10)):
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_without_a_readable_copy_the_photo_is_fetched_from_its_source_once(conn, tmp_path,
+                                                                         monkeypatch):
+    session = FakeSession({})
+    monkeypatch.setattr(pr.SourceFetcher, "__init__", lambda self, *a, **k: real_init(
+        self, session=session, sleep=lambda s: None))
+    c, _ = site_with_photos(conn, tmp_path)
+    conn.execute("update photo_copies set store = 's3://not-readable/' where photo_id = 1100")
+    conn.commit()
+    url = conn.execute("select source_url from photos where photo_id = 1100").fetchone()[0]
+    medium = url.replace("square", "medium")
+    session.answers[medium] = FakeResp(200, png())
+    as_user(c, "leader-1")
+    for _ in range(2):
+        r = c.get("/api/feedback/photo/inat:1100?size=thumb")
+        assert r.status_code == 200 and r.headers["cache-control"] == "private, no-store"
+        assert r.content[:2] == b"\xff\xd8"
+    assert session.calls == [medium]                          # the second came from the cache
+
+
+real_init = pr.SourceFetcher.__init__
+
+
+def test_a_source_that_fails_gives_the_placeholder_not_an_error(conn, tmp_path, monkeypatch):
+    session = FakeSession({})                                 # every source answer is a 404
+    monkeypatch.setattr(pr.SourceFetcher, "__init__", lambda self, *a, **k: real_init(
+        self, session=session, sleep=lambda s: None))
+    c, _ = site_with_photos(conn, tmp_path)
+    conn.execute("delete from photo_copies where photo_id = 1100")
+    conn.commit()
+    as_user(c, "admin-1")
+    assert c.get("/api/feedback/photo/inat:1100").status_code == 404
+    assert len(session.calls) == 1
+
+
+def test_the_source_fetcher_reads_only_photo_hosts_over_https_within_its_budget():
+    url = "https://static.inaturalist.org/photos/5/medium.jpg"
+    session = FakeSession({url: FakeResp(200, b"x" * 1000)})
+    f = pr.SourceFetcher(session=session, sleep=lambda s: None)
+    assert session.headers["User-Agent"].startswith("MycoMap-Vision")
+    assert f.get("http://static.inaturalist.org/photos/5/medium.jpg", "inat") is None
+    assert f.get("https://example.org/photos/5/medium.jpg", "inat") is None
+    assert session.calls == []
+    assert f.get(url, "inat") == b"x" * 1000
+    for b in f.budgets:                                       # the review's own static budget
+        b.add(b.limit)
+    assert f.get(url, "inat") is None and len(session.calls) == 1
+    # MO: one redirect, to MO's own image host only.
+    mo = "https://mushroomobserver.org/images/640/7.jpg"
+    session.answers[mo] = FakeResp(302, location="https://evil.example/7.jpg")
+    session.answers["https://evil.example/7.jpg"] = FakeResp(200, b"not ours")
+    assert f.get(mo, "mo") is None
+    assert "https://evil.example/7.jpg" not in session.calls
+    session.answers[mo] = FakeResp(302, location="https://images.mushroomobserver.org/640/7.jpg")
+    session.answers["https://images.mushroomobserver.org/640/7.jpg"] = FakeResp(200, b"mo")
+    assert f.get(mo, "mo") == b"mo"
+
+
+def test_the_queue_card_counts_photos_and_the_observations_they_are_in(conn, tmp_path):
+    items = items_for_cards()                  # 3 open photos in records 10 (2) and 11; 12 decided
+    assert pr.record_counts(items) == {"open": 2, "decided": 1}
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    s = {t["type"]: t for t in c.get("/api/feedback/summary").json()}["non_specimen_photo"]
+    assert (s["open"], s["records_open"], s["records_decided"]) == (3, 2, 0)
+    c.post("/api/feedback/photo-review/101/decision",
+           json={"photos": [{"photo_key": "inat:1001", "decision": "keep"}]})
+    s = {t["type"]: t for t in c.get("/api/feedback/summary").json()}["non_specimen_photo"]
+    assert (s["open"], s["decided"], s["records_open"], s["records_decided"]) == (2, 1, 1, 1)
+    assert "records_open" not in {t["type"]: t for t in
+                                  c.get("/api/feedback/summary").json()}["group_label"]
