@@ -217,3 +217,99 @@ def test_the_snapshot_loads_with_its_successors_and_is_cited(tmp_path):
     assert tax.cite["taxa"] == "taxa.csv.gz" and len(tax.cite["successors_sha256"]) == 64
     without = ne.Taxonomy.load(taxa, ["Psathyrella candolleana"])
     assert not ne.species_credit(101, "Psathyrella candolleana", taxonomy=without)
+
+
+# --- rule 4 gaps found by the comparisons lane (E31b), each a test --------------------------
+
+GAP_TAXA = {**TAXA,
+            13: t("Gyromitra", 20, anc=[1]), 14: t("Neogyromitra", 20, anc=[1]),
+            500: t("Gyromitra caroliniana", 10, active=False, anc=[1, 13], succ=[501]),
+            501: t("Neogyromitra caroliniana", 10, anc=[1, 14]),
+            600: t("Clavaria", 20, anc=[1]),
+            601: t("Clavaria zollingeri", 10, active=False, anc=[1, 600], succ=[602, 603]),
+            602: t("Clavaria one", 10, anc=[1, 600]), 603: t("Clavaria two", 10, anc=[1, 600])}
+GAP_LABELS = ["Psathyrella candolleana", "Candolleomyces candolleanus",
+              "Gyromitra caroliniana", "Neogyromitra caroliniana", "Clavaria zollingeri"]
+
+
+@pytest.fixture
+def gap():
+    return ne.Taxonomy(GAP_TAXA, GAP_LABELS)
+
+
+def test_gap1_the_truth_accepts_its_labels_own_genus_word(gap):
+    # 'Candolleomyces candolleanus' filed under genus Psathyrella (release genus)
+    kw = {"taxonomy": gap, "truth_species": "Candolleomyces candolleanus"}
+    assert ne.genus_match(11, "Psathyrella", **kw)["strict"]          # the Candolleomyces id
+    assert ne.genus_match(101, "Psathyrella", **kw)["strict"]         # a species id
+    assert ne.genus_match("Psathyrella", "Psathyrella", **kw)["strict"]
+    assert not ne.genus_match("Coprinellus", "Psathyrella", **kw)["strict"]
+    # only the label's own word can say it: a code iNat doesn't know, filed under Psathyrella
+    code = {"taxonomy": gap, "truth_species": "Candolleomyces sp. 'X01'"}
+    assert ne.genus_match("Candolleomyces", "Psathyrella", **code)["strict"]
+
+
+def test_gap2_a_kept_apart_label_keeps_its_inat_genus(gap):
+    assert gap.species_id("Gyromitra caroliniana") is None              # kept apart for species
+    kw = {"taxonomy": gap, "truth_species": "Gyromitra caroliniana"}
+    assert ne.genus_match(501, "Gyromitra", **kw)["strict"]           # resolves to Neogyromitra
+    assert ne.genus_match(14, "Gyromitra", **kw)["strict"]
+    assert ne.genus_match("Gyromitra", "Gyromitra", **kw)["strict"]
+
+
+def test_gap3_a_split_taxon_keeps_its_own_genus(gap):
+    assert gap.species_id(601) is None                                  # no species credit
+    assert ne.genus_match(601, "Clavaria", gap, "Clavaria zollingeri")["strict"]
+    assert not ne.species_credit(601, "Clavaria zollingeri", taxonomy=gap)
+
+
+def test_a_kept_apart_truth_does_not_resolve_so_it_leaves_the_paired_tests(gap):
+    """Rule 7: paired tests use formal truths that resolve to an iNat species. 'Psathyrella
+    candolleana' is kept apart from 'Candolleomyces candolleanus' (one iNat species): it
+    reports resolves False, so iNat's Candolleomyces answer is not scored a miss on it."""
+    assert gap.resolves("Psathyrella candolleana") is False
+    assert gap.resolves("Candolleomyces candolleanus") is False
+    assert not ne.species_credit(101, "Psathyrella candolleana", taxonomy=gap)
+    one = ne.Taxonomy(GAP_TAXA, ["Psathyrella candolleana"])
+    assert one.resolves("Psathyrella candolleana") is True
+    assert one.resolves("Amanita sp. 'NY03'") is False                 # codes never resolve
+
+
+def test_answer_side_extras_never_change_how_a_label_resolves():
+    base = {**TAXA, 801: t("Inocybe olda", 10, active=False, anc=[1], succ=[802])}
+    plain2 = ne.Taxonomy(base, LABELS + ["Inocybe olda"])
+    more2 = ne.Taxonomy(base, LABELS + ["Inocybe olda"],
+                        extras={802: t("Inocybe nova", 10, anc=[1])})   # its successor, newer
+    assert plain2.species_id("Inocybe olda") is None is more2.species_id("Inocybe olda")
+    assert more2.species_id(801) == 802                                 # as an answer it reads
+    extras = {700: t("Psathyrella candolleana", 10, anc=[1, 10]),     # a newer homonym
+              701: t("Russula three", 10, anc=[1]),
+              400: t("changed", 10)}                                   # can't override the snapshot
+    plain = ne.Taxonomy(TAXA, LABELS)
+    more = ne.Taxonomy(TAXA, LABELS, extras=extras)
+    for lab in LABELS:
+        assert plain.species_id(lab) == more.species_id(lab), lab
+    assert more.species_id(701) == 701 and plain.species_id(701) is None   # read as an answer
+    assert more.taxa[400]["name"] == "Russula emetica"
+
+
+class FakeRelease:
+    def __init__(self, labels):
+        self.rows = [{"label": lab} for lab in labels]
+
+    def records(self, splits):
+        return self.rows
+
+    def cite(self):
+        return {"dataset_release": "v1", "errata": {"file": "v1-errata-r4.tsv"}}
+
+
+def test_the_label_vocabulary_is_written_once_sorted_and_pinned(tmp_path):
+    rel = FakeRelease(["Russula emetica", "Amanita", "Amanita sp. 'NY03'", "Russula emetica",
+                       "Boletus edulis var. grandedulis", ""])
+    out = ne.write_label_vocabulary(rel, tmp_path / "labels.txt")
+    assert out["labels"] == 4 and out["errata"] == "v1-errata-r4.tsv" and len(out["sha256"]) == 64
+    assert ne.read_label_vocabulary(tmp_path / "labels.txt") == sorted(
+        ["Russula emetica", "Amanita", "Amanita sp. 'NY03'", "Boletus edulis var. grandedulis"])
+    with pytest.raises(FileExistsError):
+        ne.write_label_vocabulary(rel, tmp_path / "labels.txt")

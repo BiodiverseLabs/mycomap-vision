@@ -195,12 +195,20 @@ class Taxonomy:
     iNat doesn't know (a provisional code) stays its string.
 
     `taxa`: {id: {name, rank_level, is_active, ancestor_ids, current_synonymous_taxon_ids?}},
-    e.g. expert_ids.load_open_taxa plus expert_ids.complete_taxa (the open data has no
-    successors); `labels`: the label vocabulary, for the one-to-one rule; `cite`: the
-    snapshot file and its sha256, for reports."""
+    e.g. expert_ids.load_open_taxa plus the frozen successors (Taxonomy.load); `labels`: the
+    label vocabulary (label_vocabulary), for the one-to-one rule; `extras`: answer-side taxa
+    the snapshot lacks (a comparator's newer ids), used to read an ANSWER only: a label always
+    resolves against the snapshot alone, so extras never change how a label resolves; `cite`:
+    the files and their sha256, for reports.
 
-    def __init__(self, taxa: dict[int, dict], labels=(), cite: dict | None = None):
-        self.taxa = taxa
+    resolves(label) is False for a name that does not resolve one-to-one (a code, unknown to
+    iNat, or kept apart): such a truth leaves the iNat- and expert-paired tests (PLAN rule 7)
+    rather than counting as their miss."""
+
+    def __init__(self, taxa: dict[int, dict], labels=(), cite: dict | None = None,
+                 extras: dict[int, dict] | None = None):
+        self.base = taxa
+        self.taxa = {**(extras or {}), **taxa}         # the snapshot wins on a shared id
         self.cite = cite or {}
         self.by_name: dict[str, list[int]] = {}
         for tid, t in taxa.items():
@@ -224,7 +232,7 @@ class Taxonomy:
                 "taxa_sha256": hashlib.sha256(Path(taxa_csv_gz).read_bytes()).hexdigest()}
         if successors is not None:
             with open(successors, encoding="utf-8", newline="") as f:
-                for r in csv.DictReader(f, delimiter="	"):
+                for r in csv.DictReader(f, delimiter="\t"):
                     tid = int(r["taxon_id"])
                     ids = [int(x) for x in (r["current_ids"] or "").split(",") if x.strip()]
                     if tid in taxa:
@@ -242,12 +250,14 @@ class Taxonomy:
         self.shared_by = {sid: ks for sid, ks in claims.items() if len(ks) > 1}
         self.ambiguous = set(self.shared_by)
 
-    def current(self, tid: int) -> int | None:
-        """An active taxon id: the id itself, or a retired one's single current successor."""
+    def current(self, tid: int, base_only: bool = False) -> int | None:
+        """An active taxon id: the id itself, or a retired one's single current successor
+        (within the snapshot alone when base_only: how labels resolve)."""
+        taxa = self.base if base_only else self.taxa
         seen = set()
         while tid is not None and tid not in seen:
             seen.add(tid)
-            t = self.taxa.get(tid)
+            t = taxa.get(tid)
             if t is None:
                 return None
             if t.get("is_active", True):
@@ -279,20 +289,27 @@ class Taxonomy:
             return None            # a group or complex is no species: it stays a name
         for cand in (" ".join(words), " ".join(words[:2])):
             ids = self.by_name.get(cand.lower(), [])
-            current = {c for c in (self.current(i) for i in ids) if c is not None}
+            current = {c for c in (self.current(i, base_only=True) for i in ids) if c is not None}
             species = {s for s in (self._level(c, SPECIES_LEVEL) for c in current) if s}
             if len(species) == 1:
                 return species.pop()
         return None
 
-    def species_id(self, x) -> int | None:
-        """A name or a taxon id -> its current iNat species id, one-to-one only."""
+    def species_id(self, x, one_to_one: bool = True) -> int | None:
+        """A name or a taxon id -> its current iNat species id; one-to-one only unless
+        `one_to_one` is False (genus reads a kept-apart label's species: its genus is not in
+        doubt)."""
         if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit()):
             cur = self.current(int(x))
             sid = self._level(cur, SPECIES_LEVEL) if cur is not None else None
         else:
             sid = self._resolve_name(x)
-        return None if sid is None or sid in self.ambiguous else sid
+        return None if sid is None or (one_to_one and sid in self.ambiguous) else sid
+
+    def resolves(self, label: str) -> bool:
+        """Does this label resolve one-to-one to an iNat species? A truth that does not is
+        left out of the iNat- and expert-paired tests (PLAN rule 7), never scored a miss."""
+        return self.species_id(label) is not None
 
     def genus_names(self, x) -> set[str]:
         """Genus names a name or taxon id stands for: as written, and iNat's current genus
@@ -300,10 +317,15 @@ class Taxonomy:
         out = set()
         if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit()):
             cur = self.current(int(x))
+            if cur is None and int(x) in self.taxa:
+                # retired with no single successor (a split): its own line's genus stands
+                g = self._level(int(x), GENUS_LEVEL)
+                if g is not None and self.taxa[g].get("name"):
+                    out.add(self.taxa[g]["name"].lower())
         else:
             out.add(x.strip().split()[0].lower())
-            ids = self.by_name.get(x.strip().lower(), [])
-            cur_ids = {c for c in (self.current(i) for i in ids) if c is not None}
+            ids = self.by_name.get(x.strip().lower(), [])     # a name: the snapshot alone
+            cur_ids = {c for c in (self.current(i, base_only=True) for i in ids) if c is not None}
             cur = cur_ids.pop() if len(cur_ids) == 1 else None
         if cur is not None:
             g = self._level(cur, GENUS_LEVEL)
@@ -403,10 +425,43 @@ def genus_match(answer, truth, taxonomy: Taxonomy | None = None,
     got = taxonomy.genus_names(answer)
     want = taxonomy.genus_names(truth)
     if truth_species:
-        sid = taxonomy.species_id(truth_species)
+        # the genus word of the label as written ('Candolleomyces candolleanus' filed under
+        # genus Psathyrella), and the genus of its iNat species even when the label is kept
+        # apart for species (a kept-apart pair shares one iNat species, so one genus)
+        want.add(truth_species.strip().split()[0].lower())
+        sid = taxonomy.species_id(truth_species, one_to_one=False)
         if sid is not None:
             want |= taxonomy.genus_names(sid)
     strict = bool(got & want)
     sl = strict or any(genus_group(a.capitalize()) == genus_group(b.capitalize())
                        for a in got for b in want)
     return {"strict": strict, "sl": sl}
+
+
+def label_vocabulary(release) -> list[str]:
+    """The label vocabulary for the one-to-one rule (PLAN rule 4, research a267d31): every
+    distinct label on the release's included records in train and val, all ranks, after the
+    erratum the release was opened with (release.use_errata), sorted. The same list for every
+    comparator."""
+    return sorted({r["label"] for r in release.records(("train", "val")) if r["label"]})
+
+
+def write_label_vocabulary(release, path) -> dict:
+    """Write label_vocabulary as one label per line (UTF-8, LF; never overwritten) and give
+    its sha256, for pinning."""
+    import hashlib
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError(f"{path} exists: a pinned vocabulary is never rewritten")
+    labels = label_vocabulary(release)
+    body = ("\n".join(labels) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    cite = release.cite()
+    return {"file": path.name, "sha256": hashlib.sha256(body).hexdigest(), "labels": len(labels),
+            "release": cite["dataset_release"],
+            "errata": (cite.get("errata") or {}).get("file")}
+
+
+def read_label_vocabulary(path) -> list[str]:
+    return [x for x in Path(path).read_text(encoding="utf-8").split("\n") if x]
