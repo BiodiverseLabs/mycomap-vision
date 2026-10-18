@@ -1275,7 +1275,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     {"max_photos": MAX_PHOTOS, "max_file_mb": MAX_FILE_BYTES // 2**20,
                      "max_request_mb": MAX_REQUEST_BYTES // 2**20, "top_k_max": 10,
                      "photos_per_minute": photos_per_minute},
-                    {k: bool(v) for k, v in v1_parts.items()})
+                    {k: bool(v) for k, v in v1_parts.items()}, ident.calibration)
                 return JSONResponse(doc, headers={"Cache-Control": "private, max-age=300"})
 
             # GET /api/v1/usage: this credential's use this month. Reading it costs nothing.

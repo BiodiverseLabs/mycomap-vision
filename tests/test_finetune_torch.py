@@ -128,3 +128,18 @@ def test_a_fine_tune_on_a_release_saves_its_citation_and_version(tmp_path):
     row = conn.execute("select meta_json from finetunes where name = 'tiny-ft'").fetchone()[0]
     assert rid in row
     rel.close()
+
+
+def test_a_run_that_logs_before_the_clock_moves_does_not_divide_by_zero(conn, tmp_path,
+                                                                       monkeypatch):
+    # Windows' monotonic clock can read the same before and after a tiny run's steps: the
+    # progress line's photos/s must not fail the run (it flaked the suite on 2026-10-18).
+    store, root = embedded(conn, tmp_path, "tiny", Tiny())
+    monkeypatch.setattr(finetune.time, "monotonic", lambda: 100.0)
+    lines = []
+    cfg = finetune.FinetuneConfig(blocks=1, batch_size=4, workers=0, max_steps=2,
+                                  lr_backbone=0.05, lr_heads=0.05)
+    finetune.finetune(conn, "tiny", store, "large", "tiny-ft", cfg, 28, root,
+                      tmp_path / "models", loader=lambda spec: Tiny(), log=lines.append)
+    assert any("photos/s" in line for line in lines)
+    assert (tmp_path / "models" / "tiny-ft.pt").is_file()

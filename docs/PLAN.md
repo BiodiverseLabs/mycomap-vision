@@ -1,7 +1,8 @@
 # MycoMap Vision plan
 
-Goal: a public fungal identifier that uses every photo of a record, is trained
-only on DNA-validated MycoMap records, and gives a prediction and confidence at
+Goal: a public fungal identifier that uses every photo of a record, takes its names
+only from DNA-validated MycoMap records (fine-tuning labels and reference specimens alike;
+the base image model's pretraining is not DNA-checked), and gives a prediction and confidence at
 every rank, with advice on how to improve an ID. It runs as its own platform;
 mycomap.org links to it and calls its API when needed.
 
@@ -230,7 +231,8 @@ A "model" here is a **backbone** (frozen image model -> vector per photo) plus a
   sources (Hugging Face transformers, ONNX, an API) are one loader class each.
 - Methods: `evaluate.METHODS`. Now `nearest` (best-matching DNA-verified
   specimen) and `species-mean` (species average vector), and `nearest+mean`
-  (experimental: the two best specimen matches blended with the species average;
+  (served: the two best matching reference photos, which may be two photos of one
+  specimen, blended with the photo-weighted species average;
   see "Is nearest biased toward species with many reference photos?"); trained heads,
   multi-photo attention and the range prior plug in the same way.
 - `mv compare --backbones a,b,c --methods nearest,species-mean` scores every

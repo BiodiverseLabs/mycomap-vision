@@ -16,8 +16,8 @@ reference index, without embedding anything again:
   the number that says which species to sequence next.
 
 Both score `nearest` (mean over query photos of the best match in each species) and
-`nearest+mean` (0.6 x mean of the two best matches + 0.4 x similarity to the species'
-average photo), exactly as methods.py does on the full reference. The trick that makes
+`nearest+mean` (0.6 x mean of the two best matching PHOTOS, possibly of one record, + 0.4 x
+similarity to the species' average photo), exactly as methods.py does on the full reference. The trick that makes
 subsets cheap: each query photo's similarities are reduced once to each reference
 RECORD's best and second-best photo; the species' best two photos over any set of kept
 records are the best two of those pairs, and a species' average photo is the

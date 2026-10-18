@@ -173,6 +173,12 @@ def class_prototypes(vectors: np.ndarray, labels: np.ndarray, n_classes: int) ->
     return np.where(norms > 0, sums / np.maximum(norms, 1e-12), 0).astype(np.float32)
 
 
+def photos_per_second(seen: int, elapsed: float) -> float:
+    """The progress line's rate. A tiny run can log before the clock moves (Windows'
+    monotonic clock ticks every ~15 ms), so elapsed is floored above zero."""
+    return seen / max(elapsed, 1e-9)
+
+
 def sampling_weights(species: np.ndarray, power: float) -> np.ndarray:
     """Per photo: 1 / (photos of its species) ** power, summing to 1."""
     counts = np.bincount(species[species >= 0], minlength=max(int(species.max()) + 1, 1))
@@ -505,7 +511,7 @@ def finetune(conn: sqlite3.Connection, base: str, store, size: str, name: str,
         losses.append(float(loss.detach()))
         if step % 100 == 0 or step == steps:
             log(f"[{name}] step {step:,}/{steps:,}, loss {np.mean(losses[-100:]):.3f}, "
-                f"{seen / (time.monotonic() - t0):.0f} photos/s")
+                f"{photos_per_second(seen, time.monotonic() - t0):.0f} photos/s")
         if step >= steps:
             break
     out_dir.mkdir(parents=True, exist_ok=True)

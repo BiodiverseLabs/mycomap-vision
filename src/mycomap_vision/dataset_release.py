@@ -56,7 +56,7 @@ RECORD_REASONS = ("source_mycoportal", "source_com_sequence", "source_genbank",
                   "source_unknown", "held_out", "not_north_america", "not_fetched",
                   "missing_at_source",
                   "label_conflict", "no_label", "guest", "nonfungal_label", "review",
-                  "no_photos", "ok")
+                  "crosspost_twin", "no_photos", "ok")
 PHOTO_REASONS = ("record_excluded", "other_source", "no_original", "permission_withdrawn",
                  "mo_not_for_use", "review", "shared_other_label", "copy_in_train",
                  "copy_in_base", "ok")
@@ -928,14 +928,19 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
           freeze_approved: str | None = None, test_for: str | None = None,
           test_ids: Path | None = None, store_reader=None,
           loo_exclusions: Path | None = None, no_loo_exclusions: str | None = None,
-          base_dhash: Path | None = None, log=print) -> dict:
+          base_dhash: Path | None = None, twin_exclude_photos: Path | None = None,
+          log=print) -> dict:
     """Cut a release (frozen ids need freeze_approved: who gave the trigger, when) or a
     draft. `derive_photos` 'all' computes every derived hash (reads every original);
     'none' or a number (a sample, drafts only) do less. A frozen trainable release also
     needs the LOO exclusion list or Steve's word that there is none (loo_gate); the list
     is read like any review list and recorded with its rows and sha256. A frozen test
     release (test_for) also needs `base_dhash`, its base's dHash index (dhash.py): each
-    included test photo near a base photo is flagged in near_base."""
+    included test photo near a base photo is flagged in near_base, and a test record that is
+    the cross-post twin of a base record (errata.match_twins: the same find posted to both
+    MO and iNat) is left out as `crosspost_twin`; `twin_exclude_photos` lists base photos
+    that never pair (the base's micrograph list).
+    """
     root = Path(root or ROOT)
     check_id(name)
     if base_dhash is not None and not test_for:
@@ -997,9 +1002,20 @@ def build(*, name: str, manifest_path: Path | None = None, root: Path | None = N
                 dhash.check_index(index, base)
                 index["file_sha256"] = sha256_file(Path(base_dhash))
                 extra["near_base"] = flag_near_base(built, index, store_reader, log=log)
+                excl, excl_cite = frozenset(), None
+                if twin_exclude_photos is not None:
+                    from .errata import read_photo_list
+                    excl = read_photo_list(Path(twin_exclude_photos))
+                    excl_cite = {"file": Path(twin_exclude_photos).name, "photos": len(excl),
+                                 "sha256": sha256_file(Path(twin_exclude_photos))}
+                extra["crosspost_twin"] = {**drop_crosspost_twins(built, base, index, excl,
+                                                                  log=log),
+                                           "exclude_photos": excl_cite}
             else:
                 extra["near_base"] = None
-                log(f"DRAFT: no --base-dhash: near-copies of {base.id} photos are not flagged")
+                extra["crosspost_twin"] = None
+                log(f"DRAFT: no --base-dhash: near-copies of {base.id} photos are not flagged, "
+                    "and its cross-post twins are not left out")
         if built.public_missing:
             msg = (f"{len(built.public_missing):,} included records have no public point "
                    f"read (e.g. {built.public_missing[:5]}): run `mv fetch-mo-points` (MO) "
@@ -1058,6 +1074,59 @@ def separate_from_base(base: "Release", built: Built) -> int:
             if r["included"] and r["record_key"] not in has_photo:
                 r.update(included=0, reason="no_photos", split=None)
     return dropped
+
+
+def drop_crosspost_twins(built: Built, base: "Release", index: dict,
+                         exclude_photos=frozenset(), log=print) -> dict:
+    """Leave out every test record that is the cross-post twin of an included base record:
+    the same find posted to Mushroom Observer and iNaturalist, with the same label and a photo
+    within errata.TWIN_MAX_BITS dHash bits (errata.match_twins; the rule of v1's erratum
+    rev 4). Scored, it would meet its own photo in the reference. Template hashes (on the
+    photos of errata.TEMPLATE_RECORDS or more records, base and test together) and base photos
+    in `exclude_photos` never pair. Needs the test photos' hashes (flag_near_base first).
+    The record becomes `crosspost_twin`, its photos `record_excluded`. Returns the summary
+    MANIFEST records."""
+    from . import errata
+    test_hash = {r["photo_key"]: int(r["dhash"], 16) for r in built.near_base or []}
+    test_recs = {r["record_key"]: r for r in built.records if r["included"]}
+    base_recs = {k: (label, source) for k, label, source in base.db.execute(
+        "select record_key, label, source from records where included = 1")}
+    base_rec_of = dict(base.db.execute("select photo_key, record_key from photos "
+                                       "where included = 1"))
+    base_photos = [(k, base_rec_of[k], *base_recs[base_rec_of[k]], int(h))
+                   for k, h in zip(index["photo_key"], index["dhash"])
+                   if base_rec_of.get(k) in base_recs]
+    test_photos = [(p["photo_key"], p["record_key"], test_recs[p["record_key"]]["label"],
+                    test_recs[p["record_key"]]["source"], test_hash[p["photo_key"]])
+                   for p in built.photos
+                   if p["included"] and p["record_key"] in test_recs and p["photo_key"] in test_hash]
+    templates = errata.template_hashes([(x[4], x[1]) for x in base_photos + test_photos])
+    usable = [x for x in base_photos if x[0] not in exclude_photos] + test_photos
+    pairs = errata.match_twins(usable, templates)
+    drop: dict[str, str] = {}
+    for (mo, inat), (mp, ip, bits) in sorted(pairs.items()):
+        if (mo in test_recs) != (inat in test_recs):          # one side test, one side base
+            drop.setdefault(mo if mo in test_recs else inat, inat if mo in test_recs else mo)
+    for r in built.records:
+        if r["record_key"] in drop:
+            r.update(included=0, reason="crosspost_twin", split=None)
+    photos_dropped = 0
+    for p in built.photos:
+        if p["included"] and p["record_key"] in drop:
+            p.update(included=0, reason="record_excluded")
+            photos_dropped += 1
+    included = {p["photo_key"] for p in built.photos if p["included"]}
+    if built.near_base is not None:
+        built.near_base = [r for r in built.near_base if r["photo_key"] in included]
+    log(f"cross-post twins: {len(drop):,} test records left out (their MO or iNat twin is "
+        f"in {base.id})")
+    return {"rule": f"an MO and an iNat record with the same label and a photo within "
+                    f"{errata.TWIN_MAX_BITS} dHash bits, one in the test release and one "
+                    f"included in {base.id}: the test record is left out (crosspost_twin)",
+            "max_bits": errata.TWIN_MAX_BITS, "template_records": errata.TEMPLATE_RECORDS,
+            "records_dropped": len(drop), "photos_dropped": photos_dropped,
+            "by_source": {s: sum(1 for k in drop if test_recs[k]["source"] == s)
+                          for s in sorted({test_recs[k]["source"] for k in drop})}}
 
 
 def flag_near_base(built: Built, index: dict, store_reader, log=print) -> dict:
