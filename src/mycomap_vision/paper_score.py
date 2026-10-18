@@ -26,7 +26,8 @@ frozen backbone). Comparators:
   this command if missing; place methods see only the record's public point);
 - `published`: `mv external run`'s <model>.jsonl for the same release split;
 - `inat`: the comparisons lane's E14 finds.jsonl (`score`: vision or combined);
-- `expert`: its E31 scores.jsonl (`tier`, `view`: best or community, `strict`).
+- `expert`: its E31 scores.jsonl (`tier`: 1, 2 or pooled 1+2; `view`: first, best or
+  community; `strict`).
 
 Outputs: report.json (every table, test and input hash), report.md (Steve's tables),
 predictions/<comparator>.jsonl (each Vision answer, for audit).
@@ -54,6 +55,7 @@ TAG = "paper-analysis-freeze-v1"
 CONFIG_IN_REPO = "paper/analysis-v1.json"
 CONFIG_FORMAT = 1
 KINDS = ("vision", "published", "inat", "expert")
+EXPERT_TIERS = {"1", "2"}      # E31: >= 10,000 and 1,000-9,999 iNat IDs; "1+2" pools them
 SEASON = {12: "winter", 1: "winter", 2: "winter", 3: "spring", 4: "spring", 5: "spring",
           6: "summer", 7: "summer", 8: "summer", 9: "autumn", 10: "autumn", 11: "autumn"}
 
@@ -110,6 +112,10 @@ def check_config(doc: dict) -> None:
                 raise ValueError(f"comparator {c['id']}: place setting {c['place_setting']!r} "
                                  "reads iNat distances, which cannot leave a find's own "
                                  "observation out here")
+        if c["kind"] == "expert" and c.get("view") != "community" and not (
+                set(str(c.get("tier", "1")).split("+")) <= EXPERT_TIERS):
+            raise ValueError(f"comparator {c['id']}: expert tier is 1, 2 or 1+2, "
+                             f"not {c.get('tier')!r}")
         if c["kind"] in ("published", "inat", "expert") and not c.get("file"):
             raise ValueError(f"comparator {c['id']}: needs its input file")
     gate = doc.get("gate")

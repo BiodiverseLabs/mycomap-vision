@@ -678,3 +678,10 @@ def test_the_report_carries_the_generalisation_rows_and_the_pinned_created_file(
     with pytest.raises(ValueError, match="created_at file"):
         run(world, tmp_path, "val", config(tmp_path, ["5", "6"],
                                            generalisation={"pretraining": pre}))
+
+
+def test_an_expert_tier_other_than_1_2_or_pooled_is_refused():
+    ok = {"id": "e", "kind": "expert", "tier": "1+2", "view": "first", "file": "x"}
+    paper_score.check_config({"format": 1, "comparators": [ok]})
+    with pytest.raises(ValueError, match="expert tier"):
+        paper_score.check_config({"format": 1, "comparators": [{**ok, "tier": "1+3"}]})

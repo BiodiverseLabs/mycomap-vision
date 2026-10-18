@@ -250,3 +250,14 @@ def test_generalisation_rows_compare_each_named_row_with_the_other_finds():
     assert nd["near_duplicate_finds"] == 1
     assert nd["v"]["species_strict@1"]["primary"]["n"] == 10
     assert nd["v"]["species_strict@1"]["with_near_duplicates"]["n"] == 11
+
+
+def test_pooled_experts_take_the_first_id_by_any_identifier_with_a_thousand_ids_or_more():
+    line = e31_line("30", [
+        ident(species_right=True, tier="1", made_at="2025-03-02T00:00:00Z"),
+        ident(species_right=False, tier="2", made_at="2025-03-01T00:00:00Z"),   # earlier
+        ident(species_right=True, tier="3", made_at="2025-02-01T00:00:00Z")])   # under 1,000
+    assert po.expert_outcome(line, tier="1")["species_strict@1"] is True
+    assert po.expert_outcome(line, tier="2")["species_strict@1"] is False
+    assert po.expert_outcome(line, tier="1+2")["species_strict@1"] is False   # tier 2 was first
+    assert po.expert_outcome(line, tier="1+2", view="best")["species_strict@1"] is True
