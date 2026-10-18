@@ -114,6 +114,26 @@ class Components:
     km_inat: np.ndarray | None = None             # (n, K) km to nearest iNat find (inf none)
     n_place: np.ndarray | None = None             # (n, K) DNA records with a place
     off_season: np.ndarray | None = None          # (n, K) bool
+    # (n, K) bool: the candidate is a species the answer key credits for the truth
+    # (name_equiv.species_credit; credited_candidates). Without it, the truth's own column.
+    credited: np.ndarray | None = None
+
+
+def credited_candidates(cand: np.ndarray, is_species: np.ndarray, group_names,
+                        truth_names, rule: str | None = None) -> np.ndarray:
+    """(n, K) bool: candidate group names the answer key credits for each record's true
+    name (species rank, one writing, a hybrid code on either parent); a padding column or
+    a non-species group is never credited."""
+    from . import name_equiv
+    rule = rule or name_equiv.ANSWER_KEY
+    out = np.zeros(cand.shape, dtype=bool)
+    for i, truth in enumerate(truth_names):
+        if not truth:
+            continue
+        for j, g in enumerate(cand[i].tolist()):
+            if g >= 0 and is_species[i, j]:
+                out[i, j] = name_equiv.species_credit(str(group_names[g]), str(truth), rule)
+    return out
 
 
 def candidates(scores: np.ndarray, truth: int, k: int = TOP_K) -> np.ndarray:
@@ -208,7 +228,10 @@ def top1(c: Components, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """(species right, genus right) per record at top 1 (species among species groups)."""
     rows = np.arange(len(z))
     sp_best = np.argmax(np.where(c.SP, z, -np.inf), axis=1)
-    sp = c.has_sp & (c.truth_at >= 0) & (sp_best == c.truth_at)
+    if c.credited is not None:          # the answer key: any credited candidate is right
+        sp = c.has_sp & c.credited[rows, sp_best]
+    else:
+        sp = c.has_sp & (c.truth_at >= 0) & (sp_best == c.truth_at)
     ge = c.GG[rows, np.argmax(z, axis=1)] == c.truth_g
     return sp, ge
 
