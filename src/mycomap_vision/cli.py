@@ -521,13 +521,35 @@ def cmd_dataset(args) -> None:
             raise SystemExit(f"unknown reasons {sorted(unknown)}; known: {errata.REASONS}")
         cache = taxonomy.cache_path()
         rel = dr.load_release(args.id, root, allow_draft=True)
+        extra = {}
         try:
-            rows = errata.mo_twin_rows(rel) if "mo_twin_as_inat" in reasons else []
+            # --base: a new revision carries the earlier erratum's rows unchanged.
+            rows = errata.read_rows(Path(args.base)) if args.base else []
+            if args.base:
+                extra["base"] = {"file": Path(args.base).name,
+                                 "sha256": dr.sha256_file(Path(args.base)), "records": len(rows)}
+            if "mo_twin_as_inat" in reasons:
+                listed = {r["key"] for r in rows}
+                rows += [r for r in errata.mo_twin_rows(rel) if r["key"] not in listed]
             if "nonfungal_label" in reasons:
                 tax = taxonomy.load(cache)
                 if tax is None or not tax.outside:
                     raise SystemExit(f"{cache} holds no kingdoms yet: run `mv fetch-taxonomy`")
                 rows += errata.nonfungal_rows(rel, tax, {r["key"] for r in rows})
+            if "crosspost_twin" in reasons:
+                from . import dhash
+                ipath = Path(args.dhash_index) if args.dhash_index else dhash.index_path(rel.id)
+                excl = (errata.read_photo_list(Path(args.exclude_photos))
+                        if args.exclude_photos else frozenset())
+                listed = {r["key"] for r in rows}
+                rows += errata.crosspost_twin_rows(rel, dhash.load_index(ipath), excl, listed)
+                extra["crosspost_twin"] = {
+                    "dhash_index_sha256": dr.sha256_file(ipath),
+                    "exclude_photos": ({"file": Path(args.exclude_photos).name,
+                                        "sha256": dr.sha256_file(Path(args.exclude_photos)),
+                                        "photos": len(excl)} if args.exclude_photos else None),
+                    "max_bits": errata.TWIN_MAX_BITS,
+                    "template_records": errata.TEMPLATE_RECORDS}
             included = {r[0] for r in rel.db.execute("select record_key from records "
                                                      "where included = 1")}
             split = dict(rel.db.execute("select record_key, split from records"))
@@ -540,7 +562,7 @@ def cmd_dataset(args) -> None:
             "included_by_reason_split": dict(Counter(
                 f"{r['reason']}/{split.get(r['key'])}" for r in rows if r["key"] in included)),
             "taxonomy_cache_sha256": dr.sha256_file(cache)
-            if "nonfungal_label" in reasons else None,
+            if "nonfungal_label" in reasons else None, **extra,
             "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
     elif args.action == "pull-dhash-index":
         from . import aws, aws_dataset
@@ -2064,12 +2086,19 @@ def main(argv: list[str] | None = None) -> int:
                                                  "and check its sha256")
     q.add_argument("id")
     q = dsub.add_parser("errata", help="write a release's erratum TSV (errata.py): MO finds "
-                                       "held as iNat records, labels that are no fungus")
+                                       "held as iNat records, labels that are no fungus, "
+                                       "MO-iNat cross-post twins straddling train and val")
     q.add_argument("id")
     q.add_argument("--out", required=True, help="the TSV to write (never overwritten)")
     q.add_argument("--reasons", default="mo_twin_as_inat,nonfungal_label",
                    help="which rules (default both; mo_twin_as_inat alone remakes v1's first "
                         "erratum)")
+    q.add_argument("--base", metavar="TSV", help="an earlier erratum of the release whose rows "
+                   "the new revision carries unchanged (new reasons skip its records)")
+    q.add_argument("--dhash-index", metavar="NPZ", help="crosspost_twin: the release's dHash "
+                   "index (default: research-release-extras/<id>/dhash-index.npz)")
+    q.add_argument("--exclude-photos", metavar="TSV", help="crosspost_twin: photo keys "
+                   "(photo_key column) that never pair, e.g. the micrograph list")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
