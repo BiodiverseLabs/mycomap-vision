@@ -62,7 +62,7 @@ TIER1, TIER2 = 10_000, 1_000
 USER_AGENT = config.USER_AGENT.rstrip(")") + "; research; contact info@mycomap.org)"
 MAX_THROTTLES = 5          # 429s in one run before it stops and asks a person
 SNAPSHOT_FORMAT = 1
-SCORES_FORMAT = 1
+SCORES_FORMAT = 2   # 2: taxon ids + names on every ID, community, first_pooled, truth
 
 # Observation fields that carry a DNA result (matched by name, so a field iNat users add
 # later is caught too) and the name fields that follow a DNA result. Both end the window.
@@ -528,6 +528,12 @@ class TaxonResolver:
                     s.get("ancestor_ids") or []) else []), s.get("rank_level")
         return path, rank_level
 
+    def ref(self, taxon_id: int | None) -> dict | None:
+        """{'id', 'name'} of an iNat taxon in this taxonomy (name None if unknown here)."""
+        if taxon_id is None:
+            return None
+        return {"id": taxon_id, "name": (self.taxa.get(taxon_id) or {}).get("name")}
+
     def levels(self, taxon_id: int, path: list[int], rank_level) -> tuple[int | None, int | None]:
         """(species id or None, genus id or None) of an identification."""
         path, level = self.current(taxon_id, path, rank_level)
@@ -580,6 +586,8 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
     def entry(uid, i, before):
         sp, ge = resolver.levels(i["taxon_id"], i["taxon_path"], i["rank_level"])
         return {
+            "taxon": {**resolver.ref(i["taxon_id"]), "rank": i.get("taxon_rank")},
+            "species_taxon": resolver.ref(sp), "genus_taxon": resolver.ref(ge),
             "identifier": key(uid), "role": role_of(uid),
             "tier": tier_of(obs["identifier_counts"].get(uid)),
             "made_at": i["created_at"], "before_cutoff": before,
@@ -614,6 +622,10 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
                 if i["created_at"] and i["created_at"] >= cutoff.at and i["user_id"] != observer)
     return {**line, "status": "ok", "ids": ids,
             "community": {"present": ct is not None,
+                          "taxon": {**resolver.ref(ct),
+                                    "rank": (resolver.taxa.get(ct) or {}).get("rank")}
+                          if ct is not None else None,
+                          "species_taxon": resolver.ref(ct_sp), "genus_taxon": resolver.ref(ct_ge),
                           "at_species": ct_sp is not None, "at_genus": ct_ge is not None,
                           "species_right": (ct_sp == truth.species) if (
                               ct_sp is not None and truth.formal_species and truth.species) else None,
@@ -631,14 +643,18 @@ POOLED_TIERS = ("1", "2")
 
 def first_pooled(ids: list[dict]) -> dict:
     """Per rank, the earliest standing identifier ID before the cutoff from tiers 1+2 that
-    scores at that rank: {'species': {'right', 'tier'} or None, 'genus': ...}. Species only
-    exists on a formally named truth (species_right is None otherwise)."""
+    is at that rank (whatever the truth): {'species': {'right', 'tier', 'taxon',
+    'species_taxon' or 'genus_taxon'} or None, 'genus': ...}. `right` is E31's own
+    taxon-id verdict, None where it cannot score (a provisional truth, or one iNat has no
+    taxon for); paper-score re-scores by name_equiv from the taxa."""
     mine = sorted((i for i in ids if i["role"] == "identifier" and i["before_cutoff"]
                    and i["tier"] in POOLED_TIERS), key=lambda i: i["made_at"] or "")
     out = {"tiers": "+".join(POOLED_TIERS)}
     for rank in ("species", "genus"):
-        first = next((i for i in mine if i[f"{rank}_right"] is not None), None)
-        out[rank] = {"right": first[f"{rank}_right"], "tier": first["tier"]} if first else None
+        first = next((i for i in mine if i[f"at_{rank}"]), None)
+        out[rank] = {"right": first[f"{rank}_right"], "tier": first["tier"],
+                     "taxon": first.get("taxon"),
+                     f"{rank}_taxon": first.get(f"{rank}_taxon")} if first else None
     return out
 
 
@@ -652,7 +668,8 @@ def summarise_pooled(lines: list[dict], resamples: int = 10_000, seed: int = 202
         for rank, base in (("species", formal), ("genus", rows)):
             got = [((r.get("observer") or r["observation_id"]),
                     int(r["first_pooled"][rank]["right"]), 1)
-                   for r in rows if (r.get("first_pooled") or {}).get(rank)]
+                   for r in rows if ((r.get("first_pooled") or {}).get(rank) or {}).get(
+                       "right") is not None]
             out[f"first_{rank}"] = clustered_rate(got, resamples, seed)
             out[f"coverage_{rank}"] = round(len(got) / len(base), 4) if base else None
         return out
@@ -997,6 +1014,12 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                           validators.get(o["observation_id"], set()), key, push_accounts)
         line["status"] = not_this_observation(o, rec, mo_ids) or line["status"]
         line["backdated_trashed_dropped"] = backdated
+        label_genus = by_name.get(((rec.get("genus") or "").lower(), "genus"))
+        tt = truth_taxa(rec, by_name, taxa)
+        line["truth_taxa"] = {"label": rec.get("label"), "label_genus": rec.get("genus"),
+                              "species": resolver.ref(tt.species),
+                              "genus": resolver.ref(tt.genus),
+                              "label_genus_taxon": resolver.ref(label_genus)}
         line.update(record_key=rec["record_key"], split=rec.get("split"),
                     name_kind=rec.get("name_kind"), observed_year=(rec.get("observed_on") or "")[:4],
                     truth_genus=rec.get("genus"), observer=key(o["observer_id"])

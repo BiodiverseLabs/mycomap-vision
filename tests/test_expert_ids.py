@@ -458,16 +458,22 @@ def test_h4_comparator_is_the_first_tier_1_or_2_id_before_the_cutoff_at_each_ran
             counts={2: 20000, 3: 5000, 4: 500, 5: 20000, 6: 20000})
     line = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), {5}, key)
     fp = line["first_pooled"]
-    assert fp["species"] == {"right": False, "tier": "2"}   # tier 2's later species ID
-    assert fp["genus"] == {"right": True, "tier": "2"}      # its genus ID came first
+    assert (fp["species"]["right"], fp["species"]["tier"]) == (False, "2")  # tier 2's species ID
+    assert fp["species"]["species_taxon"] == {"id": 101, "name": "Russula silvicola"}
+    # user 3's standing ID is the later species one (it replaced the genus ID): right at genus
+    assert (fp["genus"]["right"], fp["genus"]["tier"]) == (True, "2")
+    assert fp["genus"]["genus_taxon"] == {"id": 10, "name": "Russula"}
+    assert fp["genus"]["taxon"]["id"] == 101
     assert fp["tiers"] == "1+2"
 
 
-def test_h4_comparator_has_no_species_on_a_provisional_truth_and_counts_in_the_summary():
+def test_h4_comparator_on_a_provisional_truth_keeps_the_id_unscored_and_out_of_the_summary():
     o = obs([ident(2, 100, "2023-01-01")], counts={2: 20000})
     prov = E.TruthTaxa(species=None, genus=10, formal_species=False)
     line = E.score_find(o, E.Cutoff(CUT, "dna_field"), prov, E.TaxonResolver(TAXA), set(), key)
-    assert line["first_pooled"]["species"] is None and line["first_pooled"]["genus"]["right"]
+    sp = line["first_pooled"]["species"]
+    assert sp["right"] is None and sp["species_taxon"]["name"] == "Russula emetica"
+    assert line["first_pooled"]["genus"]["right"]
     right = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), set(), key)
     s = E.summarise_pooled([line, right], resamples=100)["all"]
     assert (s["first_species"]["n"], s["first_species"]["right"]) == (1, 1)
@@ -478,3 +484,15 @@ def test_h4_comparator_never_takes_an_id_made_after_the_cutoff():
     o = obs([ident(2, 100, "2024-08-01")], counts={2: 20000})
     line = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), set(), key)
     assert line["first_pooled"]["species"] is None and line["first_pooled"]["genus"] is None
+
+
+def test_format_2_lines_carry_taxon_ids_and_names_for_paper_score_to_rescore():
+    o = obs([ident(2, 99, "2023-01-01"), ident(3, 99, "2023-01-02")], counts={2: 20000, 3: 20000})
+    line = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), set(), key)
+    i = line["ids"][0]
+    assert i["taxon"] == {"id": 99, "name": "Russula oldname", "rank": None}   # as identified
+    assert i["species_taxon"] == {"id": 100, "name": "Russula emetica"}        # its successor
+    assert i["genus_taxon"] == {"id": 10, "name": "Russula"}
+    c = line["community"]
+    assert c["species_taxon"] == {"id": 100, "name": "Russula emetica"} and c["species_right"]
+    assert E.SCORES_FORMAT == 2
