@@ -3,8 +3,8 @@
 Instructions for AI coding assistants (Claude Code) working in this repository. Human
 contributors: the rules below apply to you too; README.md is the place to start.
 
-MycoMap Vision: a photo identifier for fungi trained on DNA-validated MycoMap
-records. See README.md for the pipeline and docs/PLAN.md for the plan.
+MycoMap Vision: a photo identifier for fungi fine-tuned on, and answering from,
+DNA-validated MycoMap records (the base model's pretraining is not DNA-checked). See README.md for the pipeline and docs/PLAN.md for the plan.
 Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
 
 ## Rules

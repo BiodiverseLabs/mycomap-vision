@@ -175,8 +175,8 @@ function Footer() {
               <span className="text-lg font-bold text-white">MycoMap Vision</span>
             </div>
             <p className="text-white/70 text-sm leading-relaxed">
-              Photo identification trained only on DNA-verified MycoMap records, using every
-              photo of a find. Early development: results are provisional.
+              Photo identification fine-tuned on, and comparing with, DNA-verified MycoMap
+              records only, using every photo of a find. Early development: results are provisional.
             </p>
           </div>
           <ul className="space-y-2 text-sm">
