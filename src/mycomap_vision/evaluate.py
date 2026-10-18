@@ -366,7 +366,8 @@ def occurrence_leak_check(model, test: list[Record]) -> dict | None:
 def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
              fitted=None, sets: bool = True, name_scores: bool = False,
-             per_image: bool = False, per_record: bool = False) -> dict:
+             per_image: bool = False, per_record: bool = False,
+             answer_key: str | None = None) -> dict:
     """Score the test records. `fitted` (from fit_method) skips refitting, which matters
     for the trained methods. With `sets`, each rank's calibration also fits its likely
     set (likely.py): the probability floor for the highest useful coverage up to 90%,
@@ -380,9 +381,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
 
     With `per_record`, `per_record` lists every test record's answer for paired analyses
     outside (scripts/record_scoring): its observation_id, its top names per rank (up to
-    the deepest k reported) and, per calibrated rank, the top name's probability (`conf`)
-    and the true name's (`p_true`; None when the reference lacks it) at the fitted
-    temperature."""
+    the deepest k reported; species collapsed by the answer key) and, per calibrated rank,
+    the top name's probability (`conf`) and the true name's (`p_true`; None when the
+    reference lacks it) at the fitted temperature."""
+    # The species answer key (name_equiv: species rank, one writing, hybrid parents; "exact"
+    # reproduces v1's published numbers). Genus and family are compared as written.
+    answer_key = answer_key or name_equiv.ANSWER_KEY
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
     uses_context = getattr(model, "needs_context", False)
@@ -429,7 +433,15 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 n_cal[rank] += 1
             if sets:
                 kept[rank].append(likely.compact(rs, position[rank].get(t), T_GRID, lse=lse))
-            top = top_labels(rs, names[rank], deepest)
+            if rank == "species":
+                # answers sharing a key are one answer: rank deep enough to fill the table
+                top = name_equiv.collapse(top_labels(rs, names[rank], 4 * deepest),
+                                          answer_key)[:deepest]
+                pos = name_equiv.first_credited(top, t, answer_key)
+            else:
+                top = top_labels(rs, names[rank], deepest)
+                pos = top.index(t) if t in top else None
+            right = (lambda k, pos=pos: pos is not None and pos < k)
             if per_record:
                 mine["top"][rank] = top
                 mine["_cal"][rank] = (float(np.max(rs)), float(rs[position[rank][t]])
@@ -445,7 +457,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 first = {lv: None for lv in levels}       # best position hit at each level
                 for i, answer in enumerate(top[:max(STANDARD_K)]):
                     m = match(answer, t)
-                    m["strict"] = answer == t             # the table's strict row is exact
+                    m["strict"] = (name_equiv.species_credit(answer, t, answer_key)
+                                   if rank == "species" else answer == t)   # the answer key
                     for j, lv in enumerate(levels):
                         if first[lv] is None and any(m[x] for x in levels[:j + 1]):
                             first[lv] = i
@@ -456,22 +469,25 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             for key in ("all", b):
                 c = tally[rank][key]
                 c["n"] += 1
-                c["top1"] += top[:1] == [t]
-                c[f"top{top_k}"] += t in top[:top_k]
+                c["top1"] += right(1)
+                c[f"top{top_k}"] += right(top_k)
             for key in ("all", band):
                 c = standard[rank][key]
                 c["n"] += 1
                 for k in STANDARD_K:
-                    c[f"top{k}"] += t in top[:k]
+                    c[f"top{k}"] += right(k)
             if rank in ("genus", "species"):
                 keys = [("project", p) for p in (rec.projects or ("(none)",))]
                 keys.append(("observer", rec.observer or "(unknown)"))
                 for kind, key in keys:
                     g = groups[kind][key]
                     g[f"{rank}_n"] += 1
-                    g[f"{rank}_top1"] += top[:1] == [t]
+                    g[f"{rank}_top1"] += right(1)
             if rank == "species":
-                predicted.append((t, top[0] if top else ""))
+                # macro-F1 by answer key: a credited answer is the truth's class
+                key_t = name_equiv.answer_key(t, answer_key)
+                predicted.append((key_t, key_t if right(1) else
+                                  (name_equiv.answer_key(top[0], answer_key) if top else "")))
     out = {}
     for rank in RANKS:
         out[rank] = {k: {"n": c["n"], "top1": round(c["top1"] / c["n"], 4),
@@ -484,6 +500,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                   for key, c in standard[rank].items() if c["n"]}
            for rank in RANKS}}
     out["groups"] = {kind: summarise_groups(g) for kind, g in groups.items()}
+    out["answer_key"] = answer_key
     if leak is not None:
         out["occurrence_leak_check"] = leak
     if name_scores:
@@ -743,7 +760,8 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             embeddings_root=None, name_scores: bool = False, sets: bool = True,
             per_image: bool = False, into: str | None = None, release=None,
             shared: "SharedSet | None" = None, extra: dict | None = None,
-            public_reference: bool = False, log=print) -> dict:
+            public_reference: bool = False, answer_key: str | None = None,
+            log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
@@ -812,9 +830,10 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             row_extra = {**(extra or {}),
                          **(getattr(fitted[1], "scoreboard_extra", lambda: None)() or {})}
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted,
-                                  name_scores=name_scores, sets=sets, per_image=per_image)
+                                  name_scores=name_scores, sets=sets, per_image=per_image,
+                                  answer_key=answer_key)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted,
-                             sets=False)
+                             sets=False, answer_key=answer_key)
             if into:           # replaced only once its successor is ready to be saved
                 with conn:
                     conn.execute("delete from eval_runs where comparison_id = ? and "
@@ -856,7 +875,11 @@ def calibrate_sets(conn: sqlite3.Connection, comparison_id: str, backbone: str |
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
         ref_b, test_b = with_rows(shared.ref, row_of), with_rows(shared.test, row_of)
         log(f"  {b} / {m}: {len(test_b):,} test records")
-        res = evaluate(vecs, ref_b, test_b, method=m, fitted=fit_method(vecs, ref_b, m, b))
+        # re-scored by the rule the comparison was published with (before the answer key
+        # existed: exact names)
+        rule = json.loads(report_json)["all_photos"].get("answer_key", "exact")
+        res = evaluate(vecs, ref_b, test_b, method=m, fitted=fit_method(vecs, ref_b, m, b),
+                       answer_key=rule)
         if species_top1 is not None and abs(top1(res, "species") - species_top1) > 1e-4:
             raise RuntimeError(f"{b} / {m} scores {top1(res, 'species')} at species now, "
                                f"{species_top1} when published; run mv compare again")

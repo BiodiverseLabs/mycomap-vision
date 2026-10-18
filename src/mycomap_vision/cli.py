@@ -448,7 +448,8 @@ def cmd_compare(conn, args) -> None:
                                   max_test=args.max_test, name_scores=args.name_scores,
                                   sets=not args.no_sets, per_image=args.per_image,
                                   into=args.into, release=rel,
-                                  public_reference=args.reference == "public-trainable")
+                                  public_reference=args.reference == "public-trainable",
+                                  answer_key=args.answer_key)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -1844,6 +1845,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--methods", default="nearest", help="comma-separated: nearest, species-mean")
     p.add_argument("--test-days", type=int, default=28)
     p.add_argument("--max-test", type=int, help="sample this many test records")
+    p.add_argument("--answer-key", choices=("species-rank-2026-10-18", "exact"),
+                   default="species-rank-2026-10-18",
+                   help="how a species answer counts (name_equiv): species rank, one writing, "
+                        "hybrid parents (default), or exact names (v1's published numbers)")
     p.add_argument("--name-scores", action="store_true",
                    help="also score names s.l. and as species complexes (name_equiv.py, beta)")
     p.add_argument("--no-sets", action="store_true",

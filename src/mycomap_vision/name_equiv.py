@@ -23,8 +23,25 @@ the right genus:
 
     genus strict   the same genus;   genus s.l.   genera of one group.
 
+The answer key (Steve, 2026-10-18; V2-REQUIREMENTS 3a), applied the same way to every
+comparator (Vision, iNat CV, expert IDs, published models) and to the truth:
+
+    species rank   a variety, subspecies or form counts as its species ('Amanita muscaria
+                   var. flavivolvata' is 'Amanita muscaria'); the infraspecific name is an
+                   extra suggestion, never the answer key. 'group' / 'complex' names are
+                   not cut: they are fixed at source.
+    one writing    a name's writings are one name: rank words, code padding (IN7 / IN07),
+                   hyphens and spaces in codes, hyphenated epithets (luteo-olivaceum).
+    hybrid codes   a truth 'X sp. 'IN01 x VT01'' is answered right by either parent code.
+
+answer_key gives a name's key; species_credit says whether an answer counts for a truth;
+first_credited finds the first answer in a ranked list that counts (answers sharing a key
+are one answer, so the list is collapsed first). Scorers call these, never their own
+comparison. ANSWER_KEY names this rule in reports; "exact" (the label as written, v1's
+published rule) stays available to reproduce earlier numbers.
+
 The API is small on purpose (other scorers call it): species_match, genus_match,
-genus_group, parts, gender_fold. Steve, 2026-10-09: "we'll have to think about this
+genus_group, parts, gender_fold, answer_key, species_credit, first_credited. Steve, 2026-10-09: "we'll have to think about this
 more, but make a beta"; the stem rule is the part most likely to change (docs/PLAN.md).
 Steve, 2026-10-08: gender endings count as the same name; temporary codes "are just as
 good as names" (about half the records).
@@ -121,12 +138,86 @@ def parts(name: str) -> Parts:
     return Parts(genus, part, epithet and gender_fold(epithet), False, _fold_words(part))
 
 
+ANSWER_KEY = "species-rank-2026-10-18"      # the rule below; "exact" = v1's published rule
+ANSWER_KEYS = (ANSWER_KEY, "exact")
+_RANK_WORD = re.compile(r"\s+(?:var\.?|subsp\.?|ssp\.?|f\.|forma)\s+", re.IGNORECASE)
+_NOT_INFRA = {"group", "complex", "agg.", "s.l.", "s.str.", "sensu", "aff.", "cf.", "nr."}
+_HYBRID = re.compile(r"^(.+?)\s*[- ]x[- ]\s*(.+)$", re.IGNORECASE)
+
+
+@lru_cache(maxsize=None)
+def answer_key(name: str, rule: str = ANSWER_KEY) -> str:
+    """The key a species name is scored by. `rule` "exact": the name as written. The
+    default: provisional codes by their spelling key (names.variant_key); formal names cut
+    to genus + epithet (rank words dropped, a bare trinomial's third word dropped, a
+    hyphen inside an epithet dropped), then spelling-folded. '' for no name."""
+    n = (name or "").strip()
+    if not n or rule == "exact":
+        return n
+    if rule != ANSWER_KEY:
+        raise ValueError(f"unknown answer key {rule!r} (known: {ANSWER_KEYS})")
+    if names.parse_name(n).code:
+        return names.variant_key(n)
+    words = _RANK_WORD.sub(" ", n).split()
+    if (len(words) >= 3 and words[1][:1].islower() and words[1].lower() not in _QUALIFIERS
+            and words[2][:1].islower() and words[2].lower() not in _NOT_INFRA
+            and _EPITHET.match(words[2].lower())):
+        words = words[:2]
+    if len(words) >= 2 and words[1][:1].islower() and _EPITHET.match(words[1].lower()):
+        words[1] = words[1].replace("-", "")
+    return names.variant_key(" ".join(words))
+
+
+def hybrid_parents(name: str) -> tuple[str, ...]:
+    """A hybrid code's two parent codes as names ('Physisporinus sp. 'IN01 x VT01'' ->
+    'Physisporinus sp. 'IN01'', 'Physisporinus sp. 'VT01''), else ()."""
+    p = names.parse_name(name or "")
+    if not p.code:
+        return ()
+    m = _HYBRID.match(p.code.code.strip())
+    if not m:
+        return ()
+    return tuple(f"{p.code.genus} sp. '{x.strip()}'" for x in m.groups())
+
+
+def species_credit(answer: str, truth: str, rule: str = ANSWER_KEY) -> bool:
+    """Does `answer` count as naming the species `truth`? The same function for every
+    comparator: a model, iNat's computer vision, an expert's identification."""
+    if not answer or not truth:
+        return False
+    a = answer_key(answer, rule)
+    if a == answer_key(truth, rule):
+        return True
+    return rule != "exact" and any(a == answer_key(p, rule) for p in hybrid_parents(truth))
+
+
+def collapse(answers, rule: str = ANSWER_KEY) -> list[str]:
+    """A ranked answer list with answers that share a key kept once, at the first place."""
+    seen, out = set(), []
+    for a in answers:
+        k = answer_key(a, rule)
+        if k and k not in seen:
+            seen.add(k)
+            out.append(a)
+    return out
+
+
+def first_credited(answers, truth: str, rule: str = ANSWER_KEY) -> int | None:
+    """The position (0-based) of the first answer that counts for `truth` in the collapsed
+    ranked list (collapse), or None. Top-k is right when this is < k."""
+    for i, a in enumerate(collapse(answers, rule)):
+        if species_credit(a, truth, rule):
+            return i
+    return None
+
+
 def species_match(answer: str, truth: str) -> dict[str, bool]:
     """{"strict", "sl", "complex"} for a species answer against the true name. Each
-    implies the next (strict -> s.l. -> complex)."""
+    implies the next (strict -> s.l. -> complex). Strict is the answer key
+    (species_credit)."""
     if not answer or not truth:
         return {"strict": False, "sl": False, "complex": False}
-    strict = names.variant_key(answer) == names.variant_key(truth)
+    strict = species_credit(answer, truth)
     a, t = parts(answer), parts(truth)
     same_group = bool(a.genus) and genus_group(a.genus) == genus_group(t.genus)
     sl = strict or (same_group and not a.provisional and not t.provisional

@@ -19,11 +19,16 @@ def m(answer, truth):
     ("Exsudoporus frostii", "Exsudoporus sp. 'frostii-IN02'"),
     ("Sebacina sp. 'schweinitzii-IN01'", "Sebacina sp. 'schweinitzii-IN02'"),
     ("Lactarius fallax", "Lactarius sp. 'fallax-PNW03'"),
-    ("Amanita muscaria", "Amanita muscaria subsp. flavivolvata"),
 ])
 def test_a_described_name_and_the_provisional_names_on_its_stem_are_one_complex(answer, truth):
     assert m(answer, truth) == (False, False, True)
     assert m(truth, answer) == (False, False, True)
+
+
+def test_a_species_and_its_subspecies_are_one_species_by_the_answer_key():
+    # Steve, 2026-10-18: count at species rank (was: a complex only).
+    assert m("Amanita muscaria", "Amanita muscaria subsp. flavivolvata") == (True, True, True)
+    assert m("Amanita muscaria subsp. flavivolvata", "Amanita muscaria") == (True, True, True)
 
 
 def test_bare_codes_are_never_a_complex_only_themselves():
