@@ -444,3 +444,37 @@ def test_snapshot_writes_each_records_observation_creation_time_by_record_key(tm
     assert lines[1] == f"inat-42\t42\t{E.read_snapshot(out)[0]['created_at']}"
     assert lines[1].endswith("Z") and m["created_sha256"] == E.sha256_file(created)
     assert "created_file" not in E.build_snapshot(c, ["42"], tmp_path / "y.jsonl.gz", {})
+
+
+# --- H4 comparator: the first ID by an identifier with >= 1,000 IDs (tiers 1+2) --------
+
+def test_h4_comparator_is_the_first_tier_1_or_2_id_before_the_cutoff_at_each_rank():
+    o = obs([ident(4, 101, "2023-01-01"),                  # 500 IDs: not tier 1 or 2
+             ident(3, 10, "2023-02-01"),                   # tier 2, genus only
+             ident(5, 110, "2023-03-01"),                  # validator: never counts
+             ident(3, 101, "2023-04-01"),                  # tier 2 again, now species (wrong)
+             ident(2, 100, "2023-05-01"),                  # tier 1, right, but later
+             ident(6, 100, "2024-08-01")],                 # after the cutoff
+            counts={2: 20000, 3: 5000, 4: 500, 5: 20000, 6: 20000})
+    line = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), {5}, key)
+    fp = line["first_pooled"]
+    assert fp["species"] == {"right": False, "tier": "2"}   # tier 2's later species ID
+    assert fp["genus"] == {"right": True, "tier": "2"}      # its genus ID came first
+    assert fp["tiers"] == "1+2"
+
+
+def test_h4_comparator_has_no_species_on_a_provisional_truth_and_counts_in_the_summary():
+    o = obs([ident(2, 100, "2023-01-01")], counts={2: 20000})
+    prov = E.TruthTaxa(species=None, genus=10, formal_species=False)
+    line = E.score_find(o, E.Cutoff(CUT, "dna_field"), prov, E.TaxonResolver(TAXA), set(), key)
+    assert line["first_pooled"]["species"] is None and line["first_pooled"]["genus"]["right"]
+    right = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), set(), key)
+    s = E.summarise_pooled([line, right], resamples=100)["all"]
+    assert (s["first_species"]["n"], s["first_species"]["right"]) == (1, 1)
+    assert s["coverage_species"] == 1.0 and s["first_genus"]["n"] == 2
+
+
+def test_h4_comparator_never_takes_an_id_made_after_the_cutoff():
+    o = obs([ident(2, 100, "2024-08-01")], counts={2: 20000})
+    line = E.score_find(o, E.Cutoff(CUT, "dna_field"), TRUTH, E.TaxonResolver(TAXA), set(), key)
+    assert line["first_pooled"]["species"] is None and line["first_pooled"]["genus"] is None

@@ -620,7 +620,46 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
                           "genus_right": (ct_ge == truth.genus) if (
                               ct_ge is not None and truth.genus) else None},
             "observer_named_species_before_cutoff": observer_named_species,
-            "ids_after_cutoff_by_others": after}
+            "ids_after_cutoff_by_others": after,
+            "first_pooled": first_pooled(ids)}
+
+
+# H4 (Steve, 18 Oct): the comparator is the FIRST identification before the cutoff by an
+# identifier with >= 1,000 iNat identifications (tiers 1 and 2 pooled), at each rank.
+POOLED_TIERS = ("1", "2")
+
+
+def first_pooled(ids: list[dict]) -> dict:
+    """Per rank, the earliest standing identifier ID before the cutoff from tiers 1+2 that
+    scores at that rank: {'species': {'right', 'tier'} or None, 'genus': ...}. Species only
+    exists on a formally named truth (species_right is None otherwise)."""
+    mine = sorted((i for i in ids if i["role"] == "identifier" and i["before_cutoff"]
+                   and i["tier"] in POOLED_TIERS), key=lambda i: i["made_at"] or "")
+    out = {"tiers": "+".join(POOLED_TIERS)}
+    for rank in ("species", "genus"):
+        first = next((i for i in mine if i[f"{rank}_right"] is not None), None)
+        out[rank] = {"right": first[f"{rank}_right"], "tier": first["tier"]} if first else None
+    return out
+
+
+def summarise_pooled(lines: list[dict], resamples: int = 10_000, seed: int = 20261013) -> dict:
+    """H4's comparator on its own: the first tiers-1+2 ID's accuracy at species (formal
+    truths that have one) and genus, with coverage and observer-clustered intervals; `all`
+    and `strict` (finds the observer had not named at species before the cutoff)."""
+    def block(rows):
+        formal = [r for r in rows if r["truth_species_formal"]]
+        out = {"finds": len(rows), "formal_species_finds": len(formal)}
+        for rank, base in (("species", formal), ("genus", rows)):
+            got = [((r.get("observer") or r["observation_id"]),
+                    int(r["first_pooled"][rank]["right"]), 1)
+                   for r in rows if (r.get("first_pooled") or {}).get(rank)]
+            out[f"first_{rank}"] = clustered_rate(got, resamples, seed)
+            out[f"coverage_{rank}"] = round(len(got) / len(base), 4) if base else None
+        return out
+    ok = [r for r in lines if r["status"] == "ok"]
+    strict = [r for r in ok if not r.get("observer_named_species_before_cutoff")]
+    return {"tiers": "+".join(POOLED_TIERS), "view": "first", "all": block(ok),
+            "strict": block(strict)}
 
 
 def summarise(lines: list[dict], tier: str = "1", count_push_accounts: bool = False,
@@ -976,6 +1015,7 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                "validator_lists": bool(validators_csv), "our_dates": bool(ours_csv),
                "push_accounts_excluded": len(push_accounts),
                "tier1": summarise(lines, "1"), "tier2": summarise(lines, "2"),
+               "pooled_first": summarise_pooled(lines),
                "slices": {t: slices(lines, t) for t in ("1", "2")},
                "sensitivity": {
                    "push_account_counted_where_not_validator": {
