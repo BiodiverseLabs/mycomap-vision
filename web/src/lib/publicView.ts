@@ -182,7 +182,7 @@ export function releaseNote(b: { backbone: string; embedded_photos: number;
                                  trained_through?: string | null }): string {
   const parts = [`${publicModelName(b.backbone)}.`];
   if (b.trained_through) {
-    parts.push(`Trained on DNA-verified records validated up to ${longDate(b.trained_through)}.`);
+    parts.push(`Names learned from DNA-verified records validated up to ${longDate(b.trained_through)}.`);
   }
   parts.push(`Compares your photos with ${b.embedded_photos.toLocaleString("en-US")} reference photos.`);
   return parts.join(" ");

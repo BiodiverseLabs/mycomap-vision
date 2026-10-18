@@ -1,7 +1,8 @@
 # MycoMap Vision plan
 
-Goal: a public fungal identifier that uses every photo of a record, is trained
-only on DNA-validated MycoMap records, and gives a prediction and confidence at
+Goal: a public fungal identifier that uses every photo of a record, takes its names
+only from DNA-validated MycoMap records (fine-tuning labels and reference specimens alike;
+the base image model's pretraining is not DNA-checked), and gives a prediction and confidence at
 every rank, with advice on how to improve an ID. It runs as its own platform;
 mycomap.org links to it and calls its API when needed.
 

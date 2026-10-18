@@ -15,7 +15,11 @@ earlier experiment is re-run on v1 afterwards (section 6).
   cutoff (the newest 8 weeks are `val`, Steve's v1 default); `val` = after it. The 13,145
   held-out development records are ordinary records (PLAN G7). `v1-test` = Steve's new records,
   validated after the cut, frozen as their own release, never trained on.
-- **Training**: the fine-tune learns from `train` only. `val` is never trained on: it is where
+- **Training**: the fine-tune learns from `train` only. What is DNA-backed is precise: the
+  fine-tuning labels and every reference specimen a photo is compared with are records named by
+  DNA sequencing. The base model it starts from was pretrained elsewhere on image collections
+  whose names are not DNA-confirmed; the fine-tune adapts it, it does not replace that
+  pretraining. `val` is never trained on: it is where
   the model is scored, calibrated (per-rank temperatures, likely sets) and sanity-checked, and
   where the gate and place prior are re-tuned. `val` records are still specimens in the served
   reference index (`reference_records()` = train + val).
@@ -49,10 +53,14 @@ mv standard-summary --comparison <id>
 - `bioclip-2` (frozen) on the same release is the backbone-screen row of the re-run (section
   6, item 2), not a comparison with the served model.
 - `ft-head` scores the fine-tune's own classifier (research only; never served unless adopted).
-- `nearest+mean+place` needs `data/occurrence/inat-fungi-na.npz` (md5 `a599fb51…`). Its val
-  numbers count each record's own iNat occurrence in the store's far-penalty counts: a small
-  inflation, stated in the entry (the prior owner re-tunes it on v1 with its leave-one-out
-  index, section 6, item 6).
+- `nearest+mean+place` needs `data/occurrence/inat-fungi-na.npz` (md5 `a599fb51…`). When this
+  was declared, its val numbers counted each record's own iNat occurrence in the store's
+  far-penalty counts. **Fixed** in ec68bff (merged to main as 4a72025, 2026-10-14): the place
+  prior now leaves a find's own iNat observation out of the out-of-range counts. On v1 val the
+  fix changes that term for 3 of the 6,689 finds whose own observation is in the store and no
+  top-1 answer, and the refit comparison 20261014-012823-9d963d is identical to the official
+  comparison 20261013-104759-9d963d. The live server was never affected (a serving release
+  ships no leave-one-out index); only laptop evaluations were.
 
 **Format** (Steve, 2026-10-09; `mv standard-summary`), every table with its n:
 1. Per model and method, **photos only** and **photos + place and date** in separate groups:

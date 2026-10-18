@@ -2,8 +2,10 @@
 
 [![CI](https://github.com/BiodiverseLabs/mycomap-vision/actions/workflows/ci.yml/badge.svg)](https://github.com/BiodiverseLabs/mycomap-vision/actions/workflows/ci.yml)
 
-Photo identification for North American fungi, built only on records whose names
-were confirmed by DNA sequencing. Give it one or more photos of a find and it
+Photo identification for North American fungi whose names come only from records
+confirmed by DNA sequencing: the model is fine-tuned on those records' labels, and every
+specimen it compares a photo with is one of them. (The general image model it starts
+from was pretrained elsewhere, on names that were not DNA-checked.) Give it one or more photos of a find and it
 suggests a name at every rank (species, genus, family) with a calibrated
 confidence, shows the DNA-verified specimens that look most alike, and says what
 photo would help (for example, the gills).
