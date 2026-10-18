@@ -1133,7 +1133,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "per_photo": per_photo,
         "gate": gate_report,
         "calibration": calibration_report(finds, calib, outcomes,
-                                          config.get("calibration_metrics", {}), reps, seed),
+                                          config.get("calibration_metrics", {}), reps, seed,
+                                          config["comparators"]),
         "errors": errors_report(finds, top1, {**config.get("errors", {}), **(
             {"deadly": config["deadly_taxa"]} if config.get("deadly_taxa")
             and not (config.get("errors") or {}).get("deadly") else {})}, base, scored_rel,
@@ -1238,11 +1239,24 @@ def errors_report(finds, top1: dict, cfg: dict, base, scored_rel, keys: dict | N
 
 
 def calibration_report(finds, calib: dict, outcomes: dict, cfg: dict, reps: int,
-                       seed: int) -> dict:
-    """E13 and E11 for every comparator with confidences (paper_calibration), primary scope."""
+                       seed: int, comparators: list | None = None) -> dict:
+    """E13 and E11 for every comparator with confidences (paper_calibration), primary scope.
+    A comparator's own calibration block may give the likely-set coverage its floor was fit
+    for ({rank: {temperature, floor, target}}): that target is printed beside the coverage
+    achieved, in place of the config-wide calibration_metrics.list_target."""
     from . import paper_calibration as pc
     base = pt.in_scope(finds)
-    return {cid: {rank: pc.summarise(base, cal, outcomes[cid], rank, cfg, reps, seed,
+    own = {c["id"]: {rank: v["target"] for rank, v in (c.get("calibration") or {}).items()
+                     if isinstance(v, dict) and v.get("target") is not None}
+           for c in comparators or []}
+
+    def cfg_for(cid):
+        if not own.get(cid):
+            return cfg
+        merged = dict(cfg.get("list_target") or {}) if isinstance(cfg.get("list_target"),
+                                                                  dict) else {}
+        return {**cfg, "list_target": {**merged, **own[cid]}}
+    return {cid: {rank: pc.summarise(base, cal, outcomes[cid], rank, cfg_for(cid), reps, seed,
                                      lambda f: pt.band(f.depth))
                   for rank in ("species", "genus")            # the ranks with outcome cells
                   if any(rank in (c or {}) for c in cal.values())}
