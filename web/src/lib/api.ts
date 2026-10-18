@@ -602,6 +602,9 @@ export interface ReviewPhoto {
   in_tab: boolean;
   item_id: number | null;
   flags: PhotoFlag[];
+  /** The reason a flagged photo's exclusion starts at (its flag for the open tab, else its
+   *  strongest); null for an unflagged photo. */
+  suggested_reason: string | null;
   status: FeedbackStatus | null;
   decision: { decision: string; reason: string | null; by: string | null } | null;
 }

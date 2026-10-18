@@ -1,18 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ReviewPhoto, ReviewRecord } from "./api";
-import { bulkExcludeFlagged, bulkKeepAll, chosenCount, defaultReason, flagLabel, initialChoices, keyAction,
-         nextPageOffset, nextUnsaved, offsetWhenPageDone, openOnLabel, outlineOf, photoLabels, placeholderText,
-         savedSummary, saveBody, sortedPhotos, step, tileImage, tileKind, toggleChoice, type KeyState } from "./photoReview";
+import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReason, decisionsOf, flagLabel,
+         initialChoices, keyAction, missingReason, nextPageOffset, nextUnsaved, offsetWhenPageDone, openOnLabel,
+         outlineOf, photoLabels, placeholderText, readPreselectMode, savedLine, saveBody, setReason, sortedPhotos,
+         step, suggestedCount, tileImage, tileKind, toggleChoice, withMode, writePreselectMode, type KeyState,
+         type PhotoChoices } from "./photoReview";
 
 const photo = (over: Partial<ReviewPhoto> = {}): ReviewPhoto => ({
   photo_key: "inat:1", position: 1, license_class: "cc", shown: "public",
   thumb: "https://img.example/1/medium.jpg", full: "https://img.example/1/large.jpg",
-  flagged: false, in_tab: false, item_id: null, flags: [], status: null, decision: null, ...over,
+  flagged: false, in_tab: false, item_id: null, flags: [], suggested_reason: null, status: null, decision: null,
+  ...over,
 });
 
 const micro = { tab: "micrograph", kind: "micrograph probe", p: 0.6234, strength: 0.6234 };
 const habitat = { tab: "habitat", kind: "view habitat", p: 0.3, strength: 0.3 };
+const slip = { tab: "slip", kind: "view slip", p: 0.4, strength: 0.4 };
 const gate = { tab: "gate", kind: "not-a-fungus gate", p: 0.0123, strength: 0.9877 };
 
 /** Record 10: photo 1 flagged micrograph (open), 2 unflagged, 3 flagged habitat only,
@@ -21,19 +25,34 @@ const record = (over: Partial<ReviewRecord> = {}): ReviewRecord => ({
   record_key: "10", label: "Mycena", link: "https://www.inaturalist.org/observations/10", tab: "micrograph",
   strongest: 0.62, flagged_in_tab: 2,
   photos: [
-    photo({ photo_key: "inat:3", position: 3, flagged: true, in_tab: false, item_id: 3, flags: [habitat], status: "open" }),
-    photo({ photo_key: "inat:1", position: 1, flagged: true, in_tab: true, item_id: 1, flags: [micro], status: "open" }),
-    photo({ photo_key: "inat:4", position: 4, flagged: true, in_tab: true, item_id: 4, flags: [micro], status: "decided",
+    photo({ photo_key: "inat:3", position: 3, flagged: true, in_tab: false, item_id: 3, flags: [habitat],
+            suggested_reason: "habitat", status: "open" }),
+    photo({ photo_key: "inat:1", position: 1, flagged: true, in_tab: true, item_id: 1, flags: [micro],
+            suggested_reason: "micrograph", status: "open" }),
+    photo({ photo_key: "inat:4", position: 4, flagged: true, in_tab: true, item_id: 4, flags: [micro],
+            suggested_reason: "micrograph", status: "decided",
             decision: { decision: "exclude_photo", reason: "micrograph", by: "S" } }),
     photo({ photo_key: "inat:2", position: 2 }),
   ],
   ...over,
 });
 
-test("an exclusion's reason starts as the tab's kind, 'other' for the gate and All", () => {
-  assert.deepEqual(["micrograph", "slip", "habitat", "people", "gate", "other", "all"].map(defaultReason),
-                   ["micrograph", "slip", "habitat", "people", "other", "other", "other"]);
+/** Steve's record (2026-10-18), as the All tab sends it: photo 5 a habitat shot, 6 and 7
+ *  field slips, 1 the specimen (unflagged). */
+const mixed = (): ReviewRecord => record({
+  record_key: "20", tab: "all", flagged_in_tab: 3,
+  photos: [
+    photo({ photo_key: "p1", position: 1 }),
+    photo({ photo_key: "p5", position: 5, flagged: true, in_tab: true, item_id: 5, flags: [habitat],
+            suggested_reason: "habitat", status: "open" }),
+    photo({ photo_key: "p6", position: 6, flagged: true, in_tab: true, item_id: 6, flags: [slip],
+            suggested_reason: "slip", status: "open" }),
+    photo({ photo_key: "p7", position: 7, flagged: true, in_tab: true, item_id: 7, flags: [slip, gate],
+            suggested_reason: "not_fungus", status: "open" }),
+  ],
 });
+
+const REASONS = ["micrograph", "slip", "habitat", "people", "not_fungus", "other"];
 
 test("a record's photos show in position order", () => {
   assert.deepEqual(sortedPhotos(record()).map((p) => p.photo_key), ["inat:1", "inat:2", "inat:3", "inat:4"]);
@@ -41,61 +60,179 @@ test("a record's photos show in position order", () => {
   assert.deepEqual(sortedPhotos(unplaced).map((p) => p.photo_key), ["y", "x"]);
 });
 
-test("nothing is preselected except a decided photo, which starts with its stored decision", () => {
-  assert.deepEqual(initialChoices(record()), { "inat:4": "exclude" });
-  const kept = record({ photos: [photo({ status: "decided", flagged: true,
+test("by default nothing is preselected except a decided photo, which starts with its stored decision and reason", () => {
+  assert.deepEqual(initialChoices(record(), "micrograph"),
+                   { "inat:4": { decision: "exclude", reason: "micrograph" } });
+  assert.deepEqual(initialChoices(mixed(), "all", "none"), {});
+  const kept = record({ photos: [photo({ status: "decided", flagged: true, in_tab: true, suggested_reason: "slip",
                                          decision: { decision: "keep_photo", reason: null, by: "S" } })] });
-  assert.deepEqual(initialChoices(kept), { "inat:1": "keep" });
+  assert.deepEqual(initialChoices(kept, "all"), { "inat:1": { decision: "keep", reason: null } });
   // An open photo never starts chosen, even with an earlier decision on file.
-  const reopened = record({ photos: [photo({ status: "open", flagged: true,
+  const reopened = record({ photos: [photo({ status: "open", flagged: true, in_tab: true,
                                              decision: { decision: "exclude_photo", reason: "slip", by: "S" } })] });
-  assert.deepEqual(initialChoices(reopened), {});
+  assert.deepEqual(initialChoices(reopened, "all"), {});
+});
+
+test("in suggest mode each open photo flagged in the tab starts as a suggested Exclude with its own reason", () => {
+  assert.deepEqual(initialChoices(mixed(), "all", "suggest"), {
+    p5: { decision: "exclude", reason: "habitat", suggested: true },
+    p6: { decision: "exclude", reason: "slip", suggested: true },
+    p7: { decision: "exclude", reason: "not_fungus", suggested: true },
+  });
+  // Flagged only for another tab (3), unflagged (2): nothing. Decided (4): its stored decision.
+  assert.deepEqual(initialChoices(record(), "micrograph", "suggest"), {
+    "inat:1": { decision: "exclude", reason: "micrograph", suggested: true },
+    "inat:4": { decision: "exclude", reason: "micrograph" },
+  });
+  const keptBefore = record({ photos: [photo({ status: "decided", flagged: true, in_tab: true, suggested_reason: "slip",
+                                               decision: { decision: "keep_photo", reason: null, by: "S" } })] });
+  assert.deepEqual(initialChoices(keptBefore, "slip", "suggest"), { "inat:1": { decision: "keep", reason: null } });
+  assert.equal(suggestedCount(mixed(), initialChoices(mixed(), "all", "suggest")), 3);
+});
+
+test("suggesting is the default; a viewer who turns it off is remembered", () => {
+  const box = new Map<string, string>();
+  const store = { getItem: (k: string) => box.get(k) ?? null, setItem: (k: string, v: string) => { box.set(k, v); } };
+  assert.equal(readPreselectMode(() => store), "suggest");          // nothing stored: the default
+  writePreselectMode(() => store, "none");
+  assert.equal(readPreselectMode(() => store), "none");
+  writePreselectMode(() => store, "suggest");
+  assert.equal(readPreselectMode(() => store), "suggest");
+  const broken = () => { throw new Error("SecurityError"); };
+  assert.equal(readPreselectMode(broken), "suggest");
+  assert.doesNotThrow(() => writePreselectMode(broken, "none"));
+  assert.equal(readPreselectMode(() => null), "suggest");
+});
+
+test("switching the mode adds or drops only the suggestions, never the reviewer's own choices", () => {
+  const mine: PhotoChoices = { p1: { decision: "keep", reason: null }, p6: { decision: "keep", reason: "slip" } };
+  const on = withMode(mixed(), "all", "suggest", mine);
+  assert.deepEqual(on, { ...mine, p5: { decision: "exclude", reason: "habitat", suggested: true },
+                         p7: { decision: "exclude", reason: "not_fungus", suggested: true } });
+  assert.deepEqual(withMode(mixed(), "all", "none", on), mine);
+});
+
+test("changing the tab keeps the reasons the reviewer picked", () => {
+  // Picked "slip" for photo 1 under the micrograph tab, then opened the All tab.
+  const picked = { "inat:1": "slip" };
+  const inAll = record({ tab: "all", photos: record().photos.map((p) => ({ ...p, in_tab: p.flagged })) });
+  assert.equal(initialChoices(inAll, "all", "suggest", picked)["inat:1"].reason, "slip");
+  const one = inAll.photos.find((p) => p.photo_key === "inat:1")!;
+  assert.equal(chooseDecision({}, one, "exclude", picked)["inat:1"].reason, "slip");
+  assert.equal(bulkExcludeFlagged(inAll, "all", {}, picked)["inat:1"].reason, "slip");
+});
+
+test("on a suggestion Keep is one click and Exclude confirms it; both make it a choice", () => {
+  const start = initialChoices(mixed(), "all", "suggest");
+  const p6 = mixed().photos[2];
+  assert.deepEqual(chooseDecision(start, p6, "keep").p6, { decision: "keep", reason: "slip" });
+  assert.deepEqual(chooseDecision(start, p6, "exclude").p6, { decision: "exclude", reason: "slip" });
+  // Once confirmed, a second click on Exclude clears it, as for any choice.
+  assert.equal(chooseDecision(chooseDecision(start, p6, "exclude"), p6, "exclude").p6, undefined);
 });
 
 test("one click picks Keep or Exclude, a second click on the same one clears it", () => {
-  let c = toggleChoice({}, "inat:1", "keep");
-  assert.deepEqual(c, { "inat:1": "keep" });
-  c = toggleChoice(c, "inat:1", "exclude");
-  assert.deepEqual(c, { "inat:1": "exclude" });
-  assert.deepEqual(toggleChoice(c, "inat:1", "exclude"), {});
+  const p5 = mixed().photos[1];
+  let c = chooseDecision({}, p5, "keep");
+  assert.deepEqual(c, { p5: { decision: "keep", reason: null } });
+  c = chooseDecision(c, p5, "exclude");
+  assert.deepEqual(c, { p5: { decision: "exclude", reason: "habitat" } });
+  assert.deepEqual(chooseDecision(c, p5, "exclude"), {});
+  // The label review's plain toggle is unchanged.
+  assert.deepEqual(toggleChoice(toggleChoice({}, "a", "keep"), "a", "keep"), {});
+});
+
+test("an unflagged photo starts with no reason when excluded, and gets the one the reviewer picks", () => {
+  const p1 = mixed().photos[0];
+  let c = chooseDecision({}, p1, "exclude");
+  assert.deepEqual(c.p1, { decision: "exclude", reason: null });
+  c = setReason(c, "p1", "people");
+  assert.deepEqual(c.p1, { decision: "exclude", reason: "people" });
+  // Kept and excluded again, it comes back with that reason.
+  assert.equal(chooseDecision(chooseDecision(c, p1, "keep"), p1, "exclude").p1.reason, "people");
+  // A kept or unchosen photo has no reason to pick.
+  assert.deepEqual(setReason({}, "p1", "slip"), {});
+});
+
+test("R steps through the reasons of an excluded photo, and picking a reason confirms a suggestion", () => {
+  const start = initialChoices(mixed(), "all", "suggest");
+  assert.deepEqual(cycleReason(start, "p6", REASONS).p6, { decision: "exclude", reason: "habitat" });
+  assert.equal(cycleReason(start, "p7", REASONS).p7.reason, "other");
+  assert.equal(cycleReason({ p7: { decision: "exclude", reason: "other" } }, "p7", REASONS).p7.reason, "micrograph");
+  assert.equal(cycleReason({ p1: { decision: "exclude", reason: null } }, "p1", REASONS).p1.reason, "micrograph");
+  const kept: PhotoChoices = { p1: { decision: "keep", reason: null } };
+  assert.equal(cycleReason(kept, "p1", REASONS), kept);
+  assert.deepEqual(setReason(start, "p5", "people").p5, { decision: "exclude", reason: "people" });
 });
 
 test("Keep all keeps every photo, flagged or not", () => {
-  assert.deepEqual(bulkKeepAll(record()), { "inat:1": "keep", "inat:2": "keep", "inat:3": "keep", "inat:4": "keep" });
+  const all = bulkKeepAll(record());
+  assert.deepEqual(Object.keys(all).sort(), ["inat:1", "inat:2", "inat:3", "inat:4"]);
+  assert.ok(Object.values(all).every((c) => c.decision === "keep" && !c.suggested));
 });
 
-test("Exclude all flagged leaves out the tab's flagged photos, every flagged one in All", () => {
-  assert.deepEqual(bulkExcludeFlagged(record(), "micrograph", { "inat:2": "keep" }),
-                   { "inat:1": "exclude", "inat:4": "exclude", "inat:2": "keep" });
-  assert.deepEqual(bulkExcludeFlagged(record(), "all"),
-                   { "inat:1": "exclude", "inat:3": "exclude", "inat:4": "exclude" });
+test("Exclude all flagged leaves out the tab's flagged photos, each with its own suggested reason", () => {
+  assert.deepEqual(bulkExcludeFlagged(mixed(), "all", { p1: { decision: "keep", reason: null } }), {
+    p1: { decision: "keep", reason: null },
+    p5: { decision: "exclude", reason: "habitat" },
+    p6: { decision: "exclude", reason: "slip" },
+    p7: { decision: "exclude", reason: "not_fungus" },
+  });
+  const got = bulkExcludeFlagged(record(), "micrograph", { "inat:2": { decision: "keep", reason: null } });
+  assert.deepEqual(Object.keys(got).sort(), ["inat:1", "inat:2", "inat:4"]);
+  assert.deepEqual(Object.keys(bulkExcludeFlagged(record(), "all")).sort(), ["inat:1", "inat:3", "inat:4"]);
+  // A reason already on a photo stays; suggestions become choices.
+  const bulk = bulkExcludeFlagged(mixed(), "all", { p6: { decision: "exclude", reason: "people", suggested: true } });
+  assert.deepEqual(bulk.p6, { decision: "exclude", reason: "people" });
 });
 
-test("saving sends only the chosen photos, and each exclusion carries the reason", () => {
-  const got = saveBody(record(), { "inat:3": "keep", "inat:1": "exclude" }, "micrograph", "  scope shots ");
-  assert.deepEqual(got, { body: { photos: [
-    { photo_key: "inat:1", decision: "exclude", reason: "micrograph" },
-    { photo_key: "inat:3", decision: "keep" }], note: "scope shots" } });
-  assert.deepEqual(saveBody(record(), { "inat:2": "keep" }, ""), { body: { photos: [
-    { photo_key: "inat:2", decision: "keep" }] } });
+test("saving sends only the chosen photos, each exclusion with its own reason", () => {
+  const choices: PhotoChoices = {
+    p1: { decision: "keep", reason: null },
+    p5: { decision: "exclude", reason: "habitat" },
+    p6: { decision: "exclude", reason: "slip", suggested: true },
+    p7: { decision: "keep", reason: "not_fungus" },
+  };
+  assert.deepEqual(saveBody(mixed(), choices, "  slips and a scene ", REASONS), { body: { photos: [
+    { photo_key: "p1", decision: "keep" },
+    { photo_key: "p5", decision: "exclude", reason: "habitat" },
+    { photo_key: "p6", decision: "exclude", reason: "slip" },
+    { photo_key: "p7", decision: "keep" }], note: "slips and a scene" } });
+  // Suggest mode: saving straight away sends every suggested exclusion.
+  const got = saveBody(mixed(), initialChoices(mixed(), "all", "suggest"), undefined, REASONS);
+  assert.ok("body" in got);
+  assert.deepEqual(got.body.photos.map((p) => [p.photo_key, p.reason]),
+                   [["p5", "habitat"], ["p6", "slip"], ["p7", "not_fungus"]]);
 });
 
-test("saving refuses a record with nothing chosen, and an exclusion without a known reason", () => {
-  assert.deepEqual(saveBody(record(), {}, "micrograph"), { error: "Keep or exclude at least one photo first." });
-  assert.ok("error" in saveBody(record(), { "inat:1": "exclude" }, " "));
-  assert.ok("error" in saveBody(record(), { "inat:1": "exclude" }, "nope", undefined, ["micrograph", "other"]));
-  assert.ok("body" in saveBody(record(), { "inat:1": "exclude" }, "other", undefined, ["micrograph", "other"]));
+test("saving refuses an exclusion without a reason, naming the photo, and nothing chosen", () => {
+  assert.deepEqual(saveBody(record(), {}), { error: "Keep or exclude at least one photo first." });
+  const noReason: PhotoChoices = { p5: { decision: "exclude", reason: "habitat" }, p1: { decision: "exclude", reason: null } };
+  assert.deepEqual(saveBody(mixed(), noReason), { error: "Pick why photo 1 is left out." });
+  assert.equal(missingReason(mixed(), noReason)?.photo_key, "p1");
+  assert.equal(missingReason(mixed(), { ...noReason, p1: { decision: "exclude", reason: " " } })?.photo_key, "p1");
+  assert.equal(missingReason(mixed(), { p5: { decision: "exclude", reason: "habitat" } }), null);
+  assert.deepEqual(saveBody(mixed(), { p6: { decision: "exclude", reason: "nope" } }, undefined, REASONS),
+                   { error: "Pick a listed reason for photo 6." });
   // A choice for a photo that is not the record's is never sent.
-  assert.ok("error" in saveBody(record(), { "inat:99": "keep" }, "other"));
+  assert.ok("error" in saveBody(record(), { "inat:99": { decision: "keep", reason: null } }));
 });
 
-test("Save counts the chosen photos, and a saved card says what was kept and left out", () => {
+test("Save counts the chosen photos, and a saved card says how many were left out as suggested", () => {
   assert.equal(chosenCount(record(), {}), 0);
-  assert.equal(chosenCount(record(), initialChoices(record())), 1);
-  assert.equal(savedSummary({ photos: [{ photo_key: "a", decision: "keep" },
-                                       { photo_key: "b", decision: "exclude", reason: "slip" },
-                                       { photo_key: "c", decision: "exclude", reason: "slip" }] }),
-               "Saved: 1 kept, 2 left out");
+  assert.equal(chosenCount(record(), initialChoices(record(), "micrograph")), 1);
+  const choices: PhotoChoices = {
+    a: { decision: "exclude", reason: "slip", suggested: true },
+    b: { decision: "exclude", reason: "slip" },
+    c: { decision: "keep", reason: null }, d: { decision: "keep", reason: null }, e: { decision: "keep", reason: null },
+  };
+  const body = { photos: [{ photo_key: "a", decision: "exclude" as const, reason: "slip" },
+                          { photo_key: "b", decision: "exclude" as const, reason: "slip" },
+                          { photo_key: "c", decision: "keep" as const }, { photo_key: "d", decision: "keep" as const },
+                          { photo_key: "e", decision: "keep" as const }] };
+  assert.equal(savedLine(body, choices), "Saved: 2 left out (1 as suggested), 3 kept");
+  assert.equal(savedLine(body, { ...choices, a: { decision: "exclude", reason: "slip" } }), "Saved: 2 left out, 3 kept");
+  assert.deepEqual(decisionsOf(choices), { a: "exclude", b: "exclude", c: "keep", d: "keep", e: "keep" });
 });
 
 test("flags read as the probe or view and p to two decimals; the gate in plain words", () => {
@@ -142,7 +279,7 @@ test("the record link is named for its site", () => {
 
 const list: KeyState = { typing: false, lightbox: false };
 
-test("on the list: j/k move between records, arrows between photos, Shift+K keeps, x excludes", () => {
+test("on the list: j/k move between records, arrows between photos, Shift+K keeps, x excludes, r cycles the reason", () => {
   assert.deepEqual(keyAction({ key: "j" }, list), { type: "record", step: 1 });
   assert.deepEqual(keyAction({ key: "k" }, list), { type: "record", step: -1 });
   assert.deepEqual(keyAction({ key: "ArrowRight" }, list), { type: "photo", step: 1 });
@@ -150,6 +287,8 @@ test("on the list: j/k move between records, arrows between photos, Shift+K keep
   assert.deepEqual(keyAction({ key: "K" }, list), { type: "choose", choice: "keep" });
   assert.deepEqual(keyAction({ key: "x" }, list), { type: "choose", choice: "exclude" });
   assert.deepEqual(keyAction({ key: "X" }, list), { type: "choose", choice: "exclude" });
+  assert.deepEqual(keyAction({ key: "r" }, list), { type: "reason" });
+  assert.deepEqual(keyAction({ key: "R" }, list), { type: "reason" });
   assert.deepEqual(keyAction({ key: "a" }, list), { type: "keepAll" });
   assert.deepEqual(keyAction({ key: "F" }, list), { type: "excludeFlagged" });
   assert.deepEqual(keyAction({ key: "s" }, list), { type: "save" });
@@ -168,7 +307,7 @@ test("keys do nothing while typing, with a modifier, or Enter on a focused butto
   assert.deepEqual(keyAction({ key: "Escape" }, { ...list, help: true }), { type: "help" });
 });
 
-test("in the photo viewer: arrows move, K or k keeps, X excludes, Esc closes, nothing else", () => {
+test("in the photo viewer: arrows move, K or k keeps, X excludes, R cycles the reason, Esc closes, nothing else", () => {
   const lb: KeyState = { typing: false, lightbox: true };
   assert.deepEqual(keyAction({ key: "Escape" }, lb), { type: "close" });
   assert.deepEqual(keyAction({ key: "ArrowLeft" }, lb), { type: "photo", step: -1 });
@@ -176,6 +315,7 @@ test("in the photo viewer: arrows move, K or k keeps, X excludes, Esc closes, no
   assert.deepEqual(keyAction({ key: "k" }, lb), { type: "choose", choice: "keep" });
   assert.deepEqual(keyAction({ key: "K" }, lb), { type: "choose", choice: "keep" });
   assert.deepEqual(keyAction({ key: "x" }, lb), { type: "choose", choice: "exclude" });
+  assert.deepEqual(keyAction({ key: "R" }, lb), { type: "reason" });
   assert.equal(keyAction({ key: "j" }, lb), null);
   assert.equal(keyAction({ key: "s" }, lb), null);
 });

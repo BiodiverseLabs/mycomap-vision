@@ -203,3 +203,33 @@ def test_saving_a_record_decides_each_photo_and_feeds_the_nightly_exclusions(con
     as_user(c, "member-1")
     assert c.post(url, json={"photos": [{"photo_key": "inat:1000", "decision": "keep"}]}
                   ).status_code == 404
+
+
+# --- one reason per photo, starting at its flag (Steve, 2026-10-18) ---------------------------
+
+def test_each_flagged_photo_suggests_the_reason_of_its_own_flag():
+    slip = pr.parse_flags("R6 view slip p=0.40")
+    habitat = pr.parse_flags("R6 view habitat p=0.30")
+    both = pr.parse_flags("R6 micrograph probe p=0.55; gate not_fungus p(fungus)=0.01")
+    assert pr.suggested_reason(slip) == "slip"
+    assert pr.suggested_reason(habitat) == "habitat"
+    assert pr.suggested_reason(both) == "not_fungus"                  # strongest flag: 0.99
+    assert pr.suggested_reason(both, "micrograph") == "micrograph"   # the open tab's own flag
+    assert pr.suggested_reason(pr.parse_flags("R6 view dried p=0.05")) == "other"
+    assert pr.suggested_reason([]) is None
+    assert set(pr.REASON_OF_TAB) == set(pr.TAB_CODES)
+    assert set(pr.REASON_OF_TAB.values()) <= set(pr.REASON_CODES)
+
+
+def test_photos_of_one_record_are_left_out_for_different_reasons(conn, tmp_path):
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    card = c.get("/api/feedback/photo-review").json()["records"][0]
+    assert {p["photo_key"]: p["suggested_reason"] for p in card["photos"]} == {
+        "inat:1000": "micrograph", "inat:1100": "habitat"}
+    r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+        {"photo_key": "inat:1000", "decision": "exclude", "reason": "micrograph"},
+        {"photo_key": "inat:1100", "decision": "exclude", "reason": "not_fungus"}]})
+    assert r.status_code == 200
+    reasons = {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")}
+    assert reasons == {"inat:1000": "micrograph", "inat:1100": "not_fungus"}
