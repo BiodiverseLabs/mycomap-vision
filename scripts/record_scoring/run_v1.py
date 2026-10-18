@@ -176,26 +176,30 @@ def sha256_of(path) -> str:
 
 # --- report ---------------------------------------------------------------------------------
 
-def finds_of(rel):
+def finds_of(rel, rule: str | None = None):
     """Per val find: truth, observer, former held-out, name kind, and the true species'
-    reference depth in train (records and photos)."""
+    reference depth in train, in records and in photos. Depth is by the answer key
+    (name_equiv.ReferenceDepth, PLAN rule 7): the train records whose label shares the
+    truth's key, so a species and its varieties are pooled; `rule` "exact" counts the
+    name as written."""
+    from mycomap_vision import name_equiv
+    rule = rule or DECIDING_KEY
     train = rel.records("train")
     photos = Counter()
     for (key,) in rel.db.execute("select record_key from photos where included = 1"):
         photos[key] += 1
-    rec_depth, photo_depth = Counter(), Counter()
-    for r in train:
-        if r["species"]:
-            rec_depth[r["species"]] += 1
-            photo_depth[r["species"]] += photos[r["record_key"]]
+    labelled = [r for r in train if r["species"]]
+    rec_depth = name_equiv.ReferenceDepth((r["species"] for r in labelled), rule)
+    photo_depth = name_equiv.ReferenceDepth(((r["species"], photos[r["record_key"]])
+                                             for r in labelled), rule)
     out = {}
     for r in rel.records("val"):
         sp = r["species"] or ""
         out[str(r["record_key"])] = {
             "species": sp, "genus": r["genus"] or "", "observer": r["observer_login"]
             or f"(unknown):{r['record_key']}", "former_heldout": bool(r["benchmark"]),
-            "name_kind": r["name_kind"], "rec_depth": rec_depth.get(sp, 0) if sp else None,
-            "photo_depth": photo_depth.get(sp, 0) if sp else None}
+            "name_kind": r["name_kind"], "rec_depth": rec_depth(sp) if sp else None,
+            "photo_depth": photo_depth(sp) if sp else None}
     return out
 
 

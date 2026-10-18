@@ -137,3 +137,33 @@ def test_the_answer_key_decides_and_is_the_one_main_s_name_equiv_knows(run):
     from mycomap_vision import name_equiv
     assert run.DECIDING_KEY == name_equiv.ANSWER_KEY
     assert run.DEEP >= 40           # collapsing 4 x 10 names, as evaluate does
+
+
+class FakeRelease:
+    """train and val rows and photo rows, as dataset_release.Release.records/db give them."""
+
+    def __init__(self, train, val, photos):
+        self._rows = {"train": train, "val": val}
+        photo_rows = [(k,) for k, n in photos.items() for _ in range(n)]
+        self.db = type("Db", (), {"execute": lambda _s, _q: iter(photo_rows)})()
+
+    def records(self, split):
+        return self._rows[split]
+
+
+def row(key, species, benchmark=None):
+    return {"record_key": key, "species": species, "genus": species.split()[0],
+            "observer_login": "u", "benchmark": benchmark, "name_kind": "formal"}
+
+
+def test_depth_counts_a_species_varieties_by_the_answer_key(run):
+    rel = FakeRelease([row("t1", "Amanita muscaria"),
+                       row("t2", "Amanita muscaria var. guessowii"),
+                       row("t3", "Amanita pantherina")],
+                      [row("v1", "Amanita muscaria"), row("v2", "Russula emetica")],
+                      {"t1": 3, "t2": 2, "t3": 4})
+    keyed = run.finds_of(rel)
+    assert keyed["v1"]["rec_depth"] == 2 and keyed["v1"]["photo_depth"] == 5
+    assert keyed["v2"]["rec_depth"] == 0 and keyed["v2"]["photo_depth"] == 0
+    exact = run.finds_of(rel, "exact")
+    assert exact["v1"]["rec_depth"] == 1 and exact["v1"]["photo_depth"] == 3
