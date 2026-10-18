@@ -19,7 +19,7 @@ const APPROACHES: Approach[] = [
   { name: "Nearest + species average + place and date", how: "Nearest + species average, then each name weighed by how near and how in season its DNA-verified records are, when a place or date is given",
     trained: "Same model; DNA-verified records and iNaturalist's open fungus records for range and season", names: "Same as nearest + species average",
     status: "On the site: the default when a find has a place or date (October 2026); confirmed on held-out records" },
-  { name: "Nearest + species average", how: "Blends each photo's two best specimen matches with the species' average look",
+  { name: "Nearest + species average", how: "Blends each photo's two best matching reference photos (they can be two photos of one specimen) with the species' average look",
     trained: "BioCLIP 2, last 4 of 24 blocks fine-tuned on our records; the v1 model learned from dataset release v1's training split only", names: "Any species with one DNA-verified record; new records added nightly",
     status: "On the site for photos without a place or date (the default since October 2026); confirmed on held-out records" },
   { name: "Nearest specimen", how: "Finds the most similar DNA-verified specimens; each species scored by its best match to all your photos",
