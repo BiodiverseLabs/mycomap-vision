@@ -30,7 +30,7 @@ import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, whatNex
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import { applyPick } from "@/lib/mapPick";
-import { parseObservationLink, sourceName, type ObservationRef } from "@/lib/observationLink";
+import { observationFromQuery, parseObservationLink, sourceName, type ObservationRef } from "@/lib/observationLink";
 
 // The map (Leaflet) loads only when someone opens it: the Identify page stays light.
 const LocationPicker = lazy(() => import("@/components/LocationPicker"));
@@ -94,7 +94,9 @@ export function IdentifyPage() {
 
   // Identify from a link: an iNat or MO observation's own photos, place and date, read
   // by Vision. Whichever was started last, photos or link, is the answer shown.
-  const [link, setLink] = useState("");
+  // A link here with ?observation= (mycomap.org's "Open in Vision") fills the box.
+  const fromQuery = useMemo(() => observationFromQuery(window.location.search), []);
+  const [link, setLink] = useState(fromQuery?.text ?? "");
   const [mode, setMode] = useState<"photos" | "link">("photos");
   const byLink = useMutation({
     mutationFn: (ref: ObservationRef) =>
@@ -110,6 +112,13 @@ export function IdentifyPage() {
   const submittedAt = viaLink ? byLink.submittedAt : run.submittedAt;
   const startPhotos = () => { setMode("photos"); byLink.reset(); run.mutate({ where, files }); };
   const startLink = (ref: ObservationRef) => { setMode("link"); run.reset(); byLink.mutate(ref); };
+  // ...and identifies it once, when the person is signed in and a model is chosen.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!fromQuery || autoStarted.current || gate !== "ready" || !chosen.length) return;
+    autoStarted.current = true;
+    startLink(fromQuery.ref);
+  }, [fromQuery, gate, chosen.length]);
 
   // Start over: this find's photos, place and date, answer and error go; the model stays.
   // Clearing the photos and the request releases their object URLs (useObjectUrls).

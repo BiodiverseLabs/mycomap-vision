@@ -57,3 +57,14 @@ export function parseObservationLink(text: string): ObservationRef | null {
 }
 
 export const sourceName = (s: ObservationSource) => (s === "inat" ? "iNaturalist" : "Mushroom Observer");
+
+/**
+ * The observation a link to this page names in `?observation=` (mycomap.org's "Open in
+ * Vision" sends inat:<n> or mo:<n>; a full iNat or MO link works too): the text to put in
+ * the link box and what it parses to, or null when there is none or it names nothing.
+ */
+export function observationFromQuery(search: string): { text: string; ref: ObservationRef } | null {
+  const text = new URLSearchParams(search).get("observation")?.trim() ?? "";
+  const ref = parseObservationLink(text);
+  return ref ? { text, ref } : null;
+}
