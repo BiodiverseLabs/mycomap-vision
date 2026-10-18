@@ -168,9 +168,11 @@ def compute(config: dict, base, conn, resolve, models_root: Path | None = None,
         spec["answer_key_taxonomy"] = {
             k: sha256_file(resolve(akt[k]["file"]))
             for k in ("snapshot", "successors", "label_vocabulary") if akt.get(k)}
-        if akt.get("extras"):
+        from .paper_score import extras_files
+        files = extras_files(akt)
+        if files:
             spec["answer_key_taxonomy"]["extras"] = [sha256_file(resolve(x["file"]))
-                                                     for x in akt["extras"]]
+                                                     for x in files]
     spec["code_commit"] = config.get("code_commit")
     return spec
 
