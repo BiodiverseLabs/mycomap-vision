@@ -692,7 +692,8 @@ def answer_key_taxonomy(block: dict | None, truths=()) -> tuple[object, dict]:
     cite = {**tx.cite, "label_vocabulary_sha256": block["label_vocabulary"]["sha256"],
             "labels": len(vocab), "truths_outside_vocabulary": len(outside)}
     extras: dict = {}
-    for spec in block.get("extras") or []:
+    specs = extras_files(block)
+    for spec in specs:
         doc = _json.loads(_pinned(spec, "taxonomy extras").read_text(encoding="utf-8"))
         taxa = doc.get("taxa", doc)
         extras.update({int(k): v for k, v in taxa.items()})
@@ -704,9 +705,21 @@ def answer_key_taxonomy(block: dict | None, truths=()) -> tuple[object, dict]:
             raise ValueError(f"taxonomy extras change how {len(moved):,} labels resolve "
                              f"(e.g. {moved[:3]}): extras may only add answer taxa")
         tx = tx2
-        cite.update(extras=[{"file": str(x["file"]), "sha256": x["sha256"]}
-                            for x in block["extras"]], extra_taxa=len(extras))
+        cite.update(extras=[{"file": str(x["file"]), "sha256": x["sha256"]} for x in specs],
+                    extra_taxa=len(extras))
     return tx, cite
+
+
+def extras_files(block: dict | None) -> list[dict]:
+    """The answer-side taxonomy extras files of an answer_key_taxonomy block, each
+    {file, sha256}: a list of them, or (as the analysis config documents them) a mapping
+    whose entries with a file and a sha256 are the files and whose other entries (a rule,
+    a note such as "fetched at scoring") are text."""
+    raw = (block or {}).get("extras")
+    if not raw:
+        return []
+    items = raw if isinstance(raw, list) else list(raw.values())
+    return [x for x in items if isinstance(x, dict) and x.get("file") and x.get("sha256")]
 
 
 def genus_known(taxonomy, genus: str, species: str | None) -> bool:

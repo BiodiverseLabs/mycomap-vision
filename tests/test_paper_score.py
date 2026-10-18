@@ -884,8 +884,9 @@ def test_the_taxonomy_files_are_pinned_and_extras_never_move_a_label(tmp_path, m
     # An answer-side taxon the snapshot lacks: fine. One that re-points a label: refused.
     extra.write_text(json.dumps({"99": {"name": "Candolleomyces novus", "rank_level": 10,
                                         "is_active": True, "ancestor_ids": [20]}}))
-    tx, cite = paper_score.answer_key_taxonomy({**block, "extras": [pin(extra)]})
-    assert cite["extra_taxa"] == 1
+    tx, cite = paper_score.answer_key_taxonomy({**block, "extras": {
+        "rule": "answer-side taxa", "e31b": pin(extra), "v1_test": "fetched at scoring"}})
+    assert cite["extra_taxa"] == 1                     # the config's documented shape
     extra.write_text(json.dumps({"98": {"name": "Coprinellus micaceus", "rank_level": 10,
                                         "is_active": True, "ancestor_ids": [30]}}))
     monkeypatch.setattr(name_equiv.Taxonomy, "__init__", _moving_init(name_equiv))
@@ -974,3 +975,11 @@ def test_truths_whose_genus_inat_cannot_name_leave_only_the_genus_tests_that_ask
     assert "kept_in" not in rep["hypotheses"]["A"]["H4"]
     assert rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]["table"][
         "genus strict"]["top1"]["n"] == 2                          # Vision keeps every truth
+
+
+def test_extras_are_read_from_a_list_or_from_the_configs_documented_mapping():
+    one = {"file": "data/x.json", "sha256": "a" * 64, "taxa": 5}
+    assert paper_score.extras_files({"extras": [one]}) == [one]
+    assert paper_score.extras_files({"extras": {"rule": "answer-side taxa ...", "e31b": one,
+                                                "v1_test": "fetched at scoring"}}) == [one]
+    assert paper_score.extras_files({}) == [] and paper_score.extras_files(None) == []
