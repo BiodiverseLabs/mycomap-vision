@@ -685,3 +685,23 @@ def test_an_expert_tier_other_than_1_2_or_pooled_is_refused():
     paper_score.check_config({"format": 1, "comparators": [ok]})
     with pytest.raises(ValueError, match="expert tier"):
         paper_score.check_config({"format": 1, "comparators": [{**ok, "tier": "1+3"}]})
+
+
+def test_a_test_report_counts_what_the_build_left_out_beside_the_scorings_near_copies(
+        world, tmp_path):
+    counts = world["test"].manifest["counts"]
+    # A cross-post twin of a v1 record, as the v1-test build will leave out (its reason name
+    # is the builder's; whatever it is, it is counted).
+    counts["records_by_source_reason"] = {**counts["records_by_source_reason"],
+                                          "inat/twin_of_base": 3}
+    rep = run(world, tmp_path, world["test"], config(tmp_path, ["7", "8"]))
+    bx = rep["build_exclusions"]
+    want = {k: v for k, v in counts["records_by_source_reason"].items() if not k.endswith("/ok")}
+    assert bx["records"]["by_source_reason"] == want
+    assert bx["records"]["left_out"] == sum(want.values())
+    assert bx["records"]["total"] == counts["records"]
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert bx["records"]["by_source_reason"]["inat/twin_of_base"] == 3
+    assert "Left out by the test build (records)" in md and "inat/twin_of_base 3" in md
+    assert "Near-copies left out of the primary numbers at scoring" in md
+    assert run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))["build_exclusions"] is None

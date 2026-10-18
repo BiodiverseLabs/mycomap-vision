@@ -300,6 +300,19 @@ def read_attrs(path) -> dict[str, dict]:
                 for r in csv.DictReader(fh, delimiter="\t")}
 
 
+def build_exclusions(rel) -> dict:
+    """The test release's own exclusion counts by source and reason (records and photos),
+    from its manifest; every reason but `ok` is something the build left out."""
+    counts = (rel.manifest or {}).get("counts") or {}
+    out = {}
+    for what in ("records", "photos"):
+        by = counts.get(f"{what}_by_source_reason") or {}
+        left = {k: v for k, v in sorted(by.items()) if not k.endswith("/ok")}
+        out[what] = {"by_source_reason": left, "left_out": sum(left.values()),
+                     "total": counts.get(what)}
+    return out
+
+
 def read_created(block: dict) -> dict[str, str]:
     """{record key: the iNat observation's created_at}, from the pinned file of the config's
     generalisation.pretraining block (JSONL or TSV with record_key and created_at)."""
@@ -862,6 +875,10 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                        if str(k) in errata)},
         "attrs": {"file": str(attrs_path) if attrs_path else None,
                   "sha256": sha256_file(attrs_path) if attrs_path else None},
+        # What the test build left out before scoring (its own reasons, e.g. a byte copy
+        # of a base photo or a cross-post twin of a v1 record), beside the scoring's
+        # near-copy exclusion (standard.near_duplicates): both counted in the report.
+        "build_exclusions": build_exclusions(scored_rel) if scored_rel is not base else None,
         "dhash_flags": {"source": "the scored release's near_base table",
                         "photos_hashed": len(near_base), "photos_flagged": len(dhash),
                         "near_base": (scored_rel.manifest.get("near_base")
@@ -1011,7 +1028,21 @@ def format_report(report: dict, config: dict) -> str:
     sc = report["scored"]
     lines += [f"# Paper scores: {sc['release']} {sc['split']} against "
               f"{report['dataset_release']['dataset_release']} {'+'.join(sc['reference_splits'])}",
-              "", f"Near-duplicates: {report['standard']['near_duplicates']}", ""]
+              ""]
+    bx = report.get("build_exclusions")
+    if bx:
+        for what in ("records", "photos"):
+            b = bx[what]
+            lines.append(f"Left out by the test build ({what}): {b['left_out']:,} of "
+                         f"{b['total'] or 0:,}" + (": " + ", ".join(
+                             f"{k} {v:,}" for k, v in b["by_source_reason"].items())
+                             if b["by_source_reason"] else "") + ".")
+        lines.append("")
+    nd = report["standard"]["near_duplicates"]
+    lines += [f"Near-copies left out of the primary numbers at scoring: "
+              f"{nd['near_duplicate_finds']:,} of {nd['finds']:,} finds ("
+              + (", ".join(f"{k} {v:,}" for k, v in nd["by_kind"].items()) or "none")
+              + "); every table also has a with-near-copies scope.", ""]
     groups = {"photos only": [], "photos + place and date": []}
     for c in config["comparators"]:
         group = groups["photos + place and date" if c.get("place") or str(
