@@ -52,6 +52,20 @@ def canonical_sha(value) -> str:
                                      default=str).encode()).hexdigest()
 
 
+def cached_hub_file(model_name: str):
+    """The hub checkpoint already in the local cache (no network call), or None."""
+    from . import models
+    name = models.split_options(model_name)[0]
+    if not name.startswith("hf-hub:"):
+        return None
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        got = try_to_load_from_cache(name[len("hf-hub:"):], "open_clip_model.safetensors")
+    except Exception:
+        return None
+    return got if isinstance(got, str) else None
+
+
 def model_files(backbone: str, root: Path) -> dict[str, str]:
     """{file name: sha256} of the backbone's own files in data/models (`<name>.<suffix>`),
     and `base:<file>` for the hub checkpoint a fine-tune or alias was built from."""
@@ -67,7 +81,8 @@ def model_files(backbone: str, root: Path) -> dict[str, str]:
         except ValueError:
             spec = None
     if spec and spec.startswith("open_clip:"):
-        base = models.open_clip_weights_file(spec[len("open_clip:"):])
+        base = cached_hub_file(spec[len("open_clip:"):]) or \
+            models.open_clip_weights_file(spec[len("open_clip:"):])
         if base:
             out[f"base:{Path(base).name}"] = sha256_file(base)
     return out

@@ -164,10 +164,18 @@ def summarise(finds, cal: dict, outcome: dict, rank: str, cfg: dict, reps: int, 
                 "known": float(np.mean(np.array(known) < t)) if known else None,
                 "unknown": float(np.mean(np.array(unknown) < t)) if unknown else None,
                 "below": t}
-        g = [(outcome.get(f.key) or {}).get("genus_strict@1") for f, _, _ in rows
-             if f.depth == 0]
-        g = [bool(x) for x in g if x is not None]
-        e11["genus_top1_without_species_reference"] = {
-            "n": len(g), "rate": float(np.mean(g)) if g else None}
+        # The review's E11 rows (outside review, 18 Oct), from the same functions the val
+        # analysis uses (val_review.py); the confident threshold is the config's first rule,
+        # never the serving constant, so a later serving change can't move a frozen number.
+        from . import val_review as vr
+        threshold = float((cfg.get("rules") or [0.7])[0])
+        depth = [f.depth for f, _, _ in rows]
+        e11["confident_wrong"] = vr.confident_answers(conf, right, depth, threshold)
+        e11["selective_accuracy"] = vr.selective_accuracy(
+            conf, right, tuple(cfg.get("selective_thresholds", (0.3, 0.5, 0.7, 0.9))))
+        g = [((outcome.get(f.key) or {}).get("genus_strict@1"), f.depth) for f, _, _ in rows]
+        g = [(bool(x), d) for x, d in g if x is not None]
+        e11["genus_top1_without_species_reference"] = vr.genus_backoff(
+            [x for x, _ in g], [d for _, d in g])
         out["unknown_species"] = e11
     return out

@@ -247,10 +247,12 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
     """Finds from release rows: depth from the reference rows' species, attributes for the
     slices (source, month, season, licence class, observer new to the reference, name kind)
     and any extra attributes given per record (e.g. ecoregion, distance band)."""
+    from . import val_review as vr
     depth = Counter(r["species"] for r in ref_rows if r.get("species"))
-    ref_observers = {r["observer_login"] for r in ref_rows if r.get("observer_login")}
+    unseen = vr.unseen_observer([r.get("observer_login") for r in scored_rows],
+                                [r.get("observer_login") for r in ref_rows])
     out = []
-    for r in scored_rows:
+    for r, is_new in zip(scored_rows, unseen.tolist()):
         key = str(r["record_key"])
         ph = photos.get(key, [])
         month = int(r["observed_on"][5:7]) if (r.get("observed_on") or "")[:4].isdigit() \
@@ -262,7 +264,7 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
                  "month": month, "season": SEASON.get(month, "(no date)"),
                  "licence": "arr" if any(p.get("license_class") == "arr" for p in ph)
                  else "cc",
-                 "observer_new": "new" if who and who not in ref_observers else "known"}
+                 "observer_new": "new" if is_new else "known"}
         attrs.update((extra_attrs or {}).get(key, {}))
         species = r.get("species") or ""
         out.append(po.Find(key, who or f"(unknown observer):{key}", species,
@@ -312,11 +314,14 @@ def add_generalisation_attrs(finds, scored_rows: list[dict], recent_after: str |
     v1-test the finds observed after v1's newest records) and after_pretraining (the iNat
     observation created after `created_after`, the backbone's pretraining snapshot), as
     yes / no / (no date)."""
+    from . import val_review as vr
     observed = {str(r["record_key"]): (r.get("observed_on") or "")[:10] for r in scored_rows}
-    for f in finds:
-        d = observed.get(f.key, "")
+    dates = [observed.get(f.key, "") for f in finds]
+    recent = (vr.recent_cohort(dates, recent_after).tolist() if recent_after
+              else [False] * len(finds))
+    for f, d, is_recent in zip(finds, dates, recent):
         f.attrs["recent_cohort"] = ("(no date)" if not d[:4].isdigit() or not recent_after
-                                    else "yes" if d > recent_after else "no")
+                                    else "yes" if is_recent else "no")
         if created is not None:
             # Only iNat finds are in the snapshot (an MO find falls outside the iNat/GBIF
             # export cutoffs); an observation gone from iNat has no date.
@@ -1129,8 +1134,8 @@ def _calibration_lines(cal: dict, config: dict) -> list[str]:
             gb = u.get("genus_top1_without_species_reference") or {}
             lines.append(f"| {cid} | {u['known']:,} / {u['unknown']:,} | "
                          f"{'-' if au is None else f'{au:.3f}'} | "
-                         f"{pct((cw.get('all') or {}).get('share'))} / "
-                         f"{pct((cw.get('unknown') or {}).get('share'))} | "
+                         f"{pct((cw.get('all') or {}).get('wrong_share'))} / "
+                         f"{pct((cw.get('unknown') or {}).get('wrong_share'))} | "
                          f"{pct(gb.get('rate'))} |")
         lines.append("")
     return lines

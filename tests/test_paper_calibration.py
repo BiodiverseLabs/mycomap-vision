@@ -84,3 +84,28 @@ def test_likely_sets_report_the_coverage_achieved_with_its_interval_beside_the_t
     assert ls["ci95"][0] <= 0.8 <= ls["ci95"][1]
     assert pc.summarise(finds, cal, outcome, "species", {"list_target": 0.85}, 200, 0,
                         lambda f: "5-19")["likely_sets"]["target"] == 0.85
+
+
+def test_e11_confident_wrong_and_selective_accuracy_use_the_configs_rule_not_serving():
+    # 4 known finds (2 confident right, 1 confident wrong, 1 unsure) + 2 unknown (one
+    # confident, so wrong by definition); rule 0.6 in the config.
+    finds = [po.Find(str(i), f"o{i}", "A x", "A", "F", "formal", d, 1)
+             for i, d in enumerate([5, 5, 5, 5, 0, 0])]
+    conf = [0.9, 0.8, 0.65, 0.2, 0.7, 0.1]
+    right = [True, True, False, False, False, False]
+    cal = {f.key: {"species": {"conf": c, "p_true": 0.5, "sumsq": 0.5}}
+           for f, c in zip(finds, conf)}
+    outcome = {f.key: {"species_strict@1": r, "genus_strict@1": f.key == "4"}
+               for f, r in zip(finds, right)}
+    s = pc.summarise(finds, cal, outcome, "species",
+                     {"rules": [0.6], "selective_thresholds": [0.5, 0.85]}, 200, 0,
+                     lambda f: "x")
+    cw = s["unknown_species"]["confident_wrong"]
+    assert cw["threshold"] == 0.6
+    assert (cw["all"]["n"], cw["all"]["confident"], cw["all"]["wrong"]) == (6, 4, 2)
+    assert cw["all"]["wrong_share"] == pytest.approx(2 / 6)
+    assert (cw["unknown"]["n"], cw["unknown"]["confident"], cw["unknown"]["wrong"]) == (2, 1, 1)
+    sel = s["unknown_species"]["selective_accuracy"]
+    assert [(x["threshold"], x["n"]) for x in sel] == [(0.5, 4), (0.85, 1)]
+    assert sel[0]["accuracy"] == 0.5 and sel[1]["accuracy"] == 1.0
+    assert s["unknown_species"]["genus_top1_without_species_reference"] == {"n": 2, "rate": 0.5}
