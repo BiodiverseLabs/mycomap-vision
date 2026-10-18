@@ -275,3 +275,40 @@ def test_a_candidate_the_answer_key_credits_is_right_not_only_the_truths_own_col
     assert pt.top1(c, z)[0].tolist() == [False, False, False]      # the truth's column only
     c.credited = cr
     assert pt.top1(c, z)[0].tolist() == [True, True, False]        # the key credits column 0
+
+
+def test_the_standard_table_is_judged_by_the_answer_key_as_paper_score_judges_it():
+    from mycomap_vision import paper_outcomes as po
+    res = {"1": {"species": [{"name": "Amanita muscaria var. guessowii"}],
+                 "genus": [{"name": "Amanita"}]},
+           "2": {"species": [{"name": "Russula emetica"}, {"name": "Amanita muscaria"}],
+                 "genus": [{"name": "Russula"}, {"name": "Amanita"}]},
+           "3": {"species": [], "genus": [{"name": "Boletus"}]}}
+    truths = {"1": ("Amanita muscaria", "Amanita", "20-99"),
+              "2": ("Amanita muscaria", "Amanita", "20-99"),
+              "3": ("", "Boletus", "n/a")}
+    lad = pt.key_ladder(res, truths, po.AnswerKey())
+    sp = lad["rows"]["species strict"]
+    assert sp["n"] == 2 and sp["top1"]["right"] == 1 and sp["top3"]["right"] == 2  # variety counts
+    assert lad["rows"]["genus strict"]["n"] == 3 and lad["rows"]["genus strict"]["top1"]["right"] == 2
+    assert lad["by_depth"]["20-99"]["n"] == 2 and "n/a" not in lad["by_depth"]
+    exact = pt.key_ladder(res, truths, po.AnswerKey("exact"))
+    assert exact["rows"]["species strict"]["top1"]["right"] == 0                   # as written
+    assert lad["answer_key"] != exact["answer_key"]
+
+
+def test_credited_candidates_take_the_taxonomy_when_given():
+    from mycomap_vision import name_equiv
+    taxa = {1: {"name": "Psathyrella candolleana", "rank_level": 10, "is_active": False,
+                "ancestor_ids": [10], "current_synonymous_taxon_ids": [2]},
+            2: {"name": "Candolleomyces candolleanus", "rank_level": 10, "is_active": True,
+                "ancestor_ids": [20]},
+            10: {"name": "Psathyrella", "rank_level": 20, "is_active": True, "ancestor_ids": []},
+            20: {"name": "Candolleomyces", "rank_level": 20, "is_active": True,
+                 "ancestor_ids": []}}
+    tx = name_equiv.Taxonomy(taxa, ["Psathyrella candolleana"])
+    groups = np.array(["Candolleomyces candolleanus", "Psathyrella candolleana"])
+    cand, SP = np.array([[0, 1]]), np.ones((1, 2), bool)
+    truths = ["Psathyrella candolleana"]
+    assert pt.credited_candidates(cand, SP, groups, truths).tolist() == [[False, True]]
+    assert pt.credited_candidates(cand, SP, groups, truths, taxonomy=tx).tolist() == [[True, True]]

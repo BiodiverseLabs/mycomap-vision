@@ -120,10 +120,11 @@ class Components:
 
 
 def credited_candidates(cand: np.ndarray, is_species: np.ndarray, group_names,
-                        truth_names, rule: str | None = None) -> np.ndarray:
+                        truth_names, rule: str | None = None, taxonomy=None) -> np.ndarray:
     """(n, K) bool: candidate group names the answer key credits for each record's true
-    name (species rank, one writing, a hybrid code on either parent); a padding column or
-    a non-species group is never credited."""
+    name (species rank, one writing, a hybrid code on either parent; with `taxonomy`, the
+    canonical step as paper-score takes it); a padding column or a non-species group is
+    never credited."""
     from . import name_equiv
     rule = rule or name_equiv.ANSWER_KEY
     out = np.zeros(cand.shape, dtype=bool)
@@ -132,8 +133,55 @@ def credited_candidates(cand: np.ndarray, is_species: np.ndarray, group_names,
             continue
         for j, g in enumerate(cand[i].tolist()):
             if g >= 0 and is_species[i, j]:
-                out[i, j] = name_equiv.species_credit(str(group_names[g]), str(truth), rule)
+                out[i, j] = name_equiv.species_credit(str(group_names[g]), str(truth), rule,
+                                                      taxonomy)
     return out
+
+
+def key_ladder(results: dict[str, dict], truths: dict[str, tuple], key, ks=(1, 3, 5, 10)
+               ) -> dict:
+    """Steve's table judged by the answer key, as paper-score judges it (paper_outcomes:
+    from_ranked with an AnswerKey): top 1/3/5/10 by species strict / s.l. / complex and
+    genus strict / s.l., n on every row, and species top-1 / top-5 by the true species'
+    reference band. `results`: {record key: ranks(...)}; `truths`: {record key: (species,
+    genus, reference band)}."""
+    from collections import Counter
+
+    from . import paper_outcomes as po
+    from .heldout_report import rate
+    rows = {f"{r} {lv}": Counter() for r, lvs in po.LEVELS.items() for lv in lvs}
+    depth: dict[str, Counter] = {}
+    used = 0
+    for oid, res in results.items():
+        if oid not in truths:
+            continue
+        species, genus, band = truths[oid]
+        find = po.Find(oid, "", species or "", genus or "", "",
+                       "formal" if species else "one-word", 0, 0)
+        o = po.from_ranked([a["name"] for a in res.get("species") or []],
+                           [a["name"] for a in res.get("genus") or []], find, key=key)
+        used += 1
+        for r, lvs in po.LEVELS.items():
+            for lv in lvs:
+                if o.get(f"{r}_{lv}@1") is None:
+                    continue
+                c = rows[f"{r} {lv}"]
+                c["n"] += 1
+                for k in ks:
+                    c[k] += bool(o[f"{r}_{lv}@{k}"])
+        if o.get("species_strict@1") is not None:
+            d = depth.setdefault(str(band), Counter())
+            d["n"] += 1
+            d["top1"] += bool(o["species_strict@1"])
+            d["top5"] += bool(o["species_strict@5"])
+    label = {"species complex": "species complex (beta)", "species sl": "species s.l.",
+             "genus sl": "genus s.l."}
+    return {"records": used, "stored_depth": max(ks), "answer_key": key.rule,
+            "rows": {label.get(name, name): {"n": c["n"], **{f"top{k}": rate(c[k], c["n"])
+                                                            for k in ks}}
+                     for name, c in rows.items()},
+            "by_depth": {b: {"n": c["n"], "top1": rate(c["top1"], c["n"]),
+                             "top5": rate(c["top5"], c["n"])} for b, c in depth.items()}}
 
 
 def candidates(scores: np.ndarray, truth: int, k: int = TOP_K) -> np.ndarray:
