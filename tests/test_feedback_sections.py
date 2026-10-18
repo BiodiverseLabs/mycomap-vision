@@ -98,3 +98,67 @@ def test_only_hidden_answers_can_be_revealed(conn, tmp_path):
     c.post(f"/api/feedback/label-review/{flagged['id']}/decision", json={"outcome": "hard_example"})
     assert c.post(f"/api/feedback/items/{flagged['id']}/reveal").status_code == 409
     assert lr.ITEM_TYPE in fb.BLIND_TYPES
+
+
+# --- seen_answer is the server's record, fixed when the decision is saved ----------------------
+
+def decisions_of(fstore, item_id):
+    return [(d["decision"], d["by_user"], d["seen_answer"]) for d in fstore.get(item_id)["decisions"]]
+
+
+def test_a_client_cannot_say_it_did_not_look(conn, tmp_path):
+    c, fstore = site_with_blind_queue(conn, tmp_path)
+    flagged, blind = item(fstore, "100"), item(fstore, "104")
+    as_user(c, "leader-1")
+    for it in (flagged, blind):
+        assert c.post(f"/api/feedback/items/{it['id']}/reveal").status_code == 200
+    # Through the generic decision route and through the label review, with a forged field.
+    assert c.post(f"/api/feedback/items/{flagged['id']}/decision",
+                  json={"decision": "hard_example", "seen_answer": 0}).status_code == 200
+    assert c.post(f"/api/feedback/label-review/{blind['id']}/decision",
+                  json={"outcome": "hard_example", "seen_answer": False}).status_code == 200
+    assert decisions_of(fstore, flagged["id"]) == [("hard_example", "leader-1", 1)]
+    assert decisions_of(fstore, blind["id"]) == [("hard_example", "leader-1", 1)]
+
+
+def test_once_a_person_has_looked_every_later_decision_of_theirs_says_so(conn, tmp_path):
+    c, fstore = site_with_blind_queue(conn, tmp_path)
+    flagged = item(fstore, "100")
+    as_user(c, "leader-1")
+    # Decided blind first: that decision stays 0 for good.
+    c.post(f"/api/feedback/label-review/{flagged['id']}/decision", json={"outcome": "hard_example"})
+    c.post(f"/api/feedback/items/{flagged['id']}/reopen")
+    assert c.post(f"/api/feedback/items/{flagged['id']}/reveal").status_code == 200
+    # Looking later never rewrites the decision already made, in any output.
+    before = next(ch for ch in fstore.changes(applies="note") if ch["subject"] == "100")
+    assert before["decision"] == "hard_example" and before["seen_answer"] is False
+    c.post(f"/api/feedback/label-review/{flagged['id']}/decision",
+           json={"outcome": "rename", "value": "B y", "seen_answer": 0})
+    c.post(f"/api/feedback/items/{flagged['id']}/reopen")
+    c.post(f"/api/feedback/items/{flagged['id']}/decision", json={"decision": "hard_example"})
+    assert decisions_of(fstore, flagged["id"]) == [("hard_example", "leader-1", 0),
+                                                   ("rename", "leader-1", 1),
+                                                   ("hard_example", "leader-1", 1)]
+    latest = next(ch for ch in fstore.changes(applies="note") if ch["subject"] == "100")
+    assert latest["seen_answer"] is True
+    # Someone else who never looked decides blind.
+    c.post(f"/api/feedback/items/{flagged['id']}/reopen")
+    as_user(c, "admin-1")
+    c.post(f"/api/feedback/items/{flagged['id']}/decision", json={"decision": "hard_example"})
+    assert decisions_of(fstore, flagged["id"])[-1] == ("hard_example", "admin-1", 0)
+
+
+def test_a_store_from_before_the_reveal_button_gets_the_column_with_old_decisions_at_0(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.sqlite"
+    old = sqlite3.connect(path)
+    old.executescript(fb.SCHEMA)
+    old.execute("insert into items (item_type, subject, granularity, rule, seed, created_at) "
+                "values ('group_label', 'X group', 'name', 'R2', 's', 0)")
+    old.execute("insert into decisions (item_id, decision, applies, by_user, at) "
+                "values (1, 'keep_group', 'note', 'u', 0)")
+    old.commit()
+    old.close()
+    store = fb.Store(path)
+    assert [d["seen_answer"] for d in store.get(1)["decisions"]] == [0]
+    assert fb.Store(path).get(1)["decisions"][0]["seen_answer"] == 0     # opening again is fine

@@ -179,7 +179,8 @@ SECTION_OF: dict[str, str] = {
 }
 
 # Who looked at Vision's answer before deciding a blind item ("Show Vision's answer"): the
-# decision still counts as a fix, but not in the blind measure (Store.changes seen_answer).
+# decision still counts as a fix, but not in the blind measure. decide() fixes
+# decisions.seen_answer from this table when the decision is saved.
 REVEALS_SCHEMA = """
 create table if not exists reveals (
   id integer primary key, item_id integer not null references items(id),
@@ -265,6 +266,11 @@ class Store:
         self.conn.execute("pragma journal_mode=wal")
         self.conn.executescript(SCHEMA)
         self.conn.executescript(REVEALS_SCHEMA)
+        # Added after the store went live: set at decision time (decide), never later.
+        cols = {r[1] for r in self.conn.execute("pragma table_info(decisions)")}
+        if "seen_answer" not in cols:
+            self.conn.execute("alter table decisions add column seen_answer integer not null "
+                              "default 0")
 
     # --- seeding ------------------------------------------------------------------------------
     def seed(self, rows: list[dict], name: str, file_sha256: str | None = None) -> dict:
@@ -359,12 +365,17 @@ class Store:
         if opt.needs_value and not (value or "").strip():
             raise FeedbackError(f"{decision!r} needs a value (the name to use)")
         with self._lock, self.conn:
+            # seen_answer is the server's record, fixed here: did this person reveal Vision's
+            # answer for this item at any time before this decision? No caller can set it, and
+            # once they have looked, every later decision of theirs on the item says so.
+            seen = self.conn.execute("select 1 from reveals where item_id = ? and by_user = ? "
+                                     "limit 1", (item_id, str(person["sub"]))).fetchone()
             self.conn.execute(
                 "insert into decisions (item_id, decision, value, note, photo_keys, applies, "
-                "by_user, by_name, at) values (?,?,?,?,?,?,?,?,?)",
+                "by_user, by_name, at, seen_answer) values (?,?,?,?,?,?,?,?,?,?)",
                 (item_id, decision, (value or "").strip() or None, note,
                  json.dumps(photo_keys or []), opt.applies, str(person["sub"]),
-                 person.get("name"), time.time()))
+                 person.get("name"), time.time(), int(seen is not None)))
             self.conn.execute("update items set status = 'decided' where id = ?", (item_id,))
         return self.get(item_id, projects)
 
@@ -402,12 +413,6 @@ class Store:
                               "order by id desc limit 1", (item_id, str(user))).fetchone()
         return {"at": r["at"], "answer": json.loads(r["answer"])} if r else None
 
-    def seen_answer(self, decision: dict) -> bool:
-        """Did the decider see Vision's answer for the item before this decision?"""
-        return self.conn.execute(
-            "select 1 from reveals where item_id = ? and by_user = ? and at <= ? limit 1",
-            (decision["item_id"], decision["by_user"], decision["at"])).fetchone() is not None
-
     # --- outputs ---------------------------------------------------------------------------------
     def changes(self, applies: str | None = None, pending_only: bool = True) -> list[dict]:
         """Decisions to carry out (on .org, or by Vision), newest last, with the item."""
@@ -422,7 +427,7 @@ class Store:
             sql += " and d.applied = 0"
         return [dict(r) | {"record_keys": json.loads(r["record_keys"]),
                            "photo_keys": json.loads(r["photo_keys"]),
-                           "seen_answer": self.seen_answer(r)}
+                           "seen_answer": bool(r["seen_answer"])}
                 for r in self.conn.execute(sql + " order by d.at", params)]
 
     def excluded_photos(self) -> set[str]:
