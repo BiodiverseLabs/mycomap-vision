@@ -1067,41 +1067,114 @@ def not_this_observation(obs: dict, rec: dict, mo_ids: set[str]) -> str | None:
     return None
 
 
+def vocabulary(rel, errata=None, path: Path | None = None) -> list[str]:
+    """The label vocabulary for the answer key's one-to-one rule (PLAN rule 4): the shared
+    file when given (one label a line), else every distinct label on the release's included
+    records after the erratum, train and val, all ranks."""
+    if path is not None:
+        return sorted({l.strip() for l in Path(path).read_text(encoding="utf-8").splitlines()
+                       if l.strip()})
+    drop = errata.reasons if errata is not None else {}
+    return sorted({lab for key, lab in rel.db.execute(
+        "select record_key, label from records where included = 1")
+        if lab and key not in drop})
+
+
+def label_lookups(labels: Iterable[str], genera: Iterable[str] = ()) -> set[str]:
+    """Every lower-case name the key looks up for a label or a truth genus: the label, its
+    rank-words-dropped form, its binomial and its genus word."""
+    from . import name_equiv as N
+    out = set()
+    for lab in labels:
+        n = (lab or "").strip()
+        words = N._RANK_WORD.sub(" ", n).split()
+        out.update(x.lower() for x in (n, " ".join(words), " ".join(words[:2]),
+                                       words[0] if words else "") if x)
+    out.update(g.strip().lower() for g in genera if g and g.strip())
+    return out
+
+
+def answer_side_extras(frozen: dict[int, dict], merged: dict[int, dict],
+                       lookups: set[str]) -> tuple[dict[int, dict], list[int]]:
+    """What the identifications add to the frozen taxonomy, kept to the ANSWER side (PLAN
+    rule 4: extras never change how a label resolves): an added or changed taxon is left out
+    if a label lookup can reach it (a frozen taxon of that name, its successors and its
+    ancestry) or if it carries a looked-up name. Returns (extras, left out ids)."""
+    by_name: dict[str, list[int]] = {}
+    for t, v in frozen.items():
+        if v.get("name"):
+            by_name.setdefault(v["name"].lower(), []).append(t)
+    reach, todo = set(), [t for n in lookups for t in by_name.get(n, [])]
+    while todo:
+        t = todo.pop()
+        if t in reach:
+            continue
+        reach.add(t)
+        v = frozen.get(t) or {}
+        todo.extend(int(x) for x in (v.get("current_synonymous_taxon_ids") or []))
+        todo.extend(int(x) for x in (v.get("ancestor_ids") or []))
+    extras, left_out = {}, []
+    for t in sorted(merged):
+        if frozen.get(t) == merged[t]:
+            continue
+        if t in reach or (merged[t].get("name") or "").lower() in lookups:
+            left_out.append(t)
+        else:
+            extras[t] = merged[t]
+    return extras, left_out
+
+
+def label_resolution_changes(a, b, labels: Iterable[str], genera: Iterable[str]) -> list[str]:
+    """Labels and truth genera that two Taxonomy objects resolve differently (species id,
+    genus names); empty when extras leave the label side alone."""
+    out = [l for l in labels if a.species_id(l) != b.species_id(l)
+           or a.genus_names(l) != b.genus_names(l)]
+    return out + [g for g in sorted(set(genera)) if g and a.genus_names(g) != b.genus_names(g)]
+
+
 def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors: Path | None,
-                        out_dir: Path):
+                        out_dir: Path, errata=None, vocabulary_file: Path | None = None):
     """The shared answer key's taxonomy (name_equiv.Taxonomy): iNat open data plus the frozen
     successors TSV, with what E31's identifications add (taxa newer than the download and
-    retired ids' successors, from the cached taxa lookups) merged in; the frozen rows win.
-    The additions are written to taxonomy-extras.json and cited by sha256. Labels for the
-    one-to-one rule: every included label of the release."""
+    retired ids' successors, from the cached taxa lookups) on the answer side only: extras a
+    label lookup could reach are left out and counted, and the run refuses if extras change
+    how any label or truth genus resolves. The extras are written to taxonomy-extras.json
+    and cited by sha256 with the vocabulary's."""
     from . import name_equiv as N
-    labels = sorted({r[0] for r in rel.db.execute(
-        "select distinct label from records where included = 1") if r[0]})
-    frozen = N.Taxonomy.load(config.DATA_DIR / OPEN_TAXA, labels=(), successors=successors)
+    labels = vocabulary(rel, errata, vocabulary_file)
+    genera = sorted({g for (g,) in rel.db.execute(
+        "select distinct genus from records where included = 1") if g})
+    frozen = N.Taxonomy.load(config.DATA_DIR / OPEN_TAXA, labels=labels, successors=successors)
     base = {t: dict(v) for t, v in frozen.taxa.items()}
     merged = complete_taxa(client, {t: dict(v) for t, v in base.items()}, snap)
-    pinned = set()
-    if successors is not None:
-        with open(successors, encoding="utf-8", newline="") as f:
-            pinned = {int(r["taxon_id"]) for r in csv.DictReader(f, delimiter="\t")}
-    for t in pinned & set(base):
-        merged[t] = base[t]                              # the frozen successors win
-    extras = {str(t): merged[t] for t in sorted(merged) if base.get(t) != merged[t]}
+    extras, left_out = answer_side_extras(base, merged, label_lookups(labels, genera))
+    taxa = {**base, **extras}
     extras_path = out_dir / "taxonomy-extras.json"
-    extras_path.write_text(json.dumps(extras, sort_keys=True, indent=0), encoding="utf-8")
-    tax = N.Taxonomy(merged, labels, cite={**frozen.cite, "extras": extras_path.name,
-                                           "extras_taxa": len(extras),
-                                           "extras_sha256": sha256_file(extras_path),
-                                           "labels": len(labels)})
+    extras_path.write_text(json.dumps({str(t): v for t, v in extras.items()}, sort_keys=True,
+                                      indent=0), encoding="utf-8")
+    vocab_sha = hashlib.sha256("\n".join(labels).encode("utf-8")).hexdigest()
+    tax = N.Taxonomy(taxa, labels, cite={**frozen.cite, "extras": extras_path.name,
+                                         "extras_taxa": len(extras),
+                                         "extras_left_out_label_side": len(left_out),
+                                         "extras_sha256": sha256_file(extras_path),
+                                         "vocabulary": str(vocabulary_file.name)
+                                         if vocabulary_file else "included labels after erratum",
+                                         "vocabulary_labels": len(labels),
+                                         "vocabulary_sha256": vocab_sha})
+    changed = label_resolution_changes(frozen, tax, labels, genera)
+    if changed:
+        raise RuntimeError(f"taxonomy extras change how {len(changed)} labels resolve "
+                           f"(e.g. {changed[:5]}): PLAN rule 4 forbids it")
     tax.cite["labels_kept_apart"] = sum(len(v) for v in tax.shared_by.values())
     tax.cite["answer_key"] = N.ANSWER_KEY
-    return tax, merged
+    return tax, taxa
 
 
 def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
           validators_csv: Path | None, push_accounts: set[int], salt_path: Path,
           sealed_ok: bool = False, log=print, successors: Path | None = None,
-          errata=None, answer_key: bool = True) -> dict:
+          errata=None, answer_key: bool = True,
+          vocabulary_file: Path | None = None) -> dict:
     """Score a snapshot: one hashed line per find (scores.jsonl) and the tier summaries.
     On a test release this refuses until the analysis freeze tag exists. Verdicts come
     from the shared answer key (name_equiv, frozen taxonomy) unless answer_key=False; an
@@ -1113,7 +1186,8 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
     snap = read_snapshot(d / "snapshot.jsonl.gz")
     records = {r["source_id"]: r for r in inat_records(rel)}
     if answer_key:
-        tax, taxa = answer_key_taxonomy(rel, client, snap, successors, d)
+        tax, taxa = answer_key_taxonomy(rel, client, snap, successors, d, errata,
+                                        vocabulary_file)
     else:
         tax, taxa = None, complete_taxa(client, load_open_taxa(config.DATA_DIR / OPEN_TAXA), snap)
     by_name = name_index(taxa)

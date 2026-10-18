@@ -1501,7 +1501,7 @@ def cmd_expert_ids(args) -> None:
         summary = E.score(rel, args.name, client, our, val, push,
                           config.DATA_DIR / "secrets" / "e31_identifier_salt.txt",
                           successors=args.successors, errata=err,
-                          answer_key=not args.no_answer_key)
+                          answer_key=not args.no_answer_key, vocabulary_file=args.vocabulary)
         print(json.dumps({k: summary[k] for k in ("finds", "tier1", "tier2")}, indent=2))
 
 
@@ -1928,6 +1928,8 @@ def main(argv: list[str] | None = None) -> int:
                    "(taxon_id, current_ids) for the shared answer key's taxonomy")
     p.add_argument("--errata", type=Path, help="score: the release's erratum TSV; its records "
                    "are listed but not scored")
+    p.add_argument("--vocabulary", type=Path, help="score: the shared label-vocabulary file "
+                   "(one label a line; default: included labels after --errata)")
     p.add_argument("--no-answer-key", action="store_true", help="score: verdicts by iNat "
                    "taxon id only (E31's method before 18 Oct)")
     p.add_argument("--sql-dir", type=Path, help="dna-dates: the SQL templates (default: "

@@ -578,3 +578,38 @@ def test_an_erratum_record_is_listed_but_never_scored():
     assert E.erratum_status({"record_key": "inat-42"}, err) == "erratum_crosspost_twin"
     assert E.erratum_status({"record_key": "inat-43"}, err) is None
     assert E.erratum_status({"record_key": "inat-42"}, None) is None
+
+
+def test_taxonomy_extras_never_change_how_a_label_or_truth_genus_resolves():
+    frozen = {t: dict(v) for t, v in PSATHY.items()}
+    frozen[20] = {**frozen[20], "is_active": False}          # a retired label genus, no successor
+    frozen[22] = {**frozen[22], "is_active": False}          # a retired genus only answers use
+    merged = {t: dict(v) for t, v in frozen.items()}
+    merged[20]["current_synonymous_taxon_ids"] = [21]        # the cache knows a successor
+    merged[22]["current_synonymous_taxon_ids"] = [21]
+    merged[200] = {**merged[200], "ancestor_ids": [1, 22]}    # reached by the label's successor
+    merged[300] = {"id": 300, "name": "Psathyrella candolleana", "rank": "species",
+                   "rank_level": 10, "is_active": True, "ancestor_ids": [1, 21]}  # a homonym
+    labels, genera = ["Psathyrella candolleana"], ["Psathyrella"]
+    extras, left_out = E.answer_side_extras(frozen, merged, E.label_lookups(labels, genera))
+    assert set(extras) == {22} and set(left_out) == {20, 200, 300}
+    a = N.Taxonomy(frozen, labels)
+    assert E.label_resolution_changes(a, N.Taxonomy({**frozen, **extras}, labels), labels, genera) == []
+    assert E.label_resolution_changes(a, N.Taxonomy(merged, labels), labels, genera)  # the check bites
+    # the answer side still gains: an ID on the retired genus 22 now has a current genus
+    assert N.Taxonomy({**frozen, **extras}, labels).genus_names(22) == {"candolleomyces"}
+
+
+def test_vocabulary_is_the_included_labels_after_the_erratum_or_the_shared_file(tmp_path):
+    from mycomap_vision.errata import Errata
+
+    class Rel:
+        class db:
+            @staticmethod
+            def execute(sql):
+                return [("a", "Russula emetica"), ("b", "Russula silvicola"), ("c", "Lactarius")]
+    err = Errata("r4.tsv", "x", {"b": "crosspost_twin"})
+    assert E.vocabulary(Rel, err) == ["Lactarius", "Russula emetica"]
+    f = tmp_path / "vocab.txt"
+    f.write_text("Russula emetica\nAmanita muscaria\n\n", encoding="utf-8")
+    assert E.vocabulary(Rel, err, f) == ["Amanita muscaria", "Russula emetica"]
