@@ -34,7 +34,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
 from PIL import Image
 
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
-               modelcard, models, names, nightly, onnxtower, permissions,
+               feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
+               onnxtower, permissions,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue)
 from .dates import real_date
@@ -606,7 +607,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         # A change in who has said no rebuilds the reference set without their photos.
             # Photos Human Feedback leaves out (synced at startup and before each night).
             excluded = feedback.exclusions_fingerprint(conn)
-        return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded)
+            # Renames read from mycomap.org's name-change log between nights (name_changes.py).
+            renamed = name_changes.version(conn) if layer else 0
+        return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded, renamed)
 
     def answers_version(backbone: str, method: str, view: permissions.PermissionView) -> str:
         """What this model answers from now (answercache.answers_version): the release and
@@ -1067,6 +1070,28 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         except Exception as e:  # noqa: BLE001 - reported; the schedule below would fail too
             note(f"[nightly] time zone {nightly_settings.tz!r}: {type(e).__name__}: {e}")
 
+    # mycomap.org's name-change log (name_changes.py), read into the nightly layer only: when
+    # a Name Update Vision asked for is done, every few minutes, and before each night. Never
+    # without a layer, so a release's own manifest is never written.
+    # Read only with mycomap.org's address set (or a client given): a test never reads .org.
+    from . import feedback_api
+    org_named = feedback_org is not None or bool(config.setting("MV_ORG_BASE_URL"))
+    feedback_org = feedback_org or feedback_api.OrgClient()
+    name_change_reader = None
+    if layer and org_named:
+        def layer_db():
+            own = manifest.connect(manifest_path)
+            own.execute("pragma busy_timeout = 30000")
+            return own
+        # The cursor in <release root>/state/, across releases (name_changes.py).
+        name_change_reader = name_changes.Reader(layer.root.parent.parent
+                                                 / "org-name-changes.sqlite", feedback_org,
+                                                 layer_db, note=note)
+    app.state.name_change_reader = name_change_reader
+
+    def read_name_changes() -> dict | None:
+        return name_change_reader.run() if name_change_reader else None
+
     def run_nightly(accept_removals: bool = False) -> dict:
         """One nightly update, then the preloaded indexes rebuilt so the first person
         after it doesn't wait for the new reference set."""
@@ -1077,6 +1102,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return base_url, key
         with db_lock:                      # Human Feedback's photo decisions, once a night
             note(f"[feedback] photo exclusions: {feedback.sync_exclusions(feedback_store, conn)}")
+        read_name_changes()                # .org's renames first: tonight counts only the rest
         fetch = nightly_fetch or (lambda: nightly.fetch_green(*org(), log=note))
         fetch_pending = nightly_fetch_pending or (lambda: nightly.fetch_pending(*org(), log=note))
 
@@ -1140,7 +1166,6 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # and contributors. Its decisions are kept with the usage counts (state/), across
     # releases. "Refresh" re-asks the served model about a reference record from its stored
     # vectors, the record itself left out, behind the same queue as everything else.
-    from . import feedback_api
     if feedback_store is None:
         feedback_store = feedback.Store(
             (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT else config.DATA_DIR)
@@ -1177,9 +1202,31 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "top5": [[c["name"], c["score"]] for c in result["ranks"]["species"][:5]]}
 
     from . import photo_review
-    feedback_api.add_routes(app, person=person, store=feedback_store, org=feedback_org,
-                            rescore=feedback_rescore,
-                            photos=photo_review.ReviewPhotos(q, permission_view))
+    taxonomy_now = None
+
+    def genus_known(genus: str) -> bool | None:
+        nonlocal taxonomy_now
+        if taxonomy_now is None:
+            from . import taxonomy
+            path = (layer.taxonomy_cache if layer else Path(manifest_path).parent / taxonomy.CACHE)
+            taxonomy_now = taxonomy.load(path) or False
+        return bool(taxonomy_now) and taxonomy_now.is_genus(genus)
+
+    def name_info(wanted: list[str]) -> dict[str, dict]:
+        with db_lock:
+            return feedback_org_rules.manifest_name_info(conn, genus_known)(wanted)
+
+    feedback_requests = feedback_api.add_routes(
+        app, person=person, store=feedback_store, org=feedback_org, rescore=feedback_rescore,
+        photos=photo_review.ReviewPhotos(q, permission_view), name_info=name_info,
+        on_name_update_done=read_name_changes, note=note)
+    app.state.feedback_requests = feedback_requests
+    if background and org_named:           # unfinished Name Updates, and the log beside them
+        def follow_name_updates():
+            feedback_requests.poll_once()
+            read_name_changes()
+        start_background("feedback name updates", feedback_org_rules.POLL_SECONDS,
+                         follow_name_updates, note)
 
     v1_on = bool(api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1")
     sessions_on = bool(sessions if sessions is not None

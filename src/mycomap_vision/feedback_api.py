@@ -26,7 +26,8 @@ import requests
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from . import config, feedback as fb, label_review as lr, name_equiv, photo_review as pr
+from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
+from . import photo_review as pr
 
 ROLE_TTL = 300.0
 
@@ -63,6 +64,41 @@ class OrgClient:
         obs = record_key if record_key.startswith("mo:") else f"inat:{record_key}"
         return self._get("/api/vision/feedback/record", {"observation": obs})
 
+    # --- Name Update requests (feedback_org.py) and the name-change log (name_changes.py) ---
+    def _send(self, method: str, path: str, body: dict | None = None) -> tuple[int | None, dict]:
+        """(status, JSON body) of a write; (None, {}) without a key. A 4xx is an answer, not
+        an error: the caller tells a refusal from a conflict."""
+        if not self.key:
+            return None, {}
+        r = self.http.request(method, self.base + path, json=body, timeout=self.timeout,
+                              headers={"Authorization": f"Bearer {self.key}"})
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        return r.status_code, data if isinstance(data, dict) else {}
+
+    def name_update_post(self, payload: dict) -> tuple[int | None, dict]:
+        """Open a Name Update request from a decision: 202 new, 200 the same decision again,
+        409 conflict / open_request, 422 names refused, 400 a bad body."""
+        return self._send("POST", "/api/vision/name-updates", payload)
+
+    def name_update_get(self, request_id: int) -> dict | None:
+        return self._get(f"/api/vision/name-updates/{int(request_id)}", {})
+
+    def name_update_find(self, decision_id: str) -> dict | None:
+        return self._get("/api/vision/name-updates", {"decision": decision_id})
+
+    def name_update_delete(self, request_id: int) -> tuple[int | None, dict]:
+        """Withdraw a request nobody has run (409 once a run has started)."""
+        return self._send("DELETE", f"/api/vision/name-updates/{int(request_id)}")
+
+    def name_changes(self, after: int, limit: int = 100) -> dict | None:
+        return self._get("/api/vision/name-changes", {"after": after, "limit": limit})
+
+    def name_change_records(self, change_id: int, after: int = 0) -> dict | None:
+        return self._get(f"/api/vision/name-changes/{int(change_id)}/records", {"after": after})
+
 
 def blast_link(seq: dict, staff: bool) -> dict | None:
     """Where a sequence's BLAST link opens for this viewer (Steve, 2026-10-18; .org's
@@ -77,11 +113,23 @@ def blast_link(seq: dict, staff: bool) -> dict | None:
     return None
 
 
+def item_url(item_id: int) -> str | None:
+    """The item on Vision's Human Feedback page, for .org's link back (MV_PUBLIC_ORIGIN)."""
+    origin = (config.setting("MV_PUBLIC_ORIGIN") or "").rstrip("/")
+    return f"{origin}/feedback?item={int(item_id)}" if origin.startswith("http") else None
+
+
 def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store: fb.Store,
                org: OrgClient | None = None,
                rescore: Callable[[str], dict] | None = None,
-               photos: "pr.ReviewPhotos | None" = None) -> None:
+               photos: "pr.ReviewPhotos | None" = None,
+               name_info: "fo.NameInfo | None" = None,
+               on_name_update_done: Callable[[], object] | None = None,
+               note=print) -> fo.OrgRequests:
+    """The routes. Returns the Name Update requests (feedback_org.OrgRequests), whose
+    poll_once the server runs every feedback_org.POLL_SECONDS."""
     org = org or OrgClient()
+    requests_ = fo.OrgRequests(store, org, item_url, on_done=on_name_update_done, note=note)
     cache: dict[str, tuple[float, dict]] = {}
     lock = threading.Lock()
     allow = {x.strip() for x in (config.setting("MV_FEEDBACK_ADMINS") or "").split(",")
@@ -142,7 +190,13 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.get("/api/feedback/catalogue")
     def fb_catalogue(request: Request):
         access(request)
-        return fb.type_catalogue()
+        out = fb.type_catalogue()
+        for t in out:                # which options open a Name Update (feedback_org.KINDS)
+            for o in t["options"]:
+                o["name_update"] = fo.KINDS.get((t["type"], o["code"]))
+                if o["name_update"] == "rename":     # the shared option, on a whole name
+                    o["label"] = "Rename every record of this name to…"
+        return out
 
     @app.get("/api/feedback/summary")
     def fb_summary(request: Request):
@@ -159,6 +213,9 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             out = store.items(type, status, max(0, offset), min(max(1, limit), 100),
                               projects, q.strip())
             out["items"] = [fb.reviewer_view(i) for i in out["items"]]
+            chips = requests_.chips([i["id"] for i in out["items"]])
+            for i in out["items"]:
+                i["org_chip"] = chips.get(i["id"])
             return out
         except fb.FeedbackError as e:
             bad(e)
@@ -183,28 +240,78 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                 seq["blast_link"] = blast_link(seq, bool(roles.get("staff")))
             live.append({"record_key": key, **rec})
         item["live"] = live
+        requests_.check_item(item_id)                  # the Name Update as .org has it now
+        item["org_request"] = fo.request_view(requests_.for_item(item_id))
         out = fb.reviewer_view(item)
         if out["masked"]:
             out["revealed"] = store.revealed(item_id, str(person(request)["sub"]))
         return out
 
+    def with_request(item: dict) -> dict:
+        return item | {"org_request": fo.request_view(requests_.for_item(item["id"]))}
+
+    def plan_or_400(item: dict, decision: str, value):
+        try:
+            return fo.plan(item, decision, value, name_info)
+        except fb.FeedbackError as e:
+            bad(e)
+
+    @app.post("/api/feedback/items/{item_id}/org-preview")
+    def fb_org_preview(request: Request, item_id: int, payload: dict = Body(...)):
+        """What saving this decision would ask mycomap.org for, before it is saved: the old
+        names, the new name and anything to check ({"opens": false} for a decision that opens
+        no Name Update)."""
+        _, projects = access(request)
+        item = item_or_404(item_id, projects)
+        p = plan_or_400(item, str(payload.get("decision") or ""), payload.get("value"))
+        if p is None:
+            return {"opens": False}
+        info = name_info(p.old_names + [p.new_name]) if name_info else {}
+        return {"opens": True, **p.body(), "warnings": p.warnings,
+                "records": {n: (info.get(n) or {}).get("records") for n in info}}
+
+    @app.post("/api/feedback/items/{item_id}/org-request")
+    def fb_org_send_again(request: Request, item_id: int):
+        """Send the latest decision's Name Update again (not sent yet, not taken, refused)."""
+        _, projects = access(request)
+        item = item_or_404(item_id, projects)
+        d = requests_.latest_decision(item_id)
+        if d is None or item["status"] != "decided":
+            raise HTTPException(409, "decide first")
+        row = requests_.row(d["id"])
+        if row is not None and row["status"] not in fo.SEND_AGAIN:
+            raise HTTPException(409, "this Name Update is already on mycomap.org")
+        if requests_.send(d["id"], name_info=name_info) is None:
+            raise HTTPException(409, "this decision opens no Name Update")
+        return with_request(fb.reviewer_view(store.get(item_id, projects)))
+
     @app.post("/api/feedback/items/{item_id}/decision")
     def fb_decide(request: Request, item_id: int, payload: dict = Body(...)):
         who, projects = access(request)
-        item_or_404(item_id, projects)
+        item = item_or_404(item_id, projects)
+        decision = str(payload.get("decision") or "")
+        # A whole-name decision must make a Name Update before it is saved (feedback_org.py).
+        opens = plan_or_400(item, decision, payload.get("value")) is not None
         try:
-            return fb.reviewer_view(store.decide(
-                item_id, str(payload.get("decision") or ""), who, value=payload.get("value"),
+            done = store.decide(
+                item_id, decision, who, value=payload.get("value"),
                 note=payload.get("note"), photo_keys=list(payload.get("photo_keys") or []),
-                projects=projects))
+                projects=projects)
         except fb.FeedbackError as e:
             bad(e)
+        if opens:                    # saved either way; .org down leaves "not sent yet"
+            requests_.send(done["decisions"][-1]["id"], name_info=name_info)
+        return with_request(fb.reviewer_view(store.get(item_id, projects)))
 
     @app.post("/api/feedback/items/{item_id}/reopen")
     def fb_reopen(request: Request, item_id: int):
         _, projects = access(request)
         item_or_404(item_id, projects)
-        return fb.reviewer_view(store.reopen(item_id, projects))
+        try:                         # a Name Update nobody has run is withdrawn first
+            requests_.withdraw_for_reopen(item_id)
+        except fo.Unwithdrawable as e:
+            raise HTTPException(409, str(e)) from None
+        return with_request(fb.reviewer_view(store.reopen(item_id, projects)))
 
     @app.post("/api/feedback/items/{item_id}/reveal")
     def fb_reveal(request: Request, item_id: int):
@@ -379,15 +486,18 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         buf = io.StringIO()
         cols = ["decision_id", "item_type", "subject", "decision", "value", "applies",
                 "current", "proposed", "records", "record_keys", "photo_keys", "rule",
-                "blind", "seen_answer", "by", "at", "applied"]
+                "blind", "seen_answer", "by", "at", "applied", "name_update"]
         w = csv.writer(buf, delimiter="\t", lineterminator="\n")
         w.writerow(cols)
         for c in rows:
+            # A whole-name decision already on .org as a Name Update: not to be retyped there.
+            req = fo.request_view(requests_.row(c["id"]))
             w.writerow([c["id"], c["item_type"], c["subject"], c["decision"], c["value"] or "",
                         c["applies"], c["current"] or "", c["proposed"] or "", c["records"],
                         ",".join(c["record_keys"]), ",".join(c["photo_keys"]), c["rule"],
                         c["blind"], int(c["seen_answer"]), c["by_name"] or c["by_user"],
-                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(c["at"])), c["applied"]])
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(c["at"])), c["applied"],
+                        "" if req is None else f"request {req['request_id'] or '-'}: {req['status']}"])
         return Response(buf.getvalue(), media_type="text/tab-separated-values",
                         headers={"Content-Disposition": 'attachment; filename="feedback-changes.tsv"'})
 
@@ -396,3 +506,5 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         who = admin_only(request)
         store.mark_applied(decision_id, who)
         return JSONResponse({"ok": True})
+
+    return requests_

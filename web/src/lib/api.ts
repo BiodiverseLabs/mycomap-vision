@@ -371,6 +371,9 @@ export interface FeedbackOption {
   applies: FeedbackApplies;
   /** The decision needs a value, e.g. the name to rename to. */
   needs_value: boolean;
+  /** The kind of Name Update this decision opens on mycomap.org (a whole-name decision), or
+   *  null for one that opens none (feedback_org.py). */
+  name_update?: "respelling" | "accepted_name" | "rename" | "same_taxon" | null;
 }
 
 export interface FeedbackType {
@@ -432,7 +435,54 @@ export interface FeedbackItem {
   revealed?: Revealed | null;
   /** Epoch seconds (or ISO). */
   created_at: number | string;
+  /** The row's chip for the latest decision's Name Update on mycomap.org (lists only). */
+  org_chip?: OrgChip | null;
 }
+
+/** A whole-name decision's Name Update on mycomap.org, as Vision last read it. */
+export type OrgRequestStatus = "not_sent" | "not_taken" | "searching" | "waiting" | "running" | "done"
+  | "needs_attention" | "refused" | "declined" | "withdrawn";
+
+export interface OrgChip {
+  text: string;
+  tone: "good" | "bad" | "busy" | "quiet";
+}
+
+export interface OrgStep {
+  step: "sent" | "searched" | "waiting" | "done";
+  state: "done" | "current" | "todo" | "stopped";
+  label: string;
+}
+
+export interface OrgRequest {
+  status: OrgRequestStatus;
+  request_id: number | null;
+  /** Name Update on mycomap.org, opened in a new tab. */
+  url: string | null;
+  note: string | null;
+  totals: { total?: number; fixed?: number; set_aside?: number; problems?: number; to_fix?: number };
+  declined_by: string | null;
+  declined_reason: string | null;
+  old_names: string[];
+  new_name: string | null;
+  /** Epoch seconds. */
+  sent_at: number | null;
+  checked_at: number | null;
+  steps: OrgStep[];
+  chip: OrgChip;
+  can_send: boolean;
+  can_check: boolean;
+}
+
+/** What saving a decision would ask mycomap.org for, before it is saved. */
+export type OrgPreview = { opens: false } | {
+  opens: true;
+  kind: string;
+  old_names: string[];
+  new_name: string;
+  warnings: string[];
+  records: Record<string, number | null>;
+};
 
 export interface FeedbackDecision {
   id: number;
@@ -507,6 +557,7 @@ export interface FeedbackItemDetail extends FeedbackItem {
   decisions: FeedbackDecision[];
   refreshes: FeedbackRefresh[];
   live?: LiveRecord[];
+  org_request?: OrgRequest | null;
 }
 
 export interface RefreshedRecord {
@@ -668,6 +719,9 @@ export const feedbackApi = {
   decide: (id: number, body: FeedbackDecisionBody) =>
     postJson<FeedbackItemDetail>(`${fbItem(id)}/decision`, body),
   reopen: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/reopen`),
+  orgPreview: (id: number, body: { decision: string; value?: string }) =>
+    postJson<OrgPreview>(`${fbItem(id)}/org-preview`, body),
+  sendAgain: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/org-request`),
   /** "Show Vision's answer" on a masked item (409 on anything else). Recorded server-side: a
    *  decision made after it is kept out of the blind check. */
   reveal: (id: number) => postJson<Revealed>(`${fbItem(id)}/reveal`),

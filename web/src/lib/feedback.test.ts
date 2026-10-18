@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
 import { appliesWords, blastAnchor, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
-         itemBadges, pageText, parsePhotoKeys, prefillValue, recordLabel, refreshVerdict, REVEAL_BUTTON,
-         REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem, shownRule, showsFeedbackNav, storedVerdict,
-         whenText } from "./feedback";
+         historyOrgText, itemBadges, linkedItem, orgChipClass, pageText, parsePhotoKeys, prefillValue,
+         recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
+         shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText } from "./feedback";
 
 const item = (over: Partial<FeedbackItem> = {}): FeedbackItem => ({
   id: 1, item_type: "photos_unlike_label", subject: "123", granularity: "record",
@@ -118,6 +118,67 @@ test("records, times and pages read plainly", () => {
   assert.equal(whenText("2026-10-18T14:05:09Z"), "2026-10-18 14:05 UTC");
   assert.equal(pageText(25, 25, 312), "26–50 of 312");
   assert.equal(pageText(0, 0, 0), "0 of 0");
+});
+
+// --- whole-name decisions open a Name Update on mycomap.org ----------------------------------
+
+test("a Name Update option shows the new name, editable, prefilled with the proposal", () => {
+  const accept = opt({ code: "accept", label: "Use the accepted name for all", applies: "org",
+                       name_update: "accepted_name" });
+  const it = item({ proposed: " Amanita accepted " });
+  assert.equal(prefillValue(accept, it), "Amanita accepted");
+  assert.deepEqual(valueBox(accept), { label: "New name", required: false });
+  assert.deepEqual(valueBox(opt({ needs_value: true, name_update: "respelling" })),
+                   { label: "New name", required: true });
+  assert.deepEqual(valueBox(opt({ needs_value: true })), { label: "Value", required: true });
+  assert.equal(valueBox(opt()), null);
+  assert.equal(prefillValue(opt(), it), "");
+});
+
+test("an edited new name is sent; an empty one leaves the server's proposal", () => {
+  const accept = opt({ code: "accept", applies: "org", name_update: "accepted_name" });
+  assert.deepEqual(decisionBody(accept, { value: " Amanita fixed " }),
+                   { body: { decision: "accept", value: "Amanita fixed" } });
+  assert.deepEqual(decisionBody(accept, { value: "  " }), { body: { decision: "accept" } });
+  assert.deepEqual(decisionBody(opt({ code: "keep" }), { value: "x" }), { body: { decision: "keep" } });
+});
+
+test("the chip's tone picks its colours and the steps their marks", () => {
+  assert.match(orgChipClass("good"), /myco-green/);
+  assert.match(orgChipClass("bad"), /amber/);
+  assert.match(orgChipClass("busy"), /sky/);
+  assert.equal(stepLook("done").mark, "●");
+  assert.equal(stepLook("todo").mark, "○");
+  assert.match(stepLook("stopped").markClass, /amber/);
+  assert.match(stepLook("current").textClass, /font-medium/);
+});
+
+test("Sent shows the time it was sent; other steps say what the server said", () => {
+  const sentAt = Date.UTC(2026, 9, 18, 14, 1) / 1000;
+  const t = stepText({ step: "sent", state: "done", label: "Sent" }, { sent_at: sentAt });
+  assert.equal(t, "Sent 14:01 UTC");
+  assert.equal(stepText({ step: "sent", state: "stopped", label: "Not sent yet" }, { sent_at: sentAt }),
+               "Not sent yet");
+  assert.equal(stepText({ step: "searched", state: "done", label: "Searched: 1 record" }, { sent_at: null }),
+               "Searched: 1 record");
+});
+
+test("a link back from mycomap.org opens its item; anything else opens none", () => {
+  assert.equal(linkedItem("?item=124"), 124);
+  assert.equal(linkedItem("?tab=x&item=7"), 7);
+  for (const s of ["", "?item=", "?item=0", "?item=-3", "?item=1e3", "?item=12a", "?item=9999999999"]) {
+    assert.equal(linkedItem(s), null, s);
+  }
+});
+
+test("History names the Name Update request and where it stands", () => {
+  assert.equal(historyOrgText({ request_id: 7, chip: { text: "on mycomap.org: waiting for a person", tone: "busy" } }),
+               ", Name Update request 7: waiting for a person");
+  assert.equal(historyOrgText({ request_id: 7, chip: { text: "applied on mycomap.org · 2 renamed", tone: "good" } }),
+               ", Name Update request 7: applied · 2 renamed");
+  assert.equal(historyOrgText({ request_id: null, chip: { text: "not sent to mycomap.org yet", tone: "bad" } }),
+               ", not sent yet");
+  assert.equal(historyOrgText(null), "");
 });
 
 // --- the two sections --------------------------------------------------------------------------

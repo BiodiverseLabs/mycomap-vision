@@ -385,7 +385,8 @@ def test_serve_says_when_answers_are_not_configured(conn, tmp_path, monkeypatch)
     monkeypatch.setenv("MV_ORG_VISION_KEY", KEY)
     monkeypatch.setenv("MV_LICENSE_REFRESH_HOURS", "24")
     api.create_app(tmp_path / "m.sqlite", web_dist=None, note=logged.append)
-    assert started == ["permissions", "licences"]
+    # Human Feedback's Name Updates on .org are followed once .org's address is set too.
+    assert started == ["permissions", "licences", "feedback name updates"]
 
 
 # --- licence refresh ----------------------------------------------------------
