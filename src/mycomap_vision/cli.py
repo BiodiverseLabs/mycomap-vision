@@ -1125,7 +1125,9 @@ def cmd_feedback(conn, args) -> None:
                                   Path(args.hits) if args.hits else None,
                                   blind_ratio=args.blind_ratio, seed=args.seed,
                                   twin_locations=Path(args.twin_locations)
-                                  if args.twin_locations else None)
+                                  if args.twin_locations else None,
+                                  answer_key_groups=Path(args.answer_key_groups)
+                                  if args.answer_key_groups else None)
         print(json.dumps({"store": str(path), "seeds": out}, indent=2))
     else:
         print(json.dumps({"store": str(path), "types": store.summary()}, indent=2))
@@ -2323,6 +2325,8 @@ def main(argv: list[str] | None = None) -> int:
                                   "blind sample mixed into model-flagged queues")
     q.add_argument("--twin-locations", help="twins whose copies are over 5 km apart (the "
                                             "Atlas lane's list; no coordinates)")
+    q.add_argument("--answer-key-groups", help="labels sharing one answer key (species rank): "
+                                               "the paper lead's groups file")
     q.add_argument("--blind-ratio", type=float, default=0.25)
     q.add_argument("--seed", type=int, default=20261018)
     q.add_argument("--store", help="the queue file (default <release root>/state/"

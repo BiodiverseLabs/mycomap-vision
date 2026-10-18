@@ -6,6 +6,7 @@ there; a decision about particular records ("Rename the record(s) to…", label 
 sequence, crosswalk "nested") stays with Validate Records as before:
 
     name_writing_split      use_writing    respelling     every other writing -> the value
+    species_rank_split      use_name       same_taxon     every other label -> the value
     name_retired            accept         accepted_name  the retired name -> the accepted one
     name_inactive_on_inat   accept         accepted_name  the inactive name -> iNat's current
     name_retired / ..._inat rename         rename         the name -> the value typed
@@ -40,6 +41,7 @@ from . import feedback as fb
 
 KINDS: dict[tuple[str, str], str] = {
     ("name_writing_split", "use_writing"): "respelling",
+    ("species_rank_split", "use_name"): "same_taxon",
     ("name_retired", "accept"): "accepted_name",
     ("name_retired", "rename"): "rename",
     ("name_inactive_on_inat", "accept"): "accepted_name",
@@ -108,8 +110,10 @@ def plan(item: dict, decision: str, value: str | None = None,
     value = (value or "").strip()
     current, proposed = (item.get("current") or "").strip(), (item.get("proposed") or "").strip()
     t = item["item_type"]
-    if t == "name_writing_split":
+    if t in ("name_writing_split", "species_rank_split"):
         new = value or proposed
+        if t == "species_rank_split" and new not in writings(current):
+            raise fb.FeedbackError(f"the name to keep is one of {', '.join(writings(current))}")
         old = [w for w in writings(current) if w != new]
     elif t in ("name_retired", "name_inactive_on_inat"):
         new = value if (decision == "rename" or value) else proposed
