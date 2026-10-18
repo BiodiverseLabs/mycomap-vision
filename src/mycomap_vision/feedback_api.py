@@ -183,7 +183,10 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                 seq["blast_link"] = blast_link(seq, bool(roles.get("staff")))
             live.append({"record_key": key, **rec})
         item["live"] = live
-        return fb.reviewer_view(item)
+        out = fb.reviewer_view(item)
+        if out["masked"]:
+            out["revealed"] = store.revealed(item_id, str(person(request)["sub"]))
+        return out
 
     @app.post("/api/feedback/items/{item_id}/decision")
     def fb_decide(request: Request, item_id: int, payload: dict = Body(...)):
@@ -202,6 +205,23 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         _, projects = access(request)
         item_or_404(item_id, projects)
         return fb.reviewer_view(store.reopen(item_id, projects))
+
+    @app.post("/api/feedback/items/{item_id}/reveal")
+    def fb_reveal(request: Request, item_id: int):
+        """"Show Vision's answer" on a blind item before deciding (Steve, 2026-10-18). Gives
+        Vision's top 5 for the record asked afresh (the record left out of the reference), the
+        same way for every item of the queue, so it never tells a check-sample item from a
+        flagged one: no rule, evidence or outcome. The reveal is recorded, and a decision made
+        after it is marked seen_answer and kept out of the blind measure."""
+        who, projects = access(request)
+        item = item_or_404(item_id, projects)
+        if not fb.reviewer_view(item)["masked"]:
+            raise HTTPException(409, "nothing is hidden on this item")
+        key = (item["record_keys"] or [item["subject"]])[0]
+        got = rescore(key) if rescore else {"available": False}
+        answer = {"available": bool(got.get("available")), "top5": got.get("top5") or [],
+                  "reason": got.get("reason") if not got.get("available") else None}
+        return store.reveal(item_id, who, answer)
 
     @app.post("/api/feedback/items/{item_id}/refresh")
     def fb_refresh(request: Request, item_id: int):
@@ -294,6 +314,10 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         except fb.FeedbackError as e:
             bad(e)
         page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]
+        me = str(person(request)["sub"])
+        for c in page:
+            if c["masked"]:
+                c["revealed"] = store.revealed(c["item_id"], me)
         return {"total": out["total"],
                 "reasons": [{"code": c, "label": t} for c, t in lr.REASONS],
                 "outcomes": [{"code": o.code, "label": o.label, "applies": o.applies,
@@ -355,14 +379,14 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         buf = io.StringIO()
         cols = ["decision_id", "item_type", "subject", "decision", "value", "applies",
                 "current", "proposed", "records", "record_keys", "photo_keys", "rule",
-                "blind", "by", "at", "applied"]
+                "blind", "seen_answer", "by", "at", "applied"]
         w = csv.writer(buf, delimiter="\t", lineterminator="\n")
         w.writerow(cols)
         for c in rows:
             w.writerow([c["id"], c["item_type"], c["subject"], c["decision"], c["value"] or "",
                         c["applies"], c["current"] or "", c["proposed"] or "", c["records"],
                         ",".join(c["record_keys"]), ",".join(c["photo_keys"]), c["rule"],
-                        c["blind"], c["by_name"] or c["by_user"],
+                        c["blind"], int(c["seen_answer"]), c["by_name"] or c["by_user"],
                         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(c["at"])), c["applied"]])
         return Response(buf.getvalue(), media_type="text/tab-separated-values",
                         headers={"Content-Disposition": 'attachment; filename="feedback-changes.tsv"'})
