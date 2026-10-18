@@ -380,8 +380,15 @@ export interface FeedbackType {
   shows: string[];
   granularity: string;
   model_flagged: boolean;
+  /** The page section the queue belongs to: "cleanup" or "validation". */
+  section: FeedbackSection;
+  /** Reviewed blind: Vision's answer is hidden on open items unless the reviewer asks. */
+  blind: boolean;
   options: FeedbackOption[];
 }
+
+/** The page's two parts: mechanical fixes a rule found, and is the record's label right. */
+export type FeedbackSection = "cleanup" | "validation" | (string & {});
 
 export interface FeedbackSummary {
   type: string;
@@ -389,6 +396,8 @@ export interface FeedbackSummary {
   about: string;
   granularity: string;
   model_flagged: boolean;
+  section: FeedbackSection;
+  blind: boolean;
   open: number;
   decided: number;
 }
@@ -419,6 +428,8 @@ export interface FeedbackItem {
   records: number;
   status: FeedbackStatus;
   seed?: string;
+  /** On a masked item: this person's own "Show Vision's answer", or null. */
+  revealed?: Revealed | null;
   /** Epoch seconds (or ISO). */
   created_at: number | string;
 }
@@ -437,6 +448,20 @@ export interface FeedbackDecision {
 }
 
 export type Top5 = [string, number][];
+
+/** Vision's answer for a blind item, shown when the reviewer chose to see it ("Show Vision's
+ *  answer"); `reason` says why when it is not available. */
+export interface RevealedAnswer {
+  available: boolean;
+  top5: Top5;
+  reason: string | null;
+}
+
+/** This person's own reveal of a blind item: when, and what Vision answered. */
+export interface Revealed {
+  at: number | string;
+  answer: RevealedAnswer;
+}
 
 export interface FeedbackRefresh {
   at: number | string;
@@ -604,6 +629,8 @@ export interface LabelReviewCard {
   rule?: string | null;
   evidence?: Record<string, unknown>;
   decision?: LabelReviewDecision | null;
+  /** On a masked card: this person's own "Show Vision's answer", or null. */
+  revealed?: Revealed | null;
   photos: LabelReviewPhoto[];
 }
 
@@ -641,6 +668,9 @@ export const feedbackApi = {
   decide: (id: number, body: FeedbackDecisionBody) =>
     postJson<FeedbackItemDetail>(`${fbItem(id)}/decision`, body),
   reopen: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/reopen`),
+  /** "Show Vision's answer" on a masked item (409 on anything else). Recorded server-side: a
+   *  decision made after it is kept out of the blind check. */
+  reveal: (id: number) => postJson<Revealed>(`${fbItem(id)}/reveal`),
   refresh: (id: number) =>
     postJson<{ item: FeedbackItemDetail; refreshed: RefreshedRecord[] }>(`${fbItem(id)}/refresh`),
   photoReview: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort;

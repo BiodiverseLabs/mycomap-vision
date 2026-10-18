@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { LabelReviewCard, LabelReviewPhoto } from "./api";
+import { REVEAL_BUTTON, REVEAL_CONFIRM } from "./feedback";
 import { decidedSummary, excludedCount, isMasked, LABEL_KEY_HELP, LABEL_REVIEW_ABOUT, OUTCOME_BUTTONS, labelKeyAction, maskedCard, outcomeHint,
          outcomeStates, outcomeWords, saveBody, savedLine, sortedPhotos, splitStoredNote, visionSaid,
          WHY_LEFT_OUT, WHY_NO_NAME, WHY_NO_REASON, WHY_NONE_LEFT_OUT } from "./labelReview";
@@ -43,7 +44,9 @@ const decided = (over: Partial<LabelReviewCard> = {}): LabelReviewCard => ({
 test("an open card shows the record, its label and photos only, even when the server sent Vision's answer", () => {
   const leaky = { ...open(), ...SECRET, model_flagged: true, score: 0.71 } as LabelReviewCard;
   const shown = maskedCard(leaky);
-  assert.deepEqual(Object.keys(shown).sort(), ["item_id", "label", "link", "masked", "photos", "record_key", "status"]);
+  assert.deepEqual(Object.keys(shown).sort(),
+                   ["item_id", "label", "link", "masked", "photos", "record_key", "revealed", "status"]);
+  assert.equal(shown.revealed, null);
   assert.equal(shown.label, "A x");
   assert.equal(shown.photos.length, 3);
   const text = JSON.stringify(shown);
@@ -70,11 +73,35 @@ test("every open card looks the same: the same fields whatever the server held b
   const flagged = maskedCard({ ...open(), ...SECRET } as LabelReviewCard);
   const blind = maskedCard(open({ item_id: 8, record_key: "101" }));
   assert.deepEqual(Object.keys(flagged).sort(), Object.keys(blind).sort());
+  // Before anyone asks, no card carries an answer: revealed is null on both alike.
+  assert.equal(flagged.revealed, null);
+  assert.equal(blind.revealed, null);
 });
 
-test("the page's own words say nothing about Vision or why records are in the queue", () => {
+test("a card this person chose to reveal keeps its own answer, and only that answer", () => {
+  const answer = { available: true, top5: [["B y", 0.71], ["A x", 0.4]] as [string, number][], reason: null };
+  const shown = maskedCard({ ...open(), ...SECRET,
+                             revealed: { at: 1760800000, answer: { ...answer, rule: "M1 truth", seed: 3 }, blind: true },
+                           } as unknown as LabelReviewCard);
+  assert.deepEqual(shown.revealed, { at: 1760800000, answer });
+  assert.equal(shown.rule, undefined);
+  assert.equal(shown.evidence, undefined);
+  for (const word of ["M1 truth", "seed", "blind", "hard_example"]) {
+    assert.ok(!JSON.stringify(shown).includes(word), word);
+  }
+  const none = maskedCard(open({ revealed: { at: 2, answer: { available: false, top5: [], reason: "no photos" } } }));
+  assert.deepEqual(none.revealed, { at: 2, answer: { available: false, top5: [], reason: "no photos" } });
+});
+
+test("the page's own words say nothing about Vision or why records are in the queue, but for the one reveal button", () => {
   for (const text of [LABEL_REVIEW_ABOUT, ...Object.values(OUTCOME_BUTTONS)]) {
     assert.ok(!/vision|model|flag|rank|blind|score/i.test(text), text);
+  }
+  // "Show Vision's answer" and its confirm must name Vision. They are the only exception: fixed
+  // words, the same on every card, that say nothing else about Vision or why a record is here.
+  for (const text of [REVEAL_BUTTON, REVEAL_CONFIRM]) {
+    const rest = text.replace(/Vision's answer/g, "");
+    assert.ok(!/vision|model|flag|rank|blind|score|sample/i.test(rest), text);
   }
 });
 
