@@ -76,8 +76,8 @@ export function FeedbackPage() {
   return (
     <>
       <PageHeader title="Human Feedback">
-        Places where Vision and the reference records disagree, to check and set right: open the
-        records and their BLAST results, decide, then refresh to see whether they still disagree.
+        Two kinds of work on the records Vision learns from: data cleanup, fixing what a rule
+        found, and data validation, checking whether a record's label is right.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-6xl space-y-6">
         {me.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
