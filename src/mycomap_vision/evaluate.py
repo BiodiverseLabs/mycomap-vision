@@ -458,6 +458,10 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     answer_key = answer_key or name_equiv.ANSWER_KEY
     index, model = fitted or fit_method(vectors, ref, method)
     names = {rank: index.labels[rank] for rank in RANKS}
+    # A find's reference depth for its bands (PLAN rule 7): the reference records whose label
+    # shares the truth's answer key, so a species pools its varieties and subspecies ("exact"
+    # counts the label as written, as v1's published bands did).
+    depth = name_equiv.ReferenceDepth((r.unit for r in ref), answer_key)
     uses_context = getattr(model, "needs_context", False)
     leak = occurrence_leak_check(model, test)
     tally = {rank: defaultdict(Counter) for rank in RANKS}
@@ -495,8 +499,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
             scores = model.species_scores(vectors[rows], context_of(rec))
         else:
             scores = model.species_scores(vectors[rows])
-        b = bucket_of(index.ref_count.get(rec.unit, 0))
-        band = standard_band(index.ref_count.get(rec.unit, 0))
+        b = bucket_of(depth(rec.unit))
+        band = standard_band(depth(rec.unit))
         if per_record:
             mine = {"observation_id": rec.observation_id, "top": {}, "_cal": {}}
             answers.append(mine)
