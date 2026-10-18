@@ -575,27 +575,12 @@ class KeyTruth:
     genus_known: bool = True
 
 
-def truth_genus_known(taxonomy, label: str, genus: str | None) -> bool:
-    """PLAN rule 4/7 (Steve, 18 Oct): iNat can name the truth's genus when the label's genus
-    (the release's genus, or the label's first word) or the genus of the label's iNat
-    species (one-to-one or not) is an iNat genus at the snapshot plus successors."""
-    from . import name_equiv as N
-    words = {w for w in (genus, (label or "").split()[0] if (label or "").split() else None) if w}
-    for w in words:
-        for t in taxonomy.by_name.get(w.lower(), []):
-            cur = taxonomy.current(t)
-            if cur is not None and taxonomy._level(cur, N.GENUS_LEVEL) is not None:
-                return True
-    sid = taxonomy.species_id(label, one_to_one=False) if label else None
-    return sid is not None and taxonomy._level(sid, N.GENUS_LEVEL) is not None
-
-
 def key_truth(rec: dict, taxonomy) -> KeyTruth:
     label = rec.get("label") or ""
     formal = rec.get("name_kind") == "formal" and rec.get("label_rank") in ("species", None)
     return KeyTruth(taxonomy, label, rec.get("genus"),
                     bool(formal and label and taxonomy.species_id(label) is not None),
-                    truth_genus_known(taxonomy, label, rec.get("genus")))
+                    taxonomy.genus_known(label, rec.get("genus")))
 
 
 def verdicts(raw_id: int | None, sp: int | None, ge: int | None, truth: TruthTaxa,
@@ -1119,50 +1104,6 @@ def vocabulary(rel, errata=None, path: Path | None = None) -> list[str]:
         if lab and key not in drop})
 
 
-def label_lookups(labels: Iterable[str], genera: Iterable[str] = ()) -> set[str]:
-    """Every lower-case name the key looks up for a label or a truth genus: the label, its
-    rank-words-dropped form, its binomial and its genus word."""
-    from . import name_equiv as N
-    out = set()
-    for lab in labels:
-        n = (lab or "").strip()
-        words = N._RANK_WORD.sub(" ", n).split()
-        out.update(x.lower() for x in (n, " ".join(words), " ".join(words[:2]),
-                                       words[0] if words else "") if x)
-    out.update(g.strip().lower() for g in genera if g and g.strip())
-    return out
-
-
-def answer_side_extras(frozen: dict[int, dict], merged: dict[int, dict],
-                       lookups: set[str]) -> tuple[dict[int, dict], list[int]]:
-    """What the identifications add to the frozen taxonomy, kept to the ANSWER side (PLAN
-    rule 4: extras never change how a label resolves): an added or changed taxon is left out
-    if a label lookup can reach it (a frozen taxon of that name, its successors and its
-    ancestry) or if it carries a looked-up name. Returns (extras, left out ids)."""
-    by_name: dict[str, list[int]] = {}
-    for t, v in frozen.items():
-        if v.get("name"):
-            by_name.setdefault(v["name"].lower(), []).append(t)
-    reach, todo = set(), [t for n in lookups for t in by_name.get(n, [])]
-    while todo:
-        t = todo.pop()
-        if t in reach:
-            continue
-        reach.add(t)
-        v = frozen.get(t) or {}
-        todo.extend(int(x) for x in (v.get("current_synonymous_taxon_ids") or []))
-        todo.extend(int(x) for x in (v.get("ancestor_ids") or []))
-    extras, left_out = {}, []
-    for t in sorted(merged):
-        if frozen.get(t) == merged[t]:
-            continue
-        if t in reach or (merged[t].get("name") or "").lower() in lookups:
-            left_out.append(t)
-        else:
-            extras[t] = merged[t]
-    return extras, left_out
-
-
 def label_resolution_changes(a, b, labels: Iterable[str], genera: Iterable[str]) -> list[str]:
     """Labels and truth genera that two Taxonomy objects resolve differently (species id,
     genus names); empty when extras leave the label side alone."""
@@ -1175,9 +1116,9 @@ def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors
                         out_dir: Path, errata=None, vocabulary_file: Path | None = None):
     """(the shared answer key's Taxonomy, E31's own taxa dict). The key's: iNat open data plus the frozen
     successors TSV, with what E31's identifications add (taxa newer than the download and
-    retired ids' successors, from the cached taxa lookups) on the answer side only: extras a
-    label lookup could reach are left out and counted, and the run refuses if extras change
-    how any label or truth genus resolves. The extras are written to taxonomy-extras.json
+    retired ids' successors, from the cached taxa lookups) as name_equiv's answer-side
+    extras (never applied to a taxon a label lookup reaches); the run refuses if they
+    change how any label or truth genus resolves. The extras are written to taxonomy-extras.json
     and cited by sha256 with the vocabulary's."""
     from . import name_equiv as N
     labels = vocabulary(rel, errata, vocabulary_file)
@@ -1186,8 +1127,9 @@ def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors
     frozen = N.Taxonomy.load(config.DATA_DIR / OPEN_TAXA, labels=labels, successors=successors)
     base = {t: dict(v) for t, v in frozen.taxa.items()}
     merged = complete_taxa(client, {t: dict(v) for t, v in base.items()}, snap)
-    extras, left_out = answer_side_extras(base, merged, label_lookups(labels, genera))
-    new_ids = {t: v for t, v in extras.items() if t not in base}
+    # every entry the cached lookups add or change; name_equiv applies them to answers only
+    # (never to a taxon a label lookup reaches) and the guard below re-checks that
+    extras = {t: merged[t] for t in sorted(merged) if base.get(t) != merged[t]}
     extras_path = out_dir / "taxonomy-extras.json"
     extras_path.write_text(json.dumps({str(t): v for t, v in extras.items()}, sort_keys=True,
                                       indent=0), encoding="utf-8")
@@ -1195,10 +1137,8 @@ def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors
                  hashlib.sha256(("\n".join(labels) + "\n").encode("utf-8")).hexdigest())
     # name_equiv's extras are answer-only and the snapshot wins on a shared id, so only the
     # taxa the snapshot lacks take effect; changes to snapshot entries are counted, unused
-    tax = N.Taxonomy(base, labels, extras=new_ids, cite={**frozen.cite, "extras": extras_path.name,
-                                         "extras_effective": len(new_ids),
+    tax = N.Taxonomy(base, labels, extras=extras, cite={**frozen.cite, "extras": extras_path.name,
                                          "extras_taxa": len(extras),
-                                         "extras_left_out_label_side": len(left_out),
                                          "extras_sha256": sha256_file(extras_path),
                                          "vocabulary": str(vocabulary_file.name)
                                          if vocabulary_file else "included labels after erratum",
@@ -1209,6 +1149,7 @@ def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors
         raise RuntimeError(f"taxonomy extras change how {len(changed)} labels resolve "
                            f"(e.g. {changed[:5]}): PLAN rule 4 forbids it")
     tax.cite["labels_kept_apart"] = sum(len(v) for v in tax.shared_by.values())
+    tax.cite["extras_not_applied_label_reach"] = len(set(extras) & tax.reached)
     tax.cite["answer_key"] = N.ANSWER_KEY
     return tax, merged          # E31's own taxonomy (by-id verdicts, ID ranks): every lookup
 

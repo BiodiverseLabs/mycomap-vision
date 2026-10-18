@@ -584,20 +584,17 @@ def test_taxonomy_extras_never_change_how_a_label_or_truth_genus_resolves():
     frozen = {t: dict(v) for t, v in PSATHY.items()}
     frozen[20] = {**frozen[20], "is_active": False}          # a retired label genus, no successor
     frozen[22] = {**frozen[22], "is_active": False}          # a retired genus only answers use
-    merged = {t: dict(v) for t, v in frozen.items()}
-    merged[20]["current_synonymous_taxon_ids"] = [21]        # the cache knows a successor
-    merged[22]["current_synonymous_taxon_ids"] = [21]
-    merged[200] = {**merged[200], "ancestor_ids": [1, 22]}    # reached by the label's successor
-    merged[300] = {"id": 300, "name": "Psathyrella candolleana", "rank": "species",
-                   "rank_level": 10, "is_active": True, "ancestor_ids": [1, 21]}  # a homonym
+    extras = {20: {**frozen[20], "current_synonymous_taxon_ids": [21]},   # the cache's successors
+              22: {**frozen[22], "current_synonymous_taxon_ids": [21]},
+              200: {**frozen[200], "ancestor_ids": [1, 22]}}            # reached via a successor
     labels, genera = ["Psathyrella candolleana"], ["Psathyrella"]
-    extras, left_out = E.answer_side_extras(frozen, merged, E.label_lookups(labels, genera))
-    assert set(extras) == {22} and set(left_out) == {20, 200, 300}
     a = N.Taxonomy(frozen, labels)
-    assert E.label_resolution_changes(a, N.Taxonomy({**frozen, **extras}, labels), labels, genera) == []
-    assert E.label_resolution_changes(a, N.Taxonomy(merged, labels), labels, genera)  # the check bites
-    # the answer side still gains: an ID on the retired genus 22 now has a current genus
-    assert N.Taxonomy({**frozen, **extras}, labels).genus_names(22) == {"candolleomyces"}
+    b = N.Taxonomy(frozen, labels, extras=extras)
+    assert E.label_resolution_changes(a, b, labels, genera) == []
+    assert b.genus_names(22) == {"candolleomyces"}            # the answer side gains
+    assert b.current(20) is None                              # a reached entry is not overridden
+    changed = N.Taxonomy({**frozen, **extras}, labels)        # applied blindly: the guard bites
+    assert E.label_resolution_changes(a, changed, labels, genera)
 
 
 def test_vocabulary_is_the_included_labels_after_the_erratum_or_the_shared_file(tmp_path):
@@ -617,9 +614,9 @@ def test_vocabulary_is_the_included_labels_after_the_erratum_or_the_shared_file(
 
 def test_paired_genus_leaves_out_truths_whose_genus_inat_cannot_name_kept_in_as_a_sensitivity():
     tax = N.Taxonomy(PSATHY, ["Psathyrella candolleana"])
-    assert E.truth_genus_known(tax, "Psathyrella candolleana", "Psathyrella")
-    assert E.truth_genus_known(tax, "Candolleomyces sp. 'IN01'", "Candolleomyces")
-    assert not E.truth_genus_known(tax, "Nogenus sp. 'IN01'", "Nogenus")
+    assert tax.genus_known("Psathyrella candolleana", "Psathyrella")
+    assert tax.genus_known("Candolleomyces sp. 'IN01'", "Candolleomyces")
+    assert not tax.genus_known("Nogenus sp. 'IN01'", "Nogenus")
     rec = {"label": "Nogenus sp. 'IN01'", "genus": "Nogenus", "name_kind": "provisional",
            "label_rank": "species"}
     o = obs([pid(2, 21, "2023-01-01")], counts={2: 20000})
