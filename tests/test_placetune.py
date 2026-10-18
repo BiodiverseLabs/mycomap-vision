@@ -312,3 +312,17 @@ def test_credited_candidates_take_the_taxonomy_when_given():
     truths = ["Psathyrella candolleana"]
     assert pt.credited_candidates(cand, SP, groups, truths).tolist() == [[False, True]]
     assert pt.credited_candidates(cand, SP, groups, truths, taxonomy=tx).tolist() == [[True, True]]
+
+
+def test_the_tuners_bands_count_references_by_answer_key(tmp_path):
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parents[1] / "scripts" / "place_scoring"))
+    import run_v1
+    np.savez(tmp_path / "val-scores.npz",
+             species=np.array(["Pseudohydnum gelatinosum", "Pseudohydnum gelatinosum ssp. pusillum",
+                               "Physisporinus sp. 'IN01'"]),
+             ref_count=np.array([0, 12, 3]))
+    meta = {"truth_name": np.array(["Pseudohydnum gelatinosum", "Physisporinus sp. 'IN01 x VT01'",
+                                    ""])}
+    assert run_v1.key_depth_bands(tmp_path, meta).tolist() == ["5-19", "0", "n/a"]

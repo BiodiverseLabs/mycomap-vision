@@ -498,6 +498,30 @@ def genus_match(answer, truth, taxonomy: Taxonomy | None = None,
     return {"strict": strict, "sl": sl}
 
 
+class ReferenceDepth:
+    """A find's reference depth (PLAN rule 7, research 539a61e): the reference records
+    whose label shares the truth's answer key, so a species and its varieties and
+    subspecies are pooled (species rank) and a hybrid code keeps its own key. The one
+    definition every caller uses (paper-score's bands, H3, E6, E7, the closed set, the
+    place tuner). Build it from the reference labels, one per record, or (label, count)
+    pairs; depth(truth) is then that truth's count (0 for no truth)."""
+
+    def __init__(self, labels=(), rule: str = ANSWER_KEY):
+        self.rule = rule
+        self.counts: dict[str, int] = {}
+        for item in labels:
+            label, n = item if isinstance(item, tuple) else (item, 1)
+            key = answer_key(label, rule) if label else ""
+            if key:
+                self.counts[key] = self.counts.get(key, 0) + int(n)
+
+    def __call__(self, truth: str | None) -> int:
+        return self.counts.get(answer_key(truth, self.rule), 0) if truth else 0
+
+    def has(self, truth: str | None) -> bool:
+        return self(truth) > 0
+
+
 def label_vocabulary(release) -> list[str]:
     """The label vocabulary for the one-to-one rule (PLAN rule 4, research a267d31): every
     distinct label on the release's included records in train and val, all ranks, after the

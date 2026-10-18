@@ -268,7 +268,10 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
     slices (source, month, season, licence class, observer new to the reference, name kind)
     and any extra attributes given per record (e.g. ecoregion, distance band)."""
     from . import val_review as vr
-    depth = Counter(r["species"] for r in ref_rows if r.get("species"))
+    # PLAN rule 7: depth by answer key (a species pooled with its varieties; a hybrid
+    # code its own), the one definition (name_equiv.ReferenceDepth)
+    from .name_equiv import ReferenceDepth
+    depth = ReferenceDepth(r["species"] for r in ref_rows if r.get("species"))
     unseen = vr.unseen_observer([r.get("observer_login") for r in scored_rows],
                                 [r.get("observer_login") for r in ref_rows])
     out = []
@@ -290,7 +293,7 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
         out.append(po.Find(key, who or f"(unknown observer):{key}", species,
                            r.get("genus") or "", r.get("family") or "",
                            r.get("name_kind") or ("formal" if species else "one-word"),
-                           depth.get(species, 0) if species else 0, len(ph), attrs,
+                           depth(species), len(ph), attrs,
                            dict((near or {}).get(key, {}))))
     return out
 

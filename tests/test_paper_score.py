@@ -983,3 +983,15 @@ def test_extras_are_read_from_a_list_or_from_the_configs_documented_mapping():
     assert paper_score.extras_files({"extras": {"rule": "answer-side taxa ...", "e31b": one,
                                                 "v1_test": "fetched at scoring"}}) == [one]
     assert paper_score.extras_files({}) == [] and paper_score.extras_files(None) == []
+
+
+def test_a_finds_depth_counts_references_sharing_its_answer_key():
+    rows = [{"record_key": "1", "species": "Pseudohydnum gelatinosum", "genus": "Pseudohydnum",
+             "observer_login": "a"}]
+    refs = [{"species": "Pseudohydnum gelatinosum ssp. pusillum", "observer_login": "b"}] * 3
+    f, = paper_score.build_finds(rows, {}, refs)
+    assert f.depth == 3                                    # PLAN rule 7: band 1-4, not 0
+    hyb = [{"record_key": "2", "species": "Physisporinus sp. 'IN01 x VT01'",
+            "genus": "Physisporinus", "observer_login": "a"}]
+    g, = paper_score.build_finds(hyb, {}, [{"species": "Physisporinus sp. 'IN01'"}] * 4)
+    assert g.depth == 0                                    # a hybrid keeps its own key

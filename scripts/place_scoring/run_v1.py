@@ -247,6 +247,19 @@ def load_components(out: Path, answer_key: str | None = None, taxonomy=None):
     return c, {k: m[k] for k in m.files}
 
 
+def key_depth_bands(out: Path, meta: dict):
+    """Each record's reference band by answer key (PLAN rule 7, name_equiv.ReferenceDepth):
+    the train records of every group whose label shares the truth's key, from the saved
+    scores' group names and reference counts."""
+    import numpy as np
+    from mycomap_vision.heldout_report import DEPTH_BUCKETS, bucket
+    from mycomap_vision.name_equiv import ReferenceDepth
+    z = np.load(out / "val-scores.npz")
+    depth = ReferenceDepth(zip(z["species"].tolist(), z["ref_count"].tolist()))
+    return np.array([bucket(depth(t), DEPTH_BUCKETS) if t else "n/a"
+                     for t in meta["truth_name"].tolist()])
+
+
 def subset(c, keep):
     from mycomap_vision import placetune as pt
 
@@ -276,6 +289,7 @@ def cmd_tune(args) -> None:
         taxonomy, taxonomy_cite = paper_score.answer_key_taxonomy(
             doc.get("answer_key_taxonomy"), {t for t in m0["truth_name"].tolist() if t})
     c, meta = load_components(out, args.answer_key, taxonomy)
+    meta["depth"] = key_depth_bands(out, meta)
     keep = ~meta["guest"]
     c = subset(c, keep)
     meta = {k: (v[keep] if isinstance(v, np.ndarray) and v.shape[:1] == keep.shape else v)
