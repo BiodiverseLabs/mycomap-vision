@@ -572,13 +572,30 @@ class KeyTruth:
     label: str
     genus: str | None
     species_scored: bool
+    genus_known: bool = True
+
+
+def truth_genus_known(taxonomy, label: str, genus: str | None) -> bool:
+    """PLAN rule 4/7 (Steve, 18 Oct): iNat can name the truth's genus when the label's genus
+    (the release's genus, or the label's first word) or the genus of the label's iNat
+    species (one-to-one or not) is an iNat genus at the snapshot plus successors."""
+    from . import name_equiv as N
+    words = {w for w in (genus, (label or "").split()[0] if (label or "").split() else None) if w}
+    for w in words:
+        for t in taxonomy.by_name.get(w.lower(), []):
+            cur = taxonomy.current(t)
+            if cur is not None and taxonomy._level(cur, N.GENUS_LEVEL) is not None:
+                return True
+    sid = taxonomy.species_id(label, one_to_one=False) if label else None
+    return sid is not None and taxonomy._level(sid, N.GENUS_LEVEL) is not None
 
 
 def key_truth(rec: dict, taxonomy) -> KeyTruth:
     label = rec.get("label") or ""
     formal = rec.get("name_kind") == "formal" and rec.get("label_rank") in ("species", None)
     return KeyTruth(taxonomy, label, rec.get("genus"),
-                    bool(formal and label and taxonomy.species_id(label) is not None))
+                    bool(formal and label and taxonomy.species_id(label) is not None),
+                    truth_genus_known(taxonomy, label, rec.get("genus")))
 
 
 def verdicts(raw_id: int | None, sp: int | None, ge: int | None, truth: TruthTaxa,
@@ -621,6 +638,7 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
             "truth_species_formal": truth.formal_species,
             "truth_species_scored": kt.species_scored if kt is not None
             else bool(truth.formal_species and truth.species),
+            "truth_genus_known": kt.genus_known if kt is not None else True,
             "truth_species_taxon": truth.species, "truth_genus_taxon": truth.genus}
     if obs.get("missing") or not cutoff.at:
         return {**line, "status": "missing_on_inat" if obs.get("missing") else "no_cutoff",
@@ -692,6 +710,16 @@ def sensitivity_block(lines: list[dict]) -> dict:
             "pooled_first": summarise_pooled(lines)}
 
 
+def genus_counted(r: dict) -> bool:
+    """Genus is scored against iNat-side comparators on this find (rule 7: iNat can name
+    the truth's genus); `with_genus_kept_in` is the sensitivity that keeps every truth."""
+    return bool(r.get("truth_genus_known", True))
+
+
+def with_genus_kept_in(lines: list[dict]) -> list[dict]:
+    return [{**r, "truth_genus_known": True} for r in lines]
+
+
 def scored_species(r: dict) -> bool:
     """Species is scored on this find: a formal truth (format 3: one the key resolves)."""
     return bool(r.get("truth_species_scored", r["truth_species_formal"]))
@@ -753,10 +781,12 @@ def summarise_pooled(lines: list[dict], resamples: int = 10_000, seed: int = 202
     def block(rows):
         formal = [r for r in rows if scored_species(r)]
         out = {"finds": len(rows), "formal_species_finds": len(formal)}
-        for rank, base in (("species", formal), ("genus", rows)):
+        known = [r for r in rows if genus_counted(r)]
+        out["genus_known_finds"] = len(known)
+        for rank, base in (("species", formal), ("genus", known)):
             got = [((r.get("observer") or r["observation_id"]),
                     int(r["first_pooled"][rank]["right"]), 1)
-                   for r in rows if ((r.get("first_pooled") or {}).get(rank) or {}).get(
+                   for r in base if ((r.get("first_pooled") or {}).get(rank) or {}).get(
                        "right") is not None]
             out[f"first_{rank}"] = clustered_rate(got, resamples, seed)
             out[f"coverage_{rank}"] = round(len(got) / len(base), 4) if base else None
@@ -785,6 +815,8 @@ def summarise(lines: list[dict], tier: str = "1", count_push_accounts: bool = Fa
                     and i["before_cutoff"]
                     and not (drop_ambiguous and i.get("withdrawal_ambiguous"))]
             for rank in ("species", "genus"):
+                if rank == "genus" and not genus_counted(r):
+                    continue
                 got = [i[f"{rank}_right"] for i in mine if i[f"{rank}_right"] is not None]
                 if got:
                     c[f"best_{rank}_n"] += 1
@@ -796,6 +828,7 @@ def summarise(lines: list[dict], tier: str = "1", count_push_accounts: bool = Fa
                     c[f"community_{rank}_n"] += 1
                     c[f"community_{rank}_right"] += cr
             c["formal_finds"] += scored_species(r)
+            c["genus_finds"] += genus_counted(r)
         out = {"finds": c["finds"], "formal_species_finds": c["formal_finds"]}
         for view in ("best", "each", "community"):
             for rank in ("species", "genus"):
@@ -805,7 +838,9 @@ def summarise(lines: list[dict], tier: str = "1", count_push_accounts: bool = Fa
                                          if n else None}
         out["coverage_best_species"] = round(c["best_species_n"] / c["formal_finds"], 4) \
             if c["formal_finds"] else None
-        out["coverage_best_genus"] = round(c["best_genus_n"] / c["finds"], 4) if c["finds"] else None
+        out["genus_known_finds"] = c["genus_finds"]
+        out["coverage_best_genus"] = round(c["best_genus_n"] / c["genus_finds"], 4) \
+            if c["genus_finds"] else None
         return out
     strict = [r for r in lines if not r.get("observer_named_species_before_cutoff")]
     return {"tier": tier, "all": block(lines), "strict": block(strict),
@@ -844,10 +879,14 @@ def find_counts(r: dict, tier: str) -> dict[str, tuple[int, int]]:
     out = {}
     for rank in ("species", "genus"):
         got = [i[f"{rank}_right"] for i in mine if i[f"{rank}_right"] is not None]
+        if rank == "genus" and not genus_counted(r):
+            got = []
         out[f"best_{rank}"] = (int(any(got)), 1) if got else (0, 0)
         if rank == "species":
             out["each_species"] = (sum(got), len(got))
         cr = r["community"][f"{rank}_right"]
+        if rank == "genus" and not genus_counted(r):
+            cr = None
         out[f"community_{rank}"] = (int(cr), 1) if cr is not None else (0, 0)
     formal = scored_species(r)
     out["coverage_best_species"] = (out["best_species"][1], 1) if formal else (0, 0)
@@ -1243,6 +1282,12 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                "push_accounts_excluded": len(push_accounts),
                "answer_key": tax.cite if tax is not None else None,
                "errata": errata.cite() if errata is not None else None,
+               "genus_not_known_to_inat": {
+                   "finds": sum(1 for l in lines if l["status"] == "ok" and not genus_counted(l)),
+                   "identifier_calls": sum(
+                       1 for l in lines if l["status"] == "ok" and not genus_counted(l)
+                       for i in l["ids"] if i["role"] == "identifier" and i["before_cutoff"]
+                       and i.get("genus_right") is not None)},
                "formal_species_not_resolved": sum(
                    1 for l in lines if l["status"] == "ok" and l["truth_species_formal"]
                    and not l["truth_species_scored"]),
@@ -1259,6 +1304,7 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                        if i["role"] == "identifier" and i["before_cutoff"]
                        and i.get("withdrawal_ambiguous")),
                    "unresolved_validator_rows": unresolved,
+                   "genus_kept_in": sensitivity_block(with_genus_kept_in(lines)),
                    **({"taxon_id_only": sensitivity_block(with_verdicts(lines, "by_id")),
                        "plain_strings": sensitivity_block(with_verdicts(lines, "plain"))}
                       if tax is not None else {})}}

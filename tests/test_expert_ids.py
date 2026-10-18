@@ -613,3 +613,21 @@ def test_vocabulary_is_the_included_labels_after_the_erratum_or_the_shared_file(
     f = tmp_path / "vocab.txt"
     f.write_text("Amanita muscaria\nRussula emetica\n", encoding="utf-8")   # the pinned format
     assert E.vocabulary(Rel, err, f) == ["Amanita muscaria", "Russula emetica"]
+
+
+def test_paired_genus_leaves_out_truths_whose_genus_inat_cannot_name_kept_in_as_a_sensitivity():
+    tax = N.Taxonomy(PSATHY, ["Psathyrella candolleana"])
+    assert E.truth_genus_known(tax, "Psathyrella candolleana", "Psathyrella")
+    assert E.truth_genus_known(tax, "Candolleomyces sp. 'IN01'", "Candolleomyces")
+    assert not E.truth_genus_known(tax, "Nogenus sp. 'IN01'", "Nogenus")
+    rec = {"label": "Nogenus sp. 'IN01'", "genus": "Nogenus", "name_kind": "provisional",
+           "label_rank": "species"}
+    o = obs([pid(2, 21, "2023-01-01")], counts={2: 20000})
+    line = E.score_find(o, E.Cutoff(CUT, "dna_field"), E.TruthTaxa(None, None, False),
+                        E.TaxonResolver(PSATHY), set(), key, kt=E.key_truth(rec, tax))
+    line["status"] = "ok"
+    assert line["truth_genus_known"] is False and line["ids"][0]["genus_right"] is False
+    assert E.summarise([line])["all"]["best_genus"]["n"] == 0             # out of the paired row
+    assert E.summarise_pooled([line], resamples=20)["all"]["first_genus"]["n"] == 0
+    kept = E.with_genus_kept_in([line])
+    assert E.summarise(kept)["all"]["best_genus"] == {"n": 1, "right": 0, "accuracy": 0.0}
