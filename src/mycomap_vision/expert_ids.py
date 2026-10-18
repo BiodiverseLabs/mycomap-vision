@@ -1217,7 +1217,9 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
         for line in lines:
             f.write(json.dumps(line, sort_keys=True) + "\n")
     summary = {"set": name, **rel.cite(), "code_version": config.code_version(),
-               "snapshot_sha256": sha256_file(d / "snapshot.jsonl.gz"),
+               # the iNat identification-history snapshot (not the taxonomy: answer_key.taxa_sha256)
+               "identification_snapshot_sha256": sha256_file(d / "snapshot.jsonl.gz"),
+               "snapshot_sha256": sha256_file(d / "snapshot.jsonl.gz"),   # same; older readers
                "scores_sha256": sha256_file(out), "finds": len(lines),
                "validator_lists": bool(validators_csv), "our_dates": bool(ours_csv),
                "push_accounts_excluded": len(push_accounts),
