@@ -8,6 +8,8 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, itemBadges,
          PAGE_SIZE, pageText, prefillValue, recordLabel, refreshVerdict, shownRule, storedVerdict,
          takesPhotoKeys, whenText, yes, type Verdict } from "@/lib/feedback";
+import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
+import { PhotoReview } from "./PhotoReview";
 
 // Human Feedback (Steve, 2026-10-18): a review queue of places where Vision and the reference
 // data disagree, for mycomap.org admins, project leaders and contributors, laid out like
@@ -80,7 +82,9 @@ export function FeedbackPage() {
             {summary.isPending && <p className="text-sm text-muted-foreground">Loading the queues…</p>}
             {summary.error && <p className={BODY}>The queues could not be loaded.</p>}
             <StatCards types={types} selected={selected} onPick={setPicked} />
-            {sel && <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data} />}
+            {sel && (sel.type === PHOTO_REVIEW_TYPE
+              ? <PhotoReview key={sel.type} summary={sel} />
+              : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data} />)}
           </>
         )}
       </div>

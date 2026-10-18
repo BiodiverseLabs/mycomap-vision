@@ -1148,8 +1148,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"available": True, "model": f"{backbone}/{method}",
                 "top5": [[c["name"], c["score"]] for c in result["ranks"]["species"][:5]]}
 
+    from . import photo_review
     feedback_api.add_routes(app, person=person, store=feedback_store, org=feedback_org,
-                            rescore=feedback_rescore)
+                            rescore=feedback_rescore,
+                            photos=photo_review.ReviewPhotos(q, permission_view))
 
     v1_on = bool(api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1")
     sessions_on = bool(sessions if sessions is not None
