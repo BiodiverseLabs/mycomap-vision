@@ -212,3 +212,10 @@ def test_the_answers_version_moves_with_the_release_and_the_reference():
                   answers_version("2026-10", (100, "run-1", "fp2", 0)),  # someone said no
                   answers_version("2026-10", (100, "run-1", "fp", 7))):  # a night's changes
         assert other != base
+
+
+def test_identify_by_observation_says_which_photos_may_be_shown(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    site.inat[555] = with_licences(inat_obs(555, [9001, 9002]), ["cc-by", None])
+    body = by_number(client, "inat", 555).json()
+    assert body["observation"]["photos_shown"] == [INAT_PHOTO.format(id=9001, size="large"), None]

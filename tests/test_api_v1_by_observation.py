@@ -160,7 +160,8 @@ def test_an_inat_observation_gets_the_answer_its_photos_place_and_date_would_get
     assert body["observation"] == {
         "source": "inat", "id": "555", "url": "https://www.inaturalist.org/observations/555",
         "photos": 2, "photos_used": 2, "place": "coordinates",
-        "name_at_source": "A x", "rank_at_source": "species"}
+        "name_at_source": "A x", "rank_at_source": "species",
+        "photos_shown": [None, None]}
     assert body["context_used"] == {"latitude": 40.1, "longitude": -83.0,
                                     "observed_on": "2026-10-11", "place_from": "observation",
                                     "date_from": "observation"}

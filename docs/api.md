@@ -105,8 +105,10 @@ answered from a proxy's cache.
   `left_out_photos` counts the reference photos left out.
 - The answer adds `observation`: `{"source", "id", "url", "photos"` (at the source),
   `"photos_used", "place"` (`coordinates`, `obscured`, `area` or null), `"name_at_source",
-  "rank_at_source"}` (the source's current name, for comparison; null for a reused
-  reference record, which isn't read).
+  "rank_at_source", "photos_shown"}` (the source's current name, for comparison; null for
+  a reused reference record, which isn't read). `photos_shown` has one entry per scored
+  photo, in `per_photo`'s order: the photo's URL when it is Creative Commons or public
+  domain, else null (null as a whole for a reused reference record).
 - **Answers are kept.** Each answer is saved on the box per observation, model and
   options (`top_k`, `use_place`, `use_date`) and given again, without reading the
   observation or scoring it, while `model.answers_version` is unchanged: an opaque id

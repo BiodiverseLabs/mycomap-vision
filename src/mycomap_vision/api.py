@@ -1440,7 +1440,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 about = {"source": source, "id": number,
                          "url": sources.record_url(source, number),
                          "photos": None, "photos_used": 0, "place": None,
-                         "name_at_source": None, "rank_at_source": None}
+                         "name_at_source": None, "rank_at_source": None,
+                         "photos_shown": None}
                 if len(own):
                     # A DNA reference record: its stored vectors, nothing fetched.
                     cols = own[:MAX_PHOTOS]
@@ -1458,7 +1459,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         return n
                     start = time.monotonic()
                     try:
-                        obs, bodies = fetcher.fetch(source, number, MAX_PHOTOS, admit=admit)
+                        obs, pairs = fetcher.fetch(source, number, MAX_PHOTOS, admit=admit,
+                                                   indexed=True)
                     except byobservation.NotFound as e:
                         raise apiv1.V1Error(404, "observation_not_found", str(e)) from None
                     except byobservation.Unavailable as e:
@@ -1472,19 +1474,24 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         timer.add("fetch_ms", time.monotonic() - start)
                     start = time.monotonic()
                     side = uploads.kept_side(list(backbones.values()))
-                    images = []
-                    for photo_body in bodies:
+                    images, kept = [], []
+                    for index, photo_body in pairs:
                         try:
                             images.append(uploads.decode_upload(photo_body, side)[0])
                         except Exception:               # not an image we can read: skip
                             continue
+                        kept.append(index)
                     timer.add("decode_ms", time.monotonic() - start)
                     if not images:
                         raise apiv1.V1Error(422, "no_usable_photos", "none of the "
                                             "observation's photos could be read")
+                    # Each scored photo's URL where it may be shown (Creative Commons or
+                    # public domain), in per_photo's order; null otherwise.
                     about.update(photos=len(obs.photo_urls), photos_used=len(images),
                                  name_at_source=obs.name_at_source,
-                                 rank_at_source=obs.rank_at_source)
+                                 rank_at_source=obs.rank_at_source,
+                                 photos_shown=[byobservation.shown_photo_url(obs, i)
+                                               for i in kept])
                     hidden, _ = ident.left_out(source, number, obs.photo_ids)
                     if len(hidden) and not ident.can_leave_out():
                         raise apiv1.V1Error(400, "bad_request", "this model can't leave "
