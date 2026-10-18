@@ -26,7 +26,7 @@ import requests
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from . import config, feedback as fb, name_equiv, photo_review as pr
+from . import config, feedback as fb, label_review as lr, name_equiv, photo_review as pr
 
 ROLE_TTL = 300.0
 
@@ -277,6 +277,50 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         rec = next((r for r in pr.cards(store.items_of(pr.ITEM_TYPE, projects), "all",
                                         "any")["records"] if r["record_key"] == record_key), None)
         return {**done, "record": card(rec, projects is None) if rec else None}
+
+    # --- the label review: the blind "Photos unlike the label" queue as cards (label_review) --
+    def label_card(c: dict, admin: bool) -> dict:
+        rows = need_photos().of_record(c["record_key"])
+        excluded = set(((c.get("decision") or {}).get("photo_keys")) or [])
+        return c | {"photos": [p | {"excluded": p["photo_key"] in excluded}
+                               for p in need_photos().for_viewer(rows, admin)]}
+
+    @app.get("/api/feedback/label-review")
+    def fb_label_review(request: Request, status: str = "open", q: str = "", offset: int = 0,
+                        limit: int = 10):
+        _, projects = access(request)
+        try:
+            out = lr.cards(store.items_of(lr.ITEM_TYPE, projects), status, q)
+        except fb.FeedbackError as e:
+            bad(e)
+        page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]
+        return {"total": out["total"],
+                "reasons": [{"code": c, "label": t} for c, t in lr.REASONS],
+                "outcomes": [{"code": o.code, "label": o.label, "applies": o.applies,
+                              "needs_value": o.needs_value}
+                             for o in fb.TYPES[lr.ITEM_TYPE].options],
+                "records": [label_card(c, projects is None) for c in page]}
+
+    @app.post("/api/feedback/label-review/{item_id}/decision")
+    def fb_label_review_decide(request: Request, item_id: int, payload: dict = Body(...)):
+        who, projects = access(request)
+        try:
+            item = store.get(item_id, projects)
+        except KeyError:
+            raise HTTPException(404, "no such item") from None
+        if item["item_type"] != lr.ITEM_TYPE:
+            raise HTTPException(404, "no such item in the label review")
+        key = (item["record_keys"] or [item["subject"]])[0]
+        keys = {r.key for r in need_photos().of_record(key)}
+        try:
+            lr.decide(store, item_id, str(payload.get("outcome") or ""), who, keys,
+                      photos=list(payload.get("photos") or []), value=payload.get("value"),
+                      reason=payload.get("reason"), note=payload.get("note"), projects=projects)
+        except fb.FeedbackError as e:
+            bad(e)
+        card = next((c for c in lr.cards(store.items_of(lr.ITEM_TYPE, projects), "decided")
+                     ["records"] if c["item_id"] == item_id), None)
+        return {"record": label_card(card, projects is None) if card else None}
 
     @app.get("/api/feedback/photo/{photo_key}")
     def fb_photo(request: Request, photo_key: str, size: str = "thumb"):
