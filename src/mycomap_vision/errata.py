@@ -25,6 +25,16 @@ Reasons:
   sample. Loading records leaves them out from now on (evaluate.load_records), and the
   builder lists them as `nonfungal_label`. A record that is also an MO twin keeps that
   reason. The rule reads the taxonomy cache, whose sha256 the erratum's writer reports.
+- `crosspost_twin` (v1, Steve 2026-10-18, erratum rev 4): the val side of one find posted to
+  both Mushroom Observer and iNaturalist whose other side is in train. A pair
+  (crosspost_twin_pairs) is an included MO record and an included iNat record with the SAME
+  release label and a photo within TWIN_MAX_BITS bits of each other in the release's dHash
+  index. Template hashes (one hash on the photos of TEMPLATE_RECORDS or more records:
+  microscope fields, slip forms) and the photos of a given exclusion list (micrographs) never
+  make a pair. Only a pair with one side in train and one in val is listed, by its val side.
+  Found by the v1 miss review (2026-10-18): 99% of such val finds were answered right,
+  because their own photo was in the reference. Twins within one split are not a leak
+  (train/train duplicates a reference; val/val holds no reference) and stay.
 """
 
 from __future__ import annotations
@@ -38,7 +48,9 @@ from pathlib import Path
 
 from .dataset_release import REVIEW_COLUMNS, ReleaseError, sha256_file
 
-REASONS = ("mo_twin_as_inat", "nonfungal_label")
+REASONS = ("mo_twin_as_inat", "nonfungal_label", "crosspost_twin")
+TWIN_MAX_BITS = 3          # dHash bits at or under which two photos are one picture
+TEMPLATE_RECORDS = 4       # a hash on the photos of this many records is a template
 
 
 @dataclass(frozen=True)
@@ -115,6 +127,105 @@ def nonfungal_rows(release, tax, skip: set[str] = frozenset()) -> list[dict]:
             out.append({"kind": "record", "key": key, "reason": "nonfungal_label",
                         "note": f"{label}: genus {genus} is {kingdom} on iNat, no fungus"})
     return out
+
+
+@dataclass(frozen=True)
+class TwinPair:
+    mo_record: str
+    inat_record: str
+    label: str
+    mo_split: str
+    inat_split: str
+    mo_photo: str
+    inat_photo: str
+    bits: int
+
+
+def crosspost_twin_pairs(release, index: dict, exclude_photos=frozenset(),
+                         skip=frozenset()) -> list[TwinPair]:
+    """Every MO <-> iNat cross-post pair of the release's included records, in any splits
+    (rule in the module docstring), one per record pair (its closest photos), sorted.
+    `index` is the release's dHash index (dhash.load_index; checked against the release);
+    `exclude_photos` holds photo keys that never pair (micrographs); records in `skip`
+    (already in an erratum, so in no split) never pair."""
+    from collections import defaultdict
+
+    from . import dhash
+    dhash.check_index(index, release)
+    recs = {k: (label, split, source) for k, label, split, source in release.db.execute(
+        "select record_key, label, split, source from records where included = 1")}
+    rec_of = dict(release.db.execute("select photo_key, record_key from photos "
+                                     "where included = 1"))
+    keys = index["photo_key"]
+    hashes = [int(h) for h in index["dhash"]]
+    records_of_hash = defaultdict(set)
+    for k, h in zip(keys, hashes):
+        records_of_hash[h].add(rec_of.get(k))
+    templates = {h for h, rs in records_of_hash.items() if len(rs) >= TEMPLATE_RECORDS}
+    by_source = defaultdict(list)
+    for i, k in enumerate(keys):
+        r = rec_of.get(k)
+        if r in recs and r not in skip and hashes[i] not in templates and k not in exclude_photos:
+            by_source[recs[r][2]].append(i)
+    # Two hashes within 3 bits agree exactly on at least one of their four 16-bit blocks.
+    blocks = [defaultdict(list) for _ in range(4)]
+    for j in by_source.get("inat", []):
+        for b in range(4):
+            blocks[b][(hashes[j] >> (16 * b)) & 0xFFFF].append(j)
+    best: dict[tuple[str, str], TwinPair] = {}
+    for i in by_source.get("mo", []):
+        cand = set()
+        for b in range(4):
+            cand.update(blocks[b].get((hashes[i] >> (16 * b)) & 0xFFFF, ()))
+        mo = rec_of[keys[i]]
+        for j in cand:
+            bits = bin(hashes[i] ^ hashes[j]).count("1")
+            inat = rec_of[keys[j]]
+            if bits > TWIN_MAX_BITS or recs[mo][0] != recs[inat][0]:
+                continue
+            pair = TwinPair(mo, inat, recs[mo][0], recs[mo][1], recs[inat][1], keys[i], keys[j],
+                            bits)
+            old_pair = best.get((mo, inat))
+            if old_pair is None or (bits, keys[i], keys[j]) < (old_pair.bits, old_pair.mo_photo,
+                                                                old_pair.inat_photo):
+                best[(mo, inat)] = pair
+    return [best[k] for k in sorted(best)]
+
+
+def crosspost_twin_rows(release, index: dict, exclude_photos=frozenset(),
+                        skip=frozenset()) -> list[dict]:
+    """The erratum rows for `crosspost_twin`: the val record of every pair that straddles
+    train and val (crosspost_twin_pairs), listed once, with its first twin in the note."""
+    out = {}
+    for p in crosspost_twin_pairs(release, index, exclude_photos, skip):
+        if {p.mo_split, p.inat_split} != {"train", "val"}:
+            continue
+        val_mo = p.mo_split == "val"
+        val_key, train_key = (p.mo_record, p.inat_record) if val_mo else (p.inat_record,
+                                                                          p.mo_record)
+        val_photo, train_photo = (p.mo_photo, p.inat_photo) if val_mo else (p.inat_photo,
+                                                                            p.mo_photo)
+        out.setdefault(val_key, {
+            "kind": "record", "key": val_key, "reason": "crosspost_twin",
+            "note": f"twin {train_key} (train), {p.label}; photo {val_photo} ~ {train_photo}, "
+                    f"{p.bits} bits"})
+    return list(out.values())
+
+
+def read_rows(path: Path) -> list[dict]:
+    """An earlier erratum's rows exactly as written, to carry into a new revision."""
+    read(path)                                     # refuses a malformed one
+    with open(path, newline="", encoding="utf-8") as f:
+        return [dict(r) for r in csv.DictReader(f, delimiter="\t")]
+
+
+def read_photo_list(path: Path) -> frozenset[str]:
+    """Photo keys from a TSV with a `photo_key` column (the micrograph list)."""
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f, delimiter="\t"))
+    if rows and "photo_key" not in rows[0]:
+        raise ReleaseError(f"{Path(path).name}: needs a photo_key column")
+    return frozenset(r["photo_key"].strip() for r in rows)
 
 
 def write(rows: list[dict], path: Path) -> Path:

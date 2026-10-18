@@ -149,8 +149,8 @@ def test_the_nightly_that_learns_such_kingdoms_rebuilds_the_index(box):
     assert report["ok"] and report["changed"]
 
 
-def test_the_same_reason_is_never_given_twice_and_both_reasons_are_known():
-    assert set(errata.REASONS) == {"mo_twin_as_inat", "nonfungal_label"}
+def test_the_same_reason_is_never_given_twice_and_every_reason_is_known():
+    assert set(errata.REASONS) == {"mo_twin_as_inat", "nonfungal_label", "crosspost_twin"}
     assert "nonfungal_label" in dr.RECORD_REASONS
     assert taxonomy.NOT_FUNGI == {"Animalia", "Plantae", "Bacteria"}
     assert PLANTAE in taxonomy.KINGDOMS and taxonomy.KINGDOMS[PROTOZOA] == "Protozoa"
