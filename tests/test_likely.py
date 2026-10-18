@@ -71,9 +71,9 @@ def test_a_target_whose_sets_are_too_long_steps_down_to_a_useful_one():
     rng = np.random.default_rng(3)
     vague = simulate(2000, rng, names=60, concentration=1.0)   # probabilities spread thin
     fit = likely.fit_and_check(vague, 0.9, max_mean_size=5)
-    assert fit is None or (fit["coverage"] < 0.9 and fit["crosscheck"]["mean_size"] <= 5)
+    assert fit is None or (fit["target"] < 0.9 and fit["crosscheck"]["mean_size"] <= 5)
     roomy = likely.fit_and_check(vague, 0.9, cap=60, max_mean_size=60)
-    assert roomy["coverage"] == 0.9
+    assert roomy["target"] == 0.9
 
 
 def compared(conn, tmp_path):
@@ -94,7 +94,8 @@ def test_a_comparison_fits_a_likely_set_for_every_rank_with_a_held_back_check(co
     cid = compared(conn, tmp_path)["comparison_id"]
     sets = sets_of(conn, cid)
     for rank in ("species", "genus", "family"):
-        assert sets[rank]["coverage"] <= 0.9 and 0 <= sets[rank]["floor"] <= 1
+        assert sets[rank]["target"] <= 0.9 and 0 <= sets[rank]["floor"] <= 1
+        assert sets[rank]["coverage"] == sets[rank]["crosscheck"]["coverage"]
         assert "crosscheck" in sets[rank] and "in_sample" in sets[rank]
     assert evaluate.latest_calibration(conn, "m1", "nearest")["sets"]["species"] == sets["species"]
 
@@ -130,7 +131,8 @@ def test_an_identification_lists_the_likely_names_with_their_coverage(conn, tmp_
     [r] = post_photos(client, [247], "m1/nearest").json()["results"]
     sp = r["likely"]["species"]
     assert sp["names"] and sp["names"][0]["name"] == r["ranks"]["species"][0]["name"]
-    assert 0.5 <= sp["coverage"] <= 0.9 and sp["capped"] is False
+    assert 0 <= sp["coverage"] <= 1 and sp["capped"] is False
+    assert sp["coverage"] == sp["checked_coverage"]
     assert all(0 <= n["confidence"] <= 1 for n in sp["names"])
 
 
@@ -138,3 +140,36 @@ def test_without_a_fitted_set_no_list_is_claimed(conn, tmp_path):
     client = app_with_model(conn, tmp_path)                 # never compared: not calibrated
     [r] = post_photos(client, [247], "m1/nearest").json()["results"]
     assert r["likely"] == {}
+
+
+def test_the_stated_coverage_is_what_the_sets_achieved_on_held_back_records():
+    # A target is what the floor aims at; what is stated is what sets held on records the
+    # floor was not fitted on, which differs (here a little; before v1 at species, a lot).
+    rng = np.random.default_rng(7)
+    fit = likely.fit_and_check(simulate(2000, rng, novel=0.05), 0.9)
+    assert 0.5 <= fit["target"] <= 0.9
+    assert fit["coverage"] == fit["crosscheck"]["coverage"] != fit["target"]
+    assert likely.stated_coverage(fit) == fit["crosscheck"]["coverage"]
+
+
+def test_a_fit_stored_before_targets_were_kept_apart_states_its_checked_coverage():
+    old = {"method": "lac", "requested": 0.9, "coverage": 0.9, "floor": 0.001,
+           "crosscheck": {"coverage": 0.6, "mean_size": 4.2}}
+    assert likely.stated_coverage(old) == 0.6
+    assert likely.stated_coverage({"coverage": 0.8}) == 0.8          # no check stored
+
+
+def test_an_identification_states_the_checked_coverage_of_an_older_stored_fit(conn, tmp_path):
+    client = app_with_model(conn, tmp_path)
+    evaluate.compare(conn, ["m1"], ["nearest"], embeddings_root=tmp_path / "emb",
+                     log=lambda s: None)
+    row_id, report = conn.execute("select id, report_json from eval_runs").fetchone()
+    report = json.loads(report)
+    sp = report["all_photos"]["calibration"]["species"]["sets"]
+    sp.pop("target", None)                                  # as stored before the fix
+    sp["coverage"], sp["crosscheck"]["coverage"] = 0.9, 0.55
+    conn.execute("update eval_runs set report_json = ? where id = ?",
+                 (json.dumps(report), row_id))
+    conn.commit()
+    [r] = post_photos(client, [247], "m1/nearest").json()["results"]
+    assert r["likely"]["species"]["coverage"] == 0.55

@@ -194,12 +194,17 @@ model answering, by its public name only. Requests leave `model` out.
              "calibrated_on": "2026-10-13", "default": true,
              "reference": {"records": 169129, "species": 17854, "photos": 684135},
              "ranks": ["species", "genus", "family", "order", "class", "phylum"],
-             "confident_at": 0.7}],
+             "confident_at": 0.7,
+             "likely_coverage": {"species": 0.8, "genus": 0.9, "family": 0.91}}],
  "limits": {"max_photos": 10, "max_file_mb": 25, "max_request_mb": 80, "top_k_max": 10,
             "photos_per_minute": 20},
  "features": {"identify": true, "sessions": true, "by_observation": false,
               "models": true, "usage": true, "taxon_counts": true}}
 ```
+
+`likely_coverage` (added 2026-10-18) is how often each rank's likely set held the right name
+on validation records held back from its fit: what the sets achieved, not their target
+(§4, `likely`); `null` for a rank with no fitted set.
 
 `GET /api/v1/usage` (any credential; `no-store`): this credential's use this month. Reading
 it is never counted.
@@ -245,7 +250,7 @@ model's result, not a `results` list.
     "order":   [ … ], "class": [ … ], "phylum": [ … ]
   },
   "likely": {
-    "species": {"coverage": 0.9, "checked_coverage": 0.6, "capped": false,
+    "species": {"coverage": 0.8, "checked_coverage": 0.8, "capped": false,
                 "names": [{"name": "Amanita muscaria", "confidence": 0.62,
                            "reference_records": 412}]},
     "genus": { … }, "family": { … }
@@ -388,8 +393,13 @@ model's result, not a `results` list.
   model or release is built, not weekly;
   `model.calibrated_on` is that comparison's date. It is calibrated on average, not a
   promise per answer.
-  `checked_coverage` says how often a likely set really held the right name on unseen
-  records (today 0.6 for a 0.9 target at species).
+- **`likely`**: each rank's likely set, the names at or above a probability floor fitted
+  on v1's validation split. `coverage` is how often such a set held the right name on
+  validation records held back from the fit (the fit's crosscheck): what the sets
+  achieved, not the target they aimed at, which a set cut at 15 names can fall short of.
+  `checked_coverage` is the same held-back figure (kept for older clients). Served v1
+  model, held-back halves of v1 val: species 0.80 (mean 5.0 names), genus 0.90 (1.3),
+  family 0.91 (1.0).
 - **`reference_records`**: DNA-validated records of that name in the reference set.
 - **Photos in `specimens`** follow Vision's rules: shown only if Creative Commons or the
   owner granted permission on mycomap.org, else `photo_url: null`,

@@ -431,16 +431,32 @@ def public_model(card: dict | None, calibration_id: str | None = None) -> dict:
 ANSWER_RANKS = ("species", "genus", "family", "order", "class", "phylum")
 
 
-def models_doc(model: dict, reference: dict, limits: dict, features: dict) -> dict:
+LIKELY_RANKS = ("species", "genus", "family")
+
+
+def likely_coverage(calibration: dict | None) -> dict:
+    """{species, genus, family}: how often each rank's likely set held the right name on
+    calibration records held back from its fit (likely.stated_coverage: achieved, never the
+    target alone), to 2 decimals; null for a rank with no fitted set."""
+    from .likely import stated_coverage
+    sets = (calibration or {}).get("sets") or {}
+    return {rank: (round(float(stated_coverage(sets[rank])), 2) if sets.get(rank) else None)
+            for rank in LIKELY_RANKS}
+
+
+def models_doc(model: dict, reference: dict, limits: dict, features: dict,
+               calibration: dict | None = None) -> dict:
     """GET /api/v1/models (docs/api.md §2): the one model answering, by its public name
     (public_model: version, data, calibration date), the reference set it compares with,
-    what a request may send, and which parts of the API are on here. Never a backbone or
-    method id (Steve, 2026-10-11): callers leave `model` out of requests."""
+    how often its likely sets held the right name (likely_coverage), what a request may
+    send, and which parts of the API are on here. Never a backbone or method id (Steve,
+    2026-10-11): callers leave `model` out of requests."""
     return {"models": [{**model, "default": True,
                         "reference": {k: reference.get(k) for k in ("records", "species",
                                                                     "photos")},
                         "ranks": list(ANSWER_RANKS),
-                        "confident_at": CONFIDENT_AT}],
+                        "confident_at": CONFIDENT_AT,
+                        "likely_coverage": likely_coverage(calibration)}],
             "limits": limits,
             "features": features}
 
