@@ -1216,6 +1216,93 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_paper_attrs(conn, args) -> None:
+    """Per-find attributes for paper-score's slices and the place band (paper_attrs.py):
+    data, not model output, from public points and dates only."""
+    from pathlib import Path
+
+    from . import paper_attrs
+    from .dataset_release import load_release
+    base = _dataset_release(args)
+    if base is None:
+        raise SystemExit("paper-attrs needs --release <id>")
+    test = "val" if args.test == "val" else load_release(args.test, allow_draft=args.allow_draft)
+    regions, eco = None, None
+    if args.ecoregions:
+        from . import ecoregions
+        regions = ecoregions.Regions.load(Path(args.ecoregions))
+        eco = {"file": args.ecoregions,
+               "sha256": paper_attrs.sha256_file(Path(args.ecoregions)),
+               "dbf_sha256": paper_attrs.sha256_file(Path(args.ecoregions).with_suffix(".dbf"))}
+    attrs = paper_attrs.for_release(base, test, regions)
+    vocab = None
+    if args.vocab:
+        # E15's same-vocabulary finds: <column>=<published model short name>.
+        column, short = args.vocab.split("=", 1)
+        classes = paper_attrs.model_classes(conn, short)
+        credited = (paper_attrs.credited_pairs(Path(args.vocab_review))
+                    if args.vocab_review else set())
+        from .paper_score import scored_and_reference
+        scored_rel, split, _r, _s = scored_and_reference(base, test)
+        species = {str(r["record_key"]): r["species"] or "" for r in scored_rel.records(split)}
+        for k, a in attrs.items():
+            a[column] = "yes" if paper_attrs.in_vocabulary(species.get(k, ""), classes,
+                                                           credited) else "no"
+        vocab = {"column": column, "model": short, "classes": len(classes),
+                 "review": args.vocab_review,
+                 "review_sha256": paper_attrs.sha256_file(Path(args.vocab_review))
+                 if args.vocab_review else None}
+    out = paper_attrs.write(Path(args.out), attrs)
+    Path(str(out) + ".json").write_text(json.dumps({
+        "dataset_release": base.cite(), "test": args.test, "finds": len(attrs),
+        "ecoregions": eco, "vocabulary": vocab, "season_days": paper_attrs.SEASON_DAYS,
+        "core_share": paper_attrs.CORE_SHARE, "bands_km": [b for _, b in paper_attrs.BANDS_KM],
+        "tsv_sha256": paper_attrs.sha256_file(out)}, indent=2), encoding="utf-8")
+    from collections import Counter
+    print(json.dumps({"out": str(out), "finds": len(attrs),
+                      "distance_band": Counter(a["distance_band"] for a in attrs.values()),
+                      "in_season": Counter(a["in_season"] for a in attrs.values()),
+                      "ecoregion": Counter(a["ecoregion"] for a in attrs.values())}, indent=2))
+
+
+def cmd_paper_score(conn, args) -> None:
+    """Every table of the paper's sealed-test analysis from one command (paper_score.py).
+    The sealed test opens only under the freeze tag, the tagged config and the frozen code."""
+    from pathlib import Path
+
+    from . import paper_score
+    from .dataset_release import load_release
+    base = _dataset_release(args)
+    if base is None:
+        raise SystemExit("paper-score needs --release <id>")
+    config_doc, body = paper_score.load_config(args.config)
+    if args.freeze_spec:
+        # The predictor as it stands, for the config's "freeze" block; reads no scored
+        # record, so it never touches a sealed test.
+        from . import paper_freeze
+        print(json.dumps(paper_freeze.compute(config_doc, base, conn, paper_score.resolve),
+                         indent=1))
+        return
+    test = "val" if args.test == "val" else load_release(args.test, allow_draft=args.allow_draft)
+    scored_id = "val" if test == "val" else test.id
+    out = Path(args.out) if args.out else (config.DATA_DIR / "research-results" / base.id
+                                           / "paper-score" / scored_id)
+    sealed = test != "val" and not test.manifest.get("draft")
+    if sealed and (out / "report.json").exists():
+        raise SystemExit(f"{out / 'report.json'} exists: the sealed test is scored once; "
+                         "later additions go to a new --out, labelled post hoc")
+
+    def embed_missing(backbone, photo_ids, px=None):
+        if args.embed_missing:
+            paper_score.ensure_embedded(conn, backbone, photo_ids, px)
+    report = paper_score.run(conn, base, test, config_doc, body, out, attrs_path=args.attrs,
+                             allow_code=args.allow_code, embed_missing=embed_missing)
+    print(json.dumps({"out": str(out), "finds": report["finds"], "post_hoc": report["post_hoc"],
+                      "hypotheses": {f: {h: {k: r.get(k) for k in ("p_test", "p_holm", "reject")}
+                                         for h, r in hs.items()}
+                                     for f, hs in report["hypotheses"].items()}}, indent=2))
+
+
 def cmd_backbone_screen(conn, args) -> None:
     """The frozen-backbone screen on a release's seeded subset (backbone_screen.py):
     subset (drawn once), embed (only the subset's photos a backbone lacks), score."""
@@ -2339,6 +2426,32 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--redo", action="store_true", help="replace answers stored before")
     release_options(q)
 
+    p = sub.add_parser("paper-attrs", help="per-find attributes for paper-score: distance band "
+                                           "and season, from public points (paper_attrs.py)")
+    release_options(p)
+    p.add_argument("--test", required=True, help="a test release of --release, or 'val'")
+    p.add_argument("--out", required=True, help="the TSV to write (paper-score --attrs)")
+    p.add_argument("--ecoregions", help="CEC Level I ecoregions shapefile (NA_CEC_Eco_Level1.shp)")
+    p.add_argument("--vocab", help="COLUMN=MODEL: yes/no, is the true species one of the "
+                                   "published model's classes (e.g. beit_vocab=fungitastic-beit-b384)")
+    p.add_argument("--vocab-review", help="the reviewed crosswalk: credited pairs count too")
+
+    p = sub.add_parser("paper-score", help="every table of the paper's sealed-test analysis, "
+                                           "one command (paper_score.py)")
+    release_options(p)
+    p.add_argument("--test", required=True,
+                   help="a test release of --release (e.g. v1-test), or 'val'")
+    p.add_argument("--config", required=True, help="the analysis plan (paper/analysis-v1.json)")
+    p.add_argument("--out", help="default: research-results/<release>/paper-score/<test>")
+    p.add_argument("--attrs", help="extra per-find attributes (TSV with record_key)")
+    p.add_argument("--freeze-spec", action="store_true",
+                   help="print every predictor part by hash (the config's freeze block) "
+                        "and stop; scores nothing")
+    p.add_argument("--embed-missing", action="store_true",
+                   help="embed scored photos a backbone lacks, from copies on this machine")
+    p.add_argument("--allow-code", metavar="COMMIT",
+                   help="score the sealed test from this commit, not the frozen one: POST HOC")
+
     p = sub.add_parser("backbone-screen", help="frozen backbones on a release's seeded "
                                                "subset: subset, embed, score "
                                                "(backbone_screen.py)")
@@ -2517,6 +2630,8 @@ def main(argv: list[str] | None = None) -> int:
         "feedback": cmd_feedback,
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
+        "paper-attrs": cmd_paper_attrs,
+        "paper-score": cmd_paper_score,
         "backbone-screen": cmd_backbone_screen,
         "ood-set": cmd_ood_set,
         "external": cmd_external,
