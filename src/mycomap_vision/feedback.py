@@ -147,6 +147,15 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
                      "org"),
               Option("both_right", "Both are right (two places)", "note")),
              granularity="record pair"),
+    ItemType("species_rank_split", "A species and its own varieties",
+             "Labels that are one species at species rank (Vision's answer key): the species "
+             "and its variety or subspecies, or one variety written several ways. Vision counts "
+             "them as one answer already (Steve, 2026-10-18: species rank counts, varieties are "
+             "extra suggestions); the records should still say which name they keep.",
+             ("every label with its record count", "the most used label, proposed"),
+             (Option("use_name", "Use this name for all", "org", needs_value=True),
+              Option("keep_apart", "Keep them apart: the variety is a distinct taxon", "note")),
+             granularity="name group"),
     ItemType("crosspost_twin", "One find posted to both iNaturalist and Mushroom Observer",
              "Two records with the same name and the same photo. Vision should count them as "
              "one specimen.",
@@ -173,6 +182,7 @@ SECTION_OF: dict[str, str] = {
     "non_specimen_photo": "cleanup", "name_writing_split": "cleanup",
     "name_retired": "cleanup", "name_inactive_on_inat": "cleanup",
     "crosspost_twin": "cleanup", "twin_location_conflict": "cleanup",
+    "species_rank_split": "cleanup",
     "photos_unlike_label": "validation", "reference_label_doubt": "validation",
     "label_vs_own_dna": "validation", "vision_names_same_taxon": "validation",
     "crosswalk": "validation", "group_label": "validation",
@@ -552,6 +562,42 @@ def rows_from_twin_locations(path: Path) -> list[dict]:
     return out
 
 
+def rows_from_answer_key_groups(path: Path, store: "Store | None" = None) -> list[dict]:
+    """The paper lead's answer-key groups (columns answer_key, labels_in_group, label,
+    records_train, records_val, kind): every answer key the label vocabulary writes with more
+    than one label. A group whose labels all sit in one "One name, several writings" item is
+    queued there already and is left out; one that shares some labels with such an item says so."""
+    groups: dict[str, list[dict]] = {}
+    with open(path, encoding="utf-8", newline="") as f:
+        for r in csv.DictReader(f, delimiter="	"):
+            groups.setdefault(r["answer_key"], []).append(r)
+    from .feedback_org import writings
+    splits = [set(writings(i.get("current"))) for i in
+              (store.items_of("name_writing_split") if store is not None else [])]
+    out = []
+    for key, rows in sorted(groups.items()):
+        labels = {r["label"] for r in rows}
+        if len(labels) < 2 or any(labels <= w for w in splits):
+            continue
+        n = {r["label"]: int(r["records_train"] or 0) + int(r["records_val"] or 0) for r in rows}
+        order = sorted(labels, key=lambda lab: (-n[lab], lab))
+        trains = {r["label"]: int(r["records_train"] or 0) for r in rows}
+        out.append({
+            "item_type": "species_rank_split", "subject": "; ".join(sorted(labels)),
+            "rule": "R9 one answer key (species rank) written with 2+ labels in the v1 "
+                    "vocabulary (r4)",
+            "current": " | ".join(f"{lab} ({n[lab]})" for lab in order), "proposed": order[0],
+            "records": sum(n.values()),
+            "evidence": {"answer_key": key,
+                         "kinds": ", ".join(f"{r['label']}: {r['kind']}" for r in rows),
+                         "labels_without_train_records": ", ".join(
+                             sorted(lab for lab in labels if trains[lab] == 0)
+                             if any(trains.values()) else []),
+                         "also_in_writing_split": ", ".join(sorted(
+                             lab for lab in labels if any(lab in w for w in splits)))}})
+    return out
+
+
 def blind_sample(hits: list[dict], item_type: str, n: int, seed: int) -> list[dict]:
     """A seeded sample of finds Vision got right, queued like the model-flagged items of
     `item_type` (blind = 1), so reviewers' error rate on them can be compared."""
@@ -597,13 +643,15 @@ def with_projects(rows: list[dict], conn: sqlite3.Connection) -> list[dict]:
 def seed_files(store: Store, conn: sqlite3.Connection, queue: Path | None = None,
                crosswalk: Path | None = None, hits: Path | None = None,
                blind_ratio: float = 0.25, seed: int = 20261018,
-               twin_locations: Path | None = None) -> list[dict]:
+               twin_locations: Path | None = None,
+               answer_key_groups: Path | None = None) -> list[dict]:
     """Seed the queue from the miss review's files. With `hits`, every model-flagged type
     also gets a blind sample of finds Vision answered right: blind_ratio of its items."""
     import hashlib
     out = []
     for path, reader in ((queue, rows_from_queue_seed), (crosswalk, rows_from_crosswalk),
-                         (twin_locations, rows_from_twin_locations)):
+                         (twin_locations, rows_from_twin_locations),
+                         (answer_key_groups, lambda p: rows_from_answer_key_groups(p, store))):
         if path is None:
             continue
         sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
