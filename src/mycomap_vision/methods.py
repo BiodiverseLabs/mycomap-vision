@@ -280,18 +280,39 @@ class Hybrid:
 def top_k_within(values: np.ndarray, starts: np.ndarray, k: int) -> np.ndarray:
     """(n_rows, n_groups): each row's mean of its k largest values within each group of
     contiguous columns (`starts`: where each group begins; all of a group's values when it
-    has fewer than k). Values are similarities (-1..1), or -inf for a column left out."""
+    has fewer than k).
+
+    No sort: k rounds of a per-group maximum (reduceat), each round adding the maximum
+    once per copy of it still needed (ties count as separate matches, as a sort would rank
+    them) and then knocking those copies out. The sum is taken in the same order as the
+    sorted version (best first) and the same dtype, so for k <= 2 (nearest+mean uses 2)
+    the scores are bit for bit the sorted version's, and for larger k equal to float
+    rounding; a full argsort of every reference column per query was ~80% of a find's
+    scoring time."""
+    values = np.asarray(values)
     starts = np.asarray(starts, dtype=np.int64)
     counts = np.diff(np.append(starts, values.shape[1]))
-    group = np.repeat(np.arange(len(counts)), counts)
-    # Within each group, best first: sort on group, then on value (-1..1; -inf stays last).
-    order = np.argsort(group * 4.0 - np.nan_to_num(values, neginf=-3.0), axis=1, kind="stable")
-    ranked = np.take_along_axis(values, order, axis=1)
+    need = np.minimum(counts, k)
+    remaining = np.broadcast_to(need, (len(values), len(counts))).astype(values.dtype)
     total = np.zeros((len(values), len(counts)), dtype=np.float32)
+    work = values
     for j in range(k):
-        has = counts > j
-        total[:, has] += ranked[:, starts[has] + j]
-    return total / np.minimum(counts, k)
+        best = np.maximum.reduceat(work, starts, axis=1)
+        if j == k - 1:
+            # Last round: at most one match is still needed per group, and a group that
+            # needs one still has a value left, so no tie bookkeeping.
+            total += np.where(remaining > 0, best, 0) * remaining
+            break
+        top = work == np.repeat(best, counts, axis=1)
+        take = np.minimum(np.add.reduceat(top, starts, axis=1).astype(values.dtype), remaining)
+        # A tie for the j-th place adds the same value twice: best * 2 equals best + best.
+        total += np.where(take > 0, best, 0) * take
+        remaining -= take
+        if not remaining.any():
+            break
+        work = work.copy() if work is values else work
+        np.putmask(work, top, -np.inf)
+    return total / need
 
 
 def top_k_species_scores_per_photo(sims: np.ndarray, index, k: int) -> np.ndarray:

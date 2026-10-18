@@ -313,10 +313,17 @@ def fetch(client: HistoryClient, ids: list[str], log=print) -> dict:
             "wall_hours": round((time.monotonic() - start) / 3600, 3)}
 
 
-def build_snapshot(client: HistoryClient, ids: list[str], out: Path, meta: dict) -> dict:
+CREATED_FILE = "created_at.tsv"
+
+
+def build_snapshot(client: HistoryClient, ids: list[str], out: Path, meta: dict,
+                   record_keys: dict[str, str] | None = None) -> dict:
     """Write the slim snapshot (gzip JSONL, one observation a line, then the identifier
     counts) from the cache, fetching counts for identifiers v2 did not carry. Returns
-    the manifest with sha256s; nothing is fetched for an observation not yet cached."""
+    the manifest with sha256s; nothing is fetched for an observation not yet cached.
+    With `record_keys` (iNat id -> release record_key) it also writes created_at.tsv:
+    record_key, observation_id, created_at (iNat's observation creation, UTC; empty when
+    the observation is gone), the join paper-score uses for the training-cutoff rows."""
     rows, missing_cache = [], []
     for oid in ids:
         rails, v2 = client.cached("rails", oid), client.cached("v2", oid)
@@ -341,6 +348,14 @@ def build_snapshot(client: HistoryClient, ids: list[str], out: Path, meta: dict)
                 "ids_sha256": ids_sha256(ids), "snapshot_file": out.name,
                 "snapshot_sha256": sha256_file(out),
                 "built_at": utc(datetime.now(timezone.utc).isoformat())}
+    if record_keys is not None:
+        created = out.with_name(CREATED_FILE)
+        with open(created, "w", encoding="utf-8", newline="\n") as f:
+            f.write("record_key\tobservation_id\tcreated_at\n")
+            for r in sorted(rows, key=lambda r: record_keys[r["observation_id"]]):
+                f.write(f"{record_keys[r['observation_id']]}\t{r['observation_id']}\t"
+                        f"{r.get('created_at') or ''}\n")
+        manifest.update(created_file=created.name, created_sha256=sha256_file(created))
     out.with_name(out.name.replace(".jsonl.gz", "") + ".manifest.json").write_text(
         json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
@@ -654,6 +669,117 @@ def summarise(lines: list[dict], tier: str = "1", count_push_accounts: bool = Fa
             "status": dict(Counter(r["status"] for r in lines))}
 
 
+# --- E31b slices: by genus, depth band and year, with observer-clustered intervals -----
+
+# PLAN §9 (descriptive B): "by genus, by depth band, by year"; §7: bootstrap clustered by
+# observer, 10,000 resamples, percentile. Depth = included v1 `train` records of the find's
+# label (the find itself left out), in the standard bands. The year bands and the genus
+# floor are fixed here, before any slice is looked at.
+DEPTH_BANDS = ((0, 0, "0"), (1, 4, "1-4"), (5, 19, "5-19"), (20, 99, "20-99"),
+               (100, 10**9, "100+"))
+YEAR_BANDS = ((0, 2017, "<=2017"), (2018, 2019, "2018-2019"), (2020, 2021, "2020-2021"),
+              (2022, 2023, "2022-2023"), (2024, 9999, "2024+"))
+GENUS_MIN_FINDS = 100
+SLICE_METRICS = ("best_species", "best_genus", "each_species", "community_species",
+                 "community_genus", "coverage_best_species")
+
+
+def band_of(value: int | None, bands) -> str:
+    if value is None:
+        return "unknown"
+    for lo, hi, label in bands:
+        if lo <= value <= hi:
+            return label
+    return "unknown"
+
+
+def find_counts(r: dict, tier: str) -> dict[str, tuple[int, int]]:
+    """One scored find's (right, n) toward each slice metric, counted as `summarise` does."""
+    mine = [i for i in r["ids"] if i["role"] == "identifier" and i["tier"] == tier
+            and i["before_cutoff"]]
+    out = {}
+    for rank in ("species", "genus"):
+        got = [i[f"{rank}_right"] for i in mine if i[f"{rank}_right"] is not None]
+        out[f"best_{rank}"] = (int(any(got)), 1) if got else (0, 0)
+        if rank == "species":
+            out["each_species"] = (sum(got), len(got))
+        cr = r["community"][f"{rank}_right"]
+        out[f"community_{rank}"] = (int(cr), 1) if cr is not None else (0, 0)
+    formal = bool(r["truth_species_formal"])
+    out["coverage_best_species"] = (out["best_species"][1], 1) if formal else (0, 0)
+    return out
+
+
+def clustered_rate(rows: list[tuple[str, int, int]], resamples: int = 10_000,
+                   seed: int = 20261013) -> dict:
+    """k/n with a percentile bootstrap that resamples observers (clusters) with
+    replacement. rows: (cluster, right, n) per find."""
+    import numpy as np
+    k, n = sum(r[1] for r in rows), sum(r[2] for r in rows)
+    out = {"n": n, "right": k, "rate": round(k / n, 4) if n else None, "ci95": None,
+           "observers": 0}
+    by: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for c, rk, rn in rows:
+        if rn:
+            by[c][0] += rk
+            by[c][1] += rn
+    out["observers"] = len(by)
+    if not n:
+        return out
+    ks = np.array([v[0] for v in by.values()], dtype=float)
+    ns = np.array([v[1] for v in by.values()], dtype=float)
+    rng = np.random.default_rng(seed)
+    rates = np.empty(resamples)
+    for start in range(0, resamples, 1000):           # bounded memory with many clusters
+        m = min(1000, resamples - start)
+        w = rng.multinomial(len(ks), np.full(len(ks), 1 / len(ks)), size=m)
+        rates[start:start + m] = (w @ ks) / (w @ ns)   # every cluster here has n > 0
+    lo, hi = np.percentile(rates, [2.5, 97.5])
+    out["ci95"] = [round(float(lo), 4), round(float(hi), 4)]
+    return out
+
+
+def slices(lines: list[dict], tier: str = "1", resamples: int = 10_000,
+           seed: int = 20261013) -> dict:
+    """E31b's descriptive table: overall, by year band, by depth band and by genus (genera
+    with >= GENUS_MIN_FINDS scored finds; the rest pooled as 'other'), each metric with an
+    observer-clustered 95% interval. Scored ('ok') finds only; push accounts never count."""
+    ok = [r for r in lines if r["status"] == "ok"]
+    big = Counter(r.get("truth_genus") for r in ok)
+
+    def genus_key(r):
+        g = r.get("truth_genus")
+        return g if g and big[g] >= GENUS_MIN_FINDS else "other"
+
+    def year_key(r):
+        y = str(r.get("observed_year") or "")
+        return band_of(int(y) if y.isdigit() else None, YEAR_BANDS)
+
+    def depth_key(r):
+        return band_of(r.get("truth_train_refs"), DEPTH_BANDS)
+
+    def table(rows):
+        counts = [(r.get("observer") or r["observation_id"], find_counts(r, tier)) for r in rows]
+        return {"finds": len(rows),
+                **{m: clustered_rate([(c, fc[m][0], fc[m][1]) for c, fc in counts],
+                                     resamples, seed) for m in SLICE_METRICS}}
+
+    out = {"tier": tier, "resamples": resamples, "seed": seed, "cluster": "observer",
+           "genus_min_finds": GENUS_MIN_FINDS, "overall": table(ok)}
+    for name, keyf in (("year", year_key), ("depth", depth_key), ("genus", genus_key)):
+        groups: dict[str, list[dict]] = defaultdict(list)
+        for r in ok:
+            groups[keyf(r)].append(r)
+        out[f"by_{name}"] = {g: table(rs) for g, rs in sorted(groups.items())}
+    return out
+
+
+def train_refs(rel) -> Counter:
+    """Included v1 `train` records per label (the depth a find's species had in training)."""
+    return Counter(r[0] for r in rel.db.execute(
+        "select label from records where included = 1 and split = 'train'"))
+
+
 # --- iNat's taxonomy (open data, no calls) and the truth ------------------------------
 
 FUNGI, PROTOZOA = 47170, 47686     # slime moulds are under Protozoa on iNat
@@ -820,6 +946,7 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                              if r.get("kind") == "human" and not r.get("inat_user_id"))
     key = hasher(load_salt(salt_path))
     mo_ids = {r[0] for r in rel.db.execute("select source_id from records where source = 'mo'")}
+    refs = train_refs(rel)          # empty on a test release: depth is then not reported
     lines = []
     for o in snap:
         rec = records.get(o["observation_id"])
@@ -834,7 +961,10 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
         line.update(record_key=rec["record_key"], split=rec.get("split"),
                     name_kind=rec.get("name_kind"), observed_year=(rec.get("observed_on") or "")[:4],
                     truth_genus=rec.get("genus"), observer=key(o["observer_id"])
-                    if o.get("observer_id") else None, format=SCORES_FORMAT)
+                    if o.get("observer_id") else None, format=SCORES_FORMAT,
+                    truth_train_refs=(refs[rec.get("label")] - (
+                        rec.get("split") == "train" and bool(rec.get("included"))))
+                    if refs else None)
         lines.append(line)
     out = d / "scores.jsonl"
     with open(out, "w", encoding="utf-8", newline="\n") as f:
@@ -846,6 +976,7 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                "validator_lists": bool(validators_csv), "our_dates": bool(ours_csv),
                "push_accounts_excluded": len(push_accounts),
                "tier1": summarise(lines, "1"), "tier2": summarise(lines, "2"),
+               "slices": {t: slices(lines, t) for t in ("1", "2")},
                "sensitivity": {
                    "push_account_counted_where_not_validator": {
                        t: summarise(lines, t, count_push_accounts=True) for t in ("1", "2")},

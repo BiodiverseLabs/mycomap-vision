@@ -436,9 +436,9 @@ def cmd_compare(conn, args) -> None:
         # (replications/fungitastic/release_eval.py): the Picek vs Vision report.
         from .dataset_release import load_release
         from .replications.fungitastic import release_eval
-        if rel is None or args.into or args.max_test:
+        if rel is None or args.into or args.max_test or args.reference != "all":
             raise SystemExit("--test-release needs --release <its base>; no --into or "
-                             "--max-test")
+                             "--max-test, no --reference public-trainable (not built for a test release)")
         test_rel = load_release(args.test_release, allow_draft=args.allow_draft)
         result = release_eval.compare_on_test(conn, rel, test_rel, backbones, methods,
                                               name_scores=args.name_scores,
@@ -447,7 +447,8 @@ def cmd_compare(conn, args) -> None:
         result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
                                   max_test=args.max_test, name_scores=args.name_scores,
                                   sets=not args.no_sets, per_image=args.per_image,
-                                  into=args.into, release=rel)
+                                  into=args.into, release=rel,
+                                  public_reference=args.reference == "public-trainable")
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -1457,8 +1458,9 @@ def cmd_expert_ids(args) -> None:
         except E.CallBudgetSpent as e:
             print(f"{e}; rerun to continue (answers are cached)")
     elif args.action == "snapshot":
+        keys = {r["source_id"]: r["record_key"] for r in E.inat_records(rel)}
         print(json.dumps(E.build_snapshot(client, ids, d / "snapshot.jsonl.gz",
-                                          {"set": args.name, **rel.cite()}), indent=2))
+                                          {"set": args.name, **rel.cite()}, keys), indent=2))
     elif args.action == "score":
         push = {int(x) for x in (args.push_accounts or "").split(",") if x.strip()}
         our = args.our_dates or (d_our if d_our.exists() else None)
@@ -1830,6 +1832,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--into", metavar="COMPARISON",
                    help="add the runs to this saved comparison (same records only; replaces "
                         "a run of the same backbone and method there)")
+    p.add_argument("--reference", choices=("all", "public-trainable"), default="all",
+                   help="with --release: public-trainable keeps only the reference photos the "
+                        "public model may learn from (CC incl. NC, or ARR with permission); "
+                        "the scored records are unchanged (paper E23/E23b)")
     release_options(p)
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "

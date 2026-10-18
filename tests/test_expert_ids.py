@@ -373,3 +373,74 @@ def test_fetcher_stops_on_403_and_on_repeated_throttling(tmp_path):
     with pytest.raises(E.Refused, match="throttled"):
         c.observation("2")
     assert c.calls == E.MAX_THROTTLES
+
+
+# --- E31b slices -------------------------------------------------------------------
+
+def scored(observer, year, genus, refs, right, status="ok", formal=True):
+    """A scored line with one tier-1 identifier ID at species (right or wrong)."""
+    return {"observation_id": f"{observer}-{year}-{right}", "status": status,
+            "cutoff_source": "dna_field",
+            "observer": observer, "observed_year": year, "truth_genus": genus,
+            "truth_train_refs": refs, "truth_species_formal": formal,
+            "ids": [{"role": "identifier", "tier": "1", "before_cutoff": True,
+                     "species_right": right if formal else None, "genus_right": True}],
+            "community": {"species_right": None, "genus_right": True}}
+
+
+def test_slices_split_by_year_depth_and_genus_and_pool_small_genera():
+    lines = ([scored("a", "2016", "Russula", 3, True)] * 60
+             + [scored("b", "2024", "Russula", 150, False)] * 60
+             + [scored("c", "2021", "Lactarius", 0, True)] * 5
+             + [scored("d", "2021", "Lactarius", 0, True, status="mo_id_collision")])
+    s = E.slices(lines, "1", resamples=200)
+    assert s["overall"]["finds"] == 125                       # the collision is not scored
+    assert set(s["by_year"]) == {"<=2017", "2020-2021", "2024+"}
+    assert s["by_depth"]["1-4"]["best_species"]["rate"] == 1.0
+    assert s["by_depth"]["100+"]["best_species"]["rate"] == 0.0
+    assert s["by_depth"]["0"]["finds"] == 5
+    assert set(s["by_genus"]) == {"Russula", "other"}         # Lactarius < 100 finds: pooled
+    assert s["overall"]["best_species"]["right"] == 65
+
+
+def test_slice_intervals_resample_observers_not_finds():
+    # Two observers, 100 finds each, one always right, one always wrong: a find-level
+    # interval would be tight around 0.5; an observer-clustered one spans nearly 0..1.
+    lines = [scored("a", "2022", "Russula", 10, True)] * 100 + \
+            [scored("b", "2022", "Russula", 10, False)] * 100
+    r = E.slices(lines, "1", resamples=2000)["overall"]["best_species"]
+    assert r["rate"] == 0.5 and r["observers"] == 2
+    assert r["ci95"][0] == 0.0 and r["ci95"][1] == 1.0
+
+
+def test_slice_counts_match_the_summary_and_skip_provisional_truths_at_species():
+    lines = [scored("a", "2022", "Russula", 10, True), scored("b", "2022", "Russula", 10, False),
+             scored("c", "2022", "Russula", 10, True, formal=False)]
+    s = E.slices(lines, "1", resamples=100)["overall"]
+    full = E.summarise(lines, "1")["all"]
+    assert (s["best_species"]["n"], s["best_species"]["right"]) == \
+        (full["best_species"]["n"], full["best_species"]["right"]) == (2, 1)
+    assert s["coverage_best_species"]["rate"] == full["coverage_best_species"] == 1.0
+    assert s["best_genus"]["n"] == 3
+
+
+def test_band_of_puts_missing_values_in_unknown():
+    assert E.band_of(None, E.DEPTH_BANDS) == "unknown"
+    assert E.band_of(0, E.DEPTH_BANDS) == "0" and E.band_of(100, E.DEPTH_BANDS) == "100+"
+    assert E.band_of(2017, E.YEAR_BANDS) == "<=2017" and E.band_of(2025, E.YEAR_BANDS) == "2024+"
+
+
+def test_snapshot_writes_each_records_observation_creation_time_by_record_key(tmp_path):
+    s = FakeSession([FakeResponse(200, {"results": [{"id": 42, "community_taxon_id": 100,
+                                                     "identifications": []}]}),
+                     FakeResponse(200, RAILS), FakeResponse(200, {"results": [{"identifications_count": 3}]})])
+    c = E.HistoryClient(tmp_path / "cache", session=s, sleep=lambda d: None)
+    E.fetch(c, ["42"], log=lambda *a: None)
+    out = tmp_path / "snap.jsonl.gz"
+    m = E.build_snapshot(c, ["42"], out, {"set": "test"}, {"42": "inat-42"})
+    created = tmp_path / E.CREATED_FILE
+    lines = created.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "record_key\tobservation_id\tcreated_at"
+    assert lines[1] == f"inat-42\t42\t{E.read_snapshot(out)[0]['created_at']}"
+    assert lines[1].endswith("Z") and m["created_sha256"] == E.sha256_file(created)
+    assert "created_file" not in E.build_snapshot(c, ["42"], tmp_path / "y.jsonl.gz", {})

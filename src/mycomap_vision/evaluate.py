@@ -568,14 +568,33 @@ def calibration_method(method: str) -> str:
     return getattr(METHODS.get(method), "calibration_from", None) or method
 
 
+def own_calibration_row(conn: sqlite3.Connection, backbone: str, method: str):
+    """For a method that shares another's calibration (calibration_from), the newest row of
+    its OWN, when MV_PLACE_CALIBRATION=own asks for it and that row was scored under the
+    place setting in force (placeprior.place_setting); else None."""
+    from . import placeprior
+    if calibration_method(method) == method or placeprior.calibration_choice() != "own":
+        return None
+    setting, _ = placeprior.place_setting()
+    for row in conn.execute("select id, comparison_id, report_json from eval_runs where "
+                            "backbone = ? and method = ? order by id desc", (backbone, method)):
+        if json.loads(row[2]).get("place_setting") == setting:
+            return row
+    return None
+
+
 def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> dict | None:
     """The newest comparison's fitted temperatures for this model (or for the method whose
-    calibration it shares), with where they came from."""
-    method = calibration_method(method)
+    calibration it shares; with MV_PLACE_CALIBRATION=own, the place method's own row of the
+    place setting in force when there is one: own_calibration_row), with where they came
+    from."""
     conn.executescript(SCOREBOARD_SCHEMA)
-    row = conn.execute("select id, comparison_id, report_json from eval_runs "
-                       "where backbone = ? and method = ? order by id desc limit 1",
-                       (backbone, method)).fetchone()
+    row = own_calibration_row(conn, backbone, method)
+    if row is None:
+        method = calibration_method(method)
+        row = conn.execute("select id, comparison_id, report_json from eval_runs "
+                           "where backbone = ? and method = ? order by id desc limit 1",
+                           (backbone, method)).fetchone()
     if not row:
         return None
     cal = json.loads(row[2]).get("all_photos", {}).get("calibration")
@@ -661,10 +680,15 @@ class SharedSet:
 
 def shared_records(conn: sqlite3.Connection, backbones: list[str], test_days: int = 28,
                    max_test: int | None = None, seed: int = 0,
-                   embeddings_root=None, release=None) -> SharedSet:
+                   embeddings_root=None, release=None,
+                   public_reference: bool = False) -> SharedSet:
     """The records a comparison of these backbones uses: only photos all of them embedded.
     With a dataset `release`, reference = its train split and test = its val split
-    (test_days is not used)."""
+    (test_days is not used). `public_reference`: the reference keeps only the photos the
+    public model may learn from (CC including NC, or ARR with the owner's permission;
+    a record left with none drops out); the scored records are unchanged."""
+    if public_reference and release is None:
+        raise ValueError("a public-trainable reference needs a dataset release (--release)")
     from .embed import load_embeddings
     loaded = {}
     for b in backbones:
@@ -676,7 +700,8 @@ def shared_records(conn: sqlite3.Connection, backbones: list[str], test_days: in
     common = set.intersection(*(set(ids.tolist()) for ids, _ in loaded.values()))
     if release is not None:
         release.check_photos_match(conn)
-        ref = release.as_records("train", {p: p for p in common})
+        ref = release.as_records("train", {p: p for p in common},
+                                 public_trainable_only=public_reference)
         test = release.as_records("val", {p: p for p in common})
         cutoff = release.val_cutoff or ""
     else:
@@ -718,7 +743,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             embeddings_root=None, name_scores: bool = False, sets: bool = True,
             per_image: bool = False, into: str | None = None, release=None,
             shared: "SharedSet | None" = None, extra: dict | None = None,
-            log=print) -> dict:
+            public_reference: bool = False, log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
@@ -734,6 +759,9 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
     `shared`: the records and photos to use, built elsewhere (a dataset release's splits:
     replications/fungitastic/release_eval.py) instead of the newest-weeks split; `extra`
     is added to every row's report (e.g. the release cited).
+
+    `public_reference` (with a release): the reference keeps only public-trainable photos
+    (shared_records); every row's report says "reference": "public_trainable".
     """
     methods = methods or ["nearest"]
     for m in methods:
@@ -752,8 +780,13 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         raise ValueError("a prebuilt record set takes no --into or --release")
     if release is not None:
         extra = {**(extra or {}), "dataset_release": release.cite()}
+    if public_reference:
+        if shared is not None:
+            raise ValueError("a prebuilt record set takes no public_reference")
+        extra = {**(extra or {}), "reference": "public_trainable"}
     shared = shared or shared_records(conn, backbones, test_days, max_test, seed,
-                                      embeddings_root, release=release)
+                                      embeddings_root, release=release,
+                                      public_reference=public_reference)
     check_not_trained_on_test(conn, list(shared.loaded), shared.cutoff)
     ref, test = shared.ref, shared.test
     if into:
@@ -790,6 +823,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
                                  row_extra or None))
     return {"comparison_id": comparison_id, "cutoff": shared.cutoff, "test_days": test_days,
             **({"dataset_release": release.cite()} if release is not None else {}),
+            "reference": "public_trainable" if public_reference else "every included photo",
             "reference_records": len(ref), "test_records": len(test),
             "test_multi_photo_share": round(sum(len(r.photo_rows) > 1 for r in test)
                                             / max(1, len(test)), 3),
