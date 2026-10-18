@@ -1134,7 +1134,7 @@ def label_resolution_changes(a, b, labels: Iterable[str], genera: Iterable[str])
 
 def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors: Path | None,
                         out_dir: Path, errata=None, vocabulary_file: Path | None = None):
-    """The shared answer key's taxonomy (name_equiv.Taxonomy): iNat open data plus the frozen
+    """(the shared answer key's Taxonomy, E31's own taxa dict). The key's: iNat open data plus the frozen
     successors TSV, with what E31's identifications add (taxa newer than the download and
     retired ids' successors, from the cached taxa lookups) on the answer side only: extras a
     label lookup could reach are left out and counted, and the run refuses if extras change
@@ -1171,7 +1171,7 @@ def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors
                            f"(e.g. {changed[:5]}): PLAN rule 4 forbids it")
     tax.cite["labels_kept_apart"] = sum(len(v) for v in tax.shared_by.values())
     tax.cite["answer_key"] = N.ANSWER_KEY
-    return tax, tax.taxa
+    return tax, merged          # E31's own taxonomy (by-id verdicts, ID ranks): every lookup
 
 
 def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
