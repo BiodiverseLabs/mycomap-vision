@@ -261,3 +261,38 @@ def test_per_record_answers_agree_with_the_summary_and_the_fitted_temperature():
             assert a["cal"]["species"]["p_true"] is None
     assert "per_record" not in evaluate(vecs, ref, test, method="nearest+mean-records",
                                         fitted=fitted)
+
+
+def test_a_specimen_filed_twice_counts_once_among_a_species_best_records():
+    # Species A: one find cross-posted as two records (MO and iNat), both very close to the
+    # query, plus a far record. Species B: two distinct finds, each fairly close. Records
+    # apart, A's twin fills both places; grouped as one specimen, B's two finds win.
+    dim = 8
+    q = np.zeros(dim)
+    q[0] = 1.0
+    far = np.zeros(dim)
+    far[1] = 1.0
+    vecs = unit([q + 0.05 * far, q + 0.06 * far, far,
+                 q + 0.5 * far, q + 0.5 * far]).astype(np.float16)
+    recs = [Record("mo-1", "G a", "G", "F", "2026-01-01", "u", [0]),
+            Record("a2", "G a", "G", "F", "2026-01-01", "u", [2]),
+            Record("inat-1", "G a", "G", "F", "2026-01-01", "u", [1]),
+            Record("b1", "G b", "G", "F", "2026-01-01", "u", [3]),
+            Record("b2", "G b", "G", "F", "2026-01-01", "u", [4])]
+    query = q[None, :].astype(np.float16)
+    apart, grouped = NearestAndMeanRecords(), NearestAndMeanRecords()
+    apart.fit(vecs, build_index(recs))
+    twins = build_index(recs, specimen_of={"mo-1": "find-1", "inat-1": "find-1"})
+    grouped.fit(vecs, twins)
+    apart.weight = grouped.weight = 1.0                  # the specimen half alone
+    assert build_index(recs).species[int(np.argmax(apart.species_scores(query)))] == "G a"
+    assert twins.species[int(np.argmax(grouped.species_scores(query)))] == "G b"
+    assert twins.ref_count["G a"] == 3                    # records are still counted
+    assert len(twins.rec_starts) == 4
+
+
+def test_without_a_specimen_key_the_index_is_unchanged():
+    vecs, recs = random_reference(15, [[2, 1], [3], [1, 1, 4]])
+    plain, keyed = build_index(recs), build_index(recs, specimen_of={})
+    assert np.array_equal(plain.cols, keyed.cols)
+    assert np.array_equal(plain.rec_starts, keyed.rec_starts)

@@ -203,22 +203,27 @@ class Index:
     rec_starts: np.ndarray | None = None
 
 
-def build_index(ref: list[Record]) -> Index:
-    by_species: dict[str, list[list[int]]] = defaultdict(list)
+def build_index(ref: list[Record], specimen_of: dict[str, str] | None = None) -> Index:
+    """The reference index. `specimen_of` ({observation_id: specimen key}) puts records of
+    one specimen filed twice (an MO and iNat cross-post of the same find) together as ONE
+    run of columns, so the record-grouped methods (methods.NearestAndMeanRecords) score it
+    as one specimen; reference record counts (ref_count) still count records. Without it,
+    every record is its own run, in the order given."""
+    by_species: dict[str, dict] = defaultdict(dict)
     taxa: dict[str, Record] = {}
     count = Counter()
-    for r in ref:
+    for i, r in enumerate(ref):
+        runs = by_species[r.unit]
         if r.photo_rows:
-            by_species[r.unit].append(list(r.photo_rows))
-        else:
-            by_species.setdefault(r.unit, [])
+            key = specimen_of.get(r.observation_id, ("record", i)) if specimen_of else i
+            runs.setdefault(key, []).extend(r.photo_rows)
         taxa.setdefault(r.unit, r)
         count[r.unit] += 1
     species = sorted(by_species)
     cols, starts, rec_starts = [], [], []
     for s in species:
         starts.append(len(cols))
-        for rows in by_species[s]:
+        for rows in by_species[s].values():
             rec_starts.append(len(cols))
             cols.extend(rows)
     index = Index(species, np.asarray(cols, dtype=np.int64), np.asarray(starts, dtype=np.int64),
@@ -327,9 +332,11 @@ def method_applies(method: str, backbone: str) -> bool:
     return is_classifier(backbone)
 
 
-def fit_method(vectors: np.ndarray, ref: list[Record], method: str, backbone: str | None = None):
-    """(index, fitted model) for the reference records; reusable across evaluations."""
-    index = build_index(ref)
+def fit_method(vectors: np.ndarray, ref: list[Record], method: str, backbone: str | None = None,
+               specimen_of: dict[str, str] | None = None):
+    """(index, fitted model) for the reference records; reusable across evaluations.
+    `specimen_of`: records filed twice for one specimen, grouped (build_index)."""
+    index = build_index(ref, specimen_of)
     model = make_method(method, backbone)
     if getattr(model, "needs_context", False):
         model.fit(vectors, index, records=ref)
