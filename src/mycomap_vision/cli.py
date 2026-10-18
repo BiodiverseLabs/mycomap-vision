@@ -1123,7 +1123,9 @@ def cmd_feedback(conn, args) -> None:
         out = feedback.seed_files(store, conn, Path(args.queue) if args.queue else None,
                                   Path(args.crosswalk) if args.crosswalk else None,
                                   Path(args.hits) if args.hits else None,
-                                  blind_ratio=args.blind_ratio, seed=args.seed)
+                                  blind_ratio=args.blind_ratio, seed=args.seed,
+                                  twin_locations=Path(args.twin_locations)
+                                  if args.twin_locations else None)
         print(json.dumps({"store": str(path), "seeds": out}, indent=2))
     else:
         print(json.dumps({"store": str(path), "types": store.summary()}, indent=2))
@@ -2232,6 +2234,8 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--crosswalk", help="crosswalk_candidates.tsv")
     q.add_argument("--hits", help="finds Vision answered right (record_key, label): the "
                                   "blind sample mixed into model-flagged queues")
+    q.add_argument("--twin-locations", help="twins whose copies are over 5 km apart (the "
+                                            "Atlas lane's list; no coordinates)")
     q.add_argument("--blind-ratio", type=float, default=0.25)
     q.add_argument("--seed", type=int, default=20261018)
     q.add_argument("--store", help="the queue file (default <release root>/state/"
