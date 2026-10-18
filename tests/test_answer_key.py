@@ -313,3 +313,57 @@ def test_the_label_vocabulary_is_written_once_sorted_and_pinned(tmp_path):
         ["Russula emetica", "Amanita", "Amanita sp. 'NY03'", "Boletus edulis var. grandedulis"])
     with pytest.raises(FileExistsError):
         ne.write_label_vocabulary(rel, tmp_path / "labels.txt")
+
+
+def test_extras_update_a_retired_id_no_label_reaches_so_the_answer_follows_its_successor():
+    """(i) An identifier's historical id, retired in the snapshot without a successor there
+    and reached by no label, follows the successor a later lookup gives (the extras)."""
+    base = {**TAXA, 900: t("Hydnum oldname", 10, active=False, anc=[1]),
+            901: t("Hydnum repandum", 10, anc=[1])}
+    extras = {900: {"current_synonymous_taxon_ids": [901]}}
+    labels = LABELS + ["Hydnum repandum"]
+    plain = ne.Taxonomy(base, labels)
+    more = ne.Taxonomy(base, labels, extras=extras)
+    assert 900 not in more.reached
+    assert not ne.species_credit(900, "Hydnum repandum", taxonomy=plain)
+    assert ne.species_credit(900, "Hydnum repandum", taxonomy=more)
+
+
+def test_extras_never_override_an_entry_a_label_reaches():
+    """(ii) Psathyrella candolleana (100) is reached by a label: an extra pointing it
+    elsewhere is ignored, for the label and for an answer on that id alike."""
+    extras = {100: {"current_synonymous_taxon_ids": [201]},          # 'now Amanita muscaria'
+              10: {"name": "Elsewhere"}}                             # its genus, reached too
+    more = ne.Taxonomy(TAXA, LABELS, extras=extras)
+    assert 100 in more.reached and 10 in more.reached
+    assert more.taxa[100] == TAXA[100] and more.taxa[10]["name"] == "Psathyrella"
+    assert ne.species_credit(100, "Psathyrella candolleana", taxonomy=more)
+    assert not ne.species_credit(100, "Amanita muscaria", taxonomy=more)
+    kw = {"taxonomy": more, "truth_species": "Psathyrella candolleana"}
+    assert ne.genus_match("Psathyrella", "Psathyrella", **kw)["strict"]
+
+
+def test_genus_known_says_whether_inat_can_name_a_truths_genus(gap):
+    """Paired iNat-side genus tests (H1b, H4g) leave out truths whose genus iNat can't name:
+    neither the release genus nor the label's first word is a current iNat genus, and the
+    label's species (one-to-one or not) gives none."""
+    assert gap.genus_known("Psathyrella candolleana", "Psathyrella")
+    assert gap.genus_known("Candolleomyces candolleanus", "Psathyrella")    # kept apart, still
+    assert gap.genus_known("Gyromitra caroliniana", None)          # Gyromitra is in the snapshot
+    assert gap.genus_known("Clavaria zollingeri", "Clavaria")
+    assert gap.genus_known("Amanita sp. 'NY03'", "Amanita")        # a code in a known genus
+    assert not gap.genus_known("Unheardof sp. 'X01'", "Unheardof")
+    assert not gap.genus_known("Unheardof rarus", None)
+    # a genus iNat retired: its single successor counts; a split one doesn't
+    taxa = {**TAXA, 20: t("Oldgenus", 20, active=False, anc=[1], succ=[11]),
+            21: t("Splitgenus", 20, active=False, anc=[1], succ=[11, 12])}
+    tx = ne.Taxonomy(taxa, ["Oldgenus sp. 'A01'", "Splitgenus sp. 'B01'"])
+    assert tx.genus_known("Oldgenus sp. 'A01'", "Oldgenus")
+    assert not tx.genus_known("Splitgenus sp. 'B01'", "Splitgenus")
+    # only the species can say it: a label genus word iNat lacks, a species it knows
+    nogenus = {k: v for k, v in TAXA.items() if k != 10}
+    tn = ne.Taxonomy(nogenus, ["Psathyrella candolleana"])
+    assert tn.genus_known("Psathyrella candolleana", None)        # via Candolleomyces candolleanus
+    # extras never make a truth's genus known
+    more = ne.Taxonomy(TAXA, ["Newgenus sp. 'C01'"], extras={30: t("Newgenus", 20, anc=[1])})
+    assert not more.genus_known("Newgenus sp. 'C01'", "Newgenus")

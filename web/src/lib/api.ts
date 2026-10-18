@@ -308,6 +308,18 @@ async function getJson<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** POST JSON (or nothing) with the site session cookie, as the signed-in GETs send it. */
+async function postJson<T>(url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) throw new ApiError(res.status, await errorText(res));
+  return res.json() as Promise<T>;
+}
+
 async function errorText(res: Response): Promise<string> {
   if (res.status === 401) return "Sign in with your mycomap.org account to use this.";
   try {
@@ -338,6 +350,176 @@ export interface Me {
   signin: "off" | "identify" | "all";
   user: { id: string; name: string | null } | null;
 }
+
+// --- Human Feedback (/feedback): places where Vision and the reference data disagree ---------
+
+/** Who may review, and where: admins see every item, others their projects' items. */
+export interface FeedbackMe {
+  user: { id: string; name: string | null };
+  admin: boolean;
+  /** mycomap.org's staff flag: BLAST links open the admin results form. */
+  staff?: boolean;
+  projects: string[];
+}
+
+/** Where a decision takes effect: a change on mycomap.org, in Vision, or a note only. */
+export type FeedbackApplies = "org" | "vision" | "note";
+
+export interface FeedbackOption {
+  code: string;
+  label: string;
+  applies: FeedbackApplies;
+  /** The decision needs a value, e.g. the name to rename to. */
+  needs_value: boolean;
+}
+
+export interface FeedbackType {
+  type: string;
+  title: string;
+  about: string;
+  shows: string[];
+  granularity: string;
+  model_flagged: boolean;
+  options: FeedbackOption[];
+}
+
+export interface FeedbackSummary {
+  type: string;
+  title: string;
+  about: string;
+  granularity: string;
+  model_flagged: boolean;
+  open: number;
+  decided: number;
+}
+
+export type FeedbackStatus = "open" | "decided";
+
+/** One queue item. Some fields are for the analysis only and are never shown to reviewers. */
+export interface FeedbackItem {
+  id: number;
+  item_type: string;
+  subject: string;
+  granularity: string;
+  rule: string;
+  model_flagged: boolean;
+  /** A label check still open: Vision's answer, the rule and the outcome are withheld
+   *  until the reviewer decides (the server's reviewer_view). */
+  masked?: boolean;
+  blind?: boolean;
+  hidden_until_decided?: boolean;
+  /** iNat numbers ("123") or "mo:45". */
+  record_keys: string[];
+  /** The records' public pages, absolute. */
+  links: string[];
+  current: string | null;
+  proposed: string | null;
+  evidence: Record<string, unknown>;
+  projects: string[];
+  records: number;
+  status: FeedbackStatus;
+  seed?: string;
+  /** Epoch seconds (or ISO). */
+  created_at: number | string;
+}
+
+export interface FeedbackDecision {
+  id: number;
+  decision: string;
+  value: string | null;
+  note: string | null;
+  photo_keys: string[];
+  applies: FeedbackApplies;
+  by_user: string;
+  by_name: string | null;
+  at: number | string;
+  applied: number | boolean;
+}
+
+export type Top5 = [string, number][];
+
+export interface FeedbackRefresh {
+  at: number | string;
+  name_now: string | null;
+  top5: Top5;
+  still_disagrees: boolean | number | null;
+}
+
+/** Where a sequence's BLAST link opens for this viewer, chosen by the server: the admin
+ *  results form for staff, the public job page otherwise. */
+export interface BlastLink {
+  href: string;
+  kind: "admin" | "public";
+}
+
+export interface LiveSequence {
+  id: number | string;
+  category_id?: number | string | null;
+  trash?: boolean | number | null;
+  name: string | null;
+  length: number | null;
+  approved?: boolean | number | null;
+  flags?: unknown;
+  genbank?: string | null;
+  url: string | null;
+  blast: { job_id?: string | number | null; url?: string | null; results_url?: string | null;
+           saved_at?: string | number | null } | null;
+  blast_link?: BlastLink | null;
+}
+
+/** A record as mycomap.org holds it now (or `unavailable` when it did not answer). */
+export interface LiveRecord {
+  record_key: string;
+  unavailable?: boolean;
+  name?: string | null;
+  source?: string | null;
+  projects?: { id: string | number; status: string | null; name: string | null }[];
+  links?: { validate?: string[]; name_update?: string | null };
+  sequences?: LiveSequence[];
+}
+
+export interface FeedbackItemDetail extends FeedbackItem {
+  decisions: FeedbackDecision[];
+  refreshes: FeedbackRefresh[];
+  live?: LiveRecord[];
+}
+
+export interface RefreshedRecord {
+  record_key: string;
+  name_now: string | null;
+  vision: { available: boolean; reason?: string; model?: string; top5?: Top5 };
+  still_disagrees: boolean | null;
+}
+
+export interface FeedbackDecisionBody {
+  decision: string;
+  value?: string;
+  note?: string;
+  photo_keys?: string[];
+}
+
+/** The admins' change list, a TSV download (pending changes unless `all`). */
+export const feedbackChangesUrl = (applies: "org" | "vision", all = false) =>
+  `/api/feedback/changes.tsv?applies=${applies}&all=${all}`;
+
+const fbItem = (id: number) => `/api/feedback/items/${encodeURIComponent(String(id))}`;
+
+export const feedbackApi = {
+  me: () => getJson<FeedbackMe>("/api/feedback/me"),
+  catalogue: () => getJson<FeedbackType[]>("/api/feedback/catalogue"),
+  summary: () => getJson<FeedbackSummary[]>("/api/feedback/summary"),
+  items: (p: { type: string; status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {
+    const qs = new URLSearchParams({ type: p.type, status: p.status, q: p.q ?? "",
+                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 25) });
+    return getJson<{ total: number; items: FeedbackItem[] }>(`/api/feedback/items?${qs}`);
+  },
+  item: (id: number) => getJson<FeedbackItemDetail>(fbItem(id)),
+  decide: (id: number, body: FeedbackDecisionBody) =>
+    postJson<FeedbackItemDetail>(`${fbItem(id)}/decision`, body),
+  reopen: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/reopen`),
+  refresh: (id: number) =>
+    postJson<{ item: FeedbackItemDetail; refreshed: RefreshedRecord[] }>(`${fbItem(id)}/refresh`),
+};
 
 /** mycomap.org signs people in here; come back to the page they were on. */
 export const signInUrl = () =>
