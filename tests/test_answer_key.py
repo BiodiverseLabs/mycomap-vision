@@ -313,3 +313,31 @@ def test_the_label_vocabulary_is_written_once_sorted_and_pinned(tmp_path):
         ["Russula emetica", "Amanita", "Amanita sp. 'NY03'", "Boletus edulis var. grandedulis"])
     with pytest.raises(FileExistsError):
         ne.write_label_vocabulary(rel, tmp_path / "labels.txt")
+
+
+def test_extras_update_a_retired_id_no_label_reaches_so_the_answer_follows_its_successor():
+    """(i) An identifier's historical id, retired in the snapshot without a successor there
+    and reached by no label, follows the successor a later lookup gives (the extras)."""
+    base = {**TAXA, 900: t("Hydnum oldname", 10, active=False, anc=[1]),
+            901: t("Hydnum repandum", 10, anc=[1])}
+    extras = {900: {"current_synonymous_taxon_ids": [901]}}
+    labels = LABELS + ["Hydnum repandum"]
+    plain = ne.Taxonomy(base, labels)
+    more = ne.Taxonomy(base, labels, extras=extras)
+    assert 900 not in more.reached
+    assert not ne.species_credit(900, "Hydnum repandum", taxonomy=plain)
+    assert ne.species_credit(900, "Hydnum repandum", taxonomy=more)
+
+
+def test_extras_never_override_an_entry_a_label_reaches():
+    """(ii) Psathyrella candolleana (100) is reached by a label: an extra pointing it
+    elsewhere is ignored, for the label and for an answer on that id alike."""
+    extras = {100: {"current_synonymous_taxon_ids": [201]},          # 'now Amanita muscaria'
+              10: {"name": "Elsewhere"}}                             # its genus, reached too
+    more = ne.Taxonomy(TAXA, LABELS, extras=extras)
+    assert 100 in more.reached and 10 in more.reached
+    assert more.taxa[100] == TAXA[100] and more.taxa[10]["name"] == "Psathyrella"
+    assert ne.species_credit(100, "Psathyrella candolleana", taxonomy=more)
+    assert not ne.species_credit(100, "Amanita muscaria", taxonomy=more)
+    kw = {"taxonomy": more, "truth_species": "Psathyrella candolleana"}
+    assert ne.genus_match("Psathyrella", "Psathyrella", **kw)["strict"]

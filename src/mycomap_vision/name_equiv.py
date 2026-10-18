@@ -197,8 +197,10 @@ class Taxonomy:
     `taxa`: {id: {name, rank_level, is_active, ancestor_ids, current_synonymous_taxon_ids?}},
     e.g. expert_ids.load_open_taxa plus the frozen successors (Taxonomy.load); `labels`: the
     label vocabulary (label_vocabulary), for the one-to-one rule; `extras`: answer-side taxa
-    the snapshot lacks (a comparator's newer ids), used to read an ANSWER only: a label always
-    resolves against the snapshot alone, so extras never change how a label resolves; `cite`:
+    the snapshot lacks or knows less about (a comparator's newer ids, or a retired id's
+    successors from a later lookup): they add to and update the snapshot for reading an ANSWER
+    only; a label and a truth's genus always read the snapshot alone, so extras never change
+    how a label resolves; `cite`:
     the files and their sha256, for reports.
 
     resolves(label) is False for a name that does not resolve one-to-one (a code, unknown to
@@ -208,7 +210,11 @@ class Taxonomy:
     def __init__(self, taxa: dict[int, dict], labels=(), cite: dict | None = None,
                  extras: dict[int, dict] | None = None):
         self.base = taxa
-        self.taxa = {**(extras or {}), **taxa}         # the snapshot wins on a shared id
+        # Answers read the snapshot updated by the extras (a retired taxon's successors that
+        # only a later lookup knows); labels read the snapshot alone (current, _level and
+        # genus_names with base_only), so the extras cannot change a label's resolution.
+        self.extras = extras or {}
+        self.taxa = dict(taxa)                          # set_labels applies the extras
         self.cite = cite or {}
         self.by_name: dict[str, list[int]] = {}
         for tid, t in taxa.items():
@@ -241,7 +247,40 @@ class Taxonomy:
                 Path(successors).read_bytes()).hexdigest())
         return cls(taxa, labels, cite)
 
+    def reach(self, labels) -> set[int]:
+        """Snapshot taxa a label lookup can reach (the paper coordinator, 2026-10-18): a
+        taxon named by a label, its rank-stripped form, its binomial, its genus word or any
+        other capitalised word, plus those taxa's successors and ancestry. The extras never
+        override these, not even for reading an answer."""
+        hit = set()
+        for lab in labels:
+            words = _RANK_WORD.sub(" ", lab).split()
+            if not words:
+                continue
+            forms = {lab, " ".join(words), " ".join(words[:2]), words[0]}
+            forms |= {w.strip("'\"()") for w in words[1:] if w[:1].isupper()}
+            for f in forms:
+                hit.update(self.by_name.get(f.lower(), []))
+        out, todo = set(), list(hit)
+        while todo:
+            tid = todo.pop()
+            if tid in out or tid not in self.base:
+                continue
+            out.add(tid)
+            t = self.base[tid]
+            todo.extend(int(x) for x in t.get("current_synonymous_taxon_ids") or [])
+            todo.extend(int(x) for x in t.get("ancestor_ids") or [])
+        return out
+
     def set_labels(self, labels) -> None:
+        labels = list(labels)
+        reached = self.reach(labels)
+        # extras add taxa and update the snapshot's entries no label reaches (a retired id an
+        # identifier used, whose successor only a later lookup knows)
+        self.taxa = {**self.extras, **{tid: ({**t, **self.extras[tid]}
+                                             if tid in self.extras and tid not in reached else t)
+                                       for tid, t in self.base.items()}}
+        self.reached = reached
         claims: dict[int, set[str]] = {}
         for lab in labels:
             sid = self._resolve_name(lab)
@@ -266,15 +305,16 @@ class Taxonomy:
             tid = int(succ[0]) if len(succ) == 1 else None
         return None
 
-    def _level(self, tid: int, level: int) -> int | None:
+    def _level(self, tid: int, level: int, base_only: bool = False) -> int | None:
         """The taxon at `level` (species, genus) on tid's own line, or None."""
-        t = self.taxa.get(tid) or {}
+        taxa = self.base if base_only else self.taxa
+        t = taxa.get(tid) or {}
         if t.get("rank_level") == level:
             return tid
         if t.get("rank_level") is not None and t["rank_level"] > level:
             return None
         for a in reversed(t.get("ancestor_ids") or []):
-            if (self.taxa.get(a) or {}).get("rank_level") == level:
+            if (taxa.get(a) or {}).get("rank_level") == level:
                 return a
         return None
 
@@ -290,7 +330,8 @@ class Taxonomy:
         for cand in (" ".join(words), " ".join(words[:2])):
             ids = self.by_name.get(cand.lower(), [])
             current = {c for c in (self.current(i, base_only=True) for i in ids) if c is not None}
-            species = {s for s in (self._level(c, SPECIES_LEVEL) for c in current) if s}
+            species = {s for s in (self._level(c, SPECIES_LEVEL, base_only=True)
+                                   for c in current) if s}
             if len(species) == 1:
                 return species.pop()
         return None
@@ -311,26 +352,30 @@ class Taxonomy:
         left out of the iNat- and expert-paired tests (PLAN rule 7), never scored a miss."""
         return self.species_id(label) is not None
 
-    def genus_names(self, x) -> set[str]:
+    def genus_names(self, x, base_only: bool = False) -> set[str]:
         """Genus names a name or taxon id stands for: as written, and iNat's current genus
-        of it (a retired genus followed to its successor; a species' genus)."""
+        of it (a retired genus followed to its successor; a species' genus). A name always
+        reads the snapshot alone; an id reads the extras too unless base_only (a truth)."""
+        taxa = self.base if base_only else self.taxa
         out = set()
         if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit()):
-            cur = self.current(int(x))
-            if cur is None and int(x) in self.taxa:
+            cur = self.current(int(x), base_only)
+            if cur is None and int(x) in taxa:
                 # retired with no single successor (a split): its own line's genus stands
-                g = self._level(int(x), GENUS_LEVEL)
-                if g is not None and self.taxa[g].get("name"):
-                    out.add(self.taxa[g]["name"].lower())
+                g = self._level(int(x), GENUS_LEVEL, base_only)
+                if g is not None and taxa[g].get("name"):
+                    out.add(taxa[g]["name"].lower())
         else:
+            base_only = True
+            taxa = self.base
             out.add(x.strip().split()[0].lower())
             ids = self.by_name.get(x.strip().lower(), [])     # a name: the snapshot alone
             cur_ids = {c for c in (self.current(i, base_only=True) for i in ids) if c is not None}
             cur = cur_ids.pop() if len(cur_ids) == 1 else None
         if cur is not None:
-            g = self._level(cur, GENUS_LEVEL)
-            if g is not None and self.taxa[g].get("name"):
-                out.add(self.taxa[g]["name"].lower())
+            g = self._level(cur, GENUS_LEVEL, base_only)
+            if g is not None and taxa[g].get("name"):
+                out.add(taxa[g]["name"].lower())
         return out
 
     def name_of(self, x) -> str:
@@ -431,7 +476,7 @@ def genus_match(answer, truth, taxonomy: Taxonomy | None = None,
         want.add(truth_species.strip().split()[0].lower())
         sid = taxonomy.species_id(truth_species, one_to_one=False)
         if sid is not None:
-            want |= taxonomy.genus_names(sid)
+            want |= taxonomy.genus_names(sid, base_only=True)      # a truth: snapshot alone
     strict = bool(got & want)
     sl = strict or any(genus_group(a.capitalize()) == genus_group(b.capitalize())
                        for a in got for b in want)
