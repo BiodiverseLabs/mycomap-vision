@@ -51,6 +51,11 @@ def test_models_names_the_model_by_its_public_name_with_its_reference_and_limits
     assert body["features"]["identify"] is True and body["features"]["sessions"] is False
 
 
+def test_an_uncalibrated_model_claims_no_likely_coverage(conn, tmp_path):
+    [model] = app(conn, tmp_path).get("/api/v1/models", headers=member()).json()["models"]
+    assert model["likely_coverage"] == {"species": None, "genus": None, "family": None}
+
+
 def test_models_never_names_a_backbone_or_method(conn, tmp_path):
     text = json.dumps(app(conn, tmp_path).get("/api/v1/models", headers=member()).json())
     for internal in ('"m1', "nearest", "backbone", "method"):
@@ -113,3 +118,27 @@ def test_the_outline_marks_both_available_when_v1_is_on(conn, tmp_path):
     status = {b["path"]: b["status"] for s in outline["sections"] for b in s.get("blocks") or []
               if b.get("type") == "endpoint"}
     assert status["/models"] == status["/usage"] == "available"
+
+
+def test_models_state_the_likely_sets_achieved_coverage_not_their_target(conn, tmp_path):
+    from mycomap_vision import evaluate
+    client = app(conn, tmp_path)
+    evaluate.compare(conn, ["m1"], ["nearest+mean"], embeddings_root=tmp_path / "emb",
+                     log=lambda s: None)
+    row_id, report = conn.execute("select id, report_json from eval_runs").fetchone()
+    report = json.loads(report)
+    sp = report["all_photos"]["calibration"]["species"]["sets"]
+    sp.pop("target", None)                      # a fit stored before targets were kept apart
+    sp["coverage"], sp["crosscheck"]["coverage"] = 0.9, 0.5513
+    conn.execute("update eval_runs set report_json = ? where id = ?",
+                 (json.dumps(report), row_id))
+    conn.commit()
+    [model] = client.get("/api/v1/models", headers=member()).json()["models"]
+    assert model["likely_coverage"]["species"] == 0.55
+    assert set(model["likely_coverage"]) == {"species", "genus", "family"}
+
+
+def test_likely_coverage_reads_the_crosscheck_of_a_fit_stored_with_its_target():
+    old = {"sets": {"species": {"coverage": 0.9, "crosscheck": {"coverage": 0.6}}}}
+    assert apiv1.likely_coverage(old) == {"species": 0.6, "genus": None, "family": None}
+    assert apiv1.likely_coverage(None) == {"species": None, "genus": None, "family": None}

@@ -194,12 +194,17 @@ model answering, by its public name only. Requests leave `model` out.
              "calibrated_on": "2026-10-13", "default": true,
              "reference": {"records": 169129, "species": 17854, "photos": 684135},
              "ranks": ["species", "genus", "family", "order", "class", "phylum"],
-             "confident_at": 0.7}],
+             "confident_at": 0.7,
+             "likely_coverage": {"species": 0.8, "genus": 0.9, "family": 0.91}}],
  "limits": {"max_photos": 10, "max_file_mb": 25, "max_request_mb": 80, "top_k_max": 10,
             "photos_per_minute": 20},
  "features": {"identify": true, "sessions": true, "by_observation": false,
               "models": true, "usage": true, "taxon_counts": true}}
 ```
+
+`likely_coverage` (added 2026-10-18) is how often each rank's likely set held the right name
+on validation records held back from its fit: what the sets achieved, not their target
+(§4, `likely`); `null` for a rank with no fitted set.
 
 `GET /api/v1/usage` (any credential; `no-store`): this credential's use this month. Reading
 it is never counted.
