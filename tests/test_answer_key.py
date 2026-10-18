@@ -416,3 +416,37 @@ def test_the_nll_of_several_credited_labels_is_that_of_their_summed_probability(
         both = z[:2].max() + np.log(np.exp(z[:2] - z[:2].max()).sum())
         assert evaluate.nll_of_credited(scores, [0, 1])[ti] == pytest.approx(lse - both)
         assert evaluate.nll_of_credited(scores, [2])[ti] == pytest.approx(lse - z[2])
+
+
+def test_genus_calibration_credit_with_the_taxonomy_is_genus_match(tax):
+    """The floor must be fitted for the coverage paper-score reports: with the paper's
+    frozen taxonomy, the labels credited for a genus truth are exactly those genus_match
+    (taxonomy, truth_species) calls right."""
+    labels = ["Psathyrella", "Candolleomyces", "Coprinellus", "Amanita", "Boletus"]
+    credited = evaluate.credited_labels(labels, ne.ANSWER_KEY, "genus", tax)
+    for truth, species in [("Psathyrella", "Psathyrella candolleana"), ("Psathyrella", None),
+                           ("Amanita", "Amanita muscaria"), ("Coprinellus", None)]:
+        want = [i for i, g in enumerate(labels)
+                if ne.genus_match(g, truth, tax, truth_species=species)["strict"]]
+        assert credited(truth, species) == want, (truth, species)
+    assert credited("Psathyrella", "Psathyrella candolleana") == [0, 1]
+    assert evaluate.credited_labels(labels, ne.ANSWER_KEY, "genus")("Psathyrella") == [0]
+    assert evaluate.credit_rule("genus", ne.ANSWER_KEY, tax) == ne.ANSWER_KEY + " + taxonomy"
+    assert evaluate.credit_rule("genus", ne.ANSWER_KEY) == "exact"
+    assert evaluate.credit_rule("family", ne.ANSWER_KEY, tax) == "exact"
+
+
+def test_a_psathyrella_truth_is_calibrated_against_candolleomyces_with_the_taxonomy(tax):
+    vectors = np.asarray([unit(0.0), unit(2.0), unit(0.05)], dtype=np.float32)
+    ref = [Record("1", "Candolleomyces candolleanus", "Candolleomyces", "Ps", "2026-01-01",
+                  "a", [0]),
+           Record("2", "Boletus edulis", "Boletus", "Bo", "2026-01-01", "a", [1])]
+    test = [Record("9", "Psathyrella candolleana", "Psathyrella", "Ps", "2026-09-01", "b", [2])]
+
+    def run(**kw):
+        return evaluate.evaluate(vectors, ref, test, method="nearest", sets=False, **kw)
+    with_tax, without = run(answer_taxonomy=tax), run()
+    assert with_tax["calibration"]["genus"]["n"] == 1
+    assert with_tax["calibration"]["genus"]["credit"] == ne.ANSWER_KEY + " + taxonomy"
+    assert with_tax["calibration"]["species"]["credit"] == ne.ANSWER_KEY + " + taxonomy"
+    assert "genus" not in without["calibration"]          # its own genus label is missing

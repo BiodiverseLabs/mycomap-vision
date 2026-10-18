@@ -289,27 +289,57 @@ def nll_of_credited(scores: np.ndarray, credited: list[int],
     return lse - likely.logsumexp_by_temperature(np.asarray(scores)[credited], T_GRID)
 
 
-def credited_labels(labels: list[str], answer_key: str):
-    """truth -> the indices of `labels` the answer key credits for it (name_equiv.
-    species_credit, without the taxonomy step: the same canonical key, or a hybrid's parent),
-    as a function. "exact": the truth's own label only."""
-    position = {n: i for i, n in enumerate(labels)}
-    if answer_key == "exact":
-        return lambda t: [position[t]] if t in position else []
-    by_key: dict[str, list[int]] = defaultdict(list)
-    for i, n in enumerate(labels):
-        k = name_equiv.canonical(n, None, answer_key)
-        if k:
-            by_key[k].append(i)
-    cache: dict[str, list[int]] = {}
+def credit_rule(rank: str, answer_key: str, answer_taxonomy=None) -> str:
+    """How a rank's truth is credited in the calibration (recorded with it)."""
+    if answer_key == "exact" or rank == "family" or (rank == "genus" and answer_taxonomy is None):
+        return "exact"
+    return answer_key + (" + taxonomy" if answer_taxonomy is not None else "")
 
-    def credited(t: str) -> list[int]:
-        if t not in cache:
-            keys = {name_equiv.canonical(t, None, answer_key)}
-            keys |= {name_equiv.canonical(p, None, answer_key)
-                     for p in name_equiv.hybrid_parents(t)}
-            cache[t] = sorted({i for k in keys if k for i in by_key.get(k, ())})
-        return cache[t]
+
+def credited_labels(labels: list[str], answer_key: str, rank: str = "species",
+                    answer_taxonomy=None):
+    """(truth, truth_species) -> the indices of `labels` credited for the truth, as a
+    function; the same credit as scoring answers: species by name_equiv.species_credit (the
+    same canonical key, or a hybrid's parent; with `answer_taxonomy` (name_equiv.Taxonomy), the canonical iNat species),
+    genus with `answer_taxonomy` (name_equiv.Taxonomy) by name_equiv.genus_match(...)["strict"] (the truth accepts its
+    label genus, its current name and its resolved species' genus). Otherwise, and for the
+    "exact" key, the truth's own label only."""
+    position = {n: i for i, n in enumerate(labels)}
+    rule = credit_rule(rank, answer_key, answer_taxonomy)
+    if rule == "exact":
+        return lambda t, truth_species=None: [position[t]] if t in position else []
+    by_key: dict[str, list[int]] = defaultdict(list)
+    cache: dict = {}
+    if rank == "species":
+        for i, n in enumerate(labels):
+            k = name_equiv.canonical(n, answer_taxonomy, answer_key)
+            if k:
+                by_key[k].append(i)
+
+        def credited(t: str, truth_species=None) -> list[int]:
+            if t not in cache:
+                keys = {name_equiv.canonical(t, answer_taxonomy, answer_key)}
+                keys |= {name_equiv.canonical(p, answer_taxonomy, answer_key)
+                         for p in name_equiv.hybrid_parents(t)}
+                cache[t] = sorted({i for k in keys if k for i in by_key.get(k, ())})
+            return cache[t]
+        return credited
+    # genus with a answer_taxonomy: genus_match is "the answer's genus names meet the truth's"
+    for i, n in enumerate(labels):
+        for g in answer_taxonomy.genus_names(n):
+            by_key[g].append(i)
+
+    def credited(t: str, truth_species=None) -> list[int]:
+        key = (t, truth_species or None)
+        if key not in cache:
+            want = set(answer_taxonomy.genus_names(t))
+            if truth_species:
+                want.add(truth_species.strip().split()[0].lower())
+                sid = answer_taxonomy.species_id(truth_species, one_to_one=False)
+                if sid is not None:
+                    want |= answer_taxonomy.genus_names(sid, base_only=True)
+            cache[key] = sorted({i for g in want for i in by_key.get(g, ())})
+        return cache[key]
     return credited
 
 
@@ -406,7 +436,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
              first_photo_only: bool = False, top_k: int = 5, method: str = "nearest",
              fitted=None, sets: bool = True, name_scores: bool = False,
              per_image: bool = False, per_record: bool = False,
-             answer_key: str | None = None) -> dict:
+             answer_key: str | None = None, answer_taxonomy=None) -> dict:
     """Score the test records. `fitted` (from fit_method) skips refitting, which matters
     for the trained methods. With `sets`, each rank's calibration also fits its likely
     set (likely.py): the probability floor for the highest useful coverage up to 90%,
@@ -438,9 +468,12 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     # Species credit follows the answer key (paper PLAN P18): every label the key credits
     # for the truth counts as it (the NLL of their summed probability; a likely set is right
     # when it lists any of them, so its score is the best credited label's). Genus and
-    # family, and the "exact" key, credit the truth's own label only, as before.
+    # family, and the "exact" key, credit the truth's own label only, as before. With the
+    # paper's frozen `answer_taxonomy` (name_equiv.Taxonomy), species resolve through it and genus
+    # is credited as genus_match credits it, so the floors are fitted for the coverage
+    # paper-score reports.
     position = {rank: {n: i for i, n in enumerate(names[rank])} for rank in RANKS}
-    credited = {rank: credited_labels(names[rank], answer_key if rank == "species" else "exact")
+    credited = {rank: credited_labels(names[rank], answer_key, rank, answer_taxonomy)
                 for rank in RANKS}
     nll = {rank: np.zeros(len(T_GRID)) for rank in RANKS}
     n_cal = Counter()
@@ -473,7 +506,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 continue
             rs = rank_scores(scores, index, rank)
             lse = likely.logsumexp_by_temperature(rs, T_GRID)
-            cred = credited[rank](t)
+            cred = credited[rank](t, rec.species or None)
             best_cred = cred[int(np.argmax(rs[cred]))] if cred else None
             if cred:
                 nll[rank] += nll_of_credited(rs, cred, lse)
@@ -570,7 +603,7 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
     out["calibration"] = {
         rank: {"temperature": float(T_GRID[int(np.argmin(nll[rank]))]), "n": n_cal[rank],
                "nll": round(float(nll[rank].min() / n_cal[rank]), 4),
-               "credit": answer_key if rank == "species" else "exact"}
+               "credit": credit_rule(rank, answer_key, answer_taxonomy)}
         for rank in RANKS if n_cal[rank]}
     for rank, cal in out["calibration"].items():
         if kept[rank]:
@@ -809,7 +842,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             per_image: bool = False, into: str | None = None, release=None,
             shared: "SharedSet | None" = None, extra: dict | None = None,
             public_reference: bool = False, answer_key: str | None = None,
-            log=print) -> dict:
+            answer_taxonomy=None, log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
 
     Only photos embedded by every backbone count, so no model is judged on photos
@@ -879,7 +912,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
                          **(getattr(fitted[1], "scoreboard_extra", lambda: None)() or {})}
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted,
                                   name_scores=name_scores, sets=sets, per_image=per_image,
-                                  answer_key=answer_key)
+                                  answer_key=answer_key, answer_taxonomy=answer_taxonomy)
             first = evaluate(vecs, ref_b, test_b, method=m, first_photo_only=True, fitted=fitted,
                              sets=False, answer_key=answer_key)
             if into:           # replaced only once its successor is ready to be saved
