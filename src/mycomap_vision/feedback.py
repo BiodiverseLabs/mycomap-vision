@@ -156,6 +156,39 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
              granularity="record pair"),
 )}
 
+# Two kinds of work (Steve, 2026-10-18), shown as two sections of the page:
+#   cleanup     mechanical fixes a rule picked; the answer is usually plain once seen, so the
+#               queue is built for speed and hides nothing
+#   validation  is this record's label right? Needs evidence (photos, DNA/BLAST, Vision) and a
+#               curator's judgment; the blind queues (BLIND_TYPES) live here
+SECTIONS: dict[str, tuple[str, str, str]] = {
+    "cleanup": ("Data cleanup", "Fix what a rule found: photos that show no specimen, one name "
+                "written several ways, retired or inactive names, one find posted twice or "
+                "placed in two places.", "Fast: cards, bulk actions, keyboard."),
+    "validation": ("Data validation", "Is the record's label right? Look at the photos, its DNA "
+                   "and BLAST results, and decide as a curator.", "Some queues are reviewed "
+                   "blind: Vision's answer stays hidden unless you choose to see it."),
+}
+SECTION_OF: dict[str, str] = {
+    "non_specimen_photo": "cleanup", "name_writing_split": "cleanup",
+    "name_retired": "cleanup", "name_inactive_on_inat": "cleanup",
+    "crosspost_twin": "cleanup", "twin_location_conflict": "cleanup",
+    "photos_unlike_label": "validation", "reference_label_doubt": "validation",
+    "label_vs_own_dna": "validation", "vision_names_same_taxon": "validation",
+    "crosswalk": "validation", "group_label": "validation",
+}
+
+# Who looked at Vision's answer before deciding a blind item ("Show Vision's answer"): the
+# decision still counts as a fix, but not in the blind measure. decide() fixes
+# decisions.seen_answer from this table when the decision is saved.
+REVEALS_SCHEMA = """
+create table if not exists reveals (
+  id integer primary key, item_id integer not null references items(id),
+  by_user text not null, at real not null, answer text not null default '{}'
+);
+create index if not exists reveals_item on reveals (item_id, by_user);
+"""
+
 SCHEMA = """
 create table if not exists items (
   id integer primary key, item_type text not null, subject text not null,
@@ -238,6 +271,12 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("pragma journal_mode=wal")
         self.conn.executescript(SCHEMA)
+        self.conn.executescript(REVEALS_SCHEMA)
+        # Added after the store went live: set at decision time (decide), never later.
+        cols = {r[1] for r in self.conn.execute("pragma table_info(decisions)")}
+        if "seen_answer" not in cols:
+            self.conn.execute("alter table decisions add column seen_answer integer not null "
+                              "default 0")
 
     # --- seeding ------------------------------------------------------------------------------
     def seed(self, rows: list[dict], name: str, file_sha256: str | None = None) -> dict:
@@ -277,6 +316,7 @@ class Store:
             c["open" if r["status"] == "open" else "decided"] += 1
         return [{"type": t.code, "title": t.title, "about": t.about,
                  "granularity": t.granularity, "model_flagged": t.model_flagged,
+                 "section": SECTION_OF[t.code], "blind": t.code in BLIND_TYPES,
                  **counts.get(t.code, {"open": 0, "decided": 0})} for t in TYPES.values()]
 
     def items(self, item_type: str, status: str = "open", offset: int = 0, limit: int = 25,
@@ -331,12 +371,17 @@ class Store:
         if opt.needs_value and not (value or "").strip():
             raise FeedbackError(f"{decision!r} needs a value (the name to use)")
         with self._lock, self.conn:
+            # seen_answer is the server's record, fixed here: did this person reveal Vision's
+            # answer for this item at any time before this decision? No caller can set it, and
+            # once they have looked, every later decision of theirs on the item says so.
+            seen = self.conn.execute("select 1 from reveals where item_id = ? and by_user = ? "
+                                     "limit 1", (item_id, str(person["sub"]))).fetchone()
             self.conn.execute(
                 "insert into decisions (item_id, decision, value, note, photo_keys, applies, "
-                "by_user, by_name, at) values (?,?,?,?,?,?,?,?,?)",
+                "by_user, by_name, at, seen_answer) values (?,?,?,?,?,?,?,?,?,?)",
                 (item_id, decision, (value or "").strip() or None, note,
                  json.dumps(photo_keys or []), opt.applies, str(person["sub"]),
-                 person.get("name"), time.time()))
+                 person.get("name"), time.time(), int(seen is not None)))
             self.conn.execute("update items set status = 'decided' where id = ?", (item_id,))
         return self.get(item_id, projects)
 
@@ -360,6 +405,20 @@ class Store:
             self.conn.execute("update decisions set applied = 1, applied_at = ?, applied_by = ? "
                               "where id = ?", (time.time(), str(person["sub"]), decision_id))
 
+    def reveal(self, item_id: int, person: dict, answer: dict) -> dict:
+        """Record that this person saw Vision's answer for a blind item before deciding."""
+        now = time.time()
+        with self._lock, self.conn:
+            self.conn.execute("insert into reveals (item_id, by_user, at, answer) values "
+                              "(?,?,?,?)", (item_id, str(person["sub"]), now, json.dumps(answer)))
+        return {"at": now, "answer": answer}
+
+    def revealed(self, item_id: int, user: str) -> dict | None:
+        """This person's latest reveal of the item ({at, answer}), or None."""
+        r = self.conn.execute("select at, answer from reveals where item_id = ? and by_user = ? "
+                              "order by id desc limit 1", (item_id, str(user))).fetchone()
+        return {"at": r["at"], "answer": json.loads(r["answer"])} if r else None
+
     def mark_applied_by(self, decision_id: int, applied_by: str) -> bool:
         """Applied by something other than a person here (feedback_org.py: mycomap.org's
         Name Update). False when it was already applied."""
@@ -382,7 +441,8 @@ class Store:
         if pending_only:
             sql += " and d.applied = 0"
         return [dict(r) | {"record_keys": json.loads(r["record_keys"]),
-                           "photo_keys": json.loads(r["photo_keys"])}
+                           "photo_keys": json.loads(r["photo_keys"]),
+                           "seen_answer": bool(r["seen_answer"])}
                 for r in self.conn.execute(sql + " order by d.at", params)]
 
     def excluded_photos(self) -> set[str]:
@@ -421,6 +481,7 @@ def type_catalogue() -> list[dict]:
     """The item types, what reviewers see and the decisions with where each applies."""
     return [{"type": t.code, "title": t.title, "about": t.about, "shows": list(t.shows),
              "granularity": t.granularity, "model_flagged": t.model_flagged,
+             "section": SECTION_OF[t.code], "blind": t.code in BLIND_TYPES,
              "options": [{"code": o.code, "label": o.label, "applies": o.applies,
                           "needs_value": o.needs_value} for o in t.options]}
             for t in TYPES.values()]

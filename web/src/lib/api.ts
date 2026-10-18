@@ -159,8 +159,8 @@ export interface ContextUsed {
   latitude: number | null;
   longitude: number | null;
   observed_on: string | null;
-  place_from: "entered" | "photo" | null;
-  date_from: "entered" | "photo" | null;
+  place_from: "entered" | "photo" | "observation" | null;
+  date_from: "entered" | "photo" | "observation" | null;
 }
 
 export interface ModelsInfo {
@@ -383,8 +383,15 @@ export interface FeedbackType {
   shows: string[];
   granularity: string;
   model_flagged: boolean;
+  /** The page section the queue belongs to: "cleanup" or "validation". */
+  section: FeedbackSection;
+  /** Reviewed blind: Vision's answer is hidden on open items unless the reviewer asks. */
+  blind: boolean;
   options: FeedbackOption[];
 }
+
+/** The page's two parts: mechanical fixes a rule found, and is the record's label right. */
+export type FeedbackSection = "cleanup" | "validation" | (string & {});
 
 export interface FeedbackSummary {
   type: string;
@@ -392,6 +399,8 @@ export interface FeedbackSummary {
   about: string;
   granularity: string;
   model_flagged: boolean;
+  section: FeedbackSection;
+  blind: boolean;
   open: number;
   decided: number;
 }
@@ -422,6 +431,8 @@ export interface FeedbackItem {
   records: number;
   status: FeedbackStatus;
   seed?: string;
+  /** On a masked item: this person's own "Show Vision's answer", or null. */
+  revealed?: Revealed | null;
   /** Epoch seconds (or ISO). */
   created_at: number | string;
   /** The row's chip for the latest decision's Name Update on mycomap.org (lists only). */
@@ -487,6 +498,20 @@ export interface FeedbackDecision {
 }
 
 export type Top5 = [string, number][];
+
+/** Vision's answer for a blind item, shown when the reviewer chose to see it ("Show Vision's
+ *  answer"); `reason` says why when it is not available. */
+export interface RevealedAnswer {
+  available: boolean;
+  top5: Top5;
+  reason: string | null;
+}
+
+/** This person's own reveal of a blind item: when, and what Vision answered. */
+export interface Revealed {
+  at: number | string;
+  answer: RevealedAnswer;
+}
 
 export interface FeedbackRefresh {
   at: number | string;
@@ -655,6 +680,8 @@ export interface LabelReviewCard {
   rule?: string | null;
   evidence?: Record<string, unknown>;
   decision?: LabelReviewDecision | null;
+  /** On a masked card: this person's own "Show Vision's answer", or null. */
+  revealed?: Revealed | null;
   photos: LabelReviewPhoto[];
 }
 
@@ -695,6 +722,9 @@ export const feedbackApi = {
   orgPreview: (id: number, body: { decision: string; value?: string }) =>
     postJson<OrgPreview>(`${fbItem(id)}/org-preview`, body),
   sendAgain: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/org-request`),
+  /** "Show Vision's answer" on a masked item (409 on anything else). Recorded server-side: a
+   *  decision made after it is kept out of the blind check. */
+  reveal: (id: number) => postJson<Revealed>(`${fbItem(id)}/reveal`),
   refresh: (id: number) =>
     postJson<{ item: FeedbackItemDetail; refreshed: RefreshedRecord[] }>(`${fbItem(id)}/refresh`),
   photoReview: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort;
@@ -759,7 +789,37 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();
   },
+  /** An iNat or MO observation's own photos, place and date, read by Vision. */
+  async identifyObservation(source: "inat" | "mo", id: string, models: string[],
+                            onWait?: (attempt: number, seconds: number) => void):
+      Promise<{ results: IdentifyResult[]; context_used: ContextUsed; observation: LinkedObservation; cached?: boolean }> {
+    const res = await sendWaitingInLine(() => fetch("/api/identify/observation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, id, models: models.join(",") }),
+    }), onWait);
+    if (!res.ok) throw new ApiError(res.status, await errorText(res));
+    return res.json();
+  },
 };
+
+/** The observation a link pointed at (POST /api/identify/observation). */
+export interface LinkedObservation {
+  source: "inat" | "mo";
+  id: string;
+  url: string | null;
+  /** Its photos at the source, and how many Vision read (the first ten it could). */
+  photos: number;
+  photos_used: number;
+  name_at_source: string | null;
+  rank_at_source: string | null;
+  /** One per photo scored, in per_photo's order: its URL when the page may show it
+   *  (Creative Commons or public domain), else null. */
+  photos_shown: (string | null)[];
+  /** It is one of Vision's DNA reference records, left out of its own answer. */
+  excluded_reference: boolean;
+  left_out_photos: number;
+}
 
 export const pct = (v: number | null | undefined, digits = 0) =>
   v == null ? "–" : `${(100 * v).toFixed(digits)}%`;

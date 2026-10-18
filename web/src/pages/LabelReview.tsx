@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Keyboard } from "lucide-react";
 import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, StatusToggle,
          useDebounced } from "@/components/ReviewPhotos";
+import { RevealAnswer } from "@/components/RevealAnswer";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type LabelReviewCard,
          type LabelReviewDecisionBody, type LabelReviewOutcome, type LabelReviewPage,
          type LabelReviewPhoto } from "@/lib/api";
@@ -19,8 +20,11 @@ import { nextPageOffset, nextUnsaved, offsetWhenPageDone, openOnLabel, step, tog
 //
 // Blind: every card goes through maskedCard before it is drawn, so an open card shows nothing
 // about Vision or why the record is here, and nothing that differs between cards. The order is
-// the server's. A decided card shows the stored outcome and, under "What Vision said", the rule
-// and evidence. Tiles, the viewer and the controls are the photo review's (ReviewPhotos).
+// the server's. The one control that names Vision is "Show Vision's answer" under the photos: the
+// same button on every open card, which asks before showing this person Vision's top 5 (and the
+// decision then stays out of the blind check). A decided card shows the stored outcome and, under
+// "What Vision said", the rule and evidence. Tiles, the viewer and the controls are the photo
+// review's (ReviewPhotos).
 
 // The three outcomes look alike: none is the "expected" answer.
 const OUTCOME_BTN = `${BTN} w-full sm:w-auto`;
@@ -364,6 +368,7 @@ function OpenCard(p: CardProps & {
         ))}
       </ul>
       {!photos.length && <p className="text-sm text-muted-foreground">This record has no photos to show here.</p>}
+      <RevealAnswer itemId={card.item_id} revealed={card.revealed} />
       <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-end">
           <label className="flex min-w-0 flex-col text-xs">

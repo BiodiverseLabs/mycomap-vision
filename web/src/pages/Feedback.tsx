@@ -2,14 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, ChevronDown, Download, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/Layout";
+import { RevealAnswer } from "@/components/RevealAnswer";
 import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem, type FeedbackItemDetail,
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
          type LiveRecord, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
          type Top5 } from "@/lib/api";
-import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess,
+import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, groupBySection,
          historyOrgText, itemBadges, linkedItem, orgChipClass, PAGE_SIZE, pageText, prefillValue,
          recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
-         valueBox, whenText, yes, type Verdict } from "@/lib/feedback";
+         valueBox, whenText, yes, type SectionGroup, type Verdict } from "@/lib/feedback";
 import { LABEL_REVIEW_TYPE } from "@/lib/labelReview";
 import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
 import { LabelReview } from "./LabelReview";
@@ -17,9 +18,9 @@ import { PhotoReview } from "./PhotoReview";
 
 // Human Feedback (Steve, 2026-10-18): a review queue of places where Vision and the reference
 // data disagree, for mycomap.org admins, project leaders and contributors, laid out like
-// mycomap.org's Validator dashboards: stat cards above the list. Much of it is cleanup, so
-// each item opens the records, their sequences and BLAST results in new tabs, and can be
-// re-checked once the records are updated.
+// mycomap.org's Validator dashboards: stat cards above the list, in two sections (data cleanup,
+// then data validation; groupBySection). Each item opens the records, their sequences and BLAST
+// results in new tabs, and can be re-checked once the records are updated.
 
 const CARD = "rounded-lg border border-[#A87146]/20 bg-white shadow-sm dark:border-border dark:bg-card";
 const INK = "text-[#4a3728] dark:text-foreground";
@@ -73,14 +74,17 @@ export function FeedbackPage() {
   useEffect(() => { if (linked.data && picked == null) setPicked(linked.data.item_type); },
             [linked.data, picked]);
   const types = summary.data ?? [];
-  const selected = picked ?? (types.find((t) => t.open > 0) ?? types[0])?.type ?? null;
+  const sections = groupBySection(types);
+  const inOrder = sections.flatMap((g) => g.types);
+  const selected = picked ?? (inOrder.find((t) => t.open > 0) ?? inOrder[0])?.type ?? null;
   const sel = types.find((t) => t.type === selected);
+  const selSection = sections.find((g) => g.types.some((t) => t.type === selected));
   const catalogueType = catalogue.data?.find((t) => t.type === selected);
   return (
     <>
       <PageHeader title="Human Feedback">
-        Places where Vision and the reference records disagree, to check and set right: open the
-        records and their BLAST results, decide, then refresh to see whether they still disagree.
+        Two kinds of work on the records Vision learns from: data cleanup, fixing what a rule
+        found, and data validation, checking whether a record's label is right.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-6xl space-y-6">
         {me.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
@@ -90,13 +94,23 @@ export function FeedbackPage() {
             {me.data.admin && <AdminDownloads />}
             {summary.isPending && <p className="text-sm text-muted-foreground">Loading the queues…</p>}
             {summary.error && <p className={BODY}>The queues could not be loaded.</p>}
-            <StatCards types={types} selected={selected} onPick={setPicked} />
-            {sel && (sel.type === PHOTO_REVIEW_TYPE
-              ? <PhotoReview key={sel.type} summary={sel} />
-              : sel.type === LABEL_REVIEW_TYPE
-                ? <LabelReview key={sel.type} summary={sel} />
-                : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data}
-                             linked={linked.data?.item_type === sel.type ? stripDetail(linked.data) : undefined} />)}
+            {sections.map((g) => (
+              <SectionCards key={g.code} group={g} selected={selected} onPick={setPicked} />
+            ))}
+            {sel && (
+              <div className="min-w-0 space-y-1 border-t border-[#A87146]/20 pt-6 dark:border-border">
+                {selSection && (
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                     data-testid="feedback-queue-section">{selSection.title}</p>
+                )}
+                {sel.type === PHOTO_REVIEW_TYPE
+                  ? <PhotoReview key={sel.type} summary={sel} />
+                  : sel.type === LABEL_REVIEW_TYPE
+                    ? <LabelReview key={sel.type} summary={sel} />
+                    : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data}
+                                 linked={linked.data?.item_type === sel.type ? stripDetail(linked.data) : undefined} />}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -118,13 +132,34 @@ function AdminDownloads() {
   );
 }
 
-function StatCards({ types, selected, onPick }: {
-  types: FeedbackSummary[]; selected: string | null; onPick: (t: string) => void;
+/** One section of the page: its name, open count and intro, then its queues' stat cards. */
+function SectionCards({ group, selected, onPick }: {
+  group: SectionGroup<FeedbackSummary>; selected: string | null; onPick: (t: string) => void;
+}) {
+  const id = `feedback-section-${group.code}`;
+  return (
+    <section className="min-w-0 space-y-3" aria-labelledby={id} data-testid={id}>
+      <div className="min-w-0">
+        <h2 id={id} className={`flex flex-wrap items-baseline gap-x-3 font-display text-xl font-semibold ${INK}`}>
+          {group.title}
+          <span className="text-sm font-normal text-muted-foreground tabular-nums">
+            {group.open.toLocaleString("en-US")} open
+          </span>
+        </h2>
+        {group.intro && <p className={`mt-1 max-w-3xl text-sm ${BODY}`}>{group.intro}</p>}
+      </div>
+      <StatCards types={group.types} selected={selected} onPick={onPick} label={group.title} />
+    </section>
+  );
+}
+
+function StatCards({ types, selected, onPick, label }: {
+  types: FeedbackSummary[]; selected: string | null; onPick: (t: string) => void; label: string;
 }) {
   if (!types.length) return null;
   return (
     <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
-         role="group" aria-label="Queues">
+         role="group" aria-label={`${label} queues`}>
       {types.map((t) => {
         const on = t.type === selected;
         return (
@@ -307,9 +342,9 @@ function OrgChipBadge({ chip }: { chip: OrgChip }) {
 }
 
 function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: FeedbackMe }) {
+  const qc = useQueryClient();
   const q = useQuery({ queryKey: ["feedback", "item", id], queryFn: () => feedbackApi.item(id) });
   const item = q.data;
-  const qc = useQueryClient();
   const chip = item?.org_request?.chip ?? null;
   useEffect(() => {          // opening the item read .org: its row's chip follows
     if (!chip) return;
@@ -348,10 +383,14 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
       </div>
       <LiveRecords item={item} reloading={q.isFetching} onReload={() => q.refetch()} me={me} />
       {item.masked ? (
-        <p className="text-xs text-muted-foreground">
-          Judge the label from the photos and the record. Vision's answer and Refresh appear
-          after your decision.
-        </p>
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Judge the label from the photos and the record. Refresh appears after your decision.
+          </p>
+          <RevealAnswer itemId={item.id} revealed={item.revealed}
+                        onRevealed={(r) => qc.setQueryData<FeedbackItemDetail>(["feedback", "item", id],
+                                                                               (old) => old && { ...old, revealed: r })} />
+        </div>
       ) : item.record_keys.length > 0 && <Refresh item={item} />}
       {item.org_request && (
         <OrgRequestBlock item={item} org={item.org_request} checking={q.isFetching} onCheck={() => q.refetch()} />

@@ -51,6 +51,9 @@ POSITIVE_RECORDS = 20_000
 SEED = 20261009
 FUNGI, ANIMALIA, PLANTAE = 47170, 1, 47126
 EVERYDAY = ("animal", "plant", "person", "object", "scene", "food")
+# Sealed not-a-fungus sets (manifest sha256): scored once, by mv paper-score after the freeze
+# tag, never tuned or scored here. ood-v1-2026-10-13 (paper E10).
+SEALED_OOD_MANIFESTS = {"88c978ca0011871b8bc2b4e0e1387cd811f35bfa5c973492f33cb9c9ee978354"}
 
 
 @dataclass
@@ -210,6 +213,14 @@ def dev_records(conn, benchmark: str, keys: list[str]) -> list[str]:
     return [obs[k] for k in keys]
 
 
+def refuse_sealed(ood_manifest: Path) -> None:
+    """A sealed not-a-fungus set (SEALED_OOD_MANIFESTS) is never tuned on: refused before
+    any vectors are read."""
+    if sha256_file(ood_manifest) in SEALED_OOD_MANIFESTS:
+        raise ValueError(f"{ood_manifest} is a sealed not-a-fungus set: it is scored once, by "
+                         "mv paper-score after the freeze tag, never tuned on")
+
+
 def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Path,
          out_dir: Path, benchmark: str = "heldout-2026-10-08", negatives_npz: Path | None = None,
          embeddings_root: Path | None = None, gate_dir: Path | None = None,
@@ -217,6 +228,7 @@ def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Pa
     """See the module docstring. With `served` (a backbone name), the lighter gate: the
     probe alone, fitted and scored on that backbone's own (served) vectors, so serving
     needs no second set of weights and no extra pass; the gate's base is that backbone."""
+    refuse_sealed(ood_manifest)
     out_dir.mkdir(parents=True, exist_ok=True)
     exclude = {r["observation_id"] for r in csv.DictReader(open(exclude_tsv, encoding="utf-8"),
                                                           delimiter="\t")}
@@ -286,6 +298,7 @@ def tune_release(rel, dev_npz: Path, ood_npz: Path, ood_manifest: Path, negative
     its val records outside the former held-out benchmark (all of val reported beside),
     scored on the earlier not-a-fungus set. `embeddings`: (photo ids, vectors) of the
     probe's base (frozen BioCLIP 2, or the served model's own with `served`)."""
+    refuse_sealed(ood_manifest)
     out_dir.mkdir(parents=True, exist_ok=True)
     field, base = ("ft", served) if served else ("frozen", "bioclip-2")
     ids, vecs = embeddings

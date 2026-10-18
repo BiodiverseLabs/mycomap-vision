@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
-import { appliesWords, blastAnchor, decisionBody, evidenceRows, feedbackAccess, historyOrgText, itemBadges,
-         linkedItem, orgChipClass, pageText, parsePhotoKeys, prefillValue, recordLabel, refreshVerdict,
+import { appliesWords, blastAnchor, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
+         historyOrgText, itemBadges, linkedItem, orgChipClass, pageText, parsePhotoKeys, prefillValue,
+         recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
          shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText } from "./feedback";
 
 const item = (over: Partial<FeedbackItem> = {}): FeedbackItem => ({
@@ -178,4 +179,66 @@ test("History names the Name Update request and where it stands", () => {
   assert.equal(historyOrgText({ request_id: null, chip: { text: "not sent to mycomap.org yet", tone: "bad" } }),
                ", not sent yet");
   assert.equal(historyOrgText(null), "");
+});
+
+// --- the two sections --------------------------------------------------------------------------
+
+const queue = (type: string, section: string | undefined, open: number) => ({ type, section, open, title: type });
+
+test("the queues are shown in two sections, cleanup first, each in the summary's order with its open total", () => {
+  const groups = groupBySection([
+    queue("photos_unlike_label", "validation", 5), queue("non_specimen_photo", "cleanup", 10),
+    queue("group_label", "validation", 0), queue("name_retired", "cleanup", 2),
+  ]);
+  assert.deepEqual(groups.map((g) => [g.code, g.title, g.open, g.types.map((t) => t.type)]), [
+    ["cleanup", "Data cleanup", 12, ["non_specimen_photo", "name_retired"]],
+    ["validation", "Data validation", 5, ["photos_unlike_label", "group_label"]],
+  ]);
+  assert.match(groups[0].intro, /^Fix what a rule found: photos that show no specimen/);
+  assert.match(groups[1].intro, /reviewed blind: Vision's answer stays hidden unless you choose to see it\.$/);
+});
+
+test("a queue in a section the page doesn't know (or none) is kept, last, under Other", () => {
+  const groups = groupBySection([queue("new_kind", "triage", 3), queue("crosswalk", "validation", 1),
+                                 queue("unsorted", undefined, 4)]);
+  assert.deepEqual(groups.map((g) => [g.code, g.title, g.open, g.types.map((t) => t.type)]), [
+    ["validation", "Data validation", 1, ["crosswalk"]],
+    ["other", "Other", 7, ["new_kind", "unsorted"]],
+  ]);
+  assert.deepEqual(groupBySection([]), []);
+});
+
+// --- "Show Vision's answer" ----------------------------------------------------------------
+
+test("a revealed answer reads as Vision's top 5 in one line, scores to two places", () => {
+  assert.equal(formatTop5({ available: true, reason: null,
+                            top5: [["A x", 0.712], ["B y", 0.4], ["C z", 0.05], ["D w", 0.01], ["E v", 0], ["F u", 0]] }),
+               "Vision's top 5: A x 0.71 · B y 0.40 · C z 0.05 · D w 0.01 · E v 0.00");
+});
+
+test("when Vision has no answer the line says why", () => {
+  assert.equal(formatTop5({ available: false, top5: [], reason: "no photos Vision can read" }),
+               "Vision has no answer for this record: no photos Vision can read");
+  assert.equal(formatTop5({ available: false, top5: [], reason: null }), "Vision has no answer for this record.");
+  assert.equal(formatTop5({ available: true, top5: [], reason: null }), "Vision has no answer for this record.");
+  assert.equal(formatTop5(null), "Vision has no answer for this record.");
+});
+
+test("a seen answer carries the note that the decision is out of the blind check; an unseen one none", () => {
+  assert.equal(revealNote({ at: 1, answer: { available: false, top5: [], reason: "x" } }),
+               "Seen — this decision won't count in the blind check.");
+  assert.equal(revealNote({ at: 1, answer: { available: true, top5: [["A x", 1]], reason: null } }), REVEAL_SEEN);
+  assert.equal(revealNote(null), null);
+  assert.equal(revealNote(undefined), null);
+});
+
+test("the reveal button and its confirm are fixed words, the same for every item", () => {
+  assert.equal(REVEAL_BUTTON, "Show Vision's answer");
+  assert.equal(REVEAL_CONFIRM, "Your decision on this record will be counted as made with Vision's answer seen. Show it?");
+});
+
+test("a refused reveal says the item has nothing hidden any more; other failures ask to try again", () => {
+  assert.match(revealProblem(new ApiError(409, "nothing is hidden on this item")), /Nothing is hidden/);
+  assert.equal(revealProblem(new ApiError(401, "Sign in")), "Sign in");
+  assert.match(revealProblem(new Error("network")), /could not be shown/);
 });

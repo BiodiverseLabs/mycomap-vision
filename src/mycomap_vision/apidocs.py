@@ -166,6 +166,10 @@ def outline(enabled: dict[str, bool]) -> dict:
                            "references, it is left out of the comparison, its place and date "
                            "aren't used, nothing is fetched, and `excluded_reference` says so. "
                            "`left_out_photos` counts the reference photos left out.",
+                           "Answers are kept: the same observation with the same options "
+                           "comes back at once, without reading it again (`\"cached\": true`), "
+                           "until `model.answers_version` moves (a new release or reference "
+                           "set). GET /models gives the current `answers_version`.",
                            "Refusals: 404 `observation_not_found`, 422 `no_usable_photos`, "
                            "502 `source_unavailable` (try again after `Retry-After`)."]},
                 {"type": "endpoint", "method": "POST", "path": "/identify/mo/{observation_id}",
@@ -177,7 +181,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                             ["top_k", "1–10", "no", "Candidates per rank."],
                             ["client_ref", "string ≤ 64", "no", "Defaults to mo:<id>."]],
                  "notes": ["Mushroom Observer asks for one request every 5 seconds, photos "
-                           "included, so expect about 5 seconds a photo."]},
+                           "included, so expect about 5 seconds a photo the first time; a kept "
+                           "answer comes back at once, as for iNaturalist."]},
             ]},
             {"id": "sessions", "title": "Observation sessions", "blocks": [
                 {"type": "p", "text": "For apps that send photos one at a time as they are "
@@ -239,6 +244,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                                     "limits": {"max_photos": 10, "photos_per_minute": 20}}),
                  "notes": ["Also its data snapshot, calibration date, the ranks answered, "
                            "request limits and which parts of the API are on.",
+                           "`answers_version` names what Vision answers from now; identify by "
+                           "observation keeps its answers until it moves.",
                            "There is one model; leave `model` out of your requests."]},
                 {"type": "endpoint", "method": "GET", "path": "/usage",
                  "status": status("usage"), "summary": "Your token's use and limit this month.",
