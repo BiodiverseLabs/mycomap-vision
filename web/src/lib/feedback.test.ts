@@ -1,0 +1,120 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
+import { appliesWords, blastAnchor, decisionBody, evidenceRows, feedbackAccess, itemBadges, pageText,
+         parsePhotoKeys, prefillValue, recordLabel, refreshVerdict, shownRule, showsFeedbackNav,
+         storedVerdict, whenText } from "./feedback";
+
+const item = (over: Partial<FeedbackItem> = {}): FeedbackItem => ({
+  id: 1, item_type: "photos_unlike_label", subject: "123", granularity: "record",
+  rule: "Vision ranks the label 40th", model_flagged: true, record_keys: ["123"],
+  links: ["https://www.inaturalist.org/observations/123"], current: "Amanita muscaria",
+  proposed: "", evidence: {}, projects: [], records: 1, status: "open", created_at: 0, ...over,
+});
+
+const opt = (over: Partial<FeedbackOption> = {}): FeedbackOption =>
+  ({ code: "keep", label: "Keep as it is", applies: "note", needs_value: false, ...over });
+
+test("staff get the admin BLAST form, in a new tab", () => {
+  const a = blastAnchor({ blast_link: { href: "https://mycomap.org/admin/blast-results/1/2", kind: "admin" } });
+  assert.deepEqual(a, { href: "https://mycomap.org/admin/blast-results/1/2", label: "BLAST results (admin)",
+                        target: "_blank", rel: "noopener" });
+});
+
+test("everyone else gets the public BLAST page, never labelled admin", () => {
+  const a = blastAnchor({ blast_link: { href: "https://mycomap.org/mycoblast/77", kind: "public" } });
+  assert.equal(a?.href, "https://mycomap.org/mycoblast/77");
+  assert.equal(a?.target, "_blank");
+  assert.equal(a?.rel, "noopener");
+  assert.doesNotMatch(a!.label, /admin/i);
+});
+
+test("no BLAST link from the server: nothing is shown (the admin address is never built here)", () => {
+  assert.equal(blastAnchor({ blast_link: null }), null);
+  assert.equal(blastAnchor({}), null);
+  assert.equal(blastAnchor({ blast_link: { href: "", kind: "admin" } }), null);
+});
+
+test("the menu offers Human Feedback only to signed-in people", () => {
+  assert.equal(showsFeedbackNav({ signin: "all", user: { id: "1", name: "A" } }), true);
+  assert.equal(showsFeedbackNav({ signin: "all", user: null }), false);
+  assert.equal(showsFeedbackNav({ signin: "off", user: null }), false);
+  assert.equal(showsFeedbackNav(undefined), false);
+});
+
+test("401 asks to sign in, 403 says who the page is for", () => {
+  assert.equal(feedbackAccess(new ApiError(401, "x")), "signin");
+  assert.equal(feedbackAccess(new ApiError(403, "x")), "forbidden");
+  assert.equal(feedbackAccess(new ApiError(500, "x")), "error");
+  assert.equal(feedbackAccess(null), null);
+});
+
+test("a check-sample item looks exactly like the other model-flagged items while open", () => {
+  const flagged = item();
+  const sample = item({ blind: true, hidden_until_decided: true, seed: "7",
+                        rule: "blind sample of finds Vision answered right (seed 7)" });
+  assert.deepEqual(itemBadges(sample), itemBadges(flagged));
+  assert.equal(shownRule(sample), shownRule(flagged));
+  assert.deepEqual(evidenceRows(sample), evidenceRows(flagged));
+  const shown = JSON.stringify([itemBadges(sample), shownRule(sample), evidenceRows(sample)]);
+  assert.doesNotMatch(shown, /blind|seed/i);
+});
+
+test("once decided the rule is shown, without the word blind or the seed", () => {
+  const r = shownRule(item({ status: "decided", blind: true,
+                             rule: "blind sample of finds Vision answered right (seed 7)" }));
+  assert.equal(r, "check sample of finds Vision answered right");
+  assert.equal(shownRule(item({ model_flagged: false })), "Vision ranks the label 40th");
+});
+
+test("evidence lists the label, the proposal and non-empty evidence, never analysis fields", () => {
+  const rows = evidenceRows(item({ proposed: "Amanita persicina",
+                                   evidence: { in_v1: "yes", v1_val_outcome: "", blind_seed: "3", n: 4 } }));
+  assert.deepEqual(rows, [["Current", "Amanita muscaria"], ["Proposed", "Amanita persicina"],
+                          ["In v1", "yes"], ["N", "4"]]);
+});
+
+test("a decision that needs a value refuses an empty one and sends the trimmed value", () => {
+  const rename = opt({ code: "rename", needs_value: true, applies: "org" });
+  assert.deepEqual(decisionBody(rename, { value: "  " }), { error: "Enter the value this decision needs." });
+  assert.deepEqual(decisionBody(rename, { value: " Amanita persicina ", note: " seen " }),
+                   { body: { decision: "rename", value: "Amanita persicina", note: "seen" } });
+  assert.deepEqual(decisionBody(opt(), { value: "ignored" }), { body: { decision: "keep" } });
+});
+
+test("leaving photos out of Vision needs the photo keys, listed once each", () => {
+  const ex = opt({ code: "exclude_photos", applies: "vision" });
+  assert.deepEqual(decisionBody(ex, { photoKeys: " " }), { error: "List the photos to leave out." });
+  assert.deepEqual(decisionBody(ex, { photoKeys: "123/1, 123/2,123/1" }),
+                   { body: { decision: "exclude_photos", photo_keys: ["123/1", "123/2"] } });
+  assert.deepEqual(parsePhotoKeys("a,, b c"), ["a", "b", "c"]);
+});
+
+test("the value box starts with the item's proposal for options that need a value", () => {
+  assert.equal(prefillValue({ needs_value: true }, { proposed: "Laccaria bicolor" }), "Laccaria bicolor");
+  assert.equal(prefillValue({ needs_value: true }, { proposed: null }), "");
+  assert.equal(prefillValue({ needs_value: false }, { proposed: "x" }), "");
+});
+
+test("each option says where it takes effect", () => {
+  assert.deepEqual(["org", "vision", "note"].map(appliesWords), ["on mycomap.org", "in Vision", "note only"]);
+});
+
+test("a refresh says still disagrees, now agrees, or that Vision can't re-check", () => {
+  assert.equal(refreshVerdict({ still_disagrees: true, vision: { available: true } }).text, "Still disagrees");
+  assert.equal(refreshVerdict({ still_disagrees: false, vision: { available: true } }).text, "Now agrees");
+  assert.equal(refreshVerdict({ still_disagrees: null, vision: { available: false, reason: "no photos" } }).text,
+               "Vision can't re-check this record (no photos)");
+  assert.equal(refreshVerdict({ still_disagrees: null, vision: { available: true } }).tone, "unknown");
+  assert.deepEqual([storedVerdict(1).tone, storedVerdict(0).tone, storedVerdict(null).tone],
+                   ["disagrees", "agrees", "unknown"]);
+});
+
+test("records, times and pages read plainly", () => {
+  assert.equal(recordLabel("123"), "iNat 123");
+  assert.equal(recordLabel("mo:45"), "MO 45");
+  assert.equal(whenText(0), "1970-01-01 00:00 UTC");
+  assert.equal(whenText("2026-10-18T14:05:09Z"), "2026-10-18 14:05 UTC");
+  assert.equal(pageText(25, 25, 312), "26–50 of 312");
+  assert.equal(pageText(0, 0, 0), "0 of 0");
+});

@@ -251,3 +251,27 @@ def test_the_v1_candidates_are_served_by_name_and_the_default_is_unchanged(monke
     grid = [{k: s[k] for k in pp.NO_EXTRAS} for s in pt.settings()]
     for name in ("penalty-500-2026-10-13", "penalty-300-2026-10-13", "shrink-2026-10-13"):
         assert pp.place_setting(name)[1] in grid, name
+
+
+# --- the answer key --------------------------------------------------------------------------
+
+def test_a_candidate_the_answer_key_credits_is_right_not_only_the_truths_own_column():
+    groups = np.array(["Amanita muscaria var. guessowii", "Amanita muscaria", "Russula emetica",
+                       "Physisporinus sp. 'IN01'", "Physisporinus sp. 'IN01 x VT01'"])
+    cand = np.array([[0, 2, 1], [3, 2, 4], [2, 0, -1]])
+    SP = np.ones(cand.shape, bool)
+    truths = ["Amanita muscaria", "Physisporinus sp. 'IN01 x VT01'", ""]
+    cr = pt.credited_candidates(cand, SP, groups, truths)
+    # The variety counts for its species; a hybrid code's parent counts; padding never does.
+    assert cr.tolist() == [[True, False, True], [True, False, True], [False, False, False]]
+    exact = pt.credited_candidates(cand, SP, groups, truths, "exact")
+    assert exact.tolist() == [[False, False, True], [False, False, True], [False] * 3]
+    # top1 judges the best species candidate by the credited matrix when there is one.
+    c = pt.Components(S=np.array([[0.9, 0.5, 0.1], [0.9, 0.5, 0.1], [0.9, 0.5, 0.0]]),
+                      cand=cand, SP=SP, GG=np.zeros(cand.shape, int),
+                      truth_at=np.array([2, 2, -1]), has_sp=np.array([True, True, False]),
+                      truth_g=np.zeros(3, int))
+    z = c.S
+    assert pt.top1(c, z)[0].tolist() == [False, False, False]      # the truth's column only
+    c.credited = cr
+    assert pt.top1(c, z)[0].tolist() == [True, True, False]        # the key credits column 0

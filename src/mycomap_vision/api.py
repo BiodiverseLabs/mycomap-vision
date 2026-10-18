@@ -33,7 +33,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, fungusgate, geocode, inat, manifest,
+from . import (apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
                modelcard, models, names, nightly, onnxtower, permissions,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue)
@@ -282,7 +282,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                dataset_store_reader=None, dataset_allow_draft: bool = False,
                fungus_gate: "fungusgate.FungusGate | None | bool" = True,
                place_search: "geocode.PlaceSearch | None" = None,
-               confused_with: "confusions.Served | None | bool" = True) -> FastAPI:
+               confused_with: "confusions.Served | None | bool" = True,
+               feedback_store: "feedback.Store | None" = None,
+               feedback_org: "feedback_api.OrgClient | None" = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -593,7 +595,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # A night that only removed or renamed records leaves n alone.
             night = nightly.layer_version(conn) if layer else 0
         # A change in who has said no rebuilds the reference set without their photos.
-        return (n, cal["run_id"] if cal else None, view.fingerprint(), night)
+            # Photos Human Feedback leaves out (synced at startup and before each night).
+            excluded = feedback.exclusions_fingerprint(conn)
+        return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded)
 
     warm = Preload()
 
@@ -1043,6 +1047,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not (base_url and key):
                 raise RuntimeError("MV_ORG_BASE_URL / MV_ORG_VISION_KEY(_FILE) not set")
             return base_url, key
+        with db_lock:                      # Human Feedback's photo decisions, once a night
+            note(f"[feedback] photo exclusions: {feedback.sync_exclusions(feedback_store, conn)}")
         fetch = nightly_fetch or (lambda: nightly.fetch_green(*org(), log=note))
         fetch_pending = nightly_fetch_pending or (lambda: nightly.fetch_pending(*org(), log=note))
 
@@ -1100,6 +1106,50 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     elif layer and background:
         schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
         nightly.start(schedule, run_nightly, note)
+
+    # Human Feedback (feedback.py, feedback_api.py; Steve, 2026-10-18): the review queue of
+    # where Vision and the reference data disagree, for mycomap.org's admins, project leaders
+    # and contributors. Its decisions are kept with the usage counts (state/), across
+    # releases. "Refresh" re-asks the served model about a reference record from its stored
+    # vectors, the record itself left out, behind the same queue as everything else.
+    from . import feedback_api
+    if feedback_store is None:
+        feedback_store = feedback.Store(
+            (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT else config.DATA_DIR)
+            / "human-feedback.sqlite")
+    app.state.feedback = feedback_store
+    with db_lock:
+        feedback.sync_exclusions(feedback_store, conn)
+
+    def feedback_rescore(record_key: str) -> dict:
+        source, number = (("mo", record_key[3:]) if record_key.startswith("mo:")
+                          else ("inat", record_key))
+        ready = ready_backbones()
+        if not ready:
+            return {"available": False, "reason": "no model is ready"}
+        backbone, method = ready[0], default_method()
+        timer = apiv1.Timer()
+        try:
+            ident = served_index(backbone, method, permission_view(), timer)
+        except (serving.Updating, NotTrainedHere) as e:
+            return {"available": False, "reason": f"the model is being updated ({e})"}
+        hidden, own = ident.left_out(source, number)
+        if not len(own) or not ident.can_leave_out():
+            return {"available": False, "reason": "not a reference record of the served "
+                                                  "model: open it in Identify"}
+        vecs = ident.reference_vectors(own[:MAX_PHOTOS])
+
+        def finish(v, sims):
+            return ident.identify_vectors(v, 5, context=None, sims=sims,
+                                          photo_lookup=photo_lookup, gate=None, hidden=hidden)
+        result = model_queue.run(workqueue.Job(
+            key=id(ident), photos=0, embed=lambda: vecs, search=ident.nearest.photo_sims,
+            finish=finish, interactive=False, timer=timer))
+        return {"available": True, "model": f"{backbone}/{method}",
+                "top5": [[c["name"], c["score"]] for c in result["ranks"]["species"][:5]]}
+
+    feedback_api.add_routes(app, person=person, store=feedback_store, org=feedback_org,
+                            rescore=feedback_rescore)
 
     v1_on = bool(api_v1 if api_v1 is not None else config.setting("MV_API_V1") == "1")
     sessions_on = bool(sessions if sessions is not None
