@@ -611,5 +611,5 @@ def test_vocabulary_is_the_included_labels_after_the_erratum_or_the_shared_file(
     err = Errata("r4.tsv", "x", {"b": "crosspost_twin"})
     assert E.vocabulary(Rel, err) == ["Lactarius", "Russula emetica"]
     f = tmp_path / "vocab.txt"
-    f.write_text("Russula emetica\nAmanita muscaria\n\n", encoding="utf-8")
+    f.write_text("Amanita muscaria\nRussula emetica\n", encoding="utf-8")   # the pinned format
     assert E.vocabulary(Rel, err, f) == ["Amanita muscaria", "Russula emetica"]

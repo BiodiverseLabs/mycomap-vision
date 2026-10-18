@@ -1072,8 +1072,8 @@ def vocabulary(rel, errata=None, path: Path | None = None) -> list[str]:
     file when given (one label a line), else every distinct label on the release's included
     records after the erratum, train and val, all ranks."""
     if path is not None:
-        return sorted({l.strip() for l in Path(path).read_text(encoding="utf-8").splitlines()
-                       if l.strip()})
+        from .name_equiv import read_label_vocabulary
+        return read_label_vocabulary(path)
     drop = errata.reasons if errata is not None else {}
     return sorted({lab for key, lab in rel.db.execute(
         "select record_key, label from records where included = 1")
@@ -1148,12 +1148,16 @@ def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors
     base = {t: dict(v) for t, v in frozen.taxa.items()}
     merged = complete_taxa(client, {t: dict(v) for t, v in base.items()}, snap)
     extras, left_out = answer_side_extras(base, merged, label_lookups(labels, genera))
-    taxa = {**base, **extras}
+    new_ids = {t: v for t, v in extras.items() if t not in base}
     extras_path = out_dir / "taxonomy-extras.json"
     extras_path.write_text(json.dumps({str(t): v for t, v in extras.items()}, sort_keys=True,
                                       indent=0), encoding="utf-8")
-    vocab_sha = hashlib.sha256("\n".join(labels).encode("utf-8")).hexdigest()
-    tax = N.Taxonomy(taxa, labels, cite={**frozen.cite, "extras": extras_path.name,
+    vocab_sha = (sha256_file(vocabulary_file) if vocabulary_file else
+                 hashlib.sha256(("\n".join(labels) + "\n").encode("utf-8")).hexdigest())
+    # name_equiv's extras are answer-only and the snapshot wins on a shared id, so only the
+    # taxa the snapshot lacks take effect; changes to snapshot entries are counted, unused
+    tax = N.Taxonomy(base, labels, extras=new_ids, cite={**frozen.cite, "extras": extras_path.name,
+                                         "extras_effective": len(new_ids),
                                          "extras_taxa": len(extras),
                                          "extras_left_out_label_side": len(left_out),
                                          "extras_sha256": sha256_file(extras_path),
@@ -1167,7 +1171,7 @@ def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors
                            f"(e.g. {changed[:5]}): PLAN rule 4 forbids it")
     tax.cite["labels_kept_apart"] = sum(len(v) for v in tax.shared_by.values())
     tax.cite["answer_key"] = N.ANSWER_KEY
-    return tax, taxa
+    return tax, tax.taxa
 
 
 def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
