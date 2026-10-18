@@ -459,7 +459,21 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
 
     `place_setting` names the place setting a place method is built with; `info` gets the
     setting the fitted method actually uses."""
-    from . import evaluate, likely
+    from . import evaluate
+    index, model = fitted_method(vectors, ref_records, method, backbone, place_setting, info)
+    uses_context = getattr(model, "needs_context", False)
+
+    def score(rec):
+        rows = rec.photo_rows
+        return (model.species_scores(vectors[rows], evaluate.context_of(rec)) if uses_context
+                else model.species_scores(vectors[rows]))
+    return answers_from(index, scored_records, score, top_k, calibration, truths)
+
+
+def fitted_method(vectors, ref_records, method, backbone, place_setting=None, info=None):
+    """(index, model) for `method` fitted on the reference records, with the named place
+    setting built in (refused if the method ends up with another)."""
+    from . import evaluate
     with place_setting_used(place_setting):
         index, model = evaluate.fit_method(vectors, ref_records, method, backbone)
     used = getattr(getattr(model, "prior", None), "setting_name", None)
@@ -467,18 +481,28 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
         raise ValueError(f"{method} was built with place setting {used!r}, not {place_setting!r}")
     if info is not None and used is not None:
         info["place_setting"] = used
-    uses_context = getattr(model, "needs_context", False)
+    return index, model
+
+
+def answers_from(index, scored_records, score, top_k: int = 10,
+                 calibration: dict | None = None, truths: dict | None = None) -> dict:
+    """Each scored record's ranked names (and calibration figures) from `score(rec)`, the
+    record's species scores over index.species (-inf: a species absent for this record)."""
+    from . import evaluate, likely
     position = {rank: {n: i for i, n in enumerate(index.labels[rank])}
                 for rank in (calibration or {})}
     out = {}
     for rec in scored_records:
-        rows = rec.photo_rows
-        scores = (model.species_scores(vectors[rows], evaluate.context_of(rec)) if uses_context
-                  else model.species_scores(vectors[rows]))
+        scores = score(rec)
         ans = {}
         for rank in ("species", "genus"):
             rs = evaluate.rank_scores(scores, index, rank)
-            ans[rank] = evaluate.top_labels(rs, index.labels[rank], top_k) if len(rs) else []
+            # a name at -inf is absent for this record (a masked leave-out), never an answer;
+            # with none at -inf this is top_labels over every name, as before
+            ok = np.flatnonzero(np.isfinite(rs))
+            names = index.labels[rank]
+            ans[rank] = (evaluate.top_labels(rs[ok], [names[j] for j in ok], top_k)
+                         if len(ok) else [])
         if calibration:
             ans["cal"] = {}
             for rank, c in calibration.items():
@@ -512,12 +536,66 @@ def leave_out_key(rec, mode: str):
     raise ValueError(f"leave_out is one of {LEAVE_OUT}")
 
 
+MASKED_LEAVE_OUT = ("nearest", "nearest+mean")
+
+
 def vision_answers_leave_out(vectors, ref_records, scored_records, method, backbone, mode,
                              **kw) -> dict[str, dict]:
     """vision_answers with, for each group of finds sharing a leave_out_key, the reference
-    records sharing it removed and the method fitted again: what the identifier gives a
-    find when nothing of its own observer (or trip) is in the reference. A find with no
-    observer leaves nothing out."""
+    records sharing it left out: what the identifier gives a find when nothing of its own
+    observer (or trip) is in the reference. A find with no observer leaves nothing out.
+
+    `nearest` and `nearest+mean` fit once and hide each group's own reference columns
+    (masked_leave_out_answers; equal to a refit without them, tested); any other method,
+    including a place method (its prior is built from the reference records), is fitted
+    again per group. Either way the calibration temperatures and list floors are the
+    config's, fixed on val, never refitted per group."""
+    if method in MASKED_LEAVE_OUT:
+        return masked_leave_out_answers(vectors, ref_records, scored_records, method, backbone,
+                                        mode, **kw)
+    return refit_leave_out_answers(vectors, ref_records, scored_records, method, backbone,
+                                   mode, **kw)
+
+
+def masked_leave_out_answers(vectors, ref_records, scored_records, method, backbone, mode,
+                             top_k: int = 10, calibration: dict | None = None,
+                             truths: dict | None = None, place_setting=None, info=None) -> dict:
+    """The leave-out without a refit: the method is fitted once on every reference record;
+    a find's scores are taken with the reference columns of its own group hidden (nearest:
+    those columns out of each species' best match; nearest+mean: NearestAndMean.leave_out,
+    which takes each touched species' two best matches and its average again without them).
+    A species whose every reference record is in the group gets -inf, so it is no answer,
+    as it would be missing from a refitted index."""
+    from . import methods
+    index, model = fitted_method(vectors, ref_records, method, backbone, place_setting, info)
+    col_of_row = {int(r): i for i, r in enumerate(np.asarray(index.cols).tolist())}
+    hidden_of: dict = defaultdict(list)
+    for r in ref_records:
+        if r.observer:
+            hidden_of[leave_out_key(r, mode)].extend(
+                col_of_row[int(p)] for p in r.photo_rows if int(p) in col_of_row)
+    hidden_of = {k: np.unique(np.asarray(v, dtype=np.int64)) for k, v in hidden_of.items()}
+    empty = np.zeros(0, dtype=np.int64)
+
+    def score(rec):
+        q = np.asarray(vectors[rec.photo_rows], dtype=np.float32)
+        hidden = hidden_of.get(leave_out_key(rec, mode), empty) if rec.observer else empty
+        sims = model.photo_sims(q)
+        if method == "nearest":
+            if len(hidden):
+                sims = np.array(sims, dtype=np.float32, copy=True)
+                sims[:, hidden] = -np.inf
+            return methods.species_scores(sims, index)
+        per = model.per_photo_scores(sims, q)
+        if len(hidden):
+            per = model.leave_out(per, sims, q, hidden)
+        return per.mean(axis=0)
+    return answers_from(index, scored_records, score, top_k, calibration, truths)
+
+
+def refit_leave_out_answers(vectors, ref_records, scored_records, method, backbone, mode,
+                            **kw) -> dict[str, dict]:
+    """The leave-out by fitting the method again per group, without the group's records."""
     groups: dict = defaultdict(list)
     for r in scored_records:
         groups[leave_out_key(r, mode) if r.observer else None].append(r)
