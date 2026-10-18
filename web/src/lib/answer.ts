@@ -211,7 +211,8 @@ export function boxHints(hints: string[], speciesInPlay: boolean): string[] {
   });
 }
 
-// --- the full breakdown (Steve, 2026-10-13: the answer first, every rank one click away) --
+// --- the full breakdown (Steve, 2026-10-13: the answer first; 2026-10-18: every rank shows
+// under it by default, as it does without an answer, and the button folds it away) ----------
 
 /** Names under this chance are left out of the breakdown: they would read "0%". */
 export const BREAKDOWN_FLOOR = 0.01;
@@ -237,9 +238,10 @@ export function alsoPossible(candidates: Candidate[], listed: { name: string }[]
     .slice(0, BREAKDOWN_MAX);
 }
 
-/** Whether the breakdown shows: when asked for, and always when there is no answer to lead with. */
-export function breakdownOpen(asked: boolean, hasAnswer: boolean, noRanks: boolean): boolean {
-  return !noRanks && (asked || !hasAnswer);
+/** Whether the breakdown shows: unless folded away, and always when there is no answer to lead
+ *  with (there is no button to fold it then). Never when there are no ranks. */
+export function breakdownOpen(folded: boolean, hasAnswer: boolean, noRanks: boolean): boolean {
+  return !noRanks && (!folded || !hasAnswer);
 }
 
 /** The breakdown's button, saying which view it breaks down. `photo`: 0-based, or null for all. */

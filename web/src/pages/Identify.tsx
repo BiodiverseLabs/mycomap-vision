@@ -927,7 +927,7 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
   // null: all photos together (the main answer). A number: that photo on its own.
   const [view, setView] = useState<number | null>(null);
   const [details, setDetails] = useState(false);
-  const [everyRank, setEveryRank] = useState(false);
+  const [folded, setFolded] = useState(false);
   const photo = view == null ? null : (r.per_photo.find((p) => p.photo === view) ?? null);
   const ranks = photo ? photo.ranks : r.ranks;
   const specimens = photo ? photo.specimens : r.specimens;
@@ -939,9 +939,9 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
   const noRanks = gate.notFungus || (photo != null && leftOut(photo));
   const found = gate.withheld ? "look-alikes" : "specimens";
   const coverage = coverageSummary(r.likely);
-  // Every rank's list is detail once there is an answer; without one (or for one photo) it is the answer.
-  // The open/closed state is kept while switching photos.
-  const showRanks = breakdownOpen(everyRank, answer != null, noRanks);
+  // Every rank's list shows under the answer by default (Steve, 2026-10-18); the button folds it.
+  // Without an answer it is the answer. The folded state is kept while switching photos.
+  const showRanks = breakdownOpen(folded, answer != null, noRanks);
   return (
     <Card className="overflow-hidden scroll-mt-20" data-result-card>
       <CardContent className="p-0">
@@ -956,11 +956,11 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
           {photo && <PhotoVerdict p={photo} />}
           <div className="space-y-4">
           {!noRanks && answer && (
-            <button type="button" onClick={() => setEveryRank(!everyRank)} aria-expanded={everyRank}
+            <button type="button" onClick={() => setFolded(!folded)} aria-expanded={!folded}
                     className="flex w-full items-center justify-between rounded-md border border-[#A87146]/20 px-3 py-2 text-sm text-[#5c4a3a] hover:bg-[#faf9f7]"
                     data-testid="button-every-rank">
               <span>{breakdownLabel(r.per_photo.length, photo?.photo ?? null)}</span>
-              <ChevronRight className={`h-4 w-4 transition-transform ${everyRank ? "rotate-90" : ""}`} aria-hidden />
+              <ChevronRight className={`h-4 w-4 transition-transform ${folded ? "" : "rotate-90"}`} aria-hidden />
             </button>
           )}
           {showRanks && (
