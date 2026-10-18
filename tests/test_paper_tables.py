@@ -232,3 +232,21 @@ def test_collapsing_to_species_rank_scores_a_variety_label_by_its_species():
                          ["Amanita"], find("21", species="Amanita flavoconia"), collapse=True)
     assert two["species_strict@1"] is False and two["species_strict@3"] is True
     assert po.species_rank("Collybiopsis confluens ssp. campanulata") == "Collybiopsis confluens"
+
+
+def test_generalisation_rows_compare_each_named_row_with_the_other_finds():
+    finds = [find(str(i), observer=f"o{i}",
+                  attrs={"observer_new": "new" if i < 4 else "known"}) for i in range(10)]
+    finds.append(find("99", near_duplicate={"dhash": True}, attrs={"observer_new": "new"}))
+    outcome = {f.key: {"species_strict@1": int(f.key) >= 4} for f in finds}
+    g = pt.generalisation(finds, {"v": outcome}, {"unseen observers": {"observer_new": "new"}},
+                          ["species_strict@1"], ["v", "absent"], REPS, 0)
+    row = g["rows"]["unseen observers"]
+    assert (row["finds"], row["others"]) == (4, 6)            # the near-duplicate stays out
+    assert row["v"]["species_strict@1"]["in"]["rate"] == 0.0
+    assert row["v"]["species_strict@1"]["out"]["rate"] == 1.0
+    assert "absent" not in row
+    nd = g["near_duplicates"]
+    assert nd["near_duplicate_finds"] == 1
+    assert nd["v"]["species_strict@1"]["primary"]["n"] == 10
+    assert nd["v"]["species_strict@1"]["with_near_duplicates"]["n"] == 11

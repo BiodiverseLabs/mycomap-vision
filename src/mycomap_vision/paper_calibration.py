@@ -142,8 +142,15 @@ def summarise(finds, cal: dict, outcome: dict, rank: str, cfg: dict, reps: int, 
             b["hits"] += truth(f) in c["set"]
             b["size"] += len(c["set"])
         tot = {k: sum(b[k] for b in by_band.values()) for k in ("n", "hits", "size")}
+        hits = [truth(f) in c["set"] for f, c in with_sets]
+        # The coverage achieved on these finds, never the target the val floor was fit
+        # for (outside review, 18 Oct): the target is printed beside it, not instead.
         out["likely_sets"] = {
-            "n": tot["n"], "coverage": tot["hits"] / tot["n"], "mean_size": tot["size"] / tot["n"],
+            "n": tot["n"], "coverage": tot["hits"] / tot["n"],
+            "ci95": ps.cluster_ci(hits, [f.observer for f, _ in with_sets], reps, seed),
+            "target": (cfg.get("list_target") or {}).get(rank)
+            if isinstance(cfg.get("list_target"), dict) else cfg.get("list_target"),
+            "mean_size": tot["size"] / tot["n"],
             "by_band": {b: {"n": v["n"], "coverage": v["hits"] / v["n"],
                             "mean_size": v["size"] / v["n"]} for b, v in sorted(by_band.items())}}
     if rank == "species":

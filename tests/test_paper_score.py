@@ -632,3 +632,41 @@ def test_a_place_setting_that_reads_inat_distances_is_refused():
     finally:
         del placeprior.PLACE_SETTINGS[monkeypatch_name]
     assert inat == []                         # none of the named settings reads them today
+
+
+# --- outside-review rows: unseen observers, recent cohort, created after pretraining ----------
+
+def test_recent_cohort_and_after_pretraining_come_from_observed_and_created_dates():
+    finds = [po.Find(k, "o", "A x", "A", "F", "formal", 1, 1) for k in ("1", "2", "3", "4")]
+    rows = [{"record_key": "1", "observed_on": "2026-09-01"},
+            {"record_key": "2", "observed_on": "2026-08-17"},
+            {"record_key": "3", "observed_on": None}, {"record_key": "4"}]
+    created = {"1": "2024-05-02T00:00:00Z", "2": "2024-04-30T23:59:59Z", "3": ""}
+    paper_score.add_generalisation_attrs(finds, rows, "2026-08-17", created, "2024-05-01")
+    assert [f.attrs["recent_cohort"] for f in finds] == ["yes", "no", "(no date)", "(no date)"]
+    assert [f.attrs["after_pretraining"] for f in finds] == [
+        "yes", "no", "(no date)", "(not in the snapshot)"]     # 4: an MO find, say
+
+
+def test_the_report_carries_the_generalisation_rows_and_the_pinned_created_file(world, tmp_path):
+    created = tmp_path / "created_at.tsv"
+    created.write_text("record_key\tobservation_id\tcreated_at\n5\t55\t2025-01-01T00:00:00Z\n",
+                       encoding="utf-8")
+    pre = {"file": str(created), "sha256": paper_score.sha256_file(created),
+           "after": "2024-05-01"}
+    rep = run(world, tmp_path, "val",
+              config(tmp_path, ["5", "6"], generalisation={"pretraining": pre}))
+    gen = rep["generalisation"]
+    assert gen["recent_after"] == world["base"].val_cutoff
+    assert set(gen["rows"]) == {"unseen observers", "recent cohort", "created after 2024-05-01"}
+    row = gen["rows"]["created after 2024-05-01"]
+    assert (row["finds"], row["others"]) == (1, 1)
+    assert row["vision-photos"]["species_strict@1"]["in"]["n"] == 1
+    assert gen["near_duplicates"]["vision-photos"]["species_strict@1"]["primary"]["n"] == 2
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "## Generalisation" in md and "created after 2024-05-01" in md
+    assert "## Freeze" in md
+    pre["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="created_at file"):
+        run(world, tmp_path, "val", config(tmp_path, ["5", "6"],
+                                           generalisation={"pretraining": pre}))

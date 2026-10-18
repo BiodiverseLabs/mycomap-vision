@@ -249,3 +249,30 @@ def slices(finds: list[Find], outcomes: dict[str, dict], attrs: list[str], cells
                                                for cid in comparators if cid in outcomes}}
                      for v, fs in sorted(groups.items())}
     return out
+
+
+def generalisation(finds: list[Find], outcomes: dict[str, dict], rows: dict[str, dict],
+                   cells: list[str], comparators: list[str], reps: int, seed: int) -> dict:
+    """The outside-review rows (PLAN E20, E12, P7/P15): per named row {attr: value}, each
+    comparator's rate inside the row and outside it (primary scope), with intervals; and
+    the near-duplicate sensitivity: every find (primary) vs near-duplicates kept, with the
+    count. Descriptive only: intervals, no tests."""
+    base = in_scope(finds)
+    out = {"rows": {}, "near_duplicates": {}}
+    for name, flt in rows.items():
+        inside = [f for f in base if all(str(f.attrs.get(k)) == str(v) for k, v in flt.items())]
+        ids = {id(f) for f in inside}
+        outside = [f for f in base if id(f) not in ids]
+        out["rows"][name] = {
+            "filter": flt, "finds": len(inside), "others": len(outside),
+            **{cid: {c: {"in": rate(inside, outcomes[cid], c, reps, seed),
+                         "out": rate(outside, outcomes[cid], c, reps, seed)} for c in cells}
+               for cid in comparators if cid in outcomes}}
+    kept = in_scope(finds, "with_near_duplicates")
+    out["near_duplicates"] = {
+        **near_duplicate_counts(finds),
+        **{cid: {c: {"primary": rate(base, outcomes[cid], c, reps, seed),
+                     "with_near_duplicates": rate(kept, outcomes[cid], c, reps, seed)}
+                 for c in cells}
+           for cid in comparators if cid in outcomes}}
+    return out

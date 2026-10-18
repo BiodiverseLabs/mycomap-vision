@@ -70,3 +70,17 @@ def test_the_summary_by_band_and_for_unknown_species():
     assert s["likely_sets"]["by_band"]["0"]["coverage"] == 0.0
     assert s["likely_sets"]["by_band"]["1+"]["coverage"] == 1.0
     assert s["rules"][0]["confident"] == 3 and s["rules"][0]["precision"] == 1.0
+
+
+def test_likely_sets_report_the_coverage_achieved_with_its_interval_beside_the_target():
+    finds = [po.Find(str(i), f"o{i % 3}", "A x", "A", "F", "formal", 5, 1) for i in range(10)]
+    cal = {f.key: {"species": {"conf": 0.5, "p_true": 0.5, "sumsq": 0.5,
+                               "set": ["A x"] if int(f.key) < 8 else ["B y"]}} for f in finds}
+    outcome = {f.key: {"species_strict@1": True} for f in finds}
+    s = pc.summarise(finds, cal, outcome, "species", {"list_target": {"species": 0.9}},
+                     200, 0, lambda f: "5-19")
+    ls = s["likely_sets"]
+    assert ls["coverage"] == 0.8 and ls["target"] == 0.9          # achieved, not requested
+    assert ls["ci95"][0] <= 0.8 <= ls["ci95"][1]
+    assert pc.summarise(finds, cal, outcome, "species", {"list_target": 0.85}, 200, 0,
+                        lambda f: "5-19")["likely_sets"]["target"] == 0.85

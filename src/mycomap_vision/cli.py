@@ -1189,8 +1189,15 @@ def cmd_paper_score(conn, args) -> None:
     base = _dataset_release(args)
     if base is None:
         raise SystemExit("paper-score needs --release <id>")
-    test = "val" if args.test == "val" else load_release(args.test, allow_draft=args.allow_draft)
     config_doc, body = paper_score.load_config(args.config)
+    if args.freeze_spec:
+        # The predictor as it stands, for the config's "freeze" block; reads no scored
+        # record, so it never touches a sealed test.
+        from . import paper_freeze
+        print(json.dumps(paper_freeze.compute(config_doc, base, conn, paper_score.resolve),
+                         indent=1))
+        return
+    test = "val" if args.test == "val" else load_release(args.test, allow_draft=args.allow_draft)
     scored_id = "val" if test == "val" else test.id
     out = Path(args.out) if args.out else (config.DATA_DIR / "research-results" / base.id
                                            / "paper-score" / scored_id)
@@ -2288,6 +2295,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", required=True, help="the analysis plan (paper/analysis-v1.json)")
     p.add_argument("--out", help="default: research-results/<release>/paper-score/<test>")
     p.add_argument("--attrs", help="extra per-find attributes (TSV with record_key)")
+    p.add_argument("--freeze-spec", action="store_true",
+                   help="print every predictor part by hash (the config's freeze block) "
+                        "and stop; scores nothing")
     p.add_argument("--embed-missing", action="store_true",
                    help="embed scored photos a backbone lacks, from copies on this machine")
     p.add_argument("--allow-code", metavar="COMMIT",

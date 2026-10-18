@@ -285,6 +285,47 @@ def read_attrs(path) -> dict[str, dict]:
                 for r in csv.DictReader(fh, delimiter="\t")}
 
 
+def read_created(block: dict) -> dict[str, str]:
+    """{record key: the iNat observation's created_at}, from the pinned file of the config's
+    generalisation.pretraining block (JSONL or TSV with record_key and created_at)."""
+    import csv
+    path = resolve(block["file"])
+    got = sha256_file(path)
+    if got != block.get("sha256"):
+        raise ValueError(f"created_at file {path}: sha256 {got[:12]}, the config pins "
+                         f"{str(block.get('sha256'))[:12]}")
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".tsv":
+        rows = list(csv.DictReader(text.splitlines(), delimiter="	"))
+    else:
+        rows = [json.loads(x) for x in text.splitlines() if x.strip()]
+    return {str(r["record_key"]): str(r.get("created_at") or "") for r in rows}
+
+
+GENERALISATION_ROWS = {"unseen observers": {"observer_new": "new"},
+                       "recent cohort": {"recent_cohort": "yes"}}
+
+
+def add_generalisation_attrs(finds, scored_rows: list[dict], recent_after: str | None,
+                             created: dict[str, str] | None, created_after: str | None) -> None:
+    """recent_cohort (observed after `recent_after`: the base release's val cutoff, so on
+    v1-test the finds observed after v1's newest records) and after_pretraining (the iNat
+    observation created after `created_after`, the backbone's pretraining snapshot), as
+    yes / no / (no date)."""
+    observed = {str(r["record_key"]): (r.get("observed_on") or "")[:10] for r in scored_rows}
+    for f in finds:
+        d = observed.get(f.key, "")
+        f.attrs["recent_cohort"] = ("(no date)" if not d[:4].isdigit() or not recent_after
+                                    else "yes" if d > recent_after else "no")
+        if created is not None:
+            # Only iNat finds are in the snapshot (an MO find falls outside the iNat/GBIF
+            # export cutoffs); an observation gone from iNat has no date.
+            c = (created.get(f.key) or "")[:10]
+            f.attrs["after_pretraining"] = ("(not in the snapshot)" if f.key not in created
+                                            else "(no date)" if not c[:4].isdigit()
+                                            else "yes" if c > created_after else "no")
+
+
 # --- near-duplicates ------------------------------------------------------------------------------
 
 def max_cosine(query: np.ndarray, ref: np.ndarray, q_chunk: int = 2048,
@@ -631,6 +672,17 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
               code_commit, allow_code)
     apply_errata(base, config.get("errata"))
     attrs_path = attrs_file(config.get("attrs"), attrs_path)
+    # The whole predictor by hash (PLAN §8): the sealed test refuses any part that is not
+    # the frozen one; val and draft runs say what differs and go on.
+    from . import paper_freeze
+    freeze_now = paper_freeze.compute(config, base, conn, resolve)
+    freeze_diff = paper_freeze.check(config.get("freeze"), freeze_now)
+    if g["sealed"] and freeze_diff:
+        raise FrozenError("the predictor is not the one the config freezes: "
+                          + "; ".join(freeze_diff[:8])
+                          + (f" (+{len(freeze_diff) - 8} more)" if len(freeze_diff) > 8 else ""))
+    for d in freeze_diff:
+        log(f"[freeze] {d}")
     # An erratum given to the base release (--errata; Release.use_errata) has already left
     # its records out of every split base reads: references and depth alike.
     errata = set(base.errata.keys) if getattr(base, "errata", None) is not None else set()
@@ -671,6 +723,14 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                            float(nd_cfg.get("cosine", 0.99)))
     finds = build_finds(scored_rows, photos, ref_rows, near,
                         read_attrs(attrs_path) if attrs_path else None)
+    gen = config.get("generalisation") or {}
+    recent_after = gen.get("recent_after") or getattr(base, "val_cutoff", None)
+    pre = gen.get("pretraining")
+    add_generalisation_attrs(finds, scored_rows, recent_after,
+                             read_created(pre) if pre else None, (pre or {}).get("after"))
+    gen_rows = {**GENERALISATION_ROWS, **({f"created after {pre['after']}":
+                                           {"after_pretraining": "yes"}} if pre else {}),
+                **(gen.get("rows") or {})}
     out.mkdir(parents=True, exist_ok=True)
     (out / "predictions").mkdir(exist_ok=True)
     outcomes, inputs, calib, top1, per_photo = {}, {}, {}, {}, {}
@@ -770,6 +830,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "guard": g, "code_commit": code_commit,
         "config_sha256": sha256_bytes(config_bytes),
+        "freeze": {"predictor": freeze_now, "differences": freeze_diff},
         "dataset_release": dataset.cite(base),
         "scored": {"release": scored_rel.id, "split": split, "reference_splits": list(ref_splits),
                    **({"test_release": dataset.cite(scored_rel)} if scored_rel is not base else {})},
@@ -803,6 +864,14 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "errors": errors_report(finds, top1, {**config.get("errors", {}), **(
             {"deadly": config["deadly_taxa"]} if config.get("deadly_taxa")
             and not (config.get("errors") or {}).get("deadly") else {})}, base, scored_rel),
+        "generalisation": {"recent_after": recent_after,
+                           "pretraining": ({k: pre.get(k) for k in ("file", "sha256", "after")}
+                                           if pre else None),
+                           **pt.generalisation(
+                               finds, outcomes, gen_rows,
+                               gen.get("cells", ["species_strict@1", "genus_strict@1"]),
+                               gen.get("comparators") or [c for c in outcomes],
+                               reps, seed)},
         "slices": pt.slices(finds, outcomes, config.get("slices", {}).get("attrs", []),
                             config.get("slices", {}).get("cells", ["species_strict@1",
                                                                    "genus_strict@1"]),
@@ -952,6 +1021,15 @@ def format_report(report: dict, config: dict) -> str:
                 lines.append("")
     if report.get("gate"):
         lines += _gate_lines(report["gate"])
+    if report.get("calibration"):
+        lines += _calibration_lines(report["calibration"], config)
+    if report.get("generalisation"):
+        lines += _generalisation_lines(report["generalisation"])
+    if report.get("freeze"):
+        diff = report["freeze"]["differences"]
+        lines += ["## Freeze", "", "The predictor matches the config's freeze block."
+                  if not diff else f"{len(diff)} part(s) differ from the config's freeze "
+                  "block:", ""] + [f"- {d}" for d in diff[:40]] + [""]
     lines += ["## Hypotheses", ""]
     for fam, hyps in report["hypotheses"].items():
         lines += [f"### Family {fam} (Holm within the family)", "",
@@ -1010,3 +1088,76 @@ def _gate_lines(gr: dict) -> list[str]:
         lines += ["", f"Everyday let-through at most {100 * chk['let_through_at_most']:.0f}%: "
                       f"{'holds' if chk['holds'] else 'does NOT hold'}.", ""]
     return lines
+
+
+def _calibration_lines(cal: dict, config: dict) -> list[str]:
+    """E13 and E11 per comparator; a place method's rows stand on their own (it shares the
+    photos-only calibration, so its reliability is reported separately, never pooled)."""
+    place = {c["id"] for c in config.get("comparators", []) if c.get("place")}
+    pct = lambda v: "-" if v is None else f"{100 * v:.1f}%"  # noqa: E731
+    lines = ["## Calibration and confidence (E13, E11)", "",
+             "| comparator | rank | n | ECE | Brier | NLL | rule | precision (lower 95) "
+             "| coverage | likely sets: achieved (95% CI) / target, mean size |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
+    for cid, ranks in cal.items():
+        for rank, r in ranks.items():
+            sc = r.get("scores") or {}
+            ls = r.get("likely_sets")
+            lst = "-" if not ls else (
+                f"{pct(ls['coverage'])}"
+                + (f" ({pct(ls['ci95'][0])}-{pct(ls['ci95'][1])})" if ls.get("ci95") else "")
+                + f" / {pct(ls.get('target'))}, {ls['mean_size']:.2f}")
+            num = lambda v: "-" if v is None else f"{v:.3f}"  # noqa: E731
+            stats = (f"{num(r['reliability']['ece'])} | {num(sc.get('brier'))} | "
+                     f"{num(sc.get('nll'))}")
+            for rule in r.get("rules") or [{}]:
+                lines.append(
+                    f"| {cid}{' (place)' if cid in place else ''} | {rank} | {r['n']:,} | "
+                    f"{stats} | {rule.get('threshold', '-')} | {pct(rule.get('precision'))} "
+                    f"({pct(rule.get('lower_bound_one_sided_95'))}) | "
+                    f"{pct(rule.get('coverage'))} | {lst} |")
+    lines.append("")
+    unk = [(cid, ranks["species"]["unknown_species"]) for cid, ranks in cal.items()
+           if "unknown_species" in ranks.get("species", {})]
+    if unk:
+        lines += ["| unknown species (no v1 reference) | known / unknown finds | AUROC "
+                  "| confident and wrong: all / unknown | genus right, unknown |",
+                  "|---|---|---|---|---|"]
+        for cid, u in unk:
+            cw = u.get("confident_wrong") or {}
+            au = u.get("auroc_known_vs_unknown")
+            gb = u.get("genus_top1_without_species_reference") or {}
+            lines.append(f"| {cid} | {u['known']:,} / {u['unknown']:,} | "
+                         f"{'-' if au is None else f'{au:.3f}'} | "
+                         f"{pct((cw.get('all') or {}).get('share'))} / "
+                         f"{pct((cw.get('unknown') or {}).get('share'))} | "
+                         f"{pct(gb.get('rate'))} |")
+        lines.append("")
+    return lines
+
+
+def _generalisation_lines(gen: dict) -> list[str]:
+    """E20 named rows (unseen observers, recent cohort, created after the pretraining
+    snapshot) and E12's near-duplicate sensitivity: intervals only."""
+    lines = ["## Generalisation (E20, E12, P15)", "",
+             f"Recent cohort = observed after {gen.get('recent_after') or '-'}.", "",
+             "| row | comparator | cell | in the row | the other finds |", "|---|---|---|---|---|"]
+    for name, row in gen["rows"].items():
+        for cid, cells in row.items():
+            if not isinstance(cells, dict) or cid == "filter":
+                continue
+            for cell, r in cells.items():
+                lines.append(f"| {name} ({row['finds']:,} / {row['others']:,}) | {cid} | {cell} "
+                             f"| {_pct(r['in'])} | {_pct(r['out'])} |")
+    nd = gen["near_duplicates"]
+    lines += ["", f"Near-duplicates: {nd['near_duplicate_finds']:,} of {nd['finds']:,} finds "
+              f"({', '.join(f'{k} {v:,}' for k, v in nd['by_kind'].items()) or 'none'}).", "",
+              "| comparator | cell | primary (near-duplicates out) | near-duplicates kept |",
+              "|---|---|---|---|"]
+    for cid, cells in nd.items():
+        if not isinstance(cells, dict) or cid == "by_kind":
+            continue
+        for cell, r in cells.items():
+            lines.append(f"| {cid} | {cell} | {_pct(r['primary'])} | "
+                         f"{_pct(r['with_near_duplicates'])} |")
+    return lines + [""]
