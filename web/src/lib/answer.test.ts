@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
-  alsoPossible, answerFor, boxHints, breakdownLabel, breakdownOpen, confusedAside, confusedNote, coverageSummary, listedNames,
+  alsoPossible, answerFor, isSettled, boxHints, breakdownLabel, breakdownOpen, confusedAside, confusedNote, coverageSummary, listedNames,
   photoOnlyNote, placeCue, placeLines, placeWarns, publicNote, usesPlace,
 } from "./answer";
 import type { Candidate, IdentifyResult, LikelySet, Rank } from "./api";
@@ -47,11 +48,58 @@ test("a species at 70% or more is the headline, with genus and family under it",
   assert.equal(a.inPlay, null, "nothing finer than species to list");
 });
 
-test("just under 70% is not settled", () => {
+test("a species just under 70% with a runner-up at 20% or more is not settled", () => {
   const r = result({
-    family: [c("Amanitaceae", 0.97)], genus: [c("Amanita", 0.95)], species: [c("Amanita muscaria", 0.699)],
+    family: [c("Amanitaceae", 0.97)], genus: [c("Amanita", 0.95)],
+    species: [c("Amanita muscaria", 0.699), c("Amanita persicina", 0.25)],
   });
   assert.equal(answerFor(r, fungus)!.headline?.rank, "genus");
+});
+
+// Steve, 2026-10-18: one rule with the app and .org collection importance. A species is
+// settled at 70% outright, or at 50% with the runner-up below 20%; genus and family at 70%.
+test("the species rule: 50% with the runner-up below 20%, or 70% outright", () => {
+  assert.equal(isSettled("species", 0.62, 0.07), true, "the screenshot");
+  assert.equal(isSettled("species", 0.55, 0.21), false);
+  assert.equal(isSettled("species", 0.55, 0.19), true);
+  assert.equal(isSettled("species", 0.55, 0.2), false, "the runner-up must be below 20%");
+  assert.equal(isSettled("species", 0.72, 0.25), true, "settled outright");
+  assert.equal(isSettled("species", 0.49, 0.05), false);
+  assert.equal(isSettled("species", 0.5, null), true, "no other name known");
+  assert.equal(isSettled("species", null, null), false, "a withheld chance");
+  assert.equal(isSettled("genus", 0.69, 0.01), false, "genus still needs 70%");
+  assert.equal(isSettled("genus", 0.6, 0.01), false);
+  assert.equal(isSettled("family", 0.7, null), true);
+});
+
+test("the screenshot: Deconica montana 62% against 7% is the headline, over Deconica 85%", () => {
+  const r = result({
+    family: [c("Strophariaceae", 0.95)], genus: [c("Deconica", 0.85), c("Psilocybe", 0.05)],
+    species: [c("Deconica montana", 0.62), c("Deconica inquilina", 0.07), c("Deconica coprophila", 0.04)],
+  });
+  const a = answerFor(r, fungus)!;
+  assert.equal(a.headline?.name, "Deconica montana");
+  assert.equal(a.headline?.confidence, 0.62);
+  assert.deepEqual(a.above.map((n) => n.name), ["Deconica", "Strophariaceae"]);
+  assert.equal(a.inPlay, null, "no 'species not settled' line");
+});
+
+// The same case table the API's `answer` is tested on (tests/test_settled_rule.py), so the
+// page's headline and the API's confident flags agree.
+type Pair = [string, number];
+interface RuleCase { why: string; ranks: Record<Rank, Pair[]>; likely?: Partial<Record<Rank, Pair[]>>; headline: Rank | null }
+const CASES: RuleCase[] = JSON.parse(readFileSync(
+  new URL("../../../tests/data/settled_rule_cases.json", import.meta.url), "utf-8")).cases;
+
+test("the headline matches the API's answer on every case in the shared table", () => {
+  assert.ok(CASES.length >= 10);
+  for (const k of CASES) {
+    const ranks = Object.fromEntries(Object.entries(k.ranks).map(([rank, ps]) =>
+      [rank, ps.map(([name, p]) => c(name, p))])) as Record<Rank, Candidate[]>;
+    const likely = k.likely && Object.fromEntries(Object.entries(k.likely).map(([rank, ps]) =>
+      [rank, set(0.8, ...ps)])) as IdentifyResult["likely"];
+    assert.equal(answerFor(result(ranks, likely), fungus)!.headline?.rank ?? null, k.headline, k.why);
+  }
 });
 
 test("the species still in play come from the species likely list, at most three", () => {

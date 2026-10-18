@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import json
 
-from .apiv1 import CONFIDENT_AT
+from .apiv1 import CONFIDENT_AT, confident_rule
+from .settled import SPECIES_RUNNER_UP_MAX, SPECIES_SETTLED_MIN
 
 BASE_URL = "https://vision.mycomap.org/api/v1"
 PAGE_URL = "https://vision.mycomap.org/research/api"   # /api-docs leads there too
@@ -240,6 +241,7 @@ def outline(enabled: dict[str, bool]) -> dict:
                  "auth": "Vision token",
                  "response": _json({"models": [{**LIVE_MODEL, "default": True,
                                                 "confident_at": CONFIDENT_AT,
+                                                "confident_rule": confident_rule(),
                                                 "reference": LIVE_REFERENCE}],
                                     "limits": {"max_photos": 10, "photos_per_minute": 20}}),
                  "notes": ["Also its data snapshot, calibration date, the ranks answered, "
@@ -263,7 +265,7 @@ def outline(enabled: dict[str, bool]) -> dict:
                     ["`answer`", "Vision's answer in one line: the most precise rank it is confident at (`{rank, name, confidence}`), or `null` when it isn't confident even at family."],
                     ["`ranks`", "The top candidates at species, genus, family, order, class and phylum, combining all the photos. Order and above have names and scores but no confidence yet."],
                     ["`confidence`", "How likely the name is to be right, from 0 to 1. Calibrated on the validation split of MycoMap's frozen dataset release v1 (DNA-verified records the model did not learn from), and fitted again when a new model or release is built; `model.calibrated_on` gives the date. `null` when it can't be stated (see `gate`)."],
-                    ["`confident`", f"`true` for a rank's top name when its confidence is at least {CONFIDENT_AT:.2f} and the photos show a fungus. Confident answers are calibrated on v1's validation split, whose photos are DNA-verified records' own; expect fewer of them with field photos."],
+                    ["`confident`", f"`true` for a rank's top name when the photos show a fungus and the name is settled: at genus and family, confidence at least {CONFIDENT_AT:.2f}; at species, at least {CONFIDENT_AT:.2f}, or at least {SPECIES_SETTLED_MIN:.2f} with the next species below {SPECIES_RUNNER_UP_MAX:.2f} (Steve, 2026-10-18: one rule with the app and .org collection importance; species needed {CONFIDENT_AT:.2f} before). `GET /models` states the rule as `confident_rule`. Confident answers are calibrated on v1's validation split, whose photos are DNA-verified records' own; expect fewer of them with field photos."],
                     ["`reference_records`", "How many DNA-verified records Vision has of that name. Under 5, Vision is rarely right at species."],
                     ["`place`", "On species and genus names, when you send a place or date: distance to the nearest verified record of that name (rounded to 10 km), whether the date is in its known season, and a `note` when the find would be far from known records or out of season."],
                     ["`confused_with`", "On a species name that people often get wrong: what DNA said instead on mycomap.org's DNA-checked iNaturalist finds called that name (up to 3 names with their number of finds), how many finds were called it and how many DNA said were something else, and a one-line `note` to show under the name. Absent otherwise. Rebuilt nightly from [mycomap.org/misid](https://mycomap.org/misid)."],

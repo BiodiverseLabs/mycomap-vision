@@ -1,14 +1,32 @@
 /**
- * The answer box at the top of each Identify result (Steve, 2026-10-11): the finest rank
- * whose top name reaches 70%, the coarser ranks under it, and the names still in play one
- * rank finer. Also the small text rules around it, so the page itself holds no logic.
+ * The answer box at the top of each Identify result (Steve, 2026-10-11): the finest settled
+ * rank's top name, the coarser ranks under it, and the names still in play one rank finer.
+ * Also the small text rules around it, so the page itself holds no logic.
  */
 import { RANKS, type Candidate, type ConfusedWith, type IdentifyResult, type PlaceCue, type Rank } from "@/lib/api";
 import { coverageWords } from "@/lib/publicView";
 
-/** A rank counts as settled when its top name reaches this calibrated chance. The same
- *  line the server's "the genus looks settled" hint uses. */
+/** A rank counts as settled when its top name reaches this calibrated chance (Steve,
+ *  2026-10-11). */
 export const SETTLED = 0.7;
+/** A species also counts as settled at this chance... (Steve, 2026-10-18: one rule with
+ *  the app and .org collection importance) */
+export const SPECIES_SETTLED_MIN = 0.5;
+/** ...when the runner-up species is below this. */
+export const SPECIES_RUNNER_UP_MAX = 0.2;
+
+/**
+ * Whether a rank's top name is settled: the one rule behind the headline. The server holds
+ * the same rule (settled.py) for the API's `confident` flags and its "the genus looks
+ * settled" hint; tests/data/settled_rule_cases.json is the case table both are tested on.
+ * `runnerUp`: the best other name's chance at that rank, null when there is none.
+ */
+export function isSettled(rank: Rank, top: number | null, runnerUp: number | null): boolean {
+  if (top == null) return false;
+  if (top >= SETTLED) return true;
+  return rank === "species" && top >= SPECIES_SETTLED_MIN && (runnerUp == null || runnerUp < SPECIES_RUNNER_UP_MAX);
+}
+
 /** At most this many names are listed as still in play. */
 export const MAX_IN_PLAY = 3;
 /** Without a likely set, a name below this chance isn't worth listing as in play. */
@@ -47,6 +65,14 @@ function top(r: Result, rank: Rank): Named | null {
   return c ? { rank, name: c.name, confidence: c.confidence, place: c.place, confused_with: c.confused_with } : null;
 }
 
+/** The best chance of any name other than `name` at a rank, in its ranking or likely list. */
+function runnerUp(r: Result, rank: Rank, name: string): number | null {
+  const others = [...(r.ranks[rank] ?? []), ...(r.likely?.[rank]?.names ?? [])]
+    .filter((c) => c.name !== name && c.confidence != null)
+    .map((c) => c.confidence as number);
+  return others.length ? Math.max(...others) : null;
+}
+
 /** Names worth considering at a rank: its likely list, else the ranking's top few. */
 function contenders(r: Result, rank: Rank): Named[] {
   const likely = r.likely?.[rank]?.names;
@@ -72,7 +98,7 @@ export function answerFor(r: Result, gate: { notFungus: boolean; withheld: boole
   }
   const tops = FINEST_FIRST.map((rank) => top(r, rank));
   if (!tops.some(Boolean)) return null;
-  const at = tops.findIndex((t) => t != null && t.confidence != null && t.confidence >= SETTLED);
+  const at = tops.findIndex((t) => t != null && isSettled(t.rank, t.confidence, runnerUp(r, t.rank, t.name)));
   const headline = at >= 0 ? tops[at] : null;
   const headlineRank = headline?.rank;
   const above = RANKS.filter((rank) => !headlineRank || RANKS.indexOf(rank) < RANKS.indexOf(headlineRank))
