@@ -1457,8 +1457,9 @@ def cmd_expert_ids(args) -> None:
         except E.CallBudgetSpent as e:
             print(f"{e}; rerun to continue (answers are cached)")
     elif args.action == "snapshot":
+        keys = {r["source_id"]: r["record_key"] for r in E.inat_records(rel)}
         print(json.dumps(E.build_snapshot(client, ids, d / "snapshot.jsonl.gz",
-                                          {"set": args.name, **rel.cite()}), indent=2))
+                                          {"set": args.name, **rel.cite()}, keys), indent=2))
     elif args.action == "score":
         push = {int(x) for x in (args.push_accounts or "").split(",") if x.strip()}
         our = args.our_dates or (d_our if d_our.exists() else None)
