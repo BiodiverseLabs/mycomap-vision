@@ -242,6 +242,7 @@ def test_per_record_answers_agree_with_the_summary_and_the_fitted_temperature():
     test.append(Record("new", "G0 novum", "G0", "F", "2026-01-01", "u", [0]))
     fitted = fit_method(vecs, ref, "nearest+mean-records")
     out = evaluate(vecs, ref, test, method="nearest+mean-records", fitted=fitted,
+                   name_scores=True,
                    per_record=True)
     rows = out["per_record"]
     assert [r["observation_id"] for r in rows] == [r.observation_id for r in test]

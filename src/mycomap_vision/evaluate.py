@@ -409,8 +409,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
         b = bucket_of(index.ref_count.get(rec.unit, 0))
         band = standard_band(index.ref_count.get(rec.unit, 0))
         if per_record:
-            answer = {"observation_id": rec.observation_id, "top": {}, "_cal": {}}
-            answers.append(answer)
+            mine = {"observation_id": rec.observation_id, "top": {}, "_cal": {}}
+            answers.append(mine)
         for rank in RANKS:
             t = truth(rec, rank)
             if not t:          # e.g. species of a one-word name: not scored at that rank
@@ -424,8 +424,8 @@ def evaluate(vectors: np.ndarray, ref: list[Record], test: list[Record],
                 kept[rank].append(likely.compact(rs, position[rank].get(t), T_GRID, lse=lse))
             top = top_labels(rs, names[rank], deepest)
             if per_record:
-                answer["top"][rank] = top
-                answer["_cal"][rank] = (float(np.max(rs)), float(rs[position[rank][t]])
+                mine["top"][rank] = top
+                mine["_cal"][rank] = (float(np.max(rs)), float(rs[position[rank][t]])
                                         if t in position[rank] else None, lse)
             if name_scores and rank in ("species", "genus") and top:
                 match = (name_equiv.species_match if rank == "species"
