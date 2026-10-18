@@ -113,3 +113,107 @@ def test_evaluate_scores_species_by_the_answer_key_and_exact_reproduces_v1():
     assert old["species"]["all"]["top1"] == 0.0 and old["standard"]["species"]["all"]["top1"] == 0.0
     assert old["standard_equivalence"]["species"]["strict"]["top1"] == 0.0
     assert old["genus"]["all"]["top1"] == out["genus"]["all"]["top1"] == 1.0   # genus as before
+
+
+# --- the optional frozen-iNat-taxonomy step (the paper coordinator, 2026-10-18) ------------
+
+def t(name, level, active=True, anc=(), succ=None):
+    d = {"name": name, "rank_level": level, "is_active": active, "ancestor_ids": list(anc)}
+    if succ is not None:
+        d["current_synonymous_taxon_ids"] = succ
+    return d
+
+
+TAXA = {
+    1: t("Fungi", 70),
+    10: t("Psathyrella", 20, anc=[1]), 11: t("Candolleomyces", 20, anc=[1]),
+    12: t("Coprinellus", 20, anc=[1]),
+    100: t("Psathyrella candolleana", 10, active=False, anc=[1, 10], succ=[101]),
+    101: t("Candolleomyces candolleanus", 10, anc=[1, 11]),
+    200: t("Amanita", 20, anc=[1]), 201: t("Amanita muscaria", 10, anc=[1, 200]),
+    202: t("Amanita muscaria flavivolvata", 5, anc=[1, 200, 201]),
+    300: t("Boletus edulis", 10, anc=[1]),
+    301: t("Boletus grandedulis", 10, active=False, anc=[1], succ=[300]),
+    400: t("Russula emetica", 10, active=False, anc=[1], succ=[401, 402]),   # a split
+    401: t("Russula one", 10, anc=[1]), 402: t("Russula two", 10, anc=[1]),
+}
+LABELS = ["Psathyrella candolleana", "Psathyrella candolleana group", "Amanita muscaria",
+          "Amanita muscaria var. flavivolvata",
+          "Boletus edulis", "Boletus grandedulis", "Russula emetica", "Amanita sp. 'NY03'"]
+
+
+@pytest.fixture
+def tax():
+    return ne.Taxonomy(TAXA, LABELS, cite={"file": "taxa.csv.gz", "sha256": "x"})
+
+
+def test_a_comparator_in_inats_newer_names_is_not_wrong_for_the_taxonomys_version(tax):
+    truth = "Psathyrella candolleana"
+    for answer in (101, "101", 100, "Candolleomyces candolleanus", "Psathyrella candolleana"):
+        assert ne.species_credit(answer, truth, taxonomy=tax), answer
+    assert ne.canonical(truth, tax) == ne.canonical(101, tax) == "inat:101"
+    vision = ["Psathyrella candolleana", "Amanita muscaria"]
+    inat = [101, 201]
+    assert ne.first_credited(vision, truth, taxonomy=tax) == ne.first_credited(inat, truth, taxonomy=tax) == 0
+    assert ne.species_match(101, truth, tax) == {"strict": True, "sl": True, "complex": True}
+
+
+def test_an_infraspecific_taxon_id_counts_as_its_species(tax):
+    assert ne.species_credit(202, "Amanita muscaria", taxonomy=tax)
+    assert ne.species_credit("Amanita muscaria var. flavivolvata", 201, taxonomy=tax)
+
+
+def test_labels_sharing_an_inat_taxon_stay_apart_one_to_one_only(tax):
+    assert tax.shared_by == {300: {ne.answer_key("Boletus edulis"),
+                                   ne.answer_key("Boletus grandedulis")}}
+    assert not ne.species_credit("Boletus edulis", "Boletus grandedulis", taxonomy=tax)
+    assert not ne.species_credit(300, "Boletus grandedulis", taxonomy=tax)
+    assert ne.species_credit("Boletus edulis", "Boletus edulis", taxonomy=tax)   # as names
+
+
+def test_a_group_label_is_no_species_and_does_not_take_its_species_resolution(tax):
+    assert tax.species_id("Psathyrella candolleana group") is None
+    assert tax.species_id("Psathyrella candolleana") == 101        # not made ambiguous
+    assert not ne.species_credit(101, "Psathyrella candolleana group", taxonomy=tax)
+
+
+def test_a_split_or_an_unknown_name_falls_back_to_the_string(tax):
+    assert tax.species_id("Russula emetica") is None             # two successors: no guess
+    assert ne.canonical("Russula emetica", tax) == ne.answer_key("Russula emetica")
+    assert ne.species_credit("Amanita sp. 'NY03'", "Amanita sp. 'NY3'", taxonomy=tax)
+    assert ne.canonical(999, tax) == "taxon:999" == ne.canonical(999)
+
+
+def test_the_truth_genus_accepts_its_label_genus_and_its_resolved_species_genus(tax):
+    """PLAN rule 4, both ways: Vision's 'Psathyrella' and an identifier's Candolleomyces
+    (as a taxon id) are both right for Psathyrella candolleana; Coprinellus is not."""
+    kw = {"taxonomy": tax, "truth_species": "Psathyrella candolleana"}
+    assert ne.genus_match("Psathyrella", "Psathyrella", **kw)["strict"]
+    assert ne.genus_match(11, "Psathyrella", **kw)["strict"]
+    assert ne.genus_match("Candolleomyces", "Psathyrella", **kw)["strict"]
+    assert not ne.genus_match("Coprinellus", "Psathyrella", **kw)["strict"]
+    assert not ne.genus_match(12, "Psathyrella", **kw)["strict"]
+    assert not ne.genus_match("Candolleomyces", "Psathyrella")["strict"]     # no taxonomy
+
+
+def test_without_a_taxonomy_nothing_changes():
+    assert ne.species_credit("Candolleomyces candolleanus", "Psathyrella candolleana") is False
+    assert ne.species_credit(101, "Psathyrella candolleana") is False
+
+
+def test_the_snapshot_loads_with_its_successors_and_is_cited(tmp_path):
+    import gzip
+    taxa = tmp_path / "taxa.csv.gz"
+    with gzip.open(taxa, "wt", encoding="utf-8") as f:
+        f.write("taxon_id\tancestry\trank_level\trank\tname\tactive\n"
+                "47170\t48460\t70\tkingdom\tFungi\ttrue\n"
+                "11\t48460/47170\t20\tgenus\tCandolleomyces\ttrue\n"
+                "100\t48460/47170\t10\tspecies\tPsathyrella candolleana\tfalse\n"
+                "101\t48460/47170/11\t10\tspecies\tCandolleomyces candolleanus\ttrue\n")
+    succ = tmp_path / "successors.tsv"
+    succ.write_text("taxon_id\tcurrent_ids\n100\t101\n", encoding="utf-8")
+    tax = ne.Taxonomy.load(taxa, ["Psathyrella candolleana"], succ)
+    assert ne.species_credit(101, "Psathyrella candolleana", taxonomy=tax)
+    assert tax.cite["taxa"] == "taxa.csv.gz" and len(tax.cite["successors_sha256"]) == 64
+    without = ne.Taxonomy.load(taxa, ["Psathyrella candolleana"])
+    assert not ne.species_credit(101, "Psathyrella candolleana", taxonomy=without)

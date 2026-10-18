@@ -41,7 +41,8 @@ comparison. ANSWER_KEY names this rule in reports; "exact" (the label as written
 published rule) stays available to reproduce earlier numbers.
 
 The API is small on purpose (other scorers call it): species_match, genus_match,
-genus_group, parts, gender_fold, answer_key, species_credit, first_credited. Steve, 2026-10-09: "we'll have to think about this
+genus_group, parts, gender_fold, answer_key, species_credit, first_credited, and the
+optional frozen-iNat-taxonomy step: Taxonomy and canonical (a name or a taxon id on either side). Steve, 2026-10-09: "we'll have to think about this
 more, but make a beta"; the stem rule is the part most likely to change (docs/PLAN.md).
 Steve, 2026-10-08: gender endings count as the same name; temporary codes "are just as
 good as names" (about half the records).
@@ -180,44 +181,205 @@ def hybrid_parents(name: str) -> tuple[str, ...]:
     return tuple(f"{p.code.genus} sp. '{x.strip()}'" for x in m.groups())
 
 
-def species_credit(answer: str, truth: str, rule: str = ANSWER_KEY) -> bool:
+SPECIES_LEVEL = 10        # iNat rank_level: species 10, varieties and forms below
+GENUS_LEVEL = 20
+
+
+class Taxonomy:
+    """A frozen iNaturalist taxonomy (the paper's snapshot), for the optional canonical step
+    (the paper coordinator, 2026-10-18): truth and answer are each resolved to an iNat
+    species, following a retired taxon to its single current successor, so a comparator that
+    answers in iNat's newer names (Candolleomyces, Neoboletus, Calonarius) is not marked
+    wrong for the taxonomy's version. One-to-one only: when two labels (different answer
+    keys) resolve to the same iNat species, neither is resolved and both stay names. A name
+    iNat doesn't know (a provisional code) stays its string.
+
+    `taxa`: {id: {name, rank_level, is_active, ancestor_ids, current_synonymous_taxon_ids?}},
+    e.g. expert_ids.load_open_taxa plus expert_ids.complete_taxa (the open data has no
+    successors); `labels`: the label vocabulary, for the one-to-one rule; `cite`: the
+    snapshot file and its sha256, for reports."""
+
+    def __init__(self, taxa: dict[int, dict], labels=(), cite: dict | None = None):
+        self.taxa = taxa
+        self.cite = cite or {}
+        self.by_name: dict[str, list[int]] = {}
+        for tid, t in taxa.items():
+            if t.get("name"):
+                self.by_name.setdefault(t["name"].lower(), []).append(int(tid))
+        self.ambiguous: set[int] = set()
+        self.shared_by: dict[int, set[str]] = {}
+        self.set_labels(labels)
+
+    @classmethod
+    def load(cls, taxa_csv_gz, labels=(), successors=None) -> "Taxonomy":
+        """The paper's frozen snapshot: iNat open data's taxa.csv.gz (fungi and protozoa,
+        expert_ids.load_open_taxa) plus a TSV of retired taxa's current successors
+        (taxon_id, current_ids comma-separated; the open data has none), both cited by
+        sha256."""
+        import csv
+        import hashlib
+        from .expert_ids import load_open_taxa
+        taxa = load_open_taxa(Path(taxa_csv_gz))
+        cite = {"taxa": Path(taxa_csv_gz).name,
+                "taxa_sha256": hashlib.sha256(Path(taxa_csv_gz).read_bytes()).hexdigest()}
+        if successors is not None:
+            with open(successors, encoding="utf-8", newline="") as f:
+                for r in csv.DictReader(f, delimiter="	"):
+                    tid = int(r["taxon_id"])
+                    ids = [int(x) for x in (r["current_ids"] or "").split(",") if x.strip()]
+                    if tid in taxa:
+                        taxa[tid]["current_synonymous_taxon_ids"] = ids
+            cite.update(successors=Path(successors).name, successors_sha256=hashlib.sha256(
+                Path(successors).read_bytes()).hexdigest())
+        return cls(taxa, labels, cite)
+
+    def set_labels(self, labels) -> None:
+        claims: dict[int, set[str]] = {}
+        for lab in labels:
+            sid = self._resolve_name(lab)
+            if sid is not None:
+                claims.setdefault(sid, set()).add(answer_key(lab))
+        self.shared_by = {sid: ks for sid, ks in claims.items() if len(ks) > 1}
+        self.ambiguous = set(self.shared_by)
+
+    def current(self, tid: int) -> int | None:
+        """An active taxon id: the id itself, or a retired one's single current successor."""
+        seen = set()
+        while tid is not None and tid not in seen:
+            seen.add(tid)
+            t = self.taxa.get(tid)
+            if t is None:
+                return None
+            if t.get("is_active", True):
+                return tid
+            succ = t.get("current_synonymous_taxon_ids") or []
+            tid = int(succ[0]) if len(succ) == 1 else None
+        return None
+
+    def _level(self, tid: int, level: int) -> int | None:
+        """The taxon at `level` (species, genus) on tid's own line, or None."""
+        t = self.taxa.get(tid) or {}
+        if t.get("rank_level") == level:
+            return tid
+        if t.get("rank_level") is not None and t["rank_level"] > level:
+            return None
+        for a in reversed(t.get("ancestor_ids") or []):
+            if (self.taxa.get(a) or {}).get("rank_level") == level:
+                return a
+        return None
+
+    def _resolve_name(self, name: str) -> int | None:
+        """The current iNat species of a formal name (rank words dropped; a variety or
+        subspecies to its species), or None (a code, unknown, or a homonym)."""
+        n = (name or "").strip()
+        if not n or names.parse_name(n).code:
+            return None
+        words = _RANK_WORD.sub(" ", n).split()
+        if any(w.lower() in _NOT_INFRA for w in words[2:]):
+            return None            # a group or complex is no species: it stays a name
+        for cand in (" ".join(words), " ".join(words[:2])):
+            ids = self.by_name.get(cand.lower(), [])
+            current = {c for c in (self.current(i) for i in ids) if c is not None}
+            species = {s for s in (self._level(c, SPECIES_LEVEL) for c in current) if s}
+            if len(species) == 1:
+                return species.pop()
+        return None
+
+    def species_id(self, x) -> int | None:
+        """A name or a taxon id -> its current iNat species id, one-to-one only."""
+        if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit()):
+            cur = self.current(int(x))
+            sid = self._level(cur, SPECIES_LEVEL) if cur is not None else None
+        else:
+            sid = self._resolve_name(x)
+        return None if sid is None or sid in self.ambiguous else sid
+
+    def genus_names(self, x) -> set[str]:
+        """Genus names a name or taxon id stands for: as written, and iNat's current genus
+        of it (a retired genus followed to its successor; a species' genus)."""
+        out = set()
+        if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit()):
+            cur = self.current(int(x))
+        else:
+            out.add(x.strip().split()[0].lower())
+            ids = self.by_name.get(x.strip().lower(), [])
+            cur_ids = {c for c in (self.current(i) for i in ids) if c is not None}
+            cur = cur_ids.pop() if len(cur_ids) == 1 else None
+        if cur is not None:
+            g = self._level(cur, GENUS_LEVEL)
+            if g is not None and self.taxa[g].get("name"):
+                out.add(self.taxa[g]["name"].lower())
+        return out
+
+    def name_of(self, x) -> str:
+        """A taxon id as its current name (a name passes through)."""
+        if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit()):
+            cur = self.current(int(x))
+            return (self.taxa.get(cur) or {}).get("name", "") if cur is not None else ""
+        return x
+
+
+def canonical(x, taxonomy: Taxonomy | None = None, rule: str = ANSWER_KEY) -> str:
+    """The key a species name or iNat taxon id is scored by, for every comparator: with a
+    taxonomy and rule ANSWER_KEY, its current iNat species when that is one-to-one
+    ('inat:<id>'); otherwise answer_key of the name (a taxon id without a taxonomy, or one
+    that does not resolve, gets 'taxon:<id>', which matches nothing else)."""
+    is_id = isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit())
+    if taxonomy is not None and rule != "exact":
+        sid = taxonomy.species_id(x)
+        if sid is not None:
+            return f"inat:{sid}"
+    if is_id:
+        return f"taxon:{int(x)}"
+    return answer_key(x, rule)
+
+
+def species_credit(answer, truth, rule: str = ANSWER_KEY,
+                   taxonomy: Taxonomy | None = None) -> bool:
     """Does `answer` count as naming the species `truth`? The same function for every
-    comparator: a model, iNat's computer vision, an expert's identification."""
-    if not answer or not truth:
+    comparator: a model, iNat's computer vision, an expert's identification. Either side
+    may be a name or (with a taxonomy) an iNat taxon id."""
+    if answer in (None, "") or truth in (None, ""):
         return False
-    a = answer_key(answer, rule)
-    if a == answer_key(truth, rule):
+    a = canonical(answer, taxonomy, rule)
+    if a == canonical(truth, taxonomy, rule):
         return True
-    return rule != "exact" and any(a == answer_key(p, rule) for p in hybrid_parents(truth))
+    return rule != "exact" and isinstance(truth, str) and any(
+        a == canonical(p, taxonomy, rule) for p in hybrid_parents(truth))
 
 
-def collapse(answers, rule: str = ANSWER_KEY) -> list[str]:
+def collapse(answers, rule: str = ANSWER_KEY, taxonomy: Taxonomy | None = None) -> list:
     """A ranked answer list with answers that share a key kept once, at the first place."""
     seen, out = set(), []
     for a in answers:
-        k = answer_key(a, rule)
+        k = canonical(a, taxonomy, rule)
         if k and k not in seen:
             seen.add(k)
             out.append(a)
     return out
 
 
-def first_credited(answers, truth: str, rule: str = ANSWER_KEY) -> int | None:
+def first_credited(answers, truth, rule: str = ANSWER_KEY,
+                   taxonomy: Taxonomy | None = None) -> int | None:
     """The position (0-based) of the first answer that counts for `truth` in the collapsed
     ranked list (collapse), or None. Top-k is right when this is < k."""
-    for i, a in enumerate(collapse(answers, rule)):
-        if species_credit(a, truth, rule):
+    for i, a in enumerate(collapse(answers, rule, taxonomy)):
+        if species_credit(a, truth, rule, taxonomy):
             return i
     return None
 
 
-def species_match(answer: str, truth: str) -> dict[str, bool]:
+def species_match(answer, truth, taxonomy: Taxonomy | None = None) -> dict[str, bool]:
     """{"strict", "sl", "complex"} for a species answer against the true name. Each
     implies the next (strict -> s.l. -> complex). Strict is the answer key
-    (species_credit)."""
-    if not answer or not truth:
+    (species_credit); either side may be an iNat taxon id when a taxonomy is given."""
+    if answer in (None, "") or truth in (None, ""):
         return {"strict": False, "sl": False, "complex": False}
-    strict = species_credit(answer, truth)
+    strict = species_credit(answer, truth, taxonomy=taxonomy)
+    if taxonomy is not None:
+        answer, truth = taxonomy.name_of(answer), taxonomy.name_of(truth)
+        if not answer or not truth:
+            return {"strict": strict, "sl": strict, "complex": strict}
     a, t = parts(answer), parts(truth)
     same_group = bool(a.genus) and genus_group(a.genus) == genus_group(t.genus)
     sl = strict or (same_group and not a.provisional and not t.provisional
@@ -226,9 +388,25 @@ def species_match(answer: str, truth: str) -> dict[str, bool]:
     return {"strict": strict, "sl": sl, "complex": complex_}
 
 
-def genus_match(answer: str, truth: str) -> dict[str, bool]:
-    """{"strict", "sl"} for a genus answer against the true genus."""
-    if not answer or not truth:
+def genus_match(answer, truth, taxonomy: Taxonomy | None = None,
+                truth_species: str | None = None) -> dict[str, bool]:
+    """{"strict", "sl"} for a genus answer against the true genus. With a taxonomy (PLAN
+    rule 4), the answer may be a name or an iNat taxon id and stands for its current genus
+    too, and the truth accepts its label genus, that genus's current name, and the genus of
+    its resolved species (`truth_species`): Psathyrella candolleana's truth genus is both
+    Psathyrella and Candolleomyces, so neither vocabulary is marked wrong for the version."""
+    if answer in (None, "") or truth in (None, ""):
         return {"strict": False, "sl": False}
-    strict = answer.strip().lower() == truth.strip().lower()
-    return {"strict": strict, "sl": strict or genus_group(answer) == genus_group(truth)}
+    if taxonomy is None:
+        strict = answer.strip().lower() == truth.strip().lower()
+        return {"strict": strict, "sl": strict or genus_group(answer) == genus_group(truth)}
+    got = taxonomy.genus_names(answer)
+    want = taxonomy.genus_names(truth)
+    if truth_species:
+        sid = taxonomy.species_id(truth_species)
+        if sid is not None:
+            want |= taxonomy.genus_names(sid)
+    strict = bool(got & want)
+    sl = strict or any(genus_group(a.capitalize()) == genus_group(b.capitalize())
+                       for a in got for b in want)
+    return {"strict": strict, "sl": sl}
