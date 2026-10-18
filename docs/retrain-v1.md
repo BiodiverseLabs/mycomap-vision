@@ -25,6 +25,12 @@ earlier experiment is re-run on v1 afterwards (section 6).
 - **Name**: the public name stays "MycoMap Vision"; `version` = the training-data snapshot
   date (`release.snapshot_date`: the release's `label_snapshot_at`), written into the model's
   metadata. `mv release` adds `.2`, `.3` for later builds of the same data (the API's model card).
+  **Two versions, as served (2026-10-14).** The model's own json says `version` 2026-10-12,
+  v1's label snapshot. The serving release built with `mv release` has its own version and
+  snapshot: the date of the reference export behind it, 2026-10-13 (the catch-up export
+  just before `mv release`). `GET /api/v1/models` shows the release's version, 2026-10-13,
+  and its `data` block counts the release's manifest: 176,655 records, that is v1 plus the
+  records validated and added nightly since, not v1's 169,135.
 
 ## 2. The official numbers (pre-declared)
 
@@ -249,6 +255,10 @@ a record or class left with none drops out). Both are recorded in progress.json,
 and the model's json (`seed`, `train_photos`: the policy and the photos by licence class, which
 every fine-tune on a release records), and kept by `--resume`. Every model trained on v1 trains
 on v1 as cut and is scored and served with its erratum (dataset-release.md §4, Errata).
+Since the 2026-10-14 export the live manifest no longer holds 43 v1 records (.org deleted
+the MO-number rows), and a launch from it is refused before any spend; launch v1 runs with
+`--manifest data/manifest-v1-freeze.sqlite` (a private copy is made; the file is never
+written).
 
 | # | Re-run | Registry entries | Suggested owner | Estimate |
 |---|---|---|---|---|

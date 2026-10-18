@@ -141,6 +141,9 @@ def test_confidence_uses_the_models_latest_calibration_once_compared(conn, tmp_p
     after = post_photos(client, [247], "m1/nearest").json()["results"][0]
     assert after["calibration"]["comparison_id"]
     assert "Calibrated on" in after["confidence_note"]
+    # Calibration is fitted per model or release (v1 onwards), not weekly.
+    assert "weekly" not in after["confidence_note"]
+    assert "fitted again when a new model or release is built" in after["confidence_note"]
 
 
 def unit(*v):

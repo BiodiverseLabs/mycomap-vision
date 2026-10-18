@@ -188,11 +188,11 @@ Why sessions rather than stateless calls:
 model answering, by its public name only. Requests leave `model` out.
 
 ```json
-{"models": [{"name": "MycoMap Vision", "version": "2026-10-06",
-             "data": {"snapshot": "2026-10-06", "records": 160173, "species": 18688,
-                      "genera": 1620},
-             "calibrated_on": "2026-10-08", "default": true,
-             "reference": {"records": 152915, "species": 9876, "photos": 593224},
+{"models": [{"name": "MycoMap Vision", "version": "2026-10-13",
+             "data": {"snapshot": "2026-10-13", "records": 176655, "species": 18944,
+                      "genera": 1543},
+             "calibrated_on": "2026-10-13", "default": true,
+             "reference": {"records": 169129, "species": 17854, "photos": 684135},
              "ranks": ["species", "genus", "family", "order", "class", "phylum"],
              "confident_at": 0.7}],
  "limits": {"max_photos": 10, "max_file_mb": 25, "max_request_mb": 80, "top_k_max": 10,
@@ -226,11 +226,11 @@ model's result, not a `results` list.
 ```json
 {
   "request_id": "r_01J…",
-  "model": {"name": "MycoMap Vision", "version": "2026-10-06",
-            "data": {"snapshot": "2026-10-06", "records": 160173, "species": 18688,
-                     "genera": 1620},
-            "calibrated_on": "2026-10-08"},
-  "reference": {"records": 152915, "species": 9876, "photos": 593224},
+  "model": {"name": "MycoMap Vision", "version": "2026-10-13",
+            "data": {"snapshot": "2026-10-13", "records": 176655, "species": 18944,
+                     "genera": 1543},
+            "calibrated_on": "2026-10-13"},
+  "reference": {"records": 169129, "species": 17854, "photos": 684135},
   "photos": 3,
   "context_used": {"latitude": 40.1, "longitude": -83.0, "observed_on": "2026-10-11",
                    "place_from": "entered", "date_from": "photo"},
@@ -265,7 +265,7 @@ model's result, not a `results` list.
      "specimens": [ … ]}
   ],
   "hints": ["…"],
-  "confidence_note": "Calibrated on 1,152 test records …",
+  "confidence_note": "Calibrated on … test records …",
   "timing": { … §4.2 … },
   "usage": {"plan": "member", "used": 37, "limit": 200, "period": "2026-10",
             "resets_at": "2026-11-01T00:00:00Z"}
@@ -282,12 +282,11 @@ model's result, not a `results` list.
   label, spellings of a name counted once), from the release itself, so it doesn't move
   with the nightly additions (`reference` does). `calibrated_on` is the date its
   confidences were last calibrated. Backbone and method ids never appear in any v1
-  answer or refusal (tested), and `prior` carries only `applied`. Today's served model:
-  `version` 2026-10-06 (the 10-08 release packaged the 10-06 export; its fine-tune learned
-  from the validations through 09-07 in that export), 160,173 records, 18,688 species,
-  1,620 genera. The v1 model (trained 2026-10-13 on dataset release v1's `train` split) is
-  adopted and replaces it at the switch; its `version` is v1's label snapshot date,
-  2026-10-12 (docs/retrain-v1.md §1).
+  answer or refusal (tested), and `prior` carries only `applied`. Today's served model
+  (live since 2026-10-14 00:19 UTC): the v1 model, trained 2026-10-13 on dataset release
+  v1's `train` split; `version` 2026-10-13, `data` 176,655 records, 18,944 species, 1,543
+  genera; `calibrated_on` 2026-10-13 (`GET /api/v1/models`, 2026-10-14). The model before
+  it was `version` 2026-10-06.
 - **Combined and per-photo, at every rank.** Top-level `ranks`/`likely`/`specimens` are
   the combined answer over the photos the gate kept. `per_photo[i]` is photo *i* alone,
   with `overall_top`: where the combined top name places in that photo's own ranking.
@@ -305,16 +304,21 @@ model's result, not a `results` list.
   looks like a slime mould.", the verdict is `unsure` (rarely `not_fungus`) and never
   `fungus`, names are shown and confidence is `null`. A photo's verdict may carry
   `looks_like: "slime"` and/or `lifted_by: "slime"`.
+  Since v1 went live (2026-10-14) the gate is the one re-tuned on dataset release v1
+  (`mv fungus-gate tune --release v1`, Open Images negatives only): a photo is `not_fungus`
+  when `p_fungus` is below 0.05 and `unsure` below 0.50 (was 0.70 before v1). The cut-offs
+  belong to the served gate and may change with it; callers read the verdict, not
+  `p_fungus`.
 - **`confident`** (per candidate; Vision owns the rule, so the website, the app and
   mycomap.org's importance score never set a threshold of their own): `true` for a rank's top name when the
   gate verdict is `fungus` and its calibrated `confidence` is **≥ 0.70**: Steve's rule for
   the website's answer headline (2026-10-11), so web and app always agree. Ranks without
   a fitted confidence (order and above, for now) are never `confident`. The top-level
   **`answer`** is `{"rank", "name", "confidence"}` for the finest rank that is
-  `confident`, or `null`. On held-out records the species `answer` was right about
-  **92–93%** of the time when photos went through the app's photo path, and 96–97% in the
-  earlier offline scoring (sources in §8). A one-name `likely` set was tried as the rule and was right only 65% of
-  the time at species, so it isn't used. The threshold may change on Vision; callers don't
+  `confident`, or `null`. Confident answers are calibrated on v1's validation split (see
+  `confidence` below); how often a confident v1 answer is right has not been measured for
+  this doc yet (the pre-v1 figures are in §8). Before v1, a one-name `likely` set was tried
+  as the rule and was right only 65% of the time at species, so it isn't used. The threshold may change on Vision; callers don't
   change.
 - **Place and date** (the place/date prior). At species and genus, wherever a name appears (`ranks`, `likely.*.names`,
   `per_photo[].ranks`), each name carries:
@@ -375,8 +379,15 @@ model's result, not a `results` list.
     aliases (other spellings, iNat and MycoMap synonyms), then Vision's own spelling key
     (temporary codes 'IN7' = 'IN07', quote glyphs) against both. A name .org knows that
     doesn't prompt gets nothing, even if a synonym does.
-- **`confidence`**: a softmax with a temperature fitted per rank on the newest weekly
-  comparison (by log-likelihood). It is calibrated on average, not a promise per answer.
+- **`confidence`**: a softmax with a temperature fitted per rank (by log-likelihood),
+  calibrated on v1's validation split (temperature 0.0274; the place-and-date default
+  shares it): the served model's nearest+mean comparison on dataset release v1's `val`
+  split, erratum r3 applied (comparison 20261013-104759-9d963d; 0.0274 at species, genus
+  and family), which the served `nearest+mean+place` reuses
+  (`evaluate.latest_calibration(backbone, "nearest+mean")`). It is fitted again when a new
+  model or release is built, not weekly;
+  `model.calibrated_on` is that comparison's date. It is calibrated on average, not a
+  promise per answer.
   `checked_coverage` says how often a likely set really held the right name on unseen
   records (today 0.6 for a 0.9 target at species).
 - **`reference_records`**: DNA-validated records of that name in the reference set.
@@ -582,13 +593,13 @@ stay in front of the monthly numbers.
 
 ```json
 {"generated_at": "2026-10-11T12:00:00Z",
- "model": {"name": "MycoMap Vision", "version": "2026-10-06", "data": {…}, "calibrated_on": null},
+ "model": {"name": "MycoMap Vision", "version": "2026-10-13", "data": {…}, "calibrated_on": null},
  "nightly_version": 12,
  "counts_are": "reference_records",
  "species": {"Amanita muscaria": 412, "Russula sp. 'IN01'": 7},
  "genera": {"Amanita": 3120},
  "families": {"Amanitaceae": 3300},
- "totals": {"records": 152915, "species": 9876, "genera": 1450, "families": 210}}
+ "totals": {"records": 169129, "species": 17854, "genera": …, "families": …}}
 ```
 
 - Read from the served index (`Identifier.rank_counts`), the same number every candidate
@@ -643,8 +654,8 @@ nearest+mean+place, fungus gate mode both (fingerprint 73ce44b9afa55ff6). Refere
 laptop's shared manifest after the MO migration (151,870 records, 17,262 species), not
 the box's release. Confident species answers (v1 `answer` at species): right **93.5%**
 (273/292, photos only) and **92.2%** (412/447, with place/date); genus 95.8% / 94.9%.
-The box's reference set differs, so its figure may move a little. Quote about 92–93%, not
-the offline 96%, as what people get.
+The box's reference set differed. These are pre-v1 figures for the model served then;
+don't quote them for the v1 model, which has no measured figure here yet.
 
 The benchmark's photos are DNA-validated records' own iNat photos: all fungi, often
 taken with care. App photos at a foray will score lower. So treat these shares as an

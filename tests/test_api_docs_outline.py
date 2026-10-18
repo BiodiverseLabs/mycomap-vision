@@ -145,3 +145,34 @@ def test_the_outline_sends_members_to_the_vision_keys_page():
     access = next(s for s in doc["sections"] if s["id"] == "access")
     text = " ".join(b.get("text", "") for b in access["blocks"])
     assert "(https://mycomap.org/vision-keys)" in text
+
+
+def test_every_example_shows_the_live_model_card():
+    """The examples show the model callers meet (GET /api/v1/models, v1 live 2026-10-14), in
+    the shape the server answers, and no older model."""
+    card = apiv1.public_model({"version": "x", "data": {"snapshot": "x", "records": 1,
+                                                        "species": 1, "genera": 1}}, "20261013-1")
+    assert set(apidocs.LIVE_MODEL) == set(card)
+    assert set(apidocs.LIVE_MODEL["data"]) == set(card["data"])
+    assert apidocs.LIVE_MODEL["version"] == "2026-10-13"
+    assert apidocs.LIVE_MODEL["calibrated_on"] == "2026-10-13"
+    assert apidocs.LIVE_REFERENCE == {"records": 169129, "species": 17854, "photos": 684135}
+    doc = apidocs.outline({k: True for k in ("identify", "sessions", "by_observation",
+                                             "taxon_counts", "usage", "models")})
+    text = " ".join(values(doc))
+    assert "2026-10-06" not in text and "2026-10-08" not in text, "an older model's card"
+    models = next(b for b in apidocs.endpoints(doc) if b["path"] == "/models")
+    assert '"confident_at": 0.7' in models["response"]
+    assert apidocs.ANSWER_EXAMPLE["model"] == apidocs.LIVE_MODEL
+
+
+def test_the_outline_makes_no_pre_v1_claim_about_calibration_or_the_gate():
+    rows = {row[0].strip("`"): row[1] for row in
+            next(b for s in apidocs.outline({})["sections"] if s["id"] == "answer"
+                 for b in s["blocks"] if b["type"] == "table")["rows"]}
+    assert "weekly" not in rows["confidence"]
+    assert "dataset release v1" in rows["confidence"]
+    assert "92" not in rows["confident"] and "%" not in rows["confident"]
+    assert "calibrated on v1's validation split" in rows["confident"]
+    assert "0.70" in rows["confident"]                       # the confident rule is unchanged
+    assert "below 0.50" in rows["gate"] and "0.70" not in rows["gate"]

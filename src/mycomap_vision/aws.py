@@ -498,6 +498,17 @@ def check_release_photos(conn, rel, store_location: str, size: str) -> int:
         raise ValueError(f"{rel.id} is a test release: never trained on")
     if not rel.val_cutoff:
         raise ValueError(f"{rel.id} records no val cutoff: nothing holds the val split out")
+    # The instance keeps only the release's records (trainer.restrict_to_release) and refuses
+    # a manifest that lacks any: say so here, before anything is paid for. A later export
+    # removes records .org deleted (v1, 2026-10-14: 43 MO-number rows), so the live manifest
+    # can stop covering an older release; launch from the manifest it was cut from.
+    keys = {r[0] for r in rel.db.execute("select record_key from records where included = 1")}
+    held = {r[0] for r in conn.execute("select observation_id from records")}
+    gone = keys - held
+    if gone:
+        raise ValueError(f"{len(gone):,} records of release {rel.id} are not in this manifest "
+                         f"(e.g. {sorted(gone)[:5]}): it changed after the cut. Launch with "
+                         "--manifest <the manifest the release was cut from>")
     rel.check_photos_match(conn)
     want = set(rel.photo_ids())
     have = {r[0] for r in conn.execute("select photo_id from photo_copies where store = ? and "
