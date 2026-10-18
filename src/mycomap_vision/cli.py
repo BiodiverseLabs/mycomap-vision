@@ -497,7 +497,9 @@ def cmd_dataset(args) -> None:
                      test_ids=Path(args.ids) if args.ids else None, store_reader=reader,
                      loo_exclusions=Path(args.loo_exclusions) if args.loo_exclusions else None,
                      no_loo_exclusions=args.no_loo_exclusions,
-                     base_dhash=Path(args.base_dhash) if args.base_dhash else None)
+                     base_dhash=Path(args.base_dhash) if args.base_dhash else None,
+                     twin_exclude_photos=Path(args.twin_exclude_photos)
+                     if args.twin_exclude_photos else None)
         print(json.dumps({k: m.get(k) for k in ("id", "draft", "hashes", "counts", "splits",
                                                 "photos_identical_to_base_dropped",
                                                 "near_base")}, indent=2))
@@ -2077,6 +2079,9 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--base-dhash", help="a test release: the --test-for release's dHash index "
                                         "(`mv dataset pull-dhash-index <id>`); flags near-copies")
     loo_options(q)
+    q.add_argument("--twin-exclude-photos", metavar="TSV",
+                   help="a test release: base photos (photo_key column, e.g. the base's "
+                        "micrograph list) that never make a cross-post twin")
     q = dsub.add_parser("dhash-index", help="dHash every included photo of a release, here "
                                             "(a large release: mv aws-launch-dhash-index)")
     q.add_argument("id")
