@@ -90,3 +90,19 @@ def test_the_bootstrap_resamples_whole_observers(run):
     who = [f"u{i}" for i in range(90)] + ["miss"] * 10
     est = run.boot(values, who, reps=2000, seed=1)
     assert est.std() > 0.05
+
+
+def test_twins_group_only_the_record_arms_and_their_place_twins(run):
+    assert not run.grouped("nearest+mean") and not run.grouped("nearest+mean+place")
+    for a in run.ARMS[1:]:
+        assert run.grouped(a) and run.grouped(run.PLACE[a])
+
+
+def test_a_twins_file_maps_records_to_their_specimen(run, tmp_path):
+    p = tmp_path / "twins.tsv"
+    p.write_text("observation_id\tspecimen\nmo:1\tt1\ninat:2\tt1\n", encoding="utf-8")
+    assert run.read_twins(p) == {"mo:1": "t1", "inat:2": "t1"}
+    bad = tmp_path / "bad.tsv"
+    bad.write_text("record\tgroup\nx\ty\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="observation_id and specimen"):
+        run.read_twins(bad)

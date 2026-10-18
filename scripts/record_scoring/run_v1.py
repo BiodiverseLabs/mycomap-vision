@@ -70,6 +70,25 @@ def release_of(args):
     return rel
 
 
+UNGROUPED = "@ungrouped"         # a record arm scored without --twins (sensitivity row)
+
+
+def read_twins(path) -> dict[str, str]:
+    """{observation_id: specimen key} from a TSV with observation_id and specimen columns
+    (records filed twice for one find; evaluate.build_index's specimen_of)."""
+    import csv
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh, delimiter="	"))
+    if rows and not {"observation_id", "specimen"} <= set(rows[0]):
+        raise SystemExit(f"{path}: needs observation_id and specimen columns")
+    return {r["observation_id"]: r["specimen"] for r in rows}
+
+
+def grouped(method: str) -> bool:
+    """The record-grouped arms (b-d, with or without place): those that --twins groups."""
+    return any(method.startswith(a) for a in ARMS[1:])
+
+
 def public_points(rel) -> dict[str, tuple]:
     """Each record's public point (paper rule: obscured where iNat obscures, MO's box
     centre), (None, None) when it has none."""
@@ -110,9 +129,15 @@ def cmd_score(args) -> None:
           f"{shared.record_set} [{time.time() - t0:.0f}s]", flush=True)
     methods = [m.strip() for m in args.arms.split(",")] if args.arms else \
         [m for a in ARMS for m in (a, PLACE[a])]
-    for m in methods:
+    twins = read_twins(args.twins) if args.twins else None
+    if twins and not args.arms:
+        methods.append(ARMS[2] + UNGROUPED)          # arm c without grouping (declared)
+    for name in methods:
+        m = name.removesuffix(UNGROUPED)
         t1 = time.time()
-        fitted = evaluate.fit_method(vecs, ref, m, backbone=args.backbone)
+        specimen_of = twins if twins and grouped(m) and not name.endswith(UNGROUPED) else None
+        fitted = evaluate.fit_method(vecs, ref, m, backbone=args.backbone,
+                                     specimen_of=specimen_of)
         place = getattr(fitted[1], "needs_context", False)
         res = evaluate.evaluate(vecs, ref, test_public if place else test, method=m,
                                 fitted=fitted, name_scores=True, sets=True, per_record=True)
@@ -121,15 +146,25 @@ def cmd_score(args) -> None:
         res["run"] = {"method": m, "backbone": args.backbone, "record_set": shared.record_set,
                       "dataset_release": rel.cite(), "place_setting": used,
                       "place_points": "public" if place else None,
+                      "twins": ({"file": str(args.twins), "sha256": sha256_of(args.twins),
+                                 "records_grouped": sum(1 for r in ref
+                                                        if r.observation_id in specimen_of),
+                                 "runs": len(fitted[0].rec_starts)}
+                                if specimen_of else None),
                       "code_version": code_version,
                       "seconds": round(time.time() - t1)}
-        (out / f"{m}.summary.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
-        with open(out / f"{m}.records.jsonl", "w", encoding="utf-8") as fh:
+        (out / f"{name}.summary.json").write_text(json.dumps(res, indent=1), encoding="utf-8")
+        with open(out / f"{name}.records.jsonl", "w", encoding="utf-8") as fh:
             for r in records:
                 fh.write(json.dumps(r) + "\n")
-        print(f"  {m}: species top-1 {res['species']['all']['top1']:.4f}, T "
+        print(f"  {name}: species top-1 {res['species']['all']['top1']:.4f}, T "
               f"{res['calibration']['species']['temperature']:.4g} "
               f"[{time.time() - t1:.0f}s]", flush=True)
+
+
+def sha256_of(path) -> str:
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 # --- report ---------------------------------------------------------------------------------
@@ -264,6 +299,8 @@ def cmd_report(args) -> None:
         for m in (a, PLACE[a]):
             if (out / f"{m}.summary.json").exists():
                 arms[m] = load_arm(out, m)
+    if (out / f"{ARMS[2]}{UNGROUPED}.summary.json").exists():
+        arms[ARMS[2] + UNGROUPED] = load_arm(out, ARMS[2] + UNGROUPED)
     o = {m: outcomes(recs, finds) for m, (_, recs) in arms.items()}
     keys_all = sorted(set.intersection(*(set(v) for v in o.values())))
     scopes = {"primary (val excl. former held-out)":
@@ -297,7 +334,8 @@ def cmd_report(args) -> None:
             if base not in arms:
                 continue
             xb = np.array([o[base][k]["species_strict@1"] for k in sp_keys], float)
-            for a in ARMS[1:]:
+            extra = [ARMS[2] + UNGROUPED] if family == "photos" else []
+            for a in ARMS[1:] + extra:
                 m = a if family == "photos" else PLACE[a]
                 if m not in arms:
                     continue
@@ -429,6 +467,8 @@ def main(argv=None) -> None:
             s.add_argument("--out", required=True)
         if name == "score":
             s.add_argument("--arms")
+            s.add_argument("--twins", help="TSV observation_id, specimen: records filed "
+                                           "twice for one find, grouped in arms b-d")
             s.add_argument("--place-setting", default=PLACE_SETTING)
     args = p.parse_args(argv)
     {"score": cmd_score, "report": cmd_report, "memory": cmd_memory}[args.cmd](args)
