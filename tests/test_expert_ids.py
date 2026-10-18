@@ -495,4 +495,86 @@ def test_format_2_lines_carry_taxon_ids_and_names_for_paper_score_to_rescore():
     assert i["genus_taxon"] == {"id": 10, "name": "Russula"}
     c = line["community"]
     assert c["species_taxon"] == {"id": 100, "name": "Russula emetica"} and c["species_right"]
-    assert E.SCORES_FORMAT == 2
+    assert E.SCORES_FORMAT >= 2
+
+
+# --- format 3: verdicts by the shared answer key (name_equiv, frozen taxonomy) --------
+
+from mycomap_vision import name_equiv as N  # noqa: E402
+
+PSATHY = {
+    1: TAXA[1],
+    20: {"id": 20, "name": "Psathyrella", "rank": "genus", "rank_level": 20, "is_active": True, "ancestor_ids": [1]},
+    21: {"id": 21, "name": "Candolleomyces", "rank": "genus", "rank_level": 20, "is_active": True, "ancestor_ids": [1]},
+    22: {"id": 22, "name": "Coprinellus", "rank": "genus", "rank_level": 20, "is_active": True, "ancestor_ids": [1]},
+    200: {"id": 200, "name": "Candolleomyces candolleanus", "rank": "species", "rank_level": 10,
+          "is_active": True, "ancestor_ids": [1, 21]},
+    199: {"id": 199, "name": "Psathyrella candolleana", "rank": "species", "rank_level": 10,
+          "is_active": False, "ancestor_ids": [1, 20], "current_synonymous_taxon_ids": [200]},
+    201: {"id": 201, "name": "Candolleomyces americanus", "rank": "species", "rank_level": 10,
+          "is_active": False, "ancestor_ids": [1, 21], "current_synonymous_taxon_ids": [200]},
+    220: {"id": 220, "name": "Coprinellus micaceus", "rank": "species", "rank_level": 10,
+          "is_active": True, "ancestor_ids": [1, 22]},
+}
+
+
+def pid(uid, taxon, created):
+    t = PSATHY[taxon]
+    return {"id": uid * 1000 + taxon, "user_id": uid, "taxon_id": taxon,
+            "taxon_path": t["ancestor_ids"] + [taxon], "rank_level": t["rank_level"],
+            "taxon_rank": t["rank"], "taxon_active": t["is_active"],
+            "created_at": E.utc(created), "updated_at": E.utc(created), "current": True,
+            "category": None, "disagreement": False, "taxon_change": False,
+            "remark_mentions_dna": False}
+
+
+def psathy_line(*idents, labels=("Psathyrella candolleana",), label="Psathyrella candolleana"):
+    tax = N.Taxonomy(PSATHY, labels)
+    rec = {"label": label, "genus": label.split()[0], "name_kind": "formal",
+           "label_rank": "species"}
+    truth = E.TruthTaxa(species=200, genus=21, formal_species=True)
+    o = obs(list(idents), counts={u: 20000 for u in range(2, 9)})
+    return E.score_find(o, E.Cutoff(CUT, "dna_field"), truth, E.TaxonResolver(PSATHY), set(),
+                        key, kt=E.key_truth(rec, tax))
+
+
+def test_answer_key_credits_inats_newer_names_for_an_older_label_at_species_and_genus():
+    line = psathy_line(pid(2, 200, "2023-01-01"), pid(3, 21, "2023-01-02"),
+                       pid(4, 22, "2023-01-03"), pid(5, 220, "2023-01-04"))
+    by = {i["taxon"]["id"]: i for i in line["ids"]}
+    assert by[200]["species_right"] and by[200]["genus_right"]   # Candolleomyces candolleanus
+    assert by[21]["genus_right"] and by[21]["species_right"] is None   # the genus id
+    assert by[22]["genus_right"] is False                         # Coprinellus: wrong
+    assert by[220]["species_right"] is False and by[220]["genus_right"] is False
+    # beside it: plain strings miss the newer names, by-id agrees with the key here
+    assert by[200]["species_right_plain"] is False and by[21]["genus_right_plain"] is False
+    assert by[200]["species_right_by_id"] and by[21]["genus_right_by_id"]
+    assert line["truth_species_scored"] and line["first_pooled"]["species"]["right"]
+
+
+def test_answer_key_leaves_species_unscored_when_two_labels_share_an_inat_species():
+    # a North American segregate iNat lumps into the older species: both labels stay names
+    line = psathy_line(pid(2, 200, "2023-01-01"), label="Candolleomyces americanus",
+                       labels=("Candolleomyces candolleanus", "Candolleomyces americanus"))
+    assert line["truth_species_scored"] is False
+    assert line["ids"][0]["species_right"] is None and line["ids"][0]["genus_right"]
+    assert E.summarise([line])["all"]["formal_species_finds"] == 0
+
+
+def test_sensitivities_swap_in_their_own_verdicts_on_the_same_finds():
+    line = psathy_line(pid(2, 200, "2023-01-01"))
+    key_view = E.summarise_pooled([line], resamples=50)["all"]["first_species"]
+    plain = E.summarise_pooled(E.with_verdicts([line], "plain"), resamples=50)["all"]
+    assert (key_view["n"], key_view["right"]) == (1, 1)
+    assert (plain["first_species"]["n"], plain["first_species"]["right"]) == (1, 0)
+    tier = E.summarise(E.with_verdicts([line], "plain"), "1")["all"]["best_species"]
+    assert (tier["n"], tier["right"]) == (1, 0)                    # ids[] swapped too
+    assert line["ids"][0]["species_right"] is True               # the original is untouched
+
+
+def test_an_erratum_record_is_listed_but_never_scored():
+    from mycomap_vision.errata import Errata
+    err = Errata("v1-errata-r4.tsv", "x", {"inat-42": "crosspost_twin"})
+    assert E.erratum_status({"record_key": "inat-42"}, err) == "erratum_crosspost_twin"
+    assert E.erratum_status({"record_key": "inat-43"}, err) is None
+    assert E.erratum_status({"record_key": "inat-42"}, None) is None

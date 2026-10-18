@@ -1491,8 +1491,17 @@ def cmd_expert_ids(args) -> None:
         push = {int(x) for x in (args.push_accounts or "").split(",") if x.strip()}
         our = args.our_dates or (d_our if d_our.exists() else None)
         val = args.validators or (d_val if d_val.exists() else None)
+        if not args.no_answer_key and not args.successors:
+            raise SystemExit("score: --successors <the frozen iNat successors TSV> (the answer "
+                             "key's taxonomy), or --no-answer-key for the old by-id verdicts")
+        from . import errata as errata_mod
+        err = errata_mod.read(args.errata) if args.errata else None
+        if err is not None:
+            errata_mod.check(err, rel)
         summary = E.score(rel, args.name, client, our, val, push,
-                          config.DATA_DIR / "secrets" / "e31_identifier_salt.txt")
+                          config.DATA_DIR / "secrets" / "e31_identifier_salt.txt",
+                          successors=args.successors, errata=err,
+                          answer_key=not args.no_answer_key)
         print(json.dumps({k: summary[k] for k in ("finds", "tier1", "tier2")}, indent=2))
 
 
@@ -1915,6 +1924,12 @@ def main(argv: list[str] | None = None) -> int:
                    ".org/.com (sequence created, name push)")
     p.add_argument("--validators", type=Path, help="score: CSV observation_id,inat_user_id")
     p.add_argument("--push-accounts", help="score: iNat user ids of MycoMap's push accounts")
+    p.add_argument("--successors", type=Path, help="score: the frozen iNat successors TSV "
+                   "(taxon_id, current_ids) for the shared answer key's taxonomy")
+    p.add_argument("--errata", type=Path, help="score: the release's erratum TSV; its records "
+                   "are listed but not scored")
+    p.add_argument("--no-answer-key", action="store_true", help="score: verdicts by iNat "
+                   "taxon id only (E31's method before 18 Oct)")
     p.add_argument("--sql-dir", type=Path, help="dna-dates: the SQL templates (default: "
                    "paper/e31/sql in the research checkout)")
     p.add_argument("--com-host", help="dna-dates: ssh host of the read-only .com SQL route "

@@ -62,7 +62,8 @@ TIER1, TIER2 = 10_000, 1_000
 USER_AGENT = config.USER_AGENT.rstrip(")") + "; research; contact info@mycomap.org)"
 MAX_THROTTLES = 5          # 429s in one run before it stops and asks a person
 SNAPSHOT_FORMAT = 1
-SCORES_FORMAT = 2   # 2: taxon ids + names on every ID, community, first_pooled, truth
+SCORES_FORMAT = 3   # 2: taxon ids + names on every ID, community, first_pooled, truth
+                    # 3: verdicts by the shared answer key; by-id and plain-string beside
 
 # Observation fields that carry a DNA result (matched by name, so a field iNat users add
 # later is caught too) and the name fields that follow a DNA result. Both end the window.
@@ -562,9 +563,54 @@ def load_salt(path: Path) -> bytes:
     return bytes.fromhex(path.read_text(encoding="utf-8").strip())
 
 
+@dataclass(frozen=True)
+class KeyTruth:
+    """The truth as the shared answer key sees it (name_equiv, PLAN rule 4): the label and
+    its genus, against the frozen taxonomy. Species is scored only on a formal label that
+    resolves one-to-one to an iNat species (`species_scored`)."""
+    taxonomy: object
+    label: str
+    genus: str | None
+    species_scored: bool
+
+
+def key_truth(rec: dict, taxonomy) -> KeyTruth:
+    label = rec.get("label") or ""
+    formal = rec.get("name_kind") == "formal" and rec.get("label_rank") in ("species", None)
+    return KeyTruth(taxonomy, label, rec.get("genus"),
+                    bool(formal and label and taxonomy.species_id(label) is not None))
+
+
+def verdicts(raw_id: int | None, sp: int | None, ge: int | None, truth: TruthTaxa,
+             kt: KeyTruth | None) -> dict:
+    """Right or wrong at species and genus for one iNat taxon (an identification or the
+    community taxon). With the answer key (kt): `species_right`/`genus_right` by
+    name_equiv.species_credit / genus_match on the raw taxon id against the label, beside
+    `*_by_id` (iNat taxon ids, E31's method before 18 Oct) and `*_plain` (the taxon's
+    current name as a string, no taxonomy), on the same finds. Without it: by id only."""
+    by_sp = (sp == truth.species) if (sp is not None and truth.formal_species
+                                      and truth.species) else None
+    by_ge = (ge == truth.genus) if (ge is not None and truth.genus) else None
+    if kt is None:
+        return {"species_right": by_sp, "genus_right": by_ge}
+    from . import name_equiv as N
+    tax = kt.taxonomy
+    on_sp = sp is not None and kt.species_scored
+    on_ge = ge is not None and bool(kt.genus)
+    return {
+        "species_right": N.species_credit(raw_id, kt.label, taxonomy=tax) if on_sp else None,
+        "genus_right": N.genus_match(raw_id, kt.genus, tax, truth_species=kt.label)["strict"]
+        if on_ge else None,
+        "species_right_by_id": (sp == truth.species) if (on_sp and truth.species) else None,
+        "genus_right_by_id": by_ge if on_ge else None,
+        "species_right_plain": N.species_credit(tax.name_of(raw_id), kt.label) if on_sp else None,
+        "genus_right_plain": N.genus_match(tax.name_of(ge), kt.genus)["strict"] if on_ge else None,
+    }
+
+
 def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResolver,
                validators: set[int], key: Callable[[int], str],
-               push_accounts: set[int] = frozenset()) -> dict:
+               push_accounts: set[int] = frozenset(), kt: KeyTruth | None = None) -> dict:
     """One find's line for the scoring file: each person's standing ID at the cutoff (and
     their latest one after it, flagged) with role, tier and correctness, the community
     taxon then, and the strict flag. Roles: observer, validator (of this record on
@@ -573,6 +619,8 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
             "cutoff_source": cutoff.source, "cutoff_kind": kind_of(cutoff.source),
             "cutoff_sources": cutoff.sources,
             "truth_species_formal": truth.formal_species,
+            "truth_species_scored": kt.species_scored if kt is not None
+            else bool(truth.formal_species and truth.species),
             "truth_species_taxon": truth.species, "truth_genus_taxon": truth.genus}
     if obs.get("missing") or not cutoff.at:
         return {**line, "status": "missing_on_inat" if obs.get("missing") else "no_cutoff",
@@ -594,9 +642,7 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
             "current_now": i["current"],
             "withdrawal_ambiguous": i.get("withdrawal_ambiguous", False) if before else None,
             "at_species": sp is not None, "at_genus": ge is not None,
-            "species_right": (sp == truth.species) if (sp is not None and truth.formal_species
-                                                       and truth.species) else None,
-            "genus_right": (ge == truth.genus) if (ge is not None and truth.genus) else None,
+            **verdicts(i["taxon_id"], sp, ge, truth, kt),
         }
     ids = [entry(uid, i, True)
            for uid, i in sorted(standing.items(), key=lambda kv: kv[1]["created_at"])]
@@ -627,13 +673,53 @@ def score_find(obs: dict, cutoff: Cutoff, truth: TruthTaxa, resolver: TaxonResol
                           if ct is not None else None,
                           "species_taxon": resolver.ref(ct_sp), "genus_taxon": resolver.ref(ct_ge),
                           "at_species": ct_sp is not None, "at_genus": ct_ge is not None,
-                          "species_right": (ct_sp == truth.species) if (
-                              ct_sp is not None and truth.formal_species and truth.species) else None,
-                          "genus_right": (ct_ge == truth.genus) if (
-                              ct_ge is not None and truth.genus) else None},
+                          **verdicts(ct, ct_sp, ct_ge, truth, kt)},
             "observer_named_species_before_cutoff": observer_named_species,
             "ids_after_cutoff_by_others": after,
             "first_pooled": first_pooled(ids)}
+
+
+def erratum_status(rec: dict, errata) -> str | None:
+    """'erratum_<reason>' for a record the release's erratum lists (never scored), or None."""
+    reason = errata.reasons.get(rec["record_key"]) if errata is not None else None
+    return f"erratum_{reason}" if reason else None
+
+
+def sensitivity_block(lines: list[dict]) -> dict:
+    """The headline summaries under another verdict (with_verdicts): tiers 1 and 2, H4's
+    pooled first ID."""
+    return {"tier1": summarise(lines, "1"), "tier2": summarise(lines, "2"),
+            "pooled_first": summarise_pooled(lines)}
+
+
+def scored_species(r: dict) -> bool:
+    """Species is scored on this find: a formal truth (format 3: one the key resolves)."""
+    return bool(r.get("truth_species_scored", r["truth_species_formal"]))
+
+
+def with_verdicts(lines: list[dict], which: str) -> list[dict]:
+    """Copies of format-3 lines with a sensitivity's verdicts ('by_id', 'plain') in place of
+    the answer key's, for the same summaries."""
+    def swap(d):
+        if not d:
+            return d
+        d = dict(d)
+        for rank in ("species", "genus"):
+            if f"{rank}_right_{which}" in d:
+                d[f"{rank}_right"] = d[f"{rank}_right_{which}"]
+        return d
+
+    def swap_first(fp):
+        if not fp:
+            return fp
+        fp = dict(fp)
+        for rank in ("species", "genus"):
+            if fp.get(rank) and f"right_{which}" in fp[rank]:
+                fp[rank] = {**fp[rank], "right": fp[rank][f"right_{which}"]}
+        return fp
+    return [{**r, "ids": [swap(i) for i in r.get("ids") or []],
+             "community": swap(r.get("community")),
+             "first_pooled": swap_first(r.get("first_pooled"))} for r in lines]
 
 
 # H4 (Steve, 18 Oct): the comparator is the FIRST identification before the cutoff by an
@@ -654,7 +740,9 @@ def first_pooled(ids: list[dict]) -> dict:
         first = next((i for i in mine if i[f"at_{rank}"]), None)
         out[rank] = {"right": first[f"{rank}_right"], "tier": first["tier"],
                      "taxon": first.get("taxon"),
-                     f"{rank}_taxon": first.get(f"{rank}_taxon")} if first else None
+                     f"{rank}_taxon": first.get(f"{rank}_taxon"),
+                     **{f"right_{v}": first.get(f"{rank}_right_{v}") for v in ("by_id", "plain")
+                        if f"{rank}_right_{v}" in first}} if first else None
     return out
 
 
@@ -663,7 +751,7 @@ def summarise_pooled(lines: list[dict], resamples: int = 10_000, seed: int = 202
     truths that have one) and genus, with coverage and observer-clustered intervals; `all`
     and `strict` (finds the observer had not named at species before the cutoff)."""
     def block(rows):
-        formal = [r for r in rows if r["truth_species_formal"]]
+        formal = [r for r in rows if scored_species(r)]
         out = {"finds": len(rows), "formal_species_finds": len(formal)}
         for rank, base in (("species", formal), ("genus", rows)):
             got = [((r.get("observer") or r["observation_id"]),
@@ -707,7 +795,7 @@ def summarise(lines: list[dict], tier: str = "1", count_push_accounts: bool = Fa
                 if cr is not None:
                     c[f"community_{rank}_n"] += 1
                     c[f"community_{rank}_right"] += cr
-            c["formal_finds"] += bool(r["truth_species_formal"])
+            c["formal_finds"] += scored_species(r)
         out = {"finds": c["finds"], "formal_species_finds": c["formal_finds"]}
         for view in ("best", "each", "community"):
             for rank in ("species", "genus"):
@@ -761,7 +849,7 @@ def find_counts(r: dict, tier: str) -> dict[str, tuple[int, int]]:
             out["each_species"] = (sum(got), len(got))
         cr = r["community"][f"{rank}_right"]
         out[f"community_{rank}"] = (int(cr), 1) if cr is not None else (0, 0)
-    formal = bool(r["truth_species_formal"])
+    formal = scored_species(r)
     out["coverage_best_species"] = (out["best_species"][1], 1) if formal else (0, 0)
     return out
 
@@ -979,19 +1067,55 @@ def not_this_observation(obs: dict, rec: dict, mo_ids: set[str]) -> str | None:
     return None
 
 
+def answer_key_taxonomy(rel, client: HistoryClient, snap: list[dict], successors: Path | None,
+                        out_dir: Path):
+    """The shared answer key's taxonomy (name_equiv.Taxonomy): iNat open data plus the frozen
+    successors TSV, with what E31's identifications add (taxa newer than the download and
+    retired ids' successors, from the cached taxa lookups) merged in; the frozen rows win.
+    The additions are written to taxonomy-extras.json and cited by sha256. Labels for the
+    one-to-one rule: every included label of the release."""
+    from . import name_equiv as N
+    labels = sorted({r[0] for r in rel.db.execute(
+        "select distinct label from records where included = 1") if r[0]})
+    frozen = N.Taxonomy.load(config.DATA_DIR / OPEN_TAXA, labels=(), successors=successors)
+    base = {t: dict(v) for t, v in frozen.taxa.items()}
+    merged = complete_taxa(client, {t: dict(v) for t, v in base.items()}, snap)
+    pinned = set()
+    if successors is not None:
+        with open(successors, encoding="utf-8", newline="") as f:
+            pinned = {int(r["taxon_id"]) for r in csv.DictReader(f, delimiter="\t")}
+    for t in pinned & set(base):
+        merged[t] = base[t]                              # the frozen successors win
+    extras = {str(t): merged[t] for t in sorted(merged) if base.get(t) != merged[t]}
+    extras_path = out_dir / "taxonomy-extras.json"
+    extras_path.write_text(json.dumps(extras, sort_keys=True, indent=0), encoding="utf-8")
+    tax = N.Taxonomy(merged, labels, cite={**frozen.cite, "extras": extras_path.name,
+                                           "extras_taxa": len(extras),
+                                           "extras_sha256": sha256_file(extras_path),
+                                           "labels": len(labels)})
+    tax.cite["labels_kept_apart"] = sum(len(v) for v in tax.shared_by.values())
+    tax.cite["answer_key"] = N.ANSWER_KEY
+    return tax, merged
+
+
 def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
           validators_csv: Path | None, push_accounts: set[int], salt_path: Path,
-          sealed_ok: bool = False, log=print) -> dict:
+          sealed_ok: bool = False, log=print, successors: Path | None = None,
+          errata=None, answer_key: bool = True) -> dict:
     """Score a snapshot: one hashed line per find (scores.jsonl) and the tier summaries.
-    On a test release this refuses until the analysis freeze tag exists."""
+    On a test release this refuses until the analysis freeze tag exists. Verdicts come
+    from the shared answer key (name_equiv, frozen taxonomy) unless answer_key=False; an
+    erratum's records are listed but not scored (status erratum_<reason>)."""
     if rel.manifest.get("test_for") and not (sealed_ok or freeze_tagged()):
         raise RuntimeError(f"{rel.id} is a sealed test release: scoring waits for the tag "
                            f"{FREEZE_TAG} in the research repo")
     d = work_dir(name)
     snap = read_snapshot(d / "snapshot.jsonl.gz")
     records = {r["source_id"]: r for r in inat_records(rel)}
-    taxa = load_open_taxa(config.DATA_DIR / OPEN_TAXA)
-    taxa = complete_taxa(client, taxa, snap)
+    if answer_key:
+        tax, taxa = answer_key_taxonomy(rel, client, snap, successors, d)
+    else:
+        tax, taxa = None, complete_taxa(client, load_open_taxa(config.DATA_DIR / OPEN_TAXA), snap)
     by_name = name_index(taxa)
     resolver = TaxonResolver(taxa)
     ours, validators = read_ours(ours_csv), read_validators(validators_csv)
@@ -1011,8 +1135,10 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
         mine, backdated = drop_backdated(ours.get(o["observation_id"], []), o.get("created_at"))
         cut = dna_cutoff(o, mine, rec.get("validated_on"))
         line = score_find(o, cut, truth_taxa(rec, by_name, taxa), resolver,
-                          validators.get(o["observation_id"], set()), key, push_accounts)
+                          validators.get(o["observation_id"], set()), key, push_accounts,
+                          key_truth(rec, tax) if tax is not None else None)
         line["status"] = not_this_observation(o, rec, mo_ids) or line["status"]
+        line["status"] = erratum_status(rec, errata) or line["status"]
         line["backdated_trashed_dropped"] = backdated
         label_genus = by_name.get(((rec.get("genus") or "").lower(), "genus"))
         tt = truth_taxa(rec, by_name, taxa)
@@ -1037,6 +1163,11 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                "scores_sha256": sha256_file(out), "finds": len(lines),
                "validator_lists": bool(validators_csv), "our_dates": bool(ours_csv),
                "push_accounts_excluded": len(push_accounts),
+               "answer_key": tax.cite if tax is not None else None,
+               "errata": errata.cite() if errata is not None else None,
+               "formal_species_not_resolved": sum(
+                   1 for l in lines if l["status"] == "ok" and l["truth_species_formal"]
+                   and not l["truth_species_scored"]),
                "tier1": summarise(lines, "1"), "tier2": summarise(lines, "2"),
                "pooled_first": summarise_pooled(lines),
                "slices": {t: slices(lines, t) for t in ("1", "2")},
@@ -1049,7 +1180,10 @@ def score(rel, name: str, client: HistoryClient, ours_csv: Path | None,
                        1 for l in lines if l["status"] == "ok" for i in l["ids"]
                        if i["role"] == "identifier" and i["before_cutoff"]
                        and i.get("withdrawal_ambiguous")),
-                   "unresolved_validator_rows": unresolved}}
+                   "unresolved_validator_rows": unresolved,
+                   **({"taxon_id_only": sensitivity_block(with_verdicts(lines, "by_id")),
+                       "plain_strings": sensitivity_block(with_verdicts(lines, "plain"))}
+                      if tax is not None else {})}}
     (d / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
