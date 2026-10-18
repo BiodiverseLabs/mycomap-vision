@@ -50,8 +50,9 @@ export function placeNote(w: Where): string | null {
 }
 
 /** In the line above the answer: where the place or date the server used came from. */
-export function sourceWords(from: "entered" | "photo" | null, sentFromPhoto?: number,
+export function sourceWords(from: "entered" | "photo" | "observation" | null, sentFromPhoto?: number,
                             sentFromDevice?: boolean, sentFromMap?: boolean): string {
+  if (from === "observation") return "from the observation";   // identify from a link
   if (from === "photo") return "from your photo";        // the server read it from a photo itself
   if (sentFromPhoto) return `from photo ${sentFromPhoto}`;
   if (sentFromDevice) return "your current location";

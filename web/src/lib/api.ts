@@ -159,8 +159,8 @@ export interface ContextUsed {
   latitude: number | null;
   longitude: number | null;
   observed_on: string | null;
-  place_from: "entered" | "photo" | null;
-  date_from: "entered" | "photo" | null;
+  place_from: "entered" | "photo" | "observation" | null;
+  date_from: "entered" | "photo" | "observation" | null;
 }
 
 export interface ModelsInfo {
@@ -381,7 +381,37 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();
   },
+  /** An iNat or MO observation's own photos, place and date, read by Vision. */
+  async identifyObservation(source: "inat" | "mo", id: string, models: string[],
+                            onWait?: (attempt: number, seconds: number) => void):
+      Promise<{ results: IdentifyResult[]; context_used: ContextUsed; observation: LinkedObservation; cached?: boolean }> {
+    const res = await sendWaitingInLine(() => fetch("/api/identify/observation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source, id, models: models.join(",") }),
+    }), onWait);
+    if (!res.ok) throw new ApiError(res.status, await errorText(res));
+    return res.json();
+  },
 };
+
+/** The observation a link pointed at (POST /api/identify/observation). */
+export interface LinkedObservation {
+  source: "inat" | "mo";
+  id: string;
+  url: string | null;
+  /** Its photos at the source, and how many Vision read (the first ten it could). */
+  photos: number;
+  photos_used: number;
+  name_at_source: string | null;
+  rank_at_source: string | null;
+  /** One per photo scored, in per_photo's order: its URL when the page may show it
+   *  (Creative Commons or public domain), else null. */
+  photos_shown: (string | null)[];
+  /** It is one of Vision's DNA reference records, left out of its own answer. */
+  excluded_reference: boolean;
+  left_out_photos: number;
+}
 
 export const pct = (v: number | null | undefined, digits = 0) =>
   v == null ? "–" : `${(100 * v).toFixed(digits)}%`;

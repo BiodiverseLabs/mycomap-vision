@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, ty
          type RefObject, type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
 import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, Dna, ImagePlus,
-         Lightbulb, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
+         Lightbulb, Link2, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,6 +19,7 @@ import {
   type ContextUsed,
   type IdentifyResult,
   type LikelySet,
+  type LinkedObservation,
   type ModelsInfo,
   type PhotoResult,
   type Where,
@@ -29,6 +30,7 @@ import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, whatNex
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import { applyPick } from "@/lib/mapPick";
+import { parseObservationLink, sourceName, type ObservationRef } from "@/lib/observationLink";
 
 // The map (Leaflet) loads only when someone opens it: the Identify page stays light.
 const LocationPicker = lazy(() => import("@/components/LocationPicker"));
@@ -90,12 +92,31 @@ export function IdentifyPage() {
   });
   const sentUrls = useObjectUrls(run.variables?.files ?? NO_FILES);
 
+  // Identify from a link: an iNat or MO observation's own photos, place and date, read
+  // by Vision. Whichever was started last, photos or link, is the answer shown.
+  const [link, setLink] = useState("");
+  const [mode, setMode] = useState<"photos" | "link">("photos");
+  const byLink = useMutation({
+    mutationFn: (ref: ObservationRef) =>
+      api.identifyObservation(ref.source, ref.id, chosen, (_attempt, seconds) => setWaiting(seconds)),
+    onSettled: () => setWaiting(null),
+  });
+  const viaLink = mode === "link";
+  const answer = viaLink ? byLink.data : run.data;
+  const pending = viaLink ? byLink.isPending : run.isPending;
+  const failed = viaLink ? byLink.error : run.error;
+  const shownUrls = viaLink ? (byLink.data?.observation.photos_shown.map((u) => u ?? "") ?? []) : sentUrls;
+  const shownPhotos = viaLink ? byLink.data?.observation.photos_used : run.variables?.files.length;
+  const submittedAt = viaLink ? byLink.submittedAt : run.submittedAt;
+  const startPhotos = () => { setMode("photos"); byLink.reset(); run.mutate({ where, files }); };
+  const startLink = (ref: ObservationRef) => { setMode("link"); run.reset(); byLink.mutate(ref); };
+
   // Start over: this find's photos, place and date, answer and error go; the model stays.
   // Clearing the photos and the request releases their object URLs (useObjectUrls).
   const pickZone = useRef<HTMLDivElement>(null);
   const clearable = canStartOver({
-    files, where, hasAnswer: !!run.data, hasError: run.isError, identifying: run.isPending,
-  });
+    files, where, hasAnswer: !!answer, hasError: !!failed, identifying: pending,
+  }) || !!link.trim();
   const restart = () => {
     const blank = startOver();
     reading.current = new Set();
@@ -105,6 +126,9 @@ export function IdentifyPage() {
     setWaiting(null);
     setSentPart(null);
     run.reset();
+    byLink.reset();
+    setLink("");
+    setMode("photos");
     window.scrollTo({ top: 0, behavior: "smooth" });
     pickZone.current?.focus({ preventScroll: true });
   };
@@ -113,23 +137,23 @@ export function IdentifyPage() {
   // view (phoneFlow.shouldScrollTo has the rule).
   const results = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!run.isPending && !run.data) return;
+    if (!pending && !answer) return;
     const el = results.current?.querySelector<HTMLElement>(
-      run.data ? "[data-answer-box], [data-result-card]" : "[data-waiting-card]");
+      answer ? "[data-answer-box], [data-result-card]" : "[data-waiting-card]");
     bringIntoView(el ?? null);
-  }, [run.isPending, run.data]);
+  }, [pending, answer]);
 
   // The pinned Identify bar (phones) hides while the page's own button is on screen.
   const inlineButton = useRef<HTMLDivElement>(null);
   const inlineVisible = useOnScreen(inlineButton);
   const pinned = showPinnedBar({
-    hasPhotos: files.length > 0, hasAnswer: !!run.data, signInNeeded: gate === "sign-in",
+    hasPhotos: files.length > 0, hasAnswer: !!answer, signInNeeded: gate === "sign-in",
     inlineButtonVisible: inlineVisible,
   });
   const identify = (
-    <IdentifyButton count={files.length} pending={run.isPending} waiting={waiting != null}
-                    disabled={!files.length || !chosen.length || run.isPending || gate === "checking"}
-                    onClick={() => run.mutate({ where, files })} />
+    <IdentifyButton count={files.length} pending={run.isPending} waiting={waiting != null && !viaLink}
+                    disabled={!files.length || !chosen.length || pending || gate === "checking"}
+                    onClick={startPhotos} />
   );
   const referencePhotos = models.data?.backbones.find((b) => chosen[0]?.startsWith(`${b.backbone}/`))
     ?.embedded_photos ?? null;
@@ -146,6 +170,9 @@ export function IdentifyPage() {
           {gate === "sign-in" && <SignInFirst />}
           <PhotoPicker files={files} setFiles={setFiles} zone={pickZone}
                        onStartOver={restart} canStartOver={clearable} />
+          <LinkBox value={link} setValue={setLink} pending={byLink.isPending} waiting={viaLink ? waiting : null}
+                   disabled={!chosen.length || pending || gate !== "ready"} signIn={gate === "sign-in"}
+                   onRun={startLink} />
           <PhotoChecklist hasPhotos={files.length > 0} />
           <WhereWhen where={where} setWhere={setWhere}
                      noPlace={noPhotoPlace({ found: files.map((f) => found.get(f)), where, platform })} />
@@ -157,10 +184,10 @@ export function IdentifyPage() {
           ) : (
             <div ref={inlineButton}>{identify}</div>
           )}
-          {run.isError && (
+          {failed && (
             <p className="text-sm text-destructive">
-              {(run.error as Error).message}
-              {run.error instanceof ApiError && run.error.status === 401 && (
+              {(failed as Error).message}
+              {failed instanceof ApiError && failed.status === 401 && (
                 <> <a className="underline font-medium" href={signInUrl()}>Sign in</a></>
               )}
             </p>
@@ -168,32 +195,36 @@ export function IdentifyPage() {
         </div>
 
         <div className="min-w-0 scroll-mt-20" ref={results}>
-          {!run.data && !run.isPending && <EmptyState />}
-          {run.isPending && (
+          {!answer && !pending && <EmptyState />}
+          {pending && viaLink && byLink.variables && (
+            <LinkWaitingCard observation={byLink.variables} waitSeconds={waiting} />
+          )}
+          {pending && !viaLink && (
             <WaitingCard urls={sentUrls} steps={waitingSteps({
               photos: run.variables?.files.length ?? files.length, sent: sentPart, waitSeconds: waiting,
               referencePhotos,
             })} />
           )}
-          {run.data && (
+          {viaLink && byLink.data && <LinkedObservationLine o={byLink.data.observation} cached={!!byLink.data.cached} />}
+          {answer && (
             <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-              <ContextLine used={run.data.context_used} sent={run.variables?.where}
-                           placeModel={usesPlace(run.data.results.map((r) => r.model.method))} />
+              <ContextLine used={answer.context_used} sent={viaLink ? undefined : run.variables?.where}
+                           placeModel={usesPlace(answer.results.map((r) => r.model.method))} />
               <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-top" />
             </div>
           )}
-          {run.data && (
+          {answer && (
             <div
-              className={`grid gap-6 ${run.data.results.length > 1 ? "xl:grid-cols-2" : ""}`}
+              className={`grid gap-6 ${answer.results.length > 1 ? "xl:grid-cols-2" : ""}`}
             >
-              {run.data.results.map((r) => (
-                <ResultCard key={`${modelKey(r.model.backbone, r.model.method)}@${run.submittedAt}`}
-                            r={r} urls={sentUrls} photos={run.variables?.files.length ?? r.photos} />
+              {answer.results.map((r) => (
+                <ResultCard key={`${modelKey(r.model.backbone, r.model.method)}@${submittedAt}`}
+                            r={r} urls={shownUrls} photos={shownPhotos ?? r.photos} />
               ))}
             </div>
           )}
-          {run.data && <WhatNext results={run.data.results} />}
-          {run.data && (
+          {answer && <WhatNext results={answer.results} />}
+          {answer && (
             <div className="mt-6 flex justify-center">
               <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-bottom">
                 Start over with another find
@@ -214,6 +245,96 @@ export function IdentifyPage() {
         </div>
       )}
     </>
+  );
+}
+
+/** Identify from a link: one iNat or MO observation, its photos, place and date read by Vision. */
+function LinkBox({ value, setValue, pending, waiting, disabled, signIn, onRun }: {
+  value: string;
+  setValue: (v: string) => void;
+  pending: boolean;
+  waiting: number | null;
+  disabled: boolean;
+  signIn: boolean;
+  onRun: (ref: ObservationRef) => void;
+}) {
+  const parsed = parseObservationLink(value);
+  const typed = value.trim().length > 0;
+  return (
+    <div className="space-y-2 rounded-lg border border-[#A87146]/20 bg-white p-4" data-testid="box-link">
+      <label htmlFor="observation-link" className="flex items-center gap-1.5 text-sm font-medium text-[#4a3728]">
+        <Link2 className="h-4 w-4" aria-hidden /> Or identify from an iNaturalist or Mushroom Observer link
+      </label>
+      <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (parsed && !disabled) onRun(parsed); }}>
+        <input id="observation-link" type="text" inputMode="url" autoComplete="off" spellCheck={false}
+               className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm"
+               placeholder="inaturalist.org/observations/…" value={value}
+               onChange={(e) => setValue(e.target.value)} data-testid="input-link" />
+        <Button type="submit" disabled={!parsed || disabled} data-testid="button-identify-link">
+          {pending ? <Loader2 className="animate-spin" aria-hidden /> : null}
+          {pending ? (waiting != null ? "Waiting…" : "Reading…") : "Identify"}
+        </Button>
+      </form>
+      <p className="text-xs text-muted-foreground" aria-live="polite">
+        {signIn ? "Sign in first to identify from a link."
+          : typed && !parsed ? "Paste a link to one observation, e.g. inaturalist.org/observations/123 or mushroomobserver.org/123."
+            : parsed ? `${sourceName(parsed.source)} observation ${parsed.id}: Vision reads its photos, place and date.`
+              : "Vision reads the observation's photos, place and date itself."}
+      </p>
+    </div>
+  );
+}
+
+function LinkWaitingCard({ observation, waitSeconds }: { observation: ObservationRef; waitSeconds: number | null }) {
+  return (
+    <Card className="overflow-hidden scroll-mt-20" data-waiting-card data-testid="card-waiting-link">
+      <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3">
+        <CardTitle className="flex items-center gap-2 text-base text-[#4a3728]">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+          Reading {sourceName(observation.source)} observation {observation.id}…
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-4 space-y-2 px-4 sm:px-6 text-sm text-muted-foreground">
+        <p>
+          {waitSeconds != null
+            ? `Vision is busy; trying again in ${waitSeconds} s.`
+            : "Vision fetches the observation's photos, then compares them with DNA-sequenced specimens."}
+        </p>
+        <p className="text-xs">
+          Usually 10 to 30 seconds{observation.source === "mo" ? "; Mushroom Observer asks for 5 seconds between photos" : ""}.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LinkedObservationLine({ o, cached }: { o: LinkedObservation; cached: boolean }) {
+  const hidden = o.photos_shown.filter((u) => !u).length;
+  return (
+    <div className="mb-3 rounded-md border border-[#A87146]/20 bg-[#faf9f7] px-3 py-2 text-sm text-[#4a3728]"
+         data-testid="linked-observation">
+      {o.url
+        ? <a href={o.url} target="_blank" rel="noreferrer" className="font-medium underline">{sourceName(o.source)} {o.id}</a>
+        : <span className="font-medium">{sourceName(o.source)} {o.id}</span>}
+      {o.name_at_source && <> · called <span className="sci">{o.name_at_source}</span> there</>}
+      {` · ${o.photos_used} of ${o.photos} photo${o.photos === 1 ? "" : "s"} read`}
+      {hidden > 0 && (
+        <span className="block text-xs text-muted-foreground">
+          {hidden === o.photos_shown.length ? "Its photos aren't" : `${hidden} of its photos aren't`} Creative Commons,
+          so they are numbered here rather than shown.
+        </span>
+      )}
+      {cached && (
+        <span className="block text-xs text-muted-foreground" data-testid="linked-cached">
+          Answered before and kept: Vision's model and reference set haven't changed since.
+        </span>
+      )}
+      {o.excluded_reference && (
+        <span className="block text-xs text-amber-700">
+          This observation is one of Vision's DNA-checked reference records; it was left out of its own answer.
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -541,7 +662,7 @@ function ContextLine({ used, sent, placeModel }: { used: ContextUsed; sent?: Whe
     );
   }
   // Places and dates filled in from a photo reach the server as entered; say where they came from.
-  const from = (f: "entered" | "photo" | null, photo?: number, device?: boolean, map?: boolean) =>
+  const from = (f: ContextUsed["place_from"], photo?: number, device?: boolean, map?: boolean) =>
     sourceWords(f, photo, device, map);
   return (
     <p className="min-w-0 flex-1 text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">

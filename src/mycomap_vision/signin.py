@@ -256,7 +256,7 @@ class SigninConfig:
         if self.dataset_public and method in ("GET", "HEAD") and path.startswith("/api/dataset/"):
             return False
         if self.mode == "identify":
-            return (method == "POST" and path == "/api/identify") or members_only(path)
+            return (method == "POST" and path in ("/api/identify", "/api/identify/observation")) or members_only(path)
         return True
 
     def authorize_url(self, nonce: str) -> str:
