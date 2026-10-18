@@ -436,9 +436,9 @@ def cmd_compare(conn, args) -> None:
         # (replications/fungitastic/release_eval.py): the Picek vs Vision report.
         from .dataset_release import load_release
         from .replications.fungitastic import release_eval
-        if rel is None or args.into or args.max_test:
+        if rel is None or args.into or args.max_test or args.reference != "all":
             raise SystemExit("--test-release needs --release <its base>; no --into or "
-                             "--max-test")
+                             "--max-test, no --reference public-trainable (not built for a test release)")
         test_rel = load_release(args.test_release, allow_draft=args.allow_draft)
         result = release_eval.compare_on_test(conn, rel, test_rel, backbones, methods,
                                               name_scores=args.name_scores,
@@ -447,7 +447,8 @@ def cmd_compare(conn, args) -> None:
         result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
                                   max_test=args.max_test, name_scores=args.name_scores,
                                   sets=not args.no_sets, per_image=args.per_image,
-                                  into=args.into, release=rel)
+                                  into=args.into, release=rel,
+                                  public_reference=args.reference == "public-trainable")
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -1917,6 +1918,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--into", metavar="COMPARISON",
                    help="add the runs to this saved comparison (same records only; replaces "
                         "a run of the same backbone and method there)")
+    p.add_argument("--reference", choices=("all", "public-trainable"), default="all",
+                   help="with --release: public-trainable keeps only the reference photos the "
+                        "public model may learn from (CC incl. NC, or ARR with permission); "
+                        "the scored records are unchanged (paper E23/E23b)")
     release_options(p)
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
