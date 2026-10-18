@@ -417,6 +417,8 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
     if info is not None and used is not None:
         info["place_setting"] = used
     uses_context = getattr(model, "needs_context", False)
+    position = {rank: {n: i for i, n in enumerate(index.labels[rank])}
+                for rank in (calibration or {})}
     out = {}
     for rec in scored_records:
         rows = rec.photo_rows
@@ -435,7 +437,7 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
                 p = likely.probabilities(rs, float(c["temperature"]))
                 names = index.labels[rank]
                 truth = ((truths or {}).get(rec.observation_id) or {}).get(rank)
-                pos = {n: i for i, n in enumerate(names)}.get(truth) if truth else None
+                pos = position[rank].get(truth) if truth else None
                 one = {"conf": float(p.max()), "sumsq": float((p * p).sum()),
                        "p_true": float(p[pos]) if pos is not None else 0.0, "set": None}
                 if c.get("floor") is not None:
