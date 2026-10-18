@@ -26,7 +26,7 @@ import requests
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from . import config, feedback as fb, name_equiv
+from . import config, feedback as fb, name_equiv, photo_review as pr
 
 ROLE_TTL = 300.0
 
@@ -79,7 +79,8 @@ def blast_link(seq: dict, staff: bool) -> dict | None:
 
 def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store: fb.Store,
                org: OrgClient | None = None,
-               rescore: Callable[[str], dict] | None = None) -> None:
+               rescore: Callable[[str], dict] | None = None,
+               photos: "pr.ReviewPhotos | None" = None) -> None:
     org = org or OrgClient()
     cache: dict[str, tuple[float, dict]] = {}
     lock = threading.Lock()
@@ -225,6 +226,81 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             out.append({"record_key": key, "name_now": now.get("name"), "vision": answer,
                         "still_disagrees": still})
         return {"item": fb.reviewer_view(store.get(item_id, projects)), "refreshed": out}
+
+    # --- the photo review: one card per record (photo_review.py) ----------------------------
+    def need_photos() -> pr.ReviewPhotos:
+        if photos is None:
+            raise HTTPException(503, "photo review needs the served manifest")
+        return photos
+
+    def card(rec: dict, admin: bool) -> dict:
+        rows = need_photos().of_record(rec["record_key"])
+        shown = {p["photo_key"]: p for p in need_photos().for_viewer(rows, admin)}
+        flagged = {f["photo_key"]: f for f in rec["flagged"]}
+        out = []
+        for key in [r.key for r in rows] + [k for k in flagged if k not in shown]:
+            ph = shown.get(key) or {"photo_key": key, "position": None, "shown": "hidden",
+                                    "hidden_reason": "not in Vision's photo list now"}
+            f = flagged.get(key)
+            out.append({**ph, "flagged": f is not None, "in_tab": key in rec["in_tab"],
+                        "item_id": f and f["item_id"], "flags": f["flags"] if f else [],
+                        "status": f["status"] if f else None,
+                        "decision": f["decision"] if f else None})
+        return {k: v for k, v in rec.items() if k not in ("flagged", "in_tab")} | {"photos": out}
+
+    @app.get("/api/feedback/photo-review")
+    def fb_photo_review(request: Request, tab: str = "all", status: str = "open",
+                        sort: str = "p", min_flagged: int = 1, offset: int = 0, limit: int = 10):
+        _, projects = access(request)
+        try:
+            out = pr.cards(store.items_of(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged)
+        except fb.FeedbackError as e:
+            bad(e)
+        page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]
+        return {"tabs": out["tabs"], "total": out["total"], "reasons": [
+                    {"code": c, "label": t} for c, t in pr.REASONS],
+                "records": [card(r, projects is None) for r in page]}
+
+    @app.post("/api/feedback/photo-review/{record_key}/decision")
+    def fb_photo_review_decide(request: Request, record_key: str, payload: dict = Body(...)):
+        who, projects = access(request)
+        keys = {r.key for r in need_photos().of_record(record_key)}
+        try:
+            done = pr.decide_record(store, record_key, list(payload.get("photos") or []), who,
+                                    keys, note=payload.get("note"), projects=projects)
+        except KeyError:
+            raise HTTPException(404, "no such record in the photo review") from None
+        except fb.FeedbackError as e:
+            bad(e)
+        rec = next((r for r in pr.cards(store.items_of(pr.ITEM_TYPE, projects), "all",
+                                        "any")["records"] if r["record_key"] == record_key), None)
+        return {**done, "record": card(rec, projects is None) if rec else None}
+
+    @app.get("/api/feedback/photo/{photo_key}")
+    def fb_photo(request: Request, photo_key: str, size: str = "thumb"):
+        """Vision's own copy of a photo, for ADMINS on the review pages only (Steve,
+        2026-10-18): private, never stored by the browser or a proxy, and never a photo whose
+        owner declined."""
+        _, projects = access(request)
+        if projects is not None:
+            raise HTTPException(403, "admins only")
+        if size not in ("thumb", "full"):
+            bad(ValueError("size is thumb or full"))
+        row = need_photos().one(photo_key)
+        if row is None:
+            raise HTTPException(404, "no such photo")
+        if need_photos().declined(row, need_photos().permission_view()):
+            raise HTTPException(403, "the photo's owner declined")
+        try:
+            got = need_photos().copy_bytes(row, size)
+        except Exception:
+            got = None
+        if got is None:
+            raise HTTPException(404, "Vision holds no readable copy of this photo")
+        data, media = got
+        return Response(data, media_type=media, headers={
+            "Cache-Control": "private, no-store", "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"})
 
     @app.get("/api/feedback/changes.tsv")
     def fb_changes(request: Request, applies: str = "org", all: bool = False):

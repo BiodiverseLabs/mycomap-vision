@@ -1,0 +1,341 @@
+"""The Human Feedback photo review (Steve, 2026-10-18): the "Photos that show no specimen" queue
+(feedback.TYPES["non_specimen_photo"]) reviewed one RECORD at a time, for speed. Each card holds
+every photo of the record, the flagged ones marked with why and how strongly; a reviewer keeps
+or leaves out each photo with one click and saves the record. Decisions stay per photo
+(feedback.Store.decide on each photo's item, applies="vision"), so the nightly exclusions,
+the change list and the fairness rules are those of every other queue.
+
+Tabs, one per kind of flag, with their counts: a record shows in each tab one of its photos is
+flagged for, with that tab's photos outlined.
+
+Which photos a reviewer sees (Vision's photo rule, identify.py): a CC photo, or one its owner
+let Vision show, by its public URL. An all-rights-reserved photo is a placeholder with its
+position and the record's link, still decidable, EXCEPT for admins (Steve, 2026-10-18, a narrow
+exception): an admin sees it on these signed-in pages only, served by /api/feedback/photo/ from
+Vision's own copy with Cache-Control: private, no-store and no public URL. Never a photo whose
+owner withdrew or declined (photo_permissions), nor an MO photo its owner marked not for
+export.
+"""
+
+from __future__ import annotations
+
+import io
+import re
+from dataclasses import dataclass
+from typing import Callable
+
+from . import feedback as fb
+
+ITEM_TYPE = "non_specimen_photo"
+
+TABS: tuple[tuple[str, str], ...] = (
+    ("micrograph", "Micrographs and microscope set-ups"),
+    ("slip", "Field slips and labels"),
+    ("habitat", "Habitat and scenes"),
+    ("people", "People"),
+    ("gate", "Not a fungus (gate)"),
+    ("other", "Other"),
+)
+TAB_CODES = tuple(c for c, _ in TABS)
+
+# Why a photo is left out; the reviewer picks one (default: the tab's own kind).
+REASONS: tuple[tuple[str, str], ...] = (
+    ("micrograph", "Micrograph or microscope"),
+    ("slip", "Field slip or label"),
+    ("habitat", "Habitat or scene"),
+    ("people", "People"),
+    ("other", "Other"),
+)
+REASON_CODES = tuple(c for c, _ in REASONS)
+
+# The zero-shot views (the miss review's s6) by the tab they belong to.
+VIEW_TABS = {"habitat": "habitat", "scene": "habitat", "landscape": "habitat",
+             "slip": "slip", "label": "slip", "paper": "slip", "text": "slip",
+             "people": "people", "person": "people", "hand": "people",
+             "micrograph": "micrograph", "microscope": "micrograph"}
+
+_PROBE = re.compile(r"micrograph probe p=([0-9.]+)")
+_VIEW = re.compile(r"view (\w+) p=([0-9.]+)")
+_GATE = re.compile(r"gate not_fungus p\(fungus\)=([0-9.]+)")
+
+
+def parse_flags(rule: str) -> list[dict]:
+    """The flags a seeded rule names ('R6 micrograph probe p=0.62; gate not_fungus
+    p(fungus)=0.01'), each {tab, kind, p, strength}: strength orders the queue (the probe's or
+    view's p; for the gate, 1 - p(fungus)). A rule none of these match is one 'other' flag."""
+    out = []
+    for part in (rule or "").split(";"):
+        if m := _PROBE.search(part):
+            p = float(m.group(1))
+            out.append({"tab": "micrograph", "kind": "micrograph probe", "p": p, "strength": p})
+        elif m := _GATE.search(part):
+            p = float(m.group(1))
+            out.append({"tab": "gate", "kind": "not-a-fungus gate", "p": p,
+                        "strength": round(1 - p, 6)})
+        elif m := _VIEW.search(part):
+            p = float(m.group(2))
+            out.append({"tab": VIEW_TABS.get(m.group(1).lower(), "other"),
+                        "kind": f"view {m.group(1)}", "p": p, "strength": p})
+    if not out:
+        out.append({"tab": "other", "kind": (rule or "flagged").strip() or "flagged", "p": None,
+                    "strength": 0.0})
+    return out
+
+
+def record_of_link(link: str) -> str | None:
+    """The record key of a photo item's record link (MO 'mo:<n>', iNat '<n>')."""
+    if m := re.search(r"mushroomobserver\.org/(?:obs|observations)/(\d+)", link or ""):
+        return f"mo:{m.group(1)}"
+    if m := re.search(r"inaturalist\.org/observations/(\d+)", link or ""):
+        return m.group(1)
+    return None
+
+
+def record_of_item(item: dict) -> str | None:
+    for k in item.get("record_keys") or []:
+        return k
+    for link in item.get("links") or []:
+        if key := record_of_link(link):
+            return key
+    return None
+
+
+def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
+          min_flagged: int = 1) -> dict:
+    """Group the queue's photo items by record. `tab` is one of TAB_CODES or 'all'; a record is
+    in a tab when one of its photos is flagged for it, and `status` 'open' keeps records with an
+    open photo in the tab ('decided': every photo in the tab decided; 'any': both). Sorted by the strongest
+    flag in the tab (sort 'p', highest first; 'p_asc' lowest first; 'flagged' most flagged
+    photos first). Gives {"tabs": [{code, title, open, decided}], "total", "records"}."""
+    if tab != "all" and tab not in TAB_CODES:
+        raise fb.FeedbackError(f"unknown tab {tab!r} ({', '.join(TAB_CODES)} or all)")
+    if status not in ("open", "decided", "any"):
+        raise fb.FeedbackError("status is open, decided or any")
+    if sort not in ("p", "p_asc", "flagged"):
+        raise fb.FeedbackError("sort is p, p_asc or flagged")
+    records: dict[str, dict] = {}
+    for it in items:
+        key = record_of_item(it)
+        if key is None:
+            continue
+        rec = records.setdefault(key, {"record_key": key, "label": it.get("current") or "",
+                                       "link": fb.link(key), "flagged": []})
+        last = it.get("last_decision") or None
+        rec["flagged"].append({"item_id": it["id"], "photo_key": it["subject"],
+                               "flags": parse_flags(it.get("rule") or ""),
+                               "status": it["status"],
+                               "decision": last and {"decision": last["decision"],
+                                                     "reason": last.get("value"),
+                                                     "by": last.get("by_name") or last.get("by_user")},
+                               "rule": it.get("rule") or ""})
+
+    def in_tab(photo: dict, t: str) -> bool:
+        return t == "all" or any(f["tab"] == t for f in photo["flags"])
+
+    def state(rec: dict, t: str) -> str | None:
+        ps = [p for p in rec["flagged"] if in_tab(p, t)]
+        if not ps:
+            return None
+        return "open" if any(p["status"] == "open" for p in ps) else "decided"
+
+    tabs = []
+    for code, title in TABS:
+        c = {"open": 0, "decided": 0}
+        for rec in records.values():
+            s = state(rec, code)
+            if s:
+                c[s] += 1
+        tabs.append({"code": code, "title": title, **c})
+    chosen = []
+    for rec in records.values():
+        st = state(rec, tab)
+        if st is None or (status != "any" and st != status):
+            continue
+        mine = [p for p in rec["flagged"] if in_tab(p, tab)]
+        if len(mine) < max(1, int(min_flagged or 1)):
+            continue
+        strongest = max((f["strength"] for p in mine for f in p["flags"]
+                         if tab == "all" or f["tab"] == tab), default=0.0)
+        chosen.append({**rec, "tab": tab, "in_tab": [p["photo_key"] for p in mine],
+                       "strongest": strongest, "flagged_in_tab": len(mine)})
+    if sort == "flagged":
+        chosen.sort(key=lambda r: (-r["flagged_in_tab"], -r["strongest"], r["record_key"]))
+    else:
+        sign = -1 if sort == "p" else 1
+        chosen.sort(key=lambda r: (sign * r["strongest"], r["record_key"]))
+    return {"tabs": tabs, "total": len(chosen), "records": chosen}
+
+
+# --- the record's photos, and the admin-only copy -------------------------------------------------
+
+@dataclass
+class PhotoRow:
+    photo_id: int
+    key: str
+    position: int
+    source: str
+    license_class: str
+    owner_user_id: int | None
+    ok_for_export: int | None
+    source_url: str
+
+
+PHOTOS_SQL = ("select p.photo_id, op.position, p.source, p.source_photo_id, p.license_class, "
+              "p.owner_user_id, p.ok_for_export, p.source_url from observation_photos op "
+              "join photos p on p.photo_id = op.photo_id")
+
+
+def photo_key_of(photo_id: int, source: str, source_photo_id: int | None) -> str:
+    if source == "mo":
+        return f"mo:{source_photo_id or photo_id - fb.MO_PHOTO_ID_OFFSET}"
+    return f"inat:{source_photo_id or photo_id}"
+
+
+def _row(r) -> PhotoRow:
+    return PhotoRow(int(r[0]), photo_key_of(int(r[0]), r[2], r[3]), int(r[1] or 0), r[2],
+                    r[4], r[5], r[6], r[7])
+
+
+class ReviewPhotos:
+    """The record's photos from the manifest Vision serves from, and Vision's own copies.
+
+    `query(sql, params)` runs against that manifest (api.py's locked connection);
+    `permission_view()` the photo permissions now; `read(store, relpath)` gives a copy's
+    bytes (dataset_release.default_store_reader)."""
+
+    THUMB_PX = 480
+    FULL_PX = 1600
+
+    def __init__(self, query: Callable[[str, tuple], list], permission_view: Callable,
+                 read: Callable[[str, str], bytes] | None = None):
+        self.query = query
+        self.permission_view = permission_view
+        if read is None:
+            from .dataset_release import default_store_reader
+            read = default_store_reader()
+        self.read = read
+
+    def of_record(self, record_key: str) -> list[PhotoRow]:
+        return [_row(r) for r in self.query(PHOTOS_SQL + " where op.observation_id = ? "
+                                            "order by op.position, p.photo_id", (record_key,))]
+
+    def one(self, photo_key: str) -> PhotoRow | None:
+        pid = fb.photo_id_of(photo_key)
+        if pid is None:
+            return None
+        rows = self.query(PHOTOS_SQL + " where p.photo_id = ? limit 1", (pid,))
+        return _row(rows[0]) if rows else None
+
+    @staticmethod
+    def declined(row: PhotoRow, view) -> bool:
+        """The owner said no: withdrew or declined Vision's use (iNat), or marked the photo not
+        for export (MO)."""
+        if row.source == "inat":
+            return row.owner_user_id is not None and int(row.owner_user_id) in view.withdrawn
+        return row.source == "mo" and not row.ok_for_export
+
+    def for_viewer(self, rows: list[PhotoRow], admin: bool) -> list[dict]:
+        """Each photo as the reviewer may see it: shown 'public' (its public URL), 'private'
+        (admins only: Vision's own copy behind sign-in) or 'hidden' (a placeholder)."""
+        from .licenses import photo_url
+        view = self.permission_view()
+        out = []
+        for r in rows:
+            d = {"photo_key": r.key, "position": r.position, "license_class": r.license_class}
+            if view.may_show(r.license_class, r.owner_user_id):
+                try:
+                    d.update(shown="public", thumb=photo_url(r.source, r.source_url, "medium"),
+                             full=photo_url(r.source, r.source_url, "large"))
+                except ValueError:
+                    d.update(shown="hidden", hidden_reason="no usable photo URL")
+            elif self.declined(r, view):
+                d.update(shown="hidden", hidden_reason="the owner declined")
+            elif admin:
+                d.update(shown="private", thumb=f"/api/feedback/photo/{r.key}?size=thumb",
+                         full=f"/api/feedback/photo/{r.key}?size=full")
+            else:
+                d.update(shown="hidden", hidden_reason="all rights reserved")
+            out.append(d)
+        return out
+
+    def copy_bytes(self, row: PhotoRow, size: str) -> tuple[bytes, str] | None:
+        """Vision's own copy of the photo (the smallest copy that is big enough), scaled down
+        to the size asked for, as JPEG. None when no copy is held."""
+        copies = self.query("select store, size, path from photo_copies where photo_id = ?",
+                            (row.photo_id,))
+        if not copies:
+            return None
+        rank = {"medium": 0, "large": 1, "small": 2, "original": 3} if size == "thumb" else \
+               {"large": 0, "original": 1, "medium": 2, "small": 3}
+        last_error = None
+        for store, _, path in sorted(copies, key=lambda c: rank.get(c[1], 9)):
+            try:
+                data = self.read(store, path)
+            except Exception as e:                  # a missing file, an unreachable S3
+                last_error = e
+                continue
+            if data:
+                return _scaled(data, self.THUMB_PX if size == "thumb" else self.FULL_PX)
+        if last_error is not None:
+            raise last_error
+        return None
+
+
+def _scaled(data: bytes, px: int) -> tuple[bytes, str]:
+    from PIL import Image
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.thumbnail((px, px))
+        buf = io.BytesIO()
+        im.convert("RGB").save(buf, "JPEG", quality=85)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:                               # not an image PIL reads: refuse to guess
+        raise ValueError("the stored copy is not a readable image") from None
+
+
+def decide_record(store: fb.Store, record_key: str, photos: list[dict], person: dict,
+                  record_photo_keys: set[str], note: str | None = None,
+                  projects: set[str] | None = None) -> dict:
+    """Store a record's photo decisions: each {photo_key, decision: 'keep'|'exclude', reason}
+    on that photo's queue item. A photo no rule flagged that the reviewer leaves out gets an
+    item of its own first (rule 'reviewer: left out in photo review', not model-flagged), so
+    every exclusion has an item, a decision and who made it. Keeping an unflagged photo stores
+    nothing. Refuses a photo that is not the record's, an unknown decision, and an exclusion
+    without one of REASON_CODES."""
+    items = {it["subject"]: it for it in store.items_of(ITEM_TYPE, projects)
+             if record_of_item(it) == record_key}
+    if not items:
+        raise KeyError(record_key)
+    template = next(iter(items.values()))
+    known = record_photo_keys | set(items)
+    plan = []
+    for p in photos:
+        key, decision = str(p.get("photo_key") or ""), str(p.get("decision") or "")
+        reason = (p.get("reason") or "").strip() or None
+        if key not in known:
+            raise fb.FeedbackError(f"{key!r} is not a photo of {record_key}")
+        if decision not in ("keep", "exclude"):
+            raise fb.FeedbackError("a photo's decision is keep or exclude")
+        if decision == "exclude" and reason not in REASON_CODES:
+            raise fb.FeedbackError(f"say why {key} is left out ({', '.join(REASON_CODES)})")
+        plan.append((key, decision, reason))
+    if not plan:
+        raise fb.FeedbackError("no photo decisions")
+    decided = added = 0
+    for key, decision, reason in plan:
+        item = items.get(key)
+        if item is None:
+            if decision == "keep":
+                continue
+            store.seed([{"item_type": ITEM_TYPE, "subject": key,
+                         "rule": "reviewer: left out in photo review", "model_flagged": False,
+                         "links": [fb.link(record_key)], "current": template.get("current"),
+                         "proposed": "leave the photo out of Vision",
+                         "projects": template.get("projects") or []}], "photo-review")
+            item = next(it for it in store.items_of(ITEM_TYPE, None) if it["subject"] == key)
+            added += 1
+        store.decide(item["id"], "exclude_photo" if decision == "exclude" else "keep_photo",
+                     person, value=reason if decision == "exclude" else None, note=note,
+                     projects=projects)
+        decided += 1
+    return {"decided": decided, "added": added}

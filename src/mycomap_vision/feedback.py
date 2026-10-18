@@ -277,6 +277,18 @@ class Store:
         return {"total": len(rows),
                 "items": [self._item(r) for r in rows[offset:offset + limit]]}
 
+    def items_of(self, item_type: str, projects: set[str] | None = None) -> list[dict]:
+        """Every item of a type (within `projects` when given), each with its latest decision
+        as "last_decision" (None while undecided): the photo review groups them by record."""
+        if item_type not in TYPES:
+            raise FeedbackError(f"unknown item type {item_type!r}")
+        rows = self._visible("select * from items where item_type = ? order by id",
+                             (item_type,), projects)
+        last = {r["item_id"]: dict(r) for r in self.conn.execute(
+            "select d.* from decisions d join items i on i.id = d.item_id where i.item_type = ? "
+            "and d.id in (select max(id) from decisions group by item_id)", (item_type,))}
+        return [self._item(r) | {"last_decision": last.get(r["id"])} for r in rows]
+
     def get(self, item_id: int, projects: set[str] | None = None) -> dict:
         r = self.conn.execute("select * from items where id = ?", (item_id,)).fetchone()
         if r is None or (projects is not None and not self._in(r, projects)):
