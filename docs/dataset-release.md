@@ -27,7 +27,7 @@ what the site serves). A serving release says which dataset release its model ca
 | Command | Does |
 |---|---|
 | `mv dataset build --name v1 --freeze-approved "<who, when>" [--exclusions F.tsv …] [--val-weeks 8 \| --val-cutoff D] [--recipes original,long500-q90]` | writes the snapshot from a private copy of the manifest (never writes to it); without `--name` (or with `--dry-run`): a draft |
-| `mv dataset build --name v1-test --test-for v1 --ids new.csv --base-dhash <index> --freeze-approved …` | the test release: only those records, all `test`; refused if any record is in `v1`; a photo byte-identical to a `v1` photo is left out (`copy_in_base`); near-copies are flagged by dHash (§5) |
+| `mv dataset build --name v1-test --test-for v1 --ids new.csv --base-dhash <index> --freeze-approved …` | the test release: only those records, all `test`; refused if any record is in `v1`; a photo byte-identical to a `v1` photo is left out (`copy_in_base`); near-copies are flagged by dHash (§5); a cross-post twin of a `v1` record is left out (`crosspost_twin`, `--twin-exclude-photos <v1 micrograph list>`) |
 | `mv aws-launch-dhash-index v1`, then `mv dataset pull-dhash-index v1` | the dHash index of every included `v1` photo, made once in the bucket's region (`mv dataset dhash-index <id>` makes it here, for a small release) |
 | `mv dataset verify v1 [--photos N\|all]` | recomputes every file hash, every content hash and `release_hash`; with `--photos`, re-reads originals from the store and checks their sha256 |
 | `mv dataset derive v1 --photo <key> --recipe long500-q90 [--out F]` | regenerates one derived image from our original and checks it against the stored hash |
@@ -187,9 +187,23 @@ carries `errata` (file, sha256, records, by reason), so every report and registr
 names it. A key the release lacks refuses the erratum. The AWS launchers do not take it yet
 (the instance would not apply it).
 
-v1's erratum in use is **r3**: 175 rows, 72 `mo_twin_as_inat` and 103 `nonfungal_label`. The
-included records it drops: 42 MO twins, plus 91 `train` and 5 `val` records with a non-fungal
-label.
+v1's erratum in use is **r4** (Steve, 2026-10-18): `v1-errata-r4.tsv`, sha256
+`4ab7a16c47500f6a372baa9d77c89f023be9fe0dccc8cf6d6d231c321ee4578d`, 650 rows = r3's 175
+unchanged (72 `mo_twin_as_inat`, 103 `nonfungal_label`) + 475 `crosspost_twin`. The included
+records it drops: 42 MO twins, 91 `train` and 5 `val` records with a non-fungal label, and 475
+`val` cross-post twins. Earlier revisions, cited by the work done with them:
+
+| revision | file | sha256 | rows |
+|---|---|---|---|
+| r1 | `v1-errata.tsv` | `0b7f63fa…` | MO twins |
+| r2 | `v1-errata-r2.tsv` | `eccf79b9…6277` | 174: 71 `mo_twin_as_inat` + 103 `nonfungal_label` |
+| r3 | `v1-errata-r3.tsv` | `89bad560ce888850725270ed5516ccc6dce3e5af06521c544ff880c8651a74da` | 175: 72 + 103 |
+| **r4** | `v1-errata-r4.tsv` | `4ab7a16c47500f6a372baa9d77c89f023be9fe0dccc8cf6d6d231c321ee4578d` | 650: r3 + 475 `crosspost_twin` |
+
+r4 was written by `mv dataset errata v1 --reasons crosspost_twin --base v1-errata-r3.tsv
+--exclude-photos v1-micrograph-photos-2026-10-18.tsv --out v1-errata-r4.tsv`, against the
+release's dHash index (sha256 `4727baac…2860`) and the micrograph list (12,188 photos, sha256
+`a34d8cc6d733b9d6f926786e45381636b4665eea49f2200f2bef4dfcf147547a`, beside it).
 
 - `mo_twin_as_inat` (v1, found 2026-10-13): mycomap.org holds 71 iNaturalist rows that share
   their number and a validation project with an 'MO Observations' row (OMDL1/OMDL2, made by
@@ -216,6 +230,17 @@ label.
   and `mv fetch-taxonomy` (and the nightly's taxonomy step) asks iNat the kingdoms of
   every taxon named like a genus that has no fungal genus (`outside_fungi`); a night that
   learns some marks itself changed, so the served index is rebuilt.
+- `crosspost_twin` (v1, found 2026-10-18 by the v1 miss review; Steve: erratum r4): one find
+  posted to both Mushroom Observer and iNaturalist became two v1 records; where one landed in
+  `train` and the other in `val`, the val find's own photo was in the reference (476 of the 480
+  such val finds were answered right). Rule (`errata.match_twins`, `crosspost_twin_pairs`): an
+  included MO record and an included iNat record with the same label and a photo within 3
+  dHash bits (the release's index); a hash on the photos of 4 or more records (a template:
+  microscope field, slip form) and the photos of the `--exclude-photos` list (micrographs)
+  never pair. The val side of each pair straddling `train` and `val` is listed. Twins within
+  one split stay: train/train duplicates a reference (2,098 pairs; record-grouped scoring
+  groups them), val/val holds no reference (54). The test builder applies the same rule to
+  a test release (§5).
 
 ## 5. Splits
 
@@ -243,6 +268,13 @@ Steve, 2026-10-09: "I will provide a new dataset for testing of new records." So
     it is for another release_hash, another algorithm or Pillow, or misses a `vN` photo.
     Scoring reads `rel.near_base()`. No model is involved, so the check runs before the seal
     is broken.
+  - a test record that is the cross-post twin of an included `vN` record (the same find
+    posted to MO and iNat: the same label and a photo within 3 dHash bits; the rule of v1's
+    erratum r4, `errata.match_twins`) is left out as `crosspost_twin` and its photos as
+    `record_excluded`; MANIFEST's `crosspost_twin` gives the rule, the records and photos
+    dropped and the exclusion list's sha256. Templates (a hash on 4 or more records, base and
+    test together) and the base photos of `--twin-exclude-photos` (the base's micrograph
+    list) never pair. It needs `--base-dhash`; a draft without it drops nothing and says so.
   - The `vN` index is kept beside the release, never in it: s3
     `research-release-extras/<id>/dhash-index.npz` (sha256 in its metadata), here
     `data/research-release-extras/<id>/`.

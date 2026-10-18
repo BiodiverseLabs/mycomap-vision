@@ -141,55 +141,71 @@ class TwinPair:
     bits: int
 
 
+def template_hashes(hash_records) -> set[int]:
+    """Hashes on the photos of TEMPLATE_RECORDS or more different records (microscope
+    fields, slip forms): they say nothing about the specimen, so they never make a twin.
+    `hash_records`: (dhash, record key) for every photo considered."""
+    from collections import defaultdict
+    seen = defaultdict(set)
+    for h, r in hash_records:
+        seen[int(h)].add(r)
+    return {h for h, rs in seen.items() if len(rs) >= TEMPLATE_RECORDS}
+
+
+def match_twins(photos, templates=frozenset()) -> dict[tuple[str, str], tuple[str, str, int]]:
+    """The cross-post rule on photos given as (photo_key, record_key, label, source, dhash):
+    an 'mo' and an 'inat' record with the same label and a photo within TWIN_MAX_BITS bits,
+    template hashes left out. Returns {(mo record, inat record): (mo photo, inat photo,
+    bits)}, the closest photos of each record pair. Shared by the erratum (crosspost_twin_pairs)
+    and the test-release builder (dataset_release.drop_crosspost_twins)."""
+    from collections import defaultdict
+    usable = [(k, r, lab, src, int(h)) for k, r, lab, src, h in photos
+              if int(h) not in templates]
+    # Two hashes within 3 bits agree exactly on at least one of their four 16-bit blocks.
+    blocks = [defaultdict(list) for _ in range(4)]
+    for x in usable:
+        if x[3] == "inat":
+            for b in range(4):
+                blocks[b][(x[4] >> (16 * b)) & 0xFFFF].append(x)
+    best: dict[tuple[str, str], tuple[str, str, int]] = {}
+    for mk, mr, ml, msrc, mh in usable:
+        if msrc != "mo":
+            continue
+        cand = {}
+        for b in range(4):
+            for y in blocks[b].get((mh >> (16 * b)) & 0xFFFF, ()):
+                cand[y[0]] = y
+        for ik, ir, il, _, ih in cand.values():
+            bits = bin(mh ^ ih).count("1")
+            if bits > TWIN_MAX_BITS or ml != il:
+                continue
+            old = best.get((mr, ir))
+            if old is None or (bits, mk, ik) < (old[2], old[0], old[1]):
+                best[(mr, ir)] = (mk, ik, bits)
+    return best
+
+
 def crosspost_twin_pairs(release, index: dict, exclude_photos=frozenset(),
                          skip=frozenset()) -> list[TwinPair]:
     """Every MO <-> iNat cross-post pair of the release's included records, in any splits
-    (rule in the module docstring), one per record pair (its closest photos), sorted.
-    `index` is the release's dHash index (dhash.load_index; checked against the release);
-    `exclude_photos` holds photo keys that never pair (micrographs); records in `skip`
-    (already in an erratum, so in no split) never pair."""
-    from collections import defaultdict
-
+    (rule in the module docstring; match_twins), one per record pair (its closest photos),
+    sorted. `index` is the release's dHash index (dhash.load_index; checked against the
+    release); `exclude_photos` holds photo keys that never pair (micrographs); records in
+    `skip` (already in an erratum, so in no split) never pair."""
     from . import dhash
     dhash.check_index(index, release)
     recs = {k: (label, split, source) for k, label, split, source in release.db.execute(
         "select record_key, label, split, source from records where included = 1")}
     rec_of = dict(release.db.execute("select photo_key, record_key from photos "
                                      "where included = 1"))
-    keys = index["photo_key"]
-    hashes = [int(h) for h in index["dhash"]]
-    records_of_hash = defaultdict(set)
-    for k, h in zip(keys, hashes):
-        records_of_hash[h].add(rec_of.get(k))
-    templates = {h for h, rs in records_of_hash.items() if len(rs) >= TEMPLATE_RECORDS}
-    by_source = defaultdict(list)
-    for i, k in enumerate(keys):
-        r = rec_of.get(k)
-        if r in recs and r not in skip and hashes[i] not in templates and k not in exclude_photos:
-            by_source[recs[r][2]].append(i)
-    # Two hashes within 3 bits agree exactly on at least one of their four 16-bit blocks.
-    blocks = [defaultdict(list) for _ in range(4)]
-    for j in by_source.get("inat", []):
-        for b in range(4):
-            blocks[b][(hashes[j] >> (16 * b)) & 0xFFFF].append(j)
-    best: dict[tuple[str, str], TwinPair] = {}
-    for i in by_source.get("mo", []):
-        cand = set()
-        for b in range(4):
-            cand.update(blocks[b].get((hashes[i] >> (16 * b)) & 0xFFFF, ()))
-        mo = rec_of[keys[i]]
-        for j in cand:
-            bits = bin(hashes[i] ^ hashes[j]).count("1")
-            inat = rec_of[keys[j]]
-            if bits > TWIN_MAX_BITS or recs[mo][0] != recs[inat][0]:
-                continue
-            pair = TwinPair(mo, inat, recs[mo][0], recs[mo][1], recs[inat][1], keys[i], keys[j],
-                            bits)
-            old_pair = best.get((mo, inat))
-            if old_pair is None or (bits, keys[i], keys[j]) < (old_pair.bits, old_pair.mo_photo,
-                                                                old_pair.inat_photo):
-                best[(mo, inat)] = pair
-    return [best[k] for k in sorted(best)]
+    keys, hashes = index["photo_key"], [int(h) for h in index["dhash"]]
+    templates = template_hashes((h, rec_of.get(k)) for k, h in zip(keys, hashes))
+    photos = [(k, rec_of[k], recs[rec_of[k]][0], recs[rec_of[k]][2], h)
+              for k, h in zip(keys, hashes)
+              if rec_of.get(k) in recs and rec_of[k] not in skip and k not in exclude_photos]
+    pairs = match_twins(photos, templates)
+    return [TwinPair(mo, inat, recs[mo][0], recs[mo][1], recs[inat][1], mp, ip, bits)
+            for (mo, inat), (mp, ip, bits) in sorted(pairs.items())]
 
 
 def crosspost_twin_rows(release, index: dict, exclude_photos=frozenset(),
