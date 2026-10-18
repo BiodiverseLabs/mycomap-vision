@@ -89,6 +89,17 @@ def species_top(best: np.ndarray, second: np.ndarray, kept: np.ndarray,
     return m1, top2.astype(np.float32)
 
 
+def truth_units_by_key(units: list[str], species_of_unit) -> dict[str, list[int]]:
+    """{answer key: species unit indexes} (PLAN rule 7, the key name_equiv.ReferenceDepth
+    pools by): a species and its varieties are one truth; a hybrid code keeps its own."""
+    from .name_equiv import answer_key
+    out: dict[str, list[int]] = defaultdict(list)
+    for i, u in enumerate(units):
+        if species_of_unit[i] >= 0 and u:
+            out[answer_key(u)].append(i)
+    return dict(out)
+
+
 def kept_means(rec_sums: np.ndarray, kept: np.ndarray, unit_rec_starts: np.ndarray) -> np.ndarray:
     """(S, d) unit-length average photo of each species over its kept records (zeros for
     a species with none)."""
@@ -359,6 +370,7 @@ def score_release(args) -> None:
     import sqlite3
 
     from . import config
+    from .name_equiv import answer_key
     from .embed import load_embeddings
     from .evaluate import build_index
     from .replications.fungitastic import dataset
@@ -401,7 +413,7 @@ def score_release(args) -> None:
             cache.mkdir(parents=True, exist_ok=True)
             np.save(cache / f"ref-{tag}.npy", ref)
             np.save(cache / f"recsums-{tag}.npy", rec_sums)
-    units = {u: i for i, u in enumerate(lay.units)}
+    units_of_key = truth_units_by_key(lay.units, lay.species_of_unit)
     genera = {g: i for i, g in enumerate(lay.genus_names)}
     benchmark = {str(r["record_key"]): r["benchmark"] for r in rel.records("val")}
     queries, skipped = [], Counter()
@@ -409,8 +421,9 @@ def score_release(args) -> None:
         if not r.photo_rows:
             skipped["no vectors"] += 1
             continue
-        tu = [units[r.species]] if r.species in units and lay.species_of_unit[
-            units[r.species]] >= 0 else []
+        # PLAN rule 7: the truth is every species unit sharing its answer key (a species
+        # with its varieties; a hybrid code its own), so depth and "add N more" pool them.
+        tu = units_of_key.get(answer_key(r.species), []) if r.species else []
         tg = [genera[r.genus]] if r.genus in genera else []
         queries.append((r.observation_id, np.asarray(vecs[r.photo_rows], np.float32),
                         {"species": r.species, "genus": r.genus, "units": tu, "genera": tg}))
@@ -521,14 +534,15 @@ def _score_core(args, log, out_dir, lay, clean, is_bad, ref, rec_sums, cache, ta
         for j, i in enumerate(batch_ids):
             oid, v, t = queries[i]
             rows = np.flatnonzero(owner == j)
-            if len(t["units"]) != 1:
+            if not t["units"]:
                 continue
-            u = t["units"][0]
-            lo = lay.unit_rec_starts[u]
-            hi = lay.unit_rec_starts[u + 1] if u + 1 < S else R
-            recs = np.arange(lo, hi)[clean[lo:hi]]
-            truth_info[oid] = {"unit": u, "n_clean": int(len(recs)),
-                               "n_with_bad": int(hi - lo)}
+            # the truth's records over every unit of its answer key, in record order
+            spans = [(lay.unit_rec_starts[u], lay.unit_rec_starts[u + 1] if u + 1 < S else R)
+                     for u in sorted(t["units"])]
+            recs = np.concatenate([np.arange(lo, hi)[clean[lo:hi]] for lo, hi in spans])
+            truth_info[oid] = {"unit": int(min(t["units"])), "units": sorted(t["units"]),
+                               "n_clean": int(len(recs)),
+                               "n_with_bad": int(sum(hi - lo for lo, hi in spans))}
             if not len(recs):
                 continue
             B, S2 = best[rows][:, recs], second[rows][:, recs]
@@ -538,18 +552,27 @@ def _score_core(args, log, out_dir, lay, clean, is_bad, ref, rec_sums, cache, ta
                 for cap in args.caps:
                     if cap > len(recs) and cap != args.caps[-1]:
                         continue
-                    sel = ordr[:min(cap, len(recs))]
-                    bb_, ss_ = B[:, sel], S2[:, sel]
-                    m1 = bb_.max(axis=1)
-                    vals = np.concatenate([bb_, ss_], axis=1)
-                    top2v = np.sort(vals, axis=1)[:, -2:]
-                    t2 = np.where(np.isfinite(top2v[:, 0]), top2v.mean(axis=1), top2v[:, 1])
-                    sm = rec_sums[rk[:min(cap, len(recs))]].sum(axis=0)
-                    sm = sm / max(np.linalg.norm(sm), 1e-12)
-                    ms = v @ sm
-                    capped["nearest"][oid][(min(cap, len(recs)), s)] = float(m1.mean())
-                    capped["nearest+mean"][oid][(min(cap, len(recs)), s)] = float(
-                        blend(t2, ms).mean())
+                    sel_all = ordr[:min(cap, len(recs))]
+                    # The kept records are split by unit and each unit is scored on its
+                    # own, as the full reference scores them; the truth's score is its
+                    # best unit (one unit for most truths).
+                    unit_of = lay.rec_unit[recs[sel_all]]
+                    best_nn, best_nm = -np.inf, -np.inf
+                    for uu in np.unique(unit_of):
+                        sel = sel_all[unit_of == uu]
+                        bb_, ss_ = B[:, sel], S2[:, sel]
+                        m1 = bb_.max(axis=1)
+                        vals = np.concatenate([bb_, ss_], axis=1)
+                        top2v = np.sort(vals, axis=1)[:, -2:]
+                        t2 = np.where(np.isfinite(top2v[:, 0]), top2v.mean(axis=1),
+                                      top2v[:, 1])
+                        sm = rec_sums[recs[sel]].sum(axis=0)
+                        sm = sm / max(np.linalg.norm(sm), 1e-12)
+                        ms = v @ sm
+                        best_nn = max(best_nn, float(m1.mean()))
+                        best_nm = max(best_nm, float(blend(t2, ms).mean()))
+                    capped["nearest"][oid][(min(cap, len(recs)), s)] = best_nn
+                    capped["nearest+mean"][oid][(min(cap, len(recs)), s)] = best_nm
 
     ids_in_batch = []
     photos_in_batch = 0
