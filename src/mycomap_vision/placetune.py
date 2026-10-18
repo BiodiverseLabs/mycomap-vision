@@ -610,10 +610,20 @@ def learn_log_f(c: Components, a: AtlasComponents, rows: np.ndarray, in_reach: b
 
 
 def combine_atlas(c: Components, a: AtlasComponents, s: dict, log_f: np.ndarray,
-                  T: float = PHOTO_TEMPERATURE) -> np.ndarray:
-    """(n, K) scores of an Atlas arm. The DNA boost is the served one (shrink 3)."""
+                  T: float = PHOTO_TEMPERATURE, base: dict | None = None) -> np.ndarray:
+    """(n, K) scores of an Atlas arm. The DNA boost is the one served when the arms were
+    declared (boost-2026-10-11, shrink 3). `base` (exploratory, not declared): another
+    place setting the arm sits on instead, e.g. penalty-500-2026-10-13; its own scores,
+    with the mapped taxa's DNA boost replaced by the arm's Atlas term (P2c/P2c-u only)."""
     from . import atlasprior as ap
     cap = pp.BOOST["cap"]
+    if base is not None:
+        if s["arm"] not in ("P2c", "P2c-u"):
+            raise ValueError("a base setting is only for P2c / P2c-u")
+        tr = ap.trust(a.strength, a.models, a.rank_sd, a.aoa, s["applicability"], s["trust"])
+        atl = ap.atlas_boost(a.rank, s["weight"] * tr, log_f)
+        boost = pp.BOOST["place_weight"] * np.clip(c.boost[base["shrink"]], 0.0, cap)
+        return combine(c, base, T) + np.where(a.mapped, atl - boost, 0.0)
     dna = pp.BOOST["place_weight"] * np.clip(c.boost[3.0], 0.0, cap)
     tr = ap.trust(a.strength, a.models, a.rank_sd, a.aoa, s["applicability"], s["trust"])
     arm = s["arm"]
@@ -645,32 +655,54 @@ def choose_atlas(sp, ge, rows, grid, allowed) -> int:
 
 def nested_cv_atlas(c: Components, a: AtlasComponents, folds: np.ndarray, grid: list[dict],
                     band: np.ndarray | None = None, base: np.ndarray | None = None,
-                    margin: float = MARGIN) -> dict:
-    """As nested_cv, with f learned on each fold's training records too."""
+                    margin: float = MARGIN, base_ge: np.ndarray | None = None,
+                    on: dict | None = None, fixed: list | None = None) -> dict:
+    """As nested_cv, with f learned on each fold's training records too. With `band` and
+    `base` (P0's species right; `base_ge` its genus right): only settings holding the band
+    within `margin` on the training folds may be chosen, else the fold gets P0. `on`: the
+    place setting the arm sits on (combine_atlas's base). `fixed`: per fold, a setting to
+    use instead of choosing (P2c-u takes P2c's fold picks with trust off)."""
     n = len(c.S)
     cv_sp, cv_ge = np.zeros(n, bool), np.zeros(n, bool)
-    chosen, factors = [], []
+    chosen, factors, settings_used = [], [], []
     for f in range(int(folds.max()) + 1):
         test = folds == f
         train = np.flatnonzero(~test)
         lf = {r: learn_log_f(c, a, train, r) for r in (False, True)}
+        if fixed is not None:
+            s = fixed[f]
+            if s is None:
+                chosen.append(None), factors.append(None), settings_used.append(None)
+                cv_sp[test] = base[test]
+                if base_ge is not None:
+                    cv_ge[test] = base_ge[test]
+                continue
+            log_f = lf[s["arm"] in IN_REACH_ARMS]
+            sp1, ge1 = top1(c, combine_atlas(c, a, s, log_f, base=on))
+            chosen.append(None), factors.append(log_f), settings_used.append(s)
+            cv_sp[test], cv_ge[test] = sp1[test], ge1[test]
+            continue
         sp = np.zeros((len(grid), n), bool)
         ge = np.zeros_like(sp)
         for j, s in enumerate(grid):
-            sp[j], ge[j] = top1(c, combine_atlas(c, a, s, lf[s["arm"] in IN_REACH_ARMS]))
+            sp[j], ge[j] = top1(c, combine_atlas(c, a, s, lf[s["arm"] in IN_REACH_ARMS],
+                                                 base=on))
         ok = np.ones(len(grid), bool)
         if band is not None:
             ok &= holds_band(sp, base, train, band, margin)
         if not ok.any():
-            chosen.append(None)
-            factors.append(None)
+            chosen.append(None), factors.append(None), settings_used.append(None)
             cv_sp[test] = base[test]
+            if base_ge is not None:
+                cv_ge[test] = base_ge[test]
             continue
         j = choose_atlas(sp, ge, train, grid, ok)
         chosen.append(j)
-        factors.append(lf[grid[j]["arm"] in IN_REACH_ARMS].round(4).tolist())
+        factors.append(lf[grid[j]["arm"] in IN_REACH_ARMS])
+        settings_used.append(grid[j])
         cv_sp[test], cv_ge[test] = sp[j, test], ge[j, test]
-    return {"chosen": chosen, "log_f": factors, "species_right": cv_sp, "genus_right": cv_ge}
+    return {"chosen": chosen, "log_f": factors, "settings": settings_used,
+            "species_right": cv_sp, "genus_right": cv_ge}
 
 
 def primary_test(p0_sp: np.ndarray, arm_sp: np.ndarray, has_sp: np.ndarray,

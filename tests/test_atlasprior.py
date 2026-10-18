@@ -265,3 +265,83 @@ def test_a_capped_aoa_is_far_outside_and_only_a_null_is_unknown(tmp_path):
     assert view.aoa[i01] == 254 and view.aoa[c01] == ap.NO_DATA
     graded = ap.applicability(view.aoa[[i01, c01]], "graded")
     assert graded[0] == pytest.approx(np.exp(-1.54)) and graded[1] == 0.0
+
+
+# --- the R_train evaluation (scripts/place_scoring/run_atlas.py) -----------------------------
+
+def test_p2c_on_another_place_setting_swaps_only_the_mapped_taxas_boost():
+    from mycomap_vision import placeprior as pp
+    from mycomap_vision import placetune as pt
+    c, a = arm_components()
+    base = {**pt.SERVED, **pp.PLACE_SETTINGS["penalty-500-2026-10-13"]}
+    log_f = np.full(ap.RANK_BINS, 1.0)
+    s = {"arm": "P2c", "weight": 0.5, "applicability": "cut", "trust": True}
+    z = pt.combine_atlas(c, a, s, log_f, base=base)[0]
+    plain = pt.combine(c, base)[0]
+    assert z[2] == pytest.approx(plain[2])                     # unmapped: the base as is
+    assert z[0] == pytest.approx(plain[0] - 1.0 + 0.5 * 0.8)   # mapped: boost -> Atlas term
+    with pytest.raises(ValueError):
+        pt.combine_atlas(c, a, {**s, "arm": "P2d", "outside_penalty": 1.0}, log_f, base=base)
+
+
+def test_a_fold_with_no_setting_holding_the_band_gets_photos_only_at_genus_too():
+    import dataclasses
+    from mycomap_vision import placetune as pt
+    c, a = arm_components()
+    two = lambda obj: type(obj)(**{                                    # noqa: E731
+        f.name: ({k: np.repeat(v, 2, axis=0) for k, v in getattr(obj, f.name).items()}
+                 if isinstance(getattr(obj, f.name), dict) else
+                 np.repeat(getattr(obj, f.name), 2, axis=0)
+                 if isinstance(getattr(obj, f.name), np.ndarray) else getattr(obj, f.name))
+        for f in dataclasses.fields(obj)})
+    c, a = two(c), two(a)
+    c.truth_at = np.array([1, 1])          # the truth is the candidate the arm can't lift
+    grid = [{"family": "atlas", "arm": "P2c", "weight": 1.0, "applicability": "cut",
+             "trust": True}]
+    base_sp, base_ge = np.array([True, True]), np.array([True, True])
+    res = pt.nested_cv_atlas(c, a, np.array([0, 1]), grid, band=np.array([True, True]),
+                             base=base_sp, base_ge=base_ge, margin=0.0)
+    assert res["chosen"] == [None, None]   # the arm loses the band on each training fold
+    assert res["species_right"].tolist() == [True, True]
+    assert res["genus_right"].tolist() == [True, True]
+
+
+def test_p2c_u_reuses_each_folds_p2c_pick_with_trust_off():
+    from mycomap_vision import placetune as pt
+    c, a = arm_components()
+    s = {"family": "atlas", "arm": "P2c", "weight": 0.5, "applicability": "cut", "trust": True}
+    res = pt.nested_cv_atlas(c, a, np.array([0]), [], fixed=[pt.p2c_u(s)])
+    assert res["settings"] == [{**s, "arm": "P2c-u", "trust": False}]
+
+
+def run_atlas_module():
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).parent.parent / "scripts" / "place_scoring" / "run_atlas.py"
+    spec = importlib.util.spec_from_file_location("run_atlas", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_leak_check_matches_atlas_and_release_sources_by_id():
+    ra = run_atlas_module()
+    assert ra.source_key("iNaturalist", " 123 ") == ("inat", "123")
+    assert ra.source_key("MO Observations", "9") == ("mo", "9")
+
+    class Rel:
+        def records(self, split):
+            return {"val": [{"source": "inat", "source_id": "1"}],
+                    "train": [{"source": "inat", "source_id": "2"},
+                              {"source": "mo", "source_id": "3"}]}[split]
+    got = ra.leak_counts({("inat", "2"), ("mo", "3")}, Rel())
+    assert got["val"]["in_trained_ids"] == 0 and got["train"]["in_trained_ids"] == 2
+    assert ra.leak_counts({("inat", "1")}, Rel())["val"]["in_trained_ids"] == 1
+
+
+def test_holm_and_auc():
+    ra = run_atlas_module()
+    adj = ra.holm({"a": 0.01, "b": 0.04, "c": 0.03})
+    assert adj == {"a": 0.03, "c": 0.06, "b": 0.06}
+    assert ra.auc([3, 4], [1, 2]) == 1.0 and ra.auc([1], [1]) == 0.5
+    assert ra.wilson(0, 0) is None and ra.wilson(50, 100)[0] < 0.5 < ra.wilson(50, 100)[1]
