@@ -228,7 +228,7 @@ def cmd_components(args) -> None:
 
 # --- tune ---------------------------------------------------------------------------------
 
-def load_components(out: Path):
+def load_components(out: Path, answer_key: str | None = None):
     import numpy as np
     from mycomap_vision import placetune as pt
     z = np.load(out / "val-components.npz")
@@ -241,6 +241,9 @@ def load_components(out: Path):
         berth=z["berth"], km_dna=z["km_dna"].astype(np.float64),
         km_inat=z["km_inat"].astype(np.float64), n_place=z["n_place"].astype(np.float64),
         off_season=z["off_season"])
+    # Species right by the answer key (name_equiv), not by the truth's own column.
+    c.credited = pt.credited_candidates(c.cand, c.SP, m["group_names"], m["truth_name"],
+                                        answer_key)
     return c, {k: m[k] for k in m.files}
 
 
@@ -263,7 +266,7 @@ def cmd_tune(args) -> None:
     from mycomap_vision.heldout_summary import by_reference_depth, ladder
     t0 = time.time()
     out = Path(args.out)
-    c, meta = load_components(out)
+    c, meta = load_components(out, args.answer_key)
     keep = ~meta["guest"]
     c = subset(c, keep)
     meta = {k: (v[keep] if isinstance(v, np.ndarray) and v.shape[:1] == keep.shape else v)
@@ -416,6 +419,7 @@ def cmd_tune(args) -> None:
     report["mcnemar_species_vs_photos_only"] = {
         name: mcnemar(v["out_of_fold"]["vs_photos_only"]["broken"],
                       v["out_of_fold"]["vs_photos_only"]["fixed"]) for name, v in picks.items()}
+    report["answer_key"] = args.answer_key or name_equiv.ANSWER_KEY
     path = out / "tuning.json"
     path.write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
     print(f"-> {path} [{time.time() - t0:.0f}s]")
@@ -455,6 +459,8 @@ def main(argv=None) -> None:
     ap.add_argument("--store", help="occurrence store (default: data/occurrence's)")
     ap.add_argument("--named-case", action="append", help="a record_key to report by name")
     ap.add_argument("--errata", help="the release's erratum TSV (errata.py)")
+    ap.add_argument("--answer-key", help="tune: name_equiv's answer key (default: the current "
+                                         "key; 'exact' = v1's published rule)")
     ap.add_argument("--paper-attrs", help="`mv paper-attrs` TSV: use the paper's distance_band "
                     "(public points) for the bands and the 300-1,500 km rule")
     args = ap.parse_args(argv)
