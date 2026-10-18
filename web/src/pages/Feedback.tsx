@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, ChevronDown, Download, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/Layout";
 import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem, type FeedbackItemDetail,
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
-         type LiveRecord, type RefreshedRecord, type Top5 } from "@/lib/api";
-import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, itemBadges,
-         PAGE_SIZE, pageText, prefillValue, recordLabel, refreshVerdict, shownRule, storedVerdict,
-         takesPhotoKeys, whenText, yes, type Verdict } from "@/lib/feedback";
+         type LiveRecord, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
+         type Top5 } from "@/lib/api";
+import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess,
+         historyOrgText, itemBadges, linkedItem, orgChipClass, PAGE_SIZE, pageText, prefillValue,
+         recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
+         valueBox, whenText, yes, type Verdict } from "@/lib/feedback";
 import { LABEL_REVIEW_TYPE } from "@/lib/labelReview";
 import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
 import { LabelReview } from "./LabelReview";
@@ -65,6 +67,11 @@ export function FeedbackPage() {
   const catalogue = useQuery({ queryKey: ["feedback", "catalogue"], queryFn: feedbackApi.catalogue,
                                enabled: ok, staleTime: Infinity });
   const [picked, setPicked] = useState<string | null>(null);
+  const [linkedId] = useState(() => linkedItem(location.search));
+  const linked = useQuery({ queryKey: ["feedback", "item", linkedId], enabled: ok && linkedId != null,
+                            queryFn: () => feedbackApi.item(linkedId!), retry: false });
+  useEffect(() => { if (linked.data && picked == null) setPicked(linked.data.item_type); },
+            [linked.data, picked]);
   const types = summary.data ?? [];
   const selected = picked ?? (types.find((t) => t.open > 0) ?? types[0])?.type ?? null;
   const sel = types.find((t) => t.type === selected);
@@ -88,7 +95,8 @@ export function FeedbackPage() {
               ? <PhotoReview key={sel.type} summary={sel} />
               : sel.type === LABEL_REVIEW_TYPE
                 ? <LabelReview key={sel.type} summary={sel} />
-                : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data} />)}
+                : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data}
+                             linked={linked.data?.item_type === sel.type ? stripDetail(linked.data) : undefined} />)}
           </>
         )}
       </div>
@@ -145,13 +153,21 @@ function useDebounced<T>(value: T, ms = 300): T {
   return v;
 }
 
-function TypeQueue({ summary, type, me }: { summary: FeedbackSummary; type?: FeedbackType; me: FeedbackMe }) {
+function TypeQueue({ summary, type, me, linked }: {
+  summary: FeedbackSummary; type?: FeedbackType; me: FeedbackMe; linked?: FeedbackItem;
+}) {
   const [status, setStatus] = useState<FeedbackStatus>("open");
   const [text, setText] = useState("");
   const q = useDebounced(text.trim());
   const [offset, setOffset] = useState(0);
-  const [openId, setOpenId] = useState<number | null>(null);
-  useEffect(() => { setOffset(0); setOpenId(null); }, [status, q]);
+  const [openId, setOpenId] = useState<number | null>(linked?.id ?? null);
+  const [showLinked, setShowLinked] = useState(!!linked);
+  const shown = useRef({ status, q });          // the linked item stays open until these change
+  useEffect(() => {
+    if (shown.current.status === status && shown.current.q === q) return;
+    shown.current = { status, q };
+    setOffset(0); setOpenId(null); setShowLinked(false);
+  }, [status, q]);
   const list = useQuery({
     queryKey: ["feedback", "items", summary.type, status, q, offset],
     queryFn: () => feedbackApi.items({ type: summary.type, status, q, offset, limit: PAGE_SIZE }),
@@ -188,8 +204,17 @@ function TypeQueue({ summary, type, me }: { summary: FeedbackSummary; type?: Fee
           {q ? "Nothing matches that search." : status === "open" ? "Nothing open here." : "Nothing decided yet."}
         </p>
       )}
+      {showLinked && linked && (
+        <div className="space-y-1">
+          <p className="text-xs text-muted-foreground">Linked from mycomap.org's Name Update:</p>
+          <ul>
+            <ItemRow item={linked} type={type} me={me} open={openId === linked.id}
+                     onToggle={() => setOpenId(openId === linked.id ? null : linked.id)} />
+          </ul>
+        </div>
+      )}
       <ul className="space-y-2">
-        {items.map((it) => (
+        {items.filter((it) => !(showLinked && it.id === linked?.id)).map((it) => (
           <ItemRow key={it.id} item={it} type={type} me={me} open={openId === it.id}
                    onToggle={() => setOpenId(openId === it.id ? null : it.id)} />
         ))}
@@ -243,6 +268,7 @@ function ItemRow({ item, type, me, open, onToggle }: {
             {item.status === "decided" && (
               <span className="rounded-full bg-myco-green/10 px-2 py-0.5 text-[11px] font-medium text-myco-green">decided</span>
             )}
+            {item.status === "decided" && item.org_chip && <OrgChipBadge chip={item.org_chip} />}
             {rule && <span className="break-words">{rule}</span>}
           </span>
         </span>
@@ -267,13 +293,29 @@ function useItemUpdate(id: number) {
 }
 
 function stripDetail(d: FeedbackItemDetail): FeedbackItem {
-  const { decisions: _d, refreshes: _r, live: _l, ...rest } = d;
-  return rest;
+  const { decisions: _d, refreshes: _r, live: _l, org_request: org, ...rest } = d;
+  return { ...rest, org_chip: org?.chip ?? null };
+}
+
+function OrgChipBadge({ chip }: { chip: OrgChip }) {
+  return (
+    <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${orgChipClass(chip.tone)}`}
+          data-testid="feedback-org-chip">
+      {chip.text}
+    </span>
+  );
 }
 
 function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: FeedbackMe }) {
   const q = useQuery({ queryKey: ["feedback", "item", id], queryFn: () => feedbackApi.item(id) });
   const item = q.data;
+  const qc = useQueryClient();
+  const chip = item?.org_request?.chip ?? null;
+  useEffect(() => {          // opening the item read .org: its row's chip follows
+    if (!chip) return;
+    qc.setQueriesData<{ total: number; items: FeedbackItem[] }>({ queryKey: ["feedback", "items"] }, (old) =>
+      old && { ...old, items: old.items.map((x) => (x.id === id ? { ...x, org_chip: chip } : x)) });
+  }, [qc, id, chip?.text, chip?.tone]); // eslint-disable-line react-hooks/exhaustive-deps
   if (q.isPending) return <p className="border-t px-3 py-3 text-sm text-muted-foreground">Loading…</p>;
   if (q.error || !item) {
     return <p className={`border-t px-3 py-3 text-sm ${BODY}`}>This item could not be loaded.</p>;
@@ -311,6 +353,9 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
           after your decision.
         </p>
       ) : item.record_keys.length > 0 && <Refresh item={item} />}
+      {item.org_request && (
+        <OrgRequestBlock item={item} org={item.org_request} checking={q.isFetching} onCheck={() => q.refetch()} />
+      )}
       <History item={item} type={type} />
     </div>
   );
@@ -431,6 +476,13 @@ function Decide({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType 
   const [note, setNote] = useState("");
   const [photoKeys, setPhotoKeys] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
+  const box = choice ? valueBox(choice) : null;
+  const typed = useDebounced(value.trim(), 400);
+  const preview = useQuery({
+    queryKey: ["feedback", "org-preview", item.id, choice?.code, typed],
+    queryFn: () => feedbackApi.orgPreview(item.id, { decision: choice!.code, ...(typed ? { value: typed } : {}) }),
+    enabled: !!choice?.name_update, retry: false,
+  });
   const decide = useMutation({
     mutationFn: (o: FeedbackOption) => {
       const b = decisionBody(o, { value, note, photoKeys });
@@ -451,6 +503,7 @@ function Decide({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType 
     setProblem(null);
   };
   if (item.status === "decided") {
+    const waiting = ["searching", "waiting", "refused"].includes(item.org_request?.status ?? "");
     return (
       <div className="min-w-0 space-y-2">
         <h3 className={`text-sm font-semibold ${INK}`}>Decided</h3>
@@ -458,6 +511,11 @@ function Decide({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType 
         <button type="button" onClick={() => reopen.mutate()} disabled={reopen.isPending} className={PAGER}>
           {reopen.isPending ? "Reopening…" : "Reopen"}
         </button>
+        {waiting && (
+          <p className="text-xs text-muted-foreground">
+            Reopening while mycomap.org is still waiting withdraws the update there.
+          </p>
+        )}
         {problem && <p className="text-sm text-red-700 dark:text-red-300">{problem}</p>}
       </div>
     );
@@ -481,12 +539,13 @@ function Decide({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType 
       </div>
       {choice && (
         <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); decide.mutate(choice); }}>
-          {choice.needs_value && (
+          {box && (
             <label className="block text-sm">
-              <span className="text-muted-foreground">Value</span>
-              <input className={INPUT} value={value} onChange={(e) => setValue(e.target.value)} required />
+              <span className="text-muted-foreground">{box.label}</span>
+              <input className={INPUT} value={value} onChange={(e) => setValue(e.target.value)} required={box.required} />
             </label>
           )}
+          {choice.name_update && <OrgPreviewNote preview={preview.data} error={preview.error} />}
           {takesPhotoKeys(choice) && (
             <label className="block text-sm">
               <span className="text-muted-foreground">Photos to leave out (comma-separated photo keys)</span>
@@ -502,7 +561,9 @@ function Decide({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType 
                     className="rounded-md bg-myco-green px-4 py-1.5 text-sm font-medium text-white hover:bg-myco-green/90 disabled:opacity-50">
               {decide.isPending ? "Saving…" : "Save decision"}
             </button>
-            <span className="text-xs text-muted-foreground">Takes effect {appliesWords(choice.applies)}.</span>
+            <span className="text-xs text-muted-foreground">
+              {choice.name_update ? "Opens a Name Update on mycomap.org." : `Takes effect ${appliesWords(choice.applies)}.`}
+            </span>
           </div>
         </form>
       )}
@@ -584,7 +645,9 @@ function History({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType
             <span className={`font-medium ${INK}`}>{d.by_name ?? d.by_user}</span>{" "}
             <span className={BODY}>{decisionLabel(d.decision, type?.options)}</span>
             {d.value && <>: <Name s={d.value} /></>}
-            <span className="text-xs text-muted-foreground"> ({appliesWords(d.applies)}{yes(d.applied) ? ", applied" : ""})</span>
+            <span className="text-xs text-muted-foreground"> ({appliesWords(d.applies)}{
+              d.id === decisions[decisions.length - 1]?.id && item.org_request
+                ? historyOrgText(item.org_request) : yes(d.applied) ? ", applied" : ""})</span>
             {d.photo_keys?.length > 0 && <span className="text-xs text-muted-foreground"> · photos {d.photo_keys.join(", ")}</span>}
             {d.note && <span className="block text-xs text-muted-foreground">“{d.note}”</span>}
           </li>
@@ -601,6 +664,89 @@ function History({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+function OrgPreviewNote({ preview, error }: { preview: OrgPreview | undefined; error: unknown }) {
+  if (error) {
+    return <p className="text-sm text-red-700 dark:text-red-300">
+      {error instanceof ApiError ? error.message : "This decision cannot make a Name Update as it stands."}
+    </p>;
+  }
+  if (!preview || !preview.opens) return null;
+  const n = (name: string) => preview.records[name];
+  return (
+    <div className="space-y-1 rounded-md border border-[#A87146]/20 bg-[#faf9f7] p-2 text-sm dark:border-border dark:bg-muted/30"
+         data-testid="feedback-org-preview">
+      <p className={BODY}>
+        mycomap.org will be asked to rename every record of{" "}
+        {preview.old_names.map((o, i) => (
+          <span key={o}>{i > 0 && ", "}<Name s={o} />{n(o) != null && <span className="text-muted-foreground"> ({n(o)})</span>}</span>
+        ))}{" "}
+        to <Name s={preview.new_name} />{n(preview.new_name) != null && (
+          <span className="text-muted-foreground"> ({n(preview.new_name)})</span>)}, not only the ones flagged here.
+        A person with Name Update rights there runs it.
+      </p>
+      {preview.warnings.map((w) => (
+        <p key={w} className="text-xs font-medium text-amber-800 dark:text-amber-200">{w}</p>
+      ))}
+    </div>
+  );
+}
+
+function OrgRequestBlock({ item, org, checking, onCheck }: {
+  item: FeedbackItemDetail; org: OrgRequest; checking: boolean; onCheck: () => void;
+}) {
+  const update = useItemUpdate(item.id);
+  const send = useMutation({ mutationFn: () => feedbackApi.sendAgain(item.id), onSuccess: update });
+  return (
+    <div className="space-y-2" data-testid="feedback-org-request">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className={`text-sm font-semibold ${INK}`}>On mycomap.org</h3>
+        <button type="button" onClick={onCheck} disabled={checking}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-myco-green disabled:opacity-50">
+          <RefreshCw className={`h-3 w-3 ${checking ? "animate-spin" : ""}`} aria-hidden />
+          {checking ? "Checking…" : "Check now"}
+        </button>
+      </div>
+      <div className="rounded-md border border-[#A87146]/20 bg-[#faf9f7] p-3 text-sm dark:border-border dark:bg-muted/30">
+        <p className="flex flex-wrap items-baseline gap-x-2">
+          <span className={`font-medium ${INK}`}>
+            {org.request_id ? `Name Update request ${org.request_id}` : "Name Update"}
+          </span>
+          {org.url && <Ext href={org.url}>Open in Name Update</Ext>}
+        </p>
+        <ol className="mt-2 grid list-none gap-1 p-0 text-sm sm:grid-cols-4">
+          {org.steps.map((st) => {
+            const look = stepLook(st.state);
+            return (
+              <li key={st.step} className={`${BODY} ${look.textClass}`}>
+                <span className={look.markClass} aria-hidden>{look.mark}</span> {stepText(st, org)}
+              </li>
+            );
+          })}
+        </ol>
+        {org.declined_reason && (
+          <p className={`mt-2 ${BODY}`}>
+            Declined{org.declined_by ? ` by ${org.declined_by}` : ""}: “{org.declined_reason}”
+          </p>
+        )}
+        {org.note && <p className="mt-2 text-amber-800 dark:text-amber-200">{org.note}</p>}
+        {org.can_send && (
+          <button type="button" onClick={() => send.mutate()} disabled={send.isPending} className={`${PAGER} mt-2`}>
+            {send.isPending ? "Sending…" : "Send again"}
+          </button>
+        )}
+        {send.error && <p className="mt-1 text-sm text-red-700 dark:text-red-300">
+          {send.error instanceof Error ? send.error.message : "It could not be sent."}</p>}
+        <p className="mt-2 text-xs text-muted-foreground">
+          Every record of {org.old_names.map((o, i) => <span key={o}>{i > 0 && ", "}<Name s={o} /></span>)} is in
+          the update, not only the ones flagged here. A person with Name Update rights on mycomap.org runs it.
+          This item counts as applied when mycomap.org reports it done; Vision then relabels these records
+          straight away, without waiting for the nightly.
+        </p>
+      </div>
     </div>
   );
 }

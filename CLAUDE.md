@@ -11,7 +11,11 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
 
 - **Read-only toward every outside system.** Records are read from a read-only
   SQL route (`MV_ORG_SQL_SSH_HOST`). Never write to mycomap.org, iNat or any
-  other outside service from this repo.
+  other outside service from this repo. One exception (Steve, 2026-10-18): a Human
+  Feedback decision about a whole name opens a Name Update request on mycomap.org
+  (`feedback_org.py`), which changes nothing outside .org until a person with Name
+  Update rights there presses Fix; renames come back through .org's name-change log
+  into the nightly layer only (`name_changes.py`), never a frozen release.
 - **Respect iNat's limits.** API: 1 request/s at most (iNat asks for ≤60/min).
   Media: CC photos from the AWS Open Data bucket; all-rights-reserved photos from
   `static.inaturalist.org` under 5 GB/hour and 24 GB/day (we cap at 4 and 20).

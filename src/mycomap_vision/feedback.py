@@ -183,6 +183,12 @@ create table if not exists refreshes (
 create table if not exists seeds (
   name text primary key, file_sha256 text, rows integer, added integer, at real not null
 );
+-- A whole-name decision's Name Update request on mycomap.org (feedback_org.py).
+create table if not exists org_requests (
+  decision_id integer primary key references decisions(id), request_id integer,
+  status text not null, url text, counts text not null default '{}', note text,
+  payload text not null default '{}', sent_at real, checked_at real
+);
 """
 
 
@@ -353,6 +359,15 @@ class Store:
         with self._lock, self.conn:
             self.conn.execute("update decisions set applied = 1, applied_at = ?, applied_by = ? "
                               "where id = ?", (time.time(), str(person["sub"]), decision_id))
+
+    def mark_applied_by(self, decision_id: int, applied_by: str) -> bool:
+        """Applied by something other than a person here (feedback_org.py: mycomap.org's
+        Name Update). False when it was already applied."""
+        with self._lock, self.conn:
+            cur = self.conn.execute("update decisions set applied = 1, applied_at = ?, "
+                                    "applied_by = ? where id = ? and applied = 0",
+                                    (time.time(), applied_by, decision_id))
+        return cur.rowcount > 0
 
     # --- outputs ---------------------------------------------------------------------------------
     def changes(self, applies: str | None = None, pending_only: bool = True) -> list[dict]:

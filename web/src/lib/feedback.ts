@@ -7,7 +7,7 @@
 // which items they are.
 
 import type { BlastLink, FeedbackApplies, FeedbackDecisionBody, FeedbackItem, FeedbackOption,
-              LiveSequence, Me, RefreshedRecord } from "./api";
+              LiveSequence, Me, OrgChip, OrgRequest, OrgStep, RefreshedRecord } from "./api";
 import { ApiError } from "./api";
 
 export const FEEDBACK_PATH = "/feedback";
@@ -115,10 +115,19 @@ export function parsePhotoKeys(s: string): string[] {
 export const takesPhotoKeys = (option: Pick<FeedbackOption, "code">) =>
   option.code === "exclude_photos";
 
-/** The value box's starting text: the item's proposal, for an option that needs a value. */
-export const prefillValue = (option: Pick<FeedbackOption, "needs_value">,
+/** The value box's starting text: the item's proposal, for an option that needs a value or
+ *  opens a Name Update (whose new name is shown, editable, before saving: proposed names come
+ *  from source verbatim, typos included). */
+export const prefillValue = (option: Pick<FeedbackOption, "needs_value" | "name_update">,
                              item: Pick<FeedbackItem, "proposed">): string =>
-  option.needs_value ? (item.proposed ?? "").trim() : "";
+  option.needs_value || option.name_update ? (item.proposed ?? "").trim() : "";
+
+/** Whether the decision form shows the value box, and what it is called. */
+export function valueBox(option: Pick<FeedbackOption, "needs_value" | "name_update">):
+    { label: string; required: boolean } | null {
+  if (option.name_update) return { label: "New name", required: option.needs_value };
+  return option.needs_value ? { label: "Value", required: true } : null;
+}
 
 /** The POST body for a decision, or what is missing. */
 export function decisionBody(option: FeedbackOption,
@@ -127,7 +136,7 @@ export function decisionBody(option: FeedbackOption,
   const value = (input.value ?? "").trim();
   if (option.needs_value && !value) return { error: "Enter the value this decision needs." };
   const body: FeedbackDecisionBody = { decision: option.code };
-  if (option.needs_value) body.value = value;
+  if (option.needs_value || (option.name_update && value)) body.value = value;
   const note = (input.note ?? "").trim();
   if (note) body.note = note;
   if (takesPhotoKeys(option)) {
@@ -175,3 +184,49 @@ export function pageText(offset: number, shown: number, total: number): string {
 
 /** Truthy flags from the server come as booleans or 0/1. */
 export const yes = (v: unknown) => v === true || v === 1 || v === "1";
+
+// --- a whole-name decision's Name Update on mycomap.org (feedback_org.py) ---------------------
+
+const CHIP: Record<OrgChip["tone"], string> = {
+  good: "bg-myco-green/10 text-myco-green",
+  bad: "border border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200",
+  busy: "border border-sky-300 bg-sky-50 text-sky-800 dark:border-sky-700 dark:bg-sky-950 dark:text-sky-200",
+  quiet: "border border-[#A87146]/30 text-muted-foreground dark:border-border",
+};
+
+/** The row chip's classes, by the tone the server gave it. */
+export const orgChipClass = (tone: OrgChip["tone"]) => CHIP[tone] ?? CHIP.quiet;
+
+/** A step's mark and text classes: done and current filled, stopped hollow and amber. */
+export function stepLook(state: OrgStep["state"]): { mark: string; markClass: string; textClass: string } {
+  switch (state) {
+    case "done": return { mark: "●", markClass: "text-myco-green", textClass: "" };
+    case "current": return { mark: "●", markClass: "text-sky-600", textClass: "font-medium" };
+    case "stopped": return { mark: "○", markClass: "text-amber-700 dark:text-amber-300", textClass: "font-medium" };
+    default: return { mark: "○", markClass: "text-muted-foreground", textClass: "text-muted-foreground" };
+  }
+}
+
+/** A step's words: "Sent" gains the time it was sent (UTC, like History). */
+export function stepText(step: OrgStep, org: Pick<OrgRequest, "sent_at">): string {
+  if (step.step === "sent" && step.label === "Sent" && org.sent_at) {
+    const d = new Date(org.sent_at * 1000);
+    return `Sent ${d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" })} UTC`;
+  }
+  return step.label;
+}
+
+/** The ?item= of a link back from mycomap.org's Name Update, or null. */
+export function linkedItem(search: string): number | null {
+  const raw = new URLSearchParams(search).get("item");
+  const n = raw && /^\d{1,9}$/.test(raw) ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** The History line's words for a decision with a Name Update, e.g.
+ *  ", Name Update request 7: waiting for a person". */
+export function historyOrgText(org: Pick<OrgRequest, "request_id" | "chip"> | null | undefined): string {
+  if (!org) return "";
+  const what = org.chip.text.replace(/^on mycomap\.org: /, "").replace(/ (on|from|by|to) mycomap\.org/, "");
+  return org.request_id ? `, Name Update request ${org.request_id}: ${what}` : `, ${what}`;
+}
