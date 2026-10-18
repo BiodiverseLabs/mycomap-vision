@@ -208,6 +208,14 @@ def reviewer_view(item: dict) -> dict:
     return out
 
 
+def blind_order(subject: str) -> str:
+    """The order a BLIND_TYPES queue is shown in: a fixed shuffle by subject. The blind sample
+    is seeded after the model-flagged items, so listing by id would put every blind item last
+    and give it away."""
+    import hashlib
+    return hashlib.sha256(f"blind-order:{subject}".encode()).hexdigest()
+
+
 class FeedbackError(ValueError):
     pass
 
@@ -274,6 +282,8 @@ class Store:
                + " order by records desc, id")
         params: tuple = (item_type, status) + ((f"%{query}%",) * 3 if query else ())
         rows = self._visible(sql, params, projects)
+        if item_type in BLIND_TYPES:
+            rows = sorted(rows, key=lambda r: blind_order(r["subject"]))
         return {"total": len(rows),
                 "items": [self._item(r) for r in rows[offset:offset + limit]]}
 
