@@ -43,6 +43,10 @@ PLACE = {a: ("nearest+mean+place" if a == "nearest+mean" else f"{a}+place") for 
 LETTER = dict(zip(ARMS, "abcd"))
 PLACE_SETTING = "penalty-500-2026-10-13"
 MARGIN = 0.003
+DEEP = 40                         # names kept per record: the answer key collapses these
+# The species key that DECIDES (paper coordinator, 18 Oct; PLAN a1e15ea: every val-chosen
+# setting re-checked once on r4 with the new strict answer key); exact reported beside.
+DECIDING_KEY = "species-rank-2026-10-18"
 REPS, SEED = 10_000, 20261018
 ECE_MARGIN, NLL_MARGIN = 0.005, 0.02
 TIE = 0.001
@@ -139,8 +143,11 @@ def cmd_score(args) -> None:
         fitted = evaluate.fit_method(vecs, ref, m, backbone=args.backbone,
                                      specimen_of=specimen_of)
         place = getattr(fitted[1], "needs_context", False)
+        # Exact names, ranked DEEP (top_k): the report credits species by exact names and by
+        # the answer key from the same lists (the key collapses 4 x 10 names, as evaluate's).
         res = evaluate.evaluate(vecs, ref, test_public if place else test, method=m,
-                                fitted=fitted, name_scores=True, sets=True, per_record=True)
+                                fitted=fitted, name_scores=True, sets=True, per_record=True,
+                                answer_key="exact", top_k=DEEP)
         records = res.pop("per_record")
         used = getattr(getattr(fitted[1], "prior", None), "setting_name", None)
         res["run"] = {"method": m, "backbone": args.backbone, "record_set": shared.record_set,
@@ -202,20 +209,26 @@ def load_arm(out: Path, m: str) -> tuple[dict, dict]:
     return summary, recs
 
 
-def outcomes(recs: dict, finds: dict) -> dict:
-    """Per find: hit flags for the standard table's cells, plus calibration inputs."""
+def outcomes(recs: dict, finds: dict, key: str = "exact") -> dict:
+    """Per find: hit flags for the standard table's cells, plus calibration inputs.
+    Species are credited by `key` (name_equiv): "exact" = v1's rule (the name as written);
+    the answer key collapses the ranked list by key first and credits any answer sharing
+    the truth's key, as evaluate does (the list is scored DEEP, so collapsing leaves 10)."""
     from mycomap_vision import name_equiv
     out = {}
-    for key, a in recs.items():
-        f = finds[key]
+    for rk, a in recs.items():
+        f = finds[rk]
         o = {}
         if f["species"]:
             top = a["top"].get("species", [])
+            if key != "exact":
+                top = name_equiv.collapse(top, key)
             for lv in ("strict", "sl", "complex"):
                 first = None
                 for i, ans in enumerate(top[:10]):
                     mm = name_equiv.species_match(ans, f["species"])
-                    mm["strict"] = ans == f["species"]
+                    mm["strict"] = (ans == f["species"] if key == "exact"
+                                    else name_equiv.species_credit(ans, f["species"], key))
                     levels = ("strict", "sl", "complex")
                     if any(mm[x] for x in levels[:levels.index(lv) + 1]):
                         first = i
@@ -237,7 +250,7 @@ def outcomes(recs: dict, finds: dict) -> dict:
                         break
                 for k in K:
                     o[f"genus_{lv}@{k}"] = first is not None and first < k
-        out[key] = o
+        out[rk] = o
     return out
 
 
@@ -301,20 +314,52 @@ def cmd_report(args) -> None:
                 arms[m] = load_arm(out, m)
     if (out / f"{ARMS[2]}{UNGROUPED}.summary.json").exists():
         arms[ARMS[2] + UNGROUPED] = load_arm(out, ARMS[2] + UNGROUPED)
-    o = {m: outcomes(recs, finds) for m, (_, recs) in arms.items()}
-    keys_all = sorted(set.intersection(*(set(v) for v in o.values())))
+    from mycomap_vision import name_equiv
+    if DECIDING_KEY not in name_equiv.ANSWER_KEYS:
+        raise SystemExit(f"answer key {DECIDING_KEY} is not in this code's name_equiv")
+    by_key = {k: {m: outcomes(recs, finds, k) for m, (_, recs) in arms.items()}
+              for k in (DECIDING_KEY, "exact")}
+    keys_all = sorted(set.intersection(*(set(v) for v in by_key["exact"].values())))
     scopes = {"primary (val excl. former held-out)":
               [k for k in keys_all if not finds[k]["former_heldout"]],
               "full val": keys_all}
     cells = ([f"species_{lv}@{k}" for lv in ("strict", "sl", "complex") for k in K]
              + [f"genus_{lv}@{k}" for lv in ("strict", "sl") for k in K])
-    report = {"finds": len(keys_all), "arms": list(arms), "scopes": {}}
+    report = {"finds": len(keys_all), "arms": list(arms), "deciding_key": DECIDING_KEY,
+              "by_key": {}}
+    for skey, o in by_key.items():
+        report["by_key"][skey] = scored(o, finds, arms, scopes, cells)
+    report["scopes"] = report["by_key"][DECIDING_KEY]
+    for m, (summary, _) in arms.items():
+        report.setdefault("val_fit", {})[m] = {
+            "temperature": summary["calibration"]["species"]["temperature"],
+            "nll_in_evaluate": summary["calibration"]["species"]["nll"],
+            "likely_sets_species": summary["calibration"]["species"].get("sets"),
+            "likely_sets_genus": summary["calibration"].get("genus", {}).get("sets"),
+            "run": summary.get("run")}
+    primary = "primary (val excl. former held-out)"
+    report["decision"] = decide(report["by_key"][DECIDING_KEY][primary], arms)
+    report["decision_exact_not_deciding"] = decide(report["by_key"]["exact"][primary], arms)
+    report["keys_agree"] = (report["decision"]["adopt"]
+                            == report["decision_exact_not_deciding"]["adopt"])
+    (out / "report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    for skey in (DECIDING_KEY, "exact"):
+        print(f"\n######## species credited by {skey}"
+              + (" (DECIDES)" if skey == DECIDING_KEY else " (not deciding)"))
+        print_report({"scopes": report["by_key"][skey],
+                      "decision": report["decision"] if skey == DECIDING_KEY
+                      else report["decision_exact_not_deciding"]})
+    print(f"\nthe two keys {'agree' if report['keys_agree'] else 'DISAGREE'} on the decision")
+
+
+def scored(o: dict, finds: dict, arms: dict, scopes: dict, cells: list) -> dict:
+    """Every table, calibration row and paired test of one key's outcomes."""
+    out = {}
     for scope, keys in scopes.items():
         sp_keys = [k for k in keys if finds[k]["species"]]
-        s = report["scopes"][scope] = {"finds": len(keys), "species_finds": len(sp_keys),
-                                       "standard": {}, "depth_records": {},
-                                       "depth_photos": {}, "calibration": {},
-                                       "zero_reference": {}, "paired": {}}
+        s = out[scope] = {"finds": len(keys), "species_finds": len(sp_keys),
+                          "standard": {}, "depth_records": {}, "depth_photos": {},
+                          "calibration": {}, "zero_reference": {}, "paired": {}}
         for m in arms:
             s["standard"][m] = table(keys, o[m], finds, cells)
             for name, field_, bands in (("depth_records", "rec_depth", REC_BANDS),
@@ -349,16 +394,7 @@ def cmd_report(args) -> None:
                     "noninferior": float(np.percentile(est, 5)) > -MARGIN,
                     "only_a": int(((xa == 1) & (xb == 0)).sum()),
                     "only_b": int(((xa == 0) & (xb == 1)).sum())}
-    for m, (summary, _) in arms.items():
-        report.setdefault("val_fit", {})[m] = {
-            "temperature": summary["calibration"]["species"]["temperature"],
-            "nll_in_evaluate": summary["calibration"]["species"]["nll"],
-            "likely_sets_species": summary["calibration"]["species"].get("sets"),
-            "likely_sets_genus": summary["calibration"].get("genus", {}).get("sets"),
-            "run": summary.get("run")}
-    report["decision"] = decide(report["scopes"]["primary (val excl. former held-out)"], arms)
-    (out / "report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
-    print_report(report)
+    return out
 
 
 def decide(s: dict, arms: dict) -> dict:

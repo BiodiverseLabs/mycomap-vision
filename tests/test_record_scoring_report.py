@@ -106,3 +106,34 @@ def test_a_twins_file_maps_records_to_their_specimen(run, tmp_path):
     bad.write_text("record\tgroup\nx\ty\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="observation_id and specimen"):
         run.read_twins(bad)
+
+
+def test_the_answer_key_credits_a_variety_for_its_species_and_exact_names_do_not(run):
+    finds = {"1": {"species": "Amanita muscaria", "genus": "Amanita"}}
+    recs = {"1": {"top": {"species": ["Amanita muscaria var. guessowii", "Amanita muscaria",
+                                      "Amanita pantherina"], "genus": ["Amanita"]}}}
+    exact = run.outcomes(recs, finds, "exact")["1"]
+    key = run.outcomes(recs, finds, run.DECIDING_KEY)["1"]
+    assert not exact["species_strict@1"] and exact["species_strict@3"]
+    assert key["species_strict@1"]
+
+
+def test_the_answer_key_collapses_the_list_before_counting_places(run):
+    # two writings of one species take one place under the key: the truth, 4th as written,
+    # is 3rd once they are one answer
+    finds = {"1": {"species": "Russula emetica", "genus": "Russula"}}
+    recs = {"1": {"top": {"species": ["Amanita muscaria var. guessowii", "Amanita muscaria",
+                                      "Amanita pantherina", "Russula emetica"],
+                          "genus": ["Russula"]}}}
+    assert not run.outcomes(recs, finds, "exact")["1"]["species_strict@3"]
+    key = run.outcomes(recs, finds, run.DECIDING_KEY)["1"]
+    assert not key["species_strict@1"] and key["species_strict@3"]
+    from mycomap_vision import name_equiv
+    assert name_equiv.first_credited(recs["1"]["top"]["species"], "Russula emetica",
+                                     run.DECIDING_KEY) == 2
+
+
+def test_the_answer_key_decides_and_is_the_one_main_s_name_equiv_knows(run):
+    from mycomap_vision import name_equiv
+    assert run.DECIDING_KEY == name_equiv.ANSWER_KEY
+    assert run.DEEP >= 40           # collapsing 4 x 10 names, as evaluate does
