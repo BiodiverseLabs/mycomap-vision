@@ -29,14 +29,17 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   mycomap.org, and leave out the photos of anyone who declined or withdrew
   (`identify.pick_shown` + `permissions.py`; the rule for use is in
   `evaluate.load_records`). New code that shows or uses photos must go through them.
-  One narrow exception (Steve, 2026-10-18): mycomap.org ADMINS may see
-  all-rights-reserved photos while reviewing on the signed-in Human Feedback pages,
-  and nowhere else. They are served only by the authenticated
-  `/api/feedback/photo/` endpoint from Vision's own copy, with
-  `Cache-Control: private, no-store` and no public URL; never to project leaders,
-  contributors, anonymous visitors or API callers; and never a photo whose owner
+  One narrow exception (Steve, 2026-10-18): Human Feedback reviewers with access to the
+  item (mycomap.org admins, and project leaders and contributors for their projects'
+  items) may see all-rights-reserved photos on the signed-in Human Feedback review
+  pages, and nowhere else. They are served only by the authenticated
+  `/api/feedback/photo/` endpoint, which checks the reviewer's access to a queued record
+  of the photo, from Vision's own copy or fetched from the photo's source (iNat, MO;
+  paced and budgeted, `photo_review.SourceFetcher`), with
+  `Cache-Control: private, no-store` and no public URL; never to anonymous visitors,
+  API callers, or anyone without access to the item; and never a photo whose owner
   declined or withdrew (or an MO photo marked not for export). The rule lives in
-  `photo_review.ReviewPhotos`; it does not extend to Identify or any other page.
+  `photo_review.ReviewPhotos`; it does not extend to public pages, Identify or the API.
 - **Keep the data private.** `data/` (photos, manifest, embeddings, contributor
   lists) and the S3 bucket are never committed, published or made public. Trained
   models and embedding indexes count as data until their photo permissions allow
