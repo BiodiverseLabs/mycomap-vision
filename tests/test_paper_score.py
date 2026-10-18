@@ -995,3 +995,68 @@ def test_a_finds_depth_counts_references_sharing_its_answer_key():
             "genus": "Physisporinus", "observer_login": "a"}]
     g, = paper_score.build_finds(hyb, {}, [{"species": "Physisporinus sp. 'IN01'"}] * 4)
     assert g.depth == 0                                    # a hybrid keeps its own key
+
+
+def _leave_out_world(seed=3):
+    """Many species, observers and multi-photo records; species "S9 only" has every
+    reference record from observer o1 (it must vanish for o1's finds)."""
+    from mycomap_vision.evaluate import Record
+    rng = np.random.default_rng(seed)
+    centres = rng.normal(size=(10, 16)).astype(np.float32)
+    vecs, ref, scored = [], [], []
+
+    def photo(sp):
+        v = centres[sp] + 0.6 * rng.normal(size=16).astype(np.float32)
+        vecs.append(v / np.linalg.norm(v))
+        return len(vecs) - 1
+    for i in range(80):
+        sp = i % 9
+        obs = f"o{i % 5}"
+        ref.append(Record(f"r{i}", f"G{sp % 3} s{sp}", f"G{sp % 3}", "F", "2026-01-01", obs,
+                          [photo(sp) for _ in range(1 + i % 3)],
+                          observed_on=f"2026-0{1 + i % 4}-01"))
+    for i in range(4):                                 # S9: only o1's records
+        ref.append(Record(f"s9-{i}", "G0 only", "G0", "F", "2026-01-01", "o1",
+                          [photo(9), photo(9)], observed_on="2026-02-01"))
+    for i in range(30):
+        sp = (i * 7) % 10
+        name = "G0 only" if sp == 9 else f"G{sp % 3} s{sp}"
+        scored.append(Record(f"q{i}", name, name.split()[0], "F", None, f"o{i % 6}",
+                             [photo(sp) for _ in range(1 + i % 2)],
+                             observed_on=f"2026-0{1 + i % 4}-01"))
+    return np.stack(vecs), ref, scored
+
+
+@pytest.mark.parametrize("method", ["nearest", "nearest+mean"])
+@pytest.mark.parametrize("mode", ["observer", "trip"])
+def test_a_masked_leave_out_equals_a_refit_without_the_groups_records(method, mode):
+    vec, ref, scored = _leave_out_world()
+    truths = {r.observation_id: {"species": r.species, "genus": r.genus} for r in scored}
+    cal = {"species": {"temperature": 0.05, "floor": 0.05}, "genus": {"temperature": 0.05}}
+    kw = dict(top_k=10, calibration=cal, truths=truths)
+    masked = paper_score.masked_leave_out_answers(vec, ref, scored, method, "m", mode, **kw)
+    refit = paper_score.refit_leave_out_answers(vec, ref, scored, method, "m", mode, **kw)
+    assert masked.keys() == refit.keys()
+    for k in refit:
+        assert masked[k]["species"] == refit[k]["species"], k
+        assert masked[k]["genus"] == refit[k]["genus"], k
+        for rank in ("species", "genus"):
+            for f in ("conf", "p_true", "sumsq"):
+                # to float rounding: a touched species' average is summed in another order
+                assert masked[k]["cal"][rank][f] == pytest.approx(refit[k]["cal"][rank][f],
+                                                                  rel=1e-3, abs=1e-4), (k, rank, f)
+        assert masked[k]["cal"]["species"]["set"] == refit[k]["cal"]["species"]["set"]
+    # A find of observer o1: "G0 only" has no reference left, so it is no answer at all.
+    o1 = [r.observation_id for r in scored if r.observer == "o1"]
+    if mode == "observer":
+        assert all("G0 only" not in masked[k]["species"] for k in o1)
+
+
+def test_a_place_methods_leave_out_is_refitted_never_masked(monkeypatch):
+    seen = []
+    monkeypatch.setattr(paper_score, "refit_leave_out_answers",
+                        lambda *a, **k: seen.append(a[3]) or {})
+    monkeypatch.setattr(paper_score, "masked_leave_out_answers",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("masked")))
+    paper_score.vision_answers_leave_out(None, [], [], "nearest+mean+place", "m", "observer")
+    assert seen == ["nearest+mean+place"]
