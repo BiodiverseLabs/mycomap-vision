@@ -300,6 +300,28 @@ def read_attrs(path) -> dict[str, dict]:
                 for r in csv.DictReader(fh, delimiter="\t")}
 
 
+def val_dhash_flags(base, block: dict, photos: dict[str, list[dict]],
+                    ref_photo_rows: list[dict]) -> set[str]:
+    """Photo keys of the scored val photos within dHash distance 4 of a reference photo,
+    from the base release's dHash index (pinned by sha256, checked against the release)."""
+    from . import dhash as dh
+    from . import val_review as vr
+    path = resolve(block["file"])
+    got = sha256_file(path)
+    if got != block.get("sha256"):
+        raise ValueError(f"dHash index {path}: sha256 {got[:12]}, the config pins "
+                         f"{str(block.get('sha256'))[:12]}")
+    index = dh.load_index(path)
+    dh.check_index(index, base)
+    of_key = dict(zip(index["photo_key"], index["dhash"].tolist()))
+    queries = {str(p["photo_key"]): np.uint64(of_key[str(p["photo_key"])])
+               for ph in photos.values() for p in ph if str(p["photo_key"]) in of_key}
+    train = np.asarray([of_key[str(p["photo_key"])] for p in ref_photo_rows
+                        if str(p["photo_key"]) in of_key], dtype=np.uint64)
+    flags = vr.near_train_flags(queries, train, chunk=64) if queries and len(train) else {}
+    return {pk for pk, f in flags.items() if f}
+
+
 def build_exclusions(rel) -> dict:
     """The test release's own exclusion counts by source and reason (records and photos),
     from its manifest; every reason but `ok` is something the build left out."""
@@ -731,14 +753,20 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             photos[str(p["record_key"])].append(dict(p))
     ref_keys = {str(r["record_key"]) for r in ref_rows}
     ref_photo_rows = [dict(p) for p in base.db.execute(
-        "select manifest_photo_id, original_sha256, record_key from photos where included = 1")
-        if str(p["record_key"]) in ref_keys]
+        "select manifest_photo_id, original_sha256, record_key, photo_key from photos "
+        "where included = 1") if str(p["record_key"]) in ref_keys]
     ref_shas = {p["original_sha256"] for p in ref_photo_rows if p["original_sha256"]}
-    # dHash near-copy flags: the test release's own near_base table (part of its
-    # release_hash), the one source; empty for val and for a build made without them.
+    nd_cfg = config.get("near_duplicates", {})
+    # dHash near-copy flags: a test release's own near_base table (part of its
+    # release_hash); on val, the base release's pinned dHash index through the same rule
+    # (val_review.near_train_flags, dHash distance <= 4 to a reference photo).
     near_base = scored_rel.near_base() if scored_rel is not base else {}
     dhash = {pk for pk, v in near_base.items() if v.get("base_photo_key")}
-    nd_cfg = config.get("near_duplicates", {})
+    dhash_source = "the scored release's near_base table"
+    if scored_rel is base and nd_cfg.get("dhash_index"):
+        dhash = val_dhash_flags(base, nd_cfg["dhash_index"], photos, ref_photo_rows)
+        near_base = {pk: {} for pk in dhash}
+        dhash_source = f"the base release's dHash index ({nd_cfg['dhash_index']['file']})"
     cosine_of = None
     if nd_cfg.get("backbone"):
         b = nd_cfg["backbone"]
@@ -879,7 +907,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         # of a base photo or a cross-post twin of a v1 record), beside the scoring's
         # near-copy exclusion (standard.near_duplicates): both counted in the report.
         "build_exclusions": build_exclusions(scored_rel) if scored_rel is not base else None,
-        "dhash_flags": {"source": "the scored release's near_base table",
+        "dhash_flags": {"source": dhash_source,
                         "photos_hashed": len(near_base), "photos_flagged": len(dhash),
                         "near_base": (scored_rel.manifest.get("near_base")
                                       if scored_rel is not base else None)},

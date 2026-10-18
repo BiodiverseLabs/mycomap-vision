@@ -705,3 +705,33 @@ def test_a_test_report_counts_what_the_build_left_out_beside_the_scorings_near_c
     assert "Left out by the test build (records)" in md and "inat/twin_of_base 3" in md
     assert "Near-copies left out of the primary numbers at scoring" in md
     assert run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))["build_exclusions"] is None
+
+
+def test_on_val_the_pinned_dhash_index_flags_near_copies_of_reference_photos(world, tmp_path):
+    from mycomap_vision import dhash as dh
+    base = world["base"]
+    rows = [dict(r) for r in base.db.execute(
+        "select p.photo_key, p.original_sha256, r.record_key, r.split from photos p join "
+        "records r on r.record_key = p.record_key where p.included = 1")]
+    train_hash = 0x0F0F0F0F0F0F0F0F
+    def h(r):
+        if r["record_key"] == "5":
+            return train_hash ^ 0b11                        # 2 bits from a train photo
+        if r["record_key"] == "6":
+            return 0xFFFF000000000000                       # far from everything
+        return train_hash if r["record_key"] == "1" else 0x00FF00FF00FF00FF   # 32 bits away
+    index = {"release": base.id, "release_hash": base.release_hash, "algorithm": dh.ALGORITHM,
+             "pillow": dh.pillow_version(), "photos": len(rows),
+             "photo_key": [r["photo_key"] for r in rows],
+             "sha256": [r["original_sha256"] for r in rows],
+             "dhash": [h(r) for r in rows]}
+    path = dh.save_index(index, tmp_path / "dhash-index.npz")
+    nd = {"dhash_index": {"file": str(path), "sha256": paper_score.sha256_file(path)}}
+    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"], near_duplicates=nd))
+    assert rep["standard"]["near_duplicates"]["by_kind"]["dhash"] == 1
+    assert rep["dhash_flags"]["photos_flagged"] == 1
+    assert rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]["table"][
+        "species strict"]["top1"]["n"] == 1                    # the near-copy left out
+    nd["dhash_index"]["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="dHash index"):
+        run(world, tmp_path, "val", config(tmp_path, ["5", "6"], near_duplicates=nd))
