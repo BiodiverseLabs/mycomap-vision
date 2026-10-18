@@ -228,7 +228,7 @@ def cmd_components(args) -> None:
 
 # --- tune ---------------------------------------------------------------------------------
 
-def load_components(out: Path, answer_key: str | None = None):
+def load_components(out: Path, answer_key: str | None = None, taxonomy=None):
     import numpy as np
     from mycomap_vision import placetune as pt
     z = np.load(out / "val-components.npz")
@@ -243,7 +243,7 @@ def load_components(out: Path, answer_key: str | None = None):
         off_season=z["off_season"])
     # Species right by the answer key (name_equiv), not by the truth's own column.
     c.credited = pt.credited_candidates(c.cand, c.SP, m["group_names"], m["truth_name"],
-                                        answer_key)
+                                        answer_key, taxonomy)
     return c, {k: m[k] for k in m.files}
 
 
@@ -266,7 +266,16 @@ def cmd_tune(args) -> None:
     from mycomap_vision.heldout_summary import by_reference_depth, ladder
     t0 = time.time()
     out = Path(args.out)
-    c, meta = load_components(out, args.answer_key)
+    # The answer key as paper-score takes it: the config's pinned frozen taxonomy (snapshot,
+    # successors, shared vocabulary; each sha256-checked) when --analysis-config is given.
+    taxonomy, taxonomy_cite = None, None
+    if args.analysis_config:
+        from mycomap_vision import paper_score
+        doc = json.loads(Path(args.analysis_config).read_text(encoding="utf-8"))
+        m0 = np.load(out / "val-meta.npz")
+        taxonomy, taxonomy_cite = paper_score.answer_key_taxonomy(
+            doc.get("answer_key_taxonomy"), {t for t in m0["truth_name"].tolist() if t})
+    c, meta = load_components(out, args.answer_key, taxonomy)
     keep = ~meta["guest"]
     c = subset(c, keep)
     meta = {k: (v[keep] if isinstance(v, np.ndarray) and v.shape[:1] == keep.shape else v)
@@ -381,6 +390,10 @@ def cmd_tune(args) -> None:
     feats = {k: {"species reference records": d} for k, d in zip(keys, meta["depth"].tolist())}
     names, gg, gf = (meta["group_names"].tolist(), meta["group_genus"].tolist(),
                      meta["group_family"].tolist())
+    from mycomap_vision import paper_outcomes as po
+    key = po.AnswerKey(args.answer_key or name_equiv.ANSWER_KEY, taxonomy)
+    key_truths = {k: (truths[k].species, truths[k].genus, feats[k]["species reference records"])
+                  for k in keys if k in truths}
     tables = {}
     runs = {"P0 photos only": [pt.NONE] * 5, "P1 served": [grid[p1]] * 5}
     for name in ("(i) best overall", "(ii) best holding 300-1,500 km within 2% of photos only",
@@ -397,10 +410,16 @@ def cmd_tune(args) -> None:
         res = {k: pt.ranks(zz[i], c.cand[i], c.SP[i], names, gg, gf, float(T[i]))
                for i, k in enumerate(keys)}
         judged = score({("m",): res}, truths, labeller)[("m",)]
-        lad = ladder(res, set(truths), truths, labeller, False, name_equiv)
+        written = ladder(res, set(truths), truths, labeller, False, name_equiv)
+        # Steve's table under the answer key, as paper-score and the selection judge it;
+        # the names-as-written ladder kept beside it for the record.
+        keyed = pt.key_ladder(res, key_truths, key)
+        lad = {k: keyed[k] for k in ("records", "stored_depth", "rows")}
         conf = pt.top_confidence(c, zz, T)
         sp_right, _ = pt.top1(c, zz)
-        tables[name] = {"ladder": lad, "by_depth": by_reference_depth(judged, feats),
+        tables[name] = {"ladder": lad, "by_depth": keyed["by_depth"],
+                        "ladder_names_as_written": written,
+                        "by_depth_names_as_written": by_reference_depth(judged, feats),
                         "calibration_species": pt.calibration_report(conf, sp_right, c.has_sp),
                         "temperature_per_fold": sorted(set(np.round(T, 4).tolist()))}
         print(fmt_ladder(name, lad, tables[name]["by_depth"]), flush=True)
@@ -420,6 +439,7 @@ def cmd_tune(args) -> None:
         name: mcnemar(v["out_of_fold"]["vs_photos_only"]["broken"],
                       v["out_of_fold"]["vs_photos_only"]["fixed"]) for name, v in picks.items()}
     report["answer_key"] = args.answer_key or name_equiv.ANSWER_KEY
+    report["answer_key_taxonomy"] = taxonomy_cite
     path = out / "tuning.json"
     path.write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
     print(f"-> {path} [{time.time() - t0:.0f}s]")
@@ -461,6 +481,9 @@ def main(argv=None) -> None:
     ap.add_argument("--errata", help="the release's erratum TSV (errata.py)")
     ap.add_argument("--answer-key", help="tune: name_equiv's answer key (default: the current "
                                          "key; 'exact' = v1's published rule)")
+    ap.add_argument("--analysis-config", help="tune: the paper's analysis config, whose pinned "
+                                              "answer_key_taxonomy the key takes (paper-score's "
+                                              "canonical step)")
     ap.add_argument("--paper-attrs", help="`mv paper-attrs` TSV: use the paper's distance_band "
                     "(public points) for the bands and the 300-1,500 km rule")
     args = ap.parse_args(argv)
