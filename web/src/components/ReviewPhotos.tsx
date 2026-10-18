@@ -157,7 +157,7 @@ export function PhotoTile({ photo, record, choice, focused, outline = "border-tr
         )}
         {photo.shown === "private" && (
           <span className="pointer-events-none absolute right-1 top-1 rounded bg-[#4a3728]/85 px-1.5 py-0.5 text-[10px] font-medium text-white">
-            admin only · not public
+            reviewers only · not public
           </span>
         )}
         {choice && (
@@ -198,7 +198,7 @@ export function PhotoLightbox<P extends TilePhoto>({ record, photos, index, choi
       <div className="flex min-w-0 items-center justify-between gap-3 text-sm text-white" onClick={(e) => e.stopPropagation()}>
         <span className="min-w-0 break-words">
           {recordLabel(record.record_key)} · photo {index + 1} of {photos.length}
-          {photo.shown === "private" && <span className="ml-2 rounded bg-white/15 px-1.5 py-0.5 text-[11px]">admin only · not public</span>}
+          {photo.shown === "private" && <span className="ml-2 rounded bg-white/15 px-1.5 py-0.5 text-[11px]">reviewers only · not public</span>}
         </span>
         <button type="button" onClick={onClose} aria-label="Close"
                 className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-md hover:bg-white/10">

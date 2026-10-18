@@ -8,19 +8,26 @@ the change list and the fairness rules are those of every other queue.
 Tabs, one per kind of flag, with their counts: a record shows in each tab one of its photos is
 flagged for, with that tab's photos outlined.
 
-Which photos a reviewer sees (Vision's photo rule, identify.py): a CC photo, or one its owner
-let Vision show, by its public URL. An all-rights-reserved photo is a placeholder with its
-position and the record's link, still decidable, EXCEPT for admins (Steve, 2026-10-18, a narrow
-exception): an admin sees it on these signed-in pages only, served by /api/feedback/photo/ from
-Vision's own copy with Cache-Control: private, no-store and no public URL. Never a photo whose
-owner withdrew or declined (photo_permissions), nor an MO photo its owner marked not for
-export.
+Which photos a reviewer sees: a CC photo, or one its owner let Vision show, by its public URL
+(Vision's photo rule, identify.py). Every other photo, all rights reserved included, is shown to
+Human Feedback reviewers with access to the item (Steve, 2026-10-18), on these signed-in pages
+only: served by /api/feedback/photo/, which checks the reviewer's access to a queued record of
+the photo, with Cache-Control: private, no-store and no public URL. Never a photo whose owner
+withdrew or declined (photo_permissions), nor an MO photo its owner marked not for export, and
+never on a public page, Identify or the API.
+
+The image comes from Vision's own copy when this machine can read it, else from the photo's
+source (iNat's photo hosts, Mushroom Observer) through SourceFetcher: HTTPS to those hosts only,
+paced like every other photo download (photos.py), its own small byte budget on iNat's static
+host, a timeout, and a small in-memory cache, so a page of thumbnails costs the source little.
 """
 
 from __future__ import annotations
 
 import io
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable
 
@@ -225,13 +232,23 @@ class ReviewPhotos:
     FULL_PX = 1600
 
     def __init__(self, query: Callable[[str, tuple], list], permission_view: Callable,
-                 read: Callable[[str, str], bytes] | None = None):
+                 read: Callable[[str, str], bytes] | None = None,
+                 source: "SourceFetcher | None" = None, cache_items: int = 400):
         self.query = query
         self.permission_view = permission_view
         if read is None:
             from .dataset_release import default_store_reader
             read = default_store_reader()
         self.read = read
+        self.source = source or SourceFetcher()
+        self._cache: "OrderedDict[tuple[str, str], tuple[bytes, str]]" = OrderedDict()
+        self._cache_items = cache_items
+        self._cache_lock = threading.Lock()
+
+    def records_of(self, row: PhotoRow) -> set[str]:
+        """The records (observation ids) the photo belongs to."""
+        return {r[0] for r in self.query("select observation_id from observation_photos "
+                                         "where photo_id = ?", (row.photo_id,))}
 
     def of_record(self, record_key: str) -> list[PhotoRow]:
         return [_row(r) for r in self.query(PHOTOS_SQL + " where op.observation_id = ? "
@@ -252,9 +269,10 @@ class ReviewPhotos:
             return row.owner_user_id is not None and int(row.owner_user_id) in view.withdrawn
         return row.source == "mo" and not row.ok_for_export
 
-    def for_viewer(self, rows: list[PhotoRow], admin: bool) -> list[dict]:
-        """Each photo as the reviewer may see it: shown 'public' (its public URL), 'private'
-        (admins only: Vision's own copy behind sign-in) or 'hidden' (a placeholder)."""
+    def for_viewer(self, rows: list[PhotoRow], reviewer: bool = True) -> list[dict]:
+        """Each photo as a reviewer of the record sees it: 'public' (its public URL), 'private'
+        (served behind sign-in by /api/feedback/photo/) or 'hidden' (a placeholder: the owner
+        declined, or `reviewer` is False)."""
         from .licenses import photo_url
         view = self.permission_view()
         out = []
@@ -268,13 +286,46 @@ class ReviewPhotos:
                     d.update(shown="hidden", hidden_reason="no usable photo URL")
             elif self.declined(r, view):
                 d.update(shown="hidden", hidden_reason="the owner declined")
-            elif admin:
+            elif reviewer:
                 d.update(shown="private", thumb=f"/api/feedback/photo/{r.key}?size=thumb",
                          full=f"/api/feedback/photo/{r.key}?size=full")
             else:
                 d.update(shown="hidden", hidden_reason="all rights reserved")
             out.append(d)
         return out
+
+    def image(self, row: PhotoRow, size: str) -> tuple[bytes, str] | None:
+        """The photo at `size` ('thumb' or 'full') as JPEG: Vision's own copy when readable
+        here, else fetched from its source; None when neither works (the page shows its
+        placeholder). Kept in a small in-memory cache."""
+        key = (row.key, size)
+        with self._cache_lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+        try:
+            got = self.copy_bytes(row, size)
+        except Exception:                           # a laptop path, an S3 copy we can't read
+            got = None
+        if got is None:
+            from .licenses import photo_url
+            try:
+                url = photo_url(row.source, row.source_url, "medium" if size == "thumb"
+                                else "large")
+            except ValueError:
+                return None
+            data = self.source.get(url, row.source)
+            if not data:
+                return None
+            try:
+                got = _scaled(data, self.THUMB_PX if size == "thumb" else self.FULL_PX)
+            except ValueError:
+                return None
+        with self._cache_lock:
+            self._cache[key] = got
+            while len(self._cache) > self._cache_items:
+                self._cache.popitem(last=False)
+        return got
 
     def copy_bytes(self, row: PhotoRow, size: str) -> tuple[bytes, str] | None:
         """Vision's own copy of the photo (the smallest copy that is big enough), scaled down
@@ -297,6 +348,92 @@ class ReviewPhotos:
         if last_error is not None:
             raise last_error
         return None
+
+
+class SourceFetcher:
+    """Photo bytes from their source, politely: HTTPS to iNat's photo hosts and Mushroom
+    Observer only (one redirect, to MO's own image host), config.USER_AGENT, each host paced
+    as photos.py paces it (MO: 5 s apart), a timeout, and a size cap. iNat's static host (all
+    rights reserved photos) gets its own budget, well inside the 4 GB/hour and 20 GB/day the
+    downloaders keep to, so review pages never eat their share. Over budget, busy, or any
+    failure: None, and the page shows a placeholder."""
+
+    STATIC_HOUR_BYTES = 250 * 1024 * 1024
+    STATIC_DAY_BYTES = 1024 * 1024 * 1024
+    MAX_BYTES = 8 * 1024 * 1024
+    TIMEOUT = 10.0
+    WAIT = 8.0                                      # longest a page waits for a host's turn
+
+    def __init__(self, session=None, clock=None, sleep=None):
+        import time as _time
+        import requests
+        from . import config
+        from .licenses import MO_HOST, OPEN_DATA_HOST, STATIC_HOST
+        from .photos import MO_MIN_INTERVAL
+        from .ratelimit import ByteBudget, MinInterval
+        self.session = session or requests.Session()
+        self.session.headers["User-Agent"] = config.USER_AGENT
+        clock = clock or _time.monotonic
+        sleep = sleep or _time.sleep
+        self.static_host = STATIC_HOST
+        self.hosts = {OPEN_DATA_HOST: MinInterval(0.02, clock, sleep),
+                      STATIC_HOST: MinInterval(0.25, clock, sleep),
+                      MO_HOST: MinInterval(MO_MIN_INTERVAL, clock, sleep)}
+        self.slots = {h: threading.Semaphore(1 if h == MO_HOST else 2) for h in self.hosts}
+        self.budgets = [ByteBudget(self.STATIC_HOUR_BYTES, 3600, clock),
+                        ByteBudget(self.STATIC_DAY_BYTES, 86400, clock)]
+
+    def allowed(self, url: str) -> str | None:
+        from urllib.parse import urlparse
+        u = urlparse(url or "")
+        host = (u.hostname or "").lower()
+        return host if u.scheme == "https" and host in self.hosts else None
+
+    def get(self, url: str, source: str) -> bytes | None:
+        host = self.allowed(url)
+        if host is None:
+            return None
+        if host == self.static_host and max(b.wait_time() for b in self.budgets) > 0:
+            return None
+        if not self.slots[host].acquire(timeout=self.WAIT):
+            return None
+        try:
+            self.hosts[host].wait()
+            data = self._read(url, source)
+        finally:
+            self.slots[host].release()
+        if data and host == self.static_host:
+            for b in self.budgets:
+                b.add(len(data))
+        return data
+
+    def _read(self, url: str, source: str) -> bytes | None:
+        import requests
+        from urllib.parse import urljoin
+        from .photos import mo_redirect_ok
+        try:
+            resp = self.session.get(url, stream=True, allow_redirects=False,
+                                    timeout=self.TIMEOUT)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                target = urljoin(url, resp.headers.get("Location") or "")
+                resp.close()
+                if source != "mo" or not mo_redirect_ok(target):
+                    return None
+                resp = self.session.get(target, stream=True, allow_redirects=False,
+                                        timeout=self.TIMEOUT)
+            try:
+                if resp.status_code != 200:
+                    return None
+                body = b""
+                for chunk in resp.iter_content(64 * 1024):
+                    body += chunk
+                    if len(body) > self.MAX_BYTES:
+                        return None
+                return body
+            finally:
+                resp.close()
+        except requests.RequestException:
+            return None
 
 
 def _scaled(data: bytes, px: int) -> tuple[bytes, str]:

@@ -588,7 +588,7 @@ export interface PhotoFlag {
 }
 
 /** One photo of a record, as this reviewer may see it: by its public URL, Vision's own copy
- *  (admins only, `private`), or a placeholder (`hidden`, no URL at all). */
+ *  (reviewers of the item only, `private`), or a placeholder (`hidden`, no URL at all). */
 export interface ReviewPhoto {
   photo_key: string;
   position: number | null;
