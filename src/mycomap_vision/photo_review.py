@@ -101,12 +101,13 @@ def record_of_item(item: dict) -> str | None:
 
 
 def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
-          min_flagged: int = 1) -> dict:
+          min_flagged: int = 1, query: str = "") -> dict:
     """Group the queue's photo items by record. `tab` is one of TAB_CODES or 'all'; a record is
     in a tab when one of its photos is flagged for it, and `status` 'open' keeps records with an
     open photo in the tab ('decided': every photo in the tab decided; 'any': both). Sorted by the strongest
     flag in the tab (sort 'p', highest first; 'p_asc' lowest first; 'flagged' most flagged
-    photos first). Gives {"tabs": [{code, title, open, decided}], "total", "records"}."""
+    photos first). `query` keeps records whose key or label contains it (the tab counts stay
+    the queue's). Gives {"tabs": [{code, title, open, decided}], "total", "records"}."""
     if tab != "all" and tab not in TAB_CODES:
         raise fb.FeedbackError(f"unknown tab {tab!r} ({', '.join(TAB_CODES)} or all)")
     if status not in ("open", "decided", "any"):
@@ -147,7 +148,10 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
                 c[s] += 1
         tabs.append({"code": code, "title": title, **c})
     chosen = []
+    query = (query or "").strip().lower()
     for rec in records.values():
+        if query and query not in rec["record_key"].lower() and query not in rec["label"].lower():
+            continue
         st = state(rec, tab)
         if st is None or (status != "any" and st != status):
             continue

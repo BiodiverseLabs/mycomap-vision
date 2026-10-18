@@ -250,10 +250,12 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.get("/api/feedback/photo-review")
     def fb_photo_review(request: Request, tab: str = "all", status: str = "open",
-                        sort: str = "p", min_flagged: int = 1, offset: int = 0, limit: int = 10):
+                        sort: str = "p", min_flagged: int = 1, q: str = "", offset: int = 0,
+                        limit: int = 10):
         _, projects = access(request)
         try:
-            out = pr.cards(store.items_of(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged)
+            out = pr.cards(store.items_of(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged,
+                           q)
         except fb.FeedbackError as e:
             bad(e)
         page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]

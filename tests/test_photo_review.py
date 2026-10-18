@@ -67,6 +67,10 @@ def test_sorting_filtering_and_the_decided_view():
             ["records"]] == ["11", "10"]
     assert [r["record_key"] for r in pr.cards(items_for_cards(), "all", min_flagged=2)
             ["records"]] == ["10"]
+    found = pr.cards(items_for_cards(), "all", query="b Y")
+    assert [r["record_key"] for r in found["records"]] == ["11"]
+    assert [r["record_key"] for r in pr.cards(items_for_cards(), query="10")["records"]] == ["10"]
+    assert {t["code"]: t["open"] for t in found["tabs"]}["micrograph"] == 2  # the queue's counts
     done = pr.cards(items_for_cards(), "micrograph", status="decided")["records"]
     assert [r["record_key"] for r in done] == ["12"]
     assert done[0]["flagged"][0]["decision"]["reason"] == "micrograph"
