@@ -121,6 +121,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     upgrade(conn)
     ensure_permissions_schema(conn)
     holdouts.ensure_schema(conn)
+    from .feedback import ensure_exclusions_schema
+    ensure_exclusions_schema(conn)
     rows = conn.execute(f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
              coalesce(o.user_login, 'mo:' || m.owner_login), op.photo_id, op.position,
@@ -138,6 +140,8 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
         and r.label_conflict = 0 {na} and {EXCLUDED_FROM_USE_SQL}
         and {MO_EXCLUDED_FROM_USE_SQL}
         and {holdouts.not_held_out('r.observation_id')}
+        and not exists (select 1 from feedback_photo_exclusions fx
+                        where fx.photo_id = op.photo_id)
       order by r.observation_id, op.position
     """).fetchall()
     labels = names.manifest_labels(conn)

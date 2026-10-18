@@ -1100,6 +1100,25 @@ def cmd_contributors(conn, args) -> None:
     print(f"{len(rows):,} contributors -> {path}")
 
 
+def cmd_feedback(conn, args) -> None:
+    """The Human Feedback queue (feedback.py): seed it from review lists, or show its counts."""
+    from pathlib import Path
+
+    from . import feedback
+    path = Path(args.store) if args.store else (
+        (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT else config.DATA_DIR)
+        / "human-feedback.sqlite")
+    store = feedback.Store(path)
+    if args.action == "seed":
+        out = feedback.seed_files(store, conn, Path(args.queue) if args.queue else None,
+                                  Path(args.crosswalk) if args.crosswalk else None,
+                                  Path(args.hits) if args.hits else None,
+                                  blind_ratio=args.blind_ratio, seed=args.seed)
+        print(json.dumps({"store": str(path), "seeds": out}, indent=2))
+    else:
+        print(json.dumps({"store": str(path), "types": store.summary()}, indent=2))
+
+
 def cmd_holdout(conn, args) -> None:
     """Records no training, reference index, release or nightly update may take (holdouts.py)."""
     from pathlib import Path
@@ -2173,6 +2192,20 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--arr-only", action="store_true",
                    help="only people with all-rights-reserved photos")
 
+    p = sub.add_parser("feedback", help="the Human Feedback review queue (feedback.py)")
+    fsub = p.add_subparsers(dest="action", required=True)
+    q = fsub.add_parser("seed", help="add items from review lists (never duplicates one)")
+    q.add_argument("--queue", help="review_queue_seed.tsv (the miss review's rules)")
+    q.add_argument("--crosswalk", help="crosswalk_candidates.tsv")
+    q.add_argument("--hits", help="finds Vision answered right (record_key, label): the "
+                                  "blind sample mixed into model-flagged queues")
+    q.add_argument("--blind-ratio", type=float, default=0.25)
+    q.add_argument("--seed", type=int, default=20261018)
+    q.add_argument("--store", help="the queue file (default <release root>/state/"
+                                   "human-feedback.sqlite)")
+    q = fsub.add_parser("status", help="open and decided items per type")
+    q.add_argument("--store")
+
     p = sub.add_parser("holdout", help="records held out for a benchmark: never trained on, "
                                        "indexed, released or added at night (holdouts.py)")
     hsub = p.add_subparsers(dest="action", required=True)
@@ -2444,6 +2477,7 @@ def main(argv: list[str] | None = None) -> int:
         "permissions": cmd_permissions,
         "refresh-licenses": cmd_refresh_licenses,
         "contributors": cmd_contributors,
+        "feedback": cmd_feedback,
         "holdout": cmd_holdout,
         "heldout": cmd_heldout,
         "backbone-screen": cmd_backbone_screen,

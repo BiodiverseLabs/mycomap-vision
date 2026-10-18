@@ -4,6 +4,7 @@ import { ArrowUpRight, ChevronDown, Menu, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { api, signInUrl, type Me } from "@/lib/api";
 import { API_PATH, isResearchPath, PUBLIC_NAV, researchNav } from "@/lib/research";
+import { FEEDBACK_NAV, showsFeedbackNav } from "@/lib/feedback";
 
 // Header and footer follow mycomap.org's PublicLayout and MainNavigation so the
 // two sites read as one: sticky white header, logo + "MycoMap" in brown, grey
@@ -27,6 +28,8 @@ function Header() {
   const [open, setOpen] = useState(false);
   const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
   const research = researchNav(me.data);
+  // Human Feedback: signed-in reviewers only (the page itself says who may use it).
+  const mainNav = PUBLIC_NAV.concat(showsFeedbackNav(me.data) ? [FEEDBACK_NAV] : []);
   const isActive = (href: string) => (href === "/" ? location === "/" : location.startsWith(href));
   const cls = (href: string) =>
     `px-3 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -49,7 +52,7 @@ function Header() {
               </span>
             </Link>
             <nav className="hidden lg:flex items-center gap-1">
-              {PUBLIC_NAV.map((n) => (
+              {mainNav.map((n) => (
                 <Link key={n.href} href={n.href} className={cls(n.href)}>
                   {n.label}
                 </Link>
@@ -76,7 +79,7 @@ function Header() {
         </div>
         {open && (
           <nav className="lg:hidden pb-3 flex flex-col gap-1" onClick={() => setOpen(false)}>
-            {PUBLIC_NAV.map((n) => (
+            {mainNav.map((n) => (
               <Link key={n.href} href={n.href} className={cls(n.href)}>
                 {n.label}
               </Link>
