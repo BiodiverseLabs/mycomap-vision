@@ -90,18 +90,18 @@ test("in suggest mode each open photo flagged in the tab starts as a suggested E
   assert.equal(suggestedCount(mixed(), initialChoices(mixed(), "all", "suggest")), 3);
 });
 
-test("the mode is remembered per viewer, and is off when nothing is stored or storage fails", () => {
+test("suggesting is the default; a viewer who turns it off is remembered", () => {
   const box = new Map<string, string>();
   const store = { getItem: (k: string) => box.get(k) ?? null, setItem: (k: string, v: string) => { box.set(k, v); } };
+  assert.equal(readPreselectMode(() => store), "suggest");          // nothing stored: the default
+  writePreselectMode(() => store, "none");
   assert.equal(readPreselectMode(() => store), "none");
   writePreselectMode(() => store, "suggest");
   assert.equal(readPreselectMode(() => store), "suggest");
-  writePreselectMode(() => store, "none");
-  assert.equal(readPreselectMode(() => store), "none");
   const broken = () => { throw new Error("SecurityError"); };
-  assert.equal(readPreselectMode(broken), "none");
-  assert.doesNotThrow(() => writePreselectMode(broken, "suggest"));
-  assert.equal(readPreselectMode(() => null), "none");
+  assert.equal(readPreselectMode(broken), "suggest");
+  assert.doesNotThrow(() => writePreselectMode(broken, "none"));
+  assert.equal(readPreselectMode(() => null), "suggest");
 });
 
 test("switching the mode adds or drops only the suggestions, never the reviewer's own choices", () => {

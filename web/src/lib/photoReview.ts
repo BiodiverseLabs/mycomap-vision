@@ -44,13 +44,15 @@ export const PRESELECT_STORAGE_KEY = "mycomap-vision.photo-review.suggest-exclud
 
 type ModeStore = Pick<Storage, "getItem" | "setItem"> | null | undefined;
 
-/** The viewer's remembered mode; "none" when nothing is stored or storage is unavailable (a
- *  private window, blocked site data: the getter itself may throw). */
+/** The viewer's remembered mode. "suggest" is the default (Steve, 2026-10-18: flagged photos
+ *  start as a visible "Exclude (suggested)", Keep one click away): only a viewer who turned it
+ *  off ("none" stored) starts with nothing preselected. Storage unavailable (a private window,
+ *  blocked site data: the getter itself may throw) gives the default. */
 export function readPreselectMode(storage: () => ModeStore): PreselectMode {
   try {
-    return storage()?.getItem(PRESELECT_STORAGE_KEY) === "suggest" ? "suggest" : "none";
+    return storage()?.getItem(PRESELECT_STORAGE_KEY) === "none" ? "none" : "suggest";
   } catch {
-    return "none";
+    return "suggest";
   }
 }
 
