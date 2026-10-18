@@ -183,6 +183,21 @@ def outline(enabled: dict[str, bool]) -> dict:
                  "notes": ["Mushroom Observer asks for one request every 5 seconds, photos "
                            "included, so expect about 5 seconds a photo the first time; a kept "
                            "answer comes back at once, as for iNaturalist."]},
+                {"type": "endpoint", "method": "GET", "path": "/answers/{inat|mo}/{observation_id}",
+                 "status": status("by_observation"),
+                 "summary": "The answer Vision already holds for an observation, if any.",
+                 "auth": "Vision token",
+                 "fields": [["use_place", "boolean", "no", "As for identify (default true)."],
+                            ["use_date", "boolean", "no", "As for identify (default true)."],
+                            ["top_k", "1–10", "no", "As for identify (default 5)."]],
+                 "request": ("curl " + BASE_URL + "/answers/inat/123456789 \\\n"
+                             "  -H 'Authorization: Bearer YOUR_TOKEN'"),
+                 "notes": ["Returns a kept answer under the current `model.answers_version`, "
+                           "from an earlier identify by observation or from someone's run on "
+                           "the Identify page, in the same shape (`\"cached\": true`; "
+                           "`kept_from` is `api` or `site`). Nothing is read or scored, and "
+                           "nothing is counted.",
+                           "404 `not_answered` when Vision holds no such answer."]},
             ]},
             {"id": "sessions", "title": "Observation sessions", "blocks": [
                 {"type": "p", "text": "For apps that send photos one at a time as they are "

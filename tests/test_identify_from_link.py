@@ -219,3 +219,89 @@ def test_identify_by_observation_says_which_photos_may_be_shown(conn, tmp_path):
     site.inat[555] = with_licences(inat_obs(555, [9001, 9002]), ["cc-by", None])
     body = by_number(client, "inat", 555).json()
     assert body["observation"]["photos_shown"] == [INAT_PHOTO.format(id=9001, size="large"), None]
+
+
+# --- GET /api/v1/answers: what Vision holds, for .org, without reading or scoring --------
+
+def kept_answer(client, source, number, headers=SERVER, **params):
+    return client.get(f"/api/v1/answers/{source}/{number}", params=params, headers=headers)
+
+
+def test_an_answer_got_on_the_site_is_held_for_org_in_the_v1_shape(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    site.inat[555] = with_licences(inat_obs(555, [9001, 9002]), ["cc-by", None])
+    on_site = by_link(client, "inat", 555).json()
+    reads = len(site.log)
+    res = kept_answer(client, "inat", 555)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert len(site.log) == reads                   # nothing read from iNat, nothing scored
+    assert (body["cached"], body["kept_from"]) == (True, "site")
+    result = on_site["results"][0]
+    def names(ranks):                               # v1 adds its own `confident` marks
+        return {r: [(c["name"], c["confidence"]) for c in ranks.get(r, [])]
+                for r in ("species", "genus", "family")}
+    assert names(body["ranks"]) == names(result["ranks"])
+    assert [names(p["ranks"]) for p in body["per_photo"]] == [names(p["ranks"])
+                                                              for p in result["per_photo"]]
+    assert body["context_used"] == on_site["context_used"]
+    obs = body["observation"]
+    assert (obs["source"], obs["id"], obs["photos"], obs["photos_used"]) == ("inat", "555", 2, 2)
+    assert obs["photos_shown"] == [INAT_PHOTO.format(id=9001, size="large"), None]
+    assert "excluded_reference" not in obs and "left_out_photos" not in obs
+    assert body["excluded_reference"] is None and body["left_out_photos"] == 0
+    models = client.get("/api/v1/models", headers=SERVER).json()
+    assert body["model"]["answers_version"] == models["models"][0]["answers_version"]
+    assert "backbone" not in body["model"] and res.headers["cache-control"] == "no-store"
+
+
+def test_a_reference_record_answered_on_the_site_says_it_was_left_out(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    site.inat[100] = inat_obs(100, [9001])           # seeded reference record "A x"
+    by_link(client, "inat", 100)
+    body = kept_answer(client, "inat", 100).json()
+    assert body["excluded_reference"] == {"source": "inat", "source_id": "100"}
+
+
+def test_an_identify_by_observation_answer_is_held_too(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    first = by_number(client, "inat", 555).json()
+    reads = len(site.log)
+    body = kept_answer(client, "inat", 555).json()
+    assert len(site.log) == reads
+    assert (body["cached"], body["kept_from"]) == (True, "api")
+    assert body["request_id"] != first["request_id"]
+    for key in ("ranks", "answer", "gate", "observation", "context_used", "model"):
+        assert body[key] == first[key], key
+
+
+def test_nothing_held_is_404_not_answered_and_reads_nothing(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    res = kept_answer(client, "inat", 555)
+    assert (res.status_code, res.json()["code"]) == (404, "not_answered")
+    assert site.log == []
+    # An answer under other options, or another version, is not this one.
+    by_link(client, "inat", 555, use_place=False)
+    assert kept_answer(client, "inat", 555).status_code == 404
+    assert kept_answer(client, "inat", 555, use_place="false").status_code == 200
+    client.app.state.answer_cache._conn.execute("update observation_answers set version = 'older'")
+    assert kept_answer(client, "inat", 555, use_place="false").status_code == 404
+
+
+def test_reading_a_held_answer_counts_nothing(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    by_link(client, "inat", 555)
+    before = client.get("/api/v1/usage", headers=SERVER).json()
+    kept_answer(client, "inat", 555)
+    kept_answer(client, "inat", 555)
+    assert client.get("/api/v1/usage", headers=SERVER).json() == before
+
+
+def test_the_held_answer_needs_a_credential_and_a_real_observation(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    assert kept_answer(client, "inat", 555, headers={}).status_code == 401
+    res = kept_answer(client, "gbif", 555)
+    assert (res.status_code, res.json()["code"]) == (404, "not_found")
+    assert kept_answer(client, "inat", "12ab").status_code == 400
+    off, _ = app(conn, tmp_path / "off", by_observation=False)
+    assert kept_answer(off, "inat", 555).json()["code"] == "not_found"
