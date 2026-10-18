@@ -10,7 +10,7 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, groupBySection,
          historyOrgText, itemBadges, linkedItem, orgChipClass, PAGE_SIZE, pageText, prefillValue,
          recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
-         valueBox, whenText, yes, type SectionGroup, type Verdict } from "@/lib/feedback";
+         statCardLines, valueBox, whenText, yes, type SectionGroup, type Verdict } from "@/lib/feedback";
 import { LABEL_REVIEW_TYPE } from "@/lib/labelReview";
 import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
 import { LabelReview } from "./LabelReview";
@@ -168,10 +168,16 @@ function StatCards({ types, selected, onPick, label }: {
                     on ? "ring-2 ring-myco-green border-myco-green/50" : ""}`}
                   data-testid={`feedback-card-${t.type}`}>
             <span className="block text-sm font-medium leading-snug text-muted-foreground">{t.title}</span>
-            <span className={`mt-2 block text-2xl font-bold tabular-nums ${INK}`}>{t.open.toLocaleString("en-US")}</span>
-            <span className="block text-xs text-muted-foreground">
-              open · {t.decided.toLocaleString("en-US")} decided
-            </span>
+            {(() => {
+              const line = statCardLines(t);
+              return (<>
+                <span className={`mt-2 block text-2xl font-bold tabular-nums ${INK}`}>
+                  {line.big}
+                  {line.unit && <span className="ml-1 text-sm font-medium text-muted-foreground">{line.unit}</span>}
+                </span>
+                <span className="block text-xs text-muted-foreground">{line.sub}</span>
+              </>);
+            })()}
           </button>
         );
       })}

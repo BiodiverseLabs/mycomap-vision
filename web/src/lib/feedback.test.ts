@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
-import { appliesWords, blastAnchor, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
+import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
          historyOrgText, itemBadges, linkedItem, orgChipClass, pageText, parsePhotoKeys, prefillValue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
          shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText } from "./feedback";
@@ -241,4 +241,13 @@ test("a refused reveal says the item has nothing hidden any more; other failures
   assert.match(revealProblem(new ApiError(409, "nothing is hidden on this item")), /Nothing is hidden/);
   assert.equal(revealProblem(new ApiError(401, "Sign in")), "Sign in");
   assert.match(revealProblem(new Error("network")), /could not be shown/);
+});
+
+test("a photo queue's card counts photos and the observations they are in", () => {
+  assert.deepEqual(statCardLines({ open: 14827, decided: 0, records_open: 8417, records_decided: 0 }),
+                   { big: "14,827", unit: "photos", sub: "open in 8,417 observations · 0 decided" });
+  assert.deepEqual(statCardLines({ open: 1, decided: 3, records_open: 1, records_decided: 2 }),
+                   { big: "1", unit: "photo", sub: "open in 1 observation · 3 decided (2 observations done)" });
+  assert.deepEqual(statCardLines({ open: 80, decided: 1 }),
+                   { big: "80", unit: "", sub: "open · 1 decided" });
 });

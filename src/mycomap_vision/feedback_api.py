@@ -200,8 +200,15 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.get("/api/feedback/summary")
     def fb_summary(request: Request):
+        """Per queue, open and decided items; for a photo queue also the observations they
+        are in (records_open, records_decided)."""
         _, projects = access(request)
-        return store.summary(projects)
+        out = store.summary(projects)
+        for t in out:
+            if t["granularity"] == "photo":
+                c = pr.record_counts(store.items_of(t["type"], projects))
+                t["records_open"], t["records_decided"] = c["open"], c["decided"]
+        return out
 
     @app.get("/api/feedback/items")
     def fb_items(request: Request, type: str, status: str = "open", q: str = "",

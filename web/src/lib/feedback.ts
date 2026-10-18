@@ -305,3 +305,21 @@ export function revealProblem(error: unknown): string {
   if (error instanceof ApiError && error.status === 401) return error.message;
   return "Vision's answer could not be shown. Try again.";
 }
+
+
+/** What a queue's card says (Steve, 2026-10-18): a photo queue counts photos and the
+ *  observations they are in; every other queue counts its items. */
+export function statCardLines(t: Pick<FeedbackSummary, "open" | "decided" | "records_open" |
+                                       "records_decided">): { big: string; unit: string; sub: string } {
+  const n = (x: number) => x.toLocaleString("en-US");
+  if (t.records_open === undefined) {
+    return { big: n(t.open), unit: "", sub: `open · ${n(t.decided)} decided` };
+  }
+  const obs = (x: number) => `${n(x)} observation${x === 1 ? "" : "s"}`;
+  return {
+    big: n(t.open),
+    unit: t.open === 1 ? "photo" : "photos",
+    sub: `open in ${obs(t.records_open)} · ${n(t.decided)} decided` +
+         (t.records_decided ? ` (${obs(t.records_decided)} done)` : ""),
+  };
+}

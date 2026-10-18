@@ -403,6 +403,9 @@ export interface FeedbackSummary {
   blind: boolean;
   open: number;
   decided: number;
+  /** Photo queues only: the observations their open / fully decided photos are in. */
+  records_open?: number;
+  records_decided?: number;
 }
 
 export type FeedbackStatus = "open" | "decided";

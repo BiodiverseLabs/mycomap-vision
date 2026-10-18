@@ -121,6 +121,21 @@ def record_of_item(item: dict) -> str | None:
     return None
 
 
+def record_counts(items: list[dict]) -> dict[str, int]:
+    """Observations behind the queue's photos: "open" has at least one flagged photo still
+    open, "decided" has every flagged photo decided (Steve, 2026-10-18: photo and observation
+    counts on the queue's card)."""
+    open_, seen = set(), set()
+    for it in items:
+        key = record_of_item(it)
+        if key is None:
+            continue
+        seen.add(key)
+        if it["status"] == "open":
+            open_.add(key)
+    return {"open": len(open_), "decided": len(seen - open_)}
+
+
 def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
           min_flagged: int = 1, query: str = "") -> dict:
     """Group the queue's photo items by record. `tab` is one of TAB_CODES or 'all'; a record is

@@ -328,3 +328,18 @@ def test_the_source_fetcher_reads_only_photo_hosts_over_https_within_its_budget(
     session.answers[mo] = FakeResp(302, location="https://images.mushroomobserver.org/640/7.jpg")
     session.answers["https://images.mushroomobserver.org/640/7.jpg"] = FakeResp(200, b"mo")
     assert f.get(mo, "mo") == b"mo"
+
+
+def test_the_queue_card_counts_photos_and_the_observations_they_are_in(conn, tmp_path):
+    items = items_for_cards()                  # 3 open photos in records 10 (2) and 11; 12 decided
+    assert pr.record_counts(items) == {"open": 2, "decided": 1}
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    s = {t["type"]: t for t in c.get("/api/feedback/summary").json()}["non_specimen_photo"]
+    assert (s["open"], s["records_open"], s["records_decided"]) == (3, 2, 0)
+    c.post("/api/feedback/photo-review/101/decision",
+           json={"photos": [{"photo_key": "inat:1001", "decision": "keep"}]})
+    s = {t["type"]: t for t in c.get("/api/feedback/summary").json()}["non_specimen_photo"]
+    assert (s["open"], s["decided"], s["records_open"], s["records_decided"]) == (2, 1, 1, 1)
+    assert "records_open" not in {t["type"]: t for t in
+                                  c.get("/api/feedback/summary").json()}["group_label"]
