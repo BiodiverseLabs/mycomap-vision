@@ -567,6 +567,16 @@ def cmd_dataset(args) -> None:
             "taxonomy_cache_sha256": dr.sha256_file(cache)
             if "nonfungal_label" in reasons else None, **extra,
             "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "label-vocabulary":
+        from . import errata as errata_mod
+        from . import name_equiv
+        rel = dr.load_release(args.id, root, allow_draft=True)
+        try:
+            if args.errata:
+                rel.use_errata(errata_mod.read(Path(args.errata)))
+            print(json.dumps(name_equiv.write_label_vocabulary(rel, Path(args.out)), indent=2))
+        finally:
+            rel.close()
     elif args.action == "pull-dhash-index":
         from . import aws, aws_dataset
         path = aws_dataset.pull_dhash_index(args.id, aws.s3_client(), aws.bucket())
@@ -2127,6 +2137,12 @@ def main(argv: list[str] | None = None) -> int:
                    "index (default: research-release-extras/<id>/dhash-index.npz)")
     q.add_argument("--exclude-photos", metavar="TSV", help="crosspost_twin: photo keys "
                    "(photo_key column) that never pair, e.g. the micrograph list")
+    q = dsub.add_parser("label-vocabulary", help="write the label vocabulary of the answer "
+                                                 "key's one-to-one rule (name_equiv), pinned "
+                                                 "by sha256")
+    q.add_argument("id")
+    q.add_argument("--errata", help="the release's erratum in use")
+    q.add_argument("--out", required=True, help="the file to write (never overwritten)")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
