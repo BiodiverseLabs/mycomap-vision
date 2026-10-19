@@ -1463,7 +1463,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             def fetched_hashes(ident: Identifier, pairs) -> list[int]:
                 """The dHash of each fetched photo, when the index has a twin table to match
                 them against (a cross-post's copy of the same picture is left out)."""
-                if ident.twins is None:
+                if getattr(ident, "twins", None) is None:
                     return []
                 out = []
                 for _, photo_body in pairs:
