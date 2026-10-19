@@ -1157,9 +1157,7 @@ def cmd_feedback(conn, args) -> None:
     from pathlib import Path
 
     from . import feedback
-    path = Path(args.store) if args.store else (
-        (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT else config.DATA_DIR)
-        / "human-feedback.sqlite")
+    path = Path(args.store) if args.store else feedback.default_path()
     store = feedback.Store(path)
     if args.action == "seed":
         out = feedback.seed_files(store, conn, Path(args.queue) if args.queue else None,
@@ -2403,7 +2401,8 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--blind-ratio", type=float, default=0.25)
     q.add_argument("--seed", type=int, default=20261018)
     q.add_argument("--store", help="the queue file (default <release root>/state/"
-                                   "human-feedback.sqlite)")
+                                   "human-feedback.sqlite on the box, else beside the "
+                                   "manifest)")
     q = fsub.add_parser("status", help="open and decided items per type")
     q.add_argument("--store")
 

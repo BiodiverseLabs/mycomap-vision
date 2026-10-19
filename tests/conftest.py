@@ -1,6 +1,49 @@
+import os
+
 import pytest
 
-from mycomap_vision import manifest
+from mycomap_vision import config, manifest
+
+# The laptop's real Human Feedback queue, as config resolved it before any test ran.
+REAL_FEEDBACK_STORE = config.DATA_DIR / "human-feedback.sqlite"
+
+
+def _state(path):
+    """(size, mtime_ns) of the store and its WAL, None for a file that isn't there. The
+    -shm file is left out: any reader touches it."""
+    out = []
+    for p in (path, path.with_name(path.name + "-wal")):
+        try:
+            st = os.stat(p)
+            out.append((st.st_size, st.st_mtime_ns))
+        except FileNotFoundError:
+            out.append(None)
+    return tuple(out)
+
+
+@pytest.fixture(autouse=True)
+def data_dir_in_tmp(tmp_path, monkeypatch):
+    """Every test's data folder and default manifest are its own temporary ones, so nothing
+    a test leaves to a default lands in a laptop's real data/ (its Human Feedback queue,
+    above all). A test that needs another sets its own."""
+    data = tmp_path / "default-data"
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    monkeypatch.setattr(config, "MANIFEST_PATH", data / "manifest.sqlite")
+    for name in ("RAW_DIR", "PHOTOS_DIR", "REPORTS_DIR"):      # config.ensure_dirs() makes them
+        monkeypatch.setattr(config, name, data / getattr(config, name).name)
+
+
+@pytest.fixture(autouse=True)
+def real_feedback_store_untouched(request):
+    """Fails the test that creates or changes <data>/human-feedback.sqlite (or its WAL) in
+    the checkout's real data folder."""
+    before = _state(REAL_FEEDBACK_STORE)
+    yield
+    after = _state(REAL_FEEDBACK_STORE)
+    if after != before:
+        pytest.fail(f"{request.node.nodeid} created or changed the real Human Feedback queue "
+                    f"{REAL_FEEDBACK_STORE} ({before} -> {after}). Tests must use a temporary "
+                    "store (a local `mv serve` writing to it at the same time also trips this).")
 
 
 @pytest.fixture(autouse=True)
