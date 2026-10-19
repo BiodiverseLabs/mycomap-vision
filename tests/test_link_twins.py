@@ -99,6 +99,18 @@ def test_a_find_posted_three_times_is_one_group():
     assert len(set(table["group_id"].tolist())) == 1 and len(table["group_id"]) == 3
 
 
+def test_records_the_sites_link_are_one_find_even_when_their_pictures_differ():
+    conn = manifest_of([("mo:1", "Psathyrella candolleana", "mo"),
+                        ("10", "Candolleomyces candolleanus", "inat")],
+                       [("mo:1", photo_id_of(1)), ("10", 10)])
+    keys, hashes = ["mo:1", "inat:10"], np.array([0x0F0F, 0xF0F0F0F0], dtype=np.uint64)
+    assert twins.build(conn, keys, hashes)["pairs"] == []
+    table = twins.build(conn, keys, hashes, links=[("10", "1"), ("99", "1")])  # 99: no record
+    assert dict(zip(table["group_record"].tolist(), table["group_id"].tolist())) == {
+        "10": 0, "mo:1": 0}
+    assert (table["meta"]["link_pairs"], table["meta"]["link_only_pairs"]) == (1, 1)
+
+
 # --- leaving a find out -----------------------------------------------------------------
 
 def fake_identifier(tmp_path, groups=None, hashes=None, templates=()):
@@ -275,7 +287,7 @@ def test_mv_twins_writes_the_table_from_a_dhash_index(conn, tmp_path, capsys):
                       "pillow": "p", "photos": 2, "photo_key": ["inat:11", "mo:1"],
                       "sha256": ["a", "b"], "dhash": np.array([7, 7], dtype=np.uint64)}, index)
     out = tmp_path / "out" / twins.FILE
-    cli.cmd_twins(conn, SimpleNamespace(dhash_index=str(index), out=str(out)))
+    cli.cmd_twins(conn, SimpleNamespace(dhash_index=str(index), out=str(out), links=None))
     said = json.loads(capsys.readouterr().out)
     assert (said["pairs"], said["records"], said["finds"]) == (1, 2, 1)
     assert twins.table_counts(out)["pairs"] == 1

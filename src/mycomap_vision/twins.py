@@ -68,9 +68,13 @@ def _groups(pairs) -> dict[str, int]:
     return {x: gid[root(x)] for x in sorted(parent)}
 
 
-def build(conn, dhash_photo_keys, dhash_values, *, source_note: dict | None = None) -> dict:
+def build(conn, dhash_photo_keys, dhash_values, *, links=(),
+          source_note: dict | None = None) -> dict:
     """The twin table for a manifest's records (rule: errata.match_twins), from a dHash index's
-    photo keys and hashes. Returns what `save` writes."""
+    photo keys and hashes. `links`: (iNat number, MO number) pairs the sites link as one find
+    (iNat's "Mushroom Observer URL" field, MO's link to iNat), joined into the same finds
+    when both are records here: they catch a cross-post whose pictures differ. Returns what
+    `save` writes."""
     hash_of: dict[int, int] = {}
     for key, h in zip(dhash_photo_keys, dhash_values):
         pid = photo_id_of_key(str(key))
@@ -89,10 +93,14 @@ def build(conn, dhash_photo_keys, dhash_values, *, source_note: dict | None = No
     templates = errata.template_hashes(hash_records)
     del hash_records
     pairs = sorted(errata.match_twins(photos, templates))
-    groups = _groups(pairs)
+    linked = sorted({(f"mo:{m}", str(i)) for i, m in links
+                     if f"mo:{m}" in label_source and str(i) in label_source})
+    groups = _groups(pairs + linked)
     held = sorted({p[0] for p in photos})
     return {"meta": {"rule": RULE, "max_bits": errata.TWIN_MAX_BITS,
                      "template_records": errata.TEMPLATE_RECORDS, "pairs": len(pairs),
+                     "link_pairs": len(linked),
+                     "link_only_pairs": len(set(linked) - set(pairs)),
                      "records": len(groups), "finds": len(set(groups.values())),
                      "photos": len(held), "templates": len(templates),
                      "made_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

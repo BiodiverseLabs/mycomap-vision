@@ -975,9 +975,13 @@ def cmd_twins(conn, args) -> None:
     import numpy as np
 
     from . import twins
+    links = []
+    if args.links:
+        with open(args.links, newline="", encoding="utf-8") as f:
+            links = [(r["inat"], r["mo"]) for r in csv.DictReader(f, delimiter="	")]
     with np.load(Path(args.dhash_index), allow_pickle=False) as z:
         index_meta = json.loads(str(z["meta"]))
-        table = twins.build(conn, z["photo_key"], z["dhash"], source_note={
+        table = twins.build(conn, z["photo_key"], z["dhash"], links=links, source_note={
             "dhash_release": index_meta.get("release"),
             "dhash_algorithm": index_meta.get("algorithm")})
     out = Path(args.out) if args.out else config.DATA_DIR / twins.FILE
@@ -2208,6 +2212,8 @@ def main(argv: list[str] | None = None) -> int:
                                      "observation leaves out (twins.py), from a dHash index")
     p.add_argument("--dhash-index", required=True, metavar="NPZ",
                    help="photo_key + dhash per photo (dhash.save_index), e.g. v1's")
+    p.add_argument("--links", metavar="TSV", help="columns inat, mo: observations the sites "
+                   "link as one find (iNat's Mushroom Observer URL field, MO's link to iNat)")
     p.add_argument("--out", help="default: <data>/twins.npz")
 
     p = sub.add_parser("release", help="publish what the site serves (manifest, embeddings, "
