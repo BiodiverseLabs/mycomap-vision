@@ -35,7 +35,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               onnxtower, permissions,
+               onnxtower, permissions, twins,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue, yours)
 from .dates import real_date
@@ -582,7 +582,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             ident = Identifier(own, backbone, method, root, calibration=cal,
                                train=limits.fit_on_demand, photo_info=False,
                                layer_root=layer.embeddings if layer else None,
-                               gate=fungus_gate)
+                               gate=fungus_gate, twin_groups=served_twins())
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
@@ -634,6 +634,24 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                            index_version(backbone, method, view))
 
     warm = Preload()
+
+    # Cross-post twins (twins.py): records that are one find on MO and iNat. The served
+    # record-grouped method needs them, and every method leaves a linked observation's twin
+    # out with it. MV_TWINS_FILE, else the serving release's twins.tsv; read once.
+    twins_cache: dict = {}
+
+    def served_twins() -> dict | None:
+        if "groups" not in twins_cache:
+            path = config.setting("MV_TWINS_FILE")
+            path = Path(path) if path else (served_release_dir() or Path("/nonexistent"))                 / "twins.tsv"
+            twins_cache["groups"] = twins.read(path) if path.is_file() else None
+            twins_cache["cite"] = twins.cite(path) if path.is_file() else None
+        return twins_cache["groups"]
+
+    def served_ready(method: str) -> bool:
+        """methods.method_ready, and for a record-grouped method its twin groups here."""
+        return method_ready(method) and (not twins.is_grouped(method)
+                                         or served_twins() is not None)
 
     def served_release_dir() -> Path | None:
         """The folder of the release this server answers from, or None (a laptop)."""
@@ -719,7 +737,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def default_method() -> str:
         """What an identification uses when no method is named (MV_DEFAULT_METHOD)."""
-        return limits.served_default(lambda m: m in evaluate.METHODS and method_ready(m))
+        return limits.served_default(lambda m: m in evaluate.METHODS and served_ready(m))
 
     @app.get("/api/models")
     def list_models():
@@ -739,7 +757,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         "trained_through": through.get(name)})
         return {"backbones": out,
                 "methods": [m for m in evaluate.METHODS
-                            if limits.method_allowed(m) and method_ready(m)],
+                            if limits.method_allowed(m) and served_ready(m)],
                 "max_models": limits.max_models,
                 "default_method": default_method(),
                 "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
@@ -961,7 +979,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise HTTPException(400, f"{backbone!r} has no embeddings")
             if method not in evaluate.METHODS:
                 raise HTTPException(400, f"unknown method {method!r}")
-            if not limits.method_allowed(method) or not method_ready(method):
+            if not limits.method_allowed(method) or not served_ready(method):
                 raise HTTPException(400, f"{method!r} is not offered here")
             pairs.append((backbone, method))
         return pairs
@@ -1023,7 +1041,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if backbone not in limits.allowed_backbones or backbone not in ready:
                     raise ValueError(f"{backbone!r} is not offered here or has no embeddings")
                 if (method not in evaluate.METHODS or not limits.method_allowed(method)
-                        or not method_ready(method)):
+                        or not served_ready(method)):
                     raise ValueError(f"{method!r} is unknown or not offered here")
                 identifier(backbone, method, permission_view())
                 with gpu_lock:
@@ -1331,7 +1349,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             method = method or default_method()
             if (backbone not in limits.allowed_backbones or backbone not in ready
                     or method not in evaluate.METHODS or not limits.method_allowed(method)
-                    or not method_ready(method)):
+                    or not served_ready(method)):
                 raise apiv1.V1Error(400, "bad_request", f"model {spec!r} is not offered here; "
                                     "see GET /api/v1/models")
             return backbone, method

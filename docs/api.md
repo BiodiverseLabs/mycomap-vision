@@ -720,7 +720,8 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_BY_OBSERVATION=1` | identify by iNat or MO observation number (§3.2); needs `MV_API_V1=1` |
 | `MV_QUOTAS=off\|count\|enforce` | §6: `count` counts and reports use without refusing, for a trial |
 | `MV_TAXON_COUNTS=1` | `GET /api/v1/taxon-counts` (§7) |
-| `MV_DEFAULT_METHOD` | the method an identification uses (default `nearest+mean`; the box serves `nearest+mean+place`, which answers as `nearest+mean` without a place or date) |
+| `MV_DEFAULT_METHOD` | the method an identification uses (default `nearest+mean`). The box serves `nearest+mean+place`, which answers as `nearest+mean` without a place or date; from Steve's decision of 2026-10-18 (E32), `nearest+mean-records-balanced+place`, which scores each species by its two best specimens and counts an MO/iNat cross-post as one. If it can't answer, it falls back to `nearest+mean-records-balanced`, then `nearest+mean+place`, then `nearest+mean`. No method or backbone id appears in any v1 answer. |
+| `MV_TWINS_FILE` | the cross-post twin groups (`mv twins build`) the specimen scoring needs; default: `twins.tsv` in the served release |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |
 | `MV_PHOTOS_PER_MINUTE`, `MV_QUEUE_MAX_WAIT`, `MV_SESSIONS_MAX_MB`, `MV_QUOTA_DEFAULT_MONTHLY`, `MV_USAGE_REPORT_SECONDS` | limits, defaults in .env.example |

@@ -994,7 +994,8 @@ def cmd_release(conn, args) -> None:
     from . import release
     print(json.dumps(release.publish(conn, _split(args.backbones), label=args.label,
                                      make_current=args.make_current,
-                                     int8_vectors=args.int8_vectors), indent=2))
+                                     int8_vectors=args.int8_vectors,
+                                     twins_file=args.twins), indent=2))
 
 
 def cmd_pull_release(conn, args) -> None:
@@ -2238,6 +2239,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--int8-vectors", action="store_true",
                    help="ship the reference vectors as int8 + a scale each: half the box's "
                         "vector memory (Steve, 2026-10-12; accuracy: mv int8-check)")
+    p.add_argument("--twins", metavar="FILE",
+                   help="cross-post twin groups (mv twins build --splits train,val), shipped "
+                        "as twins.tsv: the served nearest+mean-records-balanced needs them")
 
     p = sub.add_parser("dataset", help="dataset releases for research: frozen, verifiable "
                                        "snapshots (docs/dataset-release.md)")
