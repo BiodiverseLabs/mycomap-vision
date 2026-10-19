@@ -241,6 +241,21 @@ def test_photos_of_one_record_are_left_out_for_different_reasons(conn, tmp_path)
     assert reasons == {"inat:1000": "micrograph", "inat:1100": "not_fungus"}
 
 
+def test_dried_specimens_and_spore_prints_are_reasons_of_their_own(conn, tmp_path):
+    """Steve, 2026-10-19: a dried specimen or a spore print is left out as itself, not 'Other'."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
+    assert offered["dried"] == "Dried specimen" and offered["spore_print"] == "Spore print"
+    assert list(offered)[-1] == "other"                           # "Other" stays last
+    r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+        {"photo_key": "inat:1000", "decision": "exclude", "reason": "dried"},
+        {"photo_key": "inat:1100", "decision": "exclude", "reason": "spore_print"}]})
+    assert r.status_code == 200
+    reasons = {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")}
+    assert reasons == {"inat:1000": "dried", "inat:1100": "spore_print"}
+
+
 # --- photos the box holds no readable copy of come from their source ----------------------------
 
 class FakeResp:

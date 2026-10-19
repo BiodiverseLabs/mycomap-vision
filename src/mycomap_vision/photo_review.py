@@ -46,13 +46,16 @@ TABS: tuple[tuple[str, str], ...] = (
 TAB_CODES = tuple(c for c, _ in TABS)
 
 # Why a photo is left out, one per photo (Steve, 2026-10-18: a record's photos can be of
-# several kinds). A flagged photo's reason starts at its flag's (suggested_reason).
+# several kinds). A flagged photo's reason starts at its flag's (suggested_reason). Dried
+# specimens and spore prints have their own reasons (Steve, 2026-10-19) instead of "Other".
 REASONS: tuple[tuple[str, str], ...] = (
     ("micrograph", "Micrograph or microscope"),
     ("slip", "Field slip or label"),
     ("habitat", "Habitat or scene"),
     ("people", "People"),
     ("not_fungus", "Not a fungus"),
+    ("dried", "Dried specimen"),
+    ("spore_print", "Spore print"),
     ("other", "Other"),
 )
 REASON_CODES = tuple(c for c, _ in REASONS)
