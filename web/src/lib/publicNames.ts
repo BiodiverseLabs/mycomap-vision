@@ -23,6 +23,8 @@ export const PUBLIC_METHOD_LABEL: Record<string, string> = {
   "species-mean": "species average",
   "nearest+mean": "closest specimens + species average",
   "nearest+mean+place": "closest specimens + species average + place and date",
+  "nearest+mean-records-balanced": "closest specimens + species average, by specimen",
+  "nearest+mean-records-balanced+place": "closest specimens + species average, by specimen + place and date",
   "nearest-mix": "closest specimen, photo votes",
   linear: "trained classifier",
   hybrid: "trained classifier + closest specimens",

@@ -115,16 +115,28 @@ answered from a proxy's cache.
   a reused reference record, which isn't read). `photos_shown` has one entry per scored
   photo, in `per_photo`'s order: the photo's URL when it is Creative Commons or public
   domain, else null (null as a whole for a reused reference record).
-- **Answers are kept.** Each answer is saved on the box per observation, model and
-  options (`top_k`, `use_place`, `use_date`) and given again, without reading the
-  observation or scoring it, while `model.answers_version` is unchanged: an opaque id
-  of what Vision answers from (the release and its reference set as served), which
-  moves with a new release, a night's reference changes, a recalibration or a
-  photographer's answer. A kept answer says `"cached": true` and has a new
-  `request_id` and `timing`; a fresh one says `"cached": false`. A photo added at the
-  source after the answer is not seen until the version moves. GET /api/v1/models
-  gives the current `answers_version`, so a caller that keeps answers itself can tell
-  they still hold.
+- **Answers are kept until someone runs them again** (Steve, 2026-10-19). Each answer
+  is saved on the box per observation, model and options (`top_k`, `use_place`,
+  `use_date`) and given again, without reading the observation or scoring it, to every
+  later ask: here, on the site's Identify page ("from a link"), or from mycomap.org's
+  Validate Records. One run answers both: identify-by-observation also keeps the site's
+  answer from the same photos, and an answer got on the site is given here (in this shape;
+  `"kept_from": "site"`). Nothing is run again on its own, not for a night's reference
+  changes and not for a new release: send `"rerun": true` to run it afresh and replace
+  what is kept. A kept answer says `"cached": true`, `"kept_from"` (`api` or `site`) and
+  has a new `request_id` and `timing`; a fresh one says `"cached": false`. Both carry
+  `answered`: `{"at"` (UTC, ISO 8601), `"by"` (`mycomap.org`, `app`, `api`, `site`, or
+  null for one kept before 2026-10-19), `"answers_version"`, `"current"}`.
+  `model.answers_version` is the version it was answered under: an opaque id of what
+  Vision answered from (the release and its reference set as served), which moves with a
+  new release, a night's reference changes, a recalibration or a photographer's answer;
+  `current` is false once it has moved (GET /api/v1/models gives the current one). An
+  answer kept under an older version shows each specimen's photo only if it may be shown
+  now (a photographer who withdrew since is never shown). The one exception: an older
+  answer listing a specimen Vision now leaves out of this observation's answer (the
+  record it is, or a cross-post twin found since) matched the observation to itself, so
+  it is answered afresh. A photo added at the source after the answer is not seen until
+  someone runs it again.
 - Counting: one identification, behind interactive calls in the queue, kept answers
   included. `client_ref` defaults to `inat:<id>` / `mo:<id>`, so the same observation
   for the same pool within a day is counted once (§6.4).
@@ -133,12 +145,13 @@ answered from a proxy's cache.
   `busy`.
 - **Reading a kept answer.** `GET /api/v1/answers/inat/{id}` or `/mo/{id}`, optional
   query `model`, `top_k`, `use_place`, `use_date` (defaults as above), gives the answer
-  Vision holds under the current `answers_version` without reading, scoring or counting
-  anything: one kept by identify-by-observation (`"kept_from": "api"`), else one someone
-  got on the site's Identify page from a link (`"kept_from": "site"`; same model, place
-  and date options, put in this shape: `observation.place` is null, and order, class and
-  phylum aren't listed). `"cached": true`. 404 `not_answered` when there is none. .org's
-  Validate Records uses it so an answer got on the site shows on the record at once.
+  Vision holds, under whichever version it was answered, without reading, scoring or
+  counting anything: the newer of the one kept by identify-by-observation (`"kept_from":
+  "api"`) and the one someone got on the site's Identify page from a link (`"kept_from":
+  "site"`; same model, place and date options, put in this shape: `observation.place` is
+  null, and order, class and phylum aren't listed). `"cached": true`, with `answered` as
+  above. 404 `not_answered` when there is none. .org's Validate Records uses it so an
+  answer got on the site shows on the record at once.
 
 ### 3.3 Sessions (the app)
 

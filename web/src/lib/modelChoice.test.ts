@@ -75,3 +75,19 @@ test("the place model alone is still reachable, and never asked for where it isn
                "nearest+mean");
   assert.equal(methodFor({ base: "nearest", weighNearest: false, usePlace: true }), "nearest+prior");
 });
+
+// The box since 2026-10-19 serves E32's by-specimen method by default. The page knew no
+// such base, fell back to nearest+mean+place, and so never shared an answer with
+// mycomap.org's Validate Records (which asks the default): every "Open in Vision" ran the
+// observation a second time.
+const BOX_C = ["nearest", "nearest+mean", "nearest+mean+place", "nearest+mean-records-balanced",
+               "nearest+mean-records-balanced+place"];
+
+test("the page asks for the server's by-specimen default, with place and date", () => {
+  const c = defaultChoice(BOX_C, "nearest+mean-records-balanced+place")!;
+  assert.deepEqual(c, { base: "nearest+mean-records-balanced", weighNearest: false, usePlace: true });
+  assert.equal(resolveMethod(c, BOX_C), "nearest+mean-records-balanced+place");
+  assert.deepEqual(switchesFor("nearest+mean-records-balanced", BOX_C), { weighNearest: false, usePlace: true });
+  assert.equal(resolveMethod({ ...c, usePlace: false }, BOX_C), "nearest+mean-records-balanced");
+  assert.deepEqual(offeredBases(BOX_C), ["nearest+mean-records-balanced", "nearest+mean", "nearest"]);
+});

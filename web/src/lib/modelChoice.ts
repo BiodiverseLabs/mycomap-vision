@@ -5,16 +5,21 @@
 //   Trained classifier  linear   (+ nearest specimens: hybrid)
 //   Nearest + average   nearest+mean  (the site's default, Steve 2026-10-09;
 //                       with place and date: nearest+mean+place, Steve 2026-10-11)
+//   ...by specimen      nearest+mean-records-balanced (+place): each species by its two
+//                       best specimens, a cross-post counted once; the server's default
+//                       from Steve's E32 decision (2026-10-18), so the page asks what
+//                       mycomap.org's Validate Records asks and both share one kept answer
 //   Nearest specimen    nearest
 //   Species average     species-mean
 //   ...the others with "+prior" when place and date (range and season) are used.
 
-export type Base = "linear" | "nearest+mean" | "nearest" | "species-mean";
+export type Base = "linear" | "nearest+mean-records-balanced" | "nearest+mean" | "nearest" | "species-mean";
 
-export const BASES: Base[] = ["linear", "nearest+mean", "nearest", "species-mean"];
+export const BASES: Base[] = ["linear", "nearest+mean-records-balanced", "nearest+mean", "nearest", "species-mean"];
 
 export const BASE_LABEL: Record<Base, string> = {
   linear: "Trained classifier",
+  "nearest+mean-records-balanced": "Closest specimens + species average, by specimen",
   "nearest+mean": "Closest specimens + species average",
   nearest: "Closest specimen",
   "species-mean": "Species average",
@@ -28,9 +33,9 @@ export interface Choice {
   usePlace: boolean;
 }
 
-/** A method's place-and-date variant: nearest+mean's is the boost prior "+place", the
- *  others' the range-and-season "+prior". */
-const withPlace = (core: string) => (core === "nearest+mean" ? "nearest+mean+place" : `${core}+prior`);
+/** A method's place-and-date variant: nearest+mean's (and its by-specimen form's) is the
+ *  boost prior "+place", the others' the range-and-season "+prior". */
+const withPlace = (core: string) => (core.startsWith("nearest+mean") ? `${core}+place` : `${core}+prior`);
 
 /** True for a method that uses place and date. */
 export const usesPlaceAndDate = (method: string) => method.endsWith("+prior") || method.endsWith("+place");

@@ -134,11 +134,25 @@ def test_a_photo_without_a_licence_list_is_not_shown():
     assert bo.shown_photo_url(obs, 0) is None and bo.shown_photo_url(obs, 5) is None
 
 
-# --- answers kept until what Vision answers from changes --------------------------------
+# --- answers kept until someone runs them again (Steve, 2026-10-19) --------------------
 
 from test_api_v1_by_observation import SERVER, by_number  # noqa: E402
 
+from mycomap_vision import answercache  # noqa: E402
 from mycomap_vision.answercache import AnswerCache, answer_key, answers_version  # noqa: E402
+from mycomap_vision.identify import PhotoInfo  # noqa: E402
+
+
+def age_every_kept_answer(client):
+    """What a night's new references, a recalibration or a new release does to the
+    answers kept before it: their answers version is no longer the current one."""
+    client.app.state.answer_cache._conn.execute("update observation_answers set version = 'older'")
+
+
+def site_rows(client) -> list:
+    return client.app.state.answer_cache._conn.execute(
+        "select answer_key, asked_by, payload from observation_answers "
+        "where answer_key like 'site:%'").fetchall()
 
 
 def test_a_link_answered_before_comes_back_without_reading_the_observation_again(conn, tmp_path):
@@ -153,6 +167,9 @@ def test_a_link_answered_before_comes_back_without_reading_the_observation_again
     assert body["results"][0]["ranks"] == first["results"][0]["ranks"]
     assert body["observation"] == first["observation"]
     assert body["context_used"] == first["context_used"]
+    assert body["answered"] == first["answered"]
+    assert body["answered"]["by"] == "site" and body["answered"]["current"] is True
+    assert body["answered"]["at"].endswith("Z")
 
 
 def test_other_options_are_answered_on_their_own(conn, tmp_path):
@@ -163,14 +180,88 @@ def test_other_options_are_answered_on_their_own(conn, tmp_path):
     assert body["cached"] is False and len(site.log) > reads
 
 
-def test_an_answer_from_another_version_is_never_served(conn, tmp_path):
+def test_an_older_answer_is_served_until_someone_runs_it_again(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    first = by_link(client, "inat", 555).json()
+    age_every_kept_answer(client)
+    reads = len(site.log)
+    kept = by_link(client, "inat", 555).json()
+    assert len(site.log) == reads                   # never rerun on its own
+    assert kept["cached"] is True
+    assert kept["results"][0]["ranks"] == first["results"][0]["ranks"]
+    assert kept["answered"]["current"] is False     # the page offers to run it again
+    assert kept["answered"]["at"] == first["answered"]["at"]
+    fresh = by_link(client, "inat", 555, rerun=True).json()
+    assert fresh["cached"] is False and len(site.log) > reads
+    assert fresh["answered"]["current"] is True
+    reads = len(site.log)
+    after = by_link(client, "inat", 555).json()
+    assert after["cached"] is True and after["answered"]["current"] is True
+    assert len(site.log) == reads
+
+
+def test_run_again_on_the_site_runs_even_a_current_answer(conn, tmp_path):
     client, site = app(conn, tmp_path)
     by_link(client, "inat", 555)
-    cache = client.app.state.answer_cache
-    cache._conn.execute("update observation_answers set version = 'older'")
     reads = len(site.log)
-    body = by_link(client, "inat", 555).json()
-    assert body["cached"] is False and len(site.log) > reads
+    assert by_link(client, "inat", 555, rerun=True).json()["cached"] is False
+    assert len(site.log) > reads
+
+
+def test_a_validate_records_run_opens_on_the_site_without_running_again(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    org = by_number(client, "inat", 555).json()
+    assert org["cached"] is False and org["answered"]["by"] == "mycomap.org"
+    reads = len(site.log)
+    opened = by_link(client, "inat", 555)
+    assert opened.status_code == 200, opened.text
+    body = opened.json()
+    assert len(site.log) == reads                   # nothing read, nothing scored
+    assert body["cached"] is True
+    assert body["answered"]["by"] == "mycomap.org"
+    assert body["answered"]["at"] == org["answered"]["at"]
+    # The same answer the site would have got by running it itself.
+    own = by_link(client, "inat", 555, rerun=True).json()
+    assert body["results"][0]["ranks"] == own["results"][0]["ranks"]
+    assert [p["ranks"] for p in body["results"][0]["per_photo"]] == [
+        p["ranks"] for p in own["results"][0]["per_photo"]]
+    assert ([s["observation_id"] for s in body["results"][0]["specimens"]]
+            == [s["observation_id"] for s in own["results"][0]["specimens"]])
+    assert body["context_used"] == own["context_used"]
+    assert body["observation"] == own["observation"]
+
+
+def test_the_site_copy_of_an_api_run_keeps_the_vectors_for_the_persons_own_part(conn, tmp_path):
+    client, _ = app(conn, tmp_path)
+    by_number(client, "inat", 555)
+    [(key, who, payload)] = site_rows(client)
+    kept = answercache.json.loads(payload)
+    assert who == "mycomap.org" and key.startswith("site:inat:555:")
+    assert kept["vectors"] is not None and "release" in kept
+    assert '"yours"' not in payload
+
+
+def test_a_reference_record_run_through_the_api_opens_on_the_site_too(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    site.inat[100] = inat_obs(100, [9001])           # seeded reference record "A x"
+    by_number(client, "inat", 100)
+    reads = len(site.log)
+    body = by_link(client, "inat", 100).json()
+    assert body["cached"] is True and len(site.log) == reads
+    obs = body["observation"]
+    assert obs["excluded_reference"] is True and obs["left_out_photos"] >= 1
+    assert len(obs["photos_shown"]) == obs["photos_used"] == obs["photos"]
+    assert "100" not in {s["observation_id"] for s in body["results"][0]["specimens"]}
+
+
+def test_a_site_run_answers_identify_by_observation_without_running_again(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    by_link(client, "inat", 555)
+    reads = len(site.log)
+    body = by_number(client, "inat", 555).json()
+    assert len(site.log) == reads
+    assert (body["cached"], body["kept_from"]) == (True, "site")
+    assert body["answered"]["by"] == "site"
 
 
 def test_identify_by_observation_keeps_its_answer_too_and_says_the_version(conn, tmp_path):
@@ -182,13 +273,114 @@ def test_identify_by_observation_keeps_its_answer_too_and_says_the_version(conn,
     body = again.json()
     assert len(site.log) == reads
     assert (first["cached"], body["cached"]) == (False, True)
+    assert body["kept_from"] == "api"
     assert body["request_id"] != first["request_id"]
-    for key in ("ranks", "likely", "specimens", "answer", "gate", "observation", "context_used"):
+    for key in ("ranks", "likely", "specimens", "answer", "gate", "observation", "context_used",
+                "answered"):
         assert body[key] == first[key], key
     version = first["model"]["answers_version"]
     assert body["model"]["answers_version"] == version
     models = client.get("/api/v1/models", headers=SERVER).json()
     assert models["models"][0]["answers_version"] == version
+
+
+def test_identify_by_observation_serves_an_older_answer_until_rerun(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    first = by_number(client, "inat", 555).json()
+    age_every_kept_answer(client)
+    reads = len(site.log)
+    kept = by_number(client, "inat", 555).json()
+    assert len(site.log) == reads and kept["cached"] is True
+    assert kept["model"]["answers_version"] == "older"
+    assert kept["answered"]["current"] is False
+    assert kept["ranks"] == first["ranks"]
+    fresh = by_number(client, "inat", 555, rerun=True).json()
+    assert fresh["cached"] is False and len(site.log) > reads
+    assert fresh["model"]["answers_version"] == first["model"]["answers_version"]
+    assert fresh["answered"]["current"] is True
+
+
+def test_rerun_is_true_or_false(conn, tmp_path):
+    client, _ = app(conn, tmp_path)
+    res = by_number(client, "inat", 555, rerun="yes")
+    assert (res.status_code, res.json()["code"]) == (400, "bad_request")
+
+
+def test_the_newer_of_the_two_kept_answers_is_held_for_org(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    by_number(client, "inat", 555)
+    assert kept_answer(client, "inat", 555).json()["kept_from"] == "api"
+    by_link(client, "inat", 555, rerun=True)          # run again on the site, later
+    body = kept_answer(client, "inat", 555).json()
+    assert body["kept_from"] == "site" and body["answered"]["by"] == "site"
+
+
+# --- an older answer's photos follow who may be shown now ------------------------------
+
+def specimen(obs_id, url):
+    return {"observation_id": obs_id, "photo_url": url, "photo_owner": "old",
+            "photo_withheld": url is None}
+
+
+def test_an_older_answers_photos_follow_who_may_be_shown_now():
+    infos = {1: PhotoInfo("u1", "arr", "ann", 11), 2: PhotoInfo("u2", "open", "bo", 12),
+             3: PhotoInfo("u3", "arr", "cy", 13), 4: PhotoInfo("u4", "open", "di", 14)}
+    record_photos = {"r1": [1, 2], "r2": [3], "r4": [4]}
+    answer = {"specimens": [specimen("r1", "url:u1"), specimen("r2", "url:u3"),
+                            specimen("gone", "url:u9")],
+              "per_photo": [{"specimens": [specimen("r4", "url:u4")]}],
+              "spare": [[specimen("r2", None)]]}
+    granted = {13}                                   # ann withdrew; cy still grants
+    answercache.reshow_photos(
+        answer, lambda o: record_photos.get(o, []), lambda ids: {i: infos[i] for i in ids},
+        lambda i: i.license_class == "open" or i.owner_user_id in granted,
+        lambda i: "url:" + i.source_url)
+    r1, r2, gone = answer["specimens"]
+    # Ann's photo is no longer shown: another of the record's photos that may be is.
+    assert (r1["photo_url"], r1["photo_owner"], r1["photo_withheld"]) == ("url:u2", "bo", False)
+    assert r2["photo_url"] == "url:u3" and r2["photo_owner"] == "old"   # unchanged
+    # A record no longer in the reference set shows no photo.
+    assert (gone["photo_url"], gone["photo_owner"], gone["photo_withheld"]) == (None, None, True)
+    assert answer["per_photo"][0]["specimens"][0]["photo_url"] == "url:u4"
+    assert answer["spare"][0][0]["photo_url"] == "url:u3"
+
+
+def test_an_older_answer_shows_no_photo_that_may_no_longer_be_shown(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    first = by_link(client, "inat", 555).json()["results"][0]
+    assert any(s["photo_url"] for s in first["specimens"])
+    age_every_kept_answer(client)
+    # Every reference photo becomes all rights reserved, and nobody has granted showing it.
+    conn.execute("update photos set license_class = 'arr'")
+    conn.commit()
+    for kept in (by_link(client, "inat", 555).json()["results"][0],
+                 kept_answer(client, "inat", 555).json()):
+        assert all(s["photo_url"] is None and s["photo_withheld"] for s in kept["specimens"])
+
+
+def test_a_kept_answer_says_when_who_and_under_which_version():
+    cache = AnswerCache(None, clock=lambda: 1_760_000_000.0)
+    key = answer_key("site", "inat", "1", "m1", "nearest", {"place": True})
+    cache.put(key, "v1", {"a": 1}, "mycomap.org")
+    kept = cache.held(key)
+    assert (kept.payload, kept.version, kept.asked_by) == ({"a": 1}, "v1", "mycomap.org")
+    assert kept.about("v1") == {"at": "2025-10-09T08:53:20Z", "by": "mycomap.org",
+                                "answers_version": "v1", "current": True}
+    assert kept.about("v2")["current"] is False
+    assert cache.held(answer_key("site", "inat", "2", "m1", "nearest", {"place": True})) is None
+
+
+def test_a_store_made_before_asked_by_gets_the_column(tmp_path):
+    import sqlite3
+    path = tmp_path / "answers.sqlite"
+    old = sqlite3.connect(path)
+    old.execute("create table observation_answers (answer_key text primary key, version text "
+                "not null, payload text not null, answered_at real not null)")
+    old.execute("insert into observation_answers values ('k', 'v', '{}', 1.0)")
+    old.commit()
+    old.close()
+    kept = AnswerCache(path).held("k")
+    assert kept is not None and kept.asked_by is None and kept.payload == {}
 
 
 def test_kept_answers_follow_the_version():
@@ -271,7 +463,7 @@ def test_an_identify_by_observation_answer_is_held_too(conn, tmp_path):
     assert len(site.log) == reads
     assert (body["cached"], body["kept_from"]) == (True, "api")
     assert body["request_id"] != first["request_id"]
-    for key in ("ranks", "answer", "gate", "observation", "context_used", "model"):
+    for key in ("ranks", "answer", "gate", "observation", "context_used", "model", "answered"):
         assert body[key] == first[key], key
 
 
@@ -284,8 +476,10 @@ def test_nothing_held_is_404_not_answered_and_reads_nothing(conn, tmp_path):
     by_link(client, "inat", 555, use_place=False)
     assert kept_answer(client, "inat", 555).status_code == 404
     assert kept_answer(client, "inat", 555, use_place="false").status_code == 200
-    client.app.state.answer_cache._conn.execute("update observation_answers set version = 'older'")
-    assert kept_answer(client, "inat", 555, use_place="false").status_code == 404
+    # Another version's answer is still held, saying it is not current.
+    age_every_kept_answer(client)
+    older = kept_answer(client, "inat", 555, use_place="false")
+    assert older.status_code == 200 and older.json()["answered"]["current"] is False
 
 
 def test_reading_a_held_answer_counts_nothing(conn, tmp_path):

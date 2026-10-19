@@ -153,7 +153,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                  "fields": [["use_place", "boolean", "no", "Use the observation's public place (default true). An obscured location is used as iNaturalist publishes it."],
                             ["use_date", "boolean", "no", "Use its date (default true)."],
                             ["top_k", "1–10", "no", "Candidates per rank."],
-                            ["client_ref", "string ≤ 64", "no", "Defaults to inat:<id>, so the same observation within a day is counted once."]],
+                            ["client_ref", "string ≤ 64", "no", "Defaults to inat:<id>, so the same observation within a day is counted once."],
+                            ["rerun", "boolean", "no", "Run it afresh and replace the kept answer (default false)."]],
                  "request": ("curl -X POST " + BASE_URL + "/identify/inat/123456789 \\\n"
                              "  -H 'Authorization: Bearer YOUR_TOKEN' \\\n"
                              "  -H 'Content-Type: application/json' -d '{\"top_k\": 5}'"),
@@ -172,8 +173,10 @@ def outline(enabled: dict[str, bool]) -> dict:
                            "itself. `left_out_photos` counts the reference photos left out.",
                            "Answers are kept: the same observation with the same options "
                            "comes back at once, without reading it again (`\"cached\": true`), "
-                           "until `model.answers_version` moves (a new release or reference "
-                           "set). GET /models gives the current `answers_version`.",
+                           "including one someone got on the Identify page, until you send "
+                           "`\"rerun\": true`. Nothing is run again on its own, not even for a "
+                           "new release. `answered` says when it was run, who asked, and "
+                           "whether Vision's reference set is still the same (`current`).",
                            "Refusals: 404 `observation_not_found`, 422 `no_usable_photos`, "
                            "502 `source_unavailable` (try again after `Retry-After`)."]},
                 {"type": "endpoint", "method": "POST", "path": "/identify/mo/{observation_id}",
@@ -183,7 +186,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                  "fields": [["use_place", "boolean", "no", "As above: Mushroom Observer's GPS unless hidden, else a small named place's centre."],
                             ["use_date", "boolean", "no", "As above."],
                             ["top_k", "1–10", "no", "Candidates per rank."],
-                            ["client_ref", "string ≤ 64", "no", "Defaults to mo:<id>."]],
+                            ["client_ref", "string ≤ 64", "no", "Defaults to mo:<id>."],
+                            ["rerun", "boolean", "no", "As above."]],
                  "notes": ["Mushroom Observer asks for one request every 5 seconds, photos "
                            "included, so expect about 5 seconds a photo the first time; a kept "
                            "answer comes back at once, as for iNaturalist."]},
@@ -196,9 +200,10 @@ def outline(enabled: dict[str, bool]) -> dict:
                             ["top_k", "1–10", "no", "As for identify (default 5)."]],
                  "request": ("curl " + BASE_URL + "/answers/inat/123456789 \\\n"
                              "  -H 'Authorization: Bearer YOUR_TOKEN'"),
-                 "notes": ["Returns a kept answer under the current `model.answers_version`, "
-                           "from an earlier identify by observation or from someone's run on "
-                           "the Identify page, in the same shape (`\"cached\": true`; "
+                 "notes": ["Returns the kept answer, under whichever `model.answers_version` "
+                           "it was given (`answered.current` says whether that is still "
+                           "today's), from an earlier identify by observation or from "
+                           "someone's run on the Identify page, in the same shape (`\"cached\": true`; "
                            "`kept_from` is `api` or `site`). Nothing is read or scored, and "
                            "nothing is counted.",
                            "404 `not_answered` when Vision holds no such answer."]},
@@ -264,8 +269,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                                     "limits": {"max_photos": 10, "photos_per_minute": 20}}),
                  "notes": ["Also its data snapshot, calibration date, the ranks answered, "
                            "request limits and which parts of the API are on.",
-                           "`answers_version` names what Vision answers from now; identify by "
-                           "observation keeps its answers until it moves.",
+                           "`answers_version` names what Vision answers from now; a kept "
+                           "answer under another one says `answered.current: false`.",
                            "There is one model; leave `model` out of your requests."]},
                 {"type": "endpoint", "method": "GET", "path": "/usage",
                  "status": status("usage"), "summary": "Your token's use and limit this month.",

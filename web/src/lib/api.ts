@@ -1,5 +1,6 @@
 // Types and calls for the MycoMap Vision API (`mv serve`, proxied at /api).
 
+import type { Answered } from "./keptRun";
 import type { PublishedBenchmark } from "./compareView";
 import type { Experiment, ExperimentSummary } from "./experiments";
 import { modelName, sendWaitingInLine } from "./publicView";
@@ -265,6 +266,8 @@ const METHOD_LABEL: Record<string, string> = {
   "species-mean": "species average",
   "nearest+mean": "nearest + species average",
   "nearest+mean+place": "nearest + species average + place and date",
+  "nearest+mean-records-balanced": "nearest + species average, by specimen",
+  "nearest+mean-records-balanced+place": "nearest + species average, by specimen + place and date",
   "nearest-mix": "nearest specimen, photo votes",
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",
@@ -810,14 +813,16 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();
   },
-  /** An iNat or MO observation's own photos, place and date, read by Vision. */
+  /** An iNat or MO observation's own photos, place and date, read by Vision: the answer
+   *  kept from an earlier run (here, mycomap.org or the app) unless `rerun`. */
   async identifyObservation(source: "inat" | "mo", id: string, models: string[],
-                            onWait?: (attempt: number, seconds: number) => void):
-      Promise<{ results: IdentifyResult[]; context_used: ContextUsed; observation: LinkedObservation; cached?: boolean }> {
+                            onWait?: (attempt: number, seconds: number) => void, rerun = false):
+      Promise<{ results: IdentifyResult[]; context_used: ContextUsed; observation: LinkedObservation;
+                cached?: boolean; answered?: Answered }> {
     const res = await sendWaitingInLine(() => fetch("/api/identify/observation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, id, models: models.join(",") }),
+      body: JSON.stringify({ source, id, models: models.join(","), ...(rerun ? { rerun: true } : {}) }),
     }), onWait);
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();

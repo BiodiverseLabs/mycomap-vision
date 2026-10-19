@@ -259,6 +259,26 @@ def test_answers_kept_before_a_twin_table_are_not_served_after_it(conn, tmp_path
     assert after["cached"] is False and "106" not in specimens(after)
 
 
+def test_a_kept_site_answer_that_matched_its_own_twin_is_answered_afresh(conn, tmp_path):
+    client, site = app(conn, tmp_path)
+    site.inat[100] = inat_obs(100, [9001])
+    site_ids = lambda b: {sp["observation_id"] for sp in b["results"][0]["specimens"]}
+    assert "106" in site_ids(by_link(client, "inat", 100).json())
+    write_table(tmp_path / twins.FILE, groups={"100": 0, "106": 0})
+    after = by_link(client, "inat", 100).json()
+    assert after["cached"] is False and "106" not in site_ids(after)
+
+
+def test_a_twin_table_that_does_not_touch_the_record_leaves_its_answer_kept(conn, tmp_path):
+    # Steve, 2026-10-19: kept until someone runs it again; only a self-match is not served.
+    client, _ = app(conn, tmp_path)
+    first = by_number(client, "inat", 100).json()
+    write_table(tmp_path / twins.FILE, groups={"104": 0, "mo:104": 0})
+    after = by_number(client, "inat", 100).json()
+    assert after["cached"] is True and after["answered"]["current"] is False
+    assert specimens(after) == specimens(first)
+
+
 # --- making and shipping the table ------------------------------------------------------
 
 def test_a_release_ships_the_twin_table_when_there_is_one(conn, tmp_path):
