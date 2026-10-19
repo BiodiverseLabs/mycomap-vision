@@ -63,6 +63,19 @@ export interface Specimen {
   /** The iNat page, for iNat records only (older servers send it for every record). */
   inat_url: string | null;
   species_url: string | null;
+  /** Set (true) only in a signed-in person's own answer, on a record they collected. */
+  yours?: boolean;
+}
+
+/** The signed-in person's own DNA-verified records among the references (Steve,
+ *  2026-10-18), sent only to that person. Absent: signed out, or mycomap.org couldn't be read. */
+export interface Yours {
+  /** False: no iNaturalist or Mushroom Observer account connected on mycomap.org. */
+  linked: boolean;
+  /** How many of the person's records are in the reference. */
+  records: number;
+  /** The most alike first, at most 6. */
+  specimens: Specimen[];
 }
 
 /** Where one photo, scored on its own, puts the answer from all the photos together. */
@@ -127,6 +140,8 @@ export interface IdentifyResult {
   /** Missing for a model not yet calibrated with likely sets. */
   likely?: Partial<Record<Rank, LikelySet>>;
   specimens: Specimen[];
+  /** Only in a signed-in person's own answer; `specimens` then leaves their records out. */
+  yours?: Yours;
   per_photo: PhotoResult[];
   hints: string[];
   species_url: string | null;

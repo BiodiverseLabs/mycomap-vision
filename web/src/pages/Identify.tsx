@@ -40,6 +40,7 @@ import {
 import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
+import { answerSpecies, bestPerPhoto, CONNECT_URL, othersHeading, yoursLine, yoursPanel } from "@/lib/yours";
 import {
   alsoPossible, answerFor, boxHints, breakdownLabel, breakdownOpen, confusedNote, coverageSummary, listedNames,
   photoOnlyNote, placeLines, placeWarns, publicNote, usesPlace, type Answer, type Named,
@@ -939,6 +940,7 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
   const noRanks = gate.notFungus || (photo != null && leftOut(photo));
   const found = gate.withheld ? "look-alikes" : "specimens";
   const coverage = coverageSummary(r.likely);
+  const topSpecies = answerSpecies(answer);
   // Every rank's list shows under the answer by default (Steve, 2026-10-18); the button folds it.
   // Without an answer it is the answer. The folded state is kept while switching photos.
   const showRanks = breakdownOpen(folded, answer != null, noRanks);
@@ -983,12 +985,13 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
           )}
           </div>
           {!photo && !answer && hints.length > 0 && <Hints hints={hints} />}
+          {!photo && <YoursSection r={r} urls={urls} topSpecies={topSpecies} />}
           {specimens.length > 0 && (
-            <div>
+            <div data-testid="section-specimens">
               <h3 className="text-sm font-semibold text-[#4a3728] mb-2">
                 {photo
                   ? `Closest DNA-verified ${found} to photo ${photo.photo + 1}`
-                  : `Closest DNA-verified ${found}`}
+                  : othersHeading(r, found)}
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {specimens.map((s) => (
@@ -997,6 +1000,7 @@ function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; ph
               </div>
             </div>
           )}
+          {!photo && !gate.notFungus && <BestPerPhoto r={r} urls={urls} />}
         </div>
         <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-t border-[#A87146]/10 bg-[#faf9f7] px-4 py-2.5 text-xs text-muted-foreground sm:px-6">
           <span>{publicModelName(r.model.backbone)} · {publicMethodLabel(r.model.method)}</span>
@@ -1410,15 +1414,74 @@ function Bar({ value, strong }: { value: number; strong?: boolean }) {
   );
 }
 
-function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; showMatched: boolean }) {
+/** Panel 1: the signed-in person's own DNA-verified records, most alike first. */
+function YoursSection({ r, urls, topSpecies }: { r: IdentifyResult; urls: string[]; topSpecies: string | null }) {
+  const panel = yoursPanel(r);
+  if (panel.kind === "none") return null;
+  if (panel.kind === "connect") {
+    return (
+      <p className="text-sm text-muted-foreground" data-testid="text-yours-connect">
+        <a href={CONNECT_URL} className="underline underline-offset-2 hover:text-myco-green">
+          Connect your iNaturalist or Mushroom Observer account on mycomap.org
+        </a>{" "}
+        to see your own DNA-verified records here.
+      </p>
+    );
+  }
+  return (
+    <div data-testid="section-yours">
+      <h3 className="text-sm font-semibold text-[#4a3728]">Your collections</h3>
+      <p className="mb-2 text-xs text-muted-foreground">{yoursLine(panel.records, panel.specimens.length)}</p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        {panel.specimens.map((s) => (
+          <SpecimenCard key={s.observation_id} s={s} urls={urls} showMatched
+                        sameAsAnswer={!!topSpecies && s.species === topSpecies} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Panel 3: each photo's single closest DNA-verified record, beside the photo. */
+function BestPerPhoto({ r, urls }: { r: IdentifyResult; urls: string[] }) {
+  const rows = bestPerPhoto(r);
+  if (!rows.length) return null;
+  return (
+    <div data-testid="section-best-per-photo">
+      <h3 className="text-sm font-semibold text-[#4a3728] mb-2">Best match per photo</h3>
+      <div className="grid grid-cols-1 gap-2">
+        {rows.map(({ photo, specimen }) => (
+          <div key={photo} className="flex items-center gap-2" data-testid={`best-photo-${photo}`}>
+            <span className="relative h-14 w-14 shrink-0 overflow-hidden rounded border bg-muted">
+              {urls[photo] && <img src={urls[photo]} alt={`Your photo ${photo + 1}`} className="h-full w-full object-cover" />}
+              <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[10px] text-white">{photo + 1}</span>
+            </span>
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+            <div className="min-w-0 flex-1"><SpecimenCard s={specimen} urls={urls} showMatched={false} row markYours /></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SpecimenCard({ s, urls, showMatched, sameAsAnswer, row, markYours }: {
+  s: Specimen; urls: string[]; showMatched: boolean;
+  /** Tag the card when it is the same species as the answer. */
+  sameAsAnswer?: boolean;
+  /** Photo on the left, details on the right (best match per photo). */
+  row?: boolean;
+  /** Tag the person's own record "yours" (outside the Your collections panel). */
+  markYours?: boolean;
+}) {
   const matched = showMatched && urls[s.matched_query_photo];
   const mo = s.source === "mo";
   const href = s.record_url ?? s.inat_url ?? undefined;
   const site = mo ? "Mushroom Observer" : "iNaturalist";
   const shownId = s.source_id || s.observation_id;
   return (
-    <div className="rounded-md border overflow-hidden bg-white">
-      <a href={href} target="_blank" rel="noreferrer" className="block aspect-square bg-muted">
+    <div className={`rounded-md border overflow-hidden bg-white ${row ? "flex" : ""}`}>
+      <a href={href} target="_blank" rel="noreferrer" className={`block aspect-square bg-muted ${row ? "w-24 shrink-0" : ""}`}>
         {s.photo_url ? (
           <img src={s.photo_url} alt={s.name ?? s.species} loading="lazy" className="h-full w-full object-cover" />
         ) : s.photo_withheld ? (
@@ -1430,7 +1493,7 @@ function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; s
           </span>
         ) : null}
       </a>
-      <div className="p-2 space-y-1 min-w-0">
+      <div className={`p-2 space-y-1 min-w-0 ${row ? "flex-1" : ""}`}>
         {s.species_url ? (
           <a href={s.species_url} className="sci block text-sm font-semibold text-[#4a3728] leading-tight hover:text-myco-green">
             {s.species}
@@ -1441,9 +1504,21 @@ function SpecimenCard({ s, urls, showMatched }: { s: Specimen; urls: string[]; s
             {s.name ?? (s.genus || s.family)}
           </span>
         )}
-        <Badge variant="outline" className="px-1.5 py-0 font-normal whitespace-nowrap">
-          {pct(s.similarity)} alike
-        </Badge>
+        <div className="flex flex-wrap gap-1">
+          <Badge variant="outline" className="px-1.5 py-0 font-normal whitespace-nowrap">
+            {pct(s.similarity)} alike
+          </Badge>
+          {sameAsAnswer && (
+            <Badge variant="outline" className="border-myco-green/40 px-1.5 py-0 font-normal text-myco-green">
+              same species as the answer
+            </Badge>
+          )}
+          {markYours && s.yours && (
+            <Badge variant="outline" className="border-[#A87146]/40 px-1.5 py-0 font-normal text-[#A87146] whitespace-nowrap">
+              yours
+            </Badge>
+          )}
+        </div>
         {matched && (
           <p className="text-xs text-muted-foreground">matches your photo {s.matched_query_photo + 1}</p>
         )}

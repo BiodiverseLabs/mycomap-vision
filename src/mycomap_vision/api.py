@@ -37,7 +37,7 @@ from . import (answercache, apidocs, apiv1, byobservation, config, confusions, e
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                onnxtower, permissions,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
-               workqueue)
+               workqueue, yours)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import normalise, photos_per_second
@@ -286,7 +286,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                confused_with: "confusions.Served | None | bool" = True,
                feedback_store: "feedback.Store | None" = None,
                feedback_org: "feedback_api.OrgClient | None" = None,
-               answer_cache: "answercache.AnswerCache | None" = None) -> FastAPI:
+               answer_cache: "answercache.AnswerCache | None" = None,
+               linked_accounts: "yours.LinkedCache | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -316,6 +317,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
     gate); a FungusGate uses that one; None or False runs ungated.
 
+    `linked_accounts`: a signed-in person's verified iNat and MO accounts from mycomap.org,
+    for "Your collections" on the Identify result (yours.py). True reads them with
+    MV_ORG_BASE_URL and the server key (neither set: no panel); tests pass a LinkedCache.
+
     `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
     `confused_with` field on species candidates. True reads the cache beside the manifest
     (the nightly fills it); a confusions.Served uses that one; None or False: no field."""
@@ -331,6 +336,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                        if config.setting("MV_FUNGUS_GATE", "1") != "0" else None)
     fungus_gate = fungus_gate or None
     signin = signin or SigninConfig.from_settings()
+    if linked_accounts is True:
+        linked_accounts = yours.LinkedCache.from_settings()
+    linked_accounts = linked_accounts or None
     rate = RateLimiter(*limits.rate)
     in_flight = Gate(limits.max_in_flight)
 
@@ -346,6 +354,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if not signin.enabled:
             return None
         return signin.sessions.read(request.cookies.get(SESSION_COOKIE))
+
+    def linked_of(request: Request) -> "yours.Linked | None":
+        """The signed-in person's verified accounts (yours.py), from our own session's sub
+        only; None when nobody is signed in or mycomap.org can't be read."""
+        p = person(request)
+        if not p or not p.get("sub") or linked_accounts is None:
+            return None
+        return linked_accounts.get(str(p["sub"]))
 
     # Registered after cap_request_size, so it runs first: nothing is read for a
     # request that isn't allowed in.
@@ -862,7 +878,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             except workqueue.Busy as e:
                 raise HTTPException(503, "busy identifying other photos; try again shortly",
                                     headers={"Retry-After": str(int(e.wait_seconds) + 1)}) from e
-            out = run_identify(photos, models_, context, timer)
+            out = run_identify(photos, models_, context, timer, linked_of(request))
         finally:
             in_flight.leave()
         out["timing"] = timer.block()
@@ -892,9 +908,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
                         may_show, timer: "apiv1.Timer", top_k: int = 5,
                         interactive: bool = True, higher: bool = False,
-                        hidden: np.ndarray | None = None) -> dict:
+                        hidden: np.ndarray | None = None, n_specimens: int = 6,
+                        vectors: list | None = None) -> dict:
         """One model's answer through the queue, timed: waiting, embedding, scoring.
-        `hidden`: reference columns left out (Identifier.identify_vectors)."""
+        `hidden`: reference columns left out (Identifier.identify_vectors). `vectors`, when
+        given, gets the photos' vectors appended (for yours.for_person)."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
             parts = [embed_one(ident, model, im) for im in images]
@@ -903,10 +921,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return np.stack([vec for vec, _, _ in parts])
 
         def finish(vecs, sims):
-            return ident.identify_vectors(vecs, top_k, context=context, sims=sims,
-                                          photo_lookup=photo_lookup, may_show=may_show,
-                                          gate=verdicts[0], higher_ranks=higher,
-                                          hidden=hidden)
+            if vectors is not None:
+                vectors.append(np.asarray(vecs, dtype=np.float32))
+            return ident.identify_vectors(vecs, top_k, n_specimens=n_specimens, context=context,
+                                          sims=sims, photo_lookup=photo_lookup,
+                                          may_show=may_show, gate=verdicts[0],
+                                          higher_ranks=higher, hidden=hidden)
         verdicts: list = []
         return model_queue.run(workqueue.Job(
             key=id(ident), photos=len(images), embed=embed, search=ident.nearest.photo_sims,
@@ -957,7 +977,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(503, str(e), headers={"Retry-After": "30"}) from e
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context",
-                     timer: "apiv1.Timer") -> dict:
+                     timer: "apiv1.Timer", linked: "yours.Linked | None" = None) -> dict:
         read = decode_photos(photos, timer)
         images = [img for img, _ in read]
         context, used = fill_context(context, [found for _, found in read])
@@ -970,7 +990,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         results = []
         for backbone, method in wanted:
             ident = site_index(backbone, method, view, timer)
-            results.append(embed_and_score(ident, backbone, images, context, may_show, timer))
+            vectors: list = []
+            pooled = embed_and_score(ident, backbone, images, context, may_show, timer,
+                                     n_specimens=yours.POOL, vectors=vectors)
+            result, spare = yours.split_pool(pooled)
+            results.append(yours.for_person(ident, result, spare, vectors[0] if vectors else None,
+                                            None, linked, photo_lookup, may_show))
         table = confused_table()
         for result in results:
             confusions.annotate(result, table)
@@ -1687,11 +1712,29 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                {"place": use_place, "date": use_date})
                         for b, m in wanted]
                 held = [answer_cache.get(k, v) for k, v in zip(keys, versions)]
-                if held and all(h is not None for h in held):
+                linked = linked_of(request)
+
+                def may_show(info) -> bool:
+                    return view.may_show(info.license_class, info.owner_user_id)
+
+                # A kept answer is everyone's: it holds no one's records, only the photos'
+                # vectors, so the person's own part is made here. One kept before it held
+                # them can't make it: answer afresh for a person with accounts.
+                needs_vectors = linked is not None and linked.linked
+                if held and all(h is not None and (not needs_vectors or yours.decode_vectors(
+                        h.get("vectors")) is not None) for h in held):
                     table = confused_table()
-                    for h in held:
-                        confusions.annotate(h["result"], table)
-                    return {"results": [h["result"] for h in held],
+                    results = []
+                    for (backbone, method), h in zip(wanted, held):
+                        vecs = yours.decode_vectors(h.get("vectors")) if needs_vectors else None
+                        ident = site_index(backbone, method, view, timer) if needs_vectors else None
+                        mine = yours.for_person(
+                            ident, h["result"], h.get("spare") or [], vecs,
+                            np.asarray(h.get("hidden") or [], dtype=np.int64), linked,
+                            photo_lookup, may_show)
+                        confusions.annotate(mine, table)
+                        results.append(mine)
+                    return {"results": results,
                             "context_used": held[0]["used"],
                             "observation": held[0]["observation"],
                             "cached": True,
@@ -1723,9 +1766,6 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if not images:
                     raise HTTPException(422, "the observation has no photos Vision can read")
 
-                def may_show(info) -> bool:
-                    return view.may_show(info.license_class, info.owner_user_id)
-
                 if not in_flight.enter():
                     raise HTTPException(503, "busy identifying other photos; try again shortly",
                                         headers={"Retry-After": "10"})
@@ -1738,6 +1778,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                             headers={"Retry-After": str(int(e.wait_seconds) + 1)}
                                             ) from e
                     results, used, own_any, left = [], None, False, 0
+                    scored = []                 # per model: (index, vectors, hidden columns)
                     for backbone, method in wanted:
                         ident = site_index(backbone, method, view, timer)
                         hidden, own = ident.left_out(source, number, obs.photo_ids)
@@ -1759,9 +1800,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                 "date_from": "observation" if this_used["date_from"] else None}
                         used = used or this_used
                         own_any, left = own_any or bool(len(own)), max(left, int(len(hidden)))
+                        vectors: list = []
                         results.append(embed_and_score(
                             ident, backbone, images, context, may_show, timer,
-                            hidden=hidden if len(hidden) else None))
+                            hidden=hidden if len(hidden) else None, n_specimens=yours.POOL,
+                            vectors=vectors))
+                        scored.append((ident, vectors[0] if vectors else None, hidden))
                 finally:
                     in_flight.leave()
                 about = {
@@ -1776,14 +1820,24 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         "excluded_reference": own_any,
                         "left_out_photos": left,
                 }
-                for key, version, result in zip(keys, versions, results):
+                table = confused_table()
+                answered = []
+                for key, version, pooled, (ident, vecs, hidden) in zip(keys, versions, results,
+                                                                       scored):
+                    result, spare = yours.split_pool(pooled)
+                    # Kept for everyone: the plain answer, its spare specimens, the photos'
+                    # vectors and what was left out. Nothing about the person asking.
                     answer_cache.put(key, version, {
                         "result": answercache.without_confusions(result),
+                        "spare": spare,
+                        "vectors": yours.encode_vectors(vecs) if vecs is not None else None,
+                        "hidden": [int(c) for c in np.asarray(hidden).tolist()],
                         "used": used, "observation": about})
-                table = confused_table()
-                for result in results:
-                    confusions.annotate(result, table)
-                return {"results": results, "context_used": used, "observation": about,
+                    mine = yours.for_person(ident, result, spare, vecs, hidden, linked,
+                                            photo_lookup, may_show)
+                    confusions.annotate(mine, table)
+                    answered.append(mine)
+                return {"results": answered, "context_used": used, "observation": about,
                         "cached": False, "timing": timer.block()}
 
     # The app's observation sessions (docs/api.md §3.3, sessions.py): photos sent one at a

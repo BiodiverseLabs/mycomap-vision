@@ -35,6 +35,7 @@ from .higher import HIGHER_RANKS, HigherRanks
 from .placeprior import PlaceCue
 from .settled import runner_up, settled
 from .sources import INAT, record_url
+from .yours import OwnerIndex
 
 CONFIDENCE_TEMPERATURE = 0.02
 ORG_SPECIES_URL = "https://mycomap.org/species/"
@@ -244,6 +245,8 @@ class Identifier:
         self.col_photo = ids[self.index.cols]
         self.col_record = Specimens(records, self.index.cols.tolist())
         self.rec_starts = self.col_record.starts()
+        # Each record's owner at its source, for a signed-in person's own records (yours.py).
+        self.owners = OwnerIndex.from_manifest(conn, self.col_record.obs, self.col_record.source)
         self.calibration = calibration
         self.photos = (self._photo_info(conn, set(int(p) for p in self.col_photo.tolist()))
                        if photo_info else {})
@@ -628,6 +631,38 @@ class Identifier:
             picked.append((float(record_score[ri]), int(q_best) if photo is None else photo,
                            self.col_record[col], photo_ids, block.max(axis=0)))
         return picked
+
+    def own_specimens(self, query: np.ndarray, recs: np.ndarray, hidden: np.ndarray | None,
+                      n: int, photo_lookup: Callable[[list[int]], dict[int, PhotoInfo]] | None = None,
+                      may_show: Callable[[PhotoInfo], bool] | None = None) -> list[dict]:
+        """The n records among `recs` (indices into col_record) most alike the query photos,
+        as specimens: scored by the closest-specimens rule (for each photo, its best match
+        among the record's photos, averaged over the photos), against just their own
+        reference vectors, so no search over the whole set. `hidden` columns are left out
+        as in identify_vectors (an observation never matches itself)."""
+        may_show = may_show or only_open_licences
+        cols = np.flatnonzero(np.isin(self.col_record.rec, np.asarray(recs, dtype=np.int64)))
+        if n <= 0 or not len(cols) or not len(query):
+            return []
+        sims = np.asarray(query, np.float32) @ self.reference_vectors(cols).T   # (q, cols)
+        if hidden is not None and len(hidden):
+            sims[:, np.isin(cols, hidden)] = -np.inf
+        rec_of = self.col_record.rec[cols]
+        starts = np.flatnonzero(np.diff(rec_of, prepend=-1) != 0)
+        score = np.maximum.reduceat(sims, starts, axis=1).mean(axis=0)       # per record
+        ok = np.flatnonzero(np.isfinite(score))
+        picked = []
+        for k in ok[np.argsort(-score[ok], kind="stable")][:n].tolist():
+            lo = int(starts[k])
+            hi = int(starts[k + 1]) if k + 1 < len(starts) else len(cols)
+            block = sims[:, lo:hi]
+            q_best, c_best = np.unravel_index(int(block.argmax()), block.shape)
+            photo_ids = [int(p) for p in self.col_photo[cols[lo:hi]].tolist()]
+            picked.append((float(score[k]), int(q_best), self.col_record[int(cols[lo + c_best])],
+                           photo_ids, block.max(axis=0)))
+        wanted = sorted({p for *_, ids, _ in picked for p in ids})
+        infos = photo_lookup(wanted) if photo_lookup else self.photos
+        return self._specimens(picked, infos, may_show)
 
     @staticmethod
     def _specimens(picked: list, infos: dict, may_show: Callable[[PhotoInfo], bool]) -> list[dict]:
