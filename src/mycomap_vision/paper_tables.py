@@ -14,6 +14,12 @@ val, a draft test release and the sealed test.
 - `per_species`: PLAN rule 5's per-species rows beside the per-find rate: macro accuracy
   (each true species weighted equally, interval by resampling species), the share of
   species with at least one find right, the number of species. Secondary: no test uses them.
+- `recoverability`: PLAN C4's species recoverability, the expected share of species one
+  find would name right: each species' reference band times that band's per-find accuracy,
+  averaged over species, over every species name in the release (leading; no reference =
+  band 0) and over the species in the reference; with every sparse species lifted to 20+
+  references beside it. Model-based (accuracy within a band taken as the same for every
+  species); bootstrap over finds. Descriptive: no test uses it.
 
 Near-duplicates (paper analysis plan: byte-identical, dHash-flagged or cosine >= 0.99 to a
 reference photo) are left out of every primary number; `scope="with_near_duplicates"`
@@ -101,6 +107,92 @@ def per_species(finds: list[Find], outcome: dict, cell: str, reps: int, seed: in
             "macro_ci95": ps.cluster_ci(acc, names, reps, seed) if n else None,
             "species_ge1_right": int((acc > 0).sum()),
             "share_species_ge1_right": float((acc > 0).mean()) if n else None}
+
+
+RECOVERABILITY_KS = (1, 3, 10)
+SPARSE_BANDS = ("0", "1-4", "5-19")    # lifted to 20-99 in the counterfactual
+LIFTED_BAND = "20-99"
+# PLAN C4's two denominators, (b) leading
+KNOWN, SEEN = "species MycoMap knows", "species Vision has seen"
+
+
+def recoverability(finds: list[Find], outcome: dict, denominators: dict[str, list],
+                   reps: int, seed: int, ks=RECOVERABILITY_KS) -> dict:
+    """PLAN C4. `denominators`: {name: units}, each unit a species (answer-key unit) as
+    (reference records, formal name?): (b) every species name in the release, a name with no
+    reference at 0; (a) the species in the scored reference.
+
+    Per band, the per-find accuracy at species strict top-k over the scored finds whose true
+    species falls in that band (a find with no outcome counts as wrong). Band 0 is 0 by
+    construction: a species with no reference record sharing its answer key can never be
+    named (PLAN rule 7). A species' estimate is its band's accuracy; per denominator the
+    rows average over all species, formal names only, and all species with every 0 / 1-4 /
+    5-19 species given the 20-99 band's accuracy (the counterfactual: sequencing fills the
+    sparse end). Intervals: percentile, scored finds resampled with replacement (the band
+    accuracies move, the species stay). A species in a band with no scored finds is left out
+    and counted."""
+    from . import paper_stats as stats
+    nb, zero = len(BANDS), BANDS.index("0")
+    fs = [f for f in finds if f.species]
+    fband = np.array([BANDS.index(band(f.depth)) for f in fs], dtype=np.int64)
+    hits = {k: np.array([bool((outcome.get(f.key) or {}).get(f"species_strict@{k}"))
+                         for f in fs], dtype=np.float64) for k in ks}
+
+    def band_acc(h, fb):
+        """(..., bands) per-band accuracy from hits and bands (NaN: no finds); band 0 = 0."""
+        sums = np.stack([(h * (fb == b)).sum(axis=-1) for b in range(nb)], axis=-1)
+        cnts = np.stack([(fb == b).sum(axis=-1) for b in range(nb)], axis=-1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            acc = np.where(cnts > 0, sums / np.maximum(cnts, 1), np.nan)
+        acc[..., zero] = 0.0
+        return acc, cnts
+
+    acc, cnts = band_acc(np.stack([hits[k] for k in ks]), fband[None])     # (k, bands)
+    rng = np.random.default_rng(seed)
+    boot = {k: [] for k in ks}
+    for at in range(0, reps if len(fs) else 0, stats.CHUNK):
+        n = min(stats.CHUNK, reps - at)
+        pick = rng.integers(0, len(fs), size=(n, len(fs)))
+        for k in ks:
+            boot[k].append(band_acc(hits[k][pick], fband[pick])[0])           # (n, bands)
+    boot = {k: np.concatenate(v) for k, v in boot.items() if v}
+    out = {"model": "a species' estimate is its reference band's per-find accuracy "
+                    "(assumes accuracy within a band does not depend on the species)",
+           "ci": "bootstrap over finds", "finds": len(fs),
+           "band_accuracy": {BANDS[b]: {"finds": int(cnts[0][b]),
+                                        **{f"top{k}": (None if np.isnan(acc[i][b])
+                                                       else float(acc[i][b]))
+                                           for i, k in enumerate(ks)}}
+                             for b in range(nb)},
+           "denominators": {}}
+    for dname, units in denominators.items():
+        ubands = np.array([BANDS.index(band(d)) for d, _ in units], dtype=np.int64)
+        formal = np.array([bool(fm) for _, fm in units], dtype=bool)
+        lifted = ubands.copy()
+        lifted[np.isin(ubands, [BANDS.index(b) for b in SPARSE_BANDS])] = BANDS.index(LIFTED_BAND)
+        every = np.ones(len(units), dtype=bool)
+        rows = {}
+        for name, (ub, keep) in {"all names": (ubands, every), "formal names": (ubands, formal),
+                                 "every species at 20+ references": (lifted, every)}.items():
+            known = keep & ~np.isnan(acc[0][ub])
+            row = {"species": int(known.sum()), "left_out": int((keep & ~known).sum())}
+            # the mean over species = the band accuracies weighted by each band's species
+            w = np.bincount(ub[known], minlength=nb).astype(np.float64)
+            for i, k in enumerate(ks):
+                est = float(np.nansum(acc[i] * w) / w.sum()) if w.sum() else None
+                ci = None
+                if k in boot and w.sum():
+                    ok = ~np.isnan(boot[k])
+                    per = (np.where(ok, boot[k], 0.0) @ w) / np.maximum(ok @ w, 1e-12)
+                    lo, hi = np.percentile(per, [100 * (1 - stats.LEVEL) / 2,
+                                                 100 * (1 + stats.LEVEL) / 2])
+                    ci = (float(lo), float(hi))
+                row[f"top{k}"] = {"estimate": est, "ci95": ci}
+            rows[name] = row
+        out["denominators"][dname] = {
+            "species_by_band": {BANDS[b]: int((ubands == b).sum()) for b in range(nb)},
+            "rows": rows}
+    return out
 
 
 def standard(finds: list[Find], outcome: dict, reps: int, seed: int, ci_cells=None,

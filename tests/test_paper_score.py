@@ -758,6 +758,90 @@ def test_a_per_species_block_with_an_unknown_metric_or_a_genus_cell_is_refused()
         paper_score.check_config({**base, "per_species_rows": {"cell": "genus_strict@1"}})
 
 
+# --- species recoverability (PLAN C4, 19 Oct) --------------------------------------------------
+
+def test_recoverability_is_each_species_band_accuracy_averaged_over_species_both_ways():
+    from mycomap_vision import paper_tables as pt
+    finds = [po.Find("1", "o1", "A a", "A", "F", "formal", 2, 1),       # band 1-4: 1 of 2 right
+             po.Find("2", "o2", "A b", "A", "F", "formal", 3, 1),
+             po.Find("3", "o3", "B c", "B", "F", "formal", 50, 1),      # band 20-99: 1 of 1
+             po.Find("4", "o4", "Z z", "Z", "F", "formal", 0, 1),       # band 0: 0 by construction
+             po.Find("5", "o5", "", "Y", "F", "one-word", 9, 1)]        # no species: not used
+    outcome = {"1": {f"species_strict@{k}": True for k in (1, 3, 10)},
+               "2": {"species_strict@1": False, "species_strict@3": True,
+                     "species_strict@10": True},
+               "3": {f"species_strict@{k}": True for k in (1, 3, 10)},
+               "4": {f"species_strict@{k}": True for k in (1, 3, 10)}}
+    # (a) the reference: two sparse species (one provisional), one at 50, one at 200 (100+ has
+    # no scored find, so it is left out and counted); (b) the same plus two names with no
+    # reference (one formal)
+    seen = [(2, True), (3, False), (50, True), (200, True)]
+    known = seen + [(0, True), (0, False)]
+    r = pt.recoverability(finds, outcome, {pt.KNOWN: known, pt.SEEN: seen}, REPS, 0)
+    assert list(r["denominators"]) == [pt.KNOWN, pt.SEEN]               # (b) leads
+    assert r["finds"] == 4
+    assert r["band_accuracy"]["0"]["top1"] == 0.0                       # never named
+    assert r["band_accuracy"]["1-4"]["top1"] == 0.5 and r["band_accuracy"]["1-4"]["top3"] == 1.0
+    assert r["band_accuracy"]["100+"]["top1"] is None
+    a = r["denominators"][pt.SEEN]["rows"]
+    assert a["all names"]["species"] == 3 and a["all names"]["left_out"] == 1
+    assert a["all names"]["top1"]["estimate"] == pytest.approx((0.5 + 0.5 + 1.0) / 3)
+    assert a["formal names"]["top1"]["estimate"] == pytest.approx((0.5 + 1.0) / 2)
+    assert a["every species at 20+ references"]["top1"]["estimate"] == pytest.approx(1.0)
+    b = r["denominators"][pt.KNOWN]
+    assert b["species_by_band"]["0"] == 2
+    assert b["rows"]["all names"]["species"] == 5
+    assert b["rows"]["all names"]["top1"]["estimate"] == pytest.approx((0.5 + 0.5 + 1.0) / 5)
+    assert b["rows"]["formal names"]["top1"]["estimate"] == pytest.approx((0.5 + 1.0) / 3)
+    # the counterfactual lifts the no-reference names too
+    assert b["rows"]["every species at 20+ references"]["top1"]["estimate"] == pytest.approx(1.0)
+    lo, hi = b["rows"]["all names"]["top1"]["ci95"]
+    assert lo <= b["rows"]["all names"]["top1"]["estimate"] <= hi
+
+
+def test_the_report_gives_recoverability_only_when_the_config_asks(world, tmp_path):
+    from mycomap_vision import paper_tables as pt
+    block = {"role": "descriptive, C4", "denominators": {
+        "b_leads": "every species name in the v1 release; no-reference names at band 0",
+        "a": "species in the frozen reference"}}
+    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"], recoverability=block))
+    r = rep["recoverability"]["vision-photos"]
+    # train: A x has 3 records, B y 2 -> both in 1-4; both val finds right at top 1. The
+    # release names no species outside A x and B y, so both denominators hold the same two.
+    for den in (pt.KNOWN, pt.SEEN):
+        d = r["denominators"][den]
+        assert d["species_by_band"]["1-4"] == 2 and d["species_by_band"]["0"] == 0
+        assert d["rows"]["all names"]["top1"]["estimate"] == 1.0
+    assert rep["recoverability_units"] == {pt.KNOWN: {"species": 2, "with_reference": 2},
+                                           pt.SEEN: {"species": 2, "with_reference": 2}}
+    inat = rep["recoverability"]["inat-vision"]["denominators"][pt.KNOWN]
+    assert inat["rows"]["all names"]["top1"]["estimate"] == 0.0
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "## Species recoverability (C4; descriptive, model-based)" in md
+    assert f"| {pt.KNOWN} | all names | 2 |" in md
+    plain = run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))
+    assert plain["recoverability"] is None
+    assert rep["hypotheses"] == plain["hypotheses"]                  # no test reads it
+
+
+def test_the_release_denominator_counts_names_without_a_reference_at_band_zero():
+    from mycomap_vision import paper_tables as pt
+
+    class Db:
+        def execute(self, q):
+            return [("A x", "formal"), ("A x var. y", "formal"), ("C q", "formal"),
+                    ("D sp. 'IN01'", "provisional")]
+    base = type("Base", (), {"db": Db()})()
+    ref = [{"species": "A x", "name_kind": "formal"}] * 3 + [{"species": "B y", "name_kind": "formal"}]
+    units, cite = paper_score.recoverability_units(base, ref, KEY)
+    known = units[pt.KNOWN]
+    assert sorted(d for d, _ in known) == [0, 0, 1, 3]                 # C q and D: no reference
+    assert sorted(d for d, _ in units[pt.SEEN]) == [1, 3]
+    assert cite == {pt.KNOWN: {"species": 4, "with_reference": 2},
+                    pt.SEEN: {"species": 2, "with_reference": 2}}
+    assert sum(f for _, f in known) == 3                               # D is provisional
+
+
 # --- outside-review rows: unseen observers, recent cohort, created after pretraining ----------
 
 def test_recent_cohort_and_after_pretraining_come_from_observed_and_created_dates():

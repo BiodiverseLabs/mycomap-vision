@@ -510,6 +510,33 @@ def check_place_pins(doc: dict) -> None:
                              f"this code, the config pins {str(pin['sha256'])[:12]}")
 
 
+def recoverability_units(base, ref_rows: list[dict], rule: str) -> tuple[dict, dict]:
+    """PLAN C4's denominators as {name: [(reference records, formal?)]}, (b) first: every
+    species name in the base release (all its records, included or not; a name with no
+    reference record at 0), and (a) the species of `ref_rows`; both by the answer key `rule`
+    (a species pools with its varieties). Also their counts, for the report."""
+    from .name_equiv import ReferenceDepth
+    from .name_equiv import answer_key as _key
+    rd = ReferenceDepth((r["species"] for r in ref_rows if r.get("species")), rule)
+    formal_of: dict[str, bool] = {}
+
+    def note(species, kind):
+        k = _key(species, rule)
+        if k:
+            formal_of[k] = formal_of.get(k, False) or kind == "formal"
+        return k
+    seen = {note(r["species"], r.get("name_kind")) for r in ref_rows if r.get("species")}
+    known = {note(sp, kind) for sp, kind in base.db.execute(
+        "select species, name_kind from records where species is not null and species != ''")}
+    known |= seen
+    seen.discard("")
+    known.discard("")
+    units = {pt.KNOWN: [(rd.counts.get(k, 0), formal_of.get(k, False)) for k in sorted(known)],
+             pt.SEEN: [(rd.counts[k], formal_of.get(k, False)) for k in sorted(seen)]}
+    return units, {name: {"species": len(u), "with_reference": sum(d > 0 for d, _ in u)}
+                   for name, u in units.items()}
+
+
 def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list, method: str,
                    backbone: str, top_k: int = 10, calibration: dict | None = None,
                    truths: dict[str, dict] | None = None, place_setting: str | None = None,
@@ -1183,6 +1210,15 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     per_species_kw = ({"per_species_rows": config["per_species_rows"],
                        "species_key": lambda name: _species_key(name, config["answer_key"])}
                       if config.get("per_species_rows") else {})
+    # PLAN C4: species as answer-key units with their reference records (ReferenceDepth,
+    # the same count as each find's depth; 0 with none) and whether the name is formal, over
+    # two denominators: (b, leading) every species name in the base release's records,
+    # included or not; (a) the species in the reference this run scores against.
+    recover_units, recover_cite, in_scope_primary = None, None, None
+    if config.get("recoverability"):
+        recover_units, recover_cite = recoverability_units(base, ref_rows,
+                                                           config["answer_key"])
+        in_scope_primary = pt.in_scope(finds, "primary", "all")
     gate_report = None
     if config.get("gate"):
         # E10: the gate on the scored finds and the OOD set; each Vision comparator gets a
@@ -1243,6 +1279,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   float(config.get("alpha", 0.05))),
         "per_photo": per_photo,
+        # PLAN C4 (19 Oct): species recoverability, descriptive and model-based.
+        "recoverability": ({cid: pt.recoverability(in_scope_primary, o, recover_units, reps,
+                                                    seed)
+                            for cid, o in outcomes.items() if o}
+                           if config.get("recoverability") else None),
+        "recoverability_units": recover_cite,
         "gate": gate_report,
         "calibration": calibration_report(finds, calib, outcomes,
                                           config.get("calibration_metrics", {}), reps, seed,
@@ -1454,6 +1496,8 @@ def format_report(report: dict, config: dict) -> str:
         lines += _calibration_lines(report["calibration"], config)
     if report.get("generalisation"):
         lines += _generalisation_lines(report["generalisation"])
+    if report.get("recoverability"):
+        lines += _recoverability_lines(report["recoverability"])
     if report.get("freeze"):
         diff = report["freeze"]["differences"]
         lines += ["## Freeze", "", "The predictor matches the config's freeze block."
@@ -1561,6 +1605,31 @@ def _calibration_lines(cal: dict, config: dict) -> list[str]:
                          f"{pct((cw.get('all') or {}).get('wrong_share'))} / "
                          f"{pct((cw.get('unknown') or {}).get('wrong_share'))} | "
                          f"{pct(gb.get('rate'))} |")
+        lines.append("")
+    return lines
+
+
+def _recoverability_lines(rec: dict) -> list[str]:
+    """PLAN C4: species recoverability per comparator (descriptive, model-based)."""
+    lines = ["## Species recoverability (C4; descriptive, model-based)", "",
+             "Expected share of the reference's species one find would name right: each "
+             "species' reference band x that band's per-find accuracy (species strict, by the "
+             "answer key), averaged over species. Assumes accuracy within a band does not "
+             "depend on the species. Intervals: bootstrap over finds.", ""]
+    for cid, r in rec.items():
+        lines += [f"### {cid}", "", "| of the | | species | top 1 | top 3 | top 10 |",
+                  "|---|---|---|---|---|---|"]
+        for dname, den in r["denominators"].items():
+            for name, row in den["rows"].items():
+                cells = []
+                for k in (1, 3, 10):
+                    c = row[f"top{k}"]
+                    cells.append("-" if c["estimate"] is None else
+                                 f"{100 * c['estimate']:.1f}%" + (
+                                     f" ({100 * c['ci95'][0]:.1f}-{100 * c['ci95'][1]:.1f})"
+                                     if c["ci95"] else ""))
+                lines.append(f"| {dname} | {name} | {row['species']:,} | " + " | ".join(cells)
+                             + " |")
         lines.append("")
     return lines
 
