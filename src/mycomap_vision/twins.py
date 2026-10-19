@@ -12,9 +12,11 @@ components over those pairs. They are computed once from a dataset release and k
 GROUPS FILE, a TSV with the header `observation_id<TAB>specimen` (observation_id = the
 release's record_key, which is the manifest's observation id), since the served reference
 and the research commands have no dHash index of their own. Every command that scores a
-grouped method names the file it used and its sha256.
+grouped method names the file it used and its sha256. The groups file is what GROUPS
+specimens (the definition E32 passed under and (c) is calibrated with); leaving a linked
+observation's twins out of its own answer is a separate job (Identifier.left_out).
 
-- `build(release, ...)`: the pairs, restricted to records in `splits`, as groups;
+- `release_groups(release, ...)`: the pairs, restricted to records in `splits`, as groups;
 - `write(groups, path)` / `read(path)`: the file (LF, sorted: same groups, same sha256);
 - `specimen_of(groups, records)`: the groups among these reference records only (a twin
   whose other side is not in the reference is a record like any other).
@@ -52,8 +54,8 @@ def groups_from_pairs(pairs, keep=None) -> dict[str, str]:
     return {x: f"twin-{find(x)}" for x in parent}
 
 
-def build(release, index: dict, exclude_photos=frozenset(), skip=frozenset(),
-          splits=("train",)) -> dict[str, str]:
+def release_groups(release, index: dict, exclude_photos=frozenset(), skip=frozenset(),
+                   splits=("train",)) -> dict[str, str]:
     """The release's cross-post twin groups among its records in `splits` (errata.
     crosspost_twin_pairs: `index` its dHash index, `exclude_photos` the micrograph list,
     `skip` records already in an erratum)."""
@@ -116,3 +118,15 @@ def is_grouped(method: str) -> bool:
     record-grouped arms and their +place twins)."""
     from .methods import RECORD_METHODS
     return any(method == m.name or method == f"{m.name}+place" for m in RECORD_METHODS)
+
+
+def partition(groups: dict[str, str], records) -> set[frozenset]:
+    """The specimens `groups` makes among these reference records (specimen_of), as a set
+    of record sets: two groups files define the same served method over a reference when
+    their partitions are equal. Checked 2026-10-18 for the served file twin-groups built
+    with r3 against E32's train file over v1 train after r4: identical, 2,092 specimens
+    of 4,190 records."""
+    out: dict[str, set] = {}
+    for rec, key in specimen_of(groups, records).items():
+        out.setdefault(key, set()).add(rec)
+    return {frozenset(v) for v in out.values()}

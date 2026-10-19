@@ -103,3 +103,15 @@ def test_compare_groups_twins_for_the_grouped_method_only_and_cites_the_file(mon
         {"file": "t.tsv", "sha256": "abc", "records_grouped": 2}
     assert "twins" not in (by["nearest+mean"][1] or {})
     assert by["nearest+mean-records-balanced"][0]["species"]["all"]["top1"] == 1.0
+
+
+def test_two_groups_files_define_the_same_grouping_when_their_partitions_agree():
+    # the served file also groups a pair outside this reference and names keys differently:
+    # over the reference both make the same specimens
+    ref = [rec(o) for o in ("mo:1", "10", "mo:3", "30", "7")]
+    trained = {"mo:1": "twin-10", "10": "twin-10", "mo:3": "twin-30", "30": "twin-30"}
+    served = {"mo:1": "a", "10": "a", "mo:3": "b", "30": "b", "mo:9": "c", "90": "c"}
+    assert twins.partition(trained, ref) == twins.partition(served, ref) == \
+        {frozenset({"mo:1", "10"}), frozenset({"mo:3", "30"})}
+    broader = {**served, "7": "a"}                       # a third record joins a find
+    assert twins.partition(broader, ref) != twins.partition(trained, ref)

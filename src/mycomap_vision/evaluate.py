@@ -876,7 +876,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
     grouped = [m for m in methods if twins_mod.is_grouped(m)]
     if grouped and twin_groups is None and not no_twins:
         raise ValueError(f"{', '.join(grouped)} score by specimen: give the cross-post twin "
-                         "groups (--twins FILE, mv twins build), or --no-twins to score them "
+                         "groups (--twins FILE, mv twin-groups), or --no-twins to score them "
                          "with every record its own specimen")
     for m in methods:
         if m not in METHODS:

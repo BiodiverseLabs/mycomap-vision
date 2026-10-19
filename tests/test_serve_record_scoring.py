@@ -1,7 +1,7 @@
 """Serving arm (c), nearest+mean-records-balanced(+place) (Steve, 2026-10-18; E32): the served
-index groups cross-post twins as one specimen, an observation identified by its number
-leaves its twins out with it, the default falls back when (c) can't answer, and the public
-v1 answer keeps its shape."""
+index groups cross-post twins as one specimen by the groups file E32 passed under, the
+default falls back when (c) can't answer, and the public v1 answer keeps its shape. (Leaving
+a linked observation's twins out of its own answer is the link path's job.)"""
 
 import json
 
@@ -48,56 +48,38 @@ def test_the_served_c_scores_a_twin_pair_as_one_specimen_and_other_methods_do_no
         conn, tmp_path):
     root = embedded(conn, tmp_path)
     c = Identifier(conn, "m1", C, embeddings_root=root / "m1", photo_info=False,
-                   twin_groups=TWINS)
+                   specimen_groups=TWINS)
     plain = Identifier(conn, "m1", "nearest+mean", embeddings_root=root / "m1",
-                       photo_info=False, twin_groups=TWINS)
+                       photo_info=False, specimen_groups=TWINS)
     assert c.records == plain.records == 8
     assert len(c.index.rec_starts) == c.records - 1          # 100 and 101: one run
     assert len(plain.index.rec_starts) == plain.records      # photo scoring: untouched
-    assert c.twins_grouped == 2 and plain.twins_grouped == 2
-    # the answer is the method's own, scored on the grouped index
+    assert c.specimens_grouped == 2 and plain.specimens_grouped == 0
     _, vecs = map_embeddings(conn, "m1", root / "m1")
     q = np.asarray(vecs[[0]], dtype=np.float32)
     assert np.allclose(c.model.species_scores(q),
                        c.model.per_photo_scores(c.model.photo_sims(q), q).mean(axis=0))
 
 
-def test_an_observation_identified_by_its_number_leaves_its_twin_out_too(conn, tmp_path):
-    root = embedded(conn, tmp_path)
-    for method, groups in ((C, TWINS), ("nearest+mean", TWINS)):
-        ident = Identifier(conn, "m1", method, embeddings_root=root / "m1",
-                           photo_info=False, twin_groups=groups)
-        hidden, own = ident.left_out("inat", "100")
-        recs = ident.col_record
-        held = {str(recs.obs[recs.rec[c]]) for c in hidden.tolist()}
-        assert held == {"100", "101"}, method
-        assert set(own.tolist()) == set(hidden.tolist())
-    alone = Identifier(conn, "m1", "nearest+mean", embeddings_root=root / "m1",
-                       photo_info=False, twin_groups={})
-    hidden, _ = alone.left_out("inat", "100")
-    assert {str(alone.col_record.obs[alone.col_record.rec[c]]) for c in hidden.tolist()} == \
-        {"100"}
-
-
-def test_c_answers_with_a_twin_left_out_as_if_neither_record_were_there(conn, tmp_path):
+def test_c_with_a_whole_twin_pair_left_out_answers_as_if_neither_record_were_there(
+        conn, tmp_path):
     root = embedded(conn, tmp_path)
     ident = Identifier(conn, "m1", C, embeddings_root=root / "m1", photo_info=False,
-                       twin_groups=TWINS)
+                       specimen_groups=TWINS)
     _, vecs = map_embeddings(conn, "m1", root / "m1")
     q = np.asarray(vecs[[1]], dtype=np.float32)
-    hidden, _ = ident.left_out("inat", "100")
+    recs = ident.col_record
+    hidden = np.array([c for c in range(len(recs)) if str(recs.obs[recs.rec[c]])
+                       in ("100", "101")], dtype=np.int64)
     sims = ident.nearest.photo_sims(q)
     got = ident.model.leave_out(ident.model.per_photo_scores(sims, q), sims, q, hidden)
-    # refit without both twins
-    import sqlite3
     conn.execute("update records set label_conflict = 1 where observation_id in ('100','101')")
     conn.commit()
     refit = Identifier(conn, "m1", C, embeddings_root=root / "m1", photo_info=False,
-                       twin_groups=TWINS)
+                       specimen_groups=TWINS)
     want = refit.model.per_photo_scores(refit.nearest.photo_sims(q), q)
     for s, name in enumerate(ident.index.species):
         assert np.allclose(got[:, s], want[:, refit.index.species.index(name)], atol=1e-3)
-    assert isinstance(conn, sqlite3.Connection)
 
 
 def test_the_default_falls_back_down_the_chain_when_c_cannot_answer():
@@ -118,12 +100,12 @@ def test_the_default_falls_back_down_the_chain_when_c_cannot_answer():
     assert Limits(**base, default_method="nearest+mean-typo").served_default(known) ==         "nearest"
 
 
-def app(tmp_path, root, monkeypatch, default_method, twins_file=None):
+def app(tmp_path, root, monkeypatch, default_method, groups_file=None):
     """The server on the seeded manifest (tmp_path/manifest.sqlite) and its embeddings."""
-    if twins_file:
-        monkeypatch.setenv("MV_TWINS_FILE", str(twins_file))
+    if groups_file:
+        monkeypatch.setenv("MV_TWIN_GROUPS", str(groups_file))
     else:
-        monkeypatch.delenv("MV_TWINS_FILE", raising=False)
+        monkeypatch.delenv("MV_TWIN_GROUPS", raising=False)
     return TestClient(create_app(
         tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
         limits=open_limits(default_method=default_method), background=False,

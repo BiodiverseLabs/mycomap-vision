@@ -186,11 +186,12 @@ def test_a_release_ships_the_cross_post_twin_groups_the_served_c_reads(conn, tmp
     groups = tmp_path / "twins-served.tsv"
     made = twins.write({"mo:1": "twin-1", "1": "twin-1"}, groups)
     s3 = MemoryS3()
-    rid = publish(conn, data, s3, twins_file=groups)["id"]
-    assert s3.objects[f"releases/{rid}/twins.tsv"] == groups.read_bytes()
+    rid = publish(conn, data, s3, twin_groups_file=groups)["id"]
+    assert s3.objects[f"releases/{rid}/twin-groups.tsv"] == groups.read_bytes()
     info = json.loads(s3.objects[f"releases/{rid}/release.json"])
-    assert info["twins"]["sha256"] == made["sha256"] and info["twins"]["groups"] == 1
+    assert info["twin_groups"]["sha256"] == made["sha256"]
+    assert info["twin_groups"]["groups"] == 1
     bad = tmp_path / "bad.tsv"
     bad.write_text("x\ty\n1\t2\n", encoding="utf-8")
     with pytest.raises(ValueError, match="twin groups file"):
-        publish(conn, data, MemoryS3(), twins_file=bad)
+        publish(conn, data, MemoryS3(), twin_groups_file=bad)

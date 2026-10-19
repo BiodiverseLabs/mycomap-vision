@@ -425,7 +425,7 @@ def cmd_archive_embeddings(conn, args) -> None:
         print(json.dumps(embed.archive_embeddings(conn, models.storage_name(b), args.label)))
 
 
-def cmd_twins(args) -> None:
+def cmd_twin_groups(args) -> None:
     """Cross-post twin groups of a dataset release (twins.py): the file the record-grouped
     methods read. Reads only that release, its dHash index and the given lists."""
     from pathlib import Path
@@ -435,7 +435,7 @@ def cmd_twins(args) -> None:
     rel = load_release(args.release, allow_draft=args.allow_draft)
     skip = errata.read(Path(args.errata)).keys if args.errata else frozenset()
     splits = tuple(s.strip() for s in args.splits.split(",") if s.strip())
-    groups = twins.build(rel, dhash.load_index(dhash.index_path(rel.id)),
+    groups = twins.release_groups(rel, dhash.load_index(dhash.index_path(rel.id)),
                          errata.read_photo_list(Path(args.exclude_photos)), skip, splits)
     print(json.dumps({**twins.write(groups, Path(args.out)), "release": rel.id,
                       "splits": list(splits), "errata": args.errata and Path(args.errata).name},
@@ -995,7 +995,7 @@ def cmd_release(conn, args) -> None:
     print(json.dumps(release.publish(conn, _split(args.backbones), label=args.label,
                                      make_current=args.make_current,
                                      int8_vectors=args.int8_vectors,
-                                     twins_file=args.twins), indent=2))
+                                     twin_groups_file=args.twin_groups), indent=2))
 
 
 def cmd_pull_release(conn, args) -> None:
@@ -2018,16 +2018,15 @@ def main(argv: list[str] | None = None) -> int:
                         "public model may learn from (CC incl. NC, or ARR with permission); "
                         "the scored records are unchanged (paper E23/E23b)")
     p.add_argument("--twins", metavar="FILE",
-                   help="cross-post twin groups (mv twins build): record-grouped methods "
+                   help="cross-post twin groups (mv twin-groups): record-grouped methods "
                         "(nearest+mean-records*) count an MO/iNat cross-post as one specimen")
     p.add_argument("--no-twins", action="store_true",
                    help="score record-grouped methods without twin groups (every record its "
                         "own specimen)")
     release_options(p)
 
-    p = sub.add_parser("twins", help="cross-post twin groups of a dataset release (twins.py): "
-                                     "the file record-grouped scoring reads")
-    p.add_argument("action", choices=["build"])
+    p = sub.add_parser("twin-groups", help="cross-post twin groups of a dataset release "
+                                           "(twins.py): the file record-grouped scoring reads")
     p.add_argument("--release", required=True)
     p.add_argument("--errata", metavar="TSV", help="its records never pair (skipped)")
     p.add_argument("--exclude-photos", metavar="TSV", required=True,
@@ -2239,9 +2238,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--int8-vectors", action="store_true",
                    help="ship the reference vectors as int8 + a scale each: half the box's "
                         "vector memory (Steve, 2026-10-12; accuracy: mv int8-check)")
-    p.add_argument("--twins", metavar="FILE",
-                   help="cross-post twin groups (mv twins build --splits train,val), shipped "
-                        "as twins.tsv: the served nearest+mean-records-balanced needs them")
+    p.add_argument("--twin-groups", metavar="FILE",
+                   help="cross-post twin groups (mv twin-groups --splits train,val), shipped "
+                        "as twin-groups.tsv: the served nearest+mean-records-balanced needs "
+                        "them")
 
     p = sub.add_parser("dataset", help="dataset releases for research: frozen, verifiable "
                                        "snapshots (docs/dataset-release.md)")
@@ -2589,8 +2589,8 @@ def main(argv: list[str] | None = None) -> int:
     occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
 
     args = parser.parse_args(argv)
-    if args.command == "twins":               # reads only a dataset release
-        cmd_twins(args)
+    if args.command == "twin-groups":         # reads only a dataset release
+        cmd_twin_groups(args)
         return 0
     if args.command == "dataset":             # never opens the manifest for writing
         cmd_dataset(args)

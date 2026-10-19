@@ -213,23 +213,24 @@ class Identifier:
     photo, for callers that look them up per identification (the API does).
     `layer_root` holds the shards the nightly update added (nightly.py).
 
-    `twin_groups` (twins.read: {observation_id: specimen}) names the reference records that
-    are one find posted to both Mushroom Observer and iNaturalist. A record-grouped method
-    (twins.is_grouped: the served nearest+mean-records-balanced) scores each such find as one
-    specimen, and for every method an observation identified by its number leaves its twins
-    out with it (left_out). A record-grouped method is refused without them."""
+    `specimen_groups` (twins.read: {observation_id: specimen}) names the reference records
+    that are one find posted to both Mushroom Observer and iNaturalist, by the rule E32
+    passed under (twins.release_groups). A record-grouped method (twins.is_grouped: the
+    served nearest+mean-records-balanced) scores each such find as one specimen, and is
+    refused without them; other methods ignore them."""
 
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
                  embeddings_root: Path | None = None, calibration: dict | None = None,
                  model_cache: Path | None = None, train: bool = True, photo_info: bool = True,
                  layer_root: Path | None = None, release=None,
                  gate: "fungusgate.FungusGate | None" = None,
-                 twin_groups: dict[str, str] | None = None):
+                 specimen_groups: dict[str, str] | None = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
-        if twin_groups is None and twins.is_grouped(method):
+        if specimen_groups is None and twins.is_grouped(method):
             raise ValueError(f"{method} scores by specimen and needs the cross-post twin "
-                             "groups (MV_TWINS_FILE, or twins.tsv in the serving release)")
+                             "groups (MV_TWIN_GROUPS, or twin-groups.tsv in the serving "
+                             "release)")
         self.backbone, self.method = backbone, method
         # The not-a-fungus gate (fungusgate.py), or None: answers are then ungated.
         self.gate = gate
@@ -240,9 +241,12 @@ class Identifier:
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
         by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()}, release=release)
         records = with_rows(by_id, row_of)
-        # Cross-post twins among these records only (a lone twin is an ordinary record).
-        spec = twins.specimen_of(twin_groups or {}, records)
-        self.index = build_index(records, spec if twins.is_grouped(method) else None)
+        # One run of columns per specimen for a record-grouped method (a lone twin is an
+        # ordinary record); every other method's index is unchanged.
+        spec = (twins.specimen_of(specimen_groups, records)
+                if twins.is_grouped(method) else {})
+        self.specimens_grouped = len(spec)
+        self.index = build_index(records, spec or None)
         self.model = make_method(method, backbone)
         self.uses_context = getattr(self.model, "needs_context", False)
         self.loaded_from_cache = fit_cached(
@@ -257,11 +261,6 @@ class Identifier:
         self.col_photo = ids[self.index.cols]
         self.col_record = Specimens(records, self.index.cols.tolist())
         self.rec_starts = self.col_record.starts()
-        # Each record's twin group ('' for none), in col_record's record order: left_out
-        # leaves a record's cross-post twin out with it.
-        self.rec_twin = np.array([spec.get(o, "") for o in self.col_record.obs.tolist()]
-                                 or [""])
-        self.twins_grouped = len(spec)
         # Each record's owner at its source, for a signed-in person's own records (yours.py).
         self.owners = OwnerIndex.from_manifest(conn, self.col_record.obs, self.col_record.source)
         self.calibration = calibration
@@ -312,16 +311,12 @@ class Identifier:
 
     def left_out(self, source: str, source_id: str, photo_ids=()) -> tuple[np.ndarray, np.ndarray]:
         """(columns to leave out, the record's own columns) for an observation identified
-        by its number: the reference record(s) it is (source + id at the source) and their
-        cross-post twins (the same find on the other site: twin_groups), and any column
-        holding one of its photos, those records' or `photo_ids` (the same photo filed
-        under another observation). Both empty when it is in no way part of the
+        by its number: the reference record(s) it is (source + id at the source), and any
+        column holding one of its photos, those records' or `photo_ids` (the same photo
+        filed under another observation). Both empty when it is in no way part of the
         reference."""
         recs = self.col_record
         mine = np.flatnonzero((recs.source == source) & (recs.source_id == str(source_id)))
-        groups = set(self.rec_twin[mine].tolist()) - {""} if len(mine) else set()
-        if groups:
-            mine = np.union1d(mine, np.flatnonzero(np.isin(self.rec_twin, list(groups))))
         own = (np.flatnonzero(np.isin(recs.rec, mine)) if len(mine)
                else np.empty(0, dtype=np.int64))
         ids = np.concatenate([np.asarray([int(p) for p in photo_ids],

@@ -582,7 +582,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             ident = Identifier(own, backbone, method, root, calibration=cal,
                                train=limits.fit_on_demand, photo_info=False,
                                layer_root=layer.embeddings if layer else None,
-                               gate=fungus_gate, twin_groups=served_twins())
+                               gate=fungus_gate, specimen_groups=served_groups())
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
@@ -635,23 +635,23 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     warm = Preload()
 
-    # Cross-post twins (twins.py): records that are one find on MO and iNat. The served
-    # record-grouped method needs them, and every method leaves a linked observation's twin
-    # out with it. MV_TWINS_FILE, else the serving release's twins.tsv; read once.
-    twins_cache: dict = {}
+    # Cross-post twin groups (twins.py): records that are one find on MO and iNat, by the
+    # rule the served record-grouped method was adopted and calibrated under (E32). Only
+    # that method reads them. MV_TWIN_GROUPS, else the serving release's twin-groups.tsv.
+    groups_cache: dict = {}
 
-    def served_twins() -> dict | None:
-        if "groups" not in twins_cache:
-            path = config.setting("MV_TWINS_FILE")
-            path = Path(path) if path else (served_release_dir() or Path("/nonexistent"))                 / "twins.tsv"
-            twins_cache["groups"] = twins.read(path) if path.is_file() else None
-            twins_cache["cite"] = twins.cite(path) if path.is_file() else None
-        return twins_cache["groups"]
+    def served_groups() -> dict | None:
+        if "groups" not in groups_cache:
+            path = config.setting("MV_TWIN_GROUPS")
+            path = (Path(path) if path else
+                    (served_release_dir() or Path("/nonexistent")) / "twin-groups.tsv")
+            groups_cache["groups"] = twins.read(path) if path.is_file() else None
+        return groups_cache["groups"]
 
     def served_ready(method: str) -> bool:
         """methods.method_ready, and for a record-grouped method its twin groups here."""
         return method_ready(method) and (not twins.is_grouped(method)
-                                         or served_twins() is not None)
+                                         or served_groups() is not None)
 
     def served_release_dir() -> Path | None:
         """The folder of the release this server answers from, or None (a laptop)."""
