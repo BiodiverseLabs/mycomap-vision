@@ -249,8 +249,44 @@ def test_the_v1_candidates_are_served_by_name_and_the_default_is_unchanged(monke
                       "pen_cap": 8.0, "season_penalty": 1.0}
     # Each candidate is a setting of the declared grid, so it was scored as tuned.
     grid = [{k: s[k] for k in pp.NO_EXTRAS} for s in pt.settings()]
-    for name in ("penalty-500-2026-10-13", "penalty-300-2026-10-13", "shrink-2026-10-13"):
+    for name in ("penalty-500-2026-10-13", "penalty-300-2026-10-13", "shrink-2026-10-13",
+                 "penalty-500-s30-2026-10-19"):
         assert pp.place_setting(name)[1] in grid, name
+
+
+# Steve, 2026-10-19 (PLAN O9): the band rule's pick on record-grouped scoring (E32 arm c).
+S30 = "penalty-500-s30-2026-10-19"
+S30_SHA256 = "20eb90670a20c9564b2262e6a3cf7b867922065ac474d21afd6340fcc9f82bc8"
+
+
+def test_the_arm_c_place_setting_is_grid_setting_748_with_its_pinned_sha():
+    from mycomap_vision.paper_freeze import canonical_sha
+    name, setting = pp.place_setting(S30)
+    assert setting == {**pp.NO_EXTRAS, "shrink": 30.0, "pen_slope": 2.0, "pen_start_km": 500.0,
+                       "pen_cap": 8.0, "pen_known": "dna", "damp_k": 0.0,
+                       "season_penalty": 1.0}
+    grid = pt.settings()
+    assert setting == {k: grid[748][k] for k in pp.NO_EXTRAS}       # the setting the rule picked
+    assert pt.describe(grid[748]) == ("shrink 30; -2/1,000 km past 500 km, cap 8, known dna; "
+                                      "off season -1")
+    # the values the paper's freeze spec hashes (paper_freeze: canonical JSON, sha256)
+    assert canonical_sha(setting) == S30_SHA256
+    # it differs from penalty-500 in the shrinkage only
+    old = pp.place_setting("penalty-500-2026-10-13")[1]
+    assert {k for k in setting if setting[k] != old[k]} == {"shrink"}
+
+
+def test_the_environment_serves_the_arm_c_setting_and_penalty_500_stays_for_rollback(
+        monkeypatch):
+    monkeypatch.setenv(pp.SETTING_ENV, S30)
+    assert pp.place_setting()[0] == S30
+    assert pp.place_setting()[1]["shrink"] == 30.0
+    monkeypatch.setenv(pp.SETTING_ENV, "penalty-500-2026-10-13")      # rollback
+    name, setting = pp.place_setting()
+    assert name == "penalty-500-2026-10-13" and setting["shrink"] == 10.0
+    monkeypatch.setenv(pp.SETTING_ENV, "penalty-500-s30-2026-10-1")    # a typo is refused
+    with pytest.raises(ValueError, match="not a place setting"):
+        pp.place_setting()
 
 
 # --- the answer key --------------------------------------------------------------------------
