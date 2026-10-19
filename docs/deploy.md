@@ -320,6 +320,15 @@ error text (the page is public); `mv nightly` on the box has the reason.
 a failed or refused last run, no successful run for 26 hours, a run going on
 3 hours, and a layer past 20% of the release are warnings, never failures.
 
+**Upload meter** (`uploadmeter.py`; Steve, 2026-10-19). Read with mycomap.org's server key
+only, `/api/health` also carries `upload_matches`: how often an uploaded photo is one of
+Vision's reference photos (within 3 dHash bits of a non-template photo in the release's
+`twins.npz`). It's counted per UTC day and path (`site`, `api`, `session`) as uploads,
+`metered` (checked against a table), `matched`, photos, `photos_metered` and
+`photos_matched`, for the last 7 days with a total. Only those counters are kept, in
+`state/vision-usage.sqlite`; no photo, hash, person or record id. Answers are unchanged.
+Without a twin table (`"table": false`) uploads are counted but nothing is hashed.
+
 After the reference set, the night makes **advance predictions**: up to
 `MV_NIGHTLY_PREDICT` (300) records still awaiting validation on mycomap.org
 (`GET /api/vision/pending-records`), newest first, are identified from their iNat
