@@ -326,3 +326,36 @@ def test_the_tuners_bands_count_references_by_answer_key(tmp_path):
     meta = {"truth_name": np.array(["Pseudohydnum gelatinosum", "Physisporinus sp. 'IN01 x VT01'",
                                     ""])}
     assert run_v1.key_depth_bands(tmp_path, meta).tolist() == ["5-19", "0", "n/a"]
+
+
+def test_the_tuners_score_step_groups_twins_for_a_record_arm_and_refuses_without_them(tmp_path):
+    import sys
+    from pathlib import Path
+
+    from mycomap_vision import evaluate, twins
+    from mycomap_vision.evaluate import Record
+    sys.path.insert(0, str(Path(__file__).parents[1] / "scripts" / "place_scoring"))
+    import run_v1
+    rng = np.random.default_rng(0)
+    vecs = rng.normal(size=(12, 8)).astype(np.float32)
+    vecs /= np.linalg.norm(vecs, axis=1, keepdims=True)
+    train = [Record(f"r{i}", f"G s{i % 2}", "G", "F", "2026-01-01", f"o{i}",
+                    [2 * i, 2 * i + 1]) for i in range(6)]
+    f = tmp_path / "twins.tsv"
+    f.write_text("observation_id\tspecimen\nr0\ttwin-r0\nr2\ttwin-r0\nr9\ttwin-r9\n",
+                 encoding="utf-8")
+    m = "nearest+mean-records-balanced"
+    index, model, cite = run_v1.reference_model(vecs, train, m, None, f)
+    want_index, want = evaluate.fit_method(vecs, train, m, specimen_of={"r0": "twin-r0",
+                                                                        "r2": "twin-r0"})
+    q = vecs[:3]
+    assert np.allclose(model.species_scores(q), want.species_scores(q))
+    assert cite["grouped_records"] == 2 and cite["sha256"] == twins.cite(f)["sha256"]
+    with pytest.raises(SystemExit, match="--twins"):
+        run_v1.reference_model(vecs, train, m)
+    with pytest.raises(SystemExit, match="record-grouped"):
+        run_v1.reference_model(vecs, train, "nearest+mean", None, f)
+    with pytest.raises(SystemExit, match="place method"):
+        run_v1.reference_model(vecs, train, "nearest+mean+place")
+    _, served, none = run_v1.reference_model(vecs, train)           # the default, unchanged
+    assert none is None and type(served).__name__ == "NearestAndMean"

@@ -18,6 +18,8 @@ Parts (each a sha256 unless said otherwise):
 - `calibration`: per comparator, the temperatures and list floors (values, not hashes);
 - `crosswalk`: per published comparator, the crosswalk cache and review;
 - `attrs`, `deadly_taxa`: the pinned files;
+- `twins`: the cross-post twin groups files (validation, sealed_test), when a comparator
+  scores by reference record;
 - `code_commit`: the paper-score commit the tag freezes.
 
 `compute` reads all of them; `check` compares them with the config's `freeze` block. The
@@ -36,7 +38,7 @@ import numpy as np
 
 FREEZE_KEYS = ("release", "errata", "models", "vectors", "taxonomy", "occurrence",
                "place_settings", "gate", "calibration", "crosswalk", "attrs", "deadly_taxa",
-               "answer_key", "answer_key_taxonomy", "code_commit")
+               "answer_key", "answer_key_taxonomy", "twins", "code_commit")
 
 
 def sha256_file(path) -> str:
@@ -162,6 +164,14 @@ def compute(config: dict, base, conn, resolve, models_root: Path | None = None,
         if f and not str(f).startswith("TBD"):
             p = resolve(f)
             spec[key] = sha256_file(p) if p.is_file() else None
+    from . import twins as twins_mod
+    if config.get("twins") and any(twins_mod.is_grouped(c["method"]) for c in vision):
+        spec["twins"] = {}
+        for which, entry in sorted(config["twins"].items()):
+            f = entry.get("file") if isinstance(entry, dict) else None
+            if f and not str(f).startswith("TBD"):
+                p = resolve(f)
+                spec["twins"][which] = sha256_file(p) if p.is_file() else None
     spec["answer_key"] = config.get("answer_key")
     akt = config.get("answer_key_taxonomy") or {}
     if akt:

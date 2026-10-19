@@ -106,6 +106,11 @@ def check_config(doc: dict) -> None:
             from .evaluate import METHODS
             if c["method"] not in METHODS:
                 raise ValueError(f"comparator {c['id']}: unknown method {c['method']!r}")
+            from . import twins as twins_mod
+            if twins_mod.is_grouped(c["method"]) and not doc.get("twins"):
+                raise ValueError(f"comparator {c['id']}: {c['method']} scores by reference "
+                                 "record, so the config pins its cross-post twin groups "
+                                 "(a top-level \"twins\" block)")
         if c.get("place_setting"):
             if "place" not in str(c.get("method", "")):
                 raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "
@@ -172,6 +177,34 @@ def attrs_file(block: dict | None, given) -> Path | None:
         raise ValueError(f"--attrs {given} is not the attrs file the config pins "
                          f"({got[:12]}): give that one or none")
     return path
+
+
+# The twins block's file for each reference: val is scored against train, the sealed test
+# against train + val (each file holds the groups among those splits only).
+TWINS_FOR_REFERENCE = {("train",): "validation", ("train", "val"): "sealed_test"}
+
+
+def twin_groups(block: dict | None, ref_splits) -> tuple[dict | None, dict | None]:
+    """({observation_id: specimen}, cite) from the config's "twins" block for a reference
+    of `ref_splits`: its "validation" file for train, its "sealed_test" file for train +
+    val. Refused when the block has no file for this reference, the file is missing, or
+    its sha256 is not the one pinned. (None, None) without a block."""
+    if not block:
+        return None, None
+    which = TWINS_FOR_REFERENCE.get(tuple(ref_splits))
+    entry = block.get(which) if which else None
+    if not entry or not entry.get("file") or str(entry["file"]).startswith("TBD"):
+        raise ValueError(f"twins: no {which or '?'} file pinned for a reference of "
+                         f"{' + '.join(ref_splits)}")
+    path = resolve(entry["file"])
+    if not path.is_file():
+        raise ValueError(f"twins: {path} is missing")
+    got = sha256_file(path)
+    if got != entry.get("sha256"):
+        raise ValueError(f"twins {path.name}: sha256 {got[:12]}, the config pins "
+                         f"{str(entry.get('sha256'))[:12]}")
+    from . import twins as twins_mod
+    return twins_mod.read(path), {"for": which, **twins_mod.cite(path)}
 
 
 def apply_errata(base, block: dict | None) -> dict | None:
@@ -447,7 +480,7 @@ def place_setting_used(name: str | None):
 def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list, method: str,
                    backbone: str, top_k: int = 10, calibration: dict | None = None,
                    truths: dict[str, dict] | None = None, place_setting: str | None = None,
-                   info: dict | None = None) -> dict[str, dict]:
+                   info: dict | None = None, twins: dict | None = None) -> dict[str, dict]:
     """Each scored record's ranked species and genus names from `method` fitted on the
     reference records (evaluate.fit_method; the records' photo_rows index `vectors`).
 
@@ -458,9 +491,11 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
     floor, likely.likely_set; None without a floor).
 
     `place_setting` names the place setting a place method is built with; `info` gets the
-    setting the fitted method actually uses."""
+    setting the fitted method actually uses. `twins` ({observation_id: specimen}, the
+    config's groups file): a record-grouped method counts a cross-post pair as one specimen."""
     from . import evaluate
-    index, model = fitted_method(vectors, ref_records, method, backbone, place_setting, info)
+    index, model = fitted_method(vectors, ref_records, method, backbone, place_setting, info,
+                                 twins)
     uses_context = getattr(model, "needs_context", False)
 
     def score(rec):
@@ -470,12 +505,26 @@ def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list,
     return answers_from(index, scored_records, score, top_k, calibration, truths)
 
 
-def fitted_method(vectors, ref_records, method, backbone, place_setting=None, info=None):
+def fitted_method(vectors, ref_records, method, backbone, place_setting=None, info=None,
+                  twins: dict | None = None):
     """(index, model) for `method` fitted on the reference records, with the named place
-    setting built in (refused if the method ends up with another)."""
+    setting built in (refused if the method ends up with another). A record-grouped method
+    (twins.is_grouped) groups the cross-post twins of `twins` present in this reference
+    (twins.specimen_of: a lone twin is an ordinary record), and is refused without them."""
     from . import evaluate
+    from . import twins as twins_mod
+    specimen_of = None
+    if twins_mod.is_grouped(method):
+        if twins is None:
+            raise ValueError(f"{method} scores by reference record: give the config's twin "
+                             "groups")
+        specimen_of = twins_mod.specimen_of(twins, ref_records)
+    if info is not None and specimen_of is not None:
+        info["twin_records"] = len(specimen_of)
     with place_setting_used(place_setting):
-        index, model = evaluate.fit_method(vectors, ref_records, method, backbone)
+        index, model = evaluate.fit_method(
+            vectors, ref_records, method, backbone,
+            **({"specimen_of": specimen_of} if specimen_of is not None else {}))
     used = getattr(getattr(model, "prior", None), "setting_name", None)
     if place_setting and used != place_setting:
         raise ValueError(f"{method} was built with place setting {used!r}, not {place_setting!r}")
@@ -536,7 +585,8 @@ def leave_out_key(rec, mode: str):
     raise ValueError(f"leave_out is one of {LEAVE_OUT}")
 
 
-MASKED_LEAVE_OUT = ("nearest", "nearest+mean")
+MASKED_LEAVE_OUT = ("nearest", "nearest+mean", "nearest+mean-records",
+                    "nearest+mean-records-balanced")
 
 
 def vision_answers_leave_out(vectors, ref_records, scored_records, method, backbone, mode,
@@ -545,8 +595,9 @@ def vision_answers_leave_out(vectors, ref_records, scored_records, method, backb
     records sharing it left out: what the identifier gives a find when nothing of its own
     observer (or trip) is in the reference. A find with no observer leaves nothing out.
 
-    `nearest` and `nearest+mean` fit once and hide each group's own reference columns
-    (masked_leave_out_answers; equal to a refit without them, tested); any other method,
+    `nearest`, `nearest+mean` and the record-grouped arms fit once and hide each group's
+    own reference columns (masked_leave_out_answers; equal to a refit without them,
+    tested); any other method,
     including a place method (its prior is built from the reference records), is fitted
     again per group. Either way the calibration temperatures and list floors are the
     config's, fixed on val, never refitted per group."""
@@ -559,15 +610,19 @@ def vision_answers_leave_out(vectors, ref_records, scored_records, method, backb
 
 def masked_leave_out_answers(vectors, ref_records, scored_records, method, backbone, mode,
                              top_k: int = 10, calibration: dict | None = None,
-                             truths: dict | None = None, place_setting=None, info=None) -> dict:
+                             truths: dict | None = None, place_setting=None, info=None,
+                             twins: dict | None = None) -> dict:
     """The leave-out without a refit: the method is fitted once on every reference record;
     a find's scores are taken with the reference columns of its own group hidden (nearest:
     those columns out of each species' best match; nearest+mean: NearestAndMean.leave_out,
-    which takes each touched species' two best matches and its average again without them).
+    which takes each touched species' two best matches and its average again without them;
+    the record arms: NearestAndMeanRecords.leave_out, by record, so a hidden twin leaves its
+    pair's photos in their specimen, as a refit without it would).
     A species whose every reference record is in the group gets -inf, so it is no answer,
     as it would be missing from a refitted index."""
     from . import methods
-    index, model = fitted_method(vectors, ref_records, method, backbone, place_setting, info)
+    index, model = fitted_method(vectors, ref_records, method, backbone, place_setting, info,
+                                 twins)
     col_of_row = {int(r): i for i, r in enumerate(np.asarray(index.cols).tolist())}
     hidden_of: dict = defaultdict(list)
     for r in ref_records:
@@ -984,6 +1039,18 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     taxonomy, taxonomy_cite = answer_key_taxonomy(config.get("answer_key_taxonomy"),
                                                   {f.species for f in finds})
     keys = {c["id"]: answer_key(config, c, taxonomy) for c in config["comparators"]}
+    # E32 arm (c), O8: a record-grouped method counts a cross-post pair as one specimen, by
+    # the config's pinned groups file for this reference (train: "validation"; train + val:
+    # "sealed_test"); refused when the block, the file or its sha256 is not as pinned.
+    from . import twins as twins_mod
+    groups, twins_cite = None, None
+    if any(c["kind"] == "vision" and twins_mod.is_grouped(c["method"])
+           for c in config["comparators"]):
+        if not config.get("twins"):
+            raise ValueError("a record-grouped method needs the config's \"twins\" block")
+        groups, twins_cite = twin_groups(config["twins"], ref_splits)
+        log(f"[twins] {twins_cite['file']} ({twins_cite['for']}): {twins_cite['records']:,} "
+            f"records in {twins_cite['groups']:,} groups")
     # PLAN rule 7: a species truth that does not resolve one-to-one leaves the iNat- and
     # expert-paired tests (hypotheses with "truth_resolves": true), never their miss.
     if taxonomy is not None:
@@ -1035,7 +1102,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                    photo_rows=[row_])
                            for r in scored for i, row_ in enumerate(r.photo_rows)]
                 ans_each = vision_answers(vecs, ref, singles, comp["method"], b,
-                                          int(config.get("top_k", 10)))
+                                          int(config.get("top_k", 10)), twins=groups)
                 per_photo[comp["id"]] = per_photo_table(finds, ans_each, reps, seed,
                                                         keys[comp["id"]])
                 outcomes[comp["id"]], inputs[comp["id"]] = {}, {
@@ -1046,7 +1113,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             place_info: dict = {}
             kw = {"top_k": int(config.get("top_k", 10)), "calibration": comp.get("calibration"),
                   "truths": truths, "place_setting": comp.get("place_setting"),
-                  "info": place_info}
+                  "info": place_info, "twins": groups}
             answers = (vision_answers_leave_out(vecs, ref, scored, comp["method"], b,
                                                 comp["leave_out"], **kw)
                        if comp.get("leave_out") else
@@ -1070,6 +1137,10 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                       reference=comp.get("reference", "every included photo"),
                                       **({"place_setting": place_info["place_setting"]}
                                          if place_info.get("place_setting") else {}),
+                                      **({"twins": {**twins_cite,
+                                                    "grouped_records": place_info.get(
+                                                        "twin_records", 0)}}
+                                         if twins_mod.is_grouped(comp["method"]) else {}),
                                       finds_without_vectors=len(finds) - len(answers),
                                       predictions_sha256=sha256_file(path))
     gate_report = None
