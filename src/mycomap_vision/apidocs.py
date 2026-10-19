@@ -166,7 +166,10 @@ def outline(enabled: dict[str, bool]) -> dict:
                            "If the observation is itself one of Vision's DNA-verified "
                            "references, it is left out of the comparison, its place and date "
                            "aren't used, nothing is fetched, and `excluded_reference` says so. "
-                           "`left_out_photos` counts the reference photos left out.",
+                           "So is every other record of the same find: the one it links to "
+                           "under the other source, and its Mushroom Observer <-> iNaturalist "
+                           "cross-posts (the same picture), so a cross-post never matches "
+                           "itself. `left_out_photos` counts the reference photos left out.",
                            "Answers are kept: the same observation with the same options "
                            "comes back at once, without reading it again (`\"cached\": true`), "
                            "until `model.answers_version` moves (a new release or reference "

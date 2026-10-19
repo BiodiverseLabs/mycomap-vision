@@ -19,6 +19,7 @@ place is small (MO_AREA_MAX_DEGREES). Nothing fetched is written anywhere.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -36,7 +37,7 @@ from .sources import INAT, MO, record_url
 SOURCES = (INAT, MO)
 INAT_API = "https://api.inaturalist.org/v2/observations"
 INAT_FIELDS = ("(id:!t,observed_on:!t,location:!t,obscured:!t,"
-               "taxon:(name:!t,rank:!t),"
+               "taxon:(name:!t,rank:!t),ofvs:(name:!t,value:!t),"
                "observation_photos:(position:!t,photo:(id:!t,url:!t,license_code:!t)))")
 MO_API = "https://mushroomobserver.org/api2/observations"
 INAT_PHOTO_HOSTS = (OPEN_DATA_HOST, STATIC_HOST)
@@ -45,6 +46,15 @@ MAX_PHOTO_BYTES = 15 * 2**20
 MO_AREA_MAX_DEGREES = 0.5       # an MO place whose box is wider than this gives no place
 MAX_WAITING = 3                 # callers queued behind the one fetching
 TIMEOUT = (10, 30)              # connect, read (seconds)
+
+# The same find under the other source, as each site links it: iNat's "Mushroom Observer
+# URL" observation field, MO's external links to iNat (twins.py; 2026-10-18).
+INAT_MO_FIELD = "mushroom observer url"
+MO_URL = re.compile(r"^https?://(?:www\.)?mushroomobserver\.org/"
+                    r"(?:observer/show_observation/|observations/|obs/)?(\d{1,12})/?(?:[?#].*)?$",
+                    re.I)
+INAT_URL = re.compile(r"^https?://(?:www\.)?inaturalist\.org/observations/(\d{1,12})/?(?:[?#].*)?$",
+                      re.I)
 
 # Seconds between requests to each host.
 INTERVALS = {"api.inaturalist.org": 1.0, OPEN_DATA_HOST: 0.02, STATIC_HOST: 0.25,
@@ -86,6 +96,8 @@ class Observation:
     extra: dict = field(default_factory=dict)
     # Each photo's licence as the site states it, beside photo_urls (None: none stated).
     photo_licenses: list[str | None] = field(default_factory=list)
+    # The same find under another source, as the site links it: (source, number) pairs.
+    linked: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def url(self) -> str | None:
@@ -121,9 +133,16 @@ def parse_inat(obs: dict) -> Observation:
             lat = lng = None
     place = None if lat is None else ("obscured" if obs.get("obscured") else "coordinates")
     taxon = obs.get("taxon") or {}
+    linked = []
+    for ofv in obs.get("ofvs") or []:
+        m = (MO_URL.match(str(ofv.get("value") or "").strip())
+             if str(ofv.get("name") or "").strip().lower() == INAT_MO_FIELD else None)
+        if m and (MO, m.group(1)) not in linked:
+            linked.append((MO, m.group(1)))
     return Observation(INAT, str(obs["id"]), urls, ids, lat, lng,
                        real_date(obs.get("observed_on")), place,
-                       taxon.get("name"), taxon.get("rank"), photo_licenses=licenses)
+                       taxon.get("name"), taxon.get("rank"), photo_licenses=licenses,
+                       linked=linked)
 
 
 def parse_mo(obs: dict) -> Observation:
@@ -159,8 +178,14 @@ def parse_mo(obs: dict) -> Observation:
                 and e - w <= MO_AREA_MAX_DEGREES:
             lat, lng, place = (n + s) / 2, (e + w) / 2, "area"
     name = obs.get("consensus") or {}
+    linked = []
+    for link in obs.get("external_links") or []:
+        m = INAT_URL.match(str((link or {}).get("url") or "").strip())
+        if m and (INAT, m.group(1)) not in linked:
+            linked.append((INAT, m.group(1)))
     return Observation(MO, str(obs["id"]), urls, ids, lat, lng, real_date(obs.get("date")),
-                       place, name.get("name"), name.get("rank"), photo_licenses=licenses)
+                       place, name.get("name"), name.get("rank"), photo_licenses=licenses,
+                       linked=linked)
 
 
 def open_licence(license: str | None) -> bool:
