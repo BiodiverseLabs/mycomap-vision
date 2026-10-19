@@ -245,3 +245,37 @@ def test_answers_kept_before_a_twin_table_are_not_served_after_it(conn, tmp_path
     write_table(tmp_path / twins.FILE, groups={"100": 0, "106": 0})
     after = by_number(client, "inat", 100).json()
     assert after["cached"] is False and "106" not in specimens(after)
+
+
+# --- making and shipping the table ------------------------------------------------------
+
+def test_a_release_ships_the_twin_table_when_there_is_one(conn, tmp_path):
+    from test_serving import big_reference
+
+    from mycomap_vision import release
+    big_reference(conn, tmp_path / "embeddings", records=10, photos_each=1, shard_rows=20)
+    shipped = {rel for _p, rel in release.release_files(conn, ["big"], tmp_path)}
+    assert twins.FILE not in shipped
+    write_table(tmp_path / twins.FILE, groups={"1": 0, "mo:1": 0})
+    shipped = {rel for _p, rel in release.release_files(conn, ["big"], tmp_path)}
+    assert twins.FILE in shipped
+
+
+def test_mv_twins_writes_the_table_from_a_dhash_index(conn, tmp_path, capsys):
+    import json
+
+    from mycomap_vision import cli
+    conn.executemany("insert into records (observation_id, source, source_id, scientific_name, "
+                     "north_america, exported_at) values (?, ?, ?, 'A x', 1, 'now')",
+                     [("10", "inat", "10"), ("mo:1", "mo", "1")])
+    conn.executemany("insert into observation_photos (observation_id, photo_id) values (?, ?)",
+                     [("10", 11), ("mo:1", photo_id_of(1))])
+    index = tmp_path / "dhash-index.npz"
+    dhash.save_index({"release": "t", "release_hash": "x", "algorithm": dhash.ALGORITHM,
+                      "pillow": "p", "photos": 2, "photo_key": ["inat:11", "mo:1"],
+                      "sha256": ["a", "b"], "dhash": np.array([7, 7], dtype=np.uint64)}, index)
+    out = tmp_path / "out" / twins.FILE
+    cli.cmd_twins(conn, SimpleNamespace(dhash_index=str(index), out=str(out)))
+    said = json.loads(capsys.readouterr().out)
+    assert (said["pairs"], said["records"], said["finds"]) == (1, 2, 1)
+    assert twins.table_counts(out)["pairs"] == 1
