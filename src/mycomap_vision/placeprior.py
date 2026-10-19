@@ -70,6 +70,14 @@ PLACE_SETTINGS: dict[str, dict] = {
                                "pen_cap": 8.0, "pen_known": "dna", "season_penalty": 1.0},
     # Boost shrinkage alone (the sparse-species fix; no new penalty): 57.0%.
     "shrink-2026-10-13": {"shrink": 10.0},
+    # The band-rule pick on record-grouped scoring (E32 arm c, train cross-post twins
+    # grouped; v1 val, erratum r4, the answer key; experiment v1-c-place-recheck,
+    # 2026-10-19): penalty-500 with shrink 30 (grid setting 748). It beat penalty-500 by
+    # one find at species top-1 on all val and held the 300-1,500 km band better; Steve
+    # followed the declared rule (PLAN O9). Out of fold 57.1% against photos only 54.1%,
+    # the band -1.6% against photos only. penalty-500-2026-10-13 stays for rollback.
+    "penalty-500-s30-2026-10-19": {"shrink": 30.0, "pen_slope": 2.0, "pen_start_km": 500.0,
+                                   "pen_cap": 8.0, "pen_known": "dna", "season_penalty": 1.0},
 }
 
 
