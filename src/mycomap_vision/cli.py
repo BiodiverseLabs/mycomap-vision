@@ -920,12 +920,13 @@ def cmd_fungus_gate(conn, args) -> None:
             if not 0.0 <= args.max_lost_share < 1.0:
                 raise SystemExit("--max-lost-share is a share of DEV records, 0 <= x < 1")
             from .embed import load_embeddings
-            base = args.on_served or "bioclip-2"
+            base = args.on_served or args.frozen_base
             report = tune.tune_release(rel, Path(args.dev), Path(args.ood),
                                        Path(args.ood_manifest), Path(args.negatives),
                                        Path(args.out), load_embeddings(conn, base),
                                        Path(args.text_from) if args.text_from else None,
-                                       args.on_served, max_lost_share=args.max_lost_share)
+                                       args.on_served, max_lost_share=args.max_lost_share,
+                                       base=args.frozen_base)
             print(json.dumps(report["chosen"], indent=2))
             print(f"gate and report.json in {args.out}")
             return
@@ -937,7 +938,7 @@ def cmd_fungus_gate(conn, args) -> None:
                            Path(args.negatives) if args.negatives else None,
                            Path(args.embeddings_root) if args.embeddings_root else None,
                            Path(args.text_from) if args.text_from else None,
-                           args.on_served)
+                           args.on_served, base=args.frozen_base)
         print(json.dumps(report["chosen"], indent=2))
         print(f"gate and report.json in {args.out}; copy the gate into data/models to serve it")
         return
@@ -2211,7 +2212,12 @@ def main(argv: list[str] | None = None) -> int:
                                      "the probe's negatives")
     p.add_argument("--negatives", help="tune: extra negative vectors (.npz from embed)")
     p.add_argument("--benchmark", default="heldout-2026-10-08")
-    p.add_argument("--embeddings-root", help="tune: the frozen bioclip-2 reference embeddings")
+    p.add_argument("--embeddings-root", help="tune: the frozen base's reference embeddings")
+    p.add_argument("--frozen-base", default="bioclip-2",
+                   help="tune: the frozen base model the gate reads, as the serving fork gives "
+                        "it: the base at the served model's input size (bioclip-2 for a 224 px "
+                        "fine-tune, bioclip-2-336 for the 336 px one); the --dev, --ood and "
+                        "--negatives files must hold that base's vectors")
     p.add_argument("--on-served", default=None, metavar="BACKBONE",
                    help="tune: the lighter gate, a probe on this served backbone's own vectors "
                         "(no second set of weights at serve time)")
