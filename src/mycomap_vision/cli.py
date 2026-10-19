@@ -425,6 +425,23 @@ def cmd_archive_embeddings(conn, args) -> None:
         print(json.dumps(embed.archive_embeddings(conn, models.storage_name(b), args.label)))
 
 
+def cmd_twins(args) -> None:
+    """Cross-post twin groups of a dataset release (twins.py): the file the record-grouped
+    methods read. Reads only that release, its dHash index and the given lists."""
+    from pathlib import Path
+
+    from . import dhash, errata, twins
+    from .dataset_release import load_release
+    rel = load_release(args.release, allow_draft=args.allow_draft)
+    skip = errata.read(Path(args.errata)).keys if args.errata else frozenset()
+    splits = tuple(s.strip() for s in args.splits.split(",") if s.strip())
+    groups = twins.build(rel, dhash.load_index(dhash.index_path(rel.id)),
+                         errata.read_photo_list(Path(args.exclude_photos)), skip, splits)
+    print(json.dumps({**twins.write(groups, Path(args.out)), "release": rel.id,
+                      "splits": list(splits), "errata": args.errata and Path(args.errata).name},
+                     indent=2))
+
+
 def cmd_compare(conn, args) -> None:
     """Score several backbones and methods on the same test and reference photos."""
     from . import evaluate, models
@@ -444,12 +461,16 @@ def cmd_compare(conn, args) -> None:
                                               name_scores=args.name_scores,
                                               sets=not args.no_sets, per_image=args.per_image)
     else:
+        from . import twins
         result = evaluate.compare(conn, backbones, methods, test_days=args.test_days,
                                   max_test=args.max_test, name_scores=args.name_scores,
                                   sets=not args.no_sets, per_image=args.per_image,
                                   into=args.into, release=rel,
                                   public_reference=args.reference == "public-trainable",
-                                  answer_key=args.answer_key)
+                                  answer_key=args.answer_key,
+                                  twin_groups=twins.read(args.twins) if args.twins else None,
+                                  twins_cite=twins.cite(args.twins) if args.twins else None,
+                                  no_twins=args.no_twins)
     config.ensure_dirs()
     path = config.REPORTS_DIR / f"compare-{result['comparison_id']}.json"
     path.write_text(evaluate.format_report(result), encoding="utf-8")
@@ -1995,7 +2016,27 @@ def main(argv: list[str] | None = None) -> int:
                    help="with --release: public-trainable keeps only the reference photos the "
                         "public model may learn from (CC incl. NC, or ARR with permission); "
                         "the scored records are unchanged (paper E23/E23b)")
+    p.add_argument("--twins", metavar="FILE",
+                   help="cross-post twin groups (mv twins build): record-grouped methods "
+                        "(nearest+mean-records*) count an MO/iNat cross-post as one specimen")
+    p.add_argument("--no-twins", action="store_true",
+                   help="score record-grouped methods without twin groups (every record its "
+                        "own specimen)")
     release_options(p)
+
+    p = sub.add_parser("twins", help="cross-post twin groups of a dataset release (twins.py): "
+                                     "the file record-grouped scoring reads")
+    p.add_argument("action", choices=["build"])
+    p.add_argument("--release", required=True)
+    p.add_argument("--errata", metavar="TSV", help="its records never pair (skipped)")
+    p.add_argument("--exclude-photos", metavar="TSV", required=True,
+                   help="photo keys that never pair (the micrograph list)")
+    p.add_argument("--splits", default="train",
+                   help="comma list: pairs whose two records are in these splits "
+                        "(train for val scoring; train,val for the served or sealed-test "
+                        "reference)")
+    p.add_argument("--out", required=True)
+    p.add_argument("--allow-draft", action="store_true")
 
     p = sub.add_parser("screen", help="embed candidate backbones one after another (skipping "
                                       "any that fail), then compare them with the baselines")
@@ -2544,6 +2585,9 @@ def main(argv: list[str] | None = None) -> int:
     occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
 
     args = parser.parse_args(argv)
+    if args.command == "twins":               # reads only a dataset release
+        cmd_twins(args)
+        return 0
     if args.command == "dataset":             # never opens the manifest for writing
         cmd_dataset(args)
         return 0
