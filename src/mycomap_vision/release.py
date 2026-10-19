@@ -8,6 +8,7 @@ A release is the folder s3://<bucket>/releases/<id>/:
     models/fungus-gate.*        the not-a-fungus gate (fungusgate.py), when one is saved
     taxonomy/inat_genera.sqlite iNat's families per genus (taxonomy.py), when fetched
     occurrence/inat-fungi-na.npz iNat occurrence counts for the place prior, when built
+    twins.npz                   MO <-> iNat cross-post twins (twins.py), when built
     release.json                id, backbones, code version, and every file with its
                                 size and sha256; written LAST, so a release without
                                 it is unfinished and is never pulled
@@ -38,6 +39,7 @@ from .fungusgate import GATE_NAME
 from .manifest import shippable_snapshot
 from .occurrence import STORE_NAME as OCCURRENCE_STORE
 from .taxonomy import CACHE as TAXONOMY_CACHE
+from .twins import FILE as TWINS_FILE
 
 PREFIX = "releases/"
 CURRENT_KEY = PREFIX + "current.json"
@@ -132,6 +134,10 @@ def release_files(conn, backbones: list[str], data_dir: Path,
     # (.loo.npz, ~120 MB): that is for scoring benchmark records, not for serving.
     if (data_dir / OCCURRENCE_STORE).is_file():
         files.append((data_dir / OCCURRENCE_STORE, OCCURRENCE_STORE.as_posix()))
+    # MO <-> iNat cross-post twins (twins.py, `mv twins`): a linked observation leaves its
+    # twins out of the reference, not just its own record.
+    if (data_dir / TWINS_FILE).is_file():
+        files.append((data_dir / TWINS_FILE, TWINS_FILE))
     return files
 
 
