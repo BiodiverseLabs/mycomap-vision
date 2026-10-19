@@ -27,10 +27,16 @@ What a night changes lives in a layer beside the release, never inside it
     raw/                        iNat's answers, gzipped
 
 The served index is the release plus this layer. A new release starts a fresh layer
-(its manifest already holds everything) and the old one is deleted when the server
-starts on it. The layer is meant to stay small: when the photos a backbone gained
-pass MV_NIGHTLY_WARN_SHARE (20%) of the release's, `mv nightly` and the server log
-say it is time for a new release.
+and the old one is deleted when the server starts on it; only mycomap.org's "often
+confused with" table, which no release changes, is carried over from it. A release's
+manifest is what the laptop exported, often days before the switch, so a fresh layer
+that has never had a good night and whose records were exported more than
+MV_NIGHTLY_CATCHUP_AFTER_HOURS (24) ago gets one catch-up run soon after the server
+starts (catch_up_reason): without it every record validated, renamed or un-validated
+since the export was missing until the next 3 a.m. (2026-10-18 and -19: 368 new and
+887 renamed records, most of a day each). The layer is meant to stay small: when the
+photos a backbone gained pass MV_NIGHTLY_WARN_SHARE (20%) of the release's,
+`mv nightly` and the server log say it is time for a new release.
 
 Nothing changes when mycomap.org's answer is missing, malformed, empty or short of
 the total it announced, and an answer that would remove more records than
@@ -150,6 +156,8 @@ class Settings:
     max_removed_share: float = 0.02
     warn_share: float = 0.20             # layer / release photos that call for a new release
     predict: int = 300                   # advance predictions a night (0: none)
+    catch_up_after_hours: float = 24.0   # a fresh layer exported longer ago catches up (0: never)
+    catch_up_delay_minutes: float = 10.0  # after startup, and only once the preload is done
 
     def __post_init__(self):
         if not _AT.match(self.at):
@@ -164,7 +172,9 @@ class Settings:
                    max_removed=int(_number("MV_NIGHTLY_MAX_REMOVED", 500)),
                    max_removed_share=_number("MV_NIGHTLY_MAX_REMOVED_SHARE", 0.02),
                    warn_share=_number("MV_NIGHTLY_WARN_SHARE", 0.20),
-                   predict=int(_number("MV_NIGHTLY_PREDICT", 300)))
+                   predict=int(_number("MV_NIGHTLY_PREDICT", 300)),
+                   catch_up_after_hours=_number("MV_NIGHTLY_CATCHUP_AFTER_HOURS", 24.0),
+                   catch_up_delay_minutes=_number("MV_NIGHTLY_CATCHUP_DELAY_MINUTES", 10.0))
 
     def zone(self) -> tzinfo:
         from zoneinfo import ZoneInfo
@@ -255,6 +265,7 @@ def prepare(release_root: Path, release_id: str | None = None, prune: bool = Fal
             conn.close()
         os.replace(tmp, layer.manifest)
         log(f"[nightly] new layer for release {layer.release_id} (manifest copied)")
+        carry_confused_with(layer, log)
     else:
         # A layer made before start_layer looked at the release noted every backbone in
         # the manifest; forget those the release ships no vectors for.
@@ -272,6 +283,86 @@ def prepare(release_root: Path, release_id: str | None = None, prune: bool = Fal
                 shutil.rmtree(old, ignore_errors=True)
                 log(f"[nightly] removed the layer of release {old.name}")
     return layer
+
+
+def carry_confused_with(layer: Layer, log=print) -> str | None:
+    """Copy mycomap.org's "often confused with" table (confusions.CACHE and its state) from
+    the newest other release's layer into a new one that has none. It is .org's table, the
+    same whatever release Vision serves; without it every switch served no notes until
+    the next night or `mv confused-with --fetch` (2026-10-18, -19). Returns the release it
+    came from, or None."""
+    cache = confusions.cache_path(layer.manifest)
+    parent = layer.root.parent
+    if cache.is_file() or not parent.is_dir():
+        return None
+    for old in sorted((p for p in parent.iterdir() if p.is_dir() and p.name != layer.release_id
+                       and RELEASE_ID.match(p.name)), key=lambda p: p.name, reverse=True):
+        source = old / confusions.CACHE
+        if not source.is_file():
+            continue
+        tmp = layer.root / (confusions.CACHE + ".carrying")
+        shutil.copy2(source, tmp)
+        state = old / confusions.STATE
+        if state.is_file():
+            shutil.copy2(state, layer.root / confusions.STATE)
+        os.replace(tmp, cache)
+        log(f"[nightly] often-confused-with table carried over from release {old.name}")
+        return old.name
+    return None
+
+
+def exported_at(conn: sqlite3.Connection) -> datetime | None:
+    """When the manifest's newest record was exported from mycomap.org (records.exported_at:
+    the laptop's export, for a release's manifest), or None when no record says."""
+    try:
+        (at,) = conn.execute("select max(exported_at) from records").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    try:
+        t = datetime.fromisoformat(str(at).replace("Z", "+00:00")) if at else None
+    except ValueError:
+        return None
+    return t.replace(tzinfo=timezone.utc) if t is not None and t.tzinfo is None else t
+
+
+def catch_up_reason(conn: sqlite3.Connection, settings: Settings,
+                    now: datetime | None = None) -> str | None:
+    """Why the server should run one nightly update soon after it starts, or None: the
+    layer has never had a good night (a fresh release, or one whose nights all failed or
+    were refused) and its records were exported more than catch_up_after_hours ago, so
+    what mycomap.org validated, renamed or un-validated since is missing until the next
+    scheduled night. The run is an ordinary night: MV_NIGHTLY_MAX_PHOTOS, the removal guard
+    and the lock hold as they do at 3 a.m."""
+    if settings.catch_up_after_hours <= 0:
+        return None
+    ensure_schema(conn)
+    if conn.execute("select 1 from nightly_runs where ok = 1 limit 1").fetchone():
+        return None
+    at = exported_at(conn)
+    now = now or now_utc()
+    if at is not None and now - at < timedelta(hours=settings.catch_up_after_hours):
+        return None
+    age = (f"{(now - at).total_seconds() / 86400:.1f} days ago ({iso(at)})" if at
+           else "at an unknown time")
+    return f"the layer has had no good night and its records were exported {age}"
+
+
+def arm_catch_up(schedule: "Schedule", conn: sqlite3.Connection,
+                 ready: Callable[[], bool] | None = None, now: datetime | None = None,
+                 note=print) -> str | None:
+    """Give `schedule` its one catch-up run when catch_up_reason says so: from
+    catch_up_delay_minutes after `now`, and only once `ready()` (the server: its preload is
+    done, so the night's index rebuild never runs beside the startup one on the 4 GB box).
+    It runs on the schedule's own thread, so never beside a scheduled night."""
+    now = now or now_utc()
+    why = catch_up_reason(conn, schedule.settings, now)
+    if why is None:
+        return None
+    schedule.catch_up_at = now + timedelta(minutes=schedule.settings.catch_up_delay_minutes)
+    schedule.ready = ready
+    note(f"[nightly] one catch-up run from {iso(schedule.catch_up_at)}"
+         + (", once the preload is done" if ready is not None else "") + f": {why}")
+    return why
 
 
 def shipped_backbones(release_dir: Path) -> set[str]:
@@ -544,10 +635,35 @@ class Steps:
     misidentifications: Callable[..., dict] = confusions.refresh_from_settings
 
 
+def pid_alive(pid: int) -> bool:
+    """Whether process `pid` runs on this host. Only asked on POSIX (on Windows os.kill
+    ends the process); elsewhere, and when unsure, it says yes and the lock's age decides."""
+    if os.name != "posix" or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                    # PermissionError: someone else's process, alive
+        return True
+    return True
+
+
+def _lock_holder(path: Path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 @dataclass
 class RunLock:
+    """One nightly run at a time on a layer. A server restarted mid-run leaves its lock
+    behind; the lock is stale once its process is gone (else a catch-up run cut short by a
+    restart would block the next one for hours), or after `stale_seconds`."""
     path: Path
     stale_seconds: float = LOCK_STALE_SECONDS
+    alive: Callable[[int], bool] = pid_alive
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -559,7 +675,9 @@ class RunLock:
                     age = time.time() - self.path.stat().st_mtime
                 except FileNotFoundError:
                     continue
-                if age < self.stale_seconds:
+                holder = _lock_holder(self.path)
+                gone = holder is not None and holder != os.getpid() and not self.alive(holder)
+                if age < self.stale_seconds and not gone:
                     raise NightlyBusy(f"another nightly run holds {self.path} "
                                       f"(started {age / 60:.0f} min ago)") from None
                 self.path.unlink(missing_ok=True)           # left by a run that died
@@ -767,21 +885,28 @@ def next_run(now: datetime, at: str, zone: tzinfo) -> datetime:
 
 @dataclass
 class Schedule:
-    """Decides, each tick, whether the nightly run is due: at the set time, or when
-    `mv nightly --now` left the run-now flag. Testable without threads."""
+    """Decides, each tick, whether the nightly run is due: at the set time, when
+    `mv nightly --now` left the run-now flag, or once from `catch_up_at` (arm_catch_up)
+    when `ready()` says so. Testable without threads."""
     layer: Layer
     settings: Settings
     zone: tzinfo
     next_at: datetime | None = None
     last: dict | None = field(default=None)
+    catch_up_at: datetime | None = None
+    ready: Callable[[], bool] | None = None
 
     def due(self, now: datetime) -> tuple[bool, bool]:
-        """(run now?, accept removals?) The flags are consumed when they cause a run."""
+        """(run now?, accept removals?) The flags are consumed when they cause a run, and
+        any run is the catch-up."""
         if self.next_at is None:
             self.next_at = next_run(now, self.settings.at, self.zone)
         asked = self.layer.run_now.exists()
-        if not asked and now < self.next_at:
+        catch_up = (self.catch_up_at is not None and now >= self.catch_up_at
+                    and (self.ready is None or self.ready()))
+        if not asked and not catch_up and now < self.next_at:
             return False, False
+        self.catch_up_at = None
         accept = self.layer.accept_removals.exists()
         self.layer.run_now.unlink(missing_ok=True)
         self.layer.accept_removals.unlink(missing_ok=True)
@@ -793,7 +918,8 @@ def start(schedule: Schedule, job: Callable[[bool], dict], note=print, tick: flo
           clock: Callable[[], datetime] = now_utc) -> threading.Thread:
     """Run `job(accept_removals)` whenever the schedule says so, on a daemon thread."""
     def loop():
-        schedule.due(clock())
+        if schedule.next_at is None:         # not due(): that would eat a run-now flag
+            schedule.next_at = next_run(clock(), schedule.settings.at, schedule.zone)
         note(f"[nightly] next run {iso(schedule.next_at)} "
              f"({schedule.settings.at} {schedule.settings.tz})")
         while True:

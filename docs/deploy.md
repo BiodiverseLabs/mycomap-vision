@@ -287,6 +287,26 @@ layer, and the old one is deleted when the server starts on the new release. Whe
 a backbone's nightly photos pass 20% of the release's, `mv nightly` says a new
 release is due.
 
+**Switching releases.** A fresh layer holds what the laptop exported for the release,
+often days before the switch. So that the site doesn't go a day without what
+mycomap.org validated, renamed or un-validated since (2026-10-18 and -19: 368 new and
+887 renamed records each time), the server gives a layer that has never had a good
+night, and whose records were exported more than `MV_NIGHTLY_CATCHUP_AFTER_HOURS` (24)
+ago, one **catch-up run**: an ordinary night, `MV_NIGHTLY_CATCHUP_DELAY_MINUTES` (10)
+after startup and only once the preload is done, so its index rebuild never runs beside
+the startup one. It runs on the nightly thread (never beside a scheduled night), with
+the usual `MV_NIGHTLY_MAX_PHOTOS` cap, removal guard and lock; a refused or failed one
+is tried again at the next restart or the next night. The journal says
+`[nightly] one catch-up run from …` at startup. `MV_NIGHTLY_CATCHUP_AFTER_HOURS=0`
+turns it off. Its memory is a night's: the green list read from mycomap.org and,
+while the rebuilt index is swapped in, the old and new search index side by side
+(~0.5 GB each for v1 int8).
+
+The "often confused with" table is mycomap.org's, not the release's: a new layer
+takes the previous layer's copy, and a layer with none (the first one) reads
+mycomap.org's at startup. `mv confused-with --fetch` after a switch is no longer
+needed.
+
 Before turning it on:
 
 1. mycomap.org serves `GET /api/vision/green-records` (the .org branch
