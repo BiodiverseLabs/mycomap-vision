@@ -3,12 +3,15 @@
 usage:
   python run_v1.py score      --release-root R --manifest M --backbone B --out DIR
                               [--validated-after YYYY-MM-DD] [--heldout NAME]
+                              [--method M [--twins GROUPS.tsv]]
   python run_v1.py components --release-root R --manifest M --out DIR
   python run_v1.py tune       --release-root R --manifest M --out DIR [--named-case KEY ...]
 
 score: reference = v1 `train` records with a vector for backbone B; queries = v1 `val`
 records (validated after the date, for a model fine-tuned on records up to it) scored with
-the served nearest + species average (methods.NearestAndMean itself). Query vectors come
+the served nearest + species average (methods.NearestAndMean itself), or --method (a
+record-grouped arm, E32 arm c, with --twins: the cross-post twin groups file, twins.py,
+pairs in the reference counted as one specimen). Query vectors come
 from the manifest's embeddings, else the held-out benchmark's own store. Nothing is
 embedded or fetched here.
 components: every term of placetune's declared grid per record and candidate, made by
@@ -47,12 +50,39 @@ def release_of(args):
 
 # --- score --------------------------------------------------------------------------------
 
+PHOTO_METHOD = "nearest+mean"
+
+
+def reference_model(vecs, train, method: str = PHOTO_METHOD, backbone: str | None = None,
+                    twins_path=None):
+    """(index, fitted photo method, twins cite or None) for the score step. A record-grouped
+    method (twins.is_grouped) needs `twins_path`, the groups file, and counts the pairs
+    present in `train` as one specimen (twins.specimen_of); an ungrouped one refuses it.
+    A place method is refused: the place terms are the components step's."""
+    from mycomap_vision import twins
+    from mycomap_vision.evaluate import build_index, make_method
+    if "place" in method:
+        raise SystemExit(f"score: {method} is a place method; give its photo method (place "
+                         "terms come from the components step)")
+    specimen_of, cite = None, None
+    if twins.is_grouped(method):
+        if not twins_path:
+            raise SystemExit(f"score: {method} scores by reference record: give --twins, the "
+                             "cross-post twin groups file")
+        specimen_of = twins.specimen_of(twins.read(twins_path), train)
+        cite = {**twins.cite(twins_path), "grouped_records": len(specimen_of)}
+    elif twins_path:
+        raise SystemExit(f"score: --twins is for a record-grouped method, not {method}")
+    index = build_index(train, specimen_of)
+    model = make_method(method, backbone)
+    model.fit(vecs, index)
+    return index, model, cite
+
+
 def cmd_score(args) -> None:
     import numpy as np
     from mycomap_vision import heldout
-    from mycomap_vision.evaluate import build_index
     from mycomap_vision.identify import map_embeddings
-    from mycomap_vision.methods import NearestAndMean
     t0 = time.time()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -63,10 +93,8 @@ def cmd_score(args) -> None:
                                else None, None)
     row_of = {int(p): i for i, p in enumerate(ids.tolist())}
     train = rel.as_records("train", row_of)
-    index = build_index(train)
-    m = NearestAndMean()
-    m.fit(vecs, index)
-    print(f"reference: {len(train):,} train records, {len(index.cols):,} photos, "
+    index, m, twins_cite = reference_model(vecs, train, args.method, args.backbone, args.twins)
+    print(f"{args.method}; reference: {len(train):,} train records, {len(index.cols):,} photos, "
           f"{len(index.species):,} groups [{time.time() - t0:.0f}s]", flush=True)
     held = {}
     if args.heldout:
@@ -112,7 +140,8 @@ def cmd_score(args) -> None:
         group_genus=g("genus"), group_family=g("family"),
         group_is_species=(index.label_of["species"] >= 0),
         ref_count=np.array([index.ref_count[s] for s in index.species]))
-    run = {"backbone": args.backbone, "release": rel.cite() if hasattr(rel, "cite") else "v1",
+    run = {"backbone": args.backbone, "method": args.method, "twins": twins_cite,
+           "release": rel.cite() if hasattr(rel, "cite") else "v1",
            "validated_after": args.validated_after, "scored": len(rows["key"]),
            "skipped": skipped, "reference_records": len(train),
            "reference_photos": int(len(index.cols)), "groups": len(index.species),
@@ -493,6 +522,11 @@ def main(argv=None) -> None:
     ap.add_argument("--store", help="occurrence store (default: data/occurrence's)")
     ap.add_argument("--named-case", action="append", help="a record_key to report by name")
     ap.add_argument("--errata", help="the release's erratum TSV (errata.py)")
+    ap.add_argument("--method", default=PHOTO_METHOD,
+                    help="score: the photo method (default the served nearest+mean; "
+                         "nearest+mean-records-balanced = E32 arm c, with --twins)")
+    ap.add_argument("--twins", help="score: the cross-post twin groups file (twins.py) a "
+                                    "record-grouped --method needs")
     ap.add_argument("--answer-key", help="tune: name_equiv's answer key (default: the current "
                                          "key; 'exact' = v1's published rule)")
     ap.add_argument("--analysis-config", help="tune: the paper's analysis config, whose pinned "

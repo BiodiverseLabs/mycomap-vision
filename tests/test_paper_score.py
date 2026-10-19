@@ -1027,13 +1027,34 @@ def _leave_out_world(seed=3):
     return np.stack(vecs), ref, scored
 
 
-@pytest.mark.parametrize("method", ["nearest", "nearest+mean"])
+def _world_twins(ref):
+    """Cross-post twin groups in _leave_out_world: pairs of same-species records from two
+    observers (so an observer's leave-out hides one side of a pair and keeps the other),
+    and one triple."""
+    by_species: dict = {}
+    for r in ref:
+        by_species.setdefault(r.species, []).append(r)
+    groups = {}
+    for name, recs in sorted(by_species.items()):
+        a, b = recs[0], next((r for r in recs[1:] if r.observer != recs[0].observer), None)
+        if b is not None:
+            groups[a.observation_id] = groups[b.observation_id] = f"twin-{a.observation_id}"
+    groups["r1"] = groups["r10"] = groups["r19"] = "twin-r1"       # a triple
+    return groups
+
+
+@pytest.mark.parametrize("method", ["nearest", "nearest+mean", "nearest+mean-records",
+                                    "nearest+mean-records-balanced"])
 @pytest.mark.parametrize("mode", ["observer", "trip"])
 def test_a_masked_leave_out_equals_a_refit_without_the_groups_records(method, mode):
+    from mycomap_vision import twins
     vec, ref, scored = _leave_out_world()
     truths = {r.observation_id: {"species": r.species, "genus": r.genus} for r in scored}
     cal = {"species": {"temperature": 0.05, "floor": 0.05}, "genus": {"temperature": 0.05}}
-    kw = dict(top_k=10, calibration=cal, truths=truths)
+    # a record arm counts cross-post twins as one specimen; the refit regroups whatever
+    # of each pair is left in its reference
+    kw = dict(top_k=10, calibration=cal, truths=truths,
+              twins=_world_twins(ref) if twins.is_grouped(method) else None)
     masked = paper_score.masked_leave_out_answers(vec, ref, scored, method, "m", mode, **kw)
     refit = paper_score.refit_leave_out_answers(vec, ref, scored, method, "m", mode, **kw)
     assert masked.keys() == refit.keys()
@@ -1074,3 +1095,116 @@ def test_a_comparators_own_likely_set_target_is_printed_beside_its_achieved_cove
                                          50, 0, comps)
     assert rep["v"]["species"]["likely_sets"]["target"] == 0.75     # its own fit
     assert rep["p"]["species"]["likely_sets"]["target"] == 0.8      # the config-wide one
+
+
+# --- cross-post twins for the record-grouped methods (E32 arm c, O8) ----------------------------
+
+def test_a_record_grouped_methods_scores_are_the_e32_call_with_twins_grouped():
+    """paper-score's answers for arm (c) are those of evaluate.fit_method with specimen_of
+    = the groups present in the reference (the record-scoring lane's E32 call), and differ
+    from the same arm with the twins left apart."""
+    from mycomap_vision import evaluate, twins
+    vec, ref, scored = _leave_out_world()
+    groups = _world_twins(ref)
+    m = "nearest+mean-records-balanced"
+    index, model = evaluate.fit_method(vec, ref, m, "m", specimen_of=twins.specimen_of(groups, ref))
+    want = {r.observation_id: evaluate.top_labels(
+        evaluate.rank_scores(model.species_scores(vec[r.photo_rows]), index, "species"),
+        index.labels["species"], 10) for r in scored}
+    info: dict = {}
+    got = paper_score.vision_answers(vec, ref, scored, m, "m", twins=groups, info=info)
+    assert {k: a["species"] for k, a in got.items()} == want
+    assert info["twin_records"] == len(twins.specimen_of(groups, ref)) > 0
+    index0, model0 = evaluate.fit_method(vec, ref, m, "m")
+    apart = {r.observation_id: model0.species_scores(vec[r.photo_rows]) for r in scored}
+    grouped = {r.observation_id: model.species_scores(vec[r.photo_rows]) for r in scored}
+    assert any(not np.allclose(apart[k], grouped[k]) for k in apart)   # grouping matters
+
+
+def test_a_record_grouped_method_without_twin_groups_is_refused():
+    vec, ref, scored = _leave_out_world()
+    with pytest.raises(ValueError, match="twin"):
+        paper_score.vision_answers(vec, ref, scored, "nearest+mean-records-balanced", "m")
+    paper_score.vision_answers(vec, ref, scored, "nearest+mean", "m")     # not grouped: fine
+
+
+def test_a_config_with_a_record_grouped_method_and_no_twins_block_is_refused():
+    comps = [{"id": "c", "kind": "vision", "backbone": "m1",
+              "method": "nearest+mean-records-balanced"}]
+    with pytest.raises(ValueError, match="twins"):
+        paper_score.check_config({"format": 1, "answer_key": KEY, "comparators": comps})
+    paper_score.check_config({"format": 1, "answer_key": KEY, "comparators": comps,
+                              "twins": {"validation": {"file": "x", "sha256": "y"}}})
+
+
+def _twins_block(tmp_path):
+    """Val's groups (train: 1 + mo:9, both A x) and the sealed test's (train + val: 1, mo:9
+    and 5), each pinned by its sha256."""
+    import hashlib
+    block = {}
+    for which, keys in (("validation", ["1", "mo:9"]), ("sealed_test", ["1", "5", "mo:9"])):
+        f = tmp_path / f"twins-{which}.tsv"
+        f.write_text("observation_id\tspecimen\n" + "".join(f"{k}\ttwin-1\n" for k in keys),
+                     encoding="utf-8")
+        block[which] = {"file": str(f), "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
+    return block
+
+
+def _grouped_config(tmp_path, keys, twins_block):
+    cfg = config(tmp_path, keys, twins=twins_block)
+    cfg["comparators"].append({"id": "vision-c", "kind": "vision", "backbone": "m1",
+                               "method": "nearest+mean-records-balanced"})
+    return cfg
+
+
+def test_val_groups_twins_by_the_validation_file_and_reports_it(world, tmp_path):
+    block = _twins_block(tmp_path)
+    rep = run(world, tmp_path, "val", _grouped_config(tmp_path, ["5", "6"], block))
+    t = rep["inputs"]["vision-c"]["twins"]
+    assert t["for"] == "validation" and t["sha256"] == block["validation"]["sha256"]
+    assert t["records"] == 2 and t["grouped_records"] == 2
+    assert "twins" not in rep["inputs"]["vision-mean"]         # an ungrouped method
+    c = rep["standard"]["comparators"]["vision-c"]["primary"]["all"]
+    assert c["table"]["species strict"]["top1"]["n"] == 2
+
+
+def test_a_test_release_groups_twins_by_the_sealed_test_file(world, tmp_path):
+    block = _twins_block(tmp_path)
+    rep = run(world, tmp_path, world["test"], _grouped_config(tmp_path, ["7", "8"], block))
+    t = rep["inputs"]["vision-c"]["twins"]
+    assert t["for"] == "sealed_test" and t["sha256"] == block["sealed_test"]["sha256"]
+    assert t["grouped_records"] == 3                           # 1, mo:9 and val's 5
+
+
+def test_twin_groups_are_refused_unless_the_file_is_the_pinned_one(world, tmp_path):
+    block = _twins_block(tmp_path)
+    bad = {**block, "validation": {**block["validation"], "sha256": "0" * 64}}
+    with pytest.raises(ValueError, match="sha256"):
+        run(world, tmp_path, "val", _grouped_config(tmp_path, ["5", "6"], bad))
+    gone = {**block, "validation": {**block["validation"],
+                                    "file": str(tmp_path / "no-such.tsv")}}
+    with pytest.raises(ValueError, match="missing"):
+        run(world, tmp_path, "val", _grouped_config(tmp_path, ["5", "6"], gone))
+    tbd = {**block, "sealed_test": {"file": "TBD (mv twins build)", "sha256": "TBD"}}
+    with pytest.raises(ValueError, match="no sealed_test file"):
+        run(world, tmp_path, world["test"], _grouped_config(tmp_path, ["7", "8"], tbd))
+    with pytest.raises(ValueError, match="twins"):
+        run(world, tmp_path, "val", _grouped_config(tmp_path, ["5", "6"], None))
+    assert not (tmp_path / "out" / "report.json").exists()     # refused before scoring
+
+
+def test_the_freeze_spec_pins_the_twin_groups_files_for_a_grouped_method(tmp_path, monkeypatch):
+    from mycomap_vision import paper_freeze
+    from mycomap_vision.replications.fungitastic import dataset as ds
+    monkeypatch.setattr(ds, "cite", lambda b: {})
+    block = _twins_block(tmp_path)
+    base = type("Base", (), {"db": type("Db", (), {"execute": lambda self, q: []})()})()
+
+    def spec(method):
+        cfg = {"comparators": [{"id": "c", "kind": "vision", "backbone": "TBD",
+                                "method": method}], "twins": block}
+        return paper_freeze.compute(cfg, base, None, Path, models_root=tmp_path,
+                                    load_vectors=lambda b: None, taxonomy_path=tmp_path / "x")
+    assert spec("nearest+mean-records-balanced")["twins"] == {
+        k: v["sha256"] for k, v in block.items()}
+    assert "twins" not in spec("nearest+mean")
