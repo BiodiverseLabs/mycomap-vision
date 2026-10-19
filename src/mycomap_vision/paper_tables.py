@@ -11,6 +11,9 @@ val, a draft test release and the sealed test.
   the exact McNemar p.
 - `families`: the pre-declared hypotheses (config), each family Holm-adjusted.
 - `slices`: rates by a find attribute, intervals only (no tests).
+- `per_species`: PLAN rule 5's per-species rows beside the per-find rate: macro accuracy
+  (each true species weighted equally, interval by resampling species), the share of
+  species with at least one find right, the number of species. Secondary: no test uses them.
 
 Near-duplicates (paper analysis plan: byte-identical, dHash-flagged or cosine >= 0.99 to a
 reference photo) are left out of every primary number; `scope="with_near_duplicates"`
@@ -68,9 +71,43 @@ def _applies(f: Find, cell: str) -> bool:
     return bool(f.species) if cell.startswith("species") else bool(f.genus)
 
 
-def standard(finds: list[Find], outcome: dict, reps: int, seed: int, ci_cells=None) -> dict:
+PER_SPECIES_METRICS = ("macro_species_top1", "share_species_ge1_right", "n_species")
+
+
+def per_species(finds: list[Find], outcome: dict, cell: str, reps: int, seed: int,
+                species_key=None) -> dict:
+    """PLAN rule 5's per-species rows for one cell (species strict top-1 in the config):
+    the finds with a true species grouped by `species_key(species)` (the answer key, so a
+    species pools with its varieties, as reference depth does); per species the share of
+    its finds right; `macro_species_top1` their mean (interval: species resampled),
+    `share_species_ge1_right` the share of species with at least one find right,
+    `n_species` the species. A find with no outcome counts as wrong, as in `rate`."""
+    key = species_key or (lambda name: name)
+    right: dict[str, list[bool]] = defaultdict(list)
+    for f in finds:
+        if not f.species:
+            continue
+        o = outcome.get(f.key)
+        v = o.get(cell) if o is not None else False
+        if v is None:
+            continue
+        right[key(f.species)].append(bool(v))
+    names = sorted(right)
+    acc = np.array([np.mean(right[n]) for n in names], dtype=np.float64)
+    n = len(names)
+    return {"cell": cell, "n_species": n,
+            "finds": int(sum(len(v) for v in right.values())),
+            "macro_species_top1": float(acc.mean()) if n else None,
+            "macro_ci95": ps.cluster_ci(acc, names, reps, seed) if n else None,
+            "species_ge1_right": int((acc > 0).sum()),
+            "share_species_ge1_right": float((acc > 0).mean()) if n else None}
+
+
+def standard(finds: list[Find], outcome: dict, reps: int, seed: int, ci_cells=None,
+             per_species_rows: dict | None = None, species_key=None) -> dict:
     """Steve's table for one comparator on these finds (see the module docstring).
-    `ci_cells`: the cells that get an interval (default: every top-1 cell)."""
+    `ci_cells`: the cells that get an interval (default: every top-1 cell).
+    `per_species_rows` (the config block): adds `per_species` (PLAN rule 5)."""
     ci_cells = set(ci_cells or [c for c in CELLS if c.endswith("@1")])
     table = {}
     for rank, levels in LEVELS.items():
@@ -84,16 +121,23 @@ def standard(finds: list[Find], outcome: dict, reps: int, seed: int, ci_cells=No
         by_band[b] = {"top1": rate(sub, outcome, "species_strict@1", reps, seed),
                       "top5": rate(sub, outcome, "species_strict@5", reps, seed, ci=False)}
     answered = sum(bool((outcome.get(f.key) or {}).get("answered")) for f in finds)
-    return {"finds": len(finds), "answered": answered, "table": table,
-            "species_by_reference_band": by_band}
+    out = {"finds": len(finds), "answered": answered, "table": table,
+           "species_by_reference_band": by_band}
+    if per_species_rows:
+        out["per_species"] = per_species(finds, outcome,
+                                         per_species_rows.get("cell", "species_strict@1"),
+                                         reps, seed, species_key)
+    return out
 
 
-def all_standard(finds: list[Find], outcomes: dict[str, dict], reps: int, seed: int) -> dict:
+def all_standard(finds: list[Find], outcomes: dict[str, dict], reps: int, seed: int,
+                 per_species_rows: dict | None = None, species_key=None) -> dict:
     """Every comparator's table, both denominators, both scopes; the near-duplicate count."""
     out = {"near_duplicates": near_duplicate_counts(finds), "comparators": {}}
     for cid, outcome in outcomes.items():
         out["comparators"][cid] = {
-            scope: {den: standard(in_scope(finds, scope, den), outcome, reps, seed)
+            scope: {den: standard(in_scope(finds, scope, den), outcome, reps, seed,
+                                  per_species_rows=per_species_rows, species_key=species_key)
                     for den in DENOMINATORS} for scope in SCOPES}
     return out
 

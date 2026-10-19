@@ -704,6 +704,60 @@ def test_a_run_with_an_unpinned_place_setting_is_refused_before_anything_is_read
         run(world, tmp_path, "val", _place_config())
 
 
+# --- per-species rows (PLAN rule 5, 19 Oct) ----------------------------------------------------
+
+def test_per_species_rows_weight_each_species_equally_and_pool_by_the_answer_key():
+    from mycomap_vision import name_equiv
+    from mycomap_vision import paper_tables as pt
+    sp = "Pseudohydnum gelatinosum"
+    finds = [po.Find("1", "o1", sp, "Pseudohydnum", "F", "formal", 3, 1),
+             po.Find("2", "o2", f"{sp} ssp. pusillum", "Pseudohydnum", "F", "formal", 3, 1),
+             po.Find("3", "o1", "B y", "B", "F", "formal", 3, 1),
+             po.Find("4", "o3", "C z", "C", "F", "formal", 3, 1),
+             po.Find("5", "o3", "C z", "C", "F", "formal", 3, 1),
+             po.Find("6", "o4", "", "D", "F", "one-word", 0, 1)]          # no species: left out
+    outcome = {"1": {"species_strict@1": True}, "2": {"species_strict@1": False},
+               "3": {"species_strict@1": True}, "4": {"species_strict@1": False}}
+    # "5" has no outcome line: unanswered, so wrong
+    rows = pt.per_species(finds, outcome, "species_strict@1", REPS, 0,
+                          lambda n: name_equiv.answer_key(n, KEY))
+    assert rows["n_species"] == 3 and rows["finds"] == 5    # the subspecies pools with its species
+    assert rows["macro_species_top1"] == pytest.approx((0.5 + 1.0 + 0.0) / 3)
+    assert rows["species_ge1_right"] == 2
+    assert rows["share_species_ge1_right"] == pytest.approx(2 / 3)
+    lo, hi = rows["macro_ci95"]
+    assert lo <= rows["macro_species_top1"] <= hi
+    # per find the same finds give 2 of 5: macro and per-find rates differ by design
+    assert pt.rate(finds, outcome, "species_strict@1", REPS, 0)["rate"] == pytest.approx(2 / 5)
+
+
+def test_the_headline_tables_carry_per_species_rows_only_when_the_config_asks(world, tmp_path):
+    block = {"metrics": ["macro_species_top1", "share_species_ge1_right", "n_species"],
+             "cell": "species_strict@1", "key": "answer_key",
+             "role": "secondary, outside hypothesis tests"}
+    rep = run(world, tmp_path, "val", config(tmp_path, ["5", "6"], per_species_rows=block))
+    for den in ("all", "has_reference"):
+        rows = rep["standard"]["comparators"]["vision-photos"]["primary"][den]["per_species"]
+        assert rows["n_species"] == 2 and rows["macro_species_top1"] == 1.0   # A x, B y
+        assert rows["share_species_ge1_right"] == 1.0
+    inat = rep["standard"]["comparators"]["inat-vision"]["primary"]["all"]["per_species"]
+    assert inat["macro_species_top1"] == 0.0 and inat["species_ge1_right"] == 0
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "Per species (species_strict@1; secondary, no test): macro 100.0%" in md
+    plain = run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))
+    assert "per_species" not in plain["standard"]["comparators"]["vision-photos"]["primary"]["all"]
+    assert rep["hypotheses"] == plain["hypotheses"]                  # no test reads them
+
+
+def test_a_per_species_block_with_an_unknown_metric_or_a_genus_cell_is_refused():
+    base = {"format": 1, "answer_key": KEY, "comparators": []}
+    paper_score.check_config({**base, "per_species_rows": {"metrics": ["n_species"]}})
+    with pytest.raises(ValueError, match="unknown metrics"):
+        paper_score.check_config({**base, "per_species_rows": {"metrics": ["micro_f1"]}})
+    with pytest.raises(ValueError, match="species cell"):
+        paper_score.check_config({**base, "per_species_rows": {"cell": "genus_strict@1"}})
+
+
 # --- outside-review rows: unseen observers, recent cohort, created after pretraining ----------
 
 def test_recent_cohort_and_after_pretraining_come_from_observed_and_created_dates():
