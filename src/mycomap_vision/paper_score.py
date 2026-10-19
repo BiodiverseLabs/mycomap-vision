@@ -1183,6 +1183,21 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     per_species_kw = ({"per_species_rows": config["per_species_rows"],
                        "species_key": lambda name: _species_key(name, config["answer_key"])}
                       if config.get("per_species_rows") else {})
+    # PLAN C4: the reference's species as answer-key units, with their reference records
+    # (ReferenceDepth, the same count as each find's depth) and whether the name is formal.
+    recover_units, in_scope_primary = None, None
+    if config.get("recoverability"):
+        from .name_equiv import ReferenceDepth
+        from .name_equiv import answer_key as _key
+        rd = ReferenceDepth((r["species"] for r in ref_rows if r.get("species")),
+                            config["answer_key"])
+        formal_of: dict[str, bool] = {}
+        for r in ref_rows:
+            if r.get("species"):
+                k = _key(r["species"], config["answer_key"])
+                formal_of[k] = formal_of.get(k, False) or r.get("name_kind") == "formal"
+        recover_units = [(rd.counts[k], formal_of.get(k, False)) for k in sorted(rd.counts)]
+        in_scope_primary = pt.in_scope(finds, "primary", "all")
     gate_report = None
     if config.get("gate"):
         # E10: the gate on the scored finds and the OOD set; each Vision comparator gets a
@@ -1243,6 +1258,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   float(config.get("alpha", 0.05))),
         "per_photo": per_photo,
+        # PLAN C4 (19 Oct): species recoverability, descriptive and model-based.
+        "recoverability": ({cid: pt.recoverability(in_scope_primary, o, recover_units, reps,
+                                                    seed)
+                            for cid, o in outcomes.items() if o}
+                           if config.get("recoverability") else None),
         "gate": gate_report,
         "calibration": calibration_report(finds, calib, outcomes,
                                           config.get("calibration_metrics", {}), reps, seed,
@@ -1454,6 +1474,8 @@ def format_report(report: dict, config: dict) -> str:
         lines += _calibration_lines(report["calibration"], config)
     if report.get("generalisation"):
         lines += _generalisation_lines(report["generalisation"])
+    if report.get("recoverability"):
+        lines += _recoverability_lines(report["recoverability"])
     if report.get("freeze"):
         diff = report["freeze"]["differences"]
         lines += ["## Freeze", "", "The predictor matches the config's freeze block."
@@ -1561,6 +1583,28 @@ def _calibration_lines(cal: dict, config: dict) -> list[str]:
                          f"{pct((cw.get('all') or {}).get('wrong_share'))} / "
                          f"{pct((cw.get('unknown') or {}).get('wrong_share'))} | "
                          f"{pct(gb.get('rate'))} |")
+        lines.append("")
+    return lines
+
+
+def _recoverability_lines(rec: dict) -> list[str]:
+    """PLAN C4: species recoverability per comparator (descriptive, model-based)."""
+    lines = ["## Species recoverability (C4; descriptive, model-based)", "",
+             "Expected share of the reference's species one find would name right: each "
+             "species' reference band x that band's per-find accuracy (species strict, by the "
+             "answer key), averaged over species. Assumes accuracy within a band does not "
+             "depend on the species. Intervals: bootstrap over finds.", ""]
+    for cid, r in rec.items():
+        lines += [f"### {cid}", "", "| | species | top 1 | top 3 | top 10 |", "|---|---|---|---|---|"]
+        for name, row in r["rows"].items():
+            cells = []
+            for k in (1, 3, 10):
+                c = row[f"top{k}"]
+                cells.append("-" if c["estimate"] is None else
+                             f"{100 * c['estimate']:.1f}%" + (
+                                 f" ({100 * c['ci95'][0]:.1f}-{100 * c['ci95'][1]:.1f})"
+                                 if c["ci95"] else ""))
+            lines.append(f"| {name} | {row['species']:,} | " + " | ".join(cells) + " |")
         lines.append("")
     return lines
 
