@@ -510,6 +510,33 @@ def check_place_pins(doc: dict) -> None:
                              f"this code, the config pins {str(pin['sha256'])[:12]}")
 
 
+def recoverability_units(base, ref_rows: list[dict], rule: str) -> tuple[dict, dict]:
+    """PLAN C4's denominators as {name: [(reference records, formal?)]}, (b) first: every
+    species name in the base release (all its records, included or not; a name with no
+    reference record at 0), and (a) the species of `ref_rows`; both by the answer key `rule`
+    (a species pools with its varieties). Also their counts, for the report."""
+    from .name_equiv import ReferenceDepth
+    from .name_equiv import answer_key as _key
+    rd = ReferenceDepth((r["species"] for r in ref_rows if r.get("species")), rule)
+    formal_of: dict[str, bool] = {}
+
+    def note(species, kind):
+        k = _key(species, rule)
+        if k:
+            formal_of[k] = formal_of.get(k, False) or kind == "formal"
+        return k
+    seen = {note(r["species"], r.get("name_kind")) for r in ref_rows if r.get("species")}
+    known = {note(sp, kind) for sp, kind in base.db.execute(
+        "select species, name_kind from records where species is not null and species != ''")}
+    known |= seen
+    seen.discard("")
+    known.discard("")
+    units = {pt.KNOWN: [(rd.counts.get(k, 0), formal_of.get(k, False)) for k in sorted(known)],
+             pt.SEEN: [(rd.counts[k], formal_of.get(k, False)) for k in sorted(seen)]}
+    return units, {name: {"species": len(u), "with_reference": sum(d > 0 for d, _ in u)}
+                   for name, u in units.items()}
+
+
 def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list, method: str,
                    backbone: str, top_k: int = 10, calibration: dict | None = None,
                    truths: dict[str, dict] | None = None, place_setting: str | None = None,
@@ -1183,20 +1210,14 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     per_species_kw = ({"per_species_rows": config["per_species_rows"],
                        "species_key": lambda name: _species_key(name, config["answer_key"])}
                       if config.get("per_species_rows") else {})
-    # PLAN C4: the reference's species as answer-key units, with their reference records
-    # (ReferenceDepth, the same count as each find's depth) and whether the name is formal.
-    recover_units, in_scope_primary = None, None
+    # PLAN C4: species as answer-key units with their reference records (ReferenceDepth,
+    # the same count as each find's depth; 0 with none) and whether the name is formal, over
+    # two denominators: (b, leading) every species name in the base release's records,
+    # included or not; (a) the species in the reference this run scores against.
+    recover_units, recover_cite, in_scope_primary = None, None, None
     if config.get("recoverability"):
-        from .name_equiv import ReferenceDepth
-        from .name_equiv import answer_key as _key
-        rd = ReferenceDepth((r["species"] for r in ref_rows if r.get("species")),
-                            config["answer_key"])
-        formal_of: dict[str, bool] = {}
-        for r in ref_rows:
-            if r.get("species"):
-                k = _key(r["species"], config["answer_key"])
-                formal_of[k] = formal_of.get(k, False) or r.get("name_kind") == "formal"
-        recover_units = [(rd.counts[k], formal_of.get(k, False)) for k in sorted(rd.counts)]
+        recover_units, recover_cite = recoverability_units(base, ref_rows,
+                                                           config["answer_key"])
         in_scope_primary = pt.in_scope(finds, "primary", "all")
     gate_report = None
     if config.get("gate"):
@@ -1263,6 +1284,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                                     seed)
                             for cid, o in outcomes.items() if o}
                            if config.get("recoverability") else None),
+        "recoverability_units": recover_cite,
         "gate": gate_report,
         "calibration": calibration_report(finds, calib, outcomes,
                                           config.get("calibration_metrics", {}), reps, seed,
@@ -1595,16 +1617,19 @@ def _recoverability_lines(rec: dict) -> list[str]:
              "answer key), averaged over species. Assumes accuracy within a band does not "
              "depend on the species. Intervals: bootstrap over finds.", ""]
     for cid, r in rec.items():
-        lines += [f"### {cid}", "", "| | species | top 1 | top 3 | top 10 |", "|---|---|---|---|---|"]
-        for name, row in r["rows"].items():
-            cells = []
-            for k in (1, 3, 10):
-                c = row[f"top{k}"]
-                cells.append("-" if c["estimate"] is None else
-                             f"{100 * c['estimate']:.1f}%" + (
-                                 f" ({100 * c['ci95'][0]:.1f}-{100 * c['ci95'][1]:.1f})"
-                                 if c["ci95"] else ""))
-            lines.append(f"| {name} | {row['species']:,} | " + " | ".join(cells) + " |")
+        lines += [f"### {cid}", "", "| of the | | species | top 1 | top 3 | top 10 |",
+                  "|---|---|---|---|---|---|"]
+        for dname, den in r["denominators"].items():
+            for name, row in den["rows"].items():
+                cells = []
+                for k in (1, 3, 10):
+                    c = row[f"top{k}"]
+                    cells.append("-" if c["estimate"] is None else
+                                 f"{100 * c['estimate']:.1f}%" + (
+                                     f" ({100 * c['ci95'][0]:.1f}-{100 * c['ci95'][1]:.1f})"
+                                     if c["ci95"] else ""))
+                lines.append(f"| {dname} | {name} | {row['species']:,} | " + " | ".join(cells)
+                             + " |")
         lines.append("")
     return lines
 
