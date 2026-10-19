@@ -125,6 +125,7 @@ def check_config(doc: dict) -> None:
                              f"not {c.get('tier')!r}")
         if c["kind"] in ("published", "inat", "expert") and not c.get("file"):
             raise ValueError(f"comparator {c['id']}: needs its input file")
+    check_place_pins(doc)
     gate = doc.get("gate")
     if gate:
         for k in ("dir", "fingerprint"):
@@ -442,6 +443,30 @@ def place_setting_used(name: str | None):
             os.environ.pop(env, None)
         else:
             os.environ[env] = before
+
+
+def check_place_pins(doc: dict) -> None:
+    """Every comparator's place_setting is pinned by the config's top-level "place_settings"
+    block ({name: {sha256, ...}}): the sha256 of the setting's values as the code has them
+    (placeprior.place_setting; paper_freeze.canonical_sha, as the freeze spec hashes them).
+    Refused when the name has no entry or the values differ, so a setting changed in code
+    after the decision is never scored under the decided name."""
+    from . import placeprior
+    from .paper_freeze import canonical_sha
+    pins = doc.get("place_settings") or {}
+    for c in doc.get("comparators", []):
+        name = c.get("place_setting")
+        if not name:
+            continue
+        pin = pins.get(name)
+        if not isinstance(pin, dict) or not pin.get("sha256"):
+            raise ValueError(f"comparator {c['id']}: place setting {name!r} has no entry in "
+                             "the config's \"place_settings\" block (its sha256 pins the "
+                             "values)")
+        got = canonical_sha(placeprior.place_setting(name)[1])
+        if got != pin["sha256"]:
+            raise ValueError(f"comparator {c['id']}: place setting {name!r} is {got[:12]} in "
+                             f"this code, the config pins {str(pin['sha256'])[:12]}")
 
 
 def vision_answers(vectors: np.ndarray, ref_records: list, scored_records: list, method: str,
@@ -900,6 +925,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     from .embed import load_embeddings
     from .replications.fungitastic import dataset
     scored_rel, split, ref_splits, sealed = scored_and_reference(base, test)
+    check_place_pins(config)          # before anything is read
     # The code that runs is the code checked out now: read once, here, so a commit made
     # while the run is going never relabels its report.
     code_commit = cfgmod.code_version()

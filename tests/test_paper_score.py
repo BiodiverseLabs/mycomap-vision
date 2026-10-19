@@ -536,6 +536,13 @@ def test_the_report_names_the_code_that_started_the_run_not_a_later_commit(world
     assert rep["code_commit"] == "a" * 40
 
 
+def place_pins(*names):
+    """The config's "place_settings" block pinning `names` as this code has them."""
+    from mycomap_vision import placeprior
+    from mycomap_vision.paper_freeze import canonical_sha
+    return {n: {"sha256": canonical_sha(placeprior.place_setting(n)[1])} for n in names}
+
+
 def test_a_place_setting_is_built_into_the_place_method_recorded_and_an_unknown_one_refused(
         world, tmp_path, monkeypatch):
     """place_setting: the served place scoring, exactly. The method is built with it (the
@@ -557,6 +564,7 @@ def test_a_place_setting_is_built_into_the_place_method_recorded_and_an_unknown_
     cfg["comparators"] = [{"id": "vision-place", "kind": "vision", "backbone": "m1",
                            "method": "nearest+mean+place", "place_setting": name}]
     cfg["hypotheses"] = {}
+    cfg["place_settings"] = place_pins(name)
     rep = run(world, tmp_path, "val", cfg)
     assert built == [name]
     assert rep["inputs"]["vision-place"]["place_setting"] == name
@@ -638,7 +646,8 @@ def test_a_place_setting_that_reads_inat_distances_is_refused():
     cfg = {"format": 1, "answer_key": KEY, "comparators": [{"id": "p", "kind": "vision",
                                                             "backbone": "m",
                                          "method": "nearest+mean+place",
-                                         "place_setting": "penalty-500-2026-10-13"}]}
+                                         "place_setting": "penalty-500-2026-10-13"}],
+           "place_settings": place_pins("penalty-500-2026-10-13")}
     paper_score.check_config(cfg)                                    # dna only: fine
     monkeypatch_name = "test-dna-inat"
     placeprior.PLACE_SETTINGS[monkeypatch_name] = {"pen_known": "dna+inat", "pen_slope": 2.0,
@@ -650,6 +659,49 @@ def test_a_place_setting_that_reads_inat_distances_is_refused():
     finally:
         del placeprior.PLACE_SETTINGS[monkeypatch_name]
     assert inat == []                         # none of the named settings reads them today
+
+
+# --- the decided place setting, pinned by sha (PLAN O9) ----------------------------------------
+
+def _place_config(**extra):
+    return {"format": 1, "answer_key": KEY, "comparators": [
+        {"id": "vision-place", "kind": "vision", "backbone": "m1",
+         "method": "nearest+mean+place", "place_setting": "penalty-500-s30-2026-10-19"}], **extra}
+
+
+def test_a_place_setting_is_scored_only_under_the_configs_pinned_sha():
+    # research's pin for O9 (paper/analysis-v1.draft.json, 7946bdc): the served preset's sha
+    pinned = {"penalty-500-s30-2026-10-19": {
+        "sha256": "20eb90670a20c9564b2262e6a3cf7b867922065ac474d21afd6340fcc9f82bc8",
+        "grid_id": 748}}
+    paper_score.check_config(_place_config(place_settings=pinned))
+    with pytest.raises(ValueError, match="no entry"):
+        paper_score.check_config(_place_config())
+    with pytest.raises(ValueError, match="no entry"):
+        paper_score.check_config(_place_config(place_settings=place_pins(
+            "penalty-500-2026-10-13")))                         # another setting's pin only
+    with pytest.raises(ValueError, match="the config pins"):
+        paper_score.check_config(_place_config(place_settings={
+            "penalty-500-s30-2026-10-19": {"sha256": "0" * 64}}))
+
+
+def test_a_place_setting_changed_in_code_after_the_pin_is_refused(monkeypatch):
+    from mycomap_vision import placeprior
+    cfg = _place_config(place_settings=place_pins("penalty-500-s30-2026-10-19"))
+    paper_score.check_config(cfg)
+    monkeypatch.setitem(placeprior.PLACE_SETTINGS, "penalty-500-s30-2026-10-19",
+                        {**placeprior.PLACE_SETTINGS["penalty-500-s30-2026-10-19"],
+                         "shrink": 10.0})
+    with pytest.raises(ValueError, match="the config pins"):
+        paper_score.check_config(cfg)
+
+
+def test_a_run_with_an_unpinned_place_setting_is_refused_before_anything_is_read(
+        world, tmp_path, monkeypatch):
+    monkeypatch.setattr(paper_score, "guard",
+                        lambda *a, **k: pytest.fail("read before the pin check"))
+    with pytest.raises(ValueError, match="no entry"):
+        run(world, tmp_path, "val", _place_config())
 
 
 # --- outside-review rows: unseen observers, recent cohort, created after pretraining ----------
