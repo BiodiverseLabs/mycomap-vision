@@ -35,7 +35,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               onnxtower, permissions,
+               onnxtower, permissions, dhash, twins,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue, yours)
 from .dates import real_date
@@ -569,6 +569,18 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         marks = ",".join("?" for _ in photo_ids)
         return photo_info_rows(q(f"{PHOTO_INFO_SQL} where photo_id in ({marks})", tuple(photo_ids)))
 
+    def twins_path() -> Path | None:
+        """The cross-post twin table (twins.py): MV_TWINS, else the served release's, else
+        the one beside the manifest; None when there is none (links then leave out only
+        their own record, the records they link to and copies of their photos)."""
+        named = config.setting("MV_TWINS")
+        if named:
+            return Path(named)
+        for folder in (served_release_dir(), Path(manifest_path).parent):
+            if folder is not None and (Path(folder) / twins.FILE).is_file():
+                return Path(folder) / twins.FILE
+        return None
+
     def build_index(key: tuple[str, str], version: tuple) -> Identifier:
         backbone, method = key
         with db_lock:
@@ -582,7 +594,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             ident = Identifier(own, backbone, method, root, calibration=cal,
                                train=limits.fit_on_demand, photo_info=False,
                                layer_root=layer.embeddings if layer else None,
-                               gate=fungus_gate)
+                               gate=fungus_gate, twins_file=twins_path())
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
@@ -625,7 +637,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             excluded = feedback.exclusions_fingerprint(conn)
             # Renames read from mycomap.org's name-change log between nights (name_changes.py).
             renamed = name_changes.version(conn) if layer else 0
-        return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded, renamed)
+        return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded, renamed,
+                twins.version(twins_path()))
 
     def answers_version(backbone: str, method: str, view: permissions.PermissionView) -> str:
         """What this model answers from now (answercache.answers_version): the release and
@@ -1447,6 +1460,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if by_observation_on:
             fetcher = observation_fetcher or byobservation.Fetcher()
 
+            def fetched_hashes(ident: Identifier, pairs) -> list[int]:
+                """The dHash of each fetched photo, when the index has a twin table to match
+                them against (a cross-post's copy of the same picture is left out)."""
+                if getattr(ident, "twins", None) is None:
+                    return []
+                out = []
+                for _, photo_body in pairs:
+                    try:
+                        out.append(dhash.dhash64(photo_body))
+                    except Exception:               # not an image we can read: skip
+                        continue
+                return out
+
             def flag(payload: dict, name: str) -> bool:
                 v = payload.get(name, True)
                 if not isinstance(v, bool):
@@ -1566,7 +1592,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                  rank_at_source=obs.rank_at_source,
                                  photos_shown=[byobservation.shown_photo_url(obs, i)
                                                for i in kept])
-                    hidden, _ = ident.left_out(source, number, obs.photo_ids)
+                    hidden, _ = ident.left_out(source, number, obs.photo_ids, obs.linked,
+                                               fetched_hashes(ident, pairs))
                     if len(hidden) and not ident.can_leave_out():
                         raise apiv1.V1Error(400, "bad_request", "this model can't leave "
                                             "the observation's photos out of the reference")
@@ -1781,7 +1808,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     scored = []                 # per model: (index, vectors, hidden columns)
                     for backbone, method in wanted:
                         ident = site_index(backbone, method, view, timer)
-                        hidden, own = ident.left_out(source, number, obs.photo_ids)
+                        hidden, own = ident.left_out(source, number, obs.photo_ids,
+                                                     obs.linked, fetched_hashes(ident, pairs))
                         if len(hidden) and not ident.can_leave_out():
                             raise HTTPException(400, f"{backbone}/{method} can't leave this "
                                                      "observation out of its own answer")

@@ -102,8 +102,13 @@ answered from a proxy's cache.
   would match itself. Vision uses that record's stored vectors and fetches nothing
   (`timing.photos_reused`, `fetch_ms` 0). Its place and date aren't used either: the
   record is part of the range and season data. The same applies to any reference photo
-  that is one of the observation's own (one photo filed under two observations).
-  `left_out_photos` counts the reference photos left out.
+  that is one of the observation's own (one photo filed under two observations), and to
+  every other reference record of the same find: the record the observation links to
+  under the other source (iNat's "Mushroom Observer URL" field, MO's link to iNat), its
+  Mushroom Observer <-> iNaturalist cross-post twins (the same label and a photo within 3
+  dHash bits; templates such as slip forms excepted), and any record holding a photo
+  within 3 dHash bits of one of the observation's own. A cross-post would otherwise match
+  itself, "100% alike". `left_out_photos` counts the reference photos left out.
 - The answer adds `observation`: `{"source", "id", "url", "photos"` (at the source),
   `"photos_used", "place"` (`coordinates`, `obscured`, `area` or null), `"name_at_source",
   "rank_at_source", "photos_shown"}` (the source's current name, for comparison; null for
