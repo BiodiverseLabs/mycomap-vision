@@ -96,7 +96,9 @@ def parse_linked(payload, sub: str) -> Linked:
 
 def fetch_linked(base_url: str, key: str, sub: str, session: requests.Session | None = None,
                  timeout: float = 5) -> Linked:
-    """One read from mycomap.org. 404 (no such active user) is a person with no accounts."""
+    """One read from mycomap.org. The endpoint's own 404 (`not_found`: no such active user)
+    is a person with no accounts; any other 404 (the route not deployed yet) is a failure,
+    so nobody is told to connect an account they have."""
     session = session or requests.Session()
     try:
         r = session.get(base_url.rstrip("/") + PATH, params={"user": sub}, timeout=timeout,
@@ -105,7 +107,13 @@ def fetch_linked(base_url: str, key: str, sub: str, session: requests.Session | 
     except requests.RequestException as e:
         raise LinkedError(f"unreachable: {type(e).__name__}") from None
     if r.status_code == 404:
-        return Linked()
+        try:
+            code = (r.json() or {}).get("code")
+        except (ValueError, AttributeError):
+            code = None
+        if code == "not_found":
+            return Linked()
+        raise LinkedError("HTTP 404 (no linked-accounts route)")
     if r.status_code != 200:
         raise LinkedError(f"HTTP {r.status_code}")
     try:

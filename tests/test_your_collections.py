@@ -328,3 +328,41 @@ def test_kept_vectors_come_back_exactly():
     v = np.random.default_rng(0).standard_normal((3, 5)).astype(np.float32)
     assert np.array_equal(yours.decode_vectors(yours.encode_vectors(v)), v)
     assert yours.decode_vectors(None) is None and yours.decode_vectors({"b64": "!"}) is None
+
+
+class Reply:
+    def __init__(self, status, body=None):
+        self.status_code, self._body = status, body
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("not json")
+        return self._body
+
+
+class OneReply:
+    def __init__(self, reply):
+        self.reply, self.asked = reply, []
+
+    def get(self, url, params=None, timeout=None, headers=None):
+        self.asked.append((url, params, headers))
+        return self.reply
+
+
+def test_reading_mycomap_org_sends_the_key_and_only_this_persons_id():
+    s = OneReply(Reply(200, {"user": ANNA, "inat": [{"user_id": 11, "login": "a"}], "mo": [],
+                             "unverified": {"inat": False, "mo": False}}))
+    got = yours.fetch_linked("https://org.example", "k" * 40, ANNA, session=s)
+    assert got.inat_ids == frozenset({11})
+    url, params, headers = s.asked[0]
+    assert url == "https://org.example/api/vision/linked-accounts" and params == {"user": ANNA}
+    assert headers["Authorization"] == "Bearer " + "k" * 40
+
+
+def test_no_such_user_is_no_accounts_but_a_missing_route_is_a_failure():
+    gone = OneReply(Reply(404, {"code": "not_found", "message": "No such active user."}))
+    assert yours.fetch_linked("https://org.example", "k", ANNA, session=gone) == yours.Linked()
+    for reply in (Reply(404, {"message": "Not found"}), Reply(404), Reply(401, {}), Reply(503, {}),
+                  Reply(200, None), Reply(200, {"user": BEN, "inat": [], "mo": []})):
+        with pytest.raises(yours.LinkedError):
+            yours.fetch_linked("https://org.example", "k", ANNA, session=OneReply(reply))
