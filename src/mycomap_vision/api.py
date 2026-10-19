@@ -1245,9 +1245,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # releases. "Refresh" re-asks the served model about a reference record from its stored
     # vectors, the record itself left out, behind the same queue as everything else.
     if feedback_store is None:
-        feedback_store = feedback.Store(
-            (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT else config.DATA_DIR)
-            / "human-feedback.sqlite")
+        feedback_store = feedback.Store(feedback.default_path(manifest_path))
     app.state.feedback = feedback_store
     with db_lock:
         feedback.sync_exclusions(feedback_store, conn)

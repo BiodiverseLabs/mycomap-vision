@@ -269,6 +269,19 @@ class FeedbackError(ValueError):
     pass
 
 
+STORE_FILE = "human-feedback.sqlite"
+
+
+def default_path(manifest_path: Path | None = None) -> Path:
+    """Where the review queue lives: <release root>/state/ on the box (kept across
+    releases), else beside the manifest (a laptop; a test's own temporary manifest). Never
+    the data folder by itself: a test run must not reach a laptop's real queue."""
+    from . import config
+    if config.RELEASE_ROOT:
+        return config.RELEASE_ROOT / "state" / STORE_FILE
+    return Path(manifest_path or config.MANIFEST_PATH).parent / STORE_FILE
+
+
 @dataclass
 class Store:
     path: Path
