@@ -57,11 +57,12 @@ INDEX_TABLES = ("embeddings", "embed_runs", "finetunes", "eval_runs")
 # release, a slower day for S3 reads).
 EMBED_RATES = {"bioclip-2": 122.5, "dinov3-l16-512": 18.8}
 FINETUNE_RATES = {"bioclip-2": 70.7}   # photos seen per second while training
-# BioCLIP 2 at a larger input (plan E24): the 224 px rates divided by the cost per photo
-# measured on the laptop's RTX 4070 (2026-10-13, synthetic batches of 16, bf16 training of
-# the last 4 blocks): (embed, fine-tune) x(2.48, 2.27) at 336 and x(5.03, 4.20) at 448. The
-# L4 run at 224 may be loader-bound, so this can only overestimate; replace with the run's own.
-INPUT_SIZE_COST = {"bioclip-2-336": (2.48, 2.27), "bioclip-2-448": (5.03, 4.20)}
+# BioCLIP 2 at a larger input (plan E24): the 224 px rates divided by the cost per photo.
+# 336 is MEASURED on the L4 (run 20261018-171420, 2026-10-19): embed 69.3 and 69.0 photos/s
+# (x1.77), fine-tune 19,524 steps x 64 in 402.8 min = 51.7/s (x1.37); the laptop's RTX 4070
+# had guessed x(2.48, 2.27). 448 is not measured: the 336 cost times the laptop's 448/336 step
+# (5.03/2.48 = 2.03 embed, 4.20/2.27 = 1.85 fine-tune).
+INPUT_SIZE_COST = {"bioclip-2-336": (1.77, 1.37), "bioclip-2-448": (3.59, 2.53)}
 for _alias, (_embed, _train) in INPUT_SIZE_COST.items():
     EMBED_RATES[_alias] = round(EMBED_RATES["bioclip-2"] / _embed, 1)
     FINETUNE_RATES[_alias] = round(FINETUNE_RATES["bioclip-2"] / _train, 1)

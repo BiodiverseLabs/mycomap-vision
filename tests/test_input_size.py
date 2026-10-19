@@ -84,10 +84,17 @@ def test_the_estimate_counts_the_larger_inputs_cost():
     stages = trainer.plan_stages(["bioclip-2-448"], ["bioclip-2-448"], "r")
     est = trainer.estimate(stages, 100_000)
     small = trainer.estimate(trainer.plan_stages(["bioclip-2"], ["bioclip-2"], "r"), 100_000)
-    assert est["total_hours"] > 3 * small["total_hours"]
+    assert est["total_hours"] > 2 * small["total_hours"]
     rates = {r["stage"].split(" ")[0]: r["photos_per_second"] for r in est["stages"]}
-    assert rates["finetune"] == round(trainer.FINETUNE_RATES["bioclip-2"] / 4.20, 1)
-    assert rates["embed"] == round(trainer.EMBED_RATES["bioclip-2"] / 5.03, 1)
+    assert rates["finetune"] == round(trainer.FINETUNE_RATES["bioclip-2"] / 2.53, 1)
+    assert rates["embed"] == round(trainer.EMBED_RATES["bioclip-2"] / 3.59, 1)
+
+
+def test_the_336_rates_are_the_l4_runs_own():
+    """E24's 336 px run (20261018-171420) measured 69.3/69.0 photos/s embedding and 51.7/s
+    fine-tuning on the g6.xlarge; the estimate uses those, not the laptop's guess."""
+    assert trainer.EMBED_RATES["bioclip-2-336"] == 69.2
+    assert trainer.FINETUNE_RATES["bioclip-2-336"] == 51.6
 
 
 # --- the fine-tune at a size the GPU can't hold in one pass ---------------------------------
