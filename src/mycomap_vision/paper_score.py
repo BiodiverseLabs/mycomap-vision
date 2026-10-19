@@ -131,6 +131,14 @@ def check_config(doc: dict) -> None:
         if c["kind"] in ("published", "inat", "expert") and not c.get("file"):
             raise ValueError(f"comparator {c['id']}: needs its input file")
     check_place_pins(doc)
+    psr = doc.get("per_species_rows")
+    if psr is not None:
+        unknown = set(psr.get("metrics") or []) - set(pt.PER_SPECIES_METRICS)
+        if unknown:
+            raise ValueError(f"per_species_rows: unknown metrics {sorted(unknown)} (known: "
+                             f"{', '.join(pt.PER_SPECIES_METRICS)})")
+        if not str(psr.get("cell", "species_strict@1")).startswith("species_"):
+            raise ValueError("per_species_rows: the cell is a species cell")
     gate = doc.get("gate")
     if gate:
         for k in ("dir", "fingerprint"):
@@ -1169,6 +1177,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                          if twins_mod.is_grouped(comp["method"]) else {}),
                                       finds_without_vectors=len(finds) - len(answers),
                                       predictions_sha256=sha256_file(path))
+    # PLAN rule 5 (19 Oct): per-species rows beside the per-find rate, species grouped by
+    # the config's answer key; secondary, outside every hypothesis test.
+    from .name_equiv import answer_key as _species_key
+    per_species_kw = ({"per_species_rows": config["per_species_rows"],
+                       "species_key": lambda name: _species_key(name, config["answer_key"])}
+                      if config.get("per_species_rows") else {})
     gate_report = None
     if config.get("gate"):
         # E10: the gate on the scored finds and the OOD set; each Vision comparator gets a
@@ -1219,12 +1233,13 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "bootstrap": {"reps": reps, "seed": seed, "clusters": "observer"},
         "inputs": inputs,
         "finds": {"scored": len(finds), "by_name_kind": dict(Counter(f.name_kind for f in finds))},
-        "standard": pt.all_standard(finds, outcomes, reps, seed),
+        "standard": pt.all_standard(finds, outcomes, reps, seed, **per_species_kw),
         # The same tables on named subsets of the finds (config "subsets": {name: {attr:
         # value}}), e.g. val excluding the former held-out benchmark, the half that decides.
         "subsets": {name: {"filter": flt, **pt.all_standard(
             [f for f in finds if all(str(f.attrs.get(k)) == str(v) for k, v in flt.items())],
-            outcomes, reps, seed)} for name, flt in (config.get("subsets") or {}).items()},
+            outcomes, reps, seed, **per_species_kw)}
+            for name, flt in (config.get("subsets") or {}).items()},
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   float(config.get("alpha", 0.05))),
         "per_photo": per_photo,
@@ -1422,6 +1437,16 @@ def format_report(report: dict, config: dict) -> str:
                 for b, r in t["species_by_reference_band"].items():
                     lines.append(f"| {b} | {_pct(r['top1'])} | {_pct(r['top5'])} | "
                                  f"{r['top1']['n']:,} |")
+                ps_ = t.get("per_species")
+                if ps_ and ps_["n_species"]:
+                    ci = ps_["macro_ci95"]
+                    lines += ["", f"Per species ({ps_['cell']}; secondary, no test): macro "
+                              f"{100 * ps_['macro_species_top1']:.1f}%"
+                              + (f" ({100 * ci[0]:.1f}-{100 * ci[1]:.1f})" if ci else "")
+                              + f"; {ps_['species_ge1_right']:,} of {ps_['n_species']:,} "
+                              f"species with a find right "
+                              f"({100 * ps_['share_species_ge1_right']:.1f}%); "
+                              f"{ps_['finds']:,} finds."]
                 lines.append("")
     if report.get("gate"):
         lines += _gate_lines(report["gate"])
