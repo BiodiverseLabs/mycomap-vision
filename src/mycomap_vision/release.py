@@ -143,12 +143,16 @@ def release_files(conn, backbones: list[str], data_dir: Path,
 
 def publish(conn, backbones: list[str], *, label: str | None = None, make_current: bool = False,
             s3=None, bucket: str | None = None, data_dir: Path | None = None,
-            work_dir: Path | None = None, int8_vectors: bool = False, log=print) -> dict:
+            work_dir: Path | None = None, int8_vectors: bool = False,
+            twin_groups_file: Path | None = None, log=print) -> dict:
     """Upload a release; with make_current, point releases/current.json at it.
     `int8_vectors`: the reference vectors as int8 codes + a scale each, half the memory on
     the box (serving.MappedVectors reads both; the accuracy check is mv int8-check).
     Refused while the records table holds a benchmark's held-out record (holdouts.py);
-    the manifest it ships carries the held-out list to the box's nightly update."""
+    the manifest it ships carries the held-out list to the box's nightly update.
+    `twin_groups_file` (mv twin-groups, every split the served reference holds): shipped as
+    twin-groups.tsv, the cross-post twin groups the served record-grouped method needs
+    (twins.py; the server reads it unless MV_TWIN_GROUPS names another)."""
     if not backbones:
         raise ValueError("name at least one backbone to serve")
     holdouts.check_clean(conn, "the release")
@@ -162,6 +166,10 @@ def publish(conn, backbones: list[str], *, label: str | None = None, make_curren
     # The benchmark tables stay home; benchmark_holdouts ships (the nightly update needs it).
     snap = shippable_snapshot(conn, (work_dir or data_dir) / "manifest-release.sqlite")
     files = [(snap, "manifest.sqlite")] + files
+    if twin_groups_file is not None:
+        from . import twins
+        twins.read(twin_groups_file)              # refuses a file that is not a groups file
+        files.append((Path(twin_groups_file), "twin-groups.tsv"))
     listed = []
     for path, rel in files:
         s3.upload_file(str(path), bucket, f"{PREFIX}{rid}/{rel}")
@@ -173,7 +181,9 @@ def publish(conn, backbones: list[str], *, label: str | None = None, make_curren
             "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "snapshot": snapshot,
             "version": modelcard.version_for(snapshot, earlier_versions(s3, bucket)),
-            "vectors": "int8" if int8_vectors else "float", "files": listed}
+            "vectors": "int8" if int8_vectors else "float", "files": listed,
+            **({"twin_groups": twins.cite(twin_groups_file)}
+               if twin_groups_file is not None else {})}
     s3.put_object(Bucket=bucket, Key=f"{PREFIX}{rid}/release.json",
                   Body=json.dumps(info, indent=2).encode(), ContentType="application/json")
     if make_current:

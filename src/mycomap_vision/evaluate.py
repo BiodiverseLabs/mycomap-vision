@@ -846,8 +846,13 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             per_image: bool = False, into: str | None = None, release=None,
             shared: "SharedSet | None" = None, extra: dict | None = None,
             public_reference: bool = False, answer_key: str | None = None,
-            answer_taxonomy=None, log=print) -> dict:
+            answer_taxonomy=None, twin_groups: dict | None = None, twins_cite: dict | None = None,
+            no_twins: bool = False, log=print) -> dict:
     """Evaluate every backbone x method on the same records and photos; save to the scoreboard.
+
+    `twin_groups` (twins.read: {observation_id: specimen}) groups MO/iNat cross-posts as one
+    specimen for the record-grouped methods (twins.is_grouped), which are refused without it
+    unless `no_twins` says so; every such run's report names the file (`twins_cite`).
 
     Only photos embedded by every backbone count, so no model is judged on photos
     another could not see. `sets` (likely.py) are fitted on the all-photos pass only:
@@ -867,6 +872,12 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
     (shared_records); every row's report says "reference": "public_trainable".
     """
     methods = methods or ["nearest"]
+    from . import twins as twins_mod
+    grouped = [m for m in methods if twins_mod.is_grouped(m)]
+    if grouped and twin_groups is None and not no_twins:
+        raise ValueError(f"{', '.join(grouped)} score by specimen: give the cross-post twin "
+                         "groups (--twins FILE, mv twin-groups), or --no-twins to score them "
+                         "with every record its own specimen")
     for m in methods:
         if m not in METHODS:
             raise ValueError(f"unknown method {m!r}: {', '.join(METHODS)}")
@@ -911,9 +922,14 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
                 log(f"  {b} / {m}: skipped ({m} works only with a classifier of its own)")
                 continue
             log(f"  {b} / {m}: {len(test):,} test records against {len(ref):,}")
-            fitted = fit_method(vecs, ref_b, m, backbone=b)
+            spec = (twins_mod.specimen_of(twin_groups, ref_b)
+                    if twin_groups is not None and twins_mod.is_grouped(m) else None)
+            fitted = fit_method(vecs, ref_b, m, backbone=b, specimen_of=spec)
             row_extra = {**(extra or {}),
                          **(getattr(fitted[1], "scoreboard_extra", lambda: None)() or {})}
+            if twins_mod.is_grouped(m):
+                row_extra["twins"] = ({**(twins_cite or {}), "records_grouped": len(spec)}
+                                      if spec is not None else None)
             all_photos = evaluate(vecs, ref_b, test_b, method=m, fitted=fitted,
                                   name_scores=name_scores, sets=sets, per_image=per_image,
                                   answer_key=answer_key, answer_taxonomy=answer_taxonomy)

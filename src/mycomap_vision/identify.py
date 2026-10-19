@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import config, fungusgate, likely, taxonomy
+from . import config, fungusgate, likely, taxonomy, twins
 from .embed import normalise
 from .methods import rows_at
 from .serving import map_embeddings
@@ -212,16 +212,27 @@ class Identifier:
     The reference vectors are memory-mapped from the embedding files (serving.py), not
     read into memory. `photo_info=False` skips the owner and licence of every reference
     photo, for callers that look them up per identification (the API does).
-    `layer_root` holds the shards the nightly update added (nightly.py)."""
+    `layer_root` holds the shards the nightly update added (nightly.py).
+
+    `specimen_groups` (twins.read: {observation_id: specimen}) names the reference records
+    that are one find posted to both Mushroom Observer and iNaturalist, by the rule E32
+    passed under (twins.release_groups). A record-grouped method (twins.is_grouped: the
+    served nearest+mean-records-balanced) scores each such find as one specimen, and is
+    refused without them; other methods ignore them."""
 
     def __init__(self, conn: sqlite3.Connection, backbone: str, method: str,
                  embeddings_root: Path | None = None, calibration: dict | None = None,
                  model_cache: Path | None = None, train: bool = True, photo_info: bool = True,
                  layer_root: Path | None = None, release=None,
                  gate: "fungusgate.FungusGate | None" = None,
-                 twins_file: Path | None = None):
+                 twins_file: Path | None = None,
+                 specimen_groups: dict[str, str] | None = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
+        if specimen_groups is None and twins.is_grouped(method):
+            raise ValueError(f"{method} scores by specimen and needs the cross-post twin "
+                             "groups (MV_TWIN_GROUPS, or twin-groups.tsv in the serving "
+                             "release)")
         self.backbone, self.method = backbone, method
         # The not-a-fungus gate (fungusgate.py), or None: answers are then ungated.
         self.gate = gate
@@ -232,7 +243,12 @@ class Identifier:
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
         by_id = load_records(conn, {int(p): int(p) for p in ids.tolist()}, release=release)
         records = with_rows(by_id, row_of)
-        self.index = build_index(records)
+        # One run of columns per specimen for a record-grouped method (a lone twin is an
+        # ordinary record); every other method's index is unchanged.
+        spec = (twins.specimen_of(specimen_groups, records)
+                if twins.is_grouped(method) else {})
+        self.specimens_grouped = len(spec)
+        self.index = build_index(records, spec or None)
         self.model = make_method(method, backbone)
         self.uses_context = getattr(self.model, "needs_context", False)
         self.loaded_from_cache = fit_cached(

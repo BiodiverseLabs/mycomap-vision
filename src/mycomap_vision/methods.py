@@ -531,6 +531,12 @@ class NearestAndMeanRecordsBalanced(NearestAndMeanRecords):
     name = "nearest+mean-records-balanced"
     balanced = True
 
+    @staticmethod
+    def ready() -> bool:
+        """Served since Steve's decision of 2026-10-18 (E32): offered wherever it is allowed
+        (MV_METHODS), with the cross-post twin groups (twins.py) its index needs."""
+        return True
+
 
 class NearestAndMeanViews(NearestAndMeanRecordsBalanced):
     """View matching (arm d): each query photo matches its closest photo within every
@@ -539,6 +545,11 @@ class NearestAndMeanViews(NearestAndMeanRecordsBalanced):
     and stem together) count, not a different record per view. Species average as arm c.
     For one photo it equals arm c; per_photo_scores (identify's per-photo view) is arm c's."""
     name = "nearest+mean-views"
+
+    @staticmethod
+    def ready() -> bool:
+        """Research only (not adopted: E32)."""
+        return False
 
     def find_scores(self, photo_sims: np.ndarray, query: np.ndarray) -> np.ndarray:
         """(n_species,): the find's score from its photos' similarities."""
@@ -677,13 +688,18 @@ from .placeprior import NearestMeanPlace  # noqa: E402
 
 METHODS[NearestMeanPlace.name] = NearestMeanPlace
 
-# The record-grouped arms with the same place and date (research, experiment
-# record-scoring): each shares its own photos-only calibration, as nearest+mean+place does.
+# The record-grouped arms with the same place and date (experiment record-scoring; the
+# balanced arm serves since 2026-10-18): each shares its own photos-only calibration, as
+# nearest+mean+place does, and is ready when its arm is and the place store is here.
+def _place_ready(base):
+    return staticmethod(lambda: base.ready() and NearestMeanPlace.ready())
+
+
 for _base in RECORD_METHODS:
     METHODS[f"{_base.name}+place"] = type(
         f"{_base.__name__}Place", (NearestMeanPlace,),
         {"name": f"{_base.name}+place", "base_method": _base.name,
-         "calibration_from": _base.name, "ready": staticmethod(_base.ready)})
+         "calibration_from": _base.name, "ready": _place_ready(_base)})
 
 
 # The Picek group's classifier recipe, replicated on our data (retrain.py): the trained

@@ -87,7 +87,12 @@ class Gate:
 
 
 # A default method that can't answer here falls back to this one before nearest.
-DEFAULT_FALLBACK = {"nearest+mean+place": "nearest+mean"}
+# Each served method's fallback when this server can't answer it (not allowed, or not ready:
+# the place store or the twin groups missing). Steve, 2026-10-18 (E32): nearest+mean-records-
+# balanced(+place) serves, so it falls back to it, then to the photo-level methods it replaced.
+DEFAULT_FALLBACK = {"nearest+mean-records-balanced+place": "nearest+mean-records-balanced",
+                    "nearest+mean-records-balanced": "nearest+mean+place",
+                    "nearest+mean+place": "nearest+mean"}
 
 
 @dataclass

@@ -183,12 +183,20 @@ def test_leaving_columns_out_equals_fitting_without_them(cls, hide):
             assert np.all(got[:, s] == -np.inf)
 
 
-def test_the_record_arms_and_their_place_twins_are_research_only():
+def test_the_adopted_arm_is_offered_and_the_others_stay_research_only(monkeypatch):
+    # Steve, 2026-10-18 (E32): arm c serves; b and d stay research methods. A place twin is
+    # ready when its arm is and the place store is on this machine.
+    from mycomap_vision.placeprior import PlaceBoost
     for name in RECORD_ARMS:
         assert name in METHODS and f"{name}+place" in METHODS
-        assert not method_ready(name) and not method_ready(f"{name}+place")
         twin = METHODS[f"{name}+place"]
         assert twin.calibration_from == name and twin.base_method == name
+    assert method_ready("nearest+mean-records-balanced")
+    for name in ("nearest+mean-records", "nearest+mean-views"):
+        assert not method_ready(name) and not method_ready(f"{name}+place")
+    for store in (True, False):
+        monkeypatch.setattr(PlaceBoost, "ready", staticmethod(lambda s=store: s))
+        assert method_ready("nearest+mean-records-balanced+place") is store
     assert METHODS["nearest+mean+place"].base_method == "nearest+mean"
 
 
