@@ -35,7 +35,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               onnxtower, permissions, dhash, twins,
+               onnxtower, permissions, dhash, twins, uploadmeter,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue, yours)
 from .dates import real_date
@@ -221,14 +221,21 @@ class Preload:
     error: str | None = None
 
 
-def read_photo(upload: UploadFile, side: int = uploads.kept_side([])) -> tuple[Image.Image, tuple]:
+def read_photo(upload: UploadFile, side: int = uploads.kept_side([]),
+               hashes: list | None = None) -> tuple[Image.Image, tuple]:
     """One uploaded photo, refusing oversized files and images before decoding them,
     decoded once and kept only at the size the models need (uploads.py: shorter side
     `side`). Also returns its EXIF (latitude, longitude, date), read before shrinking,
-    used only for scoring."""
+    used only for scoring. With `hashes`, appends the file's dHash (None when it can't be
+    hashed) for the upload meter (uploadmeter.py); the hash is never kept."""
     body = upload.file.read(MAX_FILE_BYTES + 1)
     if len(body) > MAX_FILE_BYTES:
         raise HTTPException(413, f"{upload.filename} is over {MAX_FILE_BYTES // 2**20} MB")
+    if hashes is not None:
+        try:
+            hashes.append(dhash.dhash64(body))
+        except Exception:                   # decode_upload says what is wrong with it
+            hashes.append(None)
     try:
         return uploads.decode_upload(body, side)
     except TooLarge as e:
@@ -276,6 +283,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                by_observation: bool | None = None,
                observation_fetcher: "byobservation.Fetcher | None" = None,
                quotas: "quota_rules.Quotas | None" = None,
+               upload_meter: "uploadmeter.UploadMeter | None" = None,
                usage_post: Callable[[dict], None] | None = None,
                app_tokens: "apiv1.AppTokens | None | bool" = True,
                introspect: "Callable[[str], dict] | None | bool" = True,
@@ -538,6 +546,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             default_monthly=int(_setting_number("MV_QUOTA_DEFAULT_MONTHLY")
                                 or quota_rules.DEFAULT_MONTHLY))
     app.state.quotas = quotas
+    # How often an uploaded photo is a reference photo (uploadmeter.py; Steve, 2026-10-19):
+    # counters only, in the usage store, shown to mycomap.org's server key in /api/health.
+    if upload_meter is None:
+        # The box's usage store; on a laptop (and in tests) beside the manifest.
+        upload_meter = uploadmeter.UploadMeter(
+            quotas.path if config.RELEASE_ROOT
+            else Path(manifest_path or config.MANIFEST_PATH).parent / quotas.path.name,
+            lambda: twins_path(), note=note)
+    app.state.upload_meter = upload_meter
     # Answers already given for an iNat or MO observation (answercache.py), served again
     # while what Vision answers from is unchanged (answers_version below).
     if answer_cache is None:
@@ -702,7 +719,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         given = request.headers.get("authorization", "")
         if org_secret and secrets.compare_digest(given.encode(),
                                                  f"Bearer {org_secret}".encode()):
-            return full
+            # Never in the public answer: how often uploads are reference photos.
+            return {**full, "upload_matches": upload_meter.summary()}
         served, ready = served_backbones()
         known = {*limits.allowed_backbones, *ready, *(full["nightly"].get("layer") or {}),
                  *full["embed"], *(m.split("/", 1)[0] for m in warm.models),
@@ -897,10 +915,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         out["timing"] = timer.block()
         return out
 
-    def decode_photos(photos: list[UploadFile], timer: "apiv1.Timer") -> list[tuple]:
+    def decode_photos(photos: list[UploadFile], timer: "apiv1.Timer",
+                      hashes: list | None = None) -> list[tuple]:
         start = time.monotonic()
         side = uploads.kept_side(list(backbones.values()))
-        read = [read_photo(f, side) for f in photos]         # one at a time, kept small
+        read = [read_photo(f, side, hashes) for f in photos]  # one at a time, kept small
         timer.add("decode_ms", time.monotonic() - start)
         return read
 
@@ -991,7 +1010,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context",
                      timer: "apiv1.Timer", linked: "yours.Linked | None" = None) -> dict:
-        read = decode_photos(photos, timer)
+        hashes = [] if upload_meter.hashing() else None
+        read = decode_photos(photos, timer, hashes)
         images = [img for img, _ in read]
         context, used = fill_context(context, [found for _, found in read])
         wanted = site_models(models_)
@@ -1012,6 +1032,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         table = confused_table()
         for result in results:
             confusions.annotate(result, table)
+        upload_meter.record("site", len(images), hashes)
         return {"results": results, "context_used": used}
 
     def backbone_model(backbone: str):
@@ -1349,9 +1370,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                     "see GET /api/v1/models")
             return backbone, method
 
-        def v1_photos(photos: list[UploadFile], timer: "apiv1.Timer") -> list[tuple]:
+        def v1_photos(photos: list[UploadFile], timer: "apiv1.Timer",
+                      hashes: list | None = None) -> list[tuple]:
             try:
-                return decode_photos(photos, timer)
+                return decode_photos(photos, timer, hashes)
             except HTTPException as e:
                 if e.status_code == 413:
                     raise apiv1.V1Error(413, "too_large", str(e.detail)) from e
@@ -1386,7 +1408,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise apiv1.V1Error(503, "busy", "busy identifying other photos",
                                     retry_after=10, estimated_wait_seconds=10)
             try:
-                read = v1_photos(photos, timer)
+                hashes = [] if upload_meter.hashing() else None
+                read = v1_photos(photos, timer, hashes)
                 context, used = fill_context(Context(latitude, longitude, observed_on),
                                              [found for _, found in read])
                 view = permission_view()
@@ -1397,6 +1420,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     timer, top_k, interactive=cred.interactive, higher=True)
             finally:
                 in_flight.leave()
+            upload_meter.record("api", len(read), hashes)
             quotas.count(cred, 0 if same_find else 1, len(photos))
             if not same_find:
                 quotas.remember_counted(cred, client_ref)
@@ -2022,10 +2046,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise apiv1.V1Error(503, "busy", "busy identifying other photos",
                                         retry_after=10, estimated_wait_seconds=10)
                 try:
-                    [(image, found)] = v1_photos([photo], timer)
+                    hashes = [] if upload_meter.hashing() else None
+                    [(image, found)] = v1_photos([photo], timer, hashes)
                     rescore(s, cred, timer, image=image, ref=photo_ref, found=found)
                 finally:
                     in_flight.leave()
+                upload_meter.record("session", 1, hashes)
                 first = not s.counted and not reopened
                 quotas.count(cred, 1 if first else 0, 1)       # once, at its first photo
                 if first:
