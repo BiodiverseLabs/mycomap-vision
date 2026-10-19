@@ -263,6 +263,21 @@ def fill_context(entered: Context, from_photos: list[tuple]) -> tuple[Context, d
     return Context(lat, lng, when), used
 
 
+def first_confused_with(served: "confusions.Served", layer: "nightly.Layer | None",
+                        steps: "nightly.Steps | None" = None, note=print) -> None:
+    """The "often confused with" table at startup. On the box (a nightly layer) with no
+    table yet (nightly.prepare carries the last release's over; none on a first layer, or
+    when that one had none), mycomap.org's is read now instead of at the next night;
+    a failed read leaves the notes off until then, as before."""
+    if layer is not None and not served.cache.is_file():
+        note("[confused-with] no table in this release's layer: reading mycomap.org's now")
+        try:
+            (steps or nightly.Steps()).misidentifications(served.cache, log=note)
+        except Exception as e:  # noqa: BLE001 - the night tries again
+            note(f"[confused-with] startup read failed: {type(e).__name__}: {e}")
+    served.reload()
+
+
 def create_app(manifest_path: Path | None = None, embeddings_root: Path | None = None,
                backbone_loader: Callable[[str], object] = models.load_backbone,
                web_dist: Path | None = WEB_DIST, limits: Limits | None = None,
@@ -520,7 +535,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     confused_with = confused_with or None
     app.state.confused_with = confused_with
     if confused_with is not None and background:    # read at startup, not by the first caller
-        threading.Thread(target=confused_with.reload, name="confused-with", daemon=True).start()
+        threading.Thread(target=first_confused_with, args=(confused_with, layer, nightly_steps,
+                                                            note),
+                         name="confused-with", daemon=True).start()
 
     def confused_table() -> "confusions.Table | None":
         return confused_with.table() if confused_with is not None else None
@@ -1237,6 +1254,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         note("[nightly] NOT scheduled: fix MV_NIGHTLY_TZ (an IANA name, e.g. America/New_York)")
     elif layer and background:
         schedule = nightly.Schedule(layer, nightly_settings, nightly_zone)
+        # A fresh release's layer holds the laptop's export, often days old: one ordinary
+        # night soon, after the preload's index build, not at the next 3 a.m.
+        with db_lock:
+            nightly.arm_catch_up(schedule, conn, ready=lambda: warm.state != "loading",
+                                 note=note)
         nightly.start(schedule, run_nightly, note)
 
     # Human Feedback (feedback.py, feedback_api.py; Steve, 2026-10-18): the review queue of
