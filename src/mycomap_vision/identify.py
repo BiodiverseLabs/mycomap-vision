@@ -34,6 +34,7 @@ from .licenses import photo_url
 from .higher import HIGHER_RANKS, HigherRanks
 from .placeprior import PlaceCue
 from .settled import runner_up, settled
+from .twins import ReferenceTwins
 from .sources import INAT, record_url
 from .yours import OwnerIndex
 
@@ -224,6 +225,7 @@ class Identifier:
                  model_cache: Path | None = None, train: bool = True, photo_info: bool = True,
                  layer_root: Path | None = None, release=None,
                  gate: "fungusgate.FungusGate | None" = None,
+                 twins_file: Path | None = None,
                  specimen_groups: dict[str, str] | None = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
@@ -263,6 +265,9 @@ class Identifier:
         self.rec_starts = self.col_record.starts()
         # Each record's owner at its source, for a signed-in person's own records (yours.py).
         self.owners = OwnerIndex.from_manifest(conn, self.col_record.obs, self.col_record.source)
+        # Cross-post twins (twins.py): one find held under two sources is left out whole.
+        self.twins = (ReferenceTwins(twins_file, self.col_photo, self.col_record)
+                      if twins_file and Path(twins_file).is_file() else None)
         self.calibration = calibration
         self.photos = (self._photo_info(conn, set(int(p) for p in self.col_photo.tolist()))
                        if photo_info else {})
@@ -309,21 +314,39 @@ class Identifier:
         """Whether this method can answer with reference columns left out (hidden=)."""
         return self.model is self.nearest or hasattr(self.model, "leave_out")
 
-    def left_out(self, source: str, source_id: str, photo_ids=()) -> tuple[np.ndarray, np.ndarray]:
+    def left_out(self, source: str, source_id: str, photo_ids=(), linked=(),
+                 photo_hashes=()) -> tuple[np.ndarray, np.ndarray]:
         """(columns to leave out, the record's own columns) for an observation identified
-        by its number: the reference record(s) it is (source + id at the source), and any
-        column holding one of its photos, those records' or `photo_ids` (the same photo
-        filed under another observation). Both empty when it is in no way part of the
-        reference."""
+        by its number. Left out: the reference record(s) it is (source + id at the source);
+        every record of the same find under another source: the ones it links to (`linked`,
+        (source, id) pairs from the iNat <-> MO link fields) and, with a twin table
+        (twins.py), those records' cross-post twins and any record holding a photo within
+        errata.TWIN_MAX_BITS dHash bits of its own photos or of `photo_hashes` (the
+        observation's fetched photos); and any column holding one of those records' photos
+        or `photo_ids` (the same photo filed under another observation). Both empty when it
+        is in no way part of the reference."""
         recs = self.col_record
-        mine = np.flatnonzero((recs.source == source) & (recs.source_id == str(source_id)))
-        own = (np.flatnonzero(np.isin(recs.rec, mine)) if len(mine)
-               else np.empty(0, dtype=np.int64))
+        empty = np.empty(0, dtype=np.int64)
+
+        def records_of(src: str, number) -> np.ndarray:
+            return np.flatnonzero((recs.source == src) & (recs.source_id == str(number)))
+
+        def columns_of(rs: np.ndarray) -> np.ndarray:
+            return np.flatnonzero(np.isin(recs.rec, rs)) if len(rs) else empty
+        mine = records_of(source, source_id)
+        own = columns_of(mine)
+        find = np.union1d(mine, np.concatenate(
+            [records_of(s, n) for s, n in linked] or [empty])).astype(np.int64)
+        twins = getattr(self, "twins", None)
+        if twins is not None:
+            hashes = np.concatenate([twins.hashes(own),
+                                     np.asarray([int(h) for h in photo_hashes], np.uint64)])
+            find = twins.mates(np.union1d(find, twins.same_picture(hashes)))
+        whole = np.union1d(own, columns_of(find)).astype(np.int64)
         ids = np.concatenate([np.asarray([int(p) for p in photo_ids],
-                                         dtype=self.col_photo.dtype), self.col_photo[own]])
-        same = (np.flatnonzero(np.isin(self.col_photo, ids)) if len(ids)
-                else np.empty(0, dtype=np.int64))
-        return np.union1d(own, same).astype(np.int64), own.astype(np.int64)
+                                         dtype=self.col_photo.dtype), self.col_photo[whole]])
+        same = (np.flatnonzero(np.isin(self.col_photo, ids)) if len(ids) else empty)
+        return np.union1d(whole, same).astype(np.int64), own.astype(np.int64)
 
     def reference_vectors(self, cols: np.ndarray) -> np.ndarray:
         """(len(cols), dim) unit float32 vectors of these reference columns, as served
