@@ -33,6 +33,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -286,6 +287,9 @@ def default_path(manifest_path: Path | None = None) -> Path:
 class Store:
     path: Path
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # The paper's seal on the queues (SealGate): set where the store is opened on the box and
+    # by seed_files; None only in tests that seed records with no dates on purpose.
+    gate: "SealGate | None" = field(default=None, repr=False)
 
     def __post_init__(self):
         self.path = Path(self.path)
@@ -306,14 +310,24 @@ class Store:
         """Add queue items (dicts with item_type, subject, rule and optionally granularity,
         model_flagged, blind, record_keys, links, current, proposed, evidence, projects,
         records). An item already queued (same type and subject) is left as it is, decisions
-        and all. Refuses an unknown item type."""
+        and all. Refuses an unknown item type.
+
+        With a seal gate (SealGate), a row whose record was first green after the seal (the
+        paper's sealed v1-test), or whose date the box cannot tell, is not added: the result
+        counts them ("refused_sealed", "refused_unknown") and names their records."""
         now = time.time()
         added = 0
+        refused = {"sealed": [], "unknown": []}
         with self._lock, self.conn:
             for r in rows:
                 t = TYPES.get(r["item_type"])
                 if t is None:
                     raise FeedbackError(f"unknown item type {r['item_type']!r}")
+                if self.gate is not None:
+                    verdict, key = self.gate.judge_row(r)
+                    if verdict != "ok":
+                        refused[verdict].append(key)
+                        continue
                 cur = self.conn.execute(
                     "insert or ignore into items (item_type, subject, granularity, rule, "
                     "model_flagged, blind, record_keys, links, current, proposed, evidence, "
@@ -326,7 +340,12 @@ class Store:
                 added += cur.rowcount
             self.conn.execute("insert or replace into seeds values (?,?,?,?,?)",
                               (name, file_sha256, len(rows), added, now))
-        return {"seed": name, "rows": len(rows), "added": added}
+        out = {"seed": name, "rows": len(rows), "added": added}
+        if self.gate is not None:
+            out.update(refused_sealed=len(refused["sealed"]),
+                       refused_unknown=len(refused["unknown"]),
+                       refused_records=sorted(set(refused["sealed"] + refused["unknown"]))[:50])
+        return out
 
     # --- reading -------------------------------------------------------------------------------
     def summary(self, projects: set[str] | None = None) -> list[dict]:
@@ -659,8 +678,11 @@ def seed_files(store: Store, conn: sqlite3.Connection, queue: Path | None = None
                twin_locations: Path | None = None,
                answer_key_groups: Path | None = None) -> list[dict]:
     """Seed the queue from the miss review's files. With `hits`, every model-flagged type
-    also gets a blind sample of finds Vision answered right: blind_ratio of its items."""
+    also gets a blind sample of finds Vision answered right: blind_ratio of its items. Every
+    row passes the paper's seal (SealGate, from this manifest when the store has none)."""
     import hashlib
+    if store.gate is None:
+        store.gate = SealGate.from_manifest(conn)
     out = []
     for path, reader in ((queue, rows_from_queue_seed), (crosswalk, rows_from_crosswalk),
                          (twin_locations, rows_from_twin_locations),
@@ -731,3 +753,126 @@ def exclusions_fingerprint(conn: sqlite3.Connection) -> str:
     except sqlite3.OperationalError:          # never synced on this manifest: none
         ids = []
     return hashlib.sha1(",".join(map(str, ids)).encode()).hexdigest()[:12]
+
+
+# --- the paper's seal on the queues -----------------------------------------------------------
+# No review queue may hold a v1-test record: one first green after dataset release v1's label
+# snapshot (prospective.seal_time(); MV_PROSPECTIVE_SEAL, "off" after the paper's freeze). The
+# box knows a record's earliest green date (manifest records.validated_on, a day), not its
+# time, so a record green on the seal's own day, or with no date, or unknown to the manifest,
+# is refused as unknown, unless it is on the pinned list of v1's record keys
+# (MV_FEEDBACK_V1_KEYS: one key a line, `mv dataset record-keys`). (The coordinator and the paper
+# coordinator, 2026-10-20, after 3 v1-test records were found queued.)
+
+def record_of_link(link: str) -> str | None:
+    """The record key a record link names (MO 'mo:<n>', iNat '<n>')."""
+    import re
+    if m := re.search(r"mushroomobserver\.org/(?:obs|observations)/(\d+)", link or ""):
+        return f"mo:{m.group(1)}"
+    if m := re.search(r"inaturalist\.org/observations/(\d+)", link or ""):
+        return m.group(1)
+    return None
+
+
+def row_records(row: dict) -> list[str]:
+    """The records an item names: its record_keys, else the record its first link names (a
+    photo item). A name-level item names none."""
+    keys = [k for k in (row.get("record_keys") or []) if k]
+    if keys:
+        return keys
+    for link in row.get("links") or []:
+        if key := record_of_link(link):
+            return [key]
+    return []
+
+
+@dataclass
+class SealGate:
+    """Is a record first green before the seal? `validated(key)` gives the manifest's earliest
+    green date (ISO, a day) or None; `v1_keys` the pinned v1 record keys (or empty); `seal`
+    the seal moment (None: no seal, everything passes)."""
+    validated: Callable[[str], str | None]
+    v1_keys: frozenset = frozenset()
+    seal: str | None = None
+
+    def judge(self, key: str) -> str:
+        if self.seal is None or key in self.v1_keys:
+            return "ok"
+        day = (self.validated(key) or "")[:10]
+        seal_day = self.seal[:10]
+        if day and day < seal_day:
+            return "ok"
+        if day and day > seal_day:
+            return "sealed"
+        return "unknown"                  # the seal's own day, no date, or not in the manifest
+
+    def judge_row(self, row: dict) -> tuple[str, str | None]:
+        """("ok"|"sealed"|"unknown", the deciding record): the worst of the row's records."""
+        worst, which = "ok", None
+        for key in row_records(row):
+            v = self.judge(key)
+            if v == "sealed":
+                return v, key
+            if v == "unknown" and worst == "ok":
+                worst, which = v, key
+        return worst, which
+
+    @classmethod
+    def from_manifest(cls, conn: sqlite3.Connection, seal: str | None = None,
+                      v1_keys_path: str | Path | None = None,
+                      lock: threading.Lock | None = None) -> "SealGate":
+        """The gate for a manifest: each record's date read when asked (under `lock`, the
+        API's manifest lock, when given), the seal from prospective.seal_time() unless given,
+        the v1 keys from `v1_keys_path` or MV_FEEDBACK_V1_KEYS."""
+        import contextlib
+        from . import config, prospective
+        seal_at = prospective.seal_time() if seal is None else seal
+
+        def validated(key: str) -> str | None:
+            with lock or contextlib.nullcontext():
+                r = conn.execute("select validated_on from records where observation_id = ?",
+                                 (key,)).fetchone()
+            return r[0] if r else None
+        path = v1_keys_path or config.setting("MV_FEEDBACK_V1_KEYS")
+        keys = frozenset(x.strip() for x in Path(path).read_text(encoding="utf-8").split("\n")
+                         if x.strip()) if path and seal_at else frozenset()
+        return cls(validated, keys, seal_at)
+
+
+def seal_check(store: Store, gate: SealGate) -> dict:
+    """Every queue's items judged by the seal, with the decisions on any that fail: the check
+    the re-seed procedure runs (`mv feedback seal-check`)."""
+    per: dict[str, dict] = {}
+    decided = dict(store.conn.execute("select item_id, count(*) from decisions group by 1"))
+    bad: dict[str, list] = {}
+    for r in store.conn.execute("select * from items"):
+        it = Store._item(r)
+        c = per.setdefault(it["item_type"], {"items": 0, "sealed": 0, "unknown": 0,
+                                             "decisions_on_failing": 0})
+        c["items"] += 1
+        verdict, key = gate.judge_row(it)
+        if verdict != "ok":
+            c[verdict] += 1
+            c["decisions_on_failing"] += decided.get(it["id"], 0)
+            bad.setdefault(verdict, []).append({"item": it["id"], "type": it["item_type"],
+                                                "record": key})
+    return {"seal": gate.seal, "v1_keys": len(gate.v1_keys), "queues": per,
+            "sealed": bad.get("sealed", []), "unknown": bad.get("unknown", [])[:200],
+            "ok": not bad.get("sealed") and not bad.get("unknown")}
+
+
+def write_record_keys(release, path: Path) -> dict:
+    """The release's record keys (train and val, included), one a line, sorted, never
+    overwritten; with its sha256 for pinning. Every one was green at the release's label
+    snapshot, so the seal accepts them whatever their manifest date says."""
+    import hashlib
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError(f"{path} exists: a pinned list is never rewritten")
+    keys = sorted({r[0] for r in release.db.execute(
+        "select record_key from records where included = 1 and split in ('train', 'val')")})
+    body = ("\n".join(keys) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    return {"file": path.name, "records": len(keys), "sha256": hashlib.sha256(body).hexdigest(),
+            "release": release.id}

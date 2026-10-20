@@ -426,6 +426,48 @@ What is where:
 `MemoryMax=3500M` in the unit makes the server restart rather than starve sshd.
 `journalctl -u mycomap-vision` shows when that happens.
 
+## Human Feedback queues and the paper's seal
+
+No review queue may hold a v1-test record: one first green after dataset release v1's label
+snapshot, 2026-10-12 13:17:51 UTC (`MV_PROSPECTIVE_SEAL`; set it to `off` only after the
+paper's freeze). Every way an item is added goes through the seal:
+
+- seeding (`mv feedback seed`);
+- a reviewer's photo item;
+- anything else that adds items.
+
+It refuses a record first green after the seal. It also refuses, as unknown, a record green
+on the seal's own day, with no date, or missing from the manifest, unless the record is on
+the pinned list of v1 record keys. Refusals are counted in the seed's output with their
+records.
+
+Once: write the pinned list where the dataset release is (a laptop; the box has no dataset
+release), copy it to the box, and point the setting at it.
+
+```
+mv dataset record-keys v1 --out data/research-release-extras/v1/v1-record-keys.txt   # prints its sha256
+# copy it to <release root>/state/v1-record-keys.txt on the box, check its sha256, then
+# vision.env: MV_FEEDBACK_V1_KEYS=<release root>/state/v1-record-keys.txt
+```
+
+Without the list, the seal still holds, but it refuses v1 records green on the seal's day
+(1,070 of v1's) or with no date as unknown.
+
+Every re-seed, on the box:
+
+1. Back up the store:
+   `sqlite3 <release root>/state/human-feedback.sqlite ".backup <release root>/state/human-feedback.sqlite.bak-<UTC time>"`.
+2. Seed, then read the output's `refused_sealed`, `refused_unknown` and `refused_records`.
+3. Check: `mv feedback seal-check`. It must print `"ok": true` (exit 0). It lists any failing
+   item with its record and the decisions made on it.
+4. For the paper's record, also run the research check, `s21_seal_check.py`, in the private
+   research repo (experiments/v1-miss-review/). It judges against the dataset release v1
+   itself and .org's first-green dates.
+   - Run it on a copy of the store with research-releases/v1/release.sqlite
+     (sha256 f2590352…) and a manifest.
+   - Never run it against a serving manifest.
+
+
 ## Opening the site
 
 - Anyone with a mycomap.org account (today): `MV_SIGNIN=all`.

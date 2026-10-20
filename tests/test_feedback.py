@@ -139,8 +139,9 @@ def test_seed_files_from_the_miss_review_load(tmp_path):
     assert cw[0]["evidence"]["v1_val_misses_resolved"] == "2"
 
 
-def test_seeding_from_files_adds_projects_and_a_blind_sample(tmp_path, conn):
+def test_seeding_from_files_adds_projects_and_a_blind_sample(tmp_path, conn, monkeypatch):
     from mycomap_vision import manifest  # noqa: F401  (conn fixture's schema)
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")   # seeding itself; the seal: test_feedback_seal
     conn.execute("insert into records (observation_id, source, scientific_name, north_america, "
                  "green_projects, exported_at) values ('7', 'inat', 'Laccaria nobilis', 1, "
                  "'[\"Idaho Fungi\"]', 'now'), ('8', 'inat', 'Laccaria laccata group', 1, "
@@ -192,7 +193,8 @@ def test_photos_left_out_by_a_decision_leave_the_reference_at_the_next_sync(tmp_
     assert fb.photo_id_of("mo:45") == 1_000_000_000_045 and fb.photo_id_of("x") is None
 
 
-def test_twin_location_conflicts_seed_without_coordinates_and_decide_on_org(tmp_path, conn):
+def test_twin_location_conflicts_seed_without_coordinates_and_decide_on_org(tmp_path, conn,
+                                                                            monkeypatch):
     """One find posted to MO and iNat whose copies sit over 5 km apart: a pair item with the
     distance, how each copy is placed and which looks wrong, and no coordinate anywhere;
     fixing either copy is a decision for mycomap.org / MO / iNat (codes kept stable)."""
@@ -203,6 +205,7 @@ def test_twin_location_conflicts_seed_without_coordinates_and_decide_on_org(tmp_
                  "unclear: both look precise\n"
                  "7.4\t1\t2\tnamed location\t3\t4\t\tagrocybe arvalis\tMO copy: named location\n",
                  encoding="utf-8")
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")   # seeding itself; the seal: test_feedback_seal
     s = fb.Store(tmp_path / "f.sqlite")
     out = fb.seed_files(s, conn, twin_locations=f)
     assert out[0]["added"] == 2

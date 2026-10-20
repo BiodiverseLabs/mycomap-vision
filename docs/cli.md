@@ -118,3 +118,12 @@ when iNat is down; `--no-taxonomy` skips it.
 | `nightly` | the server's nightly update |
 
 Commands named `aws-*-job` run on the instances themselves.
+
+### Human Feedback
+
+| Command | What it does |
+| --- | --- |
+| `feedback seed` | add review-queue items from review lists (never duplicates one; refuses records under the paper's seal, counted) |
+| `feedback seal-check` | no queue item may name a record first green after the seal; exit 1 if one does or its date is unknown |
+| `feedback status` | open and decided items per queue |
+| `dataset record-keys` | a release's record keys, the pinned list the seal accepts (`MV_FEEDBACK_V1_KEYS`) |
