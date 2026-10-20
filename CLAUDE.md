@@ -54,7 +54,9 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   never listed or indexed; deleted only by the person who ran it or a mycomap.org admin; no
   expiry. Stored in the bucket's `site-runs/` (the box may Put/Get/Delete there and
   nothing more). API v1 and the app's sessions keep nothing. New code that keeps or shows
-  a run goes through `runs.py`.
+  a run goes through `runs.py`. A run's link-preview card (`linkcards.py`, for Facebook, X,
+  iMessage) carries only its answer and its own photos: never the place, the date, the
+  observation or who ran it.
 - **Unpublished results stay out of this public repo.** Experiment entries and the paper
   draft live in the private research checkout (`config.RESEARCH_DIR`: `MV_RESEARCH_DIR`, or
   `../mycomap-vision-research`), under `experiments/` and `paper/`; the site shows them to

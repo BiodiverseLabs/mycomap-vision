@@ -37,7 +37,7 @@ fi
 echo "==> System packages"
 sudo apt-get update -qq
 sudo apt-get install -y -qq git curl build-essential python3 python3-venv python3-dev \
-  sqlite3 nginx certbot
+  sqlite3 nginx certbot fonts-dejavu-core   # fonts: link-preview cards (linkcards.py)
 command -v aws >/dev/null || sudo snap install aws-cli --classic
 
 # The model (~1.7 GB), the reference vectors and the manifest share 4 GB of RAM;
