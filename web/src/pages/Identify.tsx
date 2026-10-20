@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode,
+import { createContext, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode,
          type RefObject, type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
 import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, Dna, ImagePlus,
@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/Layout";
 import {
   api,
+  runApi,
   ApiError,
   signInUrl,
   modelKey,
@@ -32,6 +33,8 @@ import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@
 import { applyPick } from "@/lib/mapPick";
 import { localWhen, runDetails, type Answered } from "@/lib/keptRun";
 import { observationFromQuery, parseObservationLink, sourceName, type ObservationRef } from "@/lib/observationLink";
+import { CopyLink } from "@/components/CopyLink";
+import { keptLine, liveRuns, RUN_ID, runPath, runPhotos } from "@/lib/runLink";
 
 // The map (Leaflet) loads only when someone opens it: the Identify page stays light.
 const LocationPicker = lazy(() => import("@/components/LocationPicker"));
@@ -52,6 +55,8 @@ import {
 } from "@/lib/modelChoice";
 
 const MAX_PHOTOS = 10;
+/** True on a run's own page (/r/<id>) when the viewer didn't run it: "these photos", not "your". */
+export const OthersRun = createContext(false);
 const RANK_LABEL: Record<Rank, string> = { family: "Family", genus: "Genus", species: "Species" };
 
 export function IdentifyPage() {
@@ -145,9 +150,47 @@ export function IdentifyPage() {
     byLink.reset();
     setLink("");
     setMode("photos");
+    window.history.replaceState(null, "", "/");
     window.scrollTo({ top: 0, behavior: "smooth" });
     pickZone.current?.focus({ preventScroll: true });
   };
+
+  // Every run has its own link (lib/runLink.ts): the address becomes /r/<id> as the answer
+  // arrives, ready to copy, share or bookmark. Start over goes back to /.
+  const runRef = answer?.run ?? null;
+  const [deletedRun, setDeletedRun] = useState<string | null>(null);
+  const shownRun = runRef && deletedRun !== runRef.id ? runRef : null;
+  useEffect(() => {
+    if (!runRef) return;
+    liveRuns.add(runRef.id);
+    window.history.replaceState(null, "", runPath(runRef.id));
+  }, [runRef?.id]);
+  const deleteRun = async () => {
+    if (!shownRun || !window.confirm("Delete this result's link and the copies of your photos? The link stops working.")) return;
+    await runApi.remove(shownRun.id);
+    setDeletedRun(shownRun.id);
+    window.history.replaceState(null, "", "/");
+  };
+
+  // "Identify these photos again" on a run's page (/?run=<id>): its photo copies, place and
+  // date come back into the form, to identify afresh.
+  const againFrom = useMemo(() => new URLSearchParams(window.location.search).get("run"), []);
+  useEffect(() => {
+    if (!againFrom || !RUN_ID.test(againFrom)) return;
+    (async () => {
+      const r = await runApi.open(againFrom);
+      if (r.kind !== "photos") return;
+      const photos = await Promise.all(runPhotos(r).map(async (u, i) =>
+        new File([await (await fetch(u)).blob()], `photo-${i + 1}.jpg`, { type: "image/jpeg" })));
+      const c = r.context_used;
+      setFiles(photos);
+      setWhere({
+        ...(c.latitude != null && c.longitude != null ? { lat: String(c.latitude), lng: String(c.longitude) } : {}),
+        ...(c.observed_on ? { observedOn: c.observed_on } : {}),
+      });
+      window.history.replaceState(null, "", "/");
+    })().catch(() => { /* the form stays empty; the run's page is still there */ });
+  }, [againFrom]);
 
   // On a phone the waiting card, then the answer, appear below the form: bring each into
   // view (phoneFlow.shouldScrollTo has the rule).
@@ -230,7 +273,26 @@ export function IdentifyPage() {
             <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
               <ContextLine used={answer.context_used} sent={viaLink ? undefined : run.variables?.where}
                            placeModel={usesPlace(answer.results.map((r) => r.model.method))} />
-              <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-top" />
+              <div className="flex gap-2">
+                {shownRun && <CopyLink id={shownRun.id} />}
+                <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-top" />
+              </div>
+              {shownRun && (
+                <p className="w-full text-xs text-muted-foreground" data-testid="text-run-link">
+                  {keptLine(viaLink ? "observation" : "photos")}{" "}
+                  {!viaLink && (
+                    <button type="button" className="underline decoration-dotted underline-offset-2 hover:text-destructive"
+                            onClick={deleteRun} data-testid="button-delete-run">
+                      Delete it
+                    </button>
+                  )}
+                </p>
+              )}
+              {runRef && deletedRun === runRef.id && (
+                <p className="w-full text-xs text-muted-foreground" data-testid="text-run-deleted">
+                  Deleted: the link no longer works, and the copies of your photos are gone.
+                </p>
+              )}
             </div>
           )}
           {answer && (
@@ -692,7 +754,7 @@ function WhereWhen({ where, setWhere, noPlace }: {
   );
 }
 
-function ContextLine({ used, sent, placeModel }: { used: ContextUsed; sent?: Where; placeModel: boolean }) {
+export function ContextLine({ used, sent, placeModel }: { used: ContextUsed; sent?: Where; placeModel: boolean }) {
   if (!used.place_from && !used.date_from) {
     return (
       <p className="min-w-0 flex-1 text-sm text-muted-foreground">
@@ -927,7 +989,7 @@ function PhotoChecklist({ hasPhotos }: { hasPhotos: boolean }) {
 
 /** After an answer: how to go from a suggestion to a name you can rely on (gate.whatNext
  *  words it for photos that may not show a fungus). */
-function WhatNext({ results }: { results: IdentifyResult[] }) {
+export function WhatNext({ results }: { results: IdentifyResult[] }) {
   const next = whatNext(results);
   return (
     <div className="mt-6 rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-4 text-sm text-[#5c4a3a]"
@@ -955,7 +1017,7 @@ function WhatNext({ results }: { results: IdentifyResult[] }) {
   );
 }
 
-function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; photos: number }) {
+export function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; photos: number }) {
   // null: all photos together (the main answer). A number: that photo on its own.
   const [view, setView] = useState<number | null>(null);
   const [details, setDetails] = useState(false);
@@ -1126,13 +1188,14 @@ function Facts({ n, extra, size = "sm" }: { n: Named; extra?: string | null; siz
 function AnswerHero({ a, r, photos }: { a: Answer; r: IdentifyResult; photos: number }) {
   const italic = (rank: Rank) => (rank !== "family" ? "sci" : "");
   const h = a.headline;
+  const shared = useContext(OthersRun);
   return (
     <section className="border-b border-[#4f7a43]/15 bg-[#f1f6ec] px-4 py-5 sm:px-6 scroll-mt-20 text-[#4a3728]"
              data-answer-box data-testid="box-answer">
       <p className="text-xs font-semibold uppercase tracking-wider text-[#4f7a43]">
         {a.lookAlike
           ? "Closest DNA-verified look-alike"
-          : `Best answer from your ${photos === 1 ? "photo" : `${photos} photos`}`}
+          : `Best answer from ${shared ? "these" : "your"} ${photos === 1 ? "photo" : `${photos} photos`}`}
       </p>
       {h ? (
         <>

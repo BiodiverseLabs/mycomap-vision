@@ -11,6 +11,8 @@ import { BenchmarkPage, BenchmarksPage, ForResearchersPage, ProtocolsPage,
          ResearchPage } from "@/pages/Research";
 import { ExperimentPage, ExperimentsPage } from "@/pages/Experiments";
 import { FeedbackPage } from "@/pages/Feedback";
+import { RunPage } from "@/pages/Run";
+import { liveRuns } from "@/lib/runLink";
 import { api, signInUrl } from "@/lib/api";
 import { API_PATH, MOVED, mustSignIn } from "@/lib/research";
 import { FEEDBACK_PATH } from "@/lib/feedback";
@@ -28,6 +30,8 @@ export function App() {
     <Layout>
       <Switch>
         <Route path="/" component={IdentifyPage} />
+        {/* A run's own link (lib/runLink.ts). The tab that just ran it stays on Identify. */}
+        <Route path="/r/:id">{(params) => liveRuns.has(params.id) ? <IdentifyPage /> : <RunPage id={params.id} />}</Route>
         <Route path="/about" component={AboutPage} />
         <Route path="/get-involved" component={GetInvolvedPage} />
         <Route path="/research" component={ResearchPage} />
