@@ -55,6 +55,13 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   expiry. Stored in the bucket's `site-runs/` (the box may Put/Get/Delete there and
   nothing more). API v1 and the app's sessions keep nothing. New code that keeps or shows
   a run goes through `runs.py`.
+- **Every answer is logged, insert-only** (Steve, 2026-10-20; `identifylog.py`, docs/api.md
+  §11). One row per answer given or served, on every path, in `state/identify-log.sqlite`,
+  for the paper's truth-independence check: when, the path, the observation, fresh or kept,
+  versions, who asked, the run link; no photo or answer. Never UPDATE or DELETE it (the
+  table refuses); write only through `log_answer` in `api.py`, which queues and never
+  raises. New code that answers an identification logs it there. Kept until the paper
+  closes.
 - **Unpublished results stay out of this public repo.** Experiment entries and the paper
   draft live in the private research checkout (`config.RESEARCH_DIR`: `MV_RESEARCH_DIR`, or
   `../mycomap-vision-research`), under `experiments/` and `paper/`; the site shows them to

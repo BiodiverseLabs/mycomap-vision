@@ -64,6 +64,11 @@ PUBLIC_FILES = ("/favicon.png", "/mycomap-logo.png")
 PUBLIC_FILE_DIRS = ("/assets/",)
 
 
+# Routes that check their caller themselves: the identification log's read for the paper
+# (identifylog.py), for mycomap.org's server key or a signed-in admin.
+SELF_CHECKED = ("/api/identify-log/first",)
+
+
 def public_page(method: str, path: str) -> bool:
     """A page or shell file anyone may read (GET or HEAD only)."""
     return method in ("GET", "HEAD") and (
@@ -265,6 +270,10 @@ class SigninConfig:
         if path.startswith("/api/v1/") or path == "/api/v1" or path.startswith("/api/docs/"):
             return False
         if public_page(method, path):
+            return False
+        # Checks its own caller (mycomap.org's server key, or a signed-in admin), so a
+        # server-key call without a cookie reaches it.
+        if path in SELF_CHECKED:
             return False
         # The public dataset release's CC images (dataset_api.py), when Steve opens them.
         if self.dataset_public and method in ("GET", "HEAD") and path.startswith("/api/dataset/"):

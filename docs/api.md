@@ -760,3 +760,55 @@ member and admin pages, and the app's client.
 
 The box stays 4 GB for now (Steve declined the resize). Session memory has a hard cap,
 set in `docs/capacity.md`.
+
+## 11. The identification log (Steve, 2026-10-20)
+
+Every answer Vision gives or serves is logged on the box, one row each, in
+`state/identify-log.sqlite` (`identifylog.py`): for the paper's sealed test
+(v1-test, records first validated after 2026-10-12 13:17:51 UTC), which has to say for
+each test observation whether Vision had answered it **before** its first green
+validation, since a validator might have seen the answer. No other record says that:
+the observation answers (§3.2) keep only the latest answer per key, nginx keeps the
+observation number only on the v1 path, and run links cover the site only.
+
+| Path | Logged when |
+|---|---|
+| `site_upload` | the Identify page answers uploaded photos (one row per model) |
+| `site_observation` | the Identify page answers an iNat or MO link, fresh or kept |
+| `v1_identify` | `POST /api/v1/identify` |
+| `v1_observation` | `POST /api/v1/identify/{inat\|mo}/{id}`, fresh or kept |
+| `v1_answers` | `GET /api/v1/answers/{inat\|mo}/{id}` serves a kept answer |
+| `app_session` | a session's combined answer changes (a photo added or dropped, the place or date changed) |
+| `feedback_rescore` | Human Feedback's "Show Vision's answer" or Refresh re-asks Vision about a record |
+
+Each row: the UTC time; the path; the source and observation number where there is one
+(by-observation and links; for photos, only when the caller's `client_ref` names one as
+`inat:<id>` or `mo:<id>`, marked as such); whether the answer was scored then or a kept
+answer was served; the answer key, `answers_version`, model and release; who asked (a
+signed-in site user's mycomap.org id and name; for v1 and the app, the credential kind
+with its key id or the member's pseudonymous subject; mycomap.org's server key as
+`server`; the Human Feedback reviewer); the caller's `client_ref`; and the run link's id,
+if any. No photo, place, or answer is in it. A refused call is not logged.
+
+Rows are only ever inserted: the table refuses UPDATE and DELETE, and nothing in the code
+does either. Writing never fails or slows an answer: rows are queued and written on their
+own thread; one that can't be written is counted (`identify_log` in `/api/health` with
+the server key: `written`, `pending`, `dropped`, `failed`), never raised. Answers, kept
+answers, run links and every v1 response are unchanged by it. Kept until the paper
+closes; for now, forever.
+
+**The read for the paper.** `GET /api/identify-log/first` (mycomap.org's server key, or a
+signed-in mycomap.org admin; `Cache-Control: private, no-store`; optional `source`,
+`since` (ISO 8601), `format=tsv`) lists, per observation, the first time Vision answered
+it: `first_at`, `first_path`, `first_fresh`, `first_exact`, `first_provenance`, and
+`first_live_at` / `first_live_path` from the live log alone. A first row that served a
+kept answer (`first_fresh` false) means Vision had answered it before the log began.
+Who asked is never in it.
+On the box, `mv identify-log first --out first.tsv` gives the same.
+
+**Before the log.** It starts at its deploy. What older stores still hold can be added
+once with `mv identify-log import --answers --runs`, never as if it were logged live:
+observation-answer rows (`recovered:observation-answers`) and run links
+(`recovered:run-links`, only runs someone signed in for) come in with `first_exact`
+false, meaning Vision first answered at or before that time, since a rerun overwrote the
+earlier time. Each store is imported once.

@@ -425,6 +425,50 @@ def cmd_archive_embeddings(conn, args) -> None:
         print(json.dumps(embed.archive_embeddings(conn, models.storage_name(b), args.label)))
 
 
+def cmd_identify_log(args) -> None:
+    """The identification log (identifylog.py): its rows per path, the first answer per
+    observation for the paper, or a one-off, labelled import of what older stores hold."""
+    from . import identifylog
+    path = Path(args.log) if args.log else identifylog.default_path()
+    if args.action == "import":
+        if not (args.answers or args.runs):
+            raise SystemExit("give --answers and/or --runs")
+        log = identifylog.IdentifyLog(path, start=False)
+        if args.answers:
+            src = (Path(args.answers_file) if args.answers_file
+                   else path.parent / "observation-answers.sqlite")
+            n = identifylog.import_answers(log, src)
+            print(f"{n} rows from {src} ({identifylog.FROM_ANSWERS}: first answered at or "
+                  "before)")
+        if args.runs:
+            from . import runs as run_links
+            store = run_links.from_setting(config.setting("MV_RUN_LINKS"), path.parent)
+            if store is None:
+                raise SystemExit("MV_RUN_LINKS is off here: no run links to read")
+            n = identifylog.import_runs(log, path.parent / "site-runs.sqlite", store.get)
+            print(f"{n} rows from the run links ({identifylog.FROM_RUNS}: at or before)")
+        return
+    if not path.is_file():
+        raise SystemExit(f"no identification log at {path}")
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        if args.action == "first":
+            since = None
+            if args.since:
+                at = datetime.fromisoformat(args.since.replace("Z", "+00:00"))
+                since = (at if at.tzinfo else at.replace(tzinfo=timezone.utc)).timestamp()
+            text = identifylog.as_tsv(identifylog.first_answers(conn, args.source, since))
+            if args.out:
+                Path(args.out).write_text(text, encoding="utf-8")
+                print(f"wrote {args.out}", file=sys.stderr)
+            else:
+                sys.stdout.write(text)
+        else:
+            print(json.dumps(identifylog.summary(conn), indent=2))
+    finally:
+        conn.close()
+
+
 def cmd_twin_groups(args) -> None:
     """Cross-post twin groups of a dataset release (twins.py): the file the record-grouped
     methods read. Reads only that release, its dHash index and the given lists."""
@@ -2150,6 +2194,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--accept-removals", action="store_true",
                    help="with --now: take an answer that removes more records than the limit")
     sub.add_parser("prospective", help="how advance predictions fared once the DNA came in")
+    p = sub.add_parser("identify-log", help="the append-only log of every answer Vision gave "
+                       "or served: rows per path, the first answer per observation (paper), "
+                       "or a one-off labelled import of older stores")
+    p.add_argument("action", nargs="?", default="summary", choices=["summary", "first", "import"])
+    p.add_argument("--log", help="the log (default: state/identify-log.sqlite on the box, "
+                                 "beside the manifest elsewhere)")
+    p.add_argument("--source", choices=["inat", "mo"], help="first: only this source")
+    p.add_argument("--since", help="first: only observations first answered at or after this "
+                                   "UTC time (ISO 8601)")
+    p.add_argument("--out", help="first: write the TSV here")
+    p.add_argument("--answers", action="store_true", help="import: observation-answers.sqlite "
+                   "rows, as answered at or before their answered_at")
+    p.add_argument("--answers-file", help="import: that store (default: beside the log)")
+    p.add_argument("--runs", action="store_true", help="import: the run links the owner index "
+                   "lists, as answered at or before their answered_at")
     p = sub.add_parser("confused-with", help="mycomap.org's \"misidentified as\" table behind "
                        "the \"often confused with\" notes: state, a name's note, or --fetch")
     p.add_argument("names", nargs="*", help="species names to look up in the cached table")
@@ -2622,6 +2681,9 @@ def main(argv: list[str] | None = None) -> int:
     occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
 
     args = parser.parse_args(argv)
+    if args.command == "identify-log":        # its own store only: no manifest
+        cmd_identify_log(args)
+        return 0
     if args.command == "twin-groups":         # reads only a dataset release
         cmd_twin_groups(args)
         return 0
