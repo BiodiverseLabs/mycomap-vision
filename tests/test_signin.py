@@ -279,8 +279,10 @@ def test_the_api_page_is_open_to_all_while_every_other_page_needs_sign_in(conn, 
     assert "<title>site</title>" in c.get("/research/api").text
     assert c.head("/research/api").status_code in (200, 405)       # never sent to sign in
     assert c.get("/api/docs/v1.json").status_code == 200           # the page's only data
-    # Everything else still sends people to sign in, or refuses.
-    for path in ("/", "/research", "/research/results", "/research/paper", "/models",
+    # Everything else still sends people to sign in, or refuses. (/, /about and
+    # /get-involved answer with the shell and its link card; the app sends people on:
+    # test_link_cards.py.)
+    for path in ("/research", "/research/results", "/research/paper", "/models",
                  "/research/api/extra", "/api-docsx", "/assetsx.js"):
         res = c.get(path)
         assert res.status_code == 302 and res.headers["location"].startswith("/auth/signin"), path

@@ -54,7 +54,9 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   never listed or indexed; deleted only by the person who ran it or a mycomap.org admin; no
   expiry. Stored in the bucket's `site-runs/` (the box may Put/Get/Delete there and
   nothing more). API v1 and the app's sessions keep nothing. New code that keeps or shows
-  a run goes through `runs.py`.
+  a run goes through `runs.py`. A run's link-preview card (`linkcards.py`, for Facebook, X,
+  iMessage) carries only its answer and its own photos: never the place, the date, the
+  observation or who ran it.
 - **Every answer is logged, insert-only** (Steve, 2026-10-20; `identifylog.py`, docs/api.md
   §11). One row per answer given or served, on every path, in `state/identify-log.sqlite`,
   for the paper's truth-independence check: when, the path, the observation, fresh or kept,

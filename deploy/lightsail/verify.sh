@@ -41,6 +41,9 @@ if [ "$SIGNIN" = "all" ]; then
   check "pages send people to sign in"    redirects_to "$BASE/auth/signin?returnTo=" "$BASE/models"
   check "the API page is open to all"     status_is 200 "$BASE/research/api"
 fi
+# Link previews (linkcards.py): Facebook, X, iMessage and Slack read Vision's own card.
+check "a shared link carries Vision's card" body_has 'property="og:site_name" content="MycoMap Vision"'   -A "facebookexternalhit/1.1" "$BASE/"
+check "the card's image opens for anyone" status_is 200 "$BASE/og-card.jpg"
 if [ "$SIGNIN" = "identify" ]; then
   check "site open"                       body_has '"records":' "$BASE/api/stats"
   check "identify refuses before sign-in" status_is 401 -X POST "$BASE/api/identify"

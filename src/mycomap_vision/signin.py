@@ -60,8 +60,13 @@ def members_only(path: str) -> bool:
 # the API page reads only the public outline (/api/docs/v1.json). The site sends a
 # signed-out visitor to sign in when they move on to any other page (web/src/App.tsx).
 PUBLIC_PAGES = ("/research/api", "/api-docs")
-PUBLIC_FILES = ("/favicon.png", "/mycomap-logo.png")
+PUBLIC_FILES = ("/favicon.png", "/mycomap-logo.png", "/og-card.jpg")
 PUBLIC_FILE_DIRS = ("/assets/",)
+# The pages people share (Steve, 2026-10-20: link previews, linkcards.py). They answer
+# with the same shell, carrying the page's card, so Facebook, X, iMessage and Slack can read
+# it; the app sends a signed-out person on to sign in, as a full page load would
+# (web/src/lib/research.ts mustSignIn), and every answer stays behind /api/.
+SHARE_PAGES = ("/", "/about", "/get-involved")
 
 
 # Routes that check their caller themselves: the identification log's read for the paper
@@ -72,15 +77,16 @@ SELF_CHECKED = ("/api/identify-log/first",)
 def public_page(method: str, path: str) -> bool:
     """A page or shell file anyone may read (GET or HEAD only)."""
     return method in ("GET", "HEAD") and (
-        path in PUBLIC_PAGES or path in PUBLIC_FILES
+        path in PUBLIC_PAGES or path in PUBLIC_FILES or path in SHARE_PAGES
         or any(path.startswith(d) for d in PUBLIC_FILE_DIRS) or run_path(path))
 
 
-# A run's own link (runs.py; Steve, 2026-10-20): its page, its answer and its photo copies
-# open for anyone who has the link, signed in or not. The id is the only key. Nothing else
-# about runs is open: deleting one needs sign-in, and no route lists them.
+# A run's own link (runs.py; Steve, 2026-10-20): its page, its answer, its photo copies and
+# its link-preview image (linkcards.py) open for anyone who has the link, signed in or not.
+# The id is the only key. Nothing else about runs is open: deleting one needs sign-in, and
+# no route lists them.
 _RUN_PATH = re.compile(r"^/(?:r/[A-Za-z0-9_-]{16}|api/runs/[A-Za-z0-9_-]{16}"
-                       r"(?:/photos/\d{1,2}\.jpg)?)$")
+                       r"(?:/photos/\d{1,2}\.jpg|/card\.jpg)?)$")
 
 
 def run_path(path: str) -> bool:

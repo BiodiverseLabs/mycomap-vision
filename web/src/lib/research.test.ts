@@ -76,6 +76,15 @@ test("a signed-out visitor reads the API page but signs in for any other page", 
   }
 });
 
+test("the pages whose link card crawlers may read still send a signed-out person to sign in", () => {
+  // The server answers /, /about and /get-involved with the shell and its link-preview card
+  // (signin.SHARE_PAGES, linkcards.py); the app is what sends a signed-out person on.
+  const visitor = me("all", null);
+  for (const page of ["/", "/about", "/get-involved"]) {
+    assert.equal(mustSignIn(visitor, page), true, page);
+  }
+});
+
 test("nobody else is sent to sign in by the site itself", () => {
   assert.equal(mustSignIn(me("all", someone), "/research/results"), false);
   assert.equal(mustSignIn(me("identify", null), "/about"), false);

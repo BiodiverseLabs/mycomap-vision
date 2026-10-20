@@ -17,7 +17,7 @@ import sqlite3
 import sys
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -33,7 +33,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, manifest,
+from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                onnxtower, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
@@ -1371,6 +1371,64 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(404, "no such photo", headers=NOT_INDEXED)
         return Response(body, media_type="image/jpeg", headers=NOT_INDEXED)
 
+    # A run's link-preview image (linkcards.py), made from its own photo copies, kept in
+    # memory: a run never changes, and one that is deleted is gone from stored_run first.
+    card_images: "OrderedDict[str, bytes]" = OrderedDict()
+    card_lock = threading.Lock()
+    card_logo = next((p for p in ((web_dist / "mycomap-logo.png") if web_dist else None,
+                                  config.REPO_ROOT / "web" / "public" / "mycomap-logo.png")
+                      if p is not None and p.is_file()), None)
+
+    def run_card_image(rid: str, run: dict) -> bytes | None:
+        with card_lock:
+            if rid in card_images:
+                card_images.move_to_end(rid)
+                return card_images[rid]
+        n = int(run.get("photos") or 0) if run.get("kind") == "photos" else 0
+        bodies = [b for b in (run_store.photo(rid, i) for i in range(min(n, 5))) if b]
+        if not bodies:
+            return None
+        logo = Image.open(card_logo) if card_logo else None
+        body = linkcards.run_card_jpeg(bodies, linkcards.headline(linkcards.run_answer(run)),
+                                       logo)
+        with card_lock:
+            card_images[rid] = body
+            while len(card_images) > 64:
+                card_images.popitem(last=False)
+        return body
+
+    @app.api_route("/api/runs/{rid}/card.jpg", methods=["GET", "HEAD"])
+    def run_card(request: Request, rid: str):
+        """The image a shared link shows (Facebook, X, iMessage...): the find's photos and
+        the answer. Like the run itself: anyone with the link, never cached or indexed."""
+        read_limit(request)
+        body = run_card_image(rid, stored_run(rid))
+        if body is None:
+            raise HTTPException(404, "this result has no photos", headers=NOT_INDEXED)
+        return Response(body, media_type="image/jpeg", headers=NOT_INDEXED)
+
+    def public_origin(request: Request) -> str:
+        """vision.mycomap.org (MV_PUBLIC_ORIGIN) for the cards' absolute links."""
+        return (signin.origin or origin_of(config.setting("MV_PUBLIC_ORIGIN"))
+                or str(request.base_url).rstrip("/"))
+
+    def page_card(request: Request, path: str) -> tuple["linkcards.Card | None", int]:
+        """The link-preview card for a page shell, and its status: 404 for a run that is
+        gone or was never given out."""
+        origin = public_origin(request)
+        if not run_path(path):
+            return linkcards.site_card(origin, path), 200
+        rid = path.removeprefix("/r/")
+        read_limit(request)
+        try:
+            run = run_store.get(rid) if run_store is not None else None
+        except Exception as e:  # noqa: BLE001 - the page still loads; the bucket is down
+            note(f"[runs] no card for {rid}: {type(e).__name__}: {e}")
+            return None, 200
+        if run is None:
+            return linkcards.gone_card(origin, rid), 404
+        return linkcards.run_card(origin, rid, run), 200
+
     @app.delete("/api/runs/{rid}", status_code=204)
     def delete_run(request: Request, rid: str):
         """Deletes a run, its photo copies and its link: the person who ran it, or a
@@ -1383,6 +1441,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if not (owner and str(who.get("sub")) == owner) and not is_admin(str(who.get("sub"))):
             raise HTTPException(403, "only the person who ran it, or an admin, can delete it")
         run_store.delete(rid)
+        with card_lock:
+            card_images.pop(rid, None)
         return Response(status_code=204)
 
     # --- the identification log's read for the paper (identifylog.first_answers) ----------
@@ -2687,14 +2747,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         root = web_dist.resolve()
 
         @app.get("/{path:path}", include_in_schema=False)
-        def site(path: str):
+        def site(request: Request, path: str):
             if path.startswith("api/"):
                 raise HTTPException(404, "no such API route")
             target = (root / path).resolve()
             if path and target.is_file() and target.is_relative_to(root):
                 return FileResponse(target)
+            # The shell, with the link-preview card of the page (linkcards.py).
+            card, status = page_card(request, "/" + path)
+            shell = linkcards.with_tags((root / "index.html").read_text(encoding="utf-8"), card)
             # A run's link is found only by whoever was given it: never by a search engine.
-            return FileResponse(root / "index.html",
+            return HTMLResponse(shell, status_code=status,
                                 headers=NOT_INDEXED if run_path("/" + path) else None)
 
     return app

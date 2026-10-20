@@ -62,7 +62,9 @@ export function AboutPage() {
           the details cameras hide in a photo removed: exact place, time and camera. A place is
           kept only to a tenth of a degree, about 10 km, as the answer shows it. Only people
           you give the link to can open it; search engines don't see it and nothing lists it.
-          It stays until you delete it from its page. An identification from an iNaturalist or
+          It stays until you delete it from its page. If you shared the link on social media,
+          its preview there (the answer and your photos) can stay for a while after you
+          delete it. An identification from an iNaturalist or
           Mushroom Observer link keeps no photos, only where they are at the source. Your
           photos are never used to train Vision or as references.
         </Section>
