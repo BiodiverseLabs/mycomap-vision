@@ -221,18 +221,27 @@ def refuse_sealed(ood_manifest: Path) -> None:
                          "mv paper-score after the freeze tag, never tuned on")
 
 
+# The gate scores the frozen base model's vectors that the serving fork gives it
+# (models.FineTuned.encode_with_base): the base tower at the fine-tuned model's input size.
+# For a 224 px fine-tune that is BioCLIP 2 ("bioclip-2"); for the 336 px one, BioCLIP 2 with
+# its position embeddings resized to 336 ("bioclip-2-336"), whose vectors differ, so a gate
+# for a 336 model is fitted and its thresholds picked on those (paper E10 at 336, 19 Oct).
+FROZEN_BASE_NOTE = "the frozen base at the served model's input size"
+
+
 def tune(conn, dev_npz: Path, ood_npz: Path, ood_manifest: Path, exclude_tsv: Path,
          out_dir: Path, benchmark: str = "heldout-2026-10-08", negatives_npz: Path | None = None,
          embeddings_root: Path | None = None, gate_dir: Path | None = None,
-         served: str | None = None, log=print) -> dict:
+         served: str | None = None, log=print, base: str = "bioclip-2") -> dict:
     """See the module docstring. With `served` (a backbone name), the lighter gate: the
     probe alone, fitted and scored on that backbone's own (served) vectors, so serving
-    needs no second set of weights and no extra pass; the gate's base is that backbone."""
+    needs no second set of weights and no extra pass; the gate's base is that backbone.
+    `base`: the frozen model whose vectors the gate reads (FROZEN_BASE_NOTE)."""
     refuse_sealed(ood_manifest)
     out_dir.mkdir(parents=True, exist_ok=True)
     exclude = {r["observation_id"] for r in csv.DictReader(open(exclude_tsv, encoding="utf-8"),
                                                           delimiter="\t")}
-    field, base = ("ft", served) if served else ("frozen", "bioclip-2")
+    field, base = ("ft", served) if served else ("frozen", base)
     extra = unit(np.load(negatives_npz)[field]) if negatives_npz else None
     X, y, prov = probe_training_set(conn, exclude, embeddings_root or config.DATA_DIR /
                                     "embeddings" / base, extra, base=base)
@@ -292,15 +301,17 @@ def release_dev_records(rel, keys: list[str]) -> tuple[list[str], set[str]]:
 def tune_release(rel, dev_npz: Path, ood_npz: Path, ood_manifest: Path, negatives_npz: Path,
                  out_dir: Path, embeddings: tuple[np.ndarray, np.ndarray],
                  gate_dir: Path | None = None, served: str | None = None,
-                 max_lost_share: float = 0.0, log=print) -> dict:
+                 max_lost_share: float = 0.0, log=print, base: str = "bioclip-2") -> dict:
     """The gate re-tuned on a dataset release (paper E10): the probe's positives from its
     train split, Open Images test-split negatives only, thresholds by the declared rule on
     its val records outside the former held-out benchmark (all of val reported beside),
     scored on the earlier not-a-fungus set. `embeddings`: (photo ids, vectors) of the
-    probe's base (frozen BioCLIP 2, or the served model's own with `served`)."""
+    probe's base (`base`, the frozen model, or the served model's own with `served`);
+    the DEV, not-a-fungus and negative files' "frozen" vectors must come from the same
+    base (FROZEN_BASE_NOTE)."""
     refuse_sealed(ood_manifest)
     out_dir.mkdir(parents=True, exist_ok=True)
-    field, base = ("ft", served) if served else ("frozen", "bioclip-2")
+    field, base = ("ft", served) if served else ("frozen", base)
     ids, vecs = embeddings
     X, y, prov = release_probe_set(rel, ids, vecs, unit(np.load(negatives_npz)[field]))
     prov.update(negatives_sha256=sha256_file(negatives_npz))

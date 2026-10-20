@@ -135,3 +135,51 @@ def test_the_cli_passes_the_declared_lost_share_to_the_release_tune(monkeypatch,
     assert seen["max_lost_share"] == 0.0                  # the default: none may lose it
     with pytest.raises(SystemExit, match="max-lost-share"):
         cli.main(["fungus-gate", "tune", "--release", "v1", *files, "--max-lost-share", "1.5"])
+
+
+def test_the_cli_tunes_a_gate_on_the_frozen_base_it_names(monkeypatch, tmp_path):
+    """A 336 px model's serving fork gives the gate BioCLIP 2 at 336 (bioclip-2-336), whose
+    vectors differ from 224's: the probe trains on, and the gate is labelled with, the base
+    named; bioclip-2 by default."""
+    from mycomap_vision import cli, embed
+    seen = {}
+
+    def fake_tune(*args, base="bioclip-2", **kw):
+        seen["base"] = base
+        return {"chosen": {}}
+    monkeypatch.setattr(tune, "tune_release", fake_tune)
+    monkeypatch.setattr(cli, "_dataset_release", lambda args: object())
+    monkeypatch.setattr(embed, "load_embeddings",
+                        lambda conn, name: seen.setdefault("loaded", name) and (None, None))
+    files = ["--dev", "d.npz", "--ood", "o.npz", "--ood-manifest", "m.csv",
+             "--negatives", "n.npz", "--out", str(tmp_path)]
+    cli.main(["fungus-gate", "tune", "--release", "v1", *files, "--frozen-base", "bioclip-2-336"])
+    assert seen == {"base": "bioclip-2-336", "loaded": "bioclip-2-336"}
+    seen.clear()
+    cli.main(["fungus-gate", "tune", "--release", "v1", *files])
+    assert seen == {"base": "bioclip-2", "loaded": "bioclip-2"}
+
+
+def test_a_release_tune_labels_the_gate_and_report_with_its_frozen_base(monkeypatch, tmp_path):
+    seen = {}
+    for name in ("dev", "ood", "neg"):
+        np.savez(tmp_path / f"{name}.npz", keys=np.array(["1"]),
+                 frozen=np.ones((1, 4), np.float32), ft=np.ones((1, 4), np.float32))
+    (tmp_path / "m.csv").write_text("key,kind\n", encoding="utf-8")
+    monkeypatch.setattr(tune, "release_probe_set", lambda *a, **k: (None, None, {}))
+    monkeypatch.setattr(tune, "release_dev_records", lambda rel, keys: (["r"], {"r"}))
+    monkeypatch.setattr(tune, "_tune_core", lambda *a, **k: seen.update(field=a[10], base=a[11]))
+
+    class Rel:
+        id = "v1"
+
+        def cite(self):
+            return {}
+    tune.tune_release(Rel(), tmp_path / "dev.npz", tmp_path / "ood.npz", tmp_path / "m.csv",
+                      tmp_path / "neg.npz", tmp_path / "out", (np.array([1]), np.ones((1, 4))),
+                      base="bioclip-2-336")
+    assert seen == {"field": "frozen", "base": "bioclip-2-336"}
+    tune.tune_release(Rel(), tmp_path / "dev.npz", tmp_path / "ood.npz", tmp_path / "m.csv",
+                      tmp_path / "neg.npz", tmp_path / "out", (np.array([1]), np.ones((1, 4))),
+                      served="served-model", base="bioclip-2-336")
+    assert seen == {"field": "ft", "base": "served-model"}          # the lighter gate: its own
