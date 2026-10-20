@@ -349,6 +349,33 @@ Vision's reference photos (within 3 dHash bits of a non-template photo in the re
 `state/vision-usage.sqlite`; no photo, hash, person or record id. Answers are unchanged.
 Without a twin table (`"table": false`) uploads are counted but nothing is hashed.
 
+**Identification log** (`identifylog.py`; Steve, 2026-10-20). Every answer the box gives or
+serves (site uploads and links, API v1, by-observation and its kept-answer read, app
+sessions, Human Feedback re-asks) adds one row to `state/identify-log.sqlite`: when, the
+path, the observation where there is one, fresh or kept, answer key, answers version,
+model and release, who asked (a site user's mycomap.org id and name; a key id or the
+member's pseudonymous subject) and the run link. It is for the paper's sealed test: did
+Vision answer a test observation before its first green validation (docs/api.md §11)?
+Insert-only (the table refuses UPDATE and DELETE), written on its own thread so it never
+fails or slows an answer; `/api/health` with the server key shows `identify_log` counters,
+and `failed` or `dropped` above 0 is worth a look in `journalctl -u mycomap-vision`
+(`[identify-log]`). It holds people's ids and names: **back it up with the other `state/`
+files, never copy it off the box except for the paper's read, and keep it until the paper
+closes** (no expiry for now). Read it on the box:
+
+```bash
+.venv/bin/mv identify-log                         # rows per path
+.venv/bin/mv identify-log first --out first.tsv   # per observation, its first answer
+```
+
+or `GET /api/identify-log/first` with the server key. **Once, after the first deploy
+with the log**, add what older stores hold, labelled as recovered ("answered at or
+before"), never as live rows:
+
+```bash
+.venv/bin/mv identify-log import --answers --runs
+```
+
 After the reference set, the night makes **advance predictions**: up to
 `MV_NIGHTLY_PREDICT` (300) records still awaiting validation on mycomap.org
 (`GET /api/vision/pending-records`), newest first, are identified from their iNat

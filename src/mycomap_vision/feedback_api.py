@@ -121,7 +121,7 @@ def item_url(item_id: int) -> str | None:
 
 def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store: fb.Store,
                org: OrgClient | None = None,
-               rescore: Callable[[str], dict] | None = None,
+               rescore: Callable[[str, dict | None], dict] | None = None,
                photos: "pr.ReviewPhotos | None" = None,
                name_info: "fo.NameInfo | None" = None,
                on_name_update_done: Callable[[], object] | None = None,
@@ -332,7 +332,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         if not fb.reviewer_view(item)["masked"]:
             raise HTTPException(409, "nothing is hidden on this item")
         key = (item["record_keys"] or [item["subject"]])[0]
-        got = rescore(key) if rescore else {"available": False}
+        got = rescore(key, who) if rescore else {"available": False}
         answer = {"available": bool(got.get("available")), "top5": got.get("top5") or [],
                   "reason": got.get("reason") if not got.get("available") else None}
         return store.reveal(item_id, who, answer)
@@ -352,7 +352,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             except requests.RequestException:
                 now = {}
             name = now.get("name") or item.get("current")
-            answer = rescore(key) if rescore else {"available": False}
+            answer = rescore(key, who) if rescore else {"available": False}
             top5 = answer.get("top5") or []
             still = (None if not top5 or not name
                      else not name_equiv.species_credit(top5[0][0], name))

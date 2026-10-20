@@ -33,7 +33,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
+from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                onnxtower, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
@@ -317,7 +317,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                answer_cache: "answercache.AnswerCache | None" = None,
                linked_accounts: "yours.LinkedCache | None | bool" = True,
                run_store: "run_links.RunStore | None" = None,
-               run_secret: bytes | None = None) -> FastAPI:
+               run_secret: bytes | None = None,
+               identify_log: "identifylog.IdentifyLog | None" = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -354,6 +355,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `run_store`: where the site's runs are kept, each under its own link /r/<id> (runs.py).
     None reads MV_RUN_LINKS: `s3` (the Vision bucket's site-runs/), a folder, or off (the
     default: no links). `run_secret` keys an iNat/MO run's id (default: the session secret).
+
+    `identify_log`: the append-only log of every answer given or served (identifylog.py),
+    for the paper's truth-independence check. None opens state/identify-log.sqlite on the
+    box, the file beside the manifest elsewhere.
 
     `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
     `confused_with` field on species candidates. True reads the cache beside the manifest
@@ -601,6 +606,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
              else Path(manifest_path or config.MANIFEST_PATH).parent), note=note)
     app.state.run_store = run_store
     run_secret = run_secret or signin.secret or secrets.token_bytes(32)
+    # Every answer given or served, one row each, insert-only (identifylog.py; Steve,
+    # 2026-10-20), beside the observation answers. Written off the request path.
+    if identify_log is None:
+        identify_log = identifylog.IdentifyLog(identifylog.default_path(manifest_path),
+                                               note=note)
+    app.state.identify_log = identify_log
 
     def q(sql: str, params: tuple = ()):
         with db_lock:
@@ -702,6 +713,30 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return answercache.answers_version(model_card().get("version"),
                                            index_version(backbone, method, view))
 
+    # --- the identification log (identifylog.py) -----------------------------------------
+    def release_now() -> str | None:
+        return model_card().get("version")
+
+    def served_version(backbone: str, method: str, ident) -> "Callable[[], str] | None":
+        """The answers version of the index that just answered: its version taken now (the
+        index may be swapped a moment later), hashed with the release on the log's writer
+        thread. None when that index is no longer the one served."""
+        try:
+            cur = indexes.current((backbone, method))
+        except Exception:  # noqa: BLE001 - logged without it
+            return None
+        if cur is None or cur[1] is not ident:
+            return None
+        return lambda: answercache.answers_version(release_now(), cur[0])
+
+    def log_answer(path: str, **fields) -> None:
+        """One row of the identification log. Never raises and never waits: the row is
+        queued and written on the log's own thread."""
+        try:
+            identify_log.record(path, **fields)
+        except Exception as e:  # noqa: BLE001 - the answer goes out regardless
+            note(f"[identify-log] {path}: {type(e).__name__}: {e}")
+
     warm = Preload()
 
     # Cross-post twin groups (twins.py): records that are one find on MO and iNat, by the
@@ -776,8 +811,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         given = request.headers.get("authorization", "")
         if org_secret and secrets.compare_digest(given.encode(),
                                                  f"Bearer {org_secret}".encode()):
-            # Never in the public answer: how often uploads are reference photos.
-            return {**full, "upload_matches": upload_meter.summary()}
+            # Never in the public answer: how often uploads are reference photos, and the
+            # identification log's counters (rows written, waiting, dropped, failed).
+            return {**full, "upload_matches": upload_meter.summary(),
+                    "identify_log": identify_log.state()}
         served, ready = served_backbones()
         known = {*limits.allowed_backbones, *ready, *(full["nightly"].get("layer") or {}),
                  *full["embed"], *(m.split("/", 1)[0] for m in warm.models),
@@ -1132,12 +1169,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def may_show(info) -> bool:
             return view.may_show(info.license_class, info.owner_user_id)
 
-        results, parts = [], []
+        results, parts, answered = [], [], []
         for backbone, method in wanted:
             ident = site_index(backbone, method, view, timer)
             vectors: list = []
             pooled = embed_and_score(ident, backbone, images, context, may_show, timer,
                                      n_specimens=yours.POOL, vectors=vectors)
+            answered.append((backbone, method, served_version(backbone, method, ident)))
             result, spare = yours.split_pool(pooled)
             vecs = vectors[0] if vectors else None
             if run_store is not None:
@@ -1155,6 +1193,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 bodies))
             if run:
                 out["run"] = run
+        asker = identifylog.site_asker(who)
+        for backbone, method, version in answered:
+            log_answer(identifylog.SITE_UPLOAD, fresh=True, model=f"{backbone}/{method}",
+                       answers_version=version, release=release_now, asked_by=asker,
+                       run_id=(out.get("run") or {}).get("id"))
         return out
 
     # --- run links (runs.py) ----------------------------------------------------------
@@ -1329,6 +1372,42 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(403, "only the person who ran it, or an admin, can delete it")
         run_store.delete(rid)
         return Response(status_code=204)
+
+    # --- the identification log's read for the paper (identifylog.first_answers) ----------
+    @app.get("/api/identify-log/first", include_in_schema=False)
+    def identify_log_first(request: Request, source: str | None = None,
+                           since: str | None = None, format: str = "json"):
+        """Per observation, the first time Vision answered it, with the path: for the
+        paper's truth-independence check. mycomap.org's server key or a signed-in
+        mycomap.org admin only; private, never cached. Who asked is never in it."""
+        given = request.headers.get("authorization", "")
+        by_key = bool(org_secret) and secrets.compare_digest(
+            given.encode(), f"Bearer {org_secret}".encode())
+        if not by_key:
+            who = person(request)
+            if not who:
+                raise HTTPException(401, "mycomap.org's server key or an admin's sign-in",
+                                    headers=NOT_INDEXED)
+            if not is_admin(str(who.get("sub"))):
+                raise HTTPException(403, "mycomap.org admins only", headers=NOT_INDEXED)
+        if source is not None and source not in byobservation.SOURCES:
+            raise HTTPException(400, "source is inat or mo", headers=NOT_INDEXED)
+        after = None
+        if since:
+            try:
+                after = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                after = (after if after.tzinfo else after.replace(tzinfo=timezone.utc)
+                         ).timestamp()
+            except ValueError:
+                raise HTTPException(400, "since is an ISO 8601 time", headers=NOT_INDEXED) from None
+        rows = identify_log.first_answers(source=source, since=after)
+        if format == "tsv":
+            return Response(identifylog.as_tsv(rows), headers=NOT_INDEXED,
+                            media_type="text/tab-separated-values; charset=utf-8")
+        if format != "json":
+            raise HTTPException(400, "format is json or tsv", headers=NOT_INDEXED)
+        return JSONResponse({"observations": rows, "count": len(rows),
+                             "about": identifylog.FIRST_ABOUT}, headers=NOT_INDEXED)
 
     def backbone_model(backbone: str):
         """The model for one backbone, loaded once. Call with gpu_lock held."""
@@ -1531,7 +1610,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     with db_lock:
         feedback.sync_exclusions(feedback_store, conn)
 
-    def feedback_rescore(record_key: str) -> dict:
+    def feedback_rescore(record_key: str, who: dict | None = None) -> dict:
         source, number = (("mo", record_key[3:]) if record_key.startswith("mo:")
                           else ("inat", record_key))
         ready = ready_backbones()
@@ -1555,6 +1634,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         result = model_queue.run(workqueue.Job(
             key=id(ident), photos=0, embed=lambda: vecs, search=ident.nearest.photo_sims,
             finish=finish, interactive=False, timer=timer))
+        reviewer = who or {}
+        log_answer(identifylog.FEEDBACK_RESCORE, fresh=True, source=source,
+                   observation_id=number, model=f"{backbone}/{method}",
+                   answers_version=served_version(backbone, method, ident),
+                   release=release_now,
+                   asked_by=identifylog.Asker("reviewer", str(reviewer.get("sub") or "") or None,
+                                              reviewer.get("name")))
         return {"available": True, "model": f"{backbone}/{method}",
                 "top5": [[c["name"], c["score"]] for c in result["ranks"]["species"][:5]]}
 
@@ -1724,6 +1810,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 quotas.remember_counted(cred, client_ref)
             body = v1_result(result, backbone, method, used, timer)
             body["usage"] = quotas.usage(cred)
+            log_answer(identifylog.V1_IDENTIFY, fresh=True, model=f"{backbone}/{method}",
+                       answers_version=served_version(backbone, method, ident),
+                       release=release_now, asked_by=identifylog.credential_asker(cred),
+                       client_ref=client_ref)
             return JSONResponse(body, headers={"Cache-Control": "no-store",
                                                "Server-Timing": apiv1.Timer.header(body["timing"])})
 
@@ -1855,6 +1945,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 body.update(cached=True, kept_from=kept_from, answered=kept.about(version))
                 return body
 
+            def log_kept_v1(path: str, body: dict, source: str, number: str, backbone: str,
+                            method: str, kept_key: str, site_key: str, cred,
+                            client_ref: str | None = None) -> None:
+                """A kept answer served in the v1 shape (held_v1), as a log row."""
+                log_answer(path, fresh=False, source=source, observation_id=number,
+                           answer_key=site_key if body.get("kept_from") == "site" else kept_key,
+                           answers_version=(body.get("model") or {}).get("answers_version"),
+                           model=f"{backbone}/{method}",
+                           release=(body.get("model") or {}).get("version"),
+                           asked_by=identifylog.credential_asker(cred), client_ref=client_ref)
+
             def v1_identify_observation(request: Request, source: str, observation_id: str,
                                         payload: dict | None = Body(None)):
                 timer = apiv1.Timer()
@@ -1904,6 +2005,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     quotas.count(cred, 0 if same_find else 1, 0)
                     if not same_find:
                         quotas.remember_counted(cred, client_ref)
+                    log_kept_v1(identifylog.V1_OBSERVATION, body, source, number, backbone,
+                                method, kept_key, site_key, cred, client_ref)
                     body["timing"] = timer.block()
                     body["usage"] = quotas.usage(cred)
                     return JSONResponse(body, headers={
@@ -2046,6 +2149,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 body["answered"] = answer_cache.held(kept_key).about(version)
                 body["cached"] = False
                 body["usage"] = quotas.usage(cred)
+                log_answer(identifylog.V1_OBSERVATION, fresh=True, source=source,
+                           observation_id=number, answer_key=kept_key, answers_version=version,
+                           model=f"{backbone}/{method}", release=release_now,
+                           asked_by=identifylog.credential_asker(cred), client_ref=client_ref)
                 return JSONResponse(body, headers={
                     "Cache-Control": "no-store",
                     "Server-Timing": apiv1.Timer.header(body["timing"])})
@@ -2075,6 +2182,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if body is None:
                     raise apiv1.V1Error(404, "not_answered", "Vision holds no answer for "
                                         "this observation")
+                log_kept_v1(identifylog.V1_ANSWERS, body, source, number, backbone, method,
+                            answercache.answer_key("v1", source, number, backbone, method,
+                                                   {"top_k": top_k, "place": use_place,
+                                                    "date": use_date}),
+                            answercache.answer_key("site", source, number, backbone, method,
+                                                   {"place": use_place, "date": use_date}),
+                            cred)
                 body.update(timing=timer.block(), usage=quotas.usage(cred))
                 return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
@@ -2158,6 +2272,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         results.append(mine)
                     run = observation_run(request_person, keys, held, wanted, view, timer,
                                           held[0].payload["observation"])
+                    for (backbone, method), key, h in zip(wanted, keys, held):
+                        log_answer(identifylog.SITE_OBSERVATION, fresh=False, source=source,
+                                   observation_id=number, answer_key=key,
+                                   answers_version=h.version, model=f"{backbone}/{method}",
+                                   release=h.payload.get("release"),
+                                   asked_by=identifylog.site_asker(request_person),
+                                   run_id=(run or {}).get("id"))
                     return {"results": results,
                             "context_used": held[0].payload["used"],
                             "observation": held[0].payload["observation"],
@@ -2262,6 +2383,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 run = observation_run(request_person, keys,
                                       [answer_cache.held(k) for k in keys], wanted, view,
                                       timer, about)
+                release = model_card().get("version")
+                for (backbone, method), key, version in zip(wanted, keys, versions):
+                    log_answer(identifylog.SITE_OBSERVATION, fresh=True, source=source,
+                               observation_id=number, answer_key=key, answers_version=version,
+                               model=f"{backbone}/{method}", release=release,
+                               asked_by=identifylog.site_asker(request_person),
+                               run_id=(run or {}).get("id"))
                 return {"results": answered, "context_used": used, "observation": about,
                         "cached": False, "answered": answered[0]["answered"],
                         **({"run": run} if run else {}),
@@ -2339,6 +2467,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             combined.pop("timing", None)
             combined.pop("usage", None)
             s.remember(combined)
+            log_answer(identifylog.APP_SESSION, fresh=True, model=f"{s.backbone}/{s.method}",
+                       answers_version=served_version(s.backbone, s.method, ident),
+                       release=release_now, asked_by=identifylog.credential_asker(cred),
+                       client_ref=s.client_ref)
             return combined
 
         def session_answer(s, timer, cred, **extra) -> JSONResponse:
