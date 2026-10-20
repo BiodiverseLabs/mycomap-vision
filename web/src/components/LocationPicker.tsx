@@ -1,14 +1,17 @@
 // The map for picking where a find was (Steve, 2026-10-11), loaded only when someone opens
 // it (React.lazy in pages/Identify.tsx), so Leaflet stays out of the page's first load.
-// Full screen on a phone, a dialog on a computer. Tiles as on mycomap.org's maps; place
-// search through Vision's /api/geocode/search (geocode.py). The rules are lib/mapPick.ts.
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+// Full screen on a phone, a dialog on a computer. Tiles as on mycomap.org's maps; places
+// suggested as you type (/api/geocode/suggest, rules in lib/placeSuggest.ts) and the full
+// search on Search (/api/geocode/search), both through Vision (geocode.py). The map's rules
+// are lib/mapPick.ts.
+import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent as KeyEvent } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import { Crosshair, Layers, Loader2, LocateFixed, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { Where } from "@/lib/api";
+import { createSuggester, fetchSuggestions, listKey, suggestNote, type Place, type Suggestions } from "@/lib/placeSuggest";
 import { fieldsFromPoint, PLACE_ZOOM, pointFromFields, startView, type Point } from "@/lib/mapPick";
 import { locateError } from "@/lib/photoPlace";
 
@@ -36,8 +39,6 @@ const PIN = L.divIcon({
   iconAnchor: [16, 40],
 });
 
-interface Place { display_name: string; lat: number; lon: number }
-
 function ClickToPin({ onPick }: { onPick: (p: Point) => void }) {
   useMapEvents({ click: (e) => onPick({ lat: e.latlng.lat, lng: e.latlng.lng }) });
   return null;
@@ -64,12 +65,20 @@ export default function LocationPicker({ where, onUse, onClose }: {
   const [fly, setFly] = useState<{ p: Point; zoom: number; n: number } | null>(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Place[] | null>(null);
+  const [suggested, setSuggested] = useState<Suggestions | null>(null);
+  const [active, setActive] = useState(-1);
   const [searching, setSearching] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [locating, setLocating] = useState(false);
   const map = useRef<L.Map | null>(null);
   const titleId = useId();
   const searchBox = useRef<HTMLInputElement>(null);
+  const listId = useId();
+  const suggester = useRef(createSuggester({ ask: (q) => fetchSuggestions(q), onAnswer: (s) => {
+    setSuggested(s);
+    setActive(-1);
+  } })).current;
+  useEffect(() => suggester.cancel, [suggester]);
 
   // Pin → fields.
   const placePin = (p: Point, flyThere = false) => {
@@ -101,8 +110,42 @@ export default function LocationPicker({ where, onUse, onClose }: {
     };
   }, [onClose]);
 
+  // The list under the box: the full search's results once asked for, else suggestions.
+  const shown = results ?? suggested?.places ?? [];
+  const typeQuery = (v: string) => {
+    setQuery(v);
+    setResults(null);
+    setMessage(null);
+    suggester.type(v);
+  };
+  // A suggestion or a search result: centre the map there and pin it.
+  const pick = (r: Place) => {
+    suggester.cancel();
+    placePin({ lat: r.lat, lng: r.lon }, true);
+    setQuery(r.display_name);
+    setResults(null);
+    setSuggested(null);
+    setActive(-1);
+  };
+  const onSearchKey = (e: KeyEvent<HTMLInputElement>) => {
+    const k = listKey(e.key, shown.length, active);
+    if (!k.handled) return;
+    e.preventDefault();
+    e.stopPropagation();        // Escape closes the list, not the map
+    setActive(k.active);
+    if (k.pick !== undefined) pick(shown[k.pick]);
+    if (k.close) {
+      suggester.cancel();
+      setResults(null);
+      setSuggested(null);
+    }
+  };
+
   const search = async (e: FormEvent) => {
     e.preventDefault();
+    suggester.cancel();
+    setSuggested(null);
+    setActive(-1);
     if (query.trim().length < 3) return setMessage("Type at least 3 letters of a place name.");
     setSearching(true);
     setMessage(null);
@@ -157,27 +200,36 @@ export default function LocationPicker({ where, onUse, onClose }: {
         </div>
 
         <form onSubmit={search} className="flex gap-2 px-4 pt-3" role="search">
-          <input ref={searchBox} className={input} value={query} onChange={(e) => setQuery(e.target.value)}
-                 placeholder="Search for a place, park or town" aria-label="Search for a place"
-                 data-testid="input-place-search" />
+          <input ref={searchBox} className={input} value={query} onChange={(e) => typeQuery(e.target.value)}
+                 onKeyDown={onSearchKey} placeholder="Search for a place, park or town"
+                 aria-label="Search for a place" data-testid="input-place-search" autoComplete="off"
+                 role="combobox" aria-autocomplete="list" aria-expanded={shown.length > 0}
+                 aria-controls={listId}
+                 aria-activedescendant={active >= 0 ? `${listId}-${active}` : undefined} />
           <Button type="submit" variant="outline" className="h-10 shrink-0" disabled={searching}>
             {searching ? <Loader2 className="animate-spin" /> : <Search />}
             <span className="sr-only sm:not-sr-only">Search</span>
           </Button>
         </form>
-        {results && results.length > 0 && (
-          <ul className="mx-4 mt-2 max-h-40 overflow-y-auto rounded-md border text-sm" data-testid="list-place-results">
-            {results.map((r) => (
-              <li key={`${r.lat},${r.lon}`}>
-                <button type="button" className="w-full px-3 py-2 text-left hover:bg-muted focus-visible:bg-muted"
-                        onClick={() => { placePin({ lat: r.lat, lng: r.lon }, true); setResults(null); }}>
-                  {r.display_name}
-                </button>
+        {shown.length > 0 && (
+          <ul id={listId} role="listbox" aria-label={results ? "Places found" : "Suggested places"}
+              className="mx-4 mt-2 max-h-40 overflow-y-auto rounded-md border text-sm"
+              data-testid={results ? "list-place-results" : "list-place-suggestions"}>
+            {shown.map((r, i) => (
+              <li key={`${r.lat},${r.lon},${i}`} id={`${listId}-${i}`} role="option" aria-selected={i === active}
+                  className={`cursor-pointer px-3 py-2 hover:bg-muted ${i === active ? "bg-muted" : ""}`}
+                  onMouseDown={(e) => e.preventDefault()} onClick={() => pick(r)}>
+                {r.display_name}
               </li>
             ))}
           </ul>
         )}
         {message && <p className="mx-4 mt-2 text-xs text-destructive" role="status">{message}</p>}
+        {!message && !results && suggestNote(suggested) && (
+          <p className="mx-4 mt-2 text-xs text-muted-foreground" role="status" data-testid="text-suggest-note">
+            {suggestNote(suggested)}
+          </p>
+        )}
 
         <div className="relative mt-3 min-h-[260px] flex-1">
           <MapContainer ref={map} center={[start.center.lat, start.center.lng]} zoom={start.zoom}
