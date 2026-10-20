@@ -56,6 +56,16 @@ export function AboutPage() {
           down by how many reference records each species has.
         </Section>
         <Standards />
+        <Section title="Your photos, and each result's own link">
+          Every identification gets its own link, so you can share it or come back to it. Vision
+          keeps the answer and, for photos you upload, smaller copies (at most 1024 pixels) with
+          the details cameras hide in a photo removed: exact place, time and camera. A place is
+          kept only to a tenth of a degree, about 10 km, as the answer shows it. Only people
+          you give the link to can open it; search engines don't see it and nothing lists it.
+          It stays until you delete it from its page. An identification from an iNaturalist or
+          Mushroom Observer link keeps no photos, only where they are at the source. Your
+          photos are never used to train Vision or as references.
+        </Section>
         <Contributors s={s} />
         <BecomesReference s={s} />
         <Openness />

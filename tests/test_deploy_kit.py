@@ -114,14 +114,18 @@ def test_no_secret_address_or_bucket_is_committed_in_the_kit():
     assert env["MV_S3_BUCKET"] == "<BUCKET>" and env["MV_AWS_REGION"] == "<REGION>"
 
 
-def test_the_box_may_only_read_releases(monkeypatch):
+def test_the_box_may_only_read_releases_and_keep_site_runs(monkeypatch):
+    """Releases read-only; the site's run links (runs.py) put, read and delete under
+    site-runs/ only: never runs/ (the downloader's and trainer's), never a listing."""
     monkeypatch.setenv("MV_S3_BUCKET", "bucket-x")
     monkeypatch.setenv("MV_AWS_REGION", "us-east-2")
     policy = json.loads(aws.render_policy("box-policy.template.json"))
-    [statement] = policy["Statement"]
-    assert statement["Effect"] == "Allow"
-    assert statement["Action"] == "s3:GetObject"
-    assert statement["Resource"] == "arn:aws:s3:::bucket-x/releases/*"
+    releases, site_runs = policy["Statement"]
+    assert all(s["Effect"] == "Allow" for s in policy["Statement"])
+    assert releases["Action"] == "s3:GetObject"
+    assert releases["Resource"] == "arn:aws:s3:::bucket-x/releases/*"
+    assert sorted(site_runs["Action"]) == ["s3:DeleteObject", "s3:GetObject", "s3:PutObject"]
+    assert site_runs["Resource"] == "arn:aws:s3:::bucket-x/site-runs/*"
 
 
 def test_scripts_stop_at_the_first_failure():

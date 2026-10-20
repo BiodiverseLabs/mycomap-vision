@@ -4,6 +4,7 @@
 import type { Me } from "./api";
 import { showsMembersPages } from "./publicView";
 import { V1, utcDay, utcMinute } from "./datasetReleases";
+import { isRunPath } from "./runLink";
 
 export interface NavItem { href: string; label: string; blurb?: string }
 
@@ -54,12 +55,13 @@ export const MOVED: Record<string, string> = {
 export const PUBLIC_PAGES = [API_PATH, "/api-docs"];
 
 /** Whether this visitor must sign in before seeing `path`: only when every page needs it
- * (signin "all"), they aren't signed in, and it isn't one of PUBLIC_PAGES. The server
+ * (signin "all"), they aren't signed in, and it isn't one of PUBLIC_PAGES or a run's own
+ * link (/r/<id>, open to whoever has it: signin.run_path). The server
  * already sends them to sign in on a full page load; this covers moving on inside the site.
  * Never for the sign-in pages themselves, or a page shown at one would loop. */
 export function mustSignIn(me: Me | null | undefined, path: string): boolean {
   return !!me && me.signin === "all" && !me.user && !PUBLIC_PAGES.includes(path)
-    && !path.startsWith("/auth/");
+    && !isRunPath(path) && !path.startsWith("/auth/");
 }
 
 export const isResearchPath = (path: string) => path === "/research" || path.startsWith("/research/");

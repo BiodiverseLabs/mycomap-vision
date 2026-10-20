@@ -799,7 +799,7 @@ export const api = {
   async identify(photos: File[], models: string[], where: Where = {},
                  onWait?: (attempt: number, seconds: number) => void,
                  onSent?: (fraction: number) => void):
-      Promise<{ results: IdentifyResult[]; context_used: ContextUsed }> {
+      Promise<{ results: IdentifyResult[]; context_used: ContextUsed; run?: RunRef }> {
     const form = new FormData();
     photos.forEach((p) => form.append("photos", p));
     form.append("models", models.join(","));
@@ -818,7 +818,7 @@ export const api = {
   async identifyObservation(source: "inat" | "mo", id: string, models: string[],
                             onWait?: (attempt: number, seconds: number) => void, rerun = false):
       Promise<{ results: IdentifyResult[]; context_used: ContextUsed; observation: LinkedObservation;
-                cached?: boolean; answered?: Answered }> {
+                cached?: boolean; answered?: Answered; run?: RunRef }> {
     const res = await sendWaitingInLine(() => fetch("/api/identify/observation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -826,6 +826,34 @@ export const api = {
     }), onWait);
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();
+  },
+};
+
+/** A run's own link (runs.py), given with each answer on the site when run links are on. */
+export interface RunRef { id: string; url: string }
+
+/** A run as its link shows it (GET /api/runs/<id>): the answer as it was given, to anyone
+ *  with the link. `mine`: the viewer ran it (their own part is then in `results`). */
+export interface RunView {
+  id: string;
+  kind: "photos" | "observation";
+  results: IdentifyResult[];
+  context_used: ContextUsed;
+  observation: LinkedObservation | null;
+  /** UTC, ISO 8601. */
+  answered_at: string;
+  release: string | null;
+  /** Photo copies kept (an upload); 0 for an observation, whose photos stay at its source. */
+  photos: number;
+  mine: boolean;
+  can_delete: boolean;
+}
+
+export const runApi = {
+  open: (id: string) => getJson<RunView>(`/api/runs/${encodeURIComponent(id)}`),
+  async remove(id: string): Promise<void> {
+    const res = await fetch(`/api/runs/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 404) throw new ApiError(res.status, await errorText(res));
   },
 };
 

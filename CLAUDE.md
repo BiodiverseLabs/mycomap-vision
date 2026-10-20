@@ -47,6 +47,14 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
 - **Never expose coordinates.** Records can carry true locations of observations
   that are obscured on iNat (often rare or sensitive species). No API response,
   page, export or model may reveal them.
+- **Site runs are kept, under their own link** (Steve, 2026-10-20; `runs.py`). Every
+  identification on the site is kept at `/r/<id>`: the answer without anyone's own
+  collections, 1024 px photo copies re-encoded without EXIF, the place only to 0.1 degree,
+  and who ran it (mycomap.org id and name, never served). Open to anyone with the link,
+  never listed or indexed; deleted only by the person who ran it or a mycomap.org admin; no
+  expiry. Stored in the bucket's `site-runs/` (the box may Put/Get/Delete there and
+  nothing more). API v1 and the app's sessions keep nothing. New code that keeps or shows
+  a run goes through `runs.py`.
 - **Unpublished results stay out of this public repo.** Experiment entries and the paper
   draft live in the private research checkout (`config.RESEARCH_DIR`: `MV_RESEARCH_DIR`, or
   `../mycomap-vision-research`), under `experiments/` and `paper/`; the site shows them to

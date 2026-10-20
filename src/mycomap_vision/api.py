@@ -35,7 +35,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, inat, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               onnxtower, permissions, dhash, twins, uploadmeter,
+               onnxtower, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue, yours)
 from .dates import real_date
@@ -48,7 +48,7 @@ from .licenses import photo_url
 from .methods import method_ready
 from .prior import Context
 from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
-                     load_public_key, origin_of, safe_return_to, verify_token)
+                     load_public_key, origin_of, run_path, safe_return_to, verify_token)
 
 log = logging.getLogger("mycomap_vision.api")
 NAME_BUCKETS = [(1, 1, "1"), (2, 2, "2"), (3, 5, "3-5"), (6, 30, "6-30"), (31, 10**9, "31+")]
@@ -223,15 +223,19 @@ class Preload:
 
 
 def read_photo(upload: UploadFile, side: int = uploads.kept_side([]),
-               hashes: list | None = None) -> tuple[Image.Image, tuple]:
+               hashes: list | None = None,
+               bodies: list | None = None) -> tuple[Image.Image, tuple]:
     """One uploaded photo, refusing oversized files and images before decoding them,
     decoded once and kept only at the size the models need (uploads.py: shorter side
     `side`). Also returns its EXIF (latitude, longitude, date), read before shrinking,
     used only for scoring. With `hashes`, appends the file's dHash (None when it can't be
-    hashed) for the upload meter (uploadmeter.py); the hash is never kept."""
+    hashed) for the upload meter (uploadmeter.py); the hash is never kept. With `bodies`,
+    appends the file, for the run's link (runs.py keeps a small copy without its EXIF)."""
     body = upload.file.read(MAX_FILE_BYTES + 1)
     if len(body) > MAX_FILE_BYTES:
         raise HTTPException(413, f"{upload.filename} is over {MAX_FILE_BYTES // 2**20} MB")
+    if bodies is not None:
+        bodies.append(body)
     if hashes is not None:
         try:
             hashes.append(dhash.dhash64(body))
@@ -311,7 +315,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                feedback_store: "feedback.Store | None" = None,
                feedback_org: "feedback_api.OrgClient | None" = None,
                answer_cache: "answercache.AnswerCache | None" = None,
-               linked_accounts: "yours.LinkedCache | None | bool" = True) -> FastAPI:
+               linked_accounts: "yours.LinkedCache | None | bool" = True,
+               run_store: "run_links.RunStore | None" = None,
+               run_secret: bytes | None = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -344,6 +350,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `linked_accounts`: a signed-in person's verified iNat and MO accounts from mycomap.org,
     for "Your collections" on the Identify result (yours.py). True reads them with
     MV_ORG_BASE_URL and the server key (neither set: no panel); tests pass a LinkedCache.
+
+    `run_store`: where the site's runs are kept, each under its own link /r/<id> (runs.py).
+    None reads MV_RUN_LINKS: `s3` (the Vision bucket's site-runs/), a folder, or off (the
+    default: no links). `run_secret` keys an iNat/MO run's id (default: the session secret).
 
     `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
     `confused_with` field on species candidates. True reads the cache beside the manifest
@@ -581,6 +591,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
              else Path(manifest_path or config.MANIFEST_PATH).parent)
             / "observation-answers.sqlite")
     app.state.answer_cache = answer_cache
+    # Every site run under its own link (runs.py): the bucket's site-runs/ on the box, a
+    # folder on a laptop, none unless MV_RUN_LINKS says so. Its owner index sits beside the
+    # observation answers.
+    if run_store is None:
+        run_store = run_links.from_setting(
+            config.setting("MV_RUN_LINKS"),
+            (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT
+             else Path(manifest_path or config.MANIFEST_PATH).parent), note=note)
+    app.state.run_store = run_store
+    run_secret = run_secret or signin.secret or secrets.token_bytes(32)
 
     def q(sql: str, params: tuple = ()):
         with db_lock:
@@ -946,17 +966,18 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             except workqueue.Busy as e:
                 raise HTTPException(503, "busy identifying other photos; try again shortly",
                                     headers={"Retry-After": str(int(e.wait_seconds) + 1)}) from e
-            out = run_identify(photos, models_, context, timer, linked_of(request))
+            out = run_identify(photos, models_, context, timer, linked_of(request),
+                               person(request))
         finally:
             in_flight.leave()
         out["timing"] = timer.block()
         return out
 
     def decode_photos(photos: list[UploadFile], timer: "apiv1.Timer",
-                      hashes: list | None = None) -> list[tuple]:
+                      hashes: list | None = None, bodies: list | None = None) -> list[tuple]:
         start = time.monotonic()
         side = uploads.kept_side(list(backbones.values()))
-        read = [read_photo(f, side, hashes) for f in photos]  # one at a time, kept small
+        read = [read_photo(f, side, hashes, bodies) for f in photos]  # one at a time
         timer.add("decode_ms", time.monotonic() - start)
         return read
 
@@ -1096,9 +1117,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(503, str(e), headers={"Retry-After": "30"}) from e
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context",
-                     timer: "apiv1.Timer", linked: "yours.Linked | None" = None) -> dict:
+                     timer: "apiv1.Timer", linked: "yours.Linked | None" = None,
+                     who: dict | None = None) -> dict:
+        """The Identify page's answer to uploaded photos; with run links on, kept under
+        its own link (`run`), small copies of the photos with it."""
         hashes = [] if upload_meter.hashing() else None
-        read = decode_photos(photos, timer, hashes)
+        bodies = [] if run_store is not None else None
+        read = decode_photos(photos, timer, hashes, bodies)
         images = [img for img, _ in read]
         context, used = fill_context(context, [found for _, found in read])
         wanted = site_models(models_)
@@ -1107,20 +1132,203 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def may_show(info) -> bool:
             return view.may_show(info.license_class, info.owner_user_id)
 
-        results = []
+        results, parts = [], []
         for backbone, method in wanted:
             ident = site_index(backbone, method, view, timer)
             vectors: list = []
             pooled = embed_and_score(ident, backbone, images, context, may_show, timer,
                                      n_specimens=yours.POOL, vectors=vectors)
             result, spare = yours.split_pool(pooled)
-            results.append(yours.for_person(ident, result, spare, vectors[0] if vectors else None,
+            vecs = vectors[0] if vectors else None
+            if run_store is not None:
+                parts.append((ident, result, spare, vecs))
+            results.append(yours.for_person(ident, result, spare, vecs,
                                             None, linked, photo_lookup, may_show))
         table = confused_table()
         for result in results:
             confusions.annotate(result, table)
         upload_meter.record("site", len(images), hashes)
-        return {"results": results, "context_used": used}
+        out = {"results": results, "context_used": used}
+        if run_store is not None:
+            run = without_failing(lambda: keep_run(
+                "photos", who, [run_part(i, r, s, v, None) for i, r, s, v in parts], used,
+                bodies))
+            if run:
+                out["run"] = run
+        return out
+
+    # --- run links (runs.py) ----------------------------------------------------------
+
+    def run_owner(who: dict | None) -> dict | None:
+        """Who ran it, as the signed session says: mycomap.org id and name."""
+        if not who or not who.get("sub"):
+            return None
+        return {"id": str(who["sub"]), "name": who.get("name")}
+
+    def run_part(ident: Identifier, result: dict, spare: list, vecs, hidden) -> dict:
+        """One model's answer as a run keeps it: everyone's answer (no `yours`, no "often
+        confused with", which is added afresh when it is shown), the spare specimens and
+        the photos' vectors for the owner's own part, and each specimen's reference
+        photos, so a photo whose photographer withdrew since is never shown."""
+        plain = json.loads(json.dumps({"result": result, "spare": spare},
+                                      default=answercache._plain))
+        if isinstance(vecs, np.ndarray):
+            vecs = yours.encode_vectors(vecs)
+        shown = answercache.specimens_in([plain["result"], plain["spare"]])
+        return {"result": answercache.without_confusions(plain["result"]),
+                "spare": plain["spare"] or [], "vectors": vecs,
+                "hidden": [int(c) for c in np.asarray(
+                    hidden if hidden is not None else [], dtype=np.int64).tolist()],
+                "photo_ids": {str(s["observation_id"]): ident.photos_of(str(s["observation_id"]))
+                              for s in shown}}
+
+    def keep_run(kind: str, who: dict | None, parts: list, used: dict, bodies=None,
+                 rid: str | None = None, observation: dict | None = None,
+                 answered_at: str | None = None) -> dict:
+        record = run_links.run_record(
+            kind, run_owner(who), parts, used,
+            answered_at or answercache.iso_utc(time.time()), model_card().get("version"),
+            observation)
+        rid = run_store.keep(record, bodies or [], rid=rid)
+        return {"id": rid, "url": f"/r/{rid}"}
+
+    def observation_run(who: dict | None, keys: list, held: list, wanted: list, view,
+                        timer: "apiv1.Timer", about: dict) -> dict | None:
+        """The link of an observation's kept answer: one per kept answer, the same for
+        everyone who opens it, its id keyed with the server's secret. It keeps no photos:
+        the observation's own (Creative Commons) photo addresses at its source."""
+        if run_store is None or not held or any(h is None for h in held):
+            return None
+
+        def link() -> dict:
+            at = answercache.iso_utc(held[0].answered_at)
+            # Keyed on the exact time it was answered: Run again within the same second is
+            # still a new answer, with its own link.
+            rid = run_links.observation_run_id(run_secret, "|".join(keys),
+                                               repr(float(held[0].answered_at)))
+            if run_store.get(rid) is not None:
+                run_store.opened_by(run_owner(who), rid, "observation")
+                return {"id": rid, "url": f"/r/{rid}"}
+            parts = [run_part(site_index(backbone, method, view, timer), h.payload["result"],
+                              h.payload.get("spare") or [], h.payload.get("vectors"),
+                              h.payload.get("hidden"))
+                     for (backbone, method), h in zip(wanted, held)]
+            return keep_run("observation", who, parts, held[0].payload["used"], rid=rid,
+                            observation=run_links.public_observation(about), answered_at=at)
+        return without_failing(link)
+
+    def without_failing(make: Callable[[], dict]) -> dict | None:
+        """A run's link, or None when it can't be made now (the bucket unreachable): the
+        answer is never lost for want of its link."""
+        try:
+            return make()
+        except Exception as e:  # noqa: BLE001 - reported; the answer goes out without a link
+            note(f"[runs] no link for this run: {type(e).__name__}: {e}")
+            return None
+
+    # Opening a link needs no sign-in (signin.run_path), so reading is limited per address.
+    run_reads = RateLimiter(120, 60.0)
+    admin_cache: dict[str, tuple[float, bool]] = {}
+    NOT_INDEXED = {"Cache-Control": "private, no-store", "X-Robots-Tag": "noindex, nofollow"}
+
+    def is_admin(sub: str) -> bool:
+        """A mycomap.org admin (Human Feedback's roles), asked at most every 5 minutes."""
+        allow = {x.strip() for x in (config.setting("MV_FEEDBACK_ADMINS") or "").split(",")}
+        if sub in allow:
+            return True
+        hit = admin_cache.get(sub)
+        if hit and time.monotonic() - hit[0] < 300:
+            return hit[1]
+        try:
+            roles = feedback_org.roles(sub) if feedback_org is not None else None
+        except Exception:  # noqa: BLE001 - not known to be an admin
+            roles = None
+        admin = bool(roles and roles.get("admin"))
+        admin_cache[sub] = (time.monotonic(), admin)
+        return admin
+
+    def read_limit(request: Request) -> None:
+        wait = run_reads.check(request.client.host if request.client else "unknown")
+        if wait:
+            raise HTTPException(429, "too many requests from this address; try again shortly",
+                                headers={"Retry-After": str(int(wait) + 1)})
+
+    def stored_run(rid: str) -> dict:
+        run = run_store.get(rid) if run_store is not None else None
+        if run is None:
+            raise HTTPException(404, "no such result: the link is wrong, or it was deleted",
+                                headers=NOT_INDEXED)
+        return run
+
+    @app.get("/api/runs/{rid}")
+    def open_run(request: Request, rid: str):
+        """A run as its link shows it, to anyone with the link. The person who ran it, signed
+        in, also gets their own part ("Your collections"), made now. Never who ran it."""
+        read_limit(request)
+        run = stored_run(rid)
+        who = person(request)
+        owner = (run.get("owner") or {}).get("id")
+        mine = bool(who and owner and str(who.get("sub")) == owner)
+        view = permission_view()
+
+        def may_show(info) -> bool:
+            return view.may_show(info.license_class, info.owner_user_id)
+        linked = linked_of(request) if mine else None
+        table = confused_table()
+        results = []
+        for part in run.get("models") or []:
+            result = json.loads(json.dumps(part["result"]))
+            spare = json.loads(json.dumps(part.get("spare") or []))
+            ids = part.get("photo_ids") or {}
+            answercache.reshow_photos(
+                [result, spare], lambda obs: ids.get(str(obs), []), photo_lookup, may_show,
+                lambda info: photo_url(info.source, info.source_url, "medium"))
+            ident = vecs = None
+            if linked is not None and linked.linked and part.get("vectors"):
+                model = result.get("model") or {}
+                try:
+                    ident = identifier(model.get("backbone"), model.get("method"), view)
+                    vecs = yours.decode_vectors(part["vectors"])
+                except Exception:  # noqa: BLE001 - a model no longer served: no own part
+                    ident = vecs = None
+            shown = yours.for_person(
+                ident if vecs is not None else None, result, spare, vecs,
+                np.asarray(part.get("hidden") or [], dtype=np.int64),
+                linked if vecs is not None else None, photo_lookup, may_show)
+            confusions.annotate(shown, table)
+            results.append(shown)
+        body = {"id": run["id"], "kind": run["kind"], "results": results,
+                "context_used": run.get("context_used"),
+                "observation": run_links.public_observation(run.get("observation")),
+                "answered_at": run.get("answered_at"), "release": run.get("release"),
+                "photos": int(run.get("photos") or 0), "mine": mine,
+                "can_delete": mine or bool(who and is_admin(str(who.get("sub"))))}
+        return JSONResponse(body, headers=NOT_INDEXED)
+
+    @app.get("/api/runs/{rid}/photos/{name}")
+    def run_photo(request: Request, rid: str, name: str):
+        """A run's photo copy (1024 px, no EXIF), through this server: never a bucket URL."""
+        read_limit(request)
+        n = name.removesuffix(".jpg")
+        body = (run_store.photo(rid, int(n)) if run_store is not None and n.isdigit()
+                and name.endswith(".jpg") else None)
+        if body is None:
+            raise HTTPException(404, "no such photo", headers=NOT_INDEXED)
+        return Response(body, media_type="image/jpeg", headers=NOT_INDEXED)
+
+    @app.delete("/api/runs/{rid}", status_code=204)
+    def delete_run(request: Request, rid: str):
+        """Deletes a run, its photo copies and its link: the person who ran it, or a
+        mycomap.org admin."""
+        who = person(request)
+        if not who:
+            raise HTTPException(401, "sign in with your mycomap.org account")
+        run = stored_run(rid)
+        owner = (run.get("owner") or {}).get("id")
+        if not (owner and str(who.get("sub")) == owner) and not is_admin(str(who.get("sub"))):
+            raise HTTPException(403, "only the person who ran it, or an admin, can delete it")
+        run_store.delete(rid)
+        return Response(status_code=204)
 
     def backbone_model(backbone: str):
         """The model for one backbone, loaded once. Call with gpu_lock held."""
@@ -1913,6 +2121,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 # until someone runs it again (Steve, 2026-10-19).
                 held = [] if rerun else [answer_cache.held(k) for k in keys]
                 linked = linked_of(request)
+                request_person = person(request)
 
                 def may_show(info) -> bool:
                     return view.may_show(info.license_class, info.owner_user_id)
@@ -1947,11 +2156,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         confusions.annotate(mine, table)
                         mine["answered"] = h.about(version)
                         results.append(mine)
+                    run = observation_run(request_person, keys, held, wanted, view, timer,
+                                          held[0].payload["observation"])
                     return {"results": results,
                             "context_used": held[0].payload["used"],
                             "observation": held[0].payload["observation"],
                             "cached": True,
                             "answered": held[0].about(versions[0]),
+                            **({"run": run} if run else {}),
                             "timing": timer.block()}
                 start = time.monotonic()
                 try:
@@ -2047,8 +2259,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     confusions.annotate(mine, table)
                     mine["answered"] = answer_cache.held(key).about(version)
                     answered.append(mine)
+                run = observation_run(request_person, keys,
+                                      [answer_cache.held(k) for k in keys], wanted, view,
+                                      timer, about)
                 return {"results": answered, "context_used": used, "observation": about,
                         "cached": False, "answered": answered[0]["answered"],
+                        **({"run": run} if run else {}),
                         "timing": timer.block()}
 
     # The app's observation sessions (docs/api.md §3.3, sessions.py): photos sent one at a
@@ -2329,7 +2545,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             target = (root / path).resolve()
             if path and target.is_file() and target.is_relative_to(root):
                 return FileResponse(target)
-            return FileResponse(root / "index.html")
+            # A run's link is found only by whoever was given it: never by a search engine.
+            return FileResponse(root / "index.html",
+                                headers=NOT_INDEXED if run_path("/" + path) else None)
 
     return app
 
