@@ -311,6 +311,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                dataset_store_reader=None, dataset_allow_draft: bool = False,
                fungus_gate: "fungusgate.FungusGate | None | bool" = True,
                place_search: "geocode.PlaceSearch | None" = None,
+               place_suggest: "geocode.PlaceSuggest | None" = None,
                confused_with: "confusions.Served | None | bool" = True,
                feedback_store: "feedback.Store | None" = None,
                feedback_org: "feedback_api.OrgClient | None" = None,
@@ -858,6 +859,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         except geocode.GeocodeError as e:
             headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
             return JSONResponse({"detail": e.detail}, status_code=e.status, headers=headers)
+
+    # Suggestions as the person types (geocode.py): Photon, as Nominatim's policy forbids
+    # autocomplete. Always a list; X-Suggest-Status says why one is empty.
+    suggestions = place_suggest or geocode.PlaceSuggest()
+
+    @app.get("/api/geocode/suggest")
+    def geocode_suggest(request: Request, q: str = ""):
+        places, status = suggestions.suggest(q, request.client.host if request.client else "unknown")
+        return JSONResponse(places, headers={"X-Suggest-Status": status})
 
     @app.get("/api/stats")
     def stats():
@@ -2572,5 +2582,6 @@ def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     on = nightly.enabled() and config.RELEASE_ROOT
     layer = nightly.prepare(config.RELEASE_ROOT, prune=True) if on else None
     app = create_app(layer.manifest, layer=layer) if layer else create_app()
+    geocode.redact_access_log()       # place names typed into the map stay out of the log
     uvicorn.run(app, host=host, port=port, proxy_headers=True,
                 forwarded_allow_ips=config.setting("MV_FORWARDED_ALLOW_IPS", "127.0.0.1"))
