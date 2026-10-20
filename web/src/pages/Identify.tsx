@@ -30,6 +30,7 @@ import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, whatNex
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import { applyPick } from "@/lib/mapPick";
+import { localWhen, runDetails, type Answered } from "@/lib/keptRun";
 import { observationFromQuery, parseObservationLink, sourceName, type ObservationRef } from "@/lib/observationLink";
 
 // The map (Leaflet) loads only when someone opens it: the Identify page stays light.
@@ -100,8 +101,8 @@ export function IdentifyPage() {
   const [link, setLink] = useState(fromQuery?.text ?? "");
   const [mode, setMode] = useState<"photos" | "link">("photos");
   const byLink = useMutation({
-    mutationFn: (ref: ObservationRef) =>
-      api.identifyObservation(ref.source, ref.id, chosen, (_attempt, seconds) => setWaiting(seconds)),
+    mutationFn: (ref: ObservationRef & { rerun?: boolean }) =>
+      api.identifyObservation(ref.source, ref.id, chosen, (_attempt, seconds) => setWaiting(seconds), ref.rerun),
     onSettled: () => setWaiting(null),
   });
   const viaLink = mode === "link";
@@ -113,6 +114,11 @@ export function IdentifyPage() {
   const submittedAt = viaLink ? byLink.submittedAt : run.submittedAt;
   const startPhotos = () => { setMode("photos"); byLink.reset(); run.mutate({ where, files }); };
   const startLink = (ref: ObservationRef) => { setMode("link"); run.reset(); byLink.mutate(ref); };
+  // Run again: the kept answer is replaced by a fresh run of the same observation.
+  const runLinkAgain = () => {
+    const o = byLink.data?.observation;
+    if (o) byLink.mutate({ source: o.source, id: o.id, rerun: true });
+  };
   // ...and identifies it once, when the person is signed in and a model is chosen.
   const autoStarted = useRef(false);
   useEffect(() => {
@@ -215,7 +221,11 @@ export function IdentifyPage() {
               referencePhotos,
             })} />
           )}
-          {viaLink && byLink.data && <LinkedObservationLine o={byLink.data.observation} cached={!!byLink.data.cached} />}
+          {viaLink && byLink.data && (
+            <LinkedObservationLine o={byLink.data.observation} cached={!!byLink.data.cached}
+                                   answered={byLink.data.answered} onRunAgain={runLinkAgain}
+                                   busy={pending || gate !== "ready"} />
+          )}
           {answer && (
             <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
               <ContextLine used={answer.context_used} sent={viaLink ? undefined : run.variables?.where}
@@ -318,8 +328,15 @@ function LinkWaitingCard({ observation, waitSeconds }: { observation: Observatio
   );
 }
 
-function LinkedObservationLine({ o, cached }: { o: LinkedObservation; cached: boolean }) {
+function LinkedObservationLine({ o, cached, answered, onRunAgain, busy }: {
+  o: LinkedObservation;
+  cached: boolean;
+  answered?: Answered;
+  onRunAgain: () => void;
+  busy: boolean;
+}) {
   const hidden = o.photos_shown.filter((u) => !u).length;
+  const run = answered ? runDetails(answered, cached, localWhen) : null;
   return (
     <div className="mb-3 rounded-md border border-[#A87146]/20 bg-[#faf9f7] px-3 py-2 text-sm text-[#4a3728]"
          data-testid="linked-observation">
@@ -334,9 +351,23 @@ function LinkedObservationLine({ o, cached }: { o: LinkedObservation; cached: bo
           so they are numbered here rather than shown.
         </span>
       )}
-      {cached && (
+      {run ? (
+        <span className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+              data-testid="linked-run">
+          <span>
+            <span className="font-medium text-[#4a3728]" data-testid="linked-run-when">{run.ran}</span>{" "}
+            <span data-testid={cached ? "linked-cached" : "linked-kept"}>{run.note}</span>
+          </span>
+          {cached && (
+            <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs"
+                    onClick={onRunAgain} disabled={busy} data-testid="button-run-again">
+              <RotateCcw className="mr-1 h-3.5 w-3.5" aria-hidden /> Run again
+            </Button>
+          )}
+        </span>
+      ) : cached && (
         <span className="block text-xs text-muted-foreground" data-testid="linked-cached">
-          Answered before and kept: Vision's model and reference set haven't changed since.
+          Answered before and kept.
         </span>
       )}
       {o.excluded_reference && (

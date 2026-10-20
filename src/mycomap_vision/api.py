@@ -44,6 +44,7 @@ from .embed import normalise, photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge)
 from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
+from .licenses import photo_url
 from .methods import method_ready
 from .prior import Context
 from .signin import (NONCE_COOKIE, NONCE_TTL_SECONDS, SESSION_COOKIE, SigninConfig, SigninError,
@@ -977,10 +978,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         may_show, timer: "apiv1.Timer", top_k: int = 5,
                         interactive: bool = True, higher: bool = False,
                         hidden: np.ndarray | None = None, n_specimens: int = 6,
-                        vectors: list | None = None) -> dict:
+                        vectors: list | None = None, pooled: list | None = None) -> dict:
         """One model's answer through the queue, timed: waiting, embedding, scoring.
         `hidden`: reference columns left out (Identifier.identify_vectors). `vectors`, when
-        given, gets the photos' vectors appended (for yours.for_person)."""
+        given, gets the photos' vectors appended (for yours.for_person). `pooled`, when
+        given, gets the site's answer from the same photos appended (site_answer), so one
+        run answers the API and the Identify page alike."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
             parts = [embed_one(ident, model, im) for im in images]
@@ -991,6 +994,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def finish(vecs, sims):
             if vectors is not None:
                 vectors.append(np.asarray(vecs, dtype=np.float32))
+            if pooled is not None:
+                pooled.append(site_answer(ident, vecs, sims, context, may_show, verdicts[0],
+                                          hidden))
             return ident.identify_vectors(vecs, top_k, n_specimens=n_specimens, context=context,
                                           sims=sims, photo_lookup=photo_lookup,
                                           may_show=may_show, gate=verdicts[0],
@@ -999,6 +1005,51 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return model_queue.run(workqueue.Job(
             key=id(ident), photos=len(images), embed=embed, search=ident.nearest.photo_sims,
             finish=finish, interactive=interactive, timer=timer))
+
+    def site_answer(ident: Identifier, vecs, sims, context, may_show, gate, hidden) -> dict:
+        """The Identify page's answer from photos already embedded: the top 5, the pool of
+        specimens the person's own part draws on (yours.POOL), no ranks above family."""
+        return ident.identify_vectors(vecs, 5, n_specimens=yours.POOL, context=context,
+                                      sims=sims, photo_lookup=photo_lookup, may_show=may_show,
+                                      gate=gate, higher_ranks=False, hidden=hidden)
+
+    def site_kept(pooled: dict, vecs, hidden, used: dict, about: dict) -> tuple[dict, dict, list]:
+        """(what is kept for the Identify page, its plain answer, its spare specimens).
+        Kept for everyone: the plain answer, its spare specimens, the photos' vectors and
+        what was left out. Nothing about the person asking."""
+        result, spare = yours.split_pool(pooled)
+        return ({"result": answercache.without_confusions(result), "spare": spare,
+                 "vectors": yours.encode_vectors(vecs) if vecs is not None else None,
+                 "hidden": [int(c) for c in np.asarray(
+                     hidden if hidden is not None else [], dtype=np.int64).tolist()],
+                 "used": used, "observation": about}, result, spare)
+
+    def asked_by(cred: "apiv1.Credential") -> str:
+        """Who asked, as a kept answer records it: mycomap.org's server key, the app, or
+        a developer key."""
+        return {"server": "mycomap.org", "app": "app"}.get(cred.kind, "api")
+
+    def kept_matches_itself(ident: Identifier, source: str, number: str, answer) -> bool:
+        """Whether a kept answer shows, among its specimens, a record Vision now leaves out
+        of this observation's answer: the record it is, or one of its cross-post twins
+        (Identifier.left_out). Such an answer was given before the twin table or link was
+        known and matched the observation to itself: it is wrong, not just older, so it is
+        answered afresh. This is the one exception to keeping answers until someone runs
+        them again."""
+        hidden, _ = ident.left_out(source, number)
+        if not len(hidden):
+            return False
+        recs = ident.col_record
+        gone = {str(recs.obs[r]) for r in np.unique(recs.rec[hidden]).tolist()}
+        return any(str(sp.get("observation_id")) in gone for sp in answercache.specimens_in(answer))
+
+    def reshow_kept(ident: Identifier, answer, view) -> None:
+        """An answer kept under an older version, with its specimens' photos checked
+        against who may be shown now (answercache.reshow_photos)."""
+        answercache.reshow_photos(
+            answer, ident.photos_of, photo_lookup,
+            lambda info: view.may_show(info.license_class, info.owner_user_id),
+            lambda info: photo_url(info.source, info.source_url, "medium"))
 
     def served_index(backbone: str, method: str, view, timer: "apiv1.Timer") -> Identifier:
         """identifier(), its wait for a rebuild counted as queueing."""
@@ -1542,6 +1593,60 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise apiv1.V1Error(400, "bad_request", f"{name} is true or false")
                 return v
 
+            def held_v1(source: str, number: str, backbone: str, method: str, top_k: int,
+                        use_place: bool, use_date: bool, view, timer) -> dict | None:
+                """The answer Vision holds for an observation, in the v1 shape: the newer of
+                identify-by-observation's (`kept_from` api) and the site's Identify page's
+                ("from a link", `kept_from` site; same model, place and date), under
+                whichever answers version it was given (Steve, 2026-10-19: kept until someone
+                runs it again). `answered` says when, who asked, and whether Vision still
+                answers from the same reference set; an older one has its specimens' photos
+                checked against who may be shown now. None when nothing is held."""
+                version = answers_version(backbone, method, view)
+                api = answer_cache.held(answercache.answer_key(
+                    "v1", source, number, backbone, method,
+                    {"top_k": top_k, "place": use_place, "date": use_date}))
+                site = answer_cache.held(answercache.answer_key(
+                    "site", source, number, backbone, method,
+                    {"place": use_place, "date": use_date}))
+                # An older answer that matched the observation to itself is not served.
+                ident = None
+                if any(k is not None and k.version != version for k in (api, site)):
+                    ident = v1_index(backbone, method, view, timer)
+                if api is not None and api.version != version and kept_matches_itself(
+                        ident, source, number, api.payload):
+                    api = None
+                if site is not None and site.version != version and kept_matches_itself(
+                        ident, source, number, [site.payload["result"], site.payload.get("spare")]):
+                    site = None
+                if api is None and site is None:
+                    return None
+                # A run here keeps the site's copy first, so ties go to this one.
+                if site is None or (api is not None and api.answered_at >= site.answered_at):
+                    kept, kept_from = api, "api"
+                    body = {**kept.payload, "request_id": "r_" + secrets.token_urlsafe(12)}
+                    if kept.version != version:
+                        reshow_kept(ident, body, view)
+                    confusions.annotate(body, confused_table())
+                else:
+                    kept, kept_from = site, "site"
+                    held = kept.payload
+                    if kept.version != version:
+                        reshow_kept(ident, [held["result"], held.get("spare")], view)
+                    site_about = dict(held["observation"])
+                    own = site_about.pop("excluded_reference", False)
+                    left = site_about.pop("left_out_photos", 0)
+                    body = v1_result(held["result"], backbone, method, held["used"], timer)
+                    body["observation"] = {"place": None, **site_about}
+                    body["excluded_reference"] = ({"source": source, "source_id": number}
+                                                  if own else None)
+                    body["left_out_photos"] = int(left or 0)
+                    if held.get("release") is not None:
+                        body["model"] = {**body["model"], "version": held["release"]}
+                body["model"] = {**body["model"], "answers_version": kept.version}
+                body.update(cached=True, kept_from=kept_from, answered=kept.about(version))
+                return body
+
             def v1_identify_observation(request: Request, source: str, observation_id: str,
                                         payload: dict | None = Body(None)):
                 timer = apiv1.Timer()
@@ -1560,6 +1665,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 10:
                     raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
                 use_place, use_date = flag(payload, "use_place"), flag(payload, "use_date")
+                rerun = payload.get("rerun", False)
+                if not isinstance(rerun, bool):
+                    raise apiv1.V1Error(400, "bad_request", "rerun is true or false")
                 model = payload.get("model")
                 if model is not None and not isinstance(model, str):
                     raise apiv1.V1Error(400, "bad_request", "model is a string")
@@ -1574,20 +1682,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if not same_find:
                     quotas.check(cred)
                 view = permission_view()
-                # Already answered under what Vision answers from now: the same answer,
-                # without reading the observation or scoring it again.
+                # Already answered (here or on the site): the same answer, without reading
+                # the observation or scoring it again, until someone asks to run it again.
                 version = answers_version(backbone, method, view)
                 kept_key = answercache.answer_key(
                     "v1", source, number, backbone, method,
                     {"top_k": top_k, "place": use_place, "date": use_date})
-                kept = answer_cache.get(kept_key, version)
-                if kept is not None:
+                site_key = answercache.answer_key("site", source, number, backbone, method,
+                                                  {"place": use_place, "date": use_date})
+                body = None if rerun else held_v1(source, number, backbone, method, top_k,
+                                                  use_place, use_date, view, timer)
+                if body is not None:
                     quotas.count(cred, 0 if same_find else 1, 0)
                     if not same_find:
                         quotas.remember_counted(cred, client_ref)
-                    body = {**kept, "request_id": "r_" + secrets.token_urlsafe(12),
-                            "cached": True}
-                    confusions.annotate(body, confused_table())
                     body["timing"] = timer.block()
                     body["usage"] = quotas.usage(cred)
                     return JSONResponse(body, headers={
@@ -1679,8 +1787,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 try:
                     def may_show(info) -> bool:
                         return view.may_show(info.license_class, info.owner_user_id)
+                    # The site's answer comes from the same photos (pooled), kept for the
+                    # Identify page so opening the observation there runs nothing again.
+                    pooled: list = []
                     if len(own):
                         def finish(v, sims):
+                            pooled.append(site_answer(ident, v, sims, None, may_show, None,
+                                                      hidden))
                             return ident.identify_vectors(
                                 v, top_k, context=None, sims=sims, photo_lookup=photo_lookup,
                                 may_show=may_show, gate=None, higher_ranks=True,
@@ -1689,11 +1802,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                             key=id(ident), photos=0, embed=lambda: vecs,
                             search=ident.nearest.photo_sims, finish=finish,
                             interactive=False, timer=timer))
+                        scored_vecs = vecs
                     else:
+                        got: list = []
                         result = embed_and_score(ident, backbone, images, context or Context(),
                                                  may_show, timer, top_k, interactive=False,
                                                  higher=True,
-                                                 hidden=hidden if len(hidden) else None)
+                                                 hidden=hidden if len(hidden) else None,
+                                                 vectors=got, pooled=pooled)
+                        scored_vecs = got[0] if got else None
                 finally:
                     in_flight.leave()
                 quotas.count(cred, 0 if same_find else 1, n_photos)
@@ -1705,8 +1822,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                               if len(own) else None)
                 body["left_out_photos"] = int(len(hidden))
                 body["model"] = {**body["model"], "answers_version": version}
+                who = asked_by(cred)
+                if pooled:
+                    site_about = {**{k: v for k, v in about.items() if k != "place"},
+                                  "excluded_reference": bool(len(own)),
+                                  "left_out_photos": int(len(hidden))}
+                    if site_about["photos_shown"] is None:   # a reference record: none shown
+                        site_about.update(photos=n_photos, photos_shown=[None] * n_photos)
+                    kept_site, _, _ = site_kept(pooled[0], scored_vecs, hidden, used, site_about)
+                    kept_site["release"] = model_card().get("version")
+                    answer_cache.put(site_key, version, kept_site, who)
                 answer_cache.put(kept_key, version, answercache.without_confusions(
-                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")}))
+                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")}),
+                    who)
+                body["answered"] = answer_cache.held(kept_key).about(version)
                 body["cached"] = False
                 body["usage"] = quotas.usage(cred)
                 return JSONResponse(body, headers={
@@ -1733,36 +1862,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if not 1 <= top_k <= 10:
                     raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
                 backbone, method = v1_model(model)
-                view = permission_view()
-                version = answers_version(backbone, method, view)
-                kept = answer_cache.get(answercache.answer_key(
-                    "v1", source, number, backbone, method,
-                    {"top_k": top_k, "place": use_place, "date": use_date}), version)
-                if kept is not None:
-                    body = {**kept, "request_id": "r_" + secrets.token_urlsafe(12)}
-                    confusions.annotate(body, confused_table())
-                    kept_from = "api"
-                else:
-                    # The site's Identify page keeps its own answers ("from a link"); they
-                    # answer the same photos, place and date with the same model.
-                    held = answer_cache.get(answercache.answer_key(
-                        "site", source, number, backbone, method,
-                        {"place": use_place, "date": use_date}), version)
-                    if held is None:
-                        raise apiv1.V1Error(404, "not_answered", "Vision holds no answer for "
-                                            "this observation under what it answers from now")
-                    site_about = dict(held["observation"])
-                    own = site_about.pop("excluded_reference", False)
-                    left = site_about.pop("left_out_photos", 0)
-                    body = v1_result(held["result"], backbone, method, held["used"], timer)
-                    body["observation"] = {"place": None, **site_about}
-                    body["excluded_reference"] = ({"source": source, "source_id": number}
-                                                  if own else None)
-                    body["left_out_photos"] = int(left or 0)
-                    body["model"] = {**body["model"], "answers_version": version}
-                    kept_from = "site"
-                body.update(cached=True, kept_from=kept_from, timing=timer.block(),
-                            usage=quotas.usage(cred))
+                body = held_v1(source, number, backbone, method, top_k, use_place, use_date,
+                               permission_view(), timer)
+                if body is None:
+                    raise apiv1.V1Error(404, "not_answered", "Vision holds no answer for "
+                                        "this observation")
+                body.update(timing=timer.block(), usage=quotas.usage(cred))
                 return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
             app.get("/api/v1/answers/{source}/{observation_id}")(v1_kept_answer)
@@ -1793,6 +1898,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise HTTPException(400, "models is a comma-separated string")
                 use_place, use_date = (payload.get(k, True) is not False
                                        for k in ("use_place", "use_date"))
+                # Run it again (the page's "Run again"): never served from what is kept.
+                rerun = payload.get("rerun", False) is True
                 wanted = site_models(models_)
                 timer = apiv1.Timer()
                 timer.ms["fetch_ms"] = 0
@@ -1801,7 +1908,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 keys = [answercache.answer_key("site", source, number, b, m,
                                                {"place": use_place, "date": use_date})
                         for b, m in wanted]
-                held = [answer_cache.get(k, v) for k, v in zip(keys, versions)]
+                # Kept here, or by identify-by-observation (mycomap.org's Validate Records
+                # keeps the site's answer too): served under whichever version it was given
+                # until someone runs it again (Steve, 2026-10-19).
+                held = [] if rerun else [answer_cache.held(k) for k in keys]
                 linked = linked_of(request)
 
                 def may_show(info) -> bool:
@@ -1809,25 +1919,39 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
                 # A kept answer is everyone's: it holds no one's records, only the photos'
                 # vectors, so the person's own part is made here. One kept before it held
-                # them can't make it: answer afresh for a person with accounts.
+                # them is served without that part rather than run again.
                 needs_vectors = linked is not None and linked.linked
-                if held and all(h is not None and (not needs_vectors or yours.decode_vectors(
-                        h.get("vectors")) is not None) for h in held):
+                # An older answer that matched the observation to itself is answered afresh.
+                if held and all(h is not None for h in held) and any(
+                        h.version != v and kept_matches_itself(
+                            site_index(b, m, view, timer), source, number,
+                            [h.payload["result"], h.payload.get("spare")])
+                        for (b, m), h, v in zip(wanted, held, versions)):
+                    held = []
+                if held and all(h is not None for h in held):
                     table = confused_table()
                     results = []
-                    for (backbone, method), h in zip(wanted, held):
-                        vecs = yours.decode_vectors(h.get("vectors")) if needs_vectors else None
-                        ident = site_index(backbone, method, view, timer) if needs_vectors else None
+                    for (backbone, method), h, version in zip(wanted, held, versions):
+                        kept = h.payload
+                        stale = h.version != version
+                        vecs = yours.decode_vectors(kept.get("vectors")) if needs_vectors else None
+                        ident = (site_index(backbone, method, view, timer)
+                                 if needs_vectors or stale else None)
+                        if stale:
+                            reshow_kept(ident, [kept["result"], kept.get("spare")], view)
                         mine = yours.for_person(
-                            ident, h["result"], h.get("spare") or [], vecs,
-                            np.asarray(h.get("hidden") or [], dtype=np.int64), linked,
+                            ident if vecs is not None else None, kept["result"],
+                            kept.get("spare") or [], vecs,
+                            np.asarray(kept.get("hidden") or [], dtype=np.int64), linked,
                             photo_lookup, may_show)
                         confusions.annotate(mine, table)
+                        mine["answered"] = h.about(version)
                         results.append(mine)
                     return {"results": results,
-                            "context_used": held[0]["used"],
-                            "observation": held[0]["observation"],
+                            "context_used": held[0].payload["used"],
+                            "observation": held[0].payload["observation"],
                             "cached": True,
+                            "answered": held[0].about(versions[0]),
                             "timing": timer.block()}
                 start = time.monotonic()
                 try:
@@ -1915,21 +2039,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 answered = []
                 for key, version, pooled, (ident, vecs, hidden) in zip(keys, versions, results,
                                                                        scored):
-                    result, spare = yours.split_pool(pooled)
-                    # Kept for everyone: the plain answer, its spare specimens, the photos'
-                    # vectors and what was left out. Nothing about the person asking.
-                    answer_cache.put(key, version, {
-                        "result": answercache.without_confusions(result),
-                        "spare": spare,
-                        "vectors": yours.encode_vectors(vecs) if vecs is not None else None,
-                        "hidden": [int(c) for c in np.asarray(hidden).tolist()],
-                        "used": used, "observation": about})
+                    kept, result, spare = site_kept(pooled, vecs, hidden, used, about)
+                    kept["release"] = model_card().get("version")
+                    answer_cache.put(key, version, kept, "site")
                     mine = yours.for_person(ident, result, spare, vecs, hidden, linked,
                                             photo_lookup, may_show)
                     confusions.annotate(mine, table)
+                    mine["answered"] = answer_cache.held(key).about(version)
                     answered.append(mine)
                 return {"results": answered, "context_used": used, "observation": about,
-                        "cached": False, "timing": timer.block()}
+                        "cached": False, "answered": answered[0]["answered"],
+                        "timing": timer.block()}
 
     # The app's observation sessions (docs/api.md §3.3, sessions.py): photos sent one at a
     # time as they're taken; each answer is the combined answer over all of them,

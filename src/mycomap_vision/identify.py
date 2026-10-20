@@ -310,6 +310,18 @@ class Identifier:
         self.rank_counts = {rank: Counter(dict(zip(names.tolist(), n.tolist())))
                             for rank, (names, n) in counts.items()}
 
+    def photos_of(self, observation_id: str) -> list[int]:
+        """A reference record's photo ids in this index (its `observation_id`, as answers
+        name it); empty when it is not one. Built once, on first use."""
+        by = getattr(self, "_photos_by_record", None)
+        if by is None:
+            by = {}
+            obs = self.col_record.obs
+            for r, photo in zip(self.col_record.rec.tolist(), self.col_photo.tolist()):
+                by.setdefault(str(obs[r]), []).append(int(photo))
+            self._photos_by_record = by
+        return by.get(str(observation_id), [])
+
     def can_leave_out(self) -> bool:
         """Whether this method can answer with reference columns left out (hidden=)."""
         return self.model is self.nearest or hasattr(self.model, "leave_out")
