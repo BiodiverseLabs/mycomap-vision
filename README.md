@@ -159,6 +159,18 @@ permissions allow otherwise; a Creative-Commons-only dataset release is planned.
 Photographers can grant or withdraw permission on mycomap.org, and a withdrawal
 takes effect at once. Details: [docs/data.md](docs/data.md), [SECURITY.md](SECURITY.md).
 
+**Your photos on the site.** Every identification on the site gets its own link,
+`/r/<id>`, so it can be shared (`src/mycomap_vision/runs.py`). Vision keeps the answer
+with it and, for uploaded photos, copies at most 1024 px wide with the camera details
+(EXIF: exact place, time, camera) removed; the place is kept only to 0.1 degree, as the
+page shows it. Each run also records who ran it (their mycomap.org account), so they can
+delete it; that is never shown. Only people given the link can open it: the id is
+random, the pages are not indexed, and nothing lists them. A run is kept until the
+person who ran it, or a mycomap.org admin, deletes it. Runs from an iNaturalist or
+Mushroom Observer link keep no photos, only the observation's photo addresses at its
+source. Shared photos are never used to train Vision or as references. The developer
+API and the app keep nothing new.
+
 ## Contributing and contact
 
 Issues and pull requests are welcome. CI must pass, and every change comes with

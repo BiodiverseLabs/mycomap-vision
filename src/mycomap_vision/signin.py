@@ -35,6 +35,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,7 +68,20 @@ def public_page(method: str, path: str) -> bool:
     """A page or shell file anyone may read (GET or HEAD only)."""
     return method in ("GET", "HEAD") and (
         path in PUBLIC_PAGES or path in PUBLIC_FILES
-        or any(path.startswith(d) for d in PUBLIC_FILE_DIRS))
+        or any(path.startswith(d) for d in PUBLIC_FILE_DIRS) or run_path(path))
+
+
+# A run's own link (runs.py; Steve, 2026-10-20): its page, its answer and its photo copies
+# open for anyone who has the link, signed in or not. The id is the only key. Nothing else
+# about runs is open: deleting one needs sign-in, and no route lists them.
+_RUN_PATH = re.compile(r"^/(?:r/[A-Za-z0-9_-]{16}|api/runs/[A-Za-z0-9_-]{16}"
+                       r"(?:/photos/\d{1,2}\.jpg)?)$")
+
+
+def run_path(path: str) -> bool:
+    return bool(_RUN_PATH.match(path))
+
+
 SESSION_COOKIE = "mv_session"
 NONCE_COOKIE = "mv_signin"
 NONCE_TTL_SECONDS = 600
