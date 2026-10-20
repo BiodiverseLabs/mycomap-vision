@@ -451,3 +451,28 @@ def test_a_folder_store_never_writes_outside_its_folder(tmp_path):
     objects = runs.DirObjects(tmp_path / "bucket")
     with pytest.raises(ValueError):
         objects.put("../escape.txt", b"x", "text/plain")
+
+
+# --- the box's health check ----------------------------------------------------------------
+
+def test_the_box_reports_its_runs_and_their_photos_size_to_the_server_key_only(conn, tmp_path):
+    app, store, bucket = site(conn, tmp_path, by_observation=True)
+    client = person(app, "user-1")
+    upload = identify(client, photos=(("a.jpg", jpeg_with_gps((800, 600)), "image/jpeg"),))
+    by_link(client)
+    size = (bucket / runs.PREFIX / upload.json()["run"]["id"] / "0.jpg").stat().st_size
+    full = visitor(app).get("/api/health", headers={"Authorization": f"Bearer {SERVER_KEY}"})
+    assert full.json()["run_links"] == {"runs": 2, "by_kind": {"photos": 1, "observation": 1},
+                                        "photo_bytes": size}
+    # A deleted run leaves the count.
+    assert client.delete(f"/api/runs/{upload.json()['run']['id']}").status_code == 204
+    after = visitor(app).get("/api/health", headers={"Authorization": f"Bearer {SERVER_KEY}"})
+    assert after.json()["run_links"] == {"runs": 1, "by_kind": {"observation": 1}, "photo_bytes": 0}
+    # Never in the public answer.
+    assert "run_links" not in visitor(app).get("/api/health").json()
+
+
+def test_with_run_links_off_the_health_check_says_so(conn, tmp_path):
+    app, _, _ = site(conn, tmp_path, links=False, by_observation=True)
+    full = visitor(app).get("/api/health", headers={"Authorization": f"Bearer {SERVER_KEY}"})
+    assert full.json()["run_links"] is None
