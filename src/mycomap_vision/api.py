@@ -1527,6 +1527,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # vectors, the record itself left out, behind the same queue as everything else.
     if feedback_store is None:
         feedback_store = feedback.Store(feedback.default_path(manifest_path))
+    if feedback_store.gate is None:
+        # The paper's seal: nothing this server adds to a queue (a reviewer's photo item, a
+        # blind refresh) may name a v1-test record (feedback.SealGate).
+        feedback_store.gate = feedback.SealGate.from_manifest(conn, lock=db_lock)
     app.state.feedback = feedback_store
     with db_lock:
         feedback.sync_exclusions(feedback_store, conn)

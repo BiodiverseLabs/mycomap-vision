@@ -106,13 +106,7 @@ def parse_flags(rule: str) -> list[dict]:
     return out
 
 
-def record_of_link(link: str) -> str | None:
-    """The record key of a photo item's record link (MO 'mo:<n>', iNat '<n>')."""
-    if m := re.search(r"mushroomobserver\.org/(?:obs|observations)/(\d+)", link or ""):
-        return f"mo:{m.group(1)}"
-    if m := re.search(r"inaturalist\.org/observations/(\d+)", link or ""):
-        return m.group(1)
-    return None
+record_of_link = fb.record_of_link          # one rule for record links (feedback.py)
 
 
 def record_of_item(item: dict) -> str | None:
@@ -505,7 +499,11 @@ def decide_record(store: fb.Store, record_key: str, photos: list[dict], person: 
                          "links": [fb.link(record_key)], "current": template.get("current"),
                          "proposed": "leave the photo out of Vision",
                          "projects": template.get("projects") or []}], "photo-review")
-            item = next(it for it in store.items_of(ITEM_TYPE, None) if it["subject"] == key)
+            item = next((it for it in store.items_of(ITEM_TYPE, None) if it["subject"] == key),
+                        None)
+            if item is None:            # the seal refused it (feedback.SealGate)
+                raise fb.FeedbackError(f"{record_key} is in the paper's sealed test: its photos "
+                                       "are not reviewed until the seal is lifted")
             added += 1
         store.decide(item["id"], "exclude_photo" if decision == "exclude" else "keep_photo",
                      person, value=reason if decision == "exclude" else None, note=note,

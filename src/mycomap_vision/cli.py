@@ -588,6 +588,13 @@ def cmd_dataset(args) -> None:
             "taxonomy_cache_sha256": dr.sha256_file(cache)
             if "nonfungal_label" in reasons else None, **extra,
             "file": str(path), "sha256": dr.sha256_file(path)}, indent=2))
+    elif args.action == "record-keys":
+        from . import feedback
+        rel = dr.load_release(args.id, root, allow_draft=False)
+        try:
+            print(json.dumps(feedback.write_record_keys(rel, Path(args.out)), indent=2))
+        finally:
+            rel.close()
     elif args.action == "label-vocabulary":
         from . import errata as errata_mod
         from . import name_equiv
@@ -1160,6 +1167,13 @@ def cmd_feedback(conn, args) -> None:
     from . import feedback
     path = Path(args.store) if args.store else feedback.default_path()
     store = feedback.Store(path)
+    if args.action == "seal-check":
+        gate = feedback.SealGate.from_manifest(conn, v1_keys_path=args.v1_keys)
+        out = feedback.seal_check(store, gate)
+        print(json.dumps({"store": str(path), **out}, indent=2))
+        if not out["ok"]:
+            raise SystemExit(1)
+        return
     if args.action == "seed":
         out = feedback.seed_files(store, conn, Path(args.queue) if args.queue else None,
                                   Path(args.crosswalk) if args.crosswalk else None,
@@ -2330,6 +2344,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("id")
     q.add_argument("--errata", help="the release's erratum in use")
     q.add_argument("--out", required=True, help="the file to write (never overwritten)")
+    q = dsub.add_parser("record-keys", help="write the release's record keys (train and val), "
+                                            "the pinned list the Human Feedback seal accepts "
+                                            "(MV_FEEDBACK_V1_KEYS)")
+    q.add_argument("id")
+    q.add_argument("--out", required=True, help="the file to write (never overwritten)")
     q = dsub.add_parser("verify", help="recompute every file and content hash")
     q.add_argument("id")
     q.add_argument("--photos", default="0", help="also re-read N originals (or 'all')")
@@ -2411,6 +2430,11 @@ def main(argv: list[str] | None = None) -> int:
                                    "manifest)")
     q = fsub.add_parser("status", help="open and decided items per type")
     q.add_argument("--store")
+    q = fsub.add_parser("seal-check", help="no queue item may name a record first green after "
+                                           "the paper's seal (exit 1 if one does, or its date "
+                                           "is unknown); run after every re-seed")
+    q.add_argument("--store")
+    q.add_argument("--v1-keys", help="the pinned v1 record keys (default MV_FEEDBACK_V1_KEYS)")
 
     p = sub.add_parser("holdout", help="records held out for a benchmark: never trained on, "
                                        "indexed, released or added at night (holdouts.py)")
