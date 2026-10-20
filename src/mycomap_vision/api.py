@@ -776,8 +776,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         given = request.headers.get("authorization", "")
         if org_secret and secrets.compare_digest(given.encode(),
                                                  f"Bearer {org_secret}".encode()):
-            # Never in the public answer: how often uploads are reference photos.
-            return {**full, "upload_matches": upload_meter.summary()}
+            # Never in the public answer: how often uploads are reference photos, and how
+            # many runs are kept under their own links and the room their photos take.
+            return {**full, "upload_matches": upload_meter.summary(),
+                    "run_links": run_store.summary() if run_store is not None else None}
         served, ready = served_backbones()
         known = {*limits.allowed_backbones, *ready, *(full["nightly"].get("layer") or {}),
                  *full["embed"], *(m.split("/", 1)[0] for m in warm.models),

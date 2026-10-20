@@ -172,8 +172,9 @@ class S3Objects:
 
 class OwnerIndex:
     """Whose runs are whose: owner id and name, run id, kind, when (a person may also have
-    opened an iNat/MO run someone else made first). Thread-safe; `path=None` keeps it in
-    memory. Nothing serves it yet: it is for a "your past runs" page later."""
+    opened an iNat/MO run someone else made first), and every run kept with its photo
+    copies' bytes, for the box's health check. Thread-safe; `path=None` keeps it in memory.
+    Nothing serves the owners yet: they are for a "your past runs" page later."""
 
     SCHEMA = """
     create table if not exists site_runs (
@@ -185,6 +186,12 @@ class OwnerIndex:
         primary key (owner_id, run_id)
     );
     create index if not exists site_runs_by_run on site_runs (run_id);
+    create table if not exists runs (
+        run_id      text primary key,
+        kind        text not null,
+        created_at  real not null,
+        photo_bytes integer not null default 0
+    );
     """
 
     def __init__(self, path: Path | None):
@@ -225,7 +232,27 @@ class OwnerIndex:
     def remove_run(self, run_id: str) -> None:
         with self._lock:
             self._conn.execute("delete from site_runs where run_id = ?", (run_id,))
+            self._conn.execute("delete from runs where run_id = ?", (run_id,))
             self._conn.commit()
+
+    def add_run(self, run_id: str, kind: str, created_at: float, photo_bytes: int) -> None:
+        """Every run kept, whoever ran it (signed out too), and its photo copies' bytes."""
+        with self._lock:
+            self._conn.execute(
+                "insert into runs (run_id, kind, created_at, photo_bytes) values (?, ?, ?, ?) "
+                "on conflict(run_id) do update set photo_bytes = excluded.photo_bytes",
+                (run_id, kind, created_at, photo_bytes))
+            self._conn.commit()
+
+    def totals(self) -> dict:
+        """Runs kept (by kind) and their photo copies' bytes, from this box's index."""
+        with self._lock:
+            rows = self._conn.execute(
+                "select kind, count(*), coalesce(sum(photo_bytes), 0) from runs group by kind"
+            ).fetchall()
+        by_kind = {k: int(n) for k, n, _ in rows}
+        return {"runs": sum(by_kind.values()), "by_kind": by_kind,
+                "photo_bytes": int(sum(b for _, _, b in rows))}
 
 
 def owner_list_key(owner_id: str) -> str:
@@ -274,11 +301,15 @@ class RunStore:
 
         def job():
             try:
+                size = 0
                 for n, body in enumerate(bodies):
-                    self.objects.put(self._key(rid, f"{n}.jpg"), small_copy(body), "image/jpeg")
+                    copy = small_copy(body)
+                    size += len(copy)
+                    self.objects.put(self._key(rid, f"{n}.jpg"), copy, "image/jpeg")
                 self.objects.put(self._key(rid, "run.json"),
                                  json.dumps(run, separators=(",", ":")).encode(),
                                  "application/json")
+                self.index.add_run(rid, run["kind"], run["created"], size)
                 with self._lock:
                     self._remember(rid, run)
             except Exception as e:  # noqa: BLE001 - the link then answers 404; reported
@@ -378,6 +409,11 @@ class RunStore:
         self.index.remove_run(rid)
         self._drop_from_lists(rid, owners)
         return True
+
+    def summary(self) -> dict:
+        """For the box's health check (mycomap.org's server key only): runs kept since the
+        index began, and how much room their photo copies take."""
+        return self.index.totals()
 
 
 def from_setting(value: str | None, state_dir: Path, note=print) -> RunStore | None:
