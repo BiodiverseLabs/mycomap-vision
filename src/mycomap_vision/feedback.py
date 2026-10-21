@@ -161,6 +161,15 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
                      group="Not duplicate", short="Leave both",
                      hint="Two finds in two places; nothing changes")),
              granularity="record pair"),
+    ItemType("photo_view", "Photo views",
+             "What each photo shows: cap top, gills, stem and base, growing in place, several "
+             "specimens… The photo-type tagger suggests tags; confirm them, add or remove any, "
+             "and save. Nothing here leaves a photo out of Vision: a photo that shows no "
+             "specimen goes to \"Photos that show no specimen\".",
+             ("the photo", "the suggested views"),
+             (Option("confirm_views", "Views confirmed", "note", needs_value=True),
+              Option("no_specimen", "Shows no specimen: send to the exclusion review", "note")),
+             granularity="photo"),
     ItemType("species_rank_split", "A species and its own varieties",
              "Labels that are one species at species rank (Vision's answer key): the species "
              "and its variety or subspecies, or one variety written several ways. Vision counts "
@@ -188,6 +197,9 @@ SECTIONS: dict[str, tuple[str, str, str]] = {
     "cleanup": ("Data cleanup", "Fix what a rule found: photos that show no specimen, one name "
                 "written several ways, retired or inactive names, one find posted twice or "
                 "placed in two places.", "Fast: cards, bulk actions, keyboard."),
+    "views": ("Photo views", "Say what each photo shows (cap top, gills, stem and base, in "
+              "situ, …): confirm or correct the suggested tags.", "Fast: a grid, tap a tag to "
+              "toggle it, save the page."),
     "validation": ("Data validation", "Is the record's label right? Look at the photos, its DNA "
                    "and BLAST results, and decide as a curator.", "Some queues are reviewed "
                    "blind: Vision's answer stays hidden unless you choose to see it."),
@@ -196,7 +208,7 @@ SECTION_OF: dict[str, str] = {
     "non_specimen_photo": "cleanup", "name_writing_split": "cleanup",
     "name_retired": "cleanup", "name_inactive_on_inat": "cleanup",
     "crosspost_twin": "cleanup", "twin_location_conflict": "cleanup",
-    "species_rank_split": "cleanup",
+    "species_rank_split": "cleanup", "photo_view": "views",
     "photos_unlike_label": "validation", "reference_label_doubt": "validation",
     "label_vs_own_dna": "validation", "vision_names_same_taxon": "validation",
     "crosswalk": "validation", "group_label": "validation",

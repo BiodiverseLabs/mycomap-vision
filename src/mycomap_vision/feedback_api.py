@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
 from . import photo_review as pr
+from . import photo_views as pv
 from .pair_places import PairPlaces
 
 ROLE_TTL = 300.0
@@ -465,6 +466,48 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                                  "record_photos": i and i["record_photos"]})
         return {"total": len(tiles), "offset": start, "tiles": out,
                 "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
+
+    @app.get("/api/feedback/photo-views")
+    def fb_photo_views(request: Request, tab: str = "all", status: str = "open", q: str = "",
+                       offset: int = 0, limit: int = 60):
+        """Photo views (Steve, 2026-10-21): the queue's photos in a view's tab, one tile each,
+        paged (at most 200), with the suggested and confirmed tags and a small thumbnail (public
+        photos from their source, others from /api/feedback/photo/…?size=grid)."""
+        _, projects = access(request)
+        items = items_cached(pv.ITEM_TYPE, projects)
+        try:
+            tiles = pv.tiles(items, tab, status, q)
+        except fb.FeedbackError as e:
+            bad(e)
+        start = max(0, offset)
+        page = tiles[start:start + min(max(1, limit), 200)]
+        info = need_photos().many([(t["photo_key"], t["record_key"]) for t in page])
+        shown = {d["photo_key"]: d for d in need_photos().for_viewer(
+            [i["row"] for i in info.values()], thumb="grid")}
+        out = []
+        for t in page:
+            i = info.get(t["photo_key"])
+            ph = shown.get(t["photo_key"]) or {"photo_key": t["photo_key"], "position": None,
+                                               "shown": "hidden",
+                                               "hidden_reason": "not in Vision's photo list now"}
+            out.append(t | ph | {"owner_login": i and i["owner_login"],
+                                 "license_code": i and i["license_code"],
+                                 "record_photos": i and i["record_photos"]})
+        return {"tabs": pv.tab_counts(items), "total": len(tiles), "offset": start,
+                "views": [{"code": c, "label": t, "suggested": c in pv.SUGGESTED}
+                          for c, t in pv.VIEWS],
+                "tiles": out}
+
+    @app.post("/api/feedback/photo-views/batch")
+    def fb_photo_views_batch(request: Request, payload: dict = Body(...)):
+        """Save a page of Photo views: [{item_id, views: [...]}, or {item_id, no_specimen:
+        true}], written whole or not at all (photo_views.batch_decide)."""
+        who, projects = access(request)
+        try:
+            return pv.batch_decide(store, list(payload.get("decisions") or []), who,
+                                   projects=projects)
+        except fb.FeedbackError as e:
+            bad(e)
 
     @app.post("/api/feedback/photo-review/batch")
     def fb_photo_review_batch(request: Request, payload: dict = Body(...)):
