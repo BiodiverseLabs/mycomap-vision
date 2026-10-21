@@ -71,6 +71,8 @@ REASONS: tuple[tuple[str, str], ...] = (
     ("drawing_micro", "Drawing – microscopy"),
     ("drawing_specimen", "Drawing – specimen"),
     ("species_description", "Species description"),   # a photo of a written description
+    # Steve, 2026-10-21: a reason even while no flag finds these reliably.
+    ("blurry", "Blurry or badly exposed"),
     ("other", "Other"),
 )
 REASON_CODES = tuple(c for c, _ in REASONS)
