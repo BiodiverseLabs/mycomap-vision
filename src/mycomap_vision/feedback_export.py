@@ -15,8 +15,10 @@ Columns (fixed, pinned by the paper coordinator in curation_v1_1):
   photo_key, manifest_photo_id, record_key, v1_split, decision, reason, decision_id,
   decided_at, reviewer_pseudonym, confirmation, flag_source
 `confirmation` comes from the decision's note: "shown" for the Summary's default Exclude saved
-once the photo had been on screen ("summary: shown"), "flipped" for any other Summary save (the
-reviewer changed the tile or picked a reason), and "record" for a save in the record view.
+once the photo had been on screen ("summary: shown", Auto-save on), "saved" for that default
+saved by the reviewer pressing Save ("summary: saved", Auto-save off), "flipped" for any other
+Summary save (the reviewer changed the tile or picked a reason), and "record" for a save in the
+record view.
 `flag_source` is what brought the photo to review: each part of the item's rule without its
 numbers ("R6 micrograph probe; R7 uv probe"), or the reviewer's own pick for a photo no rule
 flagged."""
@@ -40,6 +42,7 @@ from . import photo_review as pr
 COLUMNS = ("photo_key", "manifest_photo_id", "record_key", "v1_split", "decision", "reason",
            "decision_id", "decided_at", "reviewer_pseudonym", "confirmation", "flag_source")
 NOTE_SHOWN = "summary: shown"
+NOTE_SAVED = "summary: saved"      # Auto-save off: the default Exclude saved by the reviewer's Save
 FINGERPRINT_LABEL = b"mycomap-e34"      # the paper pins HMAC(key, this), never the key
 _NUMBERS = re.compile(r"\s*(p(\(fungus\))?=[0-9.]+|\([^)]*\))")
 
@@ -60,6 +63,8 @@ def confirmation(note: str | None) -> str:
     note = (note or "").strip()
     if note == NOTE_SHOWN:
         return "shown"
+    if note == NOTE_SAVED:
+        return "saved"
     if note.startswith("summary:"):
         return "flipped"
     return "record"

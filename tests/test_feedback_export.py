@@ -155,3 +155,12 @@ def test_the_summary_names_the_keys_fingerprint_and_a_run_refuses_another_key(si
     assert summary["key_fingerprint"] == fp and KEY not in data
     with pytest.raises(fx.ExportError, match="fingerprint"):
         fx.export(copy, rel, CUT, b"another-key", live, expect_fingerprint=fp)
+
+
+def test_a_default_saved_by_the_reviewers_save_is_its_own_confirmation():
+    """Auto-save off (the review-autosave-toggle branch): the default Exclude written by the
+    reviewer's Save carries "summary: saved", neither shown nor flipped."""
+    assert fx.confirmation("summary: saved") == "saved"
+    assert fx.confirmation("summary: shown") == "shown"
+    assert fx.confirmation("summary: flipped") == "flipped"
+    assert fx.confirmation(None) == "record"
