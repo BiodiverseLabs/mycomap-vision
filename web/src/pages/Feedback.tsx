@@ -17,6 +17,7 @@ import { optionGroups, pairSides } from "@/lib/twinCompare";
 import { PairCompare } from "@/components/PairCompare";
 import { LABEL_REVIEW_TYPE } from "@/lib/labelReview";
 import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
+import { confirmLeave, reviewUnsaved } from "@/lib/reviewSave";
 import { LabelReview } from "./LabelReview";
 import { PhotoReview } from "./PhotoReview";
 import { PhotoViews } from "./PhotoViews";
@@ -82,6 +83,8 @@ export function FeedbackPage() {
   const linked = useQuery({ queryKey: ["feedback", "item", linkedId], enabled: ok && linkedId != null,
                             queryFn: () => feedbackApi.item(linkedId!), retry: false });
   const pick = (type: string) => {
+    // The photo review with Auto-save off may hold unsaved changes: ask before closing it.
+    if (type !== selected && !confirmLeave(reviewUnsaved.total(), (m) => window.confirm(m))) return;
     setPicked(type);
     writeLastQueue(browserStorage, type);
   };

@@ -5,7 +5,7 @@ import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReas
          initialChoices, keyAction, missingReason, nextPageOffset, nextUnsaved, offsetWhenPageDone, openOnLabel,
          outlineOf, photoLabels, placeholderText, readPreselectMode, savedLine, saveBody, setReason, sortedPhotos,
          step, suggestedCount, tileImage, tileKind, toggleChoice, withMode, writePreselectMode, type KeyState,
-         type PhotoChoices } from "./photoReview";
+         QUICK_REASONS, quickChoice, type PhotoChoices } from "./photoReview";
 
 const photo = (over: Partial<ReviewPhoto> = {}): ReviewPhoto => ({
   photo_key: "inat:1", position: 1, license_class: "cc", shown: "public",
@@ -354,4 +354,29 @@ test("a photo whose image fails to load becomes the placeholder, saying so; a hi
   assert.equal(placeholderText(photo({ shown: "hidden", hidden_reason: "the owner declined" }), true),
                "the owner declined");
   assert.equal(placeholderText(photo({ shown: "hidden" })), "not shown here");
+});
+
+// --- quick reasons (Steve, 2026-10-21) ----------------------------------------------------------
+
+test("a quick reason leaves the record-view photo out for that reason, a kept or suggested one too", () => {
+  const r = record();
+  const kept = chooseDecision(initialChoices(r, "micrograph"), r.photos[1], "keep");
+  for (const { code } of QUICK_REASONS) {
+    assert.deepEqual(quickChoice(kept, "inat:1", code)["inat:1"], { decision: "exclude", reason: code });
+  }
+  const suggested = initialChoices(r, "micrograph", "suggest");
+  assert.equal(suggested["inat:1"].suggested, true);
+  assert.deepEqual(quickChoice(suggested, "inat:1", "micrograph")["inat:1"], { decision: "exclude", reason: "micrograph" },
+                   "confirms the suggestion");
+  const mine = quickChoice(kept, "inat:2", "spore_print");
+  assert.equal(quickChoice(mine, "inat:2", "spore_print"), mine, "same reason: no change");
+  const b = saveBody(r, mine, undefined, QUICK_REASONS.map((q) => q.code));
+  assert.ok("body" in b && b.body.photos.some((p) => p.photo_key === "inat:2" && p.decision === "exclude" && p.reason === "spore_print"));
+});
+
+test("keys 1–5 are the quick reasons in the photo viewer only", () => {
+  const lb: KeyState = { typing: false, lightbox: true };
+  assert.deepEqual(keyAction({ key: "2" }, lb), { type: "quick", index: 1 });
+  assert.equal(keyAction({ key: "2" }, { ...lb, lightbox: false }), null);
+  assert.equal(keyAction({ key: "0" }, lb), null);
 });

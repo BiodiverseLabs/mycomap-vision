@@ -157,6 +157,34 @@ export function setReason(choices: PhotoChoices, photoKey: string, reason: strin
   return { ...choices, [photoKey]: { decision: "exclude", reason } };
 }
 
+// --- quick reasons (Steve, 2026-10-21) ------------------------------------------------------------
+
+/** The buckets picked most, as one-click buttons beneath Include / Exclude in the expanded photo,
+ *  in this order; keys 1–5 there. Every other reason stays in the reason list. */
+export const QUICK_REASONS: { code: string; label: string }[] = [
+  { code: "slip", label: "Field slip" },
+  { code: "micrograph", label: "Microscopy" },
+  { code: "spore_print", label: "Spore print" },
+  { code: "uv", label: "UV" },
+  { code: "chemical", label: "Chemical" },
+];
+
+/** The quick buttons to show: only those whose code is in the server's reasons (a code the
+ *  server does not list would be refused, so its button is hidden), each titled with the server's
+ *  own label. */
+export function quickReasons(reasons: { code: string; label: string }[]): { code: string; label: string; title: string }[] {
+  const byCode = new Map(reasons.map((r) => [r.code, r.label]));
+  return QUICK_REASONS.filter((q) => byCode.has(q.code)).map((q) => ({ ...q, title: byCode.get(q.code)! }));
+}
+
+/** A quick button on a record-view photo: left out, for that reason (a kept or suggested photo
+ *  becomes the reviewer's own exclusion). */
+export function quickChoice(choices: PhotoChoices, photoKey: string, reason: string): PhotoChoices {
+  const c = choices[photoKey];
+  if (!reason || (c && c.decision === "exclude" && c.reason === reason && !c.suggested)) return choices;
+  return { ...choices, [photoKey]: { decision: "exclude", reason } };
+}
+
 /** R: the excluded photo's next reason, in the review's order (the first when it has none). */
 export function cycleReason(choices: PhotoChoices, photoKey: string, reasonCodes: string[]): PhotoChoices {
   const c = choices[photoKey];
@@ -345,6 +373,7 @@ export type KeyAction =
   | { type: "photo"; step: 1 | -1 }
   | { type: "choose"; choice: Choice }
   | { type: "reason" }
+  | { type: "quick"; index: number }
   | { type: "keepAll" }
   | { type: "excludeFlagged" }
   | { type: "save" }
@@ -375,6 +404,7 @@ export function keyAction(e: KeyPress, s: KeyState): KeyAction | null {
     if (k === "k" || k === "K") return { type: "choose", choice: "keep" };
     if (k === "x" || k === "X") return { type: "choose", choice: "exclude" };
     if (k === "r" || k === "R") return { type: "reason" };
+    if (/^[1-5]$/.test(k)) return { type: "quick", index: Number(k) - 1 };
     return null;
   }
   switch (k) {
@@ -405,6 +435,7 @@ export const KEY_HELP: [string, string][] = [
   ["A", "keep all"],
   ["F", "exclude all flagged"],
   ["S or Enter", "save the record"],
+  ["1–5 (photo viewer)", "exclude as Field slip, Microscopy, Spore print, UV, Chemical"],
   ["Esc", "close the photo viewer; in a reason list, Enter or Esc hands the keys back"],
   ["?", "show or hide these keys"],
 ];

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Keyboard } from "lucide-react";
-import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, sciLike,
+import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, QuickReasons, sciLike,
          StatusToggle, useDebounced } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type PhotoReviewDecisionBody,
          type PhotoReviewPage, type PhotoReviewSort, type PhotoReviewTab, type ReviewPhoto,
@@ -9,12 +9,15 @@ import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type 
 import { pageText, recordLabel } from "@/lib/feedback";
 import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReason, decisionsOf, initialChoices,
          KEY_HELP, keyAction, MIN_FLAGGED, missingReason, nextPageOffset, nextUnsaved, offsetWhenPageDone,
-         openOnLabel, outlineOf, photoLabels, photoName, readPreselectMode, REVIEW_PAGE_SIZE, saveBody, savedLine,
+         openOnLabel, outlineOf, photoLabels, photoName, QUICK_REASONS, quickChoice, quickReasons, readPreselectMode,
+         REVIEW_PAGE_SIZE, saveBody, savedLine,
          setReason, SORTS, sortedPhotos, step, suggestedCount, withMode, writePreselectMode, type Choice,
          type KeyAction, type PhotoChoice, type PhotoChoices, type PickedReasons,
          type PreselectMode } from "@/lib/photoReview";
 import { readTileSize, readView, SUMMARY_KEY_HELP, SUMMARY_TABS, TILE_SIZES, writeTileSize, writeView,
          type ReviewView, type TileSize } from "@/lib/photoSummary";
+import { autosaveOnText, changedPhotos, pageSaves, readAutosave, writeAutosave } from "@/lib/reviewSave";
+import { AutosaveToggle, SaveBar, useLeaveGuard } from "@/components/ReviewSave";
 import { PhotoSummary } from "./PhotoSummary";
 
 // The Human Feedback photo review (Steve, 2026-10-18): the "Photos that show no specimen" queue
@@ -35,15 +38,44 @@ import { PhotoSummary } from "./PhotoSummary";
 // the record-by-record view below. The tabs, sort and search apply to both; "N+ flagged" and
 // "Suggest Exclude" to Full only, the tile size to Summary only. Full's records are not read
 // while Summary is shown.
+//
+// Auto-save (Steve, 2026-10-21; lib/reviewSave.ts), at the top, off by default and remembered per
+// viewer. On: both views save as they always have. Off: nothing is written until a Save: the
+// changes are marked unsaved, "Save page (N changes)" writes them all, and paging, a tab, a filter,
+// the view or the queue with changes unsaved asks first (then drops them).
 
 export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<PhotoReviewTab>("all");
-  const [status, setStatus] = useState<FeedbackStatus>("open");
-  const [sort, setSort] = useState<PhotoReviewSort>("p");
-  const [minFlagged, setMinFlagged] = useState<number>(1);
-  const [text, setText] = useState("");
+  const [tab, setTabNow] = useState<PhotoReviewTab>("all");
+  const [status, setStatusNow] = useState<FeedbackStatus>("open");
+  const [sort, setSortNow] = useState<PhotoReviewSort>("p");
+  const [minFlagged, setMinFlaggedNow] = useState<number>(1);
+  const [text, setTextNow] = useState("");
   const q = useDebounced(text.trim());
+  const [autosave, setAutosave] = useState(() => readAutosave(browserStorage));
+  const [unsaved, setUnsaved] = useState(0);
+  const canLeave = useLeaveGuard(unsaved, "photo-review");
+  // Bumped when the reviewer chose to leave changes unsaved: the view shown drops them.
+  const [discard, setDiscard] = useState(0);
+  /** Runs `fn` (a tab, filter or view change) once the reviewer agrees to leave what is unsaved. */
+  const leaving = <T,>(fn: (v: T) => void) => (v: T) => {
+    if (!canLeave()) return;
+    if (unsaved > 0) {
+      setDiscard((d) => d + 1);
+      setUnsaved(0);
+    }
+    fn(v);
+  };
+  const setTab = leaving(setTabNow);
+  const setStatus = leaving(setStatusNow);
+  const setSort = leaving(setSortNow);
+  const setMinFlagged = leaving(setMinFlaggedNow);
+  const setText = leaving(setTextNow);
+  const pickAutosave = (on: boolean) => {
+    if (on && unsaved > 0 && view === "summary" && !window.confirm(autosaveOnText(unsaved))) return;
+    setAutosave(on);
+    writeAutosave(browserStorage, on);
+  };
   const [offset, setOffset] = useState(0);
   // Bumped to load the page afresh (after a page is done), so saved records drop out.
   const [gen, setGen] = useState(0);
@@ -51,10 +83,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const [mode, setMode] = useState<PreselectMode>(() => readPreselectMode(browserStorage));
   const [view, setView] = useState<ReviewView>(() => readView(browserStorage));
   const full = view === "full";
-  const pickView = (v: ReviewView) => {
+  const pickView = leaving((v: ReviewView) => {
     setView(v);
     writeView(browserStorage, v);
-  };
+  });
   const [tileSize, setTileSize] = useState<TileSize>(() => readTileSize(browserStorage));
   const pickTileSize = (t: TileSize) => {
     setTileSize(t);
@@ -94,6 +126,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       <Tabs data={full ? data : undefined} photos={full ? null : summaryTotal} tab={tab} status={status}
             onPick={setTab} />
       <div className="flex flex-wrap items-center gap-3">
+        <AutosaveToggle on={autosave} onChange={pickAutosave}
+                        title={autosave
+                          ? "On: Summary saves each photo once you have seen it and each flip at once. Click to save only when you press Save."
+                          : "Off: nothing is saved until you press Save (a photo's, a record's, or Save page). Click to save as you go."} />
         <ViewToggle view={view} onChange={pickView} />
         <StatusToggle status={status} onChange={setStatus} />
         <label className="flex min-w-0 items-center gap-2 text-sm">
@@ -126,7 +162,8 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       {help && <KeyHelp rows={full ? KEY_HELP : SUMMARY_KEY_HELP} />}
       {!full && (
         <PhotoSummary tab={tab} status={status} sort={sort} q={q} help={help} onHelp={() => setHelp((h) => !h)}
-                      tileSize={tileSize} onTotal={setSummaryTotal} />
+                      tileSize={tileSize} onTotal={setSummaryTotal} autosave={autosave} onPending={setUnsaved}
+                      canLeave={canLeave} discard={discard} />
       )}
       {full && list.error && (
         <p className={BODY}>{list.error instanceof ApiError ? list.error.message : "The photo review could not be loaded."}</p>
@@ -137,7 +174,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
                status={status} searching={!!q} offset={offset} help={help} onHelp={() => setHelp((h) => !h)}
                mode={mode} picked={picked} onPick={(photoKey, r) => setPicked((x) => ({ ...x, [photoKey]: r }))}
                onPageDone={() => reload(offsetWhenPageDone(status, offset, REVIEW_PAGE_SIZE, total))}
-               onPage={reload} />
+               onPage={leaving(reload)} autosave={autosave} onPending={setUnsaved} discard={discard} />
       )}
     </section>
   );
@@ -218,10 +255,13 @@ function Tabs({ data, photos, tab, status, onPick }: {
 type Focus = { rec: number; photo: number };
 
 /** One page of cards, with the choices made on it. Mounted afresh for each page load. */
-function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone, onPage, mode, picked, onPick }: {
+function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone, onPage, mode, picked, onPick, autosave,
+                 onPending, discard }: {
   data: PhotoReviewPage; tab: PhotoReviewTab; status: FeedbackStatus; searching: boolean; offset: number; help: boolean;
   onHelp: () => void; onPageDone: () => void; onPage: (offset: number) => void;
   mode: PreselectMode; picked: PickedReasons; onPick: (photoKey: string, reason: string) => void;
+  /** Off: the changed photos are marked unsaved, with "Save page" and a guard on leaving. */
+  autosave: boolean; onPending: (n: number) => void; discard: number;
 }) {
   const qc = useQueryClient();
   const records = data.records;
@@ -322,6 +362,33 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
     decide.mutate({ key: rec.record_key, index, body: b.body, line: savedLine(b.body, mine) });
   };
 
+  // Auto-save off: what Save page writes (each changed record through its own route), and Discard.
+  const plan = useMemo(() => pageSaves(records, choices, { saved, busy: pending, notes, reasonCodes }),
+                       [records, choices, saved, pending, notes, reasonCodes]);
+  const unsaved = autosave ? 0 : plan.changes;
+  useEffect(() => { onPending(unsaved); }, [unsaved, onPending]);
+  useEffect(() => () => onPending(0), [onPending]);
+  const savePage = () => {
+    if (plan.blocked.length) setErrors((x) => ({ ...x, ...Object.fromEntries(plan.blocked.map((b) => [b.key, b.error])) }));
+    for (const s of plan.saves) {
+      setPending((p) => ({ ...p, [s.key]: true }));
+      decide.mutate({ key: s.key, index: s.index, body: s.body, line: savedLine(s.body, choicesOf(s.key)) });
+    }
+  };
+  // Discard drops every unsaved change, the suggested Excludes too (they come back on the next page).
+  const discardPage = () => {
+    setChoices((c) => ({ ...c, ...Object.fromEntries(records.filter((r) => !saved[r.record_key] && !pending[r.record_key])
+      .map((r) => [r.record_key, initialChoices(r, tab, "none")])) }));
+    setNotes({});
+    setErrors({});
+  };
+  const discardSeen = useRef(discard);
+  useEffect(() => {
+    if (discardSeen.current === discard) return;
+    discardSeen.current = discard;
+    discardPage();
+  });
+
   /** Keep or Exclude on one photo. `byKey`: from the keyboard, so an exclusion with no reason
    *  to start at puts focus on its reason select. */
   const choose = (index: number, photo: ReviewPhoto, choice: Choice, byKey = false) => {
@@ -339,6 +406,14 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
     const key = keys[index];
     if (!editable(key) || !reason) return;
     setFor(key, setReason(choicesOf(key), photoKey, reason));
+    onPick(photoKey, reason);
+  };
+
+  /** A quick reason button (or key 1–5) on a photo: left out for that reason. */
+  const quick = (index: number, photoKey: string, reason: string) => {
+    const key = keys[index];
+    if (!editable(key) || !reason) return;
+    setFor(key, quickChoice(choicesOf(key), photoKey, reason));
     onPick(photoKey, reason);
   };
 
@@ -370,6 +445,12 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
         if (!ph || !editable(rec.record_key)) return;
         const r = cycleReason(choicesOf(rec.record_key), ph.photo_key, reasonCodes)[ph.photo_key]?.reason;
         if (r) pickReason(at.rec, ph.photo_key, r);
+        return;
+      }
+      case "quick": {
+        const ph = photos[at.photo];
+        const code = QUICK_REASONS[a.index]?.code;
+        if (ph && lightbox && code && quickReasons(data.reasons).some((q) => q.code === code)) quick(at.rec, ph.photo_key, code);
         return;
       }
       case "keepAll":
@@ -415,8 +496,14 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
   const savedHere = keys.filter((k) => saved[k]).length;
   const total = data.total;
   const lbRecord = lightbox ? records[lightbox.rec] : null;
+  const busy = Object.values(pending).some(Boolean);
+  const bar = (sticky: boolean) => (
+    <SaveBar count={unsaved} busy={busy && unsaved === 0} onSave={savePage} onDiscard={discardPage} sticky={sticky}
+             note={sticky ? "Each record also has its own Save." : undefined} />
+  );
   return (
     <>
+      {!autosave && records.length > 0 && bar(true)}
       {!records.length && (
         <p className="text-sm text-muted-foreground">
           {searching ? "No record or name matches that search."
@@ -451,10 +538,11 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
                         onKeepAll={() => setFor(key, bulkKeepAll(rec, choicesOf(key)))}
                         onExcludeFlagged={() => setFor(key, bulkExcludeFlagged(rec, tab, choicesOf(key), picked))}
                         onNote={(n) => setNotes((x) => ({ ...x, [key]: n }))}
-                        onSave={() => save(i)} />
+                        onSave={() => save(i)} manual={!autosave} />
           );
         })}
       </ul>
+      {!autosave && records.length > 0 && bar(false)}
       {total > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
           <span className="text-muted-foreground">{pageText(offset, records.length, total)}</span>
@@ -473,6 +561,7 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
                   onStep={(d) => run({ type: "photo", step: d })}
                   onChoose={(c) => run({ type: "choose", choice: c })}
                   onReason={(photoKey, r) => pickReason(lightbox.rec, photoKey, r)}
+                  onQuick={(photoKey, r) => quick(lightbox.rec, photoKey, r)}
                   onClose={() => run({ type: "close" })} />
       )}
     </>
@@ -486,11 +575,15 @@ function RecordCard(p: {
   onFocusCard: () => void; onFocusPhoto: (i: number) => void; onOpen: (i: number) => void;
   onChoose: (photo: ReviewPhoto, c: Choice) => void; onReason: (photoKey: string, r: string) => void;
   onKeepAll: () => void; onExcludeFlagged: () => void; onNote: (n: string) => void; onSave: () => void;
+  /** Auto-save off: each changed photo is marked unsaved. */
+  manual: boolean;
 }) {
   const { record, photos, tab } = p;
   const chosen = chosenCount(record, p.choices);
   const suggested = suggestedCount(record, p.choices);
   const missing = missingReason(record, p.choices);
+  const changed = useMemo(() => new Set(p.manual ? changedPhotos(record, p.choices).map((ph) => ph.photo_key) : []),
+                          [p.manual, record, p.choices]);
   return (
     <li ref={p.cardRef} tabIndex={-1} onFocus={p.onFocusCard} onMouseDown={p.onFocusCard}
         className={`${CARD} min-w-0 scroll-mt-24 space-y-3 p-3 outline-none ${
@@ -507,7 +600,7 @@ function RecordCard(p: {
       </div>
       <ul className="grid grid-cols-2 gap-3 sm:flex sm:flex-wrap">
         {photos.map((ph, i) => (
-          <Tile key={ph.photo_key} photo={ph} tab={tab} record={record} reasons={p.reasons}
+          <Tile key={ph.photo_key} photo={ph} tab={tab} record={record} reasons={p.reasons} unsaved={changed.has(ph.photo_key)}
                 choice={p.choices[ph.photo_key] ?? null} focused={p.focusPhoto === i} disabled={p.saving}
                 onOpen={() => p.onOpen(i)} onFocus={() => p.onFocusPhoto(i)}
                 onChoose={(c) => p.onChoose(ph, c)} onReason={(r) => p.onReason(ph.photo_key, r)} />
@@ -530,6 +623,11 @@ function RecordCard(p: {
           {chosen} of {photos.length} photo{photos.length === 1 ? "" : "s"} chosen
           {suggested > 0 && ` · ${suggested} suggested (dashed): saved as shown unless you change them`}
         </span>
+        {changed.size > 0 && (
+          <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[11px] font-semibold text-white">
+            {changed.size} unsaved
+          </span>
+        )}
         {missing && (
           <span className="text-sm text-red-700 dark:text-red-300">
             Pick a reason for {photoName(record, missing.photo_key)} to save.
@@ -597,16 +695,20 @@ function ReasonSelect({ id, choice, reasons, label, disabled, onReason }: {
   );
 }
 
-function Tile({ photo, tab, record, reasons, choice, focused, disabled, onOpen, onFocus, onChoose, onReason }: {
+function Tile({ photo, tab, record, reasons, choice, focused, disabled, unsaved, onOpen, onFocus, onChoose, onReason }: {
   photo: ReviewPhoto; tab: PhotoReviewTab; record: ReviewRecord; reasons: { code: string; label: string }[];
-  choice: PhotoChoice | null; focused: boolean; disabled: boolean; onOpen: () => void; onFocus: () => void;
-  onChoose: (c: Choice) => void; onReason: (r: string) => void;
+  choice: PhotoChoice | null; focused: boolean; disabled: boolean; unsaved: boolean; onOpen: () => void;
+  onFocus: () => void; onChoose: (c: Choice) => void; onReason: (r: string) => void;
 }) {
   const decided = decidedLine(photo);
   const suggested = !!choice?.suggested && choice.decision === "exclude";
   return (
     <PhotoTile photo={photo} record={record} choice={choice?.decision ?? null} focused={focused} suggested={suggested}
                outline={suggested ? OUTLINE.suggested : OUTLINE[outlineOf(photo)]} onOpen={onOpen} onFocus={onFocus}>
+      {unsaved && (
+        <span className="self-start rounded bg-amber-500 px-1.5 py-0.5 text-[11px] font-semibold text-white"
+              data-testid="photo-review-unsaved">unsaved</span>
+      )}
       <FlagLabels photo={photo} tab={tab} />
       {decided && <p className="break-words text-[11px] text-muted-foreground">{decided}</p>}
       <ChoiceButtons choice={choice?.decision ?? null} onChoose={onChoose} disabled={disabled} suggested={suggested} />
@@ -619,18 +721,24 @@ function Tile({ photo, tab, record, reasons, choice, focused, disabled, onOpen, 
   );
 }
 
-function Lightbox({ record, photos, index, tab, reasons, choices, disabled, onStep, onChoose, onReason, onClose }: {
+function Lightbox({ record, photos, index, tab, reasons, choices, disabled, onStep, onChoose, onReason, onQuick, onClose }: {
   record: ReviewRecord; photos: ReviewPhoto[]; index: number; tab: PhotoReviewTab;
   reasons: { code: string; label: string }[]; choices: PhotoChoices; disabled: boolean;
   onStep: (d: 1 | -1) => void; onChoose: (c: Choice) => void; onReason: (photoKey: string, r: string) => void;
-  onClose: () => void;
+  onQuick: (photoKey: string, r: string) => void; onClose: () => void;
 }) {
   const plain = useMemo(() => decisionsOf(choices), [choices]);
   return (
     <PhotoLightbox record={record} photos={photos} index={index} choices={plain} onStep={onStep}
                    onChoose={onChoose} onClose={onClose}
                    suggested={(photo) => !!choices[photo.photo_key]?.suggested}
-                   hint="← / → photos · K keep · X exclude · R reason · Esc close"
+                   hint="← / → photos · K keep · X exclude · R reason · 1–5 quick reason · Esc close"
+                   below={(photo) => {
+                     const c = choices[photo.photo_key];
+                     return <QuickReasons reasons={reasons} disabled={disabled}
+                                          current={c?.decision === "exclude" && !c.suggested ? c.reason : null}
+                                          onPick={(r) => onQuick(photo.photo_key, r)} />;
+                   }}
                    extra={(photo) => {
                      const c = choices[photo.photo_key];
                      return (
