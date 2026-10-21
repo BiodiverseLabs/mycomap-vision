@@ -50,7 +50,8 @@ TAB_CODES = tuple(c for c, _ in TABS)
 # specimens and spore prints have their own reasons (Steve, 2026-10-19) instead of "Other",
 # and so do UV reactions, chemical spot tests (KOH, FeSO4 and like colour reactions),
 # phylogenetic trees or BLAST results, and drawings of microscopy or of the specimen (Steve,
-# 2026-10-21). A code never changes once decisions use it; only its label may.
+# 2026-10-21), and species descriptions (a reason only: no flag or tab finds them). A code
+# never changes once decisions use it; only its label may.
 REASONS: tuple[tuple[str, str], ...] = (
     ("micrograph", "Micrograph or microscope"),
     ("slip", "Field slip or label"),
@@ -64,6 +65,7 @@ REASONS: tuple[tuple[str, str], ...] = (
     ("phylo_tree", "Phylogenetic tree / BLAST"),   # BLAST result screens too (Steve, 2026-10-21)
     ("drawing_micro", "Drawing – microscopy"),
     ("drawing_specimen", "Drawing – specimen"),
+    ("species_description", "Species description"),   # a photo of a written description
     ("other", "Other"),
 )
 REASON_CODES = tuple(c for c, _ in REASONS)

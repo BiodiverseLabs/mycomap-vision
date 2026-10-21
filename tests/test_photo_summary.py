@@ -85,8 +85,10 @@ def test_the_summary_offers_and_saves_uv_chemical_tests_trees_and_drawings(conn,
     assert offered["phylo_tree"] == "Phylogenetic tree / BLAST"
     assert offered["drawing_micro"] == "Drawing – microscopy"
     assert offered["drawing_specimen"] == "Drawing – specimen"
+    assert offered["species_description"] == "Species description"
     ids = {t["photo_key"]: t["item_id"] for t in body["tiles"]}
-    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen"):
+    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen",
+                 "species_description"):
         r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
             {"item_id": ids["inat:1000"], "decision": "exclude", "reason": code}]})
         assert r.status_code == 200, code
