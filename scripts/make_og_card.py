@@ -62,7 +62,7 @@ def draw(photo: Path, credit: str, logo: Path, focus=(0.5, 0.5)) -> Image.Image:
         y += 80
     sf = font(30)
     y += 14
-    d.text((57, y), "Built on DNA-verified records, not community votes.", font=sf,
+    d.text((57, y), "Every answer comes from DNA-sequenced specimens.", font=sf,
            fill=(255, 255, 255, 225))
     pf = font(25, bold=True)
     pill = "Free · from the nonprofit MycoMap"
