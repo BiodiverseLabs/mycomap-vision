@@ -1,12 +1,12 @@
 """Draw web/public/og-card.jpg, the site's link-preview image (linkcards.py): 1200x630, the
-MycoMap Vision brand and line on the left, a DNA-validated reference photo on the right with
-its credit printed on it (Facebook shows no credit of its own).
+MycoMap Vision brand and line over a full-bleed photo.
 
-The photo must be one MycoMap may publish: CC0 or CC BY, credited here. Steve's pick
-(2026-10-20): iNat photo 328268128, Amanita muscaria var. guessowii, by Jessica Williams,
-CC BY; scientific names only on the cards.
+The photo must be one MycoMap may publish. Steve's pick (2026-10-20: "Lets use the main
+background hero from the main site"): mycomap.org's homepage hero, Jesse Bauer's photo on
+Unsplash (pzwH-a4aF3s; Unsplash License, no credit required), as mycota.com serves it:
+https://mycota.com/wp-content/uploads/2024/05/jesse-bauer-pzwH-a4aF3s-unsplash-scaled.jpg
 
-    python scripts/make_og_card.py <photo.jpg> --credit "Amanita muscaria var. guessowii · Jessica Williams, CC BY"
+    python scripts/make_og_card.py <photo.jpg>
 """
 
 from __future__ import annotations
@@ -19,58 +19,63 @@ from PIL import Image, ImageDraw, ImageOps
 from mycomap_vision.linkcards import CARD_SIZE, GREEN_TEXT, INK, font
 
 REPO = Path(__file__).resolve().parent.parent
-MUTED = (108, 101, 94)
 GREEN = (143, 199, 62)
 
 
-def draw(photo: Path, credit: str, logo: Path, focus=(0.55, 0.5)) -> Image.Image:
+def draw(photo: Path, credit: str, logo: Path, focus=(0.5, 0.5)) -> Image.Image:
+    """The photo fills the card, darkened towards the left, with the brand and the line in
+    white over it: the look of mycomap.org's own homepage hero."""
     W, H = CARD_SIZE
-    card = Image.new("RGB", CARD_SIZE, "white")
-    pw = 600
     with Image.open(photo) as img:
-        card.paste(ImageOps.fit(ImageOps.exif_transpose(img).convert("RGB"), (pw, H),
-                                Image.LANCZOS, centering=focus), (W - pw, 0))
+        card = ImageOps.fit(ImageOps.exif_transpose(img).convert("RGB"), CARD_SIZE,
+                            Image.LANCZOS, centering=focus).convert("RGBA")
+    # Dark only behind the words on the left, clear from just past the middle, so the right
+    # half shows the photo as it is (Steve, 2026-10-20: "have it not go as dark black to the
+    # right").
+    reach = int(W * 0.66)
+    column = Image.new("L", (W, 1))
+    column.putdata([int(205 * max(0.0, 1 - x / reach) ** 1.25) for x in range(W)])
+    fade = column.resize((W, H))
+    shade = Image.new("RGBA", CARD_SIZE, (8, 10, 6, 255))
+    shade.putalpha(fade)
+    card.alpha_composite(shade)
     d = ImageDraw.Draw(card, "RGBA")
-    cf = font(17)
-    tw = d.textlength(credit, font=cf)
-    d.rectangle([W - tw - 24, H - 34, W, H], fill=(0, 0, 0, 140))
-    d.text((W - tw - 12, H - 30), credit, font=cf, fill=(255, 255, 255, 235))
+    if credit:
+        cf = font(17)
+        tw = d.textlength(credit, font=cf)
+        d.text((W - tw - 14, H - 30), credit, font=cf, fill=(255, 255, 255, 200))
 
     # The brand, large (Steve, 2026-10-20: "lets also make the MycoMap Vision logo larger").
     mark = Image.open(logo).convert("RGBA")
-    mark.thumbnail((140, 140))
-    card.paste(mark, (52, 40), mark)
-    bx = 52 + mark.width + 18
-    size = 56
-    while size > 30 and bx + d.textlength("MycoMap Vision", font=font(size, bold=True)) > W - pw - 28:
-        size -= 2
-    bf = font(size, bold=True)
-    by = 40 + (mark.height - bf.getbbox("MycoMap")[3]) // 2
-    d.text((bx, by), "MycoMap", font=bf, fill=INK)
-    d.text((bx + d.textlength("MycoMap ", font=bf), by), "Vision", font=bf, fill=GREEN_TEXT)
+    mark.thumbnail((130, 130))
+    card.alpha_composite(mark, (56, 44))
+    bf = font(60, bold=True)
+    bx = 56 + mark.width + 20
+    by = 44 + (mark.height - bf.getbbox("MycoMap")[3]) // 2
+    d.text((bx, by), "MycoMap", font=bf, fill="white")
+    d.text((bx + d.textlength("MycoMap ", font=bf), by), "Vision", font=bf, fill=GREEN)
 
-    hf = font(58, bold=True)
-    y = 228
+    hf = font(66, bold=True)
+    y = 232
     for line in ("Identify fungi", "from your photos"):
-        d.text((50, y), line, font=hf, fill=INK)
-        y += 70
-    sf = font(28)
-    y += 18
-    for line in ("Built on DNA-verified records,", "not community votes."):
-        d.text((52, y), line, font=sf, fill=MUTED)
-        y += 38
-    pf = font(24, bold=True)
+        d.text((54, y), line, font=hf, fill="white")
+        y += 80
+    sf = font(30)
+    y += 14
+    d.text((57, y), "Built on DNA-verified records, not community votes.", font=sf,
+           fill=(255, 255, 255, 225))
+    pf = font(25, bold=True)
     pill = "Free · from the nonprofit MycoMap"
-    d.rounded_rectangle([52, 548, 52 + d.textlength(pill, font=pf) + 36, 592], radius=22,
+    d.rounded_rectangle([57, 540, 57 + d.textlength(pill, font=pf) + 40, 588], radius=24,
                         fill=GREEN + (255,))
-    d.text((70, 554), pill, font=pf, fill="white")
-    return card
+    d.text((77, 548), pill, font=pf, fill="white")
+    return card.convert("RGB")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("photo", type=Path)
-    ap.add_argument("--credit", required=True)
+    ap.add_argument("--credit", default="", help="printed bottom right, when the licence asks")
     ap.add_argument("--logo", type=Path, default=REPO / "web" / "public" / "mycomap-logo.png")
     ap.add_argument("--out", type=Path, default=REPO / "web" / "public" / "og-card.jpg")
     a = ap.parse_args()

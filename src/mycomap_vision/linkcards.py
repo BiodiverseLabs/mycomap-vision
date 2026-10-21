@@ -36,8 +36,8 @@ SITE_DESCRIPTION = ("Matches your photos with 150,000+ DNA-verified records and 
                     "species known only from DNA. Free with a mycomap.org account. "
                     "Not edibility advice.")
 SITE_IMAGE = "/og-card.jpg"
-SITE_IMAGE_ALT = ("MycoMap Vision: identify fungi from your photos. Photo: Amanita muscaria "
-                  "var. guessowii, Jessica Williams, CC BY.")
+SITE_IMAGE_ALT = ("MycoMap Vision: identify fungi from your photos. Built on DNA-verified "
+                  "records, not community votes.")
 CARD_SIZE = (1200, 630)
 
 # The pages people share. Every other page still sends a signed-out visitor to sign in.
