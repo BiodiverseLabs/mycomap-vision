@@ -6,11 +6,13 @@ import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type Flag
          type PhotoReviewTab } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { tileImage, type Choice } from "@/lib/photoReview";
-import { AUTOSAVE_MS, batchBody, beginSend, decidedText, dueDecisions, gridColumns, gridKey, initialMarks, markLoaded,
-         markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, reasonLabel, retry, SEEN_MS, SEEN_RATIO,
-         sendDone, sendFailed, setDecision, setReason, STATUS_TEXT, SUMMARY_PAGE_SIZE, tileStatus, toggle,
-         visitLine, visitTotals, type GridAction, type Mark, type Marks, type SaveState, type SaveStates,
-         type TileSize } from "@/lib/photoSummary";
+import { AUTOSAVE_MS, autoDue, batchBody, beginSend, decidedText, discardChanges, freshPage, gridColumns, gridKey,
+         initialMarks, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, pendingDecisions,
+         reasonLabel, retry, SEEN_MS, SEEN_RATIO, sendDone, sendFailed, setDecision, setReason, STATUS_TEXT,
+         SUMMARY_PAGE_SIZE, tileDecision, tileStatus, toggle, visitLine, visitTotals, type GridAction, type Mark,
+         type Marks, type SaveState, type SaveStates, type TileSize } from "@/lib/photoSummary";
+import type { PhotoBatchDecision } from "@/lib/api";
+import { SaveBar } from "@/components/ReviewSave";
 
 // The photo review's Summary view (Steve, 2026-10-21): the flagged photos of the tab as a grid,
 // one tile each, to scan and leave the few that belong. Each open tile starts as Exclude with its
@@ -18,16 +20,31 @@ import { AUTOSAVE_MS, batchBody, beginSend, decidedText, dueDecisions, gridColum
 // picked full screen) saves at once; the default Exclude is saved for the tiles actually shown
 // (in view a second and loaded), every couple of seconds. The rules: lib/photoSummary.ts.
 //
+// That is Auto-save on. With it off (the default, lib/reviewSave.ts) nothing is sent by itself:
+// flips and the shown tiles' starting Excludes are marked "unsaved"; each tile has its own Save,
+// and "Save page" writes them in one batch. Paging with changes unsaved asks first (canLeave).
+//
 // Photos follow the record view's rule (lib/photoReview.ts tileImage): a hidden photo is a
 // placeholder with the record's link; a private one only Vision's own same-origin copy.
 
 type Reasons = FlaggedPage["reasons"];
 
-export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onTotal }: {
+export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onTotal, autosave, onPending, canLeave,
+                              discard }: {
   tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; help: boolean;
   onHelp: () => void; tileSize: TileSize; onTotal: (n: number | null) => void;
+  /** Auto-save on: saves as the reviewer goes. Off: only Save and Save page write. */
+  autosave: boolean;
+  /** The unsaved changes on the page (always 0 with Auto-save on). */
+  onPending: (n: number) => void;
+  /** Asks before unsaved changes are left; false: stay. */
+  canLeave: () => boolean;
+  /** Bumped by the page when the reviewer chose to leave changes unsaved: drop them. */
+  discard: number;
 }) {
   const qc = useQueryClient();
+  const autosaveRef = useRef(autosave);
+  autosaveRef.current = autosave;
   const [offset, setOffset] = useState(0);
   // Bumped on every page change, so each page is read afresh (saved tiles drop out of Open)
   // while the page shown never reloads under the reviewer.
@@ -61,16 +78,14 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
   useEffect(() => {
     if (!fresh) return;
     for (const t of fresh.tiles) tilesRef.current.set(t.item_id, t);
+    updateStates((s) => freshPage(s, fresh.tiles.map((t) => t.item_id)));
     onTotal(fresh.total);
-  }, [fresh, onTotal]);
+  }, [fresh, onTotal, updateStates]);
   useEffect(() => () => onTotal(null), [onTotal]);
 
   // --- saving ---------------------------------------------------------------------------------
-  const flushRef = useRef<(o?: { keepalive?: boolean }) => void>(() => {});
-  flushRef.current = (o = {}) => {
-    const tiles = [...tilesRef.current.values()];
-    const marks = mergeMarks(initialMarks(tiles), editsRef.current);
-    const due = dueDecisions(tiles, marks, statesRef.current);
+  const sendRef = useRef<(due: PhotoBatchDecision[], o?: { keepalive?: boolean }) => void>(() => {});
+  sendRef.current = (due, o = {}) => {
     const body = batchBody(due);
     if (!body) return;
     updateStates((s) => beginSend(s, due));
@@ -84,6 +99,38 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
       (e) => updateStates((s) => sendFailed(s, due, e instanceof ApiError || e instanceof Error ? e.message : "Not saved.")),
     );
   };
+  // Auto-save: what is due, sent by the timer, a flip, hiding or leaving the page. Nothing with it off.
+  const flushRef = useRef<(o?: { keepalive?: boolean }) => void>(() => {});
+  flushRef.current = (o = {}) => {
+    const tiles = [...tilesRef.current.values()];
+    const marks = mergeMarks(initialMarks(tiles), editsRef.current);
+    sendRef.current(autoDue(autosaveRef.current, tiles, marks, statesRef.current), o);
+  };
+  // Auto-save off: the page's unsaved changes in one batch, or one tile's.
+  const pageTiles = () => (fresh?.tiles ?? []).filter((t) => tilesRef.current.has(t.item_id));
+  const savePage = () => {
+    const tiles = pageTiles();
+    sendRef.current(pendingDecisions(tiles, mergeMarks(initialMarks(tiles), editsRef.current), statesRef.current));
+  };
+  const saveTile = useCallback((id: number) => {
+    const t = tilesRef.current.get(id);
+    if (!t) return;
+    sendRef.current(tileDecision(t, mergeMarks(initialMarks([t]), editsRef.current), statesRef.current));
+  }, []);
+  const discardAll = useCallback(() => {
+    const out = discardChanges(editsRef.current, statesRef.current, tilesRef.current.keys());
+    updateEdits(() => out.edits);
+    updateStates(() => out.states);
+  }, [updateEdits, updateStates]);
+  // The page asked the reviewer, who chose to leave the changes unsaved.
+  const discardSeen = useRef(discard);
+  useEffect(() => {
+    if (discardSeen.current === discard) return;
+    discardSeen.current = discard;
+    discardAll();
+  }, [discard, discardAll]);
+  // Turning Auto-save on sends what is waiting.
+  useEffect(() => { if (autosave) flushRef.current(); }, [autosave]);
   useEffect(() => {
     const timer = window.setInterval(() => flushRef.current(), AUTOSAVE_MS);
     const onHidden = () => { if (document.visibilityState === "hidden") flushRef.current({ keepalive: true }); };
@@ -122,8 +169,13 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
     updateStates((s) => markTouched(s, id));
     flushRef.current();
   }, [updateEdits, updateStates]);
-  const retryTile = useCallback((id: number) => { updateStates((s) => retry(s, id)); flushRef.current(); }, [updateStates]);
+  const retryTile = useCallback((id: number) => {
+    if (!autosaveRef.current) return saveTile(id);
+    updateStates((s) => retry(s, id));
+    flushRef.current();
+  }, [updateStates, saveTile]);
   const retryAll = () => {
+    if (!autosaveRef.current) return savePage();
     updateStates((s) => Object.keys(s).reduce((acc, k) => retry(acc, Number(k)), s));
     flushRef.current();
   };
@@ -142,6 +194,8 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
   }, [tab, status, sort, q]);
 
   const go = (next: number) => {
+    if (!canLeave()) return;
+    if (!autosaveRef.current) discardAll();
     flushRef.current();
     setOffset(Math.max(0, next));
     setGen((g) => g + 1);
@@ -152,8 +206,17 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
   const failed = Object.values(states).filter((s) => s.failed).length;
   const savedOnPage = tiles.filter((t) => t.status === "open" && (states[t.item_id]?.saved || states[t.item_id]?.sending)).length;
   const total = fresh?.total ?? 0;
+  const pending = autosave ? 0 : pendingDecisions(tiles, marks, states).length;
+  const sending = tiles.some((t) => states[t.item_id]?.sending);
+  useEffect(() => { onPending(pending); }, [pending, onPending]);
+  useEffect(() => () => onPending(0), [onPending]);
+  const bar = (sticky: boolean) => (
+    <SaveBar count={pending} busy={sending && pending === 0} onSave={savePage} onDiscard={discardAll} sticky={sticky}
+             note={sticky ? "Photos count once you have seen them; each photo also has its own Save." : undefined} />
+  );
   return (
     <div className="min-w-0 space-y-3">
+      {!autosave && status === "open" && bar(true)}
       <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-sm" aria-live="polite">
         <span className={`font-medium ${INK}`} data-testid="photo-summary-visit">{visitLine(totals)}</span>
         {failed > 0 && (
@@ -166,12 +229,17 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
         )}
         {list.isFetching && <span className="text-xs text-muted-foreground">Loading…</span>}
       </div>
-      {status === "open" && (
+      {status === "open" && (autosave ? (
         <p className="text-xs text-muted-foreground">
           Every photo starts as Exclude and is saved that way once you have seen it. Flip the few that
           belong to Include; each flip saves at once.
         </p>
-      )}
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Every photo starts as Exclude. Nothing is saved until you press Save: flip the few that belong to
+          Include, then Save page writes every photo you have seen (marked unsaved) in one go.
+        </p>
+      ))}
       {list.error && (
         <p className={BODY}>{list.error instanceof ApiError ? list.error.message : "The photos could not be loaded."}</p>
       )}
@@ -183,9 +251,10 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
       )}
       {fresh && tiles.length > 0 && (
         <Grid key={`${tab}|${status}|${sort}|${q}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
-              marks={marks} states={states} tileSize={tileSize} help={help} onHelp={onHelp}
-              onFlip={flip} onReason={pickReason} onRetry={retryTile} onSeen={seen} onLoaded={loaded} />
+              marks={marks} states={states} tileSize={tileSize} help={help} onHelp={onHelp} manual={!autosave}
+              onFlip={flip} onReason={pickReason} onRetry={retryTile} onSave={saveTile} onSeen={seen} onLoaded={loaded} />
       )}
+      {!autosave && status === "open" && fresh && tiles.length > 0 && bar(false)}
       {total > 0 && fresh && (
         <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
           <span className="text-muted-foreground">{pageText(offset, tiles.length, total)}</span>
@@ -207,10 +276,11 @@ function columnsOf(el: HTMLElement | null): number {
   return getComputedStyle(el).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
 }
 
-function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, onFlip, onReason, onRetry, onSeen, onLoaded }: {
+function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, onFlip, onReason, onRetry, onSave, onSeen,
+                onLoaded }: {
   tiles: FlaggedTile[]; reasons: Reasons; marks: Marks; states: SaveStates; tileSize: TileSize; help: boolean;
-  onHelp: () => void; onFlip: (id: number, c?: Choice) => void; onReason: (id: number, r: string) => void;
-  onRetry: (id: number) => void; onSeen: (id: number) => void; onLoaded: (id: number) => void;
+  onHelp: () => void; manual: boolean; onFlip: (id: number, c?: Choice) => void; onReason: (id: number, r: string) => void;
+  onRetry: (id: number) => void; onSave: (id: number) => void; onSeen: (id: number) => void; onLoaded: (id: number) => void;
 }) {
   const [focus, setFocus] = useState(0);
   const [lightbox, setLightbox] = useState<number | null>(null);
@@ -306,15 +376,15 @@ function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, onFlip, o
           aria-label="Flagged photos" data-testid="photo-summary-grid">
         {tiles.map((t, i) => (
           <SummaryTile key={t.item_id} tile={t} reasons={reasons} mark={marks[t.item_id]} state={states[t.item_id]}
-                       focused={focus === i} tileRef={(el) => { tileRefs.current[i] = el; }}
+                       focused={focus === i} tileRef={(el) => { tileRefs.current[i] = el; }} manual={manual}
                        onFocus={() => setFocus(i)} onOpen={() => { setFocus(i); setLightbox(i); }}
                        onFlip={() => onFlip(t.item_id)} onRetry={() => onRetry(t.item_id)}
-                       onLoaded={() => onLoaded(t.item_id)} />
+                       onSave={() => onSave(t.item_id)} onLoaded={() => onLoaded(t.item_id)} />
         ))}
       </ul>
       {lb && lightbox != null && (
         <SummaryLightbox tile={lb} index={lightbox} count={tiles.length} reasons={reasons} mark={marks[lb.item_id]}
-                         state={states[lb.item_id]}
+                         state={states[lb.item_id]} manual={manual} onSave={() => onSave(lb.item_id)}
                          onStep={(d) => run({ type: "step", delta: d })}
                          onChoose={(c) => onFlip(lb.item_id, c)} onReason={(r) => onReason(lb.item_id, r)}
                          onRetry={() => onRetry(lb.item_id)}
@@ -328,11 +398,30 @@ function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, onFlip, o
 /** The record view's placeholder, numbering the photo from 1 (the Summary's positions count from 0). */
 const shownPhoto = (t: FlaggedTile) => ({ ...t, position: t.position == null ? null : t.position + 1 });
 
-function StatusMark({ mark, state, onRetry, dark = false }: {
+function StatusMark({ mark, state, onRetry, dark = false, manual = false, onSave }: {
   mark: Mark | undefined; state: SaveState | undefined; onRetry: () => void; dark?: boolean;
+  manual?: boolean; onSave?: () => void;
 }) {
-  const s = tileStatus(mark, state);
-  if (s === "decided" || s === "unsaved") return null;
+  const s = tileStatus(mark, state, manual);
+  if (s === "decided") return null;
+  // Auto-save off: the change waits for this Save (or Save page). A tile not yet counted as seen
+  // gets the Save alone; pressing it saves the tile as shown.
+  if (manual && onSave && (s === "pending" || s === "unsaved")) {
+    return (
+      <span className={`pointer-events-auto inline-flex items-center gap-1 rounded text-[11px] font-semibold ${
+              s === "pending" ? "bg-amber-500 pl-1.5 text-white" : ""}`} data-testid="photo-summary-unsaved">
+        {s === "pending" && STATUS_TEXT.pending}
+        <button type="button" onClick={(e) => { e.stopPropagation(); onSave(); }} tabIndex={-1}
+                aria-label="Save this photo's decision" title="Save this photo's decision"
+                className={`inline-flex min-h-6 items-center rounded px-1.5 shadow ${
+                  s === "pending" ? "bg-white text-amber-800 hover:bg-amber-50"
+                    : dark ? "bg-white/20 text-white hover:bg-white/30" : "bg-white/90 text-[#4a3728] hover:bg-white dark:bg-black/70 dark:text-foreground"}`}>
+          Save
+        </button>
+      </span>
+    );
+  }
+  if (s === "unsaved" || s === "pending") return null;
   if (s === "failed") {
     return (
       <span className="inline-flex items-center gap-1 rounded bg-red-600 px-1.5 py-0.5 text-[11px] font-semibold text-white"
@@ -351,10 +440,11 @@ function StatusMark({ mark, state, onRetry, dark = false }: {
   return <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${tone}`}>{STATUS_TEXT[s]}</span>;
 }
 
-function SummaryTile({ tile, reasons, mark, state, focused, tileRef, onFocus, onOpen, onFlip, onRetry, onLoaded }: {
+function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onFocus, onOpen, onFlip, onRetry, onSave,
+                       onLoaded }: {
   tile: FlaggedTile; reasons: Reasons; mark: Mark | undefined; state: SaveState | undefined; focused: boolean;
-  tileRef: (el: HTMLLIElement | null) => void; onFocus: () => void; onOpen: () => void; onFlip: () => void;
-  onRetry: () => void; onLoaded: () => void;
+  tileRef: (el: HTMLLIElement | null) => void; manual: boolean; onFocus: () => void; onOpen: () => void;
+  onFlip: () => void; onRetry: () => void; onSave: () => void; onLoaded: () => void;
 }) {
   // A thumb that fails to load becomes the placeholder (and never saves by itself).
   const [failed, setFailed] = useState(false);
@@ -364,10 +454,13 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, onFocus, on
   const readOnly = !!mark?.readOnly;
   const reason = exclude ? reasonLabel(mark?.reason, reasons) : null;
   const outline = keep ? "border-myco-green" : exclude ? "border-red-500/70 dark:border-red-400/70" : "border-transparent";
+  // Auto-save off: a tile holding an unsaved change is drawn dashed.
+  const unsaved = manual && tileStatus(mark, state, true) === "pending";
   return (
     <li ref={tileRef} data-item-id={tile.item_id} tabIndex={focused ? 0 : -1} onFocus={onFocus} onMouseDown={onFocus}
         className="min-w-0 space-y-0.5 outline-none" data-testid={`photo-summary-tile-${tile.item_id}`}>
       <div className={`relative aspect-square w-full overflow-hidden rounded-md ${keep ? "border-4" : "border-2"} ${outline} ${
+        unsaved ? "border-dashed" : ""} ${
         focused ? "ring-2 ring-myco-green ring-offset-2 dark:ring-offset-background" : ""}`}>
         {src ? (
           <button type="button" onClick={onOpen} className="block h-full w-full" tabIndex={-1}
@@ -394,7 +487,7 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, onFocus, on
           </span>
         )}
         <span className="pointer-events-none absolute bottom-1 left-1">
-          <StatusMark mark={mark} state={state} onRetry={onRetry} />
+          <StatusMark mark={mark} state={state} onRetry={onRetry} manual={manual} onSave={onSave} />
         </span>
         {mark && (readOnly ? (
           <span className={`pointer-events-none absolute bottom-1 right-1 rounded px-1.5 py-0.5 text-[11px] font-semibold text-white ${
@@ -415,10 +508,12 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, onFocus, on
   );
 }
 
-function SummaryLightbox({ tile, index, count, reasons, mark, state, onStep, onChoose, onReason, onRetry, onShown, onClose }: {
+function SummaryLightbox({ tile, index, count, reasons, mark, state, manual, onSave, onStep, onChoose, onReason, onRetry,
+                           onShown, onClose }: {
   tile: FlaggedTile; index: number; count: number; reasons: Reasons; mark: Mark | undefined;
-  state: SaveState | undefined; onStep: (d: 1 | -1) => void; onChoose: (c: Choice) => void;
-  onReason: (r: string) => void; onRetry: () => void; onShown: () => void; onClose: () => void;
+  state: SaveState | undefined; manual: boolean; onSave: () => void; onStep: (d: 1 | -1) => void;
+  onChoose: (c: Choice) => void; onReason: (r: string) => void; onRetry: () => void; onShown: () => void;
+  onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState<Record<number, boolean>>({});
@@ -491,7 +586,7 @@ function SummaryLightbox({ tile, index, count, reasons, mark, state, onStep, onC
                         : "border-white/40 bg-white/10 text-white hover:bg-white/20"}`}>
                 <X className="h-5 w-5" aria-hidden /> Exclude (X)
               </button>
-              <StatusMark mark={mark} state={state} onRetry={onRetry} dark />
+              <StatusMark mark={mark} state={state} onRetry={onRetry} dark manual={manual} onSave={onSave} />
             </div>
             {!keep && (
               <select value={mark?.reason ?? ""} aria-label="Why this photo is left out"
@@ -514,7 +609,9 @@ function SummaryLightbox({ tile, index, count, reasons, mark, state, onStep, onC
           </>
         )}
         <p className="text-center text-xs text-white/70">
-          {readOnly ? "← / → photos · Esc close" : "← / → photos · K include · X exclude (each saves) · Esc close"}
+          {readOnly ? "← / → photos · Esc close"
+            : manual ? "← / → photos · K include · X exclude (unsaved until Save) · Esc close"
+              : "← / → photos · K include · X exclude (each saves) · Esc close"}
         </p>
       </div>
     </div>

@@ -9,6 +9,10 @@
 //   hidden or failed photo is never saved by itself; a flip still saves it.
 // - nothing is sent twice: a tile whose current state is the one last saved is not due.
 //
+// With Auto-save off (lib/reviewSave.ts) the same decisions are held as unsaved changes instead:
+// nothing is sent until the reviewer presses a tile's Save or "Save page"; a tile not flipped is
+// then saved with the note "summary: saved". Discard drops them.
+//
 // The page's rules live here as plain functions so they can be tested (photoSummary.test.ts).
 
 import type { FlaggedTile, PhotoBatchBody, PhotoBatchDecision, PhotoReviewTab } from "./api";
@@ -24,6 +28,8 @@ export const SEEN_MS = 1000;
 
 export const NOTE_FLIPPED = "summary: flipped";
 export const NOTE_SHOWN = "summary: shown";
+/** A starting Exclude the reviewer saved by hand (Auto-save off). */
+export const NOTE_SAVED = "summary: saved";
 
 /** The tabs, as the server names them (photo_review.TABS); the record view's response carries
  *  them with counts, the Summary's does not. */
@@ -150,11 +156,14 @@ export interface Sent { decision: Choice; reason: string | null }
 /** One tile's saving this visit. `seen` and `loaded`: shown long enough, and its image loaded
  *  (both needed before the default Exclude is saved). `touched`: the reviewer flipped it or
  *  picked its reason. `saved`: what the server holds from this visit; `sending`: in flight;
- *  `failed`: why the last send was refused (not sent again until a retry or a flip). */
+ *  `failed`: why the last send was refused (not sent again until a retry or a flip).
+ *  `dropped`: its unsaved change was discarded (Auto-save off): its starting Exclude is not
+ *  pending again until it is flipped or its page is loaded afresh. */
 export interface SaveState {
   seen?: boolean;
   loaded?: boolean;
   touched?: boolean;
+  dropped?: boolean;
   saved?: Sent;
   sending?: Sent;
   failed?: string;
@@ -179,7 +188,7 @@ export const markLoaded = (states: SaveStates, id: number): SaveStates =>
 /** The reviewer changed the tile (a flip or a reason): it saves whether shown or not, and a
  *  refused one is tried again. */
 export const markTouched = (states: SaveStates, id: number): SaveStates =>
-  patch(states, id, { touched: true, failed: undefined });
+  patch(states, id, { touched: true, failed: undefined, dropped: undefined });
 
 /** Retry a refused tile. */
 export const retry = (states: SaveStates, id: number): SaveStates =>
@@ -189,8 +198,13 @@ export type DueTile = Pick<FlaggedTile, "item_id" | "status">;
 
 /** The decisions due to be sent now: open tiles whose current mark is not the one last saved,
  *  not in flight or refused, that the reviewer changed, or that were shown (seen AND loaded).
- *  An exclusion with no reason yet waits for one. */
-export function dueDecisions(tiles: DueTile[], marks: Marks, states: SaveStates): PhotoBatchDecision[] {
+ *  An exclusion with no reason yet waits for one.
+ *
+ *  `manual` (Auto-save off): the same tiles are the unsaved changes that Save writes; a refused
+ *  one is included (Save is its retry), and a starting Exclude carries NOTE_SAVED. */
+export function dueDecisions(tiles: DueTile[], marks: Marks, states: SaveStates,
+                             opts: { manual?: boolean } = {}): PhotoBatchDecision[] {
+  const manual = !!opts.manual;
   const out: PhotoBatchDecision[] = [];
   const seen = new Set<number>();
   for (const t of tiles) {
@@ -198,15 +212,55 @@ export function dueDecisions(tiles: DueTile[], marks: Marks, states: SaveStates)
     seen.add(t.item_id);
     const m = marks[t.item_id];
     const s = states[t.item_id] ?? {};
-    if (!m || m.readOnly || s.sending || s.failed) continue;
+    if (!m || m.readOnly || s.sending || (s.failed && !manual)) continue;
     if (sameState(m, s.saved)) continue;
-    if (!s.touched && !(s.seen && s.loaded)) continue;
+    if (!s.touched && (s.dropped || !(s.seen && s.loaded))) continue;
     if (m.decision === "exclude" && !(m.reason ?? "").trim()) continue;
+    const note = s.touched ? NOTE_FLIPPED : manual ? NOTE_SAVED : NOTE_SHOWN;
     out.push(m.decision === "exclude"
-      ? { item_id: t.item_id, decision: "exclude", reason: m.reason!.trim(), note: s.touched ? NOTE_FLIPPED : NOTE_SHOWN }
-      : { item_id: t.item_id, decision: "keep", note: s.touched ? NOTE_FLIPPED : NOTE_SHOWN });
+      ? { item_id: t.item_id, decision: "exclude", reason: m.reason!.trim(), note }
+      : { item_id: t.item_id, decision: "keep", note });
   }
   return out;
+}
+
+/** What the timer, hiding the page and leaving it send by themselves: the due decisions with
+ *  Auto-save on, nothing at all with it off. */
+export const autoDue = (autosave: boolean, tiles: DueTile[], marks: Marks, states: SaveStates): PhotoBatchDecision[] =>
+  (autosave ? dueDecisions(tiles, marks, states) : []);
+
+/** Auto-save off: the unsaved changes, which "Save page" writes in one batch. */
+export const pendingDecisions = (tiles: DueTile[], marks: Marks, states: SaveStates): PhotoBatchDecision[] =>
+  dueDecisions(tiles, marks, states, { manual: true });
+
+/** Auto-save off: one tile's own Save. Pressing it is seeing it, so a tile not yet counted as
+ *  shown (or one whose change was discarded) is written too. */
+export function tileDecision(tile: DueTile, marks: Marks, states: SaveStates): PhotoBatchDecision[] {
+  const s = states[tile.item_id] ?? {};
+  return dueDecisions([tile], marks, { ...states, [tile.item_id]: { ...s, seen: true, loaded: true, dropped: undefined } },
+                      { manual: true });
+}
+
+/** Discard (or leaving with changes unsaved): the reviewer's flips on these tiles are undone and
+ *  their starting Excludes stop being pending. What is saved, or in flight, stays. */
+export function discardChanges(edits: Marks, states: SaveStates, ids: Iterable<number>): { edits: Marks; states: SaveStates } {
+  const e = { ...edits };
+  let s = states;
+  for (const id of ids) {
+    if (s[id]?.sending) continue;
+    delete e[id];
+    s = patch(s, id, { touched: undefined, failed: undefined, dropped: true });
+  }
+  return { edits: e, states: s };
+}
+
+/** A page loaded afresh: its discarded tiles count again once they are shown again. */
+export function freshPage(states: SaveStates, ids: Iterable<number>): SaveStates {
+  let s = states;
+  for (const id of ids) {
+    if (s[id]?.dropped) s = patch(s, id, { dropped: undefined, seen: undefined, loaded: undefined });
+  }
+  return s;
 }
 
 /** The POST body for decisions (null when there is nothing to send). */
@@ -237,16 +291,18 @@ export function sendFailed(states: SaveStates, decisions: PhotoBatchDecision[], 
   return out;
 }
 
-export type TileStatus = "decided" | "saving" | "saved" | "failed" | "needs-reason" | "unsaved";
+export type TileStatus = "decided" | "saving" | "saved" | "failed" | "needs-reason" | "unsaved" | "pending";
 
-/** The tile's status mark. */
-export function tileStatus(mark: Mark | undefined, state: SaveState | undefined): TileStatus {
+/** The tile's status mark. `manual` (Auto-save off): a tile holding an unsaved change (flipped,
+ *  or shown with its starting Exclude) is "pending", marked "unsaved". */
+export function tileStatus(mark: Mark | undefined, state: SaveState | undefined, manual = false): TileStatus {
   if (!mark || mark.readOnly) return "decided";
   const s = state ?? {};
   if (s.sending) return "saving";
   if (s.failed) return "failed";
   if (sameState(mark, s.saved)) return "saved";
   if (mark.decision === "exclude" && !(mark.reason ?? "").trim()) return "needs-reason";
+  if (manual && (s.touched || (!s.dropped && s.seen && s.loaded))) return "pending";
   return "unsaved";
 }
 
@@ -257,6 +313,7 @@ export const STATUS_TEXT: Record<TileStatus, string> = {
   failed: "failed",
   "needs-reason": "pick a reason",
   unsaved: "",
+  pending: "unsaved",
 };
 
 /** "Saved this visit: N excluded, M included": what the server holds from this visit, by each
@@ -402,8 +459,8 @@ export function moveFocus(i: number, n: number, delta: number): number {
 export const SUMMARY_KEY_HELP: [string, string][] = [
   ["← → ↑ ↓", "move between photos"],
   ["Enter", "open the photo full screen"],
-  ["K", "include the photo (saves)"],
-  ["X", "exclude the photo (saves)"],
+  ["K", "include the photo (saves with Auto-save on)"],
+  ["X", "exclude the photo (saves with Auto-save on)"],
   ["← / → (full screen)", "previous / next photo on the page"],
   ["Esc", "close the full-screen photo"],
   ["?", "show or hide these keys"],

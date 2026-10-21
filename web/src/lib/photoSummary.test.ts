@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { FlaggedTile } from "./api";
-import { batchBody, beginSend, decidedText, dueDecisions, gridColumns, gridKey, initialMarks, licenceText, markLoaded,
-         markSeen, markTouched, mergeMarks, moveFocus, nextOffset, NOTE_FLIPPED, NOTE_SHOWN, overlay, photoOfText,
-         readTileSize, readView, retry, sameState, sendDone, sendFailed, setDecision, setReason, SUMMARY_KEY_HELP,
-         TILE_SIZE_STORAGE_KEY, tileStatus, toggle, VIEW_STORAGE_KEY, visitLine, visitTotals, writeTileSize, writeView,
+import { autoDue, batchBody, beginSend, decidedText, discardChanges, dueDecisions, freshPage, gridColumns, gridKey,
+         initialMarks, licenceText, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, NOTE_FLIPPED,
+         NOTE_SAVED, NOTE_SHOWN, overlay, pendingDecisions, photoOfText, readTileSize, readView, retry, sameState,
+         sendDone, sendFailed, setDecision, setReason, STATUS_TEXT, SUMMARY_KEY_HELP, TILE_SIZE_STORAGE_KEY,
+         tileDecision, tileStatus, toggle, VIEW_STORAGE_KEY, visitLine, visitTotals, writeTileSize, writeView,
          type GridKeyState, type Marks, type SaveStates } from "./photoSummary";
 
 const micro = { tab: "micrograph", kind: "micrograph probe", p: 0.9, strength: 0.9 };
@@ -186,6 +187,100 @@ test("the visit's totals count each tile's latest saved state", () => {
   s = sendDone(s, [{ item_id: 1, decision: "keep" }]);
   assert.deepEqual(visitTotals(s), { excluded: 1, included: 2 });
   assert.equal(visitLine({ excluded: 1200, included: 3 }), "Saved this visit: 1,200 excluded, 3 included");
+});
+
+// --- Auto-save off (lib/reviewSave.ts) -------------------------------------------------------------
+
+/** The page plus tile 6 (open, never shown). Tiles 1 and 2 shown (seen and loaded); tile 3 (no
+ *  reason to start at) flipped to Include; 4 and 5 decided. */
+const offPage = (): FlaggedTile[] => [...page(), tile({ item_id: 6, photo_key: "inat:1006" })];
+const offState = (): { marks: Marks; s: SaveStates } => {
+  let marks = initialMarks(offPage());
+  let s: SaveStates = {};
+  for (const id of [1, 2]) s = markLoaded(markSeen(s, id), id);
+  marks = toggle(marks, 3);
+  s = markTouched(s, 3);
+  return { marks, s };
+};
+
+test("with Auto-save off nothing is sent by itself: not a shown tile, not a flip", () => {
+  const { marks, s } = offState();
+  assert.deepEqual(autoDue(false, offPage(), marks, s), []);
+  // Whatever happens next, the timer, hiding the page and leaving it still send nothing.
+  const flipped = toggle(marks, 1);
+  assert.deepEqual(autoDue(false, offPage(), flipped, markTouched(s, 1)), []);
+});
+
+test("with Auto-save on the timer sends exactly what it always did", () => {
+  const { marks, s } = offState();
+  assert.deepEqual(autoDue(true, offPage(), marks, s), dueDecisions(offPage(), marks, s));
+  assert.deepEqual(autoDue(true, offPage(), marks, s), [
+    { item_id: 1, decision: "exclude", reason: "micrograph", note: NOTE_SHOWN },
+    { item_id: 2, decision: "exclude", reason: "not_fungus", note: NOTE_SHOWN },
+    { item_id: 3, decision: "keep", note: NOTE_FLIPPED },
+  ]);
+  assert.equal(tileStatus(marks[1], s[1]), "unsaved", "no unsaved mark with Auto-save on");
+  assert.equal(STATUS_TEXT.unsaved, "");
+});
+
+test("Save page writes exactly the unsaved changes: the shown tiles and the flips, nothing unseen or decided", () => {
+  const { marks, s } = offState();
+  const pending = pendingDecisions(offPage(), marks, s);
+  assert.deepEqual(pending, [
+    { item_id: 1, decision: "exclude", reason: "micrograph", note: NOTE_SAVED },
+    { item_id: 2, decision: "exclude", reason: "not_fungus", note: NOTE_SAVED },
+    { item_id: 3, decision: "keep", note: NOTE_FLIPPED },
+  ]);
+  assert.deepEqual(batchBody(pending), { decisions: pending }, "one batch");
+  // Once written they are no longer unsaved; a refused one stays for the next Save.
+  const done = sendDone(beginSend(s, pending.slice(0, 2)), pending.slice(0, 2));
+  const refused = sendFailed(beginSend(done, pending.slice(2)), pending.slice(2), "Not saved.");
+  assert.deepEqual(pendingDecisions(offPage(), marks, refused).map((d) => d.item_id), [3]);
+});
+
+test("a tile's own Save writes that tile alone, even before it counts as seen", () => {
+  const { marks, s } = offState();
+  const six = offPage().find((t) => t.item_id === 6)!;
+  assert.deepEqual(tileDecision(six, marks, s), [{ item_id: 6, decision: "exclude", reason: "micrograph", note: NOTE_SAVED }]);
+  const one = offPage()[0];
+  assert.deepEqual(tileDecision(one, marks, s), [{ item_id: 1, decision: "exclude", reason: "micrograph", note: NOTE_SAVED }]);
+  const decided = offPage().find((t) => t.item_id === 4)!;
+  assert.deepEqual(tileDecision(decided, marks, s), []);
+  const saved = sendDone(s, tileDecision(one, marks, s));
+  assert.deepEqual(tileDecision(one, marks, saved), [], "nothing twice");
+});
+
+test("unsaved tiles are marked as such with Auto-save off", () => {
+  const { marks, s } = offState();
+  assert.equal(tileStatus(marks[1], s[1], true), "pending");
+  assert.equal(tileStatus(marks[3], s[3], true), "pending");
+  assert.equal(tileStatus(marks[6], s[6], true), "unsaved", "not seen yet: no change held");
+  assert.equal(STATUS_TEXT.pending, "unsaved");
+});
+
+test("Discard drops the page's changes: flips undone, starting Excludes no longer pending until shown afresh", () => {
+  const { marks: m0, s: s0 } = offState();
+  const edits: Marks = { 3: m0[3] };
+  const out = discardChanges(edits, s0, [1, 2, 3, 6]);
+  assert.deepEqual(out.edits, {});
+  const marks = mergeMarks(initialMarks(offPage()), out.edits);
+  assert.equal(marks[3].decision, "exclude");
+  assert.deepEqual(pendingDecisions(offPage(), marks, out.states), []);
+  assert.equal(tileStatus(marks[1], out.states[1], true), "unsaved");
+  // A flip makes it a change again; the page loaded afresh counts its tiles once shown again.
+  assert.deepEqual(pendingDecisions(offPage(), toggle(marks, 1), markTouched(out.states, 1)).map((d) => d.item_id), [1]);
+  let again = freshPage(out.states, [1, 2]);
+  assert.deepEqual(pendingDecisions(offPage(), marks, again), []);
+  again = markLoaded(markSeen(again, 1), 1);
+  assert.deepEqual(pendingDecisions(offPage(), marks, again).map((d) => d.item_id), [1]);
+});
+
+test("Discard keeps what is saved or on its way", () => {
+  const { marks, s } = offState();
+  const sending = beginSend(s, pendingDecisions(offPage(), marks, s).slice(0, 1));
+  const out = discardChanges({ 1: marks[1] }, sending, [1]);
+  assert.deepEqual(out.edits, { 1: marks[1] });
+  assert.equal(out.states[1].dropped, undefined);
 });
 
 test("Next skips the open tiles saved from this page (they drop out of Open)", () => {
