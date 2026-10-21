@@ -13,6 +13,9 @@ import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReas
          setReason, SORTS, sortedPhotos, step, suggestedCount, withMode, writePreselectMode, type Choice,
          type KeyAction, type PhotoChoice, type PhotoChoices, type PickedReasons,
          type PreselectMode } from "@/lib/photoReview";
+import { readTileSize, readView, SUMMARY_KEY_HELP, SUMMARY_TABS, TILE_SIZES, writeTileSize, writeView,
+         type ReviewView, type TileSize } from "@/lib/photoSummary";
+import { PhotoSummary } from "./PhotoSummary";
 
 // The Human Feedback photo review (Steve, 2026-10-18): the "Photos that show no specimen" queue
 // a record at a time. Every photo of the record is on its card, the flagged ones outlined with
@@ -26,6 +29,12 @@ import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReas
 // Photos an admin sees privately (all rights reserved) come from Vision's own same-origin
 // route and are shown by a plain <img>: never linked for download, prefetched or copied. The
 // tiles, the viewer and the controls are shared with the label review (components/ReviewPhotos).
+//
+// Summary | Full (Steve, 2026-10-21): Summary (the default, remembered per viewer) shows the
+// tab's flagged photos alone as a grid that saves as the reviewer goes (PhotoSummary); Full is
+// the record-by-record view below. The tabs, sort and search apply to both; "N+ flagged" and
+// "Suggest Exclude" to Full only, the tile size to Summary only. Full's records are not read
+// while Summary is shown.
 
 export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const qc = useQueryClient();
@@ -40,6 +49,18 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const [gen, setGen] = useState(0);
   const [help, setHelp] = useState(false);
   const [mode, setMode] = useState<PreselectMode>(() => readPreselectMode(browserStorage));
+  const [view, setView] = useState<ReviewView>(() => readView(browserStorage));
+  const full = view === "full";
+  const pickView = (v: ReviewView) => {
+    setView(v);
+    writeView(browserStorage, v);
+  };
+  const [tileSize, setTileSize] = useState<TileSize>(() => readTileSize(browserStorage));
+  const pickTileSize = (t: TileSize) => {
+    setTileSize(t);
+    writeTileSize(browserStorage, t);
+  };
+  const [summaryTotal, setSummaryTotal] = useState<number | null>(null);
   // The reasons this reviewer picked, by photo: kept across tabs and pages (Board remounts).
   const [picked, setPicked] = useState<PickedReasons>({});
   const pickMode = (on: boolean) => {
@@ -55,6 +76,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
     placeholderData: (prev) => prev,
     // A reload under the reviewer would move the cards they are working through.
     refetchOnWindowFocus: false,
+    enabled: full,
   });
   const data = list.data;
   const total = data?.total ?? 0;
@@ -69,8 +91,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
         <h2 className={`font-display text-xl font-semibold ${INK}`}>{summary.title}</h2>
         <p className={`mt-1 max-w-3xl text-sm ${BODY}`}>{summary.about}</p>
       </div>
-      <Tabs data={data} tab={tab} status={status} onPick={setTab} />
+      <Tabs data={full ? data : undefined} photos={full ? null : summaryTotal} tab={tab} status={status}
+            onPick={setTab} />
       <div className="flex flex-wrap items-center gap-3">
+        <ViewToggle view={view} onChange={pickView} />
         <StatusToggle status={status} onChange={setStatus} />
         <label className="flex min-w-0 items-center gap-2 text-sm">
           <span className="text-muted-foreground">Sort</span>
@@ -78,32 +102,37 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
             {SORTS.map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
           </select>
         </label>
-        <label className="flex min-w-0 items-center gap-2 text-sm">
+        {full && <label className="flex min-w-0 items-center gap-2 text-sm">
           <span className="text-muted-foreground">Show</span>
           <select className={FIELD} value={minFlagged} onChange={(e) => setMinFlagged(Number(e.target.value))}>
             {MIN_FLAGGED.map((n) => <option key={n} value={n}>{n}+ flagged photo{n === 1 ? "" : "s"}</option>)}
           </select>
-        </label>
+        </label>}
         <input type="search" value={text} onChange={(e) => setText(e.target.value)}
                placeholder="Record or name" aria-label="Search records or names"
                className={`${FIELD} w-full min-w-[12rem] basis-full sm:basis-auto sm:flex-1 sm:max-w-xs`} data-testid="photo-review-search" />
-        <label className="flex min-h-10 min-w-0 items-center gap-2 text-sm"
+        {full && <label className="flex min-h-10 min-w-0 items-center gap-2 text-sm"
                title="Open flagged photos in this tab start as Exclude with their suggested reason, shown dashed until you confirm or keep them. Save sends them too.">
           <input type="checkbox" className="h-4 w-4 accent-myco-green" checked={mode === "suggest"}
                  onChange={(e) => pickMode(e.target.checked)} data-testid="photo-review-suggest" />
           <span className={BODY}>Suggest Exclude for flagged photos</span>
-        </label>
+        </label>}
+        {!full && <SizeToggle size={tileSize} onChange={pickTileSize} />}
         <button type="button" className={BTN} aria-pressed={help} onClick={() => setHelp((h) => !h)}>
           <Keyboard className="h-4 w-4" aria-hidden /> Keys
         </button>
-        {list.isFetching && <span className="text-xs text-muted-foreground">Loading…</span>}
+        {full && list.isFetching && <span className="text-xs text-muted-foreground">Loading…</span>}
       </div>
-      {help && <KeyHelp rows={KEY_HELP} />}
-      {list.error && (
+      {help && <KeyHelp rows={full ? KEY_HELP : SUMMARY_KEY_HELP} />}
+      {!full && (
+        <PhotoSummary tab={tab} status={status} sort={sort} q={q} help={help} onHelp={() => setHelp((h) => !h)}
+                      tileSize={tileSize} onTotal={setSummaryTotal} />
+      )}
+      {full && list.error && (
         <p className={BODY}>{list.error instanceof ApiError ? list.error.message : "The photo review could not be loaded."}</p>
       )}
-      {data && list.isPlaceholderData && <p className="text-sm text-muted-foreground">Loading the next records…</p>}
-      {data && !list.isPlaceholderData && (
+      {full && data && list.isPlaceholderData && <p className="text-sm text-muted-foreground">Loading the next records…</p>}
+      {full && data && !list.isPlaceholderData && (
         <Board key={`${tab}|${status}|${sort}|${minFlagged}|${q}|${offset}|${gen}`} data={data} tab={tab}
                status={status} searching={!!q} offset={offset} help={help} onHelp={() => setHelp((h) => !h)}
                mode={mode} picked={picked} onPick={(photoKey, r) => setPicked((x) => ({ ...x, [photoKey]: r }))}
@@ -121,13 +150,52 @@ const browserStorage = () => (typeof window === "undefined" ? null : window.loca
 const reasonSelectId = (recordKey: string, photoKey: string, lb = false) =>
   `${lb ? "lb-" : ""}reason-${recordKey}-${photoKey}`.replace(/[^A-Za-z0-9_-]/g, "_");
 
-function Tabs({ data, tab, status, onPick }: {
-  data?: PhotoReviewPage; tab: PhotoReviewTab; status: FeedbackStatus; onPick: (t: PhotoReviewTab) => void;
+/** Summary | Full, left of Open / Decided. */
+function ViewToggle({ view, onChange }: { view: ReviewView; onChange: (v: ReviewView) => void }) {
+  const seg = (on: boolean) => `min-h-10 px-3 py-1.5 text-sm font-medium ${
+    on ? "bg-myco-green/10 text-myco-green" : "text-gray-700 hover:bg-myco-green/5 dark:text-foreground/80"}`;
+  return (
+    <div className="inline-flex overflow-hidden rounded-md border border-[#A87146]/30 dark:border-border"
+         role="group" aria-label="View" data-testid="photo-review-view">
+      <button type="button" className={seg(view === "summary")} aria-pressed={view === "summary"}
+              title="The flagged photos as a grid, saved as you go" onClick={() => onChange("summary")}>Summary</button>
+      <button type="button" className={`${seg(view === "full")} border-l border-[#A87146]/30 dark:border-border`}
+              aria-pressed={view === "full"} title="Record by record, every photo"
+              onClick={() => onChange("full")}>Full</button>
+    </div>
+  );
+}
+
+/** The Summary's tile size: S / M / L. */
+function SizeToggle({ size, onChange }: { size: TileSize; onChange: (s: TileSize) => void }) {
+  return (
+    <div className="inline-flex overflow-hidden rounded-md border border-[#A87146]/30 dark:border-border"
+         role="group" aria-label="Tile size">
+      {TILE_SIZES.map((t, i) => (
+        <button key={t.code} type="button" aria-pressed={size === t.code} title={`${t.label} tiles`}
+                aria-label={`${t.label} tiles`} onClick={() => onChange(t.code)}
+                className={`min-h-10 min-w-10 px-2 py-1.5 text-sm font-medium ${i ? "border-l border-[#A87146]/30 dark:border-border" : ""} ${
+                  size === t.code ? "bg-myco-green/10 text-myco-green" : "text-gray-700 hover:bg-myco-green/5 dark:text-foreground/80"}`}>
+          {t.code.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** The tabs. Full: from its records' response, with record counts. Summary: by name, and the
+ *  tab shown with its count of photos (`photos`). */
+function Tabs({ data, photos, tab, status, onPick }: {
+  data?: PhotoReviewPage; photos: number | null; tab: PhotoReviewTab; status: FeedbackStatus;
+  onPick: (t: PhotoReviewTab) => void;
 }) {
+  const shownCount = (code: PhotoReviewTab) => (photos != null && code === tab ? photos : null);
   const tabs: { code: PhotoReviewTab; title: string; n: number | null }[] = [
     // A record can be in several tabs, so All's count is only known when it is the one shown.
-    { code: "all", title: "All", n: tab === "all" && data ? data.total : null },
-    ...(data?.tabs ?? []).map((t) => ({ code: t.code, title: t.title, n: status === "open" ? t.open : t.decided })),
+    { code: "all", title: "All", n: tab === "all" && data ? data.total : shownCount("all") },
+    ...(data?.tabs
+      ? data.tabs.map((t) => ({ code: t.code, title: t.title, n: status === "open" ? t.open : t.decided }))
+      : SUMMARY_TABS.map((t) => ({ code: t.code, title: t.title, n: shownCount(t.code) }))),
   ];
   return (
     <div className="flex min-w-0 gap-1 overflow-x-auto border-b border-[#A87146]/20 pb-1 dark:border-border"

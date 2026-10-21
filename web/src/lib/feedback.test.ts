@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
 import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
-         historyOrgText, itemBadges, linkedItem, orgChipClass, pageText, parsePhotoKeys, prefillValue,
+         historyOrgText, itemBadges, linkedItem, openQueue, orgChipClass, pageText, parsePhotoKeys, prefillValue,
+         queueParam, QUEUE_STORAGE_KEY, readLastQueue, writeLastQueue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
          shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText } from "./feedback";
 
@@ -250,4 +251,38 @@ test("a photo queue's card counts photos and the observations they are in", () =
                    { big: "1", unit: "photo", sub: "open in 1 observation · 3 decided (2 observations done)" });
   assert.deepEqual(statCardLines({ open: 80, decided: 1 }),
                    { big: "80", unit: "", sub: "open · 1 decided" });
+});
+
+// --- which queue the page opens ----------------------------------------------------------------
+
+test("the page opens no queue by itself: only a pick, a link, or the one last opened", () => {
+  const types = ["non_specimen_photo", "photos_unlike_label", "group_label"];
+  const base = { picked: null, param: null, linkedPending: false, linkedType: null, stored: null, types };
+  assert.equal(openQueue(base), null, "first visit: none (not the first queue with open items)");
+  assert.equal(openQueue({ ...base, stored: "group_label" }), "group_label");
+  assert.equal(openQueue({ ...base, stored: "gone_queue" }), null, "a queue no longer listed");
+  assert.equal(openQueue({ ...base, param: "photos_unlike_label", stored: "group_label" }), "photos_unlike_label");
+  assert.equal(openQueue({ ...base, linkedType: "group_label", stored: "non_specimen_photo" }), "group_label");
+  assert.equal(openQueue({ ...base, linkedPending: true, stored: "non_specimen_photo" }), null,
+               "a linked item still loading: wait, don't open the remembered queue first");
+  assert.equal(openQueue({ ...base, picked: "group_label", param: "non_specimen_photo" }), "group_label");
+  assert.equal(openQueue({ ...base, stored: "group_label", types: [] }), null, "summary not loaded");
+  assert.equal(openQueue({ ...base, stored: "group_label", types: undefined }), null);
+});
+
+test("the last queue is remembered per viewer; blocked storage remembers nothing", () => {
+  const m = new Map<string, string>();
+  const s = { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
+  assert.equal(readLastQueue(() => s), null);
+  writeLastQueue(() => s, "group_label");
+  assert.equal(m.get(QUEUE_STORAGE_KEY), "group_label");
+  assert.equal(readLastQueue(() => s), "group_label");
+  const broken = () => { throw new Error("blocked"); };
+  assert.equal(readLastQueue(broken), null);
+  assert.doesNotThrow(() => writeLastQueue(broken, "x"));
+  m.set(QUEUE_STORAGE_KEY, "<script>");
+  assert.equal(readLastQueue(() => s), null);
+  assert.equal(queueParam("?queue=non_specimen_photo&item=3"), "non_specimen_photo");
+  assert.equal(queueParam("?queue=Bad Value"), null);
+  assert.equal(queueParam(""), null);
 });

@@ -327,10 +327,11 @@ async function getJson<T>(url: string): Promise<T> {
 }
 
 /** POST JSON (or nothing) with the site session cookie, as the signed-in GETs send it. */
-async function postJson<T>(url: string, body?: unknown): Promise<T> {
+async function postJson<T>(url: string, body?: unknown, init: { keepalive?: boolean } = {}): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
     credentials: "same-origin",
+    ...(init.keepalive ? { keepalive: true } : {}),
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -666,6 +667,53 @@ export interface PhotoReviewDecided {
   record: ReviewRecord | null;
 }
 
+// --- The photo review's Summary view: the flagged photos alone, one tile each ---------------
+
+/** One flagged photo of the Summary view (GET /api/feedback/photo-review/flagged), with its
+ *  record's name and link, its flags, the reason its exclusion starts at, and how this reviewer
+ *  may see it (the same rule as the record view's photos). `position` counts from 0. */
+export interface FlaggedTile {
+  item_id: number;
+  photo_key: string;
+  record_key: string;
+  label: string;
+  link: string;
+  flags: PhotoFlag[];
+  strength: number;
+  suggested_reason: string | null;
+  status: FeedbackStatus;
+  decision: { decision: string; reason: string | null } | null;
+  shown: "public" | "private" | "hidden";
+  thumb?: string;
+  full?: string;
+  hidden_reason?: string;
+  position: number | null;
+  license_class?: string | null;
+  license_code: string | null;
+  owner_login: string | null;
+  record_photos: number | null;
+}
+
+export interface FlaggedPage {
+  total: number;
+  offset: number;
+  reasons: { code: string; label: string }[];
+  tiles: FlaggedTile[];
+}
+
+/** One photo's decision in a Summary save; every exclusion carries a reason code. */
+export interface PhotoBatchDecision {
+  item_id: number;
+  decision: "exclude" | "keep";
+  reason?: string;
+  note?: string;
+}
+
+export interface PhotoBatchBody {
+  decisions: PhotoBatchDecision[];
+  note?: string;
+}
+
 // --- The label review: the blind "Photos unlike the label" queue, a record at a time -------
 
 export type LabelReviewOutcome = "exclude_photos" | "hard_example" | "rename";
@@ -761,6 +809,17 @@ export const feedbackApi = {
   photoReviewDecide: (recordKey: string, body: PhotoReviewDecisionBody) =>
     postJson<PhotoReviewDecided>(
       `/api/feedback/photo-review/${encodeURIComponent(recordKey)}/decision`, body),
+  /** The Summary view's page of flagged photos (at most 200). */
+  photoReviewFlagged: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort; q?: string;
+                            offset?: number; limit?: number }) => {
+    const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
+                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 150) });
+    return getJson<FlaggedPage>(`/api/feedback/photo-review/flagged?${qs}`);
+  },
+  /** Keep / exclude decisions on photo items, written whole or not at all (a 400 says why).
+   *  `keepalive`: sent as the page is hidden or left. */
+  photoReviewBatch: (body: PhotoBatchBody, opts: { keepalive?: boolean } = {}) =>
+    postJson<{ excluded: number; kept: number }>("/api/feedback/photo-review/batch", body, opts),
   labelReview: (p: { status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {
     const qs = new URLSearchParams({ status: p.status, q: p.q ?? "", offset: String(p.offset ?? 0),
                                      limit: String(p.limit ?? 10) });

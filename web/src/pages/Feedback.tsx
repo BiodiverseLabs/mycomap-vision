@@ -8,9 +8,10 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
          type LiveRecord, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
          type Top5 } from "@/lib/api";
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, groupBySection,
-         historyOrgText, itemBadges, linkedItem, orgChipClass, PAGE_SIZE, pageText, prefillValue,
-         recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
-         statCardLines, valueBox, whenText, yes, type SectionGroup, type Verdict } from "@/lib/feedback";
+         historyOrgText, itemBadges, linkedItem, openQueue, orgChipClass, PAGE_SIZE, pageText, prefillValue,
+         queueParam, readLastQueue, recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
+         statCardLines, valueBox, whenText, writeLastQueue, yes, type SectionGroup,
+         type Verdict } from "@/lib/feedback";
 import { LABEL_REVIEW_TYPE } from "@/lib/labelReview";
 import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
 import { LabelReview } from "./LabelReview";
@@ -67,16 +68,23 @@ export function FeedbackPage() {
   const summary = useQuery({ queryKey: ["feedback", "summary"], queryFn: feedbackApi.summary, enabled: ok });
   const catalogue = useQuery({ queryKey: ["feedback", "catalogue"], queryFn: feedbackApi.catalogue,
                                enabled: ok, staleTime: Infinity });
+  // No queue opens by itself (Steve, 2026-10-21: the first load did too much): the one picked,
+  // a ?queue= or ?item= link, or the one this viewer last opened; otherwise none (openQueue).
   const [picked, setPicked] = useState<string | null>(null);
   const [linkedId] = useState(() => linkedItem(location.search));
+  const [param] = useState(() => queueParam(location.search));
+  const [stored] = useState(() => readLastQueue(browserStorage));
   const linked = useQuery({ queryKey: ["feedback", "item", linkedId], enabled: ok && linkedId != null,
                             queryFn: () => feedbackApi.item(linkedId!), retry: false });
-  useEffect(() => { if (linked.data && picked == null) setPicked(linked.data.item_type); },
-            [linked.data, picked]);
+  const pick = (type: string) => {
+    setPicked(type);
+    writeLastQueue(browserStorage, type);
+  };
   const types = summary.data ?? [];
   const sections = groupBySection(types);
-  const inOrder = sections.flatMap((g) => g.types);
-  const selected = picked ?? (inOrder.find((t) => t.open > 0) ?? inOrder[0])?.type ?? null;
+  const selected = openQueue({ picked, param, stored, types: types.map((t) => t.type),
+                               linkedPending: linkedId != null && linked.isPending,
+                               linkedType: linked.data?.item_type ?? null });
   const sel = types.find((t) => t.type === selected);
   const selSection = sections.find((g) => g.types.some((t) => t.type === selected));
   const catalogueType = catalogue.data?.find((t) => t.type === selected);
@@ -95,8 +103,11 @@ export function FeedbackPage() {
             {summary.isPending && <p className="text-sm text-muted-foreground">Loading the queues…</p>}
             {summary.error && <p className={BODY}>The queues could not be loaded.</p>}
             {sections.map((g) => (
-              <SectionCards key={g.code} group={g} selected={selected} onPick={setPicked} />
+              <SectionCards key={g.code} group={g} selected={selected} onPick={pick} />
             ))}
+            {summary.data && types.length > 0 && !sel && !(linkedId != null && linked.isPending) && (
+              <p className="text-sm text-muted-foreground" data-testid="feedback-pick-queue">Pick a queue above.</p>
+            )}
             {sel && (
               <div className="min-w-0 space-y-1 border-t border-[#A87146]/20 pt-6 dark:border-border">
                 {selSection && (
@@ -117,6 +128,9 @@ export function FeedbackPage() {
     </>
   );
 }
+
+/** The viewer's localStorage; reading `window.localStorage` itself can throw (blocked site data). */
+const browserStorage = () => (typeof window === "undefined" ? null : window.localStorage);
 
 function AdminDownloads() {
   return (
