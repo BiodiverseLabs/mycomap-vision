@@ -2,7 +2,36 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowUpRight, Check, ChevronLeft, ChevronRight, Lock, X } from "lucide-react";
 import type { FeedbackStatus, ReviewPhoto } from "@/lib/api";
 import { recordLabel } from "@/lib/feedback";
-import { openOnLabel, placeholderText, tileImage, type Choice, type Choices } from "@/lib/photoReview";
+import { openOnLabel, placeholderText, QUICK_REASONS, quickReasons, tileImage, type Choice,
+         type Choices } from "@/lib/photoReview";
+
+/** The quick reason buttons beneath Include / Exclude in an expanded photo (Steve, 2026-10-21):
+ *  one click excludes the photo for that reason. Only the reasons the server lists are shown;
+ *  `current` (the photo's reason while excluded) is drawn selected. Keys 1–5 follow QUICK_REASONS. */
+export function QuickReasons({ reasons, current, onPick, disabled = false }: {
+  reasons: { code: string; label: string }[]; current: string | null; onPick: (code: string) => void; disabled?: boolean;
+}) {
+  const shown = quickReasons(reasons);
+  if (!shown.length) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-1.5" role="group" aria-label="Exclude as"
+         data-testid="quick-reasons">
+      {shown.map((q) => {
+        const on = current === q.code;
+        const key = QUICK_REASONS.findIndex((r) => r.code === q.code) + 1;
+        return (
+          <button key={q.code} type="button" aria-pressed={on} disabled={disabled} title={`Exclude: ${q.title} (${key})`}
+                  onClick={(e) => { e.stopPropagation(); onPick(q.code); }}
+                  className={`inline-flex min-h-10 items-center gap-1.5 rounded-md border px-3 text-sm font-medium disabled:opacity-40 ${
+                    on ? "border-red-500 bg-red-600 text-white" : "border-white/40 bg-white/10 text-white hover:bg-white/20"}`}>
+            <span className={`text-[11px] tabular-nums ${on ? "text-white/80" : "text-white/60"}`} aria-hidden>{key}</span>
+            {q.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 // The pieces the Human Feedback review pages share (the photo review and the label review):
 // a record's photo tiles, the placeholder, Keep / Exclude buttons, the photo viewer, the key
@@ -177,9 +206,11 @@ export function PhotoTile({ photo, record, choice, focused, outline = "border-tr
  *  when `onChoose` is left out: a decided card), Esc or a click outside to close. `suggested`
  *  says which exclusions are only suggestions; `hint` replaces the key line. */
 export function PhotoLightbox<P extends TilePhoto>({ record, photos, index, choices, onStep, onChoose, onClose, extra,
-                                                    suggested, hint }: {
+                                                    below, suggested, hint }: {
   record: TileRecord; photos: P[]; index: number; choices: Choices; onStep: (d: 1 | -1) => void;
   onChoose?: (c: Choice) => void; onClose: () => void; extra?: (photo: P) => ReactNode;
+  /** Drawn directly beneath Keep / Exclude (the quick reasons). */
+  below?: (photo: P) => ReactNode;
   suggested?: (photo: P) => boolean; hint?: string;
 }) {
   const photo = photos[index];
@@ -231,6 +262,7 @@ export function PhotoLightbox<P extends TilePhoto>({ record, photos, index, choi
       <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-2" onClick={(e) => e.stopPropagation()}>
         {extra?.(photo)}
         {onChoose && <ChoiceButtons choice={choice} onChoose={onChoose} big suggested={!!suggested?.(photo)} />}
+        {below?.(photo)}
         <p className="text-center text-xs text-white/70">
           {hint ?? (onChoose ? "← / → photos · K keep · X exclude · Esc close" : "← / → photos · Esc close")}
         </p>

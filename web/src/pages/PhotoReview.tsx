@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Keyboard } from "lucide-react";
-import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, sciLike,
+import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, QuickReasons, sciLike,
          StatusToggle, useDebounced } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type PhotoReviewDecisionBody,
          type PhotoReviewPage, type PhotoReviewSort, type PhotoReviewTab, type ReviewPhoto,
@@ -9,7 +9,8 @@ import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type 
 import { pageText, recordLabel } from "@/lib/feedback";
 import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReason, decisionsOf, initialChoices,
          KEY_HELP, keyAction, MIN_FLAGGED, missingReason, nextPageOffset, nextUnsaved, offsetWhenPageDone,
-         openOnLabel, outlineOf, photoLabels, photoName, readPreselectMode, REVIEW_PAGE_SIZE, saveBody, savedLine,
+         openOnLabel, outlineOf, photoLabels, photoName, QUICK_REASONS, quickChoice, quickReasons, readPreselectMode,
+         REVIEW_PAGE_SIZE, saveBody, savedLine,
          setReason, SORTS, sortedPhotos, step, suggestedCount, withMode, writePreselectMode, type Choice,
          type KeyAction, type PhotoChoice, type PhotoChoices, type PickedReasons,
          type PreselectMode } from "@/lib/photoReview";
@@ -408,6 +409,14 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
     onPick(photoKey, reason);
   };
 
+  /** A quick reason button (or key 1–5) on a photo: left out for that reason. */
+  const quick = (index: number, photoKey: string, reason: string) => {
+    const key = keys[index];
+    if (!editable(key) || !reason) return;
+    setFor(key, quickChoice(choicesOf(key), photoKey, reason));
+    onPick(photoKey, reason);
+  };
+
   const run = (a: KeyAction) => {
     const at = lightbox ?? focus;
     const rec = records[at.rec];
@@ -436,6 +445,12 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
         if (!ph || !editable(rec.record_key)) return;
         const r = cycleReason(choicesOf(rec.record_key), ph.photo_key, reasonCodes)[ph.photo_key]?.reason;
         if (r) pickReason(at.rec, ph.photo_key, r);
+        return;
+      }
+      case "quick": {
+        const ph = photos[at.photo];
+        const code = QUICK_REASONS[a.index]?.code;
+        if (ph && lightbox && code && quickReasons(data.reasons).some((q) => q.code === code)) quick(at.rec, ph.photo_key, code);
         return;
       }
       case "keepAll":
@@ -546,6 +561,7 @@ function Board({ data, tab, status, searching, offset, help, onHelp, onPageDone,
                   onStep={(d) => run({ type: "photo", step: d })}
                   onChoose={(c) => run({ type: "choose", choice: c })}
                   onReason={(photoKey, r) => pickReason(lightbox.rec, photoKey, r)}
+                  onQuick={(photoKey, r) => quick(lightbox.rec, photoKey, r)}
                   onClose={() => run({ type: "close" })} />
       )}
     </>
@@ -705,18 +721,24 @@ function Tile({ photo, tab, record, reasons, choice, focused, disabled, unsaved,
   );
 }
 
-function Lightbox({ record, photos, index, tab, reasons, choices, disabled, onStep, onChoose, onReason, onClose }: {
+function Lightbox({ record, photos, index, tab, reasons, choices, disabled, onStep, onChoose, onReason, onQuick, onClose }: {
   record: ReviewRecord; photos: ReviewPhoto[]; index: number; tab: PhotoReviewTab;
   reasons: { code: string; label: string }[]; choices: PhotoChoices; disabled: boolean;
   onStep: (d: 1 | -1) => void; onChoose: (c: Choice) => void; onReason: (photoKey: string, r: string) => void;
-  onClose: () => void;
+  onQuick: (photoKey: string, r: string) => void; onClose: () => void;
 }) {
   const plain = useMemo(() => decisionsOf(choices), [choices]);
   return (
     <PhotoLightbox record={record} photos={photos} index={index} choices={plain} onStep={onStep}
                    onChoose={onChoose} onClose={onClose}
                    suggested={(photo) => !!choices[photo.photo_key]?.suggested}
-                   hint="← / → photos · K keep · X exclude · R reason · Esc close"
+                   hint="← / → photos · K keep · X exclude · R reason · 1–5 quick reason · Esc close"
+                   below={(photo) => {
+                     const c = choices[photo.photo_key];
+                     return <QuickReasons reasons={reasons} disabled={disabled}
+                                          current={c?.decision === "exclude" && !c.suggested ? c.reason : null}
+                                          onPick={(r) => onQuick(photo.photo_key, r)} />;
+                   }}
                    extra={(photo) => {
                      const c = choices[photo.photo_key];
                      return (

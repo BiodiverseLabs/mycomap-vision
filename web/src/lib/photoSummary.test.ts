@@ -6,7 +6,8 @@ import { autoDue, batchBody, beginSend, decidedText, discardChanges, dueDecision
          NOTE_SAVED, NOTE_SHOWN, overlay, pendingDecisions, photoOfText, readTileSize, readView, retry, sameState,
          sendDone, sendFailed, setDecision, setReason, STATUS_TEXT, SUMMARY_KEY_HELP, TILE_SIZE_STORAGE_KEY,
          tileDecision, tileStatus, toggle, VIEW_STORAGE_KEY, visitLine, visitTotals, writeTileSize, writeView,
-         type GridKeyState, type Marks, type SaveStates } from "./photoSummary";
+         quickMark, type GridKeyState, type Marks, type SaveStates } from "./photoSummary";
+import { QUICK_REASONS, quickReasons } from "./photoReview";
 
 const micro = { tab: "micrograph", kind: "micrograph probe", p: 0.9, strength: 0.9 };
 const gate = { tab: "gate", kind: "not-a-fungus gate", p: 0.0123, strength: 0.9877 };
@@ -382,4 +383,56 @@ test("viewer keys: ← / → step through the page, K / X flip, Esc closes", () 
   assert.equal(moveFocus(0, 6, -1), 0);
   assert.equal(moveFocus(2, 6, 1), 3);
   assert.ok(!SUMMARY_KEY_HELP.some(([k]) => k === "S"));
+});
+
+// --- quick reasons (Steve, 2026-10-21) ----------------------------------------------------------
+
+const SERVER_REASONS = [
+  ["micrograph", "Micrograph or microscope"], ["slip", "Field slip or label"], ["habitat", "Habitat or scene"],
+  ["people", "People"], ["not_fungus", "Not a fungus"], ["dried", "Dried specimen"], ["spore_print", "Spore print"],
+  ["uv", "UV reaction"], ["chemical", "Chemical spot test"], ["other", "Other"],
+].map(([code, label]) => ({ code, label }));
+
+test("each quick button excludes the photo for its own reason, an included one too", () => {
+  assert.deepEqual(QUICK_REASONS.map((q) => [q.label, q.code]), [
+    ["Field slip", "slip"], ["Microscopy", "micrograph"], ["Spore print", "spore_print"], ["UV", "uv"], ["Chemical", "chemical"],
+  ]);
+  for (const { code } of QUICK_REASONS) {
+    const included = toggle(initialMarks(page()), 1);
+    assert.deepEqual(quickMark(included, 1, code)[1], { decision: "exclude", reason: code });
+    assert.deepEqual(quickMark(initialMarks(page()), 2, code)[2], { decision: "exclude", reason: code });
+  }
+  const m = initialMarks(page());
+  assert.equal(quickMark(m, 1, "micrograph"), m, "already that reason: no change");
+  assert.equal(quickMark(m, 4, "uv"), m, "a decided tile does not change");
+  assert.equal(quickMark(m, 99, "uv"), m);
+});
+
+test("a quick reason saves at once with Auto-save on, and stays unsaved with it off", () => {
+  const tiles = page();
+  const marks = quickMark(initialMarks(tiles), 2, "uv");
+  const s = markTouched({}, 2);
+  assert.deepEqual(autoDue(true, tiles, marks, s), [{ item_id: 2, decision: "exclude", reason: "uv", note: NOTE_FLIPPED }]);
+  assert.deepEqual(autoDue(false, tiles, marks, s), []);
+  assert.deepEqual(pendingDecisions(tiles, marks, s), [{ item_id: 2, decision: "exclude", reason: "uv", note: NOTE_FLIPPED }]);
+  assert.equal(tileStatus(marks[2], s[2], true), "pending");
+});
+
+test("a quick button is hidden when the server does not list its reason", () => {
+  assert.deepEqual(quickReasons(SERVER_REASONS).map((q) => [q.code, q.title]), [
+    ["slip", "Field slip or label"], ["micrograph", "Micrograph or microscope"], ["spore_print", "Spore print"],
+    ["uv", "UV reaction"], ["chemical", "Chemical spot test"],
+  ]);
+  const noUv = SERVER_REASONS.filter((r) => r.code !== "uv" && r.code !== "chemical");
+  assert.deepEqual(quickReasons(noUv).map((q) => q.code), ["slip", "micrograph", "spore_print"]);
+  assert.deepEqual(quickReasons([]), []);
+});
+
+test("keys 1–5 are the quick reasons in the viewer only", () => {
+  const lb: GridKeyState = { typing: false, lightbox: true, columns: 6 };
+  for (const [k, i] of [["1", 0], ["3", 2], ["5", 4]] as const) assert.deepEqual(gridKey({ key: k }, lb), { type: "quick", index: i });
+  assert.equal(gridKey({ key: "6" }, lb), null);
+  assert.equal(gridKey({ key: "1" }, { ...lb, lightbox: false }), null);
+  assert.equal(gridKey({ key: "1" }, { ...lb, typing: true }), null);
+  assert.ok(SUMMARY_KEY_HELP.some(([k]) => k.startsWith("1–5")));
 });

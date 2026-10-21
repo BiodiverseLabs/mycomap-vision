@@ -148,6 +148,14 @@ export function setReason(marks: Marks, id: number, reason: string): Marks {
   return { ...marks, [id]: { decision: "exclude", reason } };
 }
 
+/** A quick reason button (QUICK_REASONS) in the viewer: Exclude, for that reason, whether the
+ *  tile was included or excluded for another reason. It saves like a flip (markTouched). */
+export function quickMark(marks: Marks, id: number, reason: string): Marks {
+  const m = marks[id];
+  if (!m || m.readOnly || !reason || (m.decision === "exclude" && m.reason === reason)) return marks;
+  return { ...marks, [id]: { decision: "exclude", reason } };
+}
+
 // --- saving -------------------------------------------------------------------------------------
 
 /** What the server holds or is being sent, for one tile. */
@@ -403,6 +411,7 @@ export type GridAction =
   | { type: "move"; delta: number }
   | { type: "open" }
   | { type: "choose"; choice: Choice }
+  | { type: "quick"; index: number }
   | { type: "step"; delta: 1 | -1 }
   | { type: "help" }
   | { type: "close" };
@@ -432,6 +441,7 @@ export function gridKey(e: GridKeyPress, s: GridKeyState): GridAction | null {
     if (k === "ArrowRight") return { type: "step", delta: 1 };
     if (k === "k" || k === "K") return { type: "choose", choice: "keep" };
     if (k === "x" || k === "X") return { type: "choose", choice: "exclude" };
+    if (/^[1-5]$/.test(k)) return { type: "quick", index: Number(k) - 1 };
     return null;
   }
   const cols = Math.max(1, Math.floor(s.columns) || 1);
@@ -462,6 +472,7 @@ export const SUMMARY_KEY_HELP: [string, string][] = [
   ["K", "include the photo (saves with Auto-save on)"],
   ["X", "exclude the photo (saves with Auto-save on)"],
   ["← / → (full screen)", "previous / next photo on the page"],
+  ["1–5 (full screen)", "exclude as Field slip, Microscopy, Spore print, UV, Chemical"],
   ["Esc", "close the full-screen photo"],
   ["?", "show or hide these keys"],
 ];

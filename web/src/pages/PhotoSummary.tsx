@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Lock, RotateCcw, X } from "lucide-react";
-import { BODY, BTN, Ext, FIELD, INK, Placeholder } from "@/components/ReviewPhotos";
+import { BODY, BTN, Ext, FIELD, INK, Placeholder, QuickReasons } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoReviewSort,
          type PhotoReviewTab } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
-import { tileImage, type Choice } from "@/lib/photoReview";
+import { QUICK_REASONS, quickReasons, tileImage, type Choice } from "@/lib/photoReview";
 import { AUTOSAVE_MS, autoDue, batchBody, beginSend, decidedText, discardChanges, freshPage, gridColumns, gridKey,
-         initialMarks, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, pendingDecisions,
+         initialMarks, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, pendingDecisions, quickMark,
          reasonLabel, retry, SEEN_MS, SEEN_RATIO, sendDone, sendFailed, setDecision, setReason, STATUS_TEXT,
          SUMMARY_PAGE_SIZE, tileDecision, tileStatus, toggle, visitLine, visitTotals, type GridAction, type Mark,
          type Marks, type SaveState, type SaveStates, type TileSize } from "@/lib/photoSummary";
@@ -169,6 +169,17 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
     updateStates((s) => markTouched(s, id));
     flushRef.current();
   }, [updateEdits, updateStates]);
+  // A quick reason button: Exclude for that reason, saved like a flip (or held, Auto-save off).
+  const quick = useCallback((id: number, reason: string) => {
+    const t = tilesRef.current.get(id);
+    if (!t) return;
+    const now = mergeMarks(initialMarks([t]), editsRef.current);
+    const next = quickMark(now, id, reason);
+    if (next === now) return;
+    updateEdits((m) => ({ ...m, [id]: next[id] }));
+    updateStates((s) => markTouched(s, id));
+    flushRef.current();
+  }, [updateEdits, updateStates]);
   const retryTile = useCallback((id: number) => {
     if (!autosaveRef.current) return saveTile(id);
     updateStates((s) => retry(s, id));
@@ -252,7 +263,7 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
       {fresh && tiles.length > 0 && (
         <Grid key={`${tab}|${status}|${sort}|${q}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
               marks={marks} states={states} tileSize={tileSize} help={help} onHelp={onHelp} manual={!autosave}
-              onFlip={flip} onReason={pickReason} onRetry={retryTile} onSave={saveTile} onSeen={seen} onLoaded={loaded} />
+              onFlip={flip} onReason={pickReason} onQuick={quick} onRetry={retryTile} onSave={saveTile} onSeen={seen} onLoaded={loaded} />
       )}
       {!autosave && status === "open" && fresh && tiles.length > 0 && bar(false)}
       {total > 0 && fresh && (
@@ -276,11 +287,11 @@ function columnsOf(el: HTMLElement | null): number {
   return getComputedStyle(el).gridTemplateColumns.split(" ").filter(Boolean).length || 1;
 }
 
-function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, onFlip, onReason, onRetry, onSave, onSeen,
-                onLoaded }: {
+function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, onFlip, onReason, onQuick, onRetry, onSave,
+                onSeen, onLoaded }: {
   tiles: FlaggedTile[]; reasons: Reasons; marks: Marks; states: SaveStates; tileSize: TileSize; help: boolean;
   onHelp: () => void; manual: boolean; onFlip: (id: number, c?: Choice) => void; onReason: (id: number, r: string) => void;
-  onRetry: (id: number) => void; onSave: (id: number) => void; onSeen: (id: number) => void; onLoaded: (id: number) => void;
+  onQuick: (id: number, r: string) => void; onRetry: (id: number) => void; onSave: (id: number) => void; onSeen: (id: number) => void; onLoaded: (id: number) => void;
 }) {
   const [focus, setFocus] = useState(0);
   const [lightbox, setLightbox] = useState<number | null>(null);
@@ -335,6 +346,13 @@ function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, o
         if (t) onFlip(t.item_id, a.choice);
         return;
       }
+      case "quick": {
+        // Keys 1–5 follow QUICK_REASONS; a reason the server does not list does nothing.
+        const t = lightbox != null ? tiles[lightbox] : null;
+        const code = QUICK_REASONS[a.index]?.code;
+        if (t && code && quickReasons(reasons).some((q) => q.code === code)) onQuick(t.item_id, code);
+        return;
+      }
       case "step": {
         if (lightbox == null) return;
         const i = moveFocus(lightbox, n, a.delta);
@@ -386,7 +404,7 @@ function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, o
         <SummaryLightbox tile={lb} index={lightbox} count={tiles.length} reasons={reasons} mark={marks[lb.item_id]}
                          state={states[lb.item_id]} manual={manual} onSave={() => onSave(lb.item_id)}
                          onStep={(d) => run({ type: "step", delta: d })}
-                         onChoose={(c) => onFlip(lb.item_id, c)} onReason={(r) => onReason(lb.item_id, r)}
+                         onChoose={(c) => onFlip(lb.item_id, c)} onReason={(r) => onReason(lb.item_id, r)} onQuick={(r) => onQuick(lb.item_id, r)}
                          onRetry={() => onRetry(lb.item_id)}
                          onShown={() => { onLoaded(lb.item_id); onSeen(lb.item_id); }}
                          onClose={() => run({ type: "close" })} />
@@ -508,11 +526,12 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onF
   );
 }
 
-function SummaryLightbox({ tile, index, count, reasons, mark, state, manual, onSave, onStep, onChoose, onReason, onRetry,
+function SummaryLightbox({ tile, index, count, reasons, mark, state, manual, onSave, onStep, onChoose, onReason, onQuick, onRetry,
                            onShown, onClose }: {
   tile: FlaggedTile; index: number; count: number; reasons: Reasons; mark: Mark | undefined;
   state: SaveState | undefined; manual: boolean; onSave: () => void; onStep: (d: 1 | -1) => void;
-  onChoose: (c: Choice) => void; onReason: (r: string) => void; onRetry: () => void; onShown: () => void;
+  onChoose: (c: Choice) => void; onReason: (r: string) => void; onQuick: (r: string) => void; onRetry: () => void;
+  onShown: () => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -588,6 +607,7 @@ function SummaryLightbox({ tile, index, count, reasons, mark, state, manual, onS
               </button>
               <StatusMark mark={mark} state={state} onRetry={onRetry} dark manual={manual} onSave={onSave} />
             </div>
+            <QuickReasons reasons={reasons} current={keep ? null : mark?.reason ?? null} onPick={onQuick} />
             {!keep && (
               <select value={mark?.reason ?? ""} aria-label="Why this photo is left out"
                       onChange={(e) => onReason(e.target.value)}
@@ -610,8 +630,8 @@ function SummaryLightbox({ tile, index, count, reasons, mark, state, manual, onS
         )}
         <p className="text-center text-xs text-white/70">
           {readOnly ? "← / → photos · Esc close"
-            : manual ? "← / → photos · K include · X exclude (unsaved until Save) · Esc close"
-              : "← / → photos · K include · X exclude (each saves) · Esc close"}
+            : manual ? "← / → photos · K include · X exclude · 1–5 reason (unsaved until Save) · Esc close"
+              : "← / → photos · K include · X exclude · 1–5 reason (each saves) · Esc close"}
         </p>
       </div>
     </div>
