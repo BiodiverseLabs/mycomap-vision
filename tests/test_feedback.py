@@ -67,6 +67,47 @@ def test_changes_list_the_latest_decision_per_item_until_applied(store):
     assert len(store.changes(applies="org", pending_only=False)) == 1
 
 
+def test_each_item_carries_its_latest_decision_whatever_the_other_items_decided(store):
+    group = store.items("group_label")["items"][0]["id"]
+    photo = store.items("non_specimen_photo")["items"][0]["id"]
+    unlike = store.items("photos_unlike_label")["items"][0]["id"]
+    store.decide(group, "keep_group", ANN)
+    store.decide(photo, "exclude_photo", ANN)
+    store.decide(group, "rename", ANN, value="Laccaria nobilis")
+    store.decide(photo, "keep_photo", ANN)
+    store.decide(group, "keep_group", ANN, note="third thoughts")
+    assert store.items_of("group_label")[0]["last_decision"]["note"] == "third thoughts"
+    assert store.items_of("non_specimen_photo")[0]["last_decision"]["decision"] == "keep_photo"
+    assert store.items_of("photos_unlike_label")[0]["last_decision"] is None   # undecided
+    latest = {c["item_id"]: c["decision"] for c in store.changes(pending_only=False)}
+    assert latest == {group: "keep_group", photo: "keep_photo"}
+
+
+def test_latest_decisions_stay_fast_on_a_live_sized_store(store):
+    """29k items and 10k decisions (the live store, 2026-10-21): the photo queue's items with
+    their latest decisions took 28 s there, and every Human Feedback page waited for it."""
+    import random
+    import time
+    rnd = random.Random(1)
+    types = list(fb.TYPES)
+    with store.conn:
+        store.conn.executemany(
+            "insert into items (item_type, subject, granularity, rule, seed, created_at) "
+            "values (?, ?, 'photo', 'R6', 'big', 0)",
+            [("non_specimen_photo" if i % 2 else rnd.choice(types), f"big:{i}")
+             for i in range(29_000)])
+        top = store.conn.execute("select max(id) from items").fetchone()[0]
+        store.conn.executemany(
+            "insert into decisions (item_id, decision, applies, by_user, at) "
+            "values (?, 'keep_photo', 'vision', 'u1', ?)",
+            [(rnd.randint(1, top), float(j)) for j in range(10_000)])
+    t0 = time.perf_counter()
+    items = store.items_of("non_specimen_photo")
+    store.changes(pending_only=False)
+    assert time.perf_counter() - t0 < 2.0
+    assert len(items) > 14_000 and sum(1 for i in items if i["last_decision"]) > 4_000
+
+
 def test_photo_exclusions_vision_applies_come_from_both_photo_decisions(store):
     photo = store.items("non_specimen_photo")["items"][0]
     rec = store.items("photos_unlike_label")["items"][0]

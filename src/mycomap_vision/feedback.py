@@ -229,6 +229,11 @@ create table if not exists reveals (
 create index if not exists reveals_item on reveals (item_id, by_user);
 """
 
+# A decision row `d` that is its item's latest. Looked up per item through decisions_item:
+# `d.id in (select max(id) from decisions group by item_id)` took 28 s on the live store
+# (29k items, 10k decisions; 2026-10-21) and blocked every Human Feedback page behind it.
+LATEST_DECISION = "d.id = (select max(x.id) from decisions x where x.item_id = d.item_id)"
+
 # Queues whose items are flags on one photo: a later seed adds its flag to an open item
 # (Store.seed) instead of leaving it out. The photo review reads every flag of an item.
 FLAG_MERGE_TYPES = {"non_specimen_photo"}
@@ -431,8 +436,8 @@ class Store:
         rows = self._visible("select * from items where item_type = ? order by id",
                              (item_type,), projects)
         last = {r["item_id"]: dict(r) for r in self.conn.execute(
-            "select d.* from decisions d join items i on i.id = d.item_id where i.item_type = ? "
-            "and d.id in (select max(id) from decisions group by item_id)", (item_type,))}
+            "select d.* from items i join decisions d on d.item_id = i.id where i.item_type = ? "
+            f"and {LATEST_DECISION}", (item_type,))}
         return [self._item(r) | {"last_decision": last.get(r["id"])} for r in rows]
 
     def get(self, item_id: int, projects: set[str] | None = None) -> dict:
@@ -523,7 +528,7 @@ class Store:
         """Decisions to carry out (on .org, or by Vision), newest last, with the item."""
         sql = ("select d.*, i.item_type, i.subject, i.current, i.proposed, i.record_keys, "
                "i.records, i.rule, i.blind from decisions d join items i on i.id = d.item_id "
-               "where d.id in (select max(id) from decisions group by item_id)")
+               f"where {LATEST_DECISION}")
         params: list = []
         if applies:
             sql += " and d.applies = ?"
