@@ -269,9 +269,10 @@ def test_uv_chemical_tests_trees_and_drawings_are_reasons_of_their_own(conn, tmp
     assert offered["drawing_micro"] == "Drawing – microscopy"
     assert offered["drawing_specimen"] == "Drawing – specimen"
     assert offered["species_description"] == "Species description"
+    assert offered["blurry"] == "Blurry or badly exposed"
     assert list(offered)[-1] == "other"                           # "Other" stays last
     for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen",
-                 "species_description"):
+                 "species_description", "blurry"):
         r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
             {"photo_key": "inat:1000", "decision": "exclude", "reason": code}]})
         assert r.status_code == 200, code
