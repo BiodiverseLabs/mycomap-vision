@@ -265,7 +265,7 @@ def test_uv_chemical_tests_trees_and_drawings_are_reasons_of_their_own(conn, tmp
     as_user(c, "admin-1")
     offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
     assert offered["uv"] == "UV reaction" and offered["chemical"] == "Chemical spot test"
-    assert offered["phylo_tree"] == "Phylogenetic tree"
+    assert offered["phylo_tree"] == "Phylogenetic tree / BLAST"
     assert offered["drawing_micro"] == "Drawing – microscopy"
     assert offered["drawing_specimen"] == "Drawing – specimen"
     assert list(offered)[-1] == "other"                           # "Other" stays last
