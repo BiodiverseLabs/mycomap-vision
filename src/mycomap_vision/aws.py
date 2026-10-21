@@ -843,9 +843,15 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     if done:
         log(f"  already done, restored on the instance: "
             f"{', '.join(f'{k} {n}' for k, n in sorted(done))}")
-    est = trainer.estimate(left, photos_for_estimate(conn, photos, size, f"s3://{b}/",
-                                                     sample_records),
-                           epochs_done=trainer.checkpoint_epochs(prev) if prev else None)
+    est_photos = photos_for_estimate(conn, photos, size, f"s3://{b}/", sample_records)
+    picek_photos = None
+    if rel is not None and picek:      # the recipe trains and validates on the release's splits
+        picek_photos = len(rel.photo_ids(("train", "val"),
+                                         public_trainable_only=public_trainable_only))
+        picek_photos = round(picek_photos * est_photos / max(photos, 1))   # a rehearsal's share
+    est = trainer.estimate(left, est_photos,
+                           epochs_done=trainer.checkpoint_epochs(prev) if prev else None,
+                           picek_photos=picek_photos)
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
     labels, exclude_ids, place_doc = (picek_launch_labels(conn, f"s3://{b}/", size,

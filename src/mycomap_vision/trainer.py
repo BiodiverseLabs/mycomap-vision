@@ -166,11 +166,15 @@ def checkpoint_epochs(doc: dict) -> dict[str, int]:
 
 
 def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
-             factor: float = L4_FACTOR, epochs_done: dict[str, int] | None = None) -> dict:
+             factor: float = L4_FACTOR, epochs_done: dict[str, int] | None = None,
+             picek_photos: int | None = None) -> dict:
     """Hours a run should take: photos / rate per stage (EMBED_RATES, FINETUNE_RATES,
     laptop-measured) times `factor`, plus setup and the comparison. Fine-tuning counts
     every photo `epochs` times (it trains on the reference records only, a little less).
-    `epochs_done` (checkpoint_epochs): epochs a resumed Picek stage need not train again."""
+    `epochs_done` (checkpoint_epochs): epochs a resumed Picek stage need not train again.
+    `picek_photos`: the photos a Picek stage trains and validates on each epoch, when that is
+    not `photos` (on a dataset release: its train + val split, public-trainable only when the
+    run is); its embed and the other stages still count `photos`."""
     if epochs is None:
         from .finetune import FinetuneConfig
         epochs = FinetuneConfig.epochs
@@ -184,13 +188,14 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
             rule = epoch_rule_of(s.spec)
             cached = cache_of(s.spec)
             rate = picek_rate(preset, bool(cached))
-            per_epoch = photos / (rate or UNMEASURED_FINETUNE_RATE) / 3600
+            n_photos = photos if picek_photos is None else picek_photos
+            per_epoch = n_photos / (rate or UNMEASURED_FINETUNE_RATE) / 3600
             done = min((epochs_done or {}).get(s.name, 0), n_epochs)
             hours = per_epoch * (n_epochs - done)
             if cached:
-                hours += photos / PICEK_CACHE_BUILD_RATE / 3600
+                hours += n_photos / PICEK_CACHE_BUILD_RATE / 3600
             total += hours
-            row = {"stage": f"{s.kind} {s.name} ({n_epochs} epochs)",
+            row = {"stage": f"{s.kind} {s.name} ({n_epochs} epochs)", "photos": n_photos,
                    "photos_per_second": rate or UNMEASURED_FINETUNE_RATE,
                    "measured": False, "hours": round(hours, 1)}
             if rule is not None:
@@ -246,7 +251,9 @@ def format_estimate(est: dict) -> str:
              "as a margin):"]
     for r in est["stages"]:
         lines.append(f"  {r['stage']:<40} {r['hours']:>5.1f} h at {r['photos_per_second']}/s"
-                     + ("" if r["measured"] else " (NOT MEASURED: assumed)"))
+                     + ("" if r["measured"] else " (NOT MEASURED: assumed)")
+                     + (f", {r['photos']:,} photos an epoch"
+                        if r.get("photos") not in (None, est["photos"]) else ""))
         if "epochs" in r:
             e = r["epochs"]
             lines.append(f"    epoch rule, ~{r['epoch_hours']} h an epoch: min {e['min']} epochs "

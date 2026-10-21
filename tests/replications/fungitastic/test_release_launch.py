@@ -389,3 +389,34 @@ def test_public_trainable_only_without_a_fine_tune_or_the_recipe_is_refused(laun
                            instance_type="g6.xlarge", dry_run=True,
                            dry_run_dir=tmp_path / "dry", release=BASE, allow_draft=True,
                            public_trainable_only=True, log=lambda s: None)
+
+
+def test_the_recipes_estimate_counts_the_photos_it_trains_on_not_every_stored_photo():
+    stages = trainer.plan_stages([], None, "r", ["fungitastic-beit-b384@15"])
+    every = trainer.estimate(stages, 700_000)
+    public = trainer.estimate(stages, 700_000, picek_photos=350_000)
+    assert public["stages"][0]["hours"] == pytest.approx(every["stages"][0]["hours"] / 2, abs=0.1)
+    assert public["stages"][1]["hours"] == every["stages"][1]["hours"]      # its embed: every photo
+    assert "350,000 photos an epoch" in trainer.format_estimate(public)
+    assert "photos an epoch" not in trainer.format_estimate(every)
+
+
+@pytest.mark.parametrize("public", [False, True])
+def test_a_recipe_launch_on_a_release_is_priced_on_the_photos_it_trains_on(launchable, tmp_path,
+                                                                          monkeypatch, public):
+    seen = {}
+    real = trainer.estimate
+
+    def spy(*a, **k):
+        seen.update(k, photos=a[1])
+        return real(*a, **k)
+    monkeypatch.setattr(trainer, "estimate", spy)
+    aws.launch_trainer(launchable, [], ["classifier"], max_hours=48, instance_type="g6.xlarge",
+                       picek=["fungitastic-beit-b384@15"], dry_run=True,
+                       dry_run_dir=tmp_path / "dry", release=BASE, allow_draft=True,
+                       public_trainable_only=public, log=lambda s: None)
+    rel = rel_of()
+    assert seen["picek_photos"] == len(rel.photo_ids(("train", "val"),
+                                                     public_trainable_only=public))
+    if public:
+        assert seen["picek_photos"] < len(rel.photo_ids(("train", "val")))
