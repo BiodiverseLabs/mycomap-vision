@@ -256,6 +256,26 @@ def test_dried_specimens_and_spore_prints_are_reasons_of_their_own(conn, tmp_pat
     assert reasons == {"inat:1000": "dried", "inat:1100": "spore_print"}
 
 
+
+def test_uv_chemical_tests_trees_and_drawings_are_reasons_of_their_own(conn, tmp_path):
+    """Steve, 2026-10-21: a UV reaction, a chemical spot test (KOH, FeSO4 and the like), a
+    phylogenetic tree, or a drawing of microscopy or of the specimen is left out as itself,
+    not 'Other'."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
+    assert offered["uv"] == "UV reaction" and offered["chemical"] == "Chemical spot test"
+    assert offered["phylo_tree"] == "Phylogenetic tree"
+    assert offered["drawing_micro"] == "Drawing – microscopy"
+    assert offered["drawing_specimen"] == "Drawing – specimen"
+    assert list(offered)[-1] == "other"                           # "Other" stays last
+    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen"):
+        r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+            {"photo_key": "inat:1000", "decision": "exclude", "reason": code}]})
+        assert r.status_code == 200, code
+        reasons = {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")}
+        assert reasons == {"inat:1000": code}
+
 # --- photos the box holds no readable copy of come from their source ----------------------------
 
 class FakeResp:
