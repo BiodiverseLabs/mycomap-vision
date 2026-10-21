@@ -1214,7 +1214,8 @@ def cmd_feedback(conn, args) -> None:
         key = Path(args.key_file).read_bytes().strip()
         try:
             data, summary = feedback_export.export(Path(args.store_copy), Path(args.release),
-                                                   args.as_of, key, feedback.default_path())
+                                                   args.as_of, key, feedback.default_path(),
+                                                   args.expect_key_fingerprint)
         except feedback_export.ExportError as e:
             raise SystemExit(f"export refused: {e}") from None
         Path(args.out).write_bytes(data)
@@ -2517,6 +2518,8 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--key-file", required=True,
                    help="the HMAC key for reviewer pseudonyms (kept private, never exported)")
     q.add_argument("--out", required=True, help="the TSV to write (and <out>.summary.json)")
+    q.add_argument("--expect-key-fingerprint",
+                   help="refuse unless HMAC(key, 'mycomap-e34') is this (the paper's pinned value)")
 
     p = sub.add_parser("holdout", help="records held out for a benchmark: never trained on, "
                                        "indexed, released or added at night (holdouts.py)")

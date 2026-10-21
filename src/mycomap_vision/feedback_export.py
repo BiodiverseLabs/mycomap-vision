@@ -7,7 +7,8 @@ run after the cut-off gives the same bytes. Items nobody decided (a flag alone) 
 
 It reads a COPY of the store (made with sqlite3's .backup), opened read-only; it never opens
 the live store and writes nothing to the copy. Reviewers appear only as an HMAC pseudonym (a key
-the caller holds), never by name or id. A photo of a v1-test record is refused: the paper's
+the caller holds), never by name or id; the summary gives the key's fingerprint,
+HMAC(key, "mycomap-e34"), and a run given --expect-key-fingerprint refuses any other key. A photo of a v1-test record is refused: the paper's
 seal says no queue may hold one (feedback.SealGate), so finding one is an error to look into.
 
 Columns (fixed, pinned by the paper coordinator in curation_v1_1):
@@ -39,6 +40,7 @@ from . import photo_review as pr
 COLUMNS = ("photo_key", "manifest_photo_id", "record_key", "v1_split", "decision", "reason",
            "decision_id", "decided_at", "reviewer_pseudonym", "confirmation", "flag_source")
 NOTE_SHOWN = "summary: shown"
+FINGERPRINT_LABEL = b"mycomap-e34"      # the paper pins HMAC(key, this), never the key
 _NUMBERS = re.compile(r"\s*(p(\(fungus\))?=[0-9.]+|\([^)]*\))")
 
 
@@ -66,6 +68,11 @@ def confirmation(note: str | None) -> str:
 def flag_source(rule: str) -> str:
     parts = [_NUMBERS.sub("", p).strip() for p in (rule or "").split(";")]
     return "; ".join(p for p in parts if p)
+
+
+def key_fingerprint(key: bytes) -> str:
+    """What the paper's config records for the key: HMAC(key, "mycomap-e34")."""
+    return hmac.new(key, FINGERPRINT_LABEL, hashlib.sha256).hexdigest()
 
 
 def pseudonym(key: bytes, user: str) -> str:
@@ -97,11 +104,15 @@ def _splits(release: Path) -> dict[str, str]:
 
 
 def export(store_copy: Path, release: Path, as_of: str, key: bytes,
-           live: Path | None = None) -> tuple[bytes, dict]:
+           live: Path | None = None, expect_fingerprint: str | None = None
+           ) -> tuple[bytes, dict]:
     """The export's bytes (UTF-8, LF, a header row, rows sorted by photo_key) and a summary
     with its sha256 and counts by decision, reason, confirmation and v1 split."""
     if not key:
         raise ExportError("no HMAC key: reviewers are exported only as pseudonyms")
+    if expect_fingerprint is not None and key_fingerprint(key) != expect_fingerprint.strip():
+        raise ExportError("the HMAC key's fingerprint is not the one expected: a different key "
+                          "would give different pseudonyms")
     cut = parse_as_of(as_of)
     conn = _open_copy(store_copy, live)
     split_of = _splits(release)
@@ -143,6 +154,7 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
     w.writerows(rows)
     data = buf.getvalue().encode("utf-8")
     summary = {"as_of": as_of, "rows": len(rows), "sha256": hashlib.sha256(data).hexdigest(),
+               "key_fingerprint": key_fingerprint(key),
                "by_decision": dict(sorted(Counter(r["decision"] for r in rows).items())),
                "exclusions_by_confirmation": dict(sorted(Counter(
                    r["confirmation"] for r in rows if r["decision"] == "exclude_photo").items())),

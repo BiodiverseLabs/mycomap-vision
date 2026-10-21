@@ -144,3 +144,14 @@ def test_it_reads_a_backup_copy_and_never_the_live_store(site):
     fx.export(copy, rel, CUT, KEY, live)
     assert hashlib.sha256(copy.read_bytes()).hexdigest() == sha      # nothing written
     assert not (tmp / "copy.sqlite-wal").exists()
+
+
+def test_the_summary_names_the_keys_fingerprint_and_a_run_refuses_another_key(site):
+    s, live, rel, tmp = site
+    decided(s)
+    copy = backup(live, tmp / "copy.sqlite")
+    fp = hmac.new(KEY, b"mycomap-e34", hashlib.sha256).hexdigest()
+    data, summary = fx.export(copy, rel, CUT, KEY, live, expect_fingerprint=fp)
+    assert summary["key_fingerprint"] == fp and KEY not in data
+    with pytest.raises(fx.ExportError, match="fingerprint"):
+        fx.export(copy, rel, CUT, b"another-key", live, expect_fingerprint=fp)
