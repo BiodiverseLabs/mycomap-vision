@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -302,6 +303,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                sessions: bool | None = None,
                by_observation: bool | None = None,
                observation_fetcher: "byobservation.Fetcher | None" = None,
+               card_writer: Callable[[Callable[[], None]], object] | None = None,
                quotas: "quota_rules.Quotas | None" = None,
                upload_meter: "uploadmeter.UploadMeter | None" = None,
                usage_post: Callable[[dict], None] | None = None,
@@ -1263,13 +1265,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                repr(float(held[0].answered_at)))
             if run_store.get(rid) is not None:
                 run_store.opened_by(run_owner(who), rid, "observation")
+                card_later(rid)                 # a no-op once its card is kept
                 return {"id": rid, "url": f"/r/{rid}"}
             parts = [run_part(site_index(backbone, method, view, timer), h.payload["result"],
                               h.payload.get("spare") or [], h.payload.get("vectors"),
                               h.payload.get("hidden"))
                      for (backbone, method), h in zip(wanted, held)]
-            return keep_run("observation", who, parts, held[0].payload["used"], rid=rid,
+            kept = keep_run("observation", who, parts, held[0].payload["used"], rid=rid,
                             observation=run_links.public_observation(about), answered_at=at)
+            card_later(rid)                     # its link card, off this request
+            return kept
         return without_failing(link)
 
     def without_failing(make: Callable[[], dict]) -> dict | None:
@@ -1371,38 +1376,151 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(404, "no such photo", headers=NOT_INDEXED)
         return Response(body, media_type="image/jpeg", headers=NOT_INDEXED)
 
-    # A run's link-preview image (linkcards.py), made from its own photo copies, kept in
-    # memory: a run never changes, and one that is deleted is gone from stored_run first.
+    # A run's link-preview image (linkcards.py), made once and kept beside the run
+    # (site-runs/<id>/card.jpg), and in memory: a run never changes, and one that is
+    # deleted is gone from stored_run first. An upload run's is drawn from its own photo
+    # copies when first asked for. An iNat/MO run's is drawn from the observation's CC0 /
+    # CC BY photos, read from the source once through the same polite fetcher as every
+    # observation read, and made when the run is kept, on its own worker (`card_writer`;
+    # inline without `background`): a crawler gives up after a few seconds, and MO's pace
+    # alone is 5 s a photo. Until it is kept, the run's tags name the site image.
+    source_fetcher = observation_fetcher or byobservation.Fetcher()
+    if card_writer is None:
+        card_writer = (ThreadPoolExecutor(max_workers=1, thread_name_prefix="run-cards").submit
+                       if background else (lambda job: job()))
     card_images: "OrderedDict[str, bytes]" = OrderedDict()
     card_lock = threading.Lock()
+    card_making = threading.Lock()          # one upload card made at a time
+    card_queued: set[str] = set()           # iNat/MO cards waiting for, or on, the worker
+    card_failed: dict[str, float] = {}      # run -> when its source last failed (retry later)
+    CARD_RETRY_SECONDS = 900
     card_logo = next((p for p in ((web_dist / "mycomap-logo.png") if web_dist else None,
                                   config.REPO_ROOT / "web" / "public" / "mycomap-logo.png")
                       if p is not None and p.is_file()), None)
+    site_card_image = (web_dist / "og-card.jpg") if web_dist else None
 
-    def run_card_image(rid: str, run: dict) -> bytes | None:
+    def card_from_source(rid: str, run: dict) -> bytes | None:
+        """An iNat/MO run's card from the observation's own CC0 / CC BY photos, with their
+        credits; None when none qualifies or the source gave none (not asked again for
+        CARD_RETRY_SECONDS)."""
+        chosen = linkcards.card_photos(run)
+        if not chosen:
+            return None
+        failed = card_failed.get(rid)
+        if failed is not None and time.monotonic() - failed < CARD_RETRY_SECONDS:
+            return None
+        source = (run.get("observation") or {}).get("source")
+        try:
+            pairs = source_fetcher.photos_at(source, [url for url, _ in chosen])
+        except (byobservation.Unavailable, byobservation.Busy) as e:
+            note(f"[runs] card for {rid}: the source's photos can't be read now: {e}")
+            pairs = []
+        bodies, credits = [], []
+        for i, body in pairs:
+            try:
+                bodies.append(run_links.small_copy(body))
+            except Exception:  # noqa: BLE001 - not an image we can read: left off the card
+                continue
+            credits.append(chosen[i][1])
+        if not bodies:
+            card_failed[rid] = time.monotonic()
+            return None
+        card_failed.pop(rid, None)
+        used = (run.get("observation") or {}).get("photos_used")
+        logo = Image.open(card_logo) if card_logo else None
+        return linkcards.run_card_jpeg(bodies, linkcards.headline(linkcards.run_answer(run)),
+                                       logo, credits=credits,
+                                       answered_from=int(used) if used else None)
+
+    def remembered_card(rid: str) -> bytes | None:
         with card_lock:
             if rid in card_images:
                 card_images.move_to_end(rid)
                 return card_images[rid]
-        n = int(run.get("photos") or 0) if run.get("kind") == "photos" else 0
-        bodies = [b for b in (run_store.photo(rid, i) for i in range(min(n, 5))) if b]
-        if not bodies:
-            return None
-        logo = Image.open(card_logo) if card_logo else None
-        body = linkcards.run_card_jpeg(bodies, linkcards.headline(linkcards.run_answer(run)),
-                                       logo)
+        return None
+
+    def remember_card(rid: str, body: bytes) -> None:
         with card_lock:
             card_images[rid] = body
             while len(card_images) > 64:
                 card_images.popitem(last=False)
+
+    def card_later(rid: str) -> None:
+        """Makes an iNat/MO run's card off the request, once: when the run is kept, and
+        again (after CARD_RETRY_SECONDS) for one whose source failed or whose job a restart
+        lost. Nothing for a run with no CC0 / CC BY photo, or whose card is kept."""
+        with card_lock:
+            if rid in card_queued or rid in card_images:
+                return
+            card_queued.add(rid)
+
+        def job() -> None:
+            try:
+                run = run_store.get(rid)
+                if run is None or not linkcards.card_photos(run) or run_store.has_card(rid):
+                    return
+                body = card_from_source(rid, run)
+                if body is not None and run_store.keep_card(rid, body):
+                    remember_card(rid, body)
+            except Exception as e:  # noqa: BLE001 - the site image stands in; tried again
+                note(f"[runs] making the card of {rid} failed: {type(e).__name__}: {e}")
+            finally:
+                with card_lock:
+                    card_queued.discard(rid)
+        try:
+            card_writer(job)
+        except Exception as e:  # noqa: BLE001 - the worker is gone (shutting down)
+            note(f"[runs] no card for {rid} now: {type(e).__name__}: {e}")
+            with card_lock:
+                card_queued.discard(rid)
+
+    def observation_card(rid: str) -> bytes | None:
+        """An iNat/MO run's kept card, never made here."""
+        body = remembered_card(rid)
+        if body is None:
+            body = run_store.card(rid)
+            if body is not None:
+                remember_card(rid, body)
+        return body
+
+    def upload_card(rid: str, run: dict) -> bytes | None:
+        """An upload run's card, made from its own photo copies when first asked for."""
+        body = remembered_card(rid)
+        if body is not None:
+            return body
+        with card_making:
+            body = remembered_card(rid) or run_store.card(rid)
+            if body is None:
+                n = int(run.get("photos") or 0)
+                bodies = [b for b in (run_store.photo(rid, i) for i in range(min(n, 5))) if b]
+                if not bodies:
+                    return None
+                logo = Image.open(card_logo) if card_logo else None
+                body = linkcards.run_card_jpeg(
+                    bodies, linkcards.headline(linkcards.run_answer(run)), logo)
+                try:
+                    run_store.keep_card(rid, body)
+                except Exception as e:  # noqa: BLE001 - served now, made again next time
+                    note(f"[runs] keeping the card of {rid} failed: {type(e).__name__}: {e}")
+            remember_card(rid, body)
         return body
 
     @app.api_route("/api/runs/{rid}/card.jpg", methods=["GET", "HEAD"])
     def run_card(request: Request, rid: str):
         """The image a shared link shows (Facebook, X, iMessage...): the find's photos and
-        the answer. Like the run itself: anyone with the link, never cached or indexed."""
+        the answer. Like the run itself: anyone with the link, never cached or indexed. An
+        iNat/MO run's is never made while a crawler waits: until it is kept, the site's
+        image stands in (and the card is made, if it never was)."""
         read_limit(request)
-        body = run_card_image(rid, stored_run(rid))
+        run = stored_run(rid)
+        if run.get("kind") == "observation":
+            body = observation_card(rid)
+            if body is None and linkcards.card_photos(run):
+                card_later(rid)
+                if site_card_image is not None and site_card_image.is_file():
+                    body = site_card_image.read_bytes()
+        else:
+            body = upload_card(rid, run) if run.get("kind") == "photos" else None
         if body is None:
             raise HTTPException(404, "this result has no photos", headers=NOT_INDEXED)
         return Response(body, media_type="image/jpeg", headers=NOT_INDEXED)
@@ -1430,7 +1548,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return None, 200
         if run is None:
             return linkcards.gone_card(origin, rid, card_version), 404
-        return linkcards.run_card(origin, rid, run, card_version), 200
+        ready = False
+        if run.get("kind") == "observation" and linkcards.card_photos(run):
+            try:
+                ready = remembered_card(rid) is not None or run_store.has_card(rid)
+            except Exception as e:  # noqa: BLE001 - the site image until it can be read
+                note(f"[runs] no card state for {rid}: {type(e).__name__}: {e}")
+            if not ready:
+                card_later(rid)
+        return linkcards.run_card(origin, rid, run, card_version, card_ready=ready), 200
 
     @app.delete("/api/runs/{rid}", status_code=204)
     def delete_run(request: Request, rid: str):
@@ -1949,7 +2075,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         # its place and date (the record is part of the place prior); so is one whose
         # photo is filed under a reference record. Behind interactive calls in the queue.
         if by_observation_on:
-            fetcher = observation_fetcher or byobservation.Fetcher()
+            fetcher = source_fetcher
 
             def fetched_hashes(ident: Identifier, pairs) -> list[int]:
                 """The dHash of each fetched photo, when the index has a twin table to match
@@ -2011,6 +2137,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     if kept.version != version:
                         reshow_kept(ident, [held["result"], held.get("spare")], view)
                     site_about = dict(held["observation"])
+                    site_about.pop("photos_credit", None)        # the site's, for its cards
                     own = site_about.pop("excluded_reference", False)
                     left = site_about.pop("left_out_photos", 0)
                     body = v1_result(held["result"], backbone, method, held["used"], timer)
@@ -2103,6 +2230,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                          "photos": None, "photos_used": 0, "place": None,
                          "name_at_source": None, "rank_at_source": None,
                          "photos_shown": None}
+                credits = None                  # the site's copy only (its run cards)
                 if len(own):
                     # A DNA reference record: its stored vectors, nothing fetched.
                     cols = own[:MAX_PHOTOS]
@@ -2153,6 +2281,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                  rank_at_source=obs.rank_at_source,
                                  photos_shown=[byobservation.shown_photo_url(obs, i)
                                                for i in kept])
+                    credits = [byobservation.shown_photo_credit(obs, i) for i in kept]
                     hidden, _ = ident.left_out(source, number, obs.photo_ids, obs.linked,
                                                fetched_hashes(ident, pairs))
                     if len(hidden) and not ident.can_leave_out():
@@ -2215,10 +2344,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 who = asked_by(cred)
                 if pooled:
                     site_about = {**{k: v for k, v in about.items() if k != "place"},
+                                  "photos_credit": credits,
                                   "excluded_reference": bool(len(own)),
                                   "left_out_photos": int(len(hidden))}
                     if site_about["photos_shown"] is None:   # a reference record: none shown
-                        site_about.update(photos=n_photos, photos_shown=[None] * n_photos)
+                        site_about.update(photos=n_photos, photos_shown=[None] * n_photos,
+                                          photos_credit=[None] * n_photos)
                     kept_site, _, _ = site_kept(pooled[0], scored_vecs, hidden, used, site_about)
                     kept_site["release"] = model_card().get("version")
                     answer_cache.put(site_key, version, kept_site, who)
@@ -2444,6 +2575,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         # One entry per photo scored, in per_photo's order: its URL when
                         # the page may show it, else null.
                         "photos_shown": [byobservation.shown_photo_url(obs, i) for i in kept],
+                        # Beside it: each shown photo's licence code and who took it, so the
+                        # run's link card can credit it (linkcards.card_photos).
+                        "photos_credit": [byobservation.shown_photo_credit(obs, i)
+                                          for i in kept],
                         "excluded_reference": own_any,
                         "left_out_photos": left,
                 }

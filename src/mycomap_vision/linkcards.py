@@ -14,6 +14,14 @@ the card's tags written into its head:
   settled.py) and a card image made from the find's photos (`run_card_jpeg`). Never the
   place, the date or who ran it. A deleted run, or an id never given out, answers 404 with
   the site's image and "this result isn't available".
+- An iNat or MO run's card is drawn from the observation's own photos, but only those
+  free to reuse with a credit (CARD_LICENCES: CC0, CC BY, public domain; never NC, SA, ND
+  or all rights reserved), with the credit printed on it ("Jane Doe, CC BY via
+  iNaturalist"; Steve, 2026-10-20: shared results "include images from that search"). The
+  card is made when the run is kept, off the request (a crawler gives up after a few
+  seconds; MO's pace alone is 5 s a photo): the photos are read from the source once, by
+  the server, and the card is kept beside the run (runs.RunStore.keep_card). Until it is
+  kept, and when no photo qualifies, the tags name the site's image.
 
 Pure functions only; api.py serves them.
 """
@@ -55,6 +63,12 @@ GONE_TITLE = "MycoMap Vision: this result isn't available"
 GONE_DESCRIPTION = "The link is wrong, or the person who ran it deleted it."
 
 RANKS_FINEST_FIRST = ("species", "genus", "family")
+
+# The licences an observation's photo may carry to go on a card, and how its credit names
+# them. CC BY needs the photographer's name; CC0 and public domain need none.
+CARD_LICENCES = {"cc0": "CC0", "cc-by": "CC BY", "pd": "public domain"}
+SOURCE_NAMES = {"inat": "iNaturalist", "mo": "Mushroom Observer"}
+MAX_CARD_PHOTOS = 5
 
 
 @dataclass(frozen=True)
@@ -172,11 +186,50 @@ def run_answer(run: dict) -> dict | None:
     return (models[0] or {}).get("result") if models else None
 
 
-def run_card(origin: str, rid: str, run: dict, version: str | None = None) -> Card:
+def credit(source: str | None, licence: str | None, by: str | None) -> str | None:
+    """The credit a card prints for an observation's photo ("Jane Doe, CC BY via
+    iNaturalist"), or None when the photo may not go on a card: a licence other than
+    CARD_LICENCES, or CC BY with no one to credit."""
+    code = (licence or "").strip().lower()
+    words = CARD_LICENCES.get(code)
+    where = SOURCE_NAMES.get(source or "")
+    by = " ".join(str(by or "").split())
+    if words is None or where is None or (code == "cc-by" and not by):
+        return None
+    return f"{by + ', ' if by else ''}{words} via {where}"
+
+
+def card_photos(run: dict) -> list[tuple[str, str]]:
+    """An iNat/MO run's photos that may go on its card, as (address at the source, credit),
+    in the page's order, at most MAX_CARD_PHOTOS. Only shown photos (photos_shown) whose
+    kept licence is CC0, CC BY or public domain (photos_credit); none for an upload run, or
+    for a run kept before licences were (its card is the site's image)."""
+    if run.get("kind") != "observation":
+        return []
+    obs = run.get("observation") or {}
+    shown = obs.get("photos_shown") or []
+    credits = obs.get("photos_credit") or []
+    out = []
+    for url, about in zip(shown, credits):
+        line = (credit(obs.get("source"), about.get("licence"), about.get("by"))
+                if url and isinstance(about, dict) else None)
+        if line:
+            out.append((url, line))
+    return out[:MAX_CARD_PHOTOS]
+
+
+def run_card(origin: str, rid: str, run: dict, version: str | None = None,
+             card_ready: bool = False) -> Card:
     """A run's card. Only the answer and the find's own photos go in it: never the place,
-    the date, the observation, or who ran it."""
+    the date, the observation, or who ran it (nor who took an observation's photos: that
+    credit is printed on the image). `card_ready`: an iNat/MO run's card.jpg is kept (made
+    off the request, when the run was kept); until then the tags name the site image, so a
+    crawler never keeps a stand-in under the card's address."""
     h = headline(run_answer(run))
-    photos = int(run.get("photos") or 0) if run.get("kind") == "photos" else 0
+    if run.get("kind") == "photos":
+        photos = int(run.get("photos") or 0)
+    else:                   # an iNat/MO run: its card once made (api.py card_later)
+        photos = len(card_photos(run)) if card_ready else 0
     image = f"{origin}/api/runs/{rid}/card.jpg" if photos else site_image(origin, version)
     alt = (f"{photos} photo{'s' if photos != 1 else ''} of one find, identified by MycoMap Vision"
            if photos else SITE_IMAGE_ALT)
@@ -278,9 +331,9 @@ def _slanted(text: str, size: int, fill) -> Image.Image:
                            resample=Image.BICUBIC)
 
 
-def badge(card: Image.Image, logo: Image.Image | None, at: tuple[int, int] = (28, 28)) -> None:
+def badge(card: Image.Image, logo: Image.Image | None, at: tuple[int, int] = (28, 28)) -> int:
     """The MycoMap Vision badge: the logo and the name on a white pill (large, Steve
-    2026-10-20: "lets also make the MycoMap Vision logo larger")."""
+    2026-10-20: "lets also make the MycoMap Vision logo larger"); its right edge."""
     d = ImageDraw.Draw(card, "RGBA")
     f = font(44, bold=True)
     x, y = at
@@ -298,6 +351,32 @@ def badge(card: Image.Image, logo: Image.Image | None, at: tuple[int, int] = (28
     ty = y + (height - (f.getbbox("MycoMap")[3])) // 2 - 2
     d.text((words_x, ty), "MycoMap", font=f, fill=INK)
     d.text((words_x + d.textlength("MycoMap ", font=f), ty), "Vision", font=f, fill=GREEN_TEXT)
+    return int(x + width)
+
+
+def fitted(d: ImageDraw.ImageDraw, text: str, f, room: float) -> str:
+    """`text`, cut short with an ellipsis to fit `room` px."""
+    if d.textlength(text, font=f) <= room:
+        return text
+    while text and d.textlength(text + "…", font=f) > room:
+        text = text[:-1]
+    return text.rstrip(" ,") + "…"
+
+
+def credits_on(card: Image.Image, lines: list[str], left: int) -> None:
+    """Each photo credit on a dark pill at the top right, clear of the badge (`left`)."""
+    d = ImageDraw.Draw(card, "RGBA")
+    f = font(22)
+    y, pad, height = 28, 14, 38
+    room = card.width - 28 - left - 24 - 2 * pad
+    for line in lines:
+        text = fitted(d, line, f, room)
+        w = d.textlength(text, font=f) + 2 * pad
+        x = card.width - 28 - w
+        d.rounded_rectangle([x, y, x + w, y + height], radius=height // 2, fill=(0, 0, 0, 170))
+        d.text((x + pad, y + (height - f.getbbox("Ag")[3]) // 2 - 1), text, font=f,
+               fill=(255, 255, 255, 240))
+        y += height + 6
 
 
 def card_lines(h: Headline, photos: int) -> tuple[str, str | None, str | None, str]:
@@ -317,10 +396,13 @@ def card_lines(h: Headline, photos: int) -> tuple[str, str | None, str | None, s
 
 
 def run_card_jpeg(photos: list[bytes], h: Headline, logo: Image.Image | None = None,
-                  quality: int = 85) -> bytes:
+                  quality: int = 85, credits: list[str] = (),
+                  answered_from: int | None = None) -> bytes:
     """A run's 1200x630 card: its photos (first large, up to four beside it), the badge, and
-    the answer printed at the bottom. Made only from the run's own kept copies, which carry
-    no EXIF; the card is re-encoded from pixels, so none can come back."""
+    the answer printed at the bottom. Made from the run's own kept copies (no EXIF), or an
+    observation's CC0 / CC BY photos with their `credits` printed at the top right (each
+    distinct one once). The card is re-encoded from pixels, so no metadata comes back.
+    `answered_from`: how many photos the answer used, when not the ones shown."""
     W, H = CARD_SIZE
     card = Image.new("RGBA", CARD_SIZE, (24, 24, 22, 255))
     shown = photos[:5]
@@ -334,8 +416,9 @@ def run_card_jpeg(photos: list[bytes], h: Headline, logo: Image.Image | None = N
     shade = Image.new("RGBA", (W, band), (0, 0, 0, 255))
     shade.putalpha(fade)
     card.alpha_composite(shade, (0, H - band))
-    badge(card, logo)
-    above, rank, name, chance = card_lines(h, len(photos))
+    right = badge(card, logo)
+    credits_on(card, list(dict.fromkeys(credits)), right)
+    above, rank, name, chance = card_lines(h, answered_from or len(photos))
     d = ImageDraw.Draw(card, "RGBA")
     d.text((36, H - 160), above, font=font(30), fill=(255, 255, 255, 235))
     x, base = 36, H - 108

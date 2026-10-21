@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -30,6 +31,7 @@ import requests
 from . import config
 from .dates import real_date
 from .licenses import MO_HOST, OPEN_DATA_HOST, STATIC_HOST, photo_url
+from .mo import license_of as mo_license_of
 from .mo import photo_id_of
 from .photos import MO_MIN_INTERVAL, mo_redirect_ok
 from .sources import INAT, MO, record_url
@@ -37,7 +39,7 @@ from .sources import INAT, MO, record_url
 SOURCES = (INAT, MO)
 INAT_API = "https://api.inaturalist.org/v2/observations"
 INAT_FIELDS = ("(id:!t,observed_on:!t,location:!t,obscured:!t,"
-               "taxon:(name:!t,rank:!t),ofvs:(name:!t,value:!t),"
+               "taxon:(name:!t,rank:!t),ofvs:(name:!t,value:!t),user:(login:!t,name:!t),"
                "observation_photos:(position:!t,photo:(id:!t,url:!t,license_code:!t)))")
 MO_API = "https://mushroomobserver.org/api2/observations"
 INAT_PHOTO_HOSTS = (OPEN_DATA_HOST, STATIC_HOST)
@@ -96,6 +98,8 @@ class Observation:
     extra: dict = field(default_factory=dict)
     # Each photo's licence as the site states it, beside photo_urls (None: none stated).
     photo_licenses: list[str | None] = field(default_factory=list)
+    # Who took each photo, as the site credits it, beside photo_urls (None: not stated).
+    photo_credits: list[str | None] = field(default_factory=list)
     # The same find under another source, as the site links it: (source, number) pairs.
     linked: list[tuple[str, str]] = field(default_factory=list)
 
@@ -112,7 +116,10 @@ def valid_id(raw: str) -> str | None:
 
 def parse_inat(obs: dict) -> Observation:
     """One iNat v2 result -> Observation (photos at PHOTO_SIZE, in position order)."""
-    urls, ids, licenses = [], [], []
+    urls, ids, licenses, credits = [], [], [], []
+    # An iNat observation's photos are its observer's uploads: credited by name, else login.
+    user = obs.get("user") or {}
+    by = str(user.get("name") or user.get("login") or "").strip() or None
     for op in sorted(obs.get("observation_photos") or [], key=lambda p: p.get("position") or 0):
         p = op.get("photo") or {}
         try:
@@ -124,6 +131,7 @@ def parse_inat(obs: dict) -> Observation:
         urls.append(url)
         ids.append(int(p["id"]))
         licenses.append(p.get("license_code") or None)
+        credits.append(by)
     lat = lng = None
     loc = obs.get("location")
     if loc and "," in loc:
@@ -142,7 +150,7 @@ def parse_inat(obs: dict) -> Observation:
     return Observation(INAT, str(obs["id"]), urls, ids, lat, lng,
                        real_date(obs.get("observed_on")), place,
                        taxon.get("name"), taxon.get("rank"), photo_licenses=licenses,
-                       linked=linked)
+                       photo_credits=credits, linked=linked)
 
 
 def parse_mo(obs: dict) -> Observation:
@@ -153,7 +161,7 @@ def parse_mo(obs: dict) -> Observation:
         if img and img.get("id") and img["id"] not in seen:
             seen.add(img["id"])
             images.append(img)
-    urls, ids, licenses = [], [], []
+    urls, ids, licenses, credits = [], [], [], []
     for img in images:
         source_url = img.get("original_url") or f"https://{MO_HOST}/images/orig/{img['id']}.jpg"
         try:
@@ -162,6 +170,7 @@ def parse_mo(obs: dict) -> Observation:
             continue
         ids.append(photo_id_of(int(img["id"])))
         licenses.append(img.get("license") or None)
+        credits.append(mo_credit(img, obs))
     lat = lng = None
     place = None
     if not obs.get("gps_hidden") and obs.get("latitude") is not None \
@@ -185,7 +194,30 @@ def parse_mo(obs: dict) -> Observation:
             linked.append((INAT, m.group(1)))
     return Observation(MO, str(obs["id"]), urls, ids, lat, lng, real_date(obs.get("date")),
                        place, name.get("name"), name.get("rank"), photo_licenses=licenses,
-                       linked=linked)
+                       photo_credits=credits, linked=linked)
+
+
+def mo_credit(img: dict, obs: dict) -> str | None:
+    """Who an MO image credits: its copyright holder, else its owner's name or login (the
+    observation's owner when the image doesn't say)."""
+    owner = img.get("owner") or obs.get("owner") or {}
+    if not isinstance(owner, dict):
+        owner = {}
+    for v in (img.get("copyright_holder"), owner.get("legal_name"), owner.get("login_name"),
+              owner.get("name"), owner.get("login")):
+        if str(v or "").strip():
+            return str(v).strip()
+    return None
+
+
+def licence_code(source: str, license: str | None) -> str | None:
+    """A photo's licence as a code (cc0, cc-by, cc-by-nc, ..., pd), from iNat's license_code
+    or MO's licence name; None for all rights reserved or a name not known."""
+    if source == MO:
+        code = mo_license_of(license)[0]
+    else:
+        code = (license or "").strip().lower()
+    return code or None
 
 
 def open_licence(license: str | None) -> bool:
@@ -204,6 +236,24 @@ def shown_photo_url(obs: Observation, index: int) -> str | None:
         return None
     licence = obs.photo_licenses[index] if index < len(obs.photo_licenses) else None
     return obs.photo_urls[index] if open_licence(licence) else None
+
+
+def shown_photo_credit(obs: Observation, index: int) -> dict | None:
+    """Beside shown_photo_url: the shown photo's licence code and who took it, so a link
+    card can credit it (linkcards.card_photos). None for a photo not shown; never a place."""
+    if shown_photo_url(obs, index) is None:
+        return None
+    licence = obs.photo_licenses[index] if index < len(obs.photo_licenses) else None
+    by = obs.photo_credits[index] if index < len(obs.photo_credits) else None
+    return {"licence": licence_code(obs.source, licence), "by": by}
+
+
+def source_photo_ok(source: str, url: str) -> bool:
+    """A photo address a kept run may have fetched again: HTTPS on that source's own photo
+    host (iNat's open-data bucket or static host; MO's site), nothing else."""
+    u = urlparse(url or "")
+    hosts = INAT_PHOTO_HOSTS if source == INAT else (MO_HOST,) if source == MO else ()
+    return u.scheme == "https" and (u.hostname or "") in hosts
 
 
 class Fetcher:
@@ -233,6 +283,31 @@ class Fetcher:
         how many to read (0: none) or raises to refuse: a caller over its limits costs
         the photo hosts nothing. `indexed`: (place in photo_urls, bytes) pairs, so a
         caller can tell which photos a skipped one leaves."""
+        with self._turn():
+            obs = self.observation(source, source_id)
+            n = min(max_photos, len(obs.photo_urls))
+            if admit is not None:
+                n = min(n, admit(obs))
+            pairs = self.photo_pairs(obs, n) if n > 0 else []
+            return obs, (pairs if indexed else [body for _, body in pairs])
+
+    def photos_at(self, source: str, urls: list[str]) -> list[tuple[int, bytes]]:
+        """Photos at addresses a kept run holds (for its link-preview card), in the same
+        queue and at the same pace as every observation read: (place in `urls`, bytes)
+        pairs. An address off the source's own photo hosts is never asked for."""
+        with self._turn():
+            out = []
+            for i, url in enumerate(urls):
+                if not source_photo_ok(source, url):
+                    continue
+                body = self._photo(url, source)
+                if body is not None:
+                    out.append((i, body))
+            return out
+
+    @contextmanager
+    def _turn(self):
+        """One read at a time across the server, at most max_waiting queued (else Busy)."""
         with self.count:
             if self.waiting > self.max_waiting:
                 raise Busy(int(self.last_seconds * self.waiting) + 1)
@@ -241,15 +316,9 @@ class Fetcher:
             with self.busy:
                 start = self.clock()
                 try:
-                    obs = self.observation(source, source_id)
-                    n = min(max_photos, len(obs.photo_urls))
-                    if admit is not None:
-                        n = min(n, admit(obs))
-                    pairs = self.photo_pairs(obs, n) if n > 0 else []
-                    bodies = pairs if indexed else [body for _, body in pairs]
+                    yield
                 finally:
                     self.last_seconds = max(1.0, self.clock() - start)
-                return obs, bodies
         finally:
             with self.count:
                 self.waiting -= 1

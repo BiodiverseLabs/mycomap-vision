@@ -31,7 +31,8 @@ class Roles:
         return {"admin": user_id in self.admins, "staff": False, "projects": []}
 
 
-def site(conn, tmp_path, admins=("admin-1",), links=True, by_observation=False, web_dist=None):
+def site(conn, tmp_path, admins=("admin-1",), links=True, by_observation=False, web_dist=None,
+         observation_fetcher=None, card_writer=None):
     store = seed_two_species(conn, tmp_path)
     root = tmp_path / "emb"
     embed_photos(conn, store, Const("m1"), photos_to_embed(conn, "m1", "large", store.location,
@@ -43,12 +44,13 @@ def site(conn, tmp_path, admins=("admin-1",), links=True, by_observation=False, 
     signin = SigninConfig(mode="all", origin=HERE, issuer=ISSUER, public_key=PUBLIC_KEY,
                           secret=SECRET)
     extra = dict(api_v1=True, server_key=SERVER_KEY, by_observation=True,
-                 observation_fetcher=fetcher(), app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE),
+                 observation_fetcher=observation_fetcher or fetcher(),
+                 app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE),
                  introspect=Introspect()) if by_observation else {}
     app = create_app(tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
                      limits=open_limits(), signin=signin, background=False, fungus_gate=None,
                      run_store=run_store if links else None, feedback_org=Roles(admins),
-                     web_dist=web_dist, note=lambda s: None, **extra)
+                     web_dist=web_dist, note=lambda s: None, card_writer=card_writer, **extra)
     return app, run_store, tmp_path / "bucket"
 
 

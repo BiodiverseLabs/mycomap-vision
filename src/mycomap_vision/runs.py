@@ -15,7 +15,10 @@ What a run keeps (RunStore), and never anything else:
   never served;
 - for uploads, copies at most COPY_SIDE px on the long side, re-encoded from the pixels:
   no EXIF, GPS, camera or time survives, and the original is never kept. An iNat or MO
-  run keeps no photos, only the observation's own photo addresses at its source;
+  run keeps no photos, only the observation's own photo addresses at its source, each
+  shown one's licence code and who took it (photos_credit), so its card can credit them;
+- its link-preview card (linkcards.py) once made, as `card.jpg` beside it: an iNat or MO
+  run's is drawn from its CC0 / CC BY photos, read from the source once;
 - the place at 0.1 degree and the date, as the page shows them; never the exact point;
 - the reference photos each specimen could show, so a photo whose photographer withdrew
   since is never shown (answercache.reshow_photos);
@@ -61,6 +64,7 @@ PREFIX = "site-runs/"
 COPY_SIDE = 1024
 COPY_QUALITY = 80
 KINDS = ("photos", "observation")
+CARD = "card.jpg"                          # the run's link-preview image, beside it
 
 
 def new_id() -> str:
@@ -135,6 +139,9 @@ class DirObjects:
         path = self._path(key)
         return path.read_bytes() if path.is_file() else None
 
+    def exists(self, key: str) -> bool:
+        return self._path(key).is_file()
+
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
         try:
@@ -162,6 +169,17 @@ class S3Objects:
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") in self.MISSING:
                 return None
+            raise
+
+    def exists(self, key: str) -> bool:
+        """HEAD, which needs only s3:GetObject (and answers a missing key 403 or 404)."""
+        from botocore.exceptions import ClientError
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in self.MISSING:
+                return False
             raise
 
     def delete(self, key: str) -> None:
@@ -394,14 +412,40 @@ class RunStore:
             return None
         return self.objects.get(self._key(rid, f"{n}.jpg"))
 
+    def card(self, rid: str) -> bytes | None:
+        """The run's link-preview card as kept beside it, or None (not made yet, no run)."""
+        if self.get(rid) is None:
+            return None
+        return self.objects.get(self._key(rid, CARD))
+
+    def has_card(self, rid: str) -> bool:
+        """Whether the run's card is kept beside it (without reading it)."""
+        if self.get(rid) is None:
+            return False
+        exists = getattr(self.objects, "exists", None)
+        if exists is None:
+            return self.objects.get(self._key(rid, CARD)) is not None
+        return bool(exists(self._key(rid, CARD)))
+
+    def keep_card(self, rid: str, body: bytes) -> bool:
+        """Keeps the run's card beside it; False (and nothing kept) when the run is gone."""
+        if self.get(rid) is None:
+            return False
+        self.objects.put(self._key(rid, CARD), body, "image/jpeg")
+        if self.get(rid) is None:           # deleted while the card was being kept
+            self.objects.delete(self._key(rid, CARD))
+            return False
+        return True
+
     def delete(self, rid: str) -> bool:
-        """Removes the run, its photo copies and its place on every owner's list; False
-        when there was none."""
+        """Removes the run, its photo copies, its card and its place on every owner's list;
+        False when there was none."""
         run = self.get(rid)
         if run is None:
             return False
         for n in range(int(run.get("photos") or 0)):
             self.objects.delete(self._key(rid, f"{n}.jpg"))
+        self.objects.delete(self._key(rid, CARD))
         self.objects.delete(self._key(rid, "run.json"))
         with self._lock:
             self._remember(rid, None)
@@ -443,9 +487,12 @@ def run_record(kind: str, owner: dict | None, models: list[dict], context_used: 
 
 def public_observation(observation: dict | None) -> dict | None:
     """An iNat/MO run's observation as the page shows it: the source's own photo
-    addresses (Creative Commons only, else null), never anything kept here."""
+    addresses (Creative Commons only, else null) and, beside them, each shown photo's
+    licence code and who took it (photos_credit); never the place, never anything kept
+    here."""
     if not observation:
         return None
     keep = ("source", "id", "url", "photos", "photos_used", "name_at_source",
-            "rank_at_source", "photos_shown", "excluded_reference", "left_out_photos")
+            "rank_at_source", "photos_shown", "photos_credit", "excluded_reference",
+            "left_out_photos")
     return {k: observation.get(k) for k in keep}
