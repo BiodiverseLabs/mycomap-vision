@@ -30,14 +30,14 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from .settled import runner_up, settled
 
 SITE_NAME = "MycoMap Vision"
-# Steve's pick, 2026-10-20 ("ID fungi not fungus ID").
-SITE_TITLE = "MycoMap Vision: ID fungi, built on DNA, not votes"
+# Steve's pick, 2026-10-20 ("ID fungi not fungus ID"; then tagline A, not "community votes").
+SITE_TITLE = "MycoMap Vision: ID fungi, built on DNA"
 SITE_DESCRIPTION = ("Matches your photos with 150,000+ DNA-verified records and can name "
                     "species known only from DNA. Free with a mycomap.org account. "
                     "Not edibility advice.")
 SITE_IMAGE = "/og-card.jpg"
-SITE_IMAGE_ALT = ("MycoMap Vision: identify fungi from your photos. Built on DNA-verified "
-                  "records, not community votes.")
+SITE_IMAGE_ALT = ("MycoMap Vision: identify fungi from your photos. Every answer comes from "
+                  "DNA-sequenced specimens.")
 CARD_SIZE = (1200, 630)
 
 # The pages people share. Every other page still sends a signed-out visitor to sign in.
