@@ -338,3 +338,54 @@ def test_the_instance_refuses_an_altered_or_other_release_before_its_first_stage
     with pytest.raises(dr.ReleaseError):
         run_job(world, inst, sha if how == "altered" else "0" * 64, trained)
     assert trained == []
+
+
+# --- the recipe on the public model's photos only (paper E4-recipe; Steve, 2026-10-21) -------
+
+def public_data(world, rel):
+    return retrain.build_data_from_release(world["conn"], rel, world["store"].location, "large",
+                                           public_trainable_only=True)
+
+
+def test_a_public_run_trains_and_validates_on_public_trainable_photos_only(world):
+    rel = rel_of()
+    every, public = data_of(world, rel), public_data(world, rel)
+    not_public = {int(r[0]) for r in rel.db.execute(
+        "select manifest_photo_id from photos where included = 1 and public_trainable = 0")}
+    assert not_public                                   # the release has an ARR photo
+    ids = lambda d: {t[0] for t in d.train} | {v[0] for v in d.val}   # noqa: E731
+    assert ids(every) & not_public                      # internal benchmarking keeps it
+    assert not ids(public) & not_public                 # the public run never sees it
+    # a record whose photos are all non-public drops out, in train and in val alike
+    only_arr = {k for k in every.train_records + every.val_records
+                if all(int(p["public_trainable"]) == 0 for p in rel.photos(k))}
+    assert set(public.train_records + public.val_records) == \
+        set(every.train_records + every.val_records) - only_arr
+    # Seesaw's class counts and the month prior come from the photos kept
+    assert int(public.class_photos.sum()) == len(public.train)
+    assert int(public.month_counts.sum()) <= len(public.train) < len(every.train) + 1
+    snap = retrain.release_snapshot(rel, public)
+    assert snap["public_trainable_only"] is True
+    assert snap["photo_licence_policy"] == retrain.PHOTO_LICENCE_POLICY_PUBLIC
+    assert "arr" not in snap["photo_licences"]
+    assert retrain.release_snapshot(rel, every)["public_trainable_only"] is False
+
+
+def test_a_public_recipe_launch_ships_the_flag_and_the_public_counts(launchable, tmp_path):
+    out = aws.launch_trainer(launchable, [], ["classifier"], max_hours=48,
+                             instance_type="g6.xlarge", picek=["fungitastic-beit-b384@15"],
+                             dry_run=True, dry_run_dir=tmp_path / "dry", release=BASE,
+                             allow_draft=True, public_trainable_only=True, log=lambda s: None)
+    assert out["picek_labels"]["public_trainable_only"] is True
+    assert out["picek_labels"]["photo_licence_policy"] == retrain.PHOTO_LICENCE_POLICY_PUBLIC
+    script = (tmp_path / "dry" / "user-data.sh").read_text(encoding="utf-8")
+    assert "--public-trainable-only" in script
+
+
+def test_public_trainable_only_without_a_fine_tune_or_the_recipe_is_refused(launchable,
+                                                                            tmp_path):
+    with pytest.raises(ValueError, match="--finetune or --picek"):
+        aws.launch_trainer(launchable, ["bioclip-2"], ["nearest"], max_hours=48,
+                           instance_type="g6.xlarge", dry_run=True,
+                           dry_run_dir=tmp_path / "dry", release=BASE, allow_draft=True,
+                           public_trainable_only=True, log=lambda s: None)
