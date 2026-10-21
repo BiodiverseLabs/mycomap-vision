@@ -163,6 +163,10 @@ def item_url(item_id: int) -> str | None:
     return f"{origin}/feedback?item={int(item_id)}" if origin.startswith("http") else None
 
 
+# The Summary's largest page (its page-size choices are 150, 300 and 500; Steve, 2026-10-21).
+SUMMARY_MAX_PAGE = 500
+
+
 def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store: fb.Store,
                org: OrgClient | None = None,
                rescore: Callable[[str, dict | None], dict] | None = None,
@@ -491,8 +495,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                                 sort: str = "p", q: str = "", offset: int = 0, limit: int = 150,
                                 band: str = "all"):
         """The Summary view (Steve, 2026-10-21): the queue's flagged photos in the tab, one tile
-        each, paged (at most 200), with the record's name and link, the flags, the suggested
-        reason, and a small thumbnail: public photos straight from their source, others
+        each, paged (at most SUMMARY_MAX_PAGE), with the record's name and link, the flags, the
+        suggested reason, and a small thumbnail: public photos straight from their source, others
         from /api/feedback/photo/…?size=grid (private, no-store)."""
         _, projects = access(request)
         try:
@@ -501,7 +505,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         except fb.FeedbackError as e:
             bad(e)
         start = max(0, offset)
-        page = tiles[start:start + min(max(1, limit), 200)]
+        page = tiles[start:start + min(max(1, limit), SUMMARY_MAX_PAGE)]
         info = need_photos().many([(t["photo_key"], t["record_key"]) for t in page])
         shown = {d["photo_key"]: d for d in need_photos().for_viewer(
             [i["row"] for i in info.values()], thumb="grid")}

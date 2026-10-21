@@ -19,7 +19,11 @@ import type { FlaggedTile, PhotoBatchBody, PhotoBatchDecision, PhotoReviewTab } 
 import { recordLabel } from "./feedback";
 import { flagLabel, type Choice } from "./photoReview";
 
+/** The Summary's photos per page: the default, and the choices (Steve, 2026-10-21), each
+ *  remembered per viewer. The server serves at most the largest. */
 export const SUMMARY_PAGE_SIZE = 150;
+export const PAGE_SIZES = [150, 300, 500] as const;
+export type PageSize = (typeof PAGE_SIZES)[number];
 /** How often the shown tiles' default decisions are sent. */
 export const AUTOSAVE_MS = 2000;
 /** A tile counts as seen when this much of it has been in view for SEEN_MS. */
@@ -89,6 +93,11 @@ export const readTileSize = (storage: () => Store): TileSize =>
   readKey(storage, TILE_SIZE_STORAGE_KEY, ["s", "m", "l"] as const, "m");
 export const writeTileSize = (storage: () => Store, s: TileSize) => writeKey(storage, TILE_SIZE_STORAGE_KEY, s);
 
+export const PAGE_SIZE_STORAGE_KEY = "mycomap-vision.photo-review.page-size";
+export const readPageSize = (storage: () => Store): PageSize =>
+  Number(readKey(storage, PAGE_SIZE_STORAGE_KEY, PAGE_SIZES.map(String), String(SUMMARY_PAGE_SIZE))) as PageSize;
+export const writePageSize = (storage: () => Store, n: PageSize) => writeKey(storage, PAGE_SIZE_STORAGE_KEY, String(n));
+
 /** The grid's columns for a tile size: as many tiles of about that width as fit, never fewer
  *  than two across (a phone). `gapPx` is the grid's gap. */
 export function gridColumns(size: TileSize, gapPx = 8): string {
@@ -100,8 +109,9 @@ export function gridColumns(size: TileSize, gapPx = 8): string {
 
 /** A tile's current choice. "keep" is shown as Include. A kept tile keeps its reason so it comes
  *  back if the tile is excluded again (it is never sent with a keep). `readOnly`: a decided
- *  tile's stored decision. */
-export interface Mark { decision: Choice; reason: string | null; readOnly?: boolean }
+ *  tile's stored decision. `reclassified`: a decided tile the reviewer changed full screen
+ *  (Steve, 2026-10-21), saved like a flip; the latest decision wins on the server. */
+export interface Mark { decision: Choice; reason: string | null; readOnly?: boolean; reclassified?: boolean }
 /** By item id. */
 export type Marks = Record<number, Mark>;
 
@@ -132,7 +142,8 @@ export function mergeMarks(fresh: Marks, edits: Marks): Marks {
   const out: Marks = {};
   for (const [k, m] of Object.entries(fresh)) {
     const id = Number(k);
-    out[id] = m.readOnly ? m : edits[id] ?? m;
+    const e = edits[id];
+    out[id] = m.readOnly ? (e?.reclassified ? e : m) : e ?? m;
   }
   return out;
 }
@@ -164,6 +175,21 @@ export function quickMark(marks: Marks, id: number, reason: string): Marks {
   const m = marks[id];
   if (!m || m.readOnly || !reason || (m.decision === "exclude" && m.reason === reason)) return marks;
   return { ...marks, [id]: { decision: "exclude", reason } };
+}
+
+/** A change made full screen (Steve, 2026-10-21: "on the decided tab I should have the ability to
+ *  open and reclassify an image"): on a decided tile it unlocks the stored decision and applies
+ *  `op` (setDecision, setReason or quickMark) to it, marked `reclassified`; a change that ends
+ *  where the stored decision is changes nothing. On an open tile it is `op` itself. The grid
+ *  never reclassifies: a decided tile is changed only from the viewer. */
+export function reclassify(marks: Marks, id: number, op: (m: Marks) => Marks): Marks {
+  const m = marks[id];
+  if (!m?.readOnly) return op(marks);
+  const stored = { decision: m.decision, reason: m.reason };
+  const unlocked = { ...marks, [id]: { ...stored, reclassified: true } };
+  const next = op(unlocked);
+  if (next === unlocked || sameState(next[id], stored)) return marks;
+  return { ...next, [id]: { ...next[id], reclassified: true } };
 }
 
 // --- saving -------------------------------------------------------------------------------------
@@ -226,9 +252,9 @@ export function dueDecisions(tiles: DueTile[], marks: Marks, states: SaveStates,
   const out: PhotoBatchDecision[] = [];
   const seen = new Set<number>();
   for (const t of tiles) {
-    if (t.status !== "open" || seen.has(t.item_id)) continue;
-    seen.add(t.item_id);
     const m = marks[t.item_id];
+    if ((t.status !== "open" && !m?.reclassified) || seen.has(t.item_id)) continue;
+    seen.add(t.item_id);
     const s = states[t.item_id] ?? {};
     if (!m || m.readOnly || s.sending || (s.failed && !manual)) continue;
     if (sameState(m, s.saved)) continue;

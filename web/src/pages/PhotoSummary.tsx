@@ -10,7 +10,7 @@ import { AUTOSAVE_MS, autoDue, batchBody, beginSend, decidedText, discardChanges
          initialMarks, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, pendingDecisions, quickMark,
          reasonLabel, retry, SEEN_MS, SEEN_RATIO, sendDone, sendFailed, setDecision, setReason, STATUS_TEXT,
          SUMMARY_PAGE_SIZE, tileDecision, tileStatus, toggle, visitLine, visitTotals, type GridAction, type Mark,
-         type Marks, type SaveState, type SaveStates, type TileSize } from "@/lib/photoSummary";
+         reclassify, type Marks, type SaveState, type SaveStates, type TileSize } from "@/lib/photoSummary";
 import type { PhotoBatchDecision } from "@/lib/api";
 import { SaveBar } from "@/components/ReviewSave";
 
@@ -29,10 +29,10 @@ import { SaveBar } from "@/components/ReviewSave";
 
 type Reasons = FlaggedPage["reasons"];
 
-export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp, tileSize, onTotal, autosave, onPending, canLeave,
+export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp, tileSize, pageSize = SUMMARY_PAGE_SIZE, onTotal, autosave, onPending, canLeave,
                               discard }: {
   tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; band?: PhotoBandFilter; help: boolean;
-  onHelp: () => void; tileSize: TileSize; onTotal: (n: number | null) => void;
+  onHelp: () => void; tileSize: TileSize; pageSize?: number; onTotal: (n: number | null) => void;
   /** Auto-save on: saves as the reviewer goes. Off: only Save and Save page write. */
   autosave: boolean;
   /** The unsaved changes on the page (always 0 with Auto-save on). */
@@ -66,8 +66,8 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
   }, []);
 
   const list = useQuery({
-    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, offset, gen],
-    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, offset, limit: SUMMARY_PAGE_SIZE }),
+    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, pageSize, offset, gen],
+    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, offset, limit: pageSize }),
     placeholderData: (prev) => prev,
     refetchOnWindowFocus: false,
     staleTime: Infinity,
@@ -149,32 +149,34 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
   const tiles = fresh?.tiles ?? [];
   const marks = useMemo(() => mergeMarks(initialMarks(tiles), edits), [tiles, edits]);
 
-  const flip = useCallback((id: number, choice?: Choice) => {
+  // `viewer`: the change was made full screen, where a decided photo can be reclassified.
+  const flip = useCallback((id: number, choice?: Choice, viewer = false) => {
     const t = tilesRef.current.get(id);
     if (!t) return;
     const now = mergeMarks(initialMarks([t]), editsRef.current);
-    const next = choice ? setDecision(now, id, choice) : toggle(now, id);
+    const op = (m: Marks) => (choice ? setDecision(m, id, choice) : toggle(m, id));
+    const next = viewer ? reclassify(now, id, op) : op(now);
     if (next === now) return;
     updateEdits((m) => ({ ...m, [id]: next[id] }));
     updateStates((s) => markTouched(s, id));
     flushRef.current();
   }, [updateEdits, updateStates]);
-  const pickReason = useCallback((id: number, reason: string) => {
+  const pickReason = useCallback((id: number, reason: string, viewer = false) => {
     const t = tilesRef.current.get(id);
     if (!t) return;
     const now = mergeMarks(initialMarks([t]), editsRef.current);
-    const next = setReason(now, id, reason);
+    const next = viewer ? reclassify(now, id, (m) => setReason(m, id, reason)) : setReason(now, id, reason);
     if (next === now) return;
     updateEdits((m) => ({ ...m, [id]: next[id] }));
     updateStates((s) => markTouched(s, id));
     flushRef.current();
   }, [updateEdits, updateStates]);
   // A quick reason button: Exclude for that reason, saved like a flip (or held, Auto-save off).
-  const quick = useCallback((id: number, reason: string) => {
+  const quick = useCallback((id: number, reason: string, viewer = false) => {
     const t = tilesRef.current.get(id);
     if (!t) return;
     const now = mergeMarks(initialMarks([t]), editsRef.current);
-    const next = quickMark(now, id, reason);
+    const next = viewer ? reclassify(now, id, (m) => quickMark(m, id, reason)) : quickMark(now, id, reason);
     if (next === now) return;
     updateEdits((m) => ({ ...m, [id]: next[id] }));
     updateStates((s) => markTouched(s, id));
@@ -193,16 +195,17 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
   const seen = useCallback((id: number) => updateStates((s) => markSeen(s, id)), [updateStates]);
   const loaded = useCallback((id: number) => updateStates((s) => markLoaded(s, id)), [updateStates]);
 
-  // A filter change starts at the first page; the page shown is saved first.
-  const filters = useRef({ tab, status, sort, q });
+  // A filter change (or a new page size) starts at the first page; the page shown is saved first.
+  const filters = useRef({ tab, status, sort, q, band, pageSize });
   useEffect(() => {
     const f = filters.current;
-    if (f.tab === tab && f.status === status && f.sort === sort && f.q === q) return;
-    filters.current = { tab, status, sort, q };
+    if (f.tab === tab && f.status === status && f.sort === sort && f.q === q && f.band === band
+        && f.pageSize === pageSize) return;
+    filters.current = { tab, status, sort, q, band, pageSize };
     flushRef.current();
     setOffset(0);
     setGen((g) => g + 1);
-  }, [tab, status, sort, q]);
+  }, [tab, status, sort, q, band, pageSize]);
 
   const go = (next: number) => {
     if (!canLeave()) return;
@@ -271,9 +274,9 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
           <span className="text-muted-foreground">{pageText(offset, tiles.length, total)}</span>
           <span className="flex gap-2">
             <button type="button" className={BTN} disabled={offset === 0}
-                    onClick={() => go(offset - SUMMARY_PAGE_SIZE)}>Previous</button>
+                    onClick={() => go(offset - pageSize)}>Previous</button>
             <button type="button" className={BTN} disabled={offset + tiles.length >= total}
-                    onClick={() => go(nextOffset(status, offset, SUMMARY_PAGE_SIZE, savedOnPage))}>Next</button>
+                    onClick={() => go(nextOffset(status, offset, pageSize, savedOnPage))}>Next</button>
           </span>
         </div>
       )}
@@ -290,8 +293,8 @@ function columnsOf(el: HTMLElement | null): number {
 function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, onFlip, onReason, onQuick, onRetry, onSave,
                 onSeen, onLoaded }: {
   tiles: FlaggedTile[]; reasons: Reasons; marks: Marks; states: SaveStates; tileSize: TileSize; help: boolean;
-  onHelp: () => void; manual: boolean; onFlip: (id: number, c?: Choice) => void; onReason: (id: number, r: string) => void;
-  onQuick: (id: number, r: string) => void; onRetry: (id: number) => void; onSave: (id: number) => void; onSeen: (id: number) => void; onLoaded: (id: number) => void;
+  onHelp: () => void; manual: boolean; onFlip: (id: number, c?: Choice, viewer?: boolean) => void;
+  onReason: (id: number, r: string, viewer?: boolean) => void; onQuick: (id: number, r: string, viewer?: boolean) => void; onRetry: (id: number) => void; onSave: (id: number) => void; onSeen: (id: number) => void; onLoaded: (id: number) => void;
 }) {
   const [focus, setFocus] = useState(0);
   const [lightbox, setLightbox] = useState<number | null>(null);
@@ -343,14 +346,14 @@ function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, o
       case "open": setLightbox(focus); return;
       case "choose": {
         const t = tiles[lightbox ?? focus];
-        if (t) onFlip(t.item_id, a.choice);
+        if (t) onFlip(t.item_id, a.choice, lightbox != null);
         return;
       }
       case "quick": {
         // Keys 1–5 follow QUICK_REASONS; a reason the server does not list does nothing.
         const t = lightbox != null ? tiles[lightbox] : null;
         const code = QUICK_REASONS[a.index]?.code;
-        if (t && code && quickReasons(reasons).some((q) => q.code === code)) onQuick(t.item_id, code);
+        if (t && code && quickReasons(reasons).some((q) => q.code === code)) onQuick(t.item_id, code, true);
         return;
       }
       case "step": {
@@ -404,7 +407,8 @@ function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, o
         <SummaryLightbox tile={lb} index={lightbox} count={tiles.length} reasons={reasons} mark={marks[lb.item_id]}
                          state={states[lb.item_id]} manual={manual} onSave={() => onSave(lb.item_id)}
                          onStep={(d) => run({ type: "step", delta: d })}
-                         onChoose={(c) => onFlip(lb.item_id, c)} onReason={(r) => onReason(lb.item_id, r)} onQuick={(r) => onQuick(lb.item_id, r)}
+                         onChoose={(c) => onFlip(lb.item_id, c, true)} onReason={(r) => onReason(lb.item_id, r, true)}
+                         onQuick={(r) => onQuick(lb.item_id, r, true)}
                          onRetry={() => onRetry(lb.item_id)}
                          onShown={() => { onLoaded(lb.item_id); onSeen(lb.item_id); }}
                          onClose={() => run({ type: "close" })} />
@@ -542,7 +546,10 @@ function SummaryLightbox({ tile, index, count, reasons, mark, state, manual, onS
   const src = broken ? null : tileImage(tile, "full");
   const o = overlay(tile, reasons);
   const keep = mark?.decision === "keep";
-  const readOnly = !mark || !!mark.readOnly;
+  // A decided photo is shown as decided, with the same controls to reclassify it (Steve,
+  // 2026-10-21); a change saves like a flip, and the latest decision wins.
+  const decided = tile.status !== "open";
+  const readOnly = !mark;
   const big = "inline-flex min-h-12 items-center justify-center gap-1 rounded-md border px-6 text-base font-semibold";
   const known = !mark?.reason || reasons.some((r) => r.code === mark.reason);
   return (
@@ -590,9 +597,13 @@ function SummaryLightbox({ tile, index, count, reasons, mark, state, manual, onS
         </button>
       </div>
       <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-2 pt-1" onClick={(e) => e.stopPropagation()}>
-        {readOnly ? (
-          <p className="text-sm text-white">{decidedText(tile, reasons) ?? "Decided"}</p>
-        ) : (
+        {decided && (
+          <p className="text-sm text-white" data-testid="photo-summary-decided">
+            {decidedText(tile, reasons) ?? "Decided"}
+            {mark?.reclassified ? " · reclassified below" : " · change it below to reclassify"}
+          </p>
+        )}
+        {readOnly ? null : (
           <>
             <div className="flex flex-wrap items-center justify-center gap-2">
               <button type="button" onClick={() => onChoose("keep")} aria-pressed={keep}

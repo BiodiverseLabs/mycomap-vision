@@ -14,8 +14,8 @@ import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReas
          setReason, SORTS, BAND_FILTERS, bandCount, sortedPhotos, step, suggestedCount, withMode, writePreselectMode, type Choice,
          type KeyAction, type PhotoChoice, type PhotoChoices, type PickedReasons,
          type PreselectMode } from "@/lib/photoReview";
-import { readTileSize, readView, SUMMARY_KEY_HELP, SUMMARY_TABS, TILE_SIZES, writeTileSize, writeView,
-         type ReviewView, type TileSize } from "@/lib/photoSummary";
+import { PAGE_SIZES, readPageSize, readTileSize, readView, SUMMARY_KEY_HELP, SUMMARY_TABS, TILE_SIZES, writePageSize,
+         writeTileSize, writeView, type PageSize, type ReviewView, type TileSize } from "@/lib/photoSummary";
 import { autosaveOnText, changedPhotos, pageSaves, readAutosave, writeAutosave } from "@/lib/reviewSave";
 import { AutosaveToggle, SaveBar, useLeaveGuard } from "@/components/ReviewSave";
 import { PhotoSummary } from "./PhotoSummary";
@@ -90,6 +90,13 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
     writeView(browserStorage, v);
   });
   const [tileSize, setTileSize] = useState<TileSize>(() => readTileSize(browserStorage));
+  // The Summary's photos per page, remembered per viewer (Steve, 2026-10-21). A change loads
+  // the first page again, so unsaved changes are asked about first.
+  const [pageSize, setPageSizeNow] = useState<PageSize>(() => readPageSize(browserStorage));
+  const setPageSize = leaving((n: PageSize) => {
+    setPageSizeNow(n);
+    writePageSize(browserStorage, n);
+  });
   const pickTileSize = (t: TileSize) => {
     setTileSize(t);
     writeTileSize(browserStorage, t);
@@ -166,6 +173,13 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
           <span className={BODY}>Suggest Exclude for flagged photos</span>
         </label>}
         {!full && <SizeToggle size={tileSize} onChange={pickTileSize} />}
+        {!full && <label className="flex min-w-0 items-center gap-2 text-sm">
+          <span className="text-muted-foreground">Per page</span>
+          <select className={FIELD} value={pageSize} onChange={(e) => setPageSize(Number(e.target.value) as PageSize)}
+                  data-testid="photo-review-page-size">
+            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n} photos</option>)}
+          </select>
+        </label>}
         <button type="button" className={BTN} aria-pressed={help} onClick={() => setHelp((h) => !h)}>
           <Keyboard className="h-4 w-4" aria-hidden /> Keys
         </button>
@@ -174,7 +188,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       {help && <KeyHelp rows={full ? KEY_HELP : SUMMARY_KEY_HELP} />}
       {!full && (
         <PhotoSummary tab={tab} status={status} sort={sort} q={q} band={band} help={help} onHelp={() => setHelp((h) => !h)}
-                      tileSize={tileSize} onTotal={setSummaryTotal} autosave={autosave} onPending={setUnsaved}
+                      tileSize={tileSize} pageSize={pageSize} onTotal={setSummaryTotal} autosave={autosave} onPending={setUnsaved}
                       canLeave={canLeave} discard={discard} />
       )}
       {full && list.error && (

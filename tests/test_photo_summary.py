@@ -170,3 +170,42 @@ def test_flips_save_at_once_and_resending_the_same_state_adds_no_rows(conn, tmp_
     # A new reason is a new decision.
     other = c.post(url, json={"decisions": [shown | {"reason": "slip"}]}).json()
     assert other["excluded"] == 1 and len(fstore.get(tile["item_id"])["decisions"]) == 4
+
+
+def test_a_decided_photo_reclassified_full_screen_takes_its_new_decision(conn, tmp_path):
+    """Steve, 2026-10-21: a decided photo can be reclassified from the viewer. The batch writes
+    the new decision on the decided item; the latest wins for the nightly exclusions."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    ids = {t["photo_key"]: t["item_id"] for t in c.get("/api/feedback/photo-review/flagged").json()["tiles"]}
+    c.post("/api/feedback/photo-review/batch", json={"decisions": [
+        {"item_id": ids["inat:1000"], "decision": "exclude", "reason": "micrograph", "note": "summary: shown"},
+        {"item_id": ids["inat:1100"], "decision": "keep", "note": "summary: flipped"}]})
+    assert fstore.excluded_photos() == {"inat:1000"}
+    r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
+        {"item_id": ids["inat:1000"], "decision": "exclude", "reason": "slip", "note": "summary: flipped"},
+        {"item_id": ids["inat:1100"], "decision": "exclude", "reason": "uv", "note": "summary: flipped"}]})
+    assert r.status_code == 200 and r.json()["excluded"] == 2
+    assert fstore.excluded_photos() == {"inat:1000", "inat:1100"}
+    done = {t["photo_key"]: t["decision"] for t in
+            c.get("/api/feedback/photo-review/flagged", params={"status": "decided"}).json()["tiles"]}
+    assert done["inat:1000"]["reason"] == "slip" and done["inat:1100"]["reason"] == "uv"
+    c.post("/api/feedback/photo-review/batch", json={"decisions": [
+        {"item_id": ids["inat:1000"], "decision": "keep", "note": "summary: flipped"}]})
+    assert fstore.excluded_photos() == {"inat:1100"}                # included again: leaves the list
+
+
+def test_the_summary_serves_pages_of_up_to_500_photos(conn, tmp_path):
+    """Steve, 2026-10-21: 150, 300 or 500 photos per page; the server serves up to 500."""
+    from mycomap_vision import feedback_api
+    from test_photo_review import photo_item
+    assert feedback_api.SUMMARY_MAX_PAGE == 500
+    c, fstore = site_with_photos(conn, tmp_path)
+    fstore.seed([photo_item(f"inat:{9000 + i}", "100", f"R6 micrograph probe p=0.{i % 90 + 10}")
+                 for i in range(520)], "many")
+    as_user(c, "admin-1")
+    page = lambda n: c.get("/api/feedback/photo-review/flagged", params={"limit": n}).json()  # noqa: E731
+    assert len(page(300)["tiles"]) == 300
+    assert len(page(500)["tiles"]) == 500
+    big = page(1000)
+    assert big["total"] == 523 and len(big["tiles"]) == 500                # capped at 500
