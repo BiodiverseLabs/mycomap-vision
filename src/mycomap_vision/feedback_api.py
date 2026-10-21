@@ -180,6 +180,38 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def bad(e: Exception):
         raise HTTPException(400, str(e)) from e
 
+    # Counts and item lists cached until the store changes (any item or decision added):
+    # the page's first load reads 16,000+ photo items for its counts and lists.
+    views: dict = {}
+    views_lock = threading.Lock()
+
+    def version() -> tuple:
+        return tuple(store.conn.execute(
+            "select (select count(*) from items), (select max(id) from items), "
+            "(select max(id) from decisions), (select count(*) from decisions), "
+            "(select coalesce(sum(case when status = 'open' then 1 else 0 end), 0) from items)"
+        ).fetchone())
+
+    def projkey(projects):
+        return None if projects is None else tuple(sorted(projects))
+
+    def cached(key, build):
+        v = version()
+        with views_lock:
+            hit = views.get(key)
+            if hit and hit[0] == v:
+                return hit[1]
+        value = build()
+        with views_lock:
+            if len(views) > 64:
+                views.clear()
+            views[key] = (v, value)
+        return value
+
+    def items_cached(item_type: str, projects):
+        return cached(("items", item_type, projkey(projects)),
+                      lambda: store.items_of(item_type, projects))
+
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
         who, projects, roles = access_roles(request)
@@ -201,14 +233,17 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.get("/api/feedback/summary")
     def fb_summary(request: Request):
         """Per queue, open and decided items; for a photo queue also the observations they
-        are in (records_open, records_decided)."""
+        are in (records_open, records_decided). Cached until the store changes."""
         _, projects = access(request)
-        out = store.summary(projects)
-        for t in out:
-            if t["granularity"] == "photo":
-                c = pr.record_counts(store.items_of(t["type"], projects))
-                t["records_open"], t["records_decided"] = c["open"], c["decided"]
-        return out
+
+        def build():
+            out = store.summary(projects)
+            for t in out:
+                if t["granularity"] == "photo":
+                    c = pr.record_counts(items_cached(t["type"], projects))
+                    t["records_open"], t["records_decided"] = c["open"], c["decided"]
+            return out
+        return cached(("summary", projkey(projects)), build)
 
     @app.get("/api/feedback/items")
     def fb_items(request: Request, type: str, status: str = "open", q: str = "",
@@ -369,7 +404,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     def card(rec: dict, admin: bool) -> dict:
         rows = need_photos().of_record(rec["record_key"])
-        shown = {p["photo_key"]: p for p in need_photos().for_viewer(rows)}
+        shown = {p["photo_key"]: p for p in need_photos().for_viewer(rows, thumb="grid")}
         flagged = {f["photo_key"]: f for f in rec["flagged"]}
         out = []
         for key in [r.key for r in rows] + [k for k in flagged if k not in shown]:
@@ -384,13 +419,53 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                         "decision": f["decision"] if f else None})
         return {k: v for k, v in rec.items() if k not in ("flagged", "in_tab")} | {"photos": out}
 
+    @app.get("/api/feedback/photo-review/flagged")
+    def fb_photo_review_flagged(request: Request, tab: str = "all", status: str = "open",
+                                sort: str = "p", q: str = "", offset: int = 0, limit: int = 150):
+        """The Summary view (Steve, 2026-10-21): the queue's flagged photos in the tab, one tile
+        each, paged (at most 200), with the record's name and link, the flags, the suggested
+        reason, and a small thumbnail: public photos straight from their source, others
+        from /api/feedback/photo/…?size=grid (private, no-store)."""
+        _, projects = access(request)
+        try:
+            tiles = pr.flagged_tiles(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, q)
+        except fb.FeedbackError as e:
+            bad(e)
+        start = max(0, offset)
+        page = tiles[start:start + min(max(1, limit), 200)]
+        info = need_photos().many([(t["photo_key"], t["record_key"]) for t in page])
+        shown = {d["photo_key"]: d for d in need_photos().for_viewer(
+            [i["row"] for i in info.values()], thumb="grid")}
+        out = []
+        for t in page:
+            i = info.get(t["photo_key"])
+            ph = shown.get(t["photo_key"]) or {"photo_key": t["photo_key"], "position": None,
+                                               "shown": "hidden",
+                                               "hidden_reason": "not in Vision's photo list now"}
+            out.append(t | ph | {"owner_login": i and i["owner_login"],
+                                 "license_code": i and i["license_code"],
+                                 "record_photos": i and i["record_photos"]})
+        return {"total": len(tiles), "offset": start, "tiles": out,
+                "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
+
+    @app.post("/api/feedback/photo-review/batch")
+    def fb_photo_review_batch(request: Request, payload: dict = Body(...)):
+        """The Summary's one commit: [{item_id, decision: exclude|keep, reason}], written whole
+        or not at all (photo_review.batch_decide)."""
+        who, projects = access(request)
+        try:
+            return pr.batch_decide(store, list(payload.get("decisions") or []), who,
+                                   note=payload.get("note"), projects=projects)
+        except fb.FeedbackError as e:
+            bad(e)
+
     @app.get("/api/feedback/photo-review")
     def fb_photo_review(request: Request, tab: str = "all", status: str = "open",
                         sort: str = "p", min_flagged: int = 1, q: str = "", offset: int = 0,
                         limit: int = 10):
         _, projects = access(request)
         try:
-            out = pr.cards(store.items_of(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged,
+            out = pr.cards(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged,
                            q)
         except fb.FeedbackError as e:
             bad(e)
@@ -419,7 +494,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         rows = need_photos().of_record(c["record_key"])
         excluded = set(((c.get("decision") or {}).get("photo_keys")) or [])
         return c | {"photos": [p | {"excluded": p["photo_key"] in excluded}
-                               for p in need_photos().for_viewer(rows)]}
+                               for p in need_photos().for_viewer(rows, thumb="grid")]}
 
     @app.get("/api/feedback/label-review")
     def fb_label_review(request: Request, status: str = "open", q: str = "", offset: int = 0,
@@ -487,8 +562,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         with access to a queued record of the photo, private, never stored by the browser or a
         proxy, and never a photo whose owner declined. From Vision's copy or its source."""
         _, projects = access(request)
-        if size not in ("thumb", "full"):
-            bad(ValueError("size is thumb or full"))
+        if size not in ("grid", "thumb", "full"):
+            bad(ValueError("size is grid, thumb or full"))
         row = need_photos().one(photo_key)
         if row is None:
             raise HTTPException(404, "no such photo")
