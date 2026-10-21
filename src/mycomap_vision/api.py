@@ -1407,6 +1407,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(404, "this result has no photos", headers=NOT_INDEXED)
         return Response(body, media_type="image/jpeg", headers=NOT_INDEXED)
 
+    # The site image's version, read once at startup: its address changes with the picture.
+    card_version = linkcards.image_version(web_dist / linkcards.SITE_IMAGE.lstrip("/"))         if web_dist else None
+
     def public_origin(request: Request) -> str:
         """vision.mycomap.org (MV_PUBLIC_ORIGIN) for the cards' absolute links."""
         return (signin.origin or origin_of(config.setting("MV_PUBLIC_ORIGIN"))
@@ -1417,7 +1420,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         gone or was never given out."""
         origin = public_origin(request)
         if not run_path(path):
-            return linkcards.site_card(origin, path), 200
+            return linkcards.site_card(origin, path, card_version), 200
         rid = path.removeprefix("/r/")
         read_limit(request)
         try:
@@ -1426,8 +1429,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             note(f"[runs] no card for {rid}: {type(e).__name__}: {e}")
             return None, 200
         if run is None:
-            return linkcards.gone_card(origin, rid), 404
-        return linkcards.run_card(origin, rid, run), 200
+            return linkcards.gone_card(origin, rid, card_version), 404
+        return linkcards.run_card(origin, rid, run, card_version), 200
 
     @app.delete("/api/runs/{rid}", status_code=204)
     def delete_run(request: Request, rid: str):
