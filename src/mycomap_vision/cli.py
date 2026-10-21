@@ -1209,6 +1209,19 @@ def cmd_feedback(conn, args) -> None:
     from pathlib import Path
 
     from . import feedback
+    if args.action == "export-photo-exclusions":         # reads a copy; opens no Store
+        from . import feedback_export
+        key = Path(args.key_file).read_bytes().strip()
+        try:
+            data, summary = feedback_export.export(Path(args.store_copy), Path(args.release),
+                                                   args.as_of, key, feedback.default_path())
+        except feedback_export.ExportError as e:
+            raise SystemExit(f"export refused: {e}") from None
+        Path(args.out).write_bytes(data)
+        Path(args.out).with_suffix(".summary.json").write_text(
+            json.dumps(summary, indent=1) + "\n", encoding="utf-8")
+        print(json.dumps({"out": args.out, **summary}, indent=2))
+        return
     path = Path(args.store) if args.store else feedback.default_path()
     store = feedback.Store(path)
     if args.action == "seal-check":
@@ -2494,6 +2507,16 @@ def main(argv: list[str] | None = None) -> int:
                                            "is unknown); run after every re-seed")
     q.add_argument("--store")
     q.add_argument("--v1-keys", help="the pinned v1 record keys (default MV_FEEDBACK_V1_KEYS)")
+    q = fsub.add_parser("export-photo-exclusions",
+                        help="the photo decisions people made up to a time, as a TSV the paper "
+                             "freezes by sha256 (feedback_export.py); reads a .backup COPY")
+    q.add_argument("--store-copy", required=True,
+                   help="a copy made with: sqlite3 <store> '.backup <copy>'")
+    q.add_argument("--release", required=True, help="research-releases/v1/release.sqlite")
+    q.add_argument("--as-of", required=True, help="UTC cut-off, e.g. 2026-11-14T23:59:59Z")
+    q.add_argument("--key-file", required=True,
+                   help="the HMAC key for reviewer pseudonyms (kept private, never exported)")
+    q.add_argument("--out", required=True, help="the TSV to write (and <out>.summary.json)")
 
     p = sub.add_parser("holdout", help="records held out for a benchmark: never trained on, "
                                        "indexed, released or added at night (holdouts.py)")
