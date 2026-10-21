@@ -4,14 +4,14 @@ import { Check, Keyboard } from "lucide-react";
 import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, QuickReasons, sciLike,
          StatusToggle, useDebounced } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type PhotoReviewDecisionBody,
-         type PhotoReviewPage, type PhotoReviewSort, type PhotoReviewTab, type ReviewPhoto,
+         type PhotoBandFilter, type PhotoReviewPage, type PhotoReviewSort, type PhotoReviewTab, type ReviewPhoto,
          type ReviewRecord } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReason, decisionsOf, initialChoices,
          KEY_HELP, keyAction, MIN_FLAGGED, missingReason, nextPageOffset, nextUnsaved, offsetWhenPageDone,
          openOnLabel, outlineOf, photoLabels, photoName, QUICK_REASONS, quickChoice, quickReasons, readPreselectMode,
          REVIEW_PAGE_SIZE, saveBody, savedLine,
-         setReason, SORTS, sortedPhotos, step, suggestedCount, withMode, writePreselectMode, type Choice,
+         setReason, SORTS, BAND_FILTERS, bandCount, sortedPhotos, step, suggestedCount, withMode, writePreselectMode, type Choice,
          type KeyAction, type PhotoChoice, type PhotoChoices, type PickedReasons,
          type PreselectMode } from "@/lib/photoReview";
 import { readTileSize, readView, SUMMARY_KEY_HELP, SUMMARY_TABS, TILE_SIZES, writeTileSize, writeView,
@@ -50,6 +50,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const [status, setStatusNow] = useState<FeedbackStatus>("open");
   const [sort, setSortNow] = useState<PhotoReviewSort>("p");
   const [minFlagged, setMinFlaggedNow] = useState<number>(1);
+  const [band, setBandNow] = useState<PhotoBandFilter>("all");
   const [text, setTextNow] = useState("");
   const q = useDebounced(text.trim());
   const [autosave, setAutosave] = useState(() => readAutosave(browserStorage));
@@ -70,6 +71,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const setStatus = leaving(setStatusNow);
   const setSort = leaving(setSortNow);
   const setMinFlagged = leaving(setMinFlaggedNow);
+  const setBand = leaving(setBandNow);
   const setText = leaving(setTextNow);
   const pickAutosave = (on: boolean) => {
     if (on && unsaved > 0 && view === "summary" && !window.confirm(autosaveOnText(unsaved))) return;
@@ -100,10 +102,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
     setMode(next);
     writePreselectMode(browserStorage, next);
   };
-  useEffect(() => { setOffset(0); }, [tab, status, sort, minFlagged, q]);
+  useEffect(() => { setOffset(0); }, [tab, status, sort, minFlagged, q, band]);
   const list = useQuery({
-    queryKey: ["feedback", "photo-review", tab, status, sort, minFlagged, q, offset, gen],
-    queryFn: () => feedbackApi.photoReview({ tab, status, sort, min_flagged: minFlagged, q, offset,
+    queryKey: ["feedback", "photo-review", tab, status, sort, minFlagged, q, band, offset, gen],
+    queryFn: () => feedbackApi.photoReview({ tab, status, sort, min_flagged: minFlagged, q, band, offset,
                                              limit: REVIEW_PAGE_SIZE }),
     placeholderData: (prev) => prev,
     // A reload under the reviewer would move the cards they are working through.
@@ -138,6 +140,16 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
             {SORTS.map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
           </select>
         </label>
+        <label className="flex min-w-0 items-center gap-2 text-sm"
+               title="Tagger v2's confidence: High is checked at 85% or better by eye, Medium 50-85%, Low below. Low photos start as Include.">
+          <span className="text-muted-foreground">Confidence</span>
+          <select className={FIELD} value={band} onChange={(e) => setBand(e.target.value as PhotoBandFilter)}
+                  data-testid="photo-review-band">
+            {BAND_FILTERS.map((b) => (
+              <option key={b.code} value={b.code}>{b.label}{bandCount(data, tab, b.code)}</option>
+            ))}
+          </select>
+        </label>
         {full && <label className="flex min-w-0 items-center gap-2 text-sm">
           <span className="text-muted-foreground">Show</span>
           <select className={FIELD} value={minFlagged} onChange={(e) => setMinFlagged(Number(e.target.value))}>
@@ -161,7 +173,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       </div>
       {help && <KeyHelp rows={full ? KEY_HELP : SUMMARY_KEY_HELP} />}
       {!full && (
-        <PhotoSummary tab={tab} status={status} sort={sort} q={q} help={help} onHelp={() => setHelp((h) => !h)}
+        <PhotoSummary tab={tab} status={status} sort={sort} q={q} band={band} help={help} onHelp={() => setHelp((h) => !h)}
                       tileSize={tileSize} onTotal={setSummaryTotal} autosave={autosave} onPending={setUnsaved}
                       canLeave={canLeave} discard={discard} />
       )}
@@ -170,7 +182,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       )}
       {full && data && list.isPlaceholderData && <p className="text-sm text-muted-foreground">Loading the next records…</p>}
       {full && data && !list.isPlaceholderData && (
-        <Board key={`${tab}|${status}|${sort}|${minFlagged}|${q}|${offset}|${gen}`} data={data} tab={tab}
+        <Board key={`${tab}|${status}|${sort}|${minFlagged}|${q}|${band}|${offset}|${gen}`} data={data} tab={tab}
                status={status} searching={!!q} offset={offset} help={help} onHelp={() => setHelp((h) => !h)}
                mode={mode} picked={picked} onPick={(photoKey, r) => setPicked((x) => ({ ...x, [photoKey]: r }))}
                onPageDone={() => reload(offsetWhenPageDone(status, offset, REVIEW_PAGE_SIZE, total))}

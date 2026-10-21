@@ -480,20 +480,24 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                         "item_id": f and f["item_id"], "flags": f["flags"] if f else [],
                         "suggested_reason": pr.suggested_reason(f["flags"], rec.get("tab", "all"))
                         if f else None,
+                        "suggested_decision": pr.suggested_decision(f["flags"]) if f else None,
+                        "band": pr.band_of(f["flags"]) if f else None,
                         "status": f["status"] if f else None,
                         "decision": f["decision"] if f else None})
         return {k: v for k, v in rec.items() if k not in ("flagged", "in_tab")} | {"photos": out}
 
     @app.get("/api/feedback/photo-review/flagged")
     def fb_photo_review_flagged(request: Request, tab: str = "all", status: str = "open",
-                                sort: str = "p", q: str = "", offset: int = 0, limit: int = 150):
+                                sort: str = "p", q: str = "", offset: int = 0, limit: int = 150,
+                                band: str = "all"):
         """The Summary view (Steve, 2026-10-21): the queue's flagged photos in the tab, one tile
         each, paged (at most 200), with the record's name and link, the flags, the suggested
         reason, and a small thumbnail: public photos straight from their source, others
         from /api/feedback/photo/…?size=grid (private, no-store)."""
         _, projects = access(request)
         try:
-            tiles = pr.flagged_tiles(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, q)
+            tiles = pr.flagged_tiles(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, q,
+                                     band)
         except fb.FeedbackError as e:
             bad(e)
         start = max(0, offset)
@@ -569,11 +573,11 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.get("/api/feedback/photo-review")
     def fb_photo_review(request: Request, tab: str = "all", status: str = "open",
                         sort: str = "p", min_flagged: int = 1, q: str = "", offset: int = 0,
-                        limit: int = 10):
+                        limit: int = 10, band: str = "all"):
         _, projects = access(request)
         try:
             out = pr.cards(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged,
-                           q)
+                           q, band)
         except fb.FeedbackError as e:
             bad(e)
         page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]

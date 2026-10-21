@@ -223,7 +223,8 @@ def test_each_flagged_photo_suggests_the_reason_of_its_own_flag():
     assert pr.suggested_reason(both, "micrograph") == "micrograph"   # the open tab's own flag
     assert pr.suggested_reason(pr.parse_flags("R6 view dried p=0.05")) == "other"
     assert pr.suggested_reason([]) is None
-    assert set(pr.REASON_OF_TAB) == set(pr.TAB_CODES)
+    # every tab but tagger v2's "Probably shows the specimen" (its photos start as Include)
+    assert set(pr.REASON_OF_TAB) == set(pr.TAB_CODES) - {"specimen"}
     assert set(pr.REASON_OF_TAB.values()) <= set(pr.REASON_CODES)
 
 

@@ -42,6 +42,10 @@ export const SUMMARY_TABS: { code: Exclude<PhotoReviewTab, "all">; title: string
   { code: "uv", title: "UV reactions" },
   { code: "tree", title: "Phylogenetic trees and BLAST" },
   { code: "drawing", title: "Drawings" },
+  { code: "chemical", title: "Chemical spot tests" },
+  { code: "spore_print", title: "Spore prints" },
+  { code: "dried", title: "Dried specimens" },
+  { code: "specimen", title: "Probably shows the specimen" },
   { code: "other", title: "Other" },
 ];
 
@@ -101,15 +105,18 @@ export interface Mark { decision: Choice; reason: string | null; readOnly?: bool
 /** By item id. */
 export type Marks = Record<number, Mark>;
 
-type MarkTile = Pick<FlaggedTile, "item_id" | "status" | "decision" | "suggested_reason">;
+type MarkTile = Pick<FlaggedTile, "item_id" | "status" | "decision" | "suggested_reason" | "suggested_decision">;
 
-/** How a page starts: an open tile as Exclude with its suggested reason; a decided tile shows
- *  its stored decision, read-only. */
+/** How a page starts: an open tile as Exclude with its suggested reason, or as Include when the
+ *  server suggests keeping it (tagger v2 reads it as a specimen photo, or in its low band); a
+ *  decided tile shows its stored decision, read-only. */
 export function initialMarks(tiles: MarkTile[]): Marks {
   const out: Marks = {};
   for (const t of tiles) {
     if (t.status === "open") {
-      out[t.item_id] = { decision: "exclude", reason: t.suggested_reason ?? null };
+      out[t.item_id] = t.suggested_decision === "keep"
+        ? { decision: "keep", reason: t.suggested_reason ?? null }
+        : { decision: "exclude", reason: t.suggested_reason ?? null };
       continue;
     }
     const d = t.decision?.decision;
