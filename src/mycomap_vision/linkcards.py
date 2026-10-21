@@ -20,6 +20,7 @@ Pure functions only; api.py serves them.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import io
 from dataclasses import dataclass
@@ -65,16 +66,31 @@ class Card:
     image_alt: str = ""
 
 
-def site_card(origin: str, path: str) -> Card | None:
+def image_version(path: Path) -> str | None:
+    """The first 10 hex of the site image's sha256, for its address (`?v=`): Facebook keeps
+    an image by its URL, so a new picture needs a new address before a re-scrape shows it
+    (2026-10-20: the old card stayed after tagline A went live). None when there is no file."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return None
+
+
+def site_image(origin: str, version: str | None = None) -> str:
+    return origin + SITE_IMAGE + (f"?v={version}" if version else "")
+
+
+def site_card(origin: str, path: str, version: str | None = None) -> Card | None:
     """The card of a page people share, or None for any other page."""
     title = SHARE_PAGES.get(path)
     if title is None:
         return None
-    return Card(title, SITE_DESCRIPTION, origin + path, origin + SITE_IMAGE, SITE_IMAGE_ALT)
+    return Card(title, SITE_DESCRIPTION, origin + path, site_image(origin, version),
+                SITE_IMAGE_ALT)
 
 
-def gone_card(origin: str, rid: str) -> Card:
-    return Card(GONE_TITLE, GONE_DESCRIPTION, f"{origin}/r/{rid}", origin + SITE_IMAGE,
+def gone_card(origin: str, rid: str, version: str | None = None) -> Card:
+    return Card(GONE_TITLE, GONE_DESCRIPTION, f"{origin}/r/{rid}", site_image(origin, version),
                 SITE_IMAGE_ALT)
 
 
@@ -156,12 +172,12 @@ def run_answer(run: dict) -> dict | None:
     return (models[0] or {}).get("result") if models else None
 
 
-def run_card(origin: str, rid: str, run: dict) -> Card:
+def run_card(origin: str, rid: str, run: dict, version: str | None = None) -> Card:
     """A run's card. Only the answer and the find's own photos go in it: never the place,
     the date, the observation, or who ran it."""
     h = headline(run_answer(run))
     photos = int(run.get("photos") or 0) if run.get("kind") == "photos" else 0
-    image = f"{origin}/api/runs/{rid}/card.jpg" if photos else origin + SITE_IMAGE
+    image = f"{origin}/api/runs/{rid}/card.jpg" if photos else site_image(origin, version)
     alt = (f"{photos} photo{'s' if photos != 1 else ''} of one find, identified by MycoMap Vision"
            if photos else SITE_IMAGE_ALT)
     return Card(run_title(h), RUN_DESCRIPTION, f"{origin}/r/{rid}", image, alt)

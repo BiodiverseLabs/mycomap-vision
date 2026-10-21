@@ -28,6 +28,13 @@ def dist(tmp_path):
     return d
 
 
+def site_image(tmp_path) -> str:
+    """The site image's address as the tags give it: versioned by the file's content."""
+    v = linkcards.image_version(tmp_path / "dist" / "og-card.jpg")
+    assert v and len(v) == 10
+    return f"{HERE}/og-card.jpg?v={v}"
+
+
 def card_of(page_html: str) -> dict:
     """The og:/twitter: tags of a page, unescaped."""
     return {k: html.unescape(v) for k, v in re.findall(
@@ -55,7 +62,7 @@ def test_a_crawler_reading_a_shared_page_gets_visions_own_card_not_the_sign_in_p
         assert card["og:title"] == title and card["twitter:title"] == title
         assert card["og:description"] == linkcards.SITE_DESCRIPTION
         assert card["og:url"] == HERE + path
-        assert card["og:image"] == HERE + "/og-card.jpg" == card["twitter:image"]
+        assert card["og:image"] == site_image(tmp_path) == card["twitter:image"]
         assert card["og:site_name"] == "MycoMap Vision"
         assert card["twitter:card"] == "summary_large_image"
         assert (card["og:image:width"], card["og:image:height"]) == ("1200", "630")
@@ -68,10 +75,33 @@ def test_the_site_card_says_it_is_free_needs_a_mycomap_account_and_is_no_edibili
     assert len(text) <= 160
 
 
-def test_the_cards_image_opens_without_sign_in(conn, tmp_path):
+def test_the_cards_image_opens_without_sign_in_at_its_versioned_address(conn, tmp_path):
     app, _, _ = site(conn, tmp_path, web_dist=dist(tmp_path))
-    res = visitor(app).get("/og-card.jpg")
-    assert res.status_code == 200 and res.headers["content-type"] == "image/jpeg"
+    for address in ("/og-card.jpg", site_image(tmp_path).removeprefix(HERE)):
+        res = visitor(app).get(address)
+        assert res.status_code == 200 and res.headers["content-type"] == "image/jpeg", address
+
+
+def test_a_new_site_image_gets_a_new_address_so_facebook_fetches_it_again(conn, tmp_path):
+    """Facebook keeps an image by its URL: after tagline A went live (2026-10-20) a re-scrape
+    still showed the old picture at the same address."""
+    d = dist(tmp_path)
+    app, _, _ = site(conn, tmp_path, web_dist=d)
+    before = card_of(visitor(app).get("/").text)["og:image"]
+    Image.new("RGB", (1200, 630), (20, 60, 20)).save(d / "og-card.jpg")
+    (tmp_path / "again").mkdir()
+    app, _, _ = site(conn, tmp_path / "again", web_dist=d)
+    after = card_of(visitor(app).get("/").text)
+    assert before != after["og:image"] and after["og:image"] == site_image(tmp_path)
+    assert after["twitter:image"] == after["og:image"]
+    # Every card that uses the site image carries the same versioned address.
+    gone = card_of(visitor(app).get(f"/r/{runs.new_id()}").text)
+    assert gone["og:image"] == after["og:image"]
+
+
+def test_without_a_site_image_file_the_address_has_no_version(tmp_path):
+    assert linkcards.image_version(tmp_path / "missing.jpg") is None
+    assert linkcards.site_image("https://v") == "https://v/og-card.jpg"
 
 
 def test_a_shared_page_gives_a_signed_out_visitor_only_the_shell_and_its_card(conn, tmp_path):
@@ -178,7 +208,7 @@ def test_a_deleted_runs_link_and_card_image_are_gone(conn, tmp_path):
     assert page.status_code == 404
     card = card_of(page.text)
     assert card["og:title"] == linkcards.GONE_TITLE
-    assert card["og:image"] == HERE + "/og-card.jpg"
+    assert card["og:image"] == site_image(tmp_path)
     assert page.headers["x-robots-tag"] == "noindex, nofollow"
     assert anyone.get(f"/api/runs/{rid}/card.jpg").status_code == 404
 
@@ -198,7 +228,7 @@ def test_an_observation_runs_card_uses_the_site_image_and_names_no_observation(c
     rid = res.json()["run"]["id"]
     page = visitor(app).get(f"/r/{rid}")
     card = card_of(page.text)
-    assert card["og:image"] == HERE + "/og-card.jpg"
+    assert card["og:image"] == site_image(tmp_path)
     assert card["og:title"].startswith("MycoMap Vision")
     block = re.search(r"<!-- link preview -->.*?(?=</head>)", page.text, re.S).group(0)
     assert "555" not in block and "inaturalist" not in block.lower()
