@@ -10,9 +10,10 @@ from mycomap_vision import feedback as fb
 from mycomap_vision import label_review as lr
 
 
-def test_every_queue_is_in_one_of_the_two_sections_and_the_blind_ones_are_validation():
+def test_every_queue_is_in_one_of_the_three_sections_and_the_blind_ones_are_validation():
     assert set(fb.SECTION_OF) == set(fb.TYPES)
-    assert set(fb.SECTION_OF.values()) == set(fb.SECTIONS) == {"cleanup", "validation"}
+    assert set(fb.SECTION_OF.values()) == set(fb.SECTIONS) == {"cleanup", "views", "validation"}
+    assert fb.SECTION_OF["photo_view"] == "views"
     assert all(fb.SECTION_OF[t] == "validation" for t in fb.BLIND_TYPES)
     assert fb.SECTION_OF["non_specimen_photo"] == "cleanup"
     by_type = {t["type"]: t for t in fb.type_catalogue()}
