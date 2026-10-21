@@ -150,7 +150,7 @@ def test_admins_get_cards_and_see_all_rights_reserved_photos_privately(conn, tmp
     assert [p["photo_key"] for p in card["photos"]] == ["inat:1000", "inat:1100"]
     cc, arr = photo_of(card, "inat:1000"), photo_of(card, "inat:1100")
     assert cc["shown"] == "public" and cc["thumb"].startswith("https://") and cc["in_tab"]
-    assert arr["shown"] == "private" and arr["thumb"] == "/api/feedback/photo/inat:1100?size=thumb"
+    assert arr["shown"] == "private" and arr["thumb"] == "/api/feedback/photo/inat:1100?size=grid"
     assert arr["flagged"] and not arr["in_tab"]               # flagged for habitat, not here
     img = c.get(arr["thumb"])
     assert img.status_code == 200 and img.headers["content-type"] == "image/jpeg"
@@ -168,7 +168,7 @@ def test_any_reviewer_with_access_to_the_record_sees_its_photos_and_nobody_else(
     as_user(c, "leader-1")                                    # a leader of the item's project
     card = c.get("/api/feedback/photo-review").json()["records"][0]
     arr = photo_of(card, "inat:1100")
-    assert arr["shown"] == "private" and arr["thumb"] == "/api/feedback/photo/inat:1100?size=thumb"
+    assert arr["shown"] == "private" and arr["thumb"] == "/api/feedback/photo/inat:1100?size=grid"
     img = c.get(arr["thumb"])
     assert img.status_code == 200 and img.headers["cache-control"] == "private, no-store"
     as_user(c, "member-1")                                    # another project's contributor

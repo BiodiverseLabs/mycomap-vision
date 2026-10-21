@@ -323,3 +323,54 @@ export function statCardLines(t: Pick<FeedbackSummary, "open" | "decided" | "rec
          (t.records_decided ? ` (${obs(t.records_decided)} done)` : ""),
   };
 }
+
+// --- which queue the page opens (Steve, 2026-10-21: "Initial load of this page takes a really
+// long time"): never one by itself. Opening the first queue with open items meant the 16,000-
+// photo review and its photos on every visit.
+
+/** Where the queue a viewer last opened is remembered (their browser only). */
+export const QUEUE_STORAGE_KEY = "mycomap-vision.feedback.queue";
+
+type QueueStore = Pick<Storage, "getItem" | "setItem"> | null | undefined;
+
+/** The queue this viewer last opened, or null (none, or storage unavailable). */
+export function readLastQueue(storage: () => QueueStore): string | null {
+  try {
+    const v = storage()?.getItem(QUEUE_STORAGE_KEY);
+    return v && /^[a-z0-9_]{1,64}$/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remembers the queue opened; does nothing when storage is unavailable. */
+export function writeLastQueue(storage: () => QueueStore, type: string): void {
+  try {
+    storage()?.setItem(QUEUE_STORAGE_KEY, type);
+  } catch {
+    // Not remembered: the next visit asks again.
+  }
+}
+
+/** A ?queue= deep link's queue, or null. */
+export function queueParam(search: string): string | null {
+  const v = new URLSearchParams(search).get("queue");
+  return v && /^[a-z0-9_]{1,64}$/.test(v) ? v : null;
+}
+
+/** The queue the page shows: the one the viewer picked here, else a ?queue= link, else a linked
+ *  item's (?item=; nothing while it loads), else the one they last opened, else none ("Pick a
+ *  queue above"). Only a queue the summary lists; nothing until the summary is loaded. */
+export function openQueue(o: {
+  picked: string | null; param: string | null; linkedPending: boolean; linkedType: string | null;
+  stored: string | null; types: readonly string[] | null | undefined;
+}): string | null {
+  if (!o.types?.length) return null;
+  const known = (t: string | null): t is string => !!t && o.types!.includes(t);
+  if (known(o.picked)) return o.picked;
+  if (known(o.param)) return o.param;
+  if (o.linkedPending) return null;
+  if (known(o.linkedType)) return o.linkedType;
+  if (known(o.stored)) return o.stored;
+  return null;
+}
