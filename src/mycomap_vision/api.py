@@ -36,7 +36,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               onnxtower, permissions, dhash, runs as run_links, twins, uploadmeter,
+               onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue, yours)
 from .dates import real_date
@@ -317,6 +317,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                confused_with: "confusions.Served | None | bool" = True,
                feedback_store: "feedback.Store | None" = None,
                feedback_org: "feedback_api.OrgClient | None" = None,
+               feedback_places: "pair_places.PairPlaces | None" = None,
                answer_cache: "answercache.AnswerCache | None" = None,
                linked_accounts: "yours.LinkedCache | None | bool" = True,
                run_store: "run_links.RunStore | None" = None,
@@ -1860,6 +1861,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             taxonomy_now = taxonomy.load(path) or False
         return bool(taxonomy_now) and taxonomy_now.is_genus(genus)
 
+    def cached_mo_place(key: str) -> str | None:
+        """MO's location name from the cache of MO's public points (mopoints.py), if read."""
+        try:
+            with db_lock:
+                r = conn.execute("select location_name from mo_public_points "
+                                 "where observation_id = ? and status = 'ok'", (key,)).fetchone()
+        except sqlite3.OperationalError:          # a manifest without that table
+            return None
+        return r[0] if r and r[0] else None
+
     def name_info(wanted: list[str]) -> dict[str, dict]:
         with db_lock:
             return feedback_org_rules.manifest_name_info(conn, genus_known)(wanted)
@@ -1867,7 +1878,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     feedback_requests = feedback_api.add_routes(
         app, person=person, store=feedback_store, org=feedback_org, rescore=feedback_rescore,
         photos=photo_review.ReviewPhotos(q, permission_view), name_info=name_info,
-        on_name_update_done=read_name_changes, note=note)
+        on_name_update_done=read_name_changes, places=feedback_places or pair_places.PairPlaces(
+            cached_mo_place), note=note)
     app.state.feedback_requests = feedback_requests
     if background and org_named:           # unfinished Name Updates, and the log beside them
         def follow_name_updates():

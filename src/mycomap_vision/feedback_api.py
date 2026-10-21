@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
 from . import photo_review as pr
+from .pair_places import PairPlaces
 
 ROLE_TTL = 300.0
 
@@ -125,6 +126,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                photos: "pr.ReviewPhotos | None" = None,
                name_info: "fo.NameInfo | None" = None,
                on_name_update_done: Callable[[], object] | None = None,
+               places: "PairPlaces | None" = None,
                note=print) -> fo.OrgRequests:
     """The routes. Returns the Name Update requests (feedback_org.OrgRequests), whose
     poll_once the server runs every feedback_org.POLL_SECONDS."""
@@ -282,12 +284,28 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                 seq["blast_link"] = blast_link(seq, bool(roles.get("staff")))
             live.append({"record_key": key, **rec})
         item["live"] = live
+        if item["granularity"] == "record pair" and photos is not None:
+            # Both copies' photos side by side (Steve, 2026-10-21: one look tells whether the
+            # two records are one find). A record Vision has no photos of gets an empty list.
+            item["photos"] = {key: photos.for_viewer(photos.of_record(key))
+                              for key in item["record_keys"][:4]}
         requests_.check_item(item_id)                  # the Name Update as .org has it now
         item["org_request"] = fo.request_view(requests_.for_item(item_id))
         out = fb.reviewer_view(item)
         if out["masked"]:
             out["revealed"] = store.revealed(item_id, str(person(request)["sub"]))
         return out
+
+    @app.get("/api/feedback/items/{item_id}/places")
+    def fb_item_places(request: Request, item_id: int):
+        """Where each copy of a record pair is, as MO and iNat list it (pair_places.py): the
+        place text only, never a coordinate. Asked apart from the item, so its photos show
+        before MO and iNat answer."""
+        _, projects = access(request)
+        item = item_or_404(item_id, projects)
+        if item["granularity"] != "record pair" or places is None:
+            return {"places": {}}
+        return {"places": places.of(item["record_keys"][:4])}
 
     def with_request(item: dict) -> dict:
         return item | {"org_request": fo.request_view(requests_.for_item(item["id"]))}

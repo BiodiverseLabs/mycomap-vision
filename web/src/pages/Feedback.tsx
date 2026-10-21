@@ -12,6 +12,8 @@ import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, f
          queueParam, readLastQueue, recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
          statCardLines, valueBox, whenText, writeLastQueue, yes, type SectionGroup,
          type Verdict } from "@/lib/feedback";
+import { optionGroups, pairSides } from "@/lib/twinCompare";
+import { PairCompare } from "@/components/PairCompare";
 import { LABEL_REVIEW_TYPE } from "@/lib/labelReview";
 import { PHOTO_REVIEW_TYPE } from "@/lib/photoReview";
 import { LabelReview } from "./LabelReview";
@@ -365,6 +367,10 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["feedback", "item", id], queryFn: () => feedbackApi.item(id) });
   const item = q.data;
+  const sides = item ? pairSides(item) : [];
+  // A pair's places as MO and iNat list them: asked apart, so the photos show first.
+  const places = useQuery({ queryKey: ["feedback", "places", id], queryFn: () => feedbackApi.places(id),
+                            enabled: sides.length > 0, staleTime: 10 * 60_000, retry: false });
   const chip = item?.org_request?.chip ?? null;
   useEffect(() => {          // opening the item read .org: its row's chip follows
     if (!chip) return;
@@ -378,6 +384,12 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
   const facts = evidenceRows(item);
   return (
     <div className="space-y-5 border-t border-[#A87146]/15 p-3 dark:border-border" data-testid={`feedback-item-${id}`}>
+      {sides.length > 0 ? (<>
+        {/* A record pair: both copies' photos side by side, then the decision under them. */}
+        <PairCompare sides={sides} distanceKm={item.evidence?.distance_km} likelyWrong={item.evidence?.likely_wrong_copy}
+                     places={places.data?.places} placesLoading={places.isPending} />
+        <Decide item={item} type={type} wide />
+      </>) : (
       <div className="grid gap-5 lg:grid-cols-2">
         <div className="min-w-0 space-y-3">
           {facts.length > 0 && (
@@ -401,6 +413,7 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
         </div>
         <Decide item={item} type={type} />
       </div>
+      )}
       <LiveRecords item={item} reloading={q.isFetching} onReload={() => q.refetch()} me={me} />
       {item.masked ? (
         <div className="space-y-2">
@@ -527,7 +540,7 @@ function LiveCard({ r, me }: { r: LiveRecord; me: FeedbackMe }) {
   );
 }
 
-function Decide({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType }) {
+function Decide({ item, type, wide = false }: { item: FeedbackItemDetail; type?: FeedbackType; wide?: boolean }) {
   const update = useItemUpdate(item.id);
   const options = type?.options ?? [];
   const [choice, setChoice] = useState<FeedbackOption | null>(null);
@@ -583,18 +596,29 @@ function Decide({ item, type }: { item: FeedbackItemDetail; type?: FeedbackType 
     <div className="min-w-0 space-y-3">
       <h3 className={`text-sm font-semibold ${INK}`}>Decide</h3>
       {!options.length && <p className="text-sm text-muted-foreground">Loading the choices…</p>}
-      <div className="flex flex-col gap-2">
-        {options.map((o) => {
-          const on = choice?.code === o.code;
-          return (
-            <button key={o.code} type="button" onClick={() => pick(o)} aria-pressed={on}
-                    className={`rounded-md border px-3 py-2 text-left text-sm transition-colors ${
-                      on ? "border-myco-green bg-myco-green/10" : "border-[#A87146]/30 bg-white hover:bg-myco-green/5 dark:border-border dark:bg-card"}`}>
-              <span className={`block font-medium ${INK}`}>{o.label}</span>
-              <span className="block text-xs text-muted-foreground">{appliesWords(o.applies)}</span>
-            </button>
-          );
-        })}
+      {/* Options of one group sit under its heading (e.g. Duplicate observation: Use iNat,
+          Use MO); `wide` (a record pair, decided under the photos) lays the blocks in a row. */}
+      <div className={wide ? "grid gap-3 sm:grid-cols-[2fr_1fr]" : "flex flex-col gap-2"}>
+        {optionGroups(options).map((g) => (
+          <div key={g.group ?? g.options[0].code} className="min-w-0 space-y-1.5"
+               role={g.group ? "group" : undefined} aria-label={g.group ?? undefined}>
+            {g.group && <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.group}</p>}
+            <div className={g.options.length > 1 && g.group ? "grid grid-cols-2 gap-2" : "flex flex-col gap-2"}>
+              {g.options.map((o) => {
+                const on = choice?.code === o.code;
+                return (
+                  <button key={o.code} type="button" onClick={() => pick(o)} aria-pressed={on}
+                          aria-label={o.short ? o.label : undefined}
+                          className={`min-w-0 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                            on ? "border-myco-green bg-myco-green/10" : "border-[#A87146]/30 bg-white hover:bg-myco-green/5 dark:border-border dark:bg-card"}`}>
+                    <span className={`block break-words font-medium ${INK}`}>{o.short ?? o.label}</span>
+                    <span className="block break-words text-xs text-muted-foreground">{o.hint ?? appliesWords(o.applies)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
       {choice && (
         <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); decide.mutate(choice); }}>

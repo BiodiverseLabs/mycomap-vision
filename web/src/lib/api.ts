@@ -393,6 +393,11 @@ export interface FeedbackOption {
   /** The kind of Name Update this decision opens on mycomap.org (a whole-name decision), or
    *  null for one that opens none (feedback_org.py). */
   name_update?: "respelling" | "accepted_name" | "rename" | "same_taxon" | null;
+  /** Options shown under one heading (e.g. "Duplicate observation"), with a short name there
+   *  and a line on what the choice does; `label` stays the whole decision. */
+  group?: string | null;
+  short?: string | null;
+  hint?: string | null;
 }
 
 export interface FeedbackType {
@@ -580,7 +585,21 @@ export interface FeedbackItemDetail extends FeedbackItem {
   refreshes: FeedbackRefresh[];
   live?: LiveRecord[];
   org_request?: OrgRequest | null;
+  /** A record pair's photos, per record key (empty when Vision holds none of that record). */
+  photos?: Record<string, PairPhoto[]>;
 }
+
+/** Where one copy of a pair is, as its own site (MO, iNat) lists it: text, never a point. */
+export interface PairPlace {
+  site: "MO" | "iNat";
+  text: string | null;
+  /** ok: text is the place; none: the site lists none; unavailable: it did not answer now. */
+  status: "ok" | "none" | "unavailable";
+}
+
+/** A photo of one record of a pair, as ReviewPhotos.for_viewer gives it. */
+export type PairPhoto = Pick<ReviewPhoto, "photo_key" | "position" | "license_class" | "shown" | "thumb"
+                             | "full" | "hidden_reason">;
 
 export interface RefreshedRecord {
   record_key: string;
@@ -788,6 +807,7 @@ export const feedbackApi = {
     return getJson<{ total: number; items: FeedbackItem[] }>(`/api/feedback/items?${qs}`);
   },
   item: (id: number) => getJson<FeedbackItemDetail>(fbItem(id)),
+  places: (id: number) => getJson<{ places: Record<string, PairPlace> }>(`${fbItem(id)}/places`),
   decide: (id: number, body: FeedbackDecisionBody) =>
     postJson<FeedbackItemDetail>(`${fbItem(id)}/decision`, body),
   reopen: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/reopen`),

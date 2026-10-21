@@ -42,6 +42,12 @@ class Option:
     label: str
     applies: str               # org | vision | note
     needs_value: bool = False  # e.g. the name to rename to
+    # Options shown under one heading on the page (e.g. "Duplicate observation" > "Use iNat",
+    # "Use MO"): the heading, the option's short name there, and a line on what it does.
+    # `label` stays the whole decision, for the history and the change list.
+    group: str | None = None
+    short: str | None = None
+    hint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,17 +142,24 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
               Option("keep_photo", "Keep it (it shows the specimen)", "note")),
              granularity="photo"),
     ItemType("twin_location_conflict", "One find, two places",
-             "The same find posted to both Mushroom Observer and iNaturalist, whose two copies "
-             "are more than 5 km apart, so maps and the Atlas count it as two sites. Check "
-             "both copies' maps and fix the copy that is wrong at its source.",
-             ("both records' links", "how far apart (km)", "how each copy is placed",
-              "which copy looks wrong"),
+             "Two records, one on Mushroom Observer and one on iNaturalist, with the same label "
+             "and photo but placed more than 5 km apart, so maps and the Atlas count one find "
+             "as two sites. Compare the two copies' photos: if they are one find, say which "
+             "copy's place is right; if they are two finds, leave both.",
+             ("both records' photos", "both records' links", "how far apart (km)",
+              "how each copy is placed", "which copy looks wrong"),
              # Codes kept stable: a later .org hand-off may act on them (the coordinator).
-             (Option("fix_mo_location", "The MO copy's location is wrong: fix it on MO / .org",
-                     "org"),
-              Option("fix_inat_location", "The iNat copy's location is wrong: fix it on iNat",
-                     "org"),
-              Option("both_right", "Both are right (two places)", "note")),
+             # Steve, 2026-10-21: the choices are "Duplicate observation" (use iNat / use MO)
+             # and "Not duplicate - leave both"; the code says which copy gets fixed.
+             (Option("fix_mo_location", "Duplicate observation: use the iNat copy's place",
+                     "org", group="Duplicate observation", short="Use iNat",
+                     hint="The MO copy's place is the one to fix"),
+              Option("fix_inat_location", "Duplicate observation: use the MO copy's place",
+                     "org", group="Duplicate observation", short="Use MO",
+                     hint="The iNat copy's place is the one to fix"),
+              Option("both_right", "Not a duplicate: leave both", "note",
+                     group="Not duplicate", short="Leave both",
+                     hint="Two finds in two places; nothing changes")),
              granularity="record pair"),
     ItemType("species_rank_split", "A species and its own varieties",
              "Labels that are one species at species rank (Vision's answer key): the species "
@@ -525,7 +538,8 @@ def type_catalogue() -> list[dict]:
              "granularity": t.granularity, "model_flagged": t.model_flagged,
              "section": SECTION_OF[t.code], "blind": t.code in BLIND_TYPES,
              "options": [{"code": o.code, "label": o.label, "applies": o.applies,
-                          "needs_value": o.needs_value} for o in t.options]}
+                          "needs_value": o.needs_value, "group": o.group, "short": o.short,
+                          "hint": o.hint} for o in t.options]}
             for t in TYPES.values()]
 
 
