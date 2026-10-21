@@ -60,7 +60,9 @@ def members_only(path: str) -> bool:
 # the API page reads only the public outline (/api/docs/v1.json). The site sends a
 # signed-out visitor to sign in when they move on to any other page (web/src/App.tsx).
 PUBLIC_PAGES = ("/research/api", "/api-docs")
-PUBLIC_FILES = ("/favicon.png", "/mycomap-logo.png", "/og-card.jpg")
+# /favicon.ico: browsers ask for it on their own; sent to sign in, it started a second sign-in
+# beside the page's and overwrote its nonce ("sign-in token refused: nonce", 2026-10-21).
+PUBLIC_FILES = ("/favicon.png", "/favicon.ico", "/mycomap-logo.png", "/og-card.jpg")
 PUBLIC_FILE_DIRS = ("/assets/",)
 # The pages people share (Steve, 2026-10-20: link previews, linkcards.py). They answer
 # with the same shell, carrying the page's card, so Facebook, X, iMessage and Slack can read

@@ -2891,6 +2891,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             target = (root / path).resolve()
             if path and target.is_file() and target.is_relative_to(root):
                 return FileResponse(target)
+            # The site ships favicon.png; a browser's own /favicon.ico gets it too.
+            if path == "favicon.ico" and (root / "favicon.png").is_file():
+                return FileResponse(root / "favicon.png", media_type="image/png")
             # The shell, with the link-preview card of the page (linkcards.py).
             card, status = page_card(request, "/" + path)
             shell = linkcards.with_tags((root / "index.html").read_text(encoding="utf-8"), card)

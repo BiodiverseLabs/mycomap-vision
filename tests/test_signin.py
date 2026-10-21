@@ -289,3 +289,14 @@ def test_the_api_page_is_open_to_all_while_every_other_page_needs_sign_in(conn, 
     assert c.post("/research/api").status_code == 302
     for api_path in ("/api/stats", "/api/models", "/api/paper", "/api/experiments"):
         assert c.get(api_path).status_code == 401, api_path
+
+
+def test_a_browsers_own_favicon_ico_is_served_never_a_second_sign_in(conn, tmp_path):
+    # Browsers ask for /favicon.ico by themselves; sending it to sign in started a second
+    # sign-in that overwrote the page's nonce (2026-10-21).
+    c = gated_site_with_pages(conn, tmp_path)
+    res = c.get("/favicon.ico")
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("image/png")
+    assert res.content == b"\x89PNG"
+    assert "set-cookie" not in res.headers
