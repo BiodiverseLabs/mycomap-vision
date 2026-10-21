@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
 import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
+         inatLinks, isNameItem, noProposal, roleText, usableOptions,
          historyOrgText, itemBadges, linkedItem, openQueue, orgChipClass, pageText, parsePhotoKeys, prefillValue,
          queueParam, QUEUE_STORAGE_KEY, readLastQueue, writeLastQueue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
@@ -285,4 +286,52 @@ test("the last queue is remembered per viewer; blocked storage remembers nothing
   assert.equal(queueParam("?queue=non_specimen_photo&item=3"), "non_specimen_photo");
   assert.equal(queueParam("?queue=Bad Value"), null);
   assert.equal(queueParam(""), null);
+});
+
+// --- The names behind a name item (Steve, 2026-10-21) ---
+
+const taxon = (id: number, name: string, active = true) =>
+  ({ id, name, rank: "species", active, observations: 0, changes: 0, url: `https://www.inaturalist.org/taxa/${id}` });
+
+test("an inactive iNat name with no current name links its taxon and iNat's other writing", () => {
+  const links = inatLinks({ inat: { status: "inactive", asked: "Callistosporium luteoolivaceum",
+    taxon: taxon(1287172, "Callistosporium luteoolivaceum", false), current: [],
+    near: [taxon(118354, "Callistosporium luteo-olivaceum")], search_url: "s" } });
+  assert.deepEqual(links, [
+    { text: "iNat taxon 1287172 (inactive)", href: "https://www.inaturalist.org/taxa/1287172" },
+    { text: "iNat writes it Callistosporium luteo-olivaceum", href: "https://www.inaturalist.org/taxa/118354", strong: true },
+  ]);
+});
+
+test("an inactive name links the current name iNat points to", () => {
+  const links = inatLinks({ inat: { status: "inactive", asked: "A b", taxon: taxon(5, "A b", false),
+    current: [taxon(6, "A c")], near: [], search_url: "s" } });
+  assert.equal(links[1].text, "iNat's current name: A c");
+  assert.equal(links[1].href, "https://www.inaturalist.org/taxa/6");
+  const chain = inatLinks({ inat: { status: "inactive", asked: "Boletus pallidoroseus", taxon: taxon(500028, "Boletus pallidoroseus", false),
+    current: [taxon(1068083, "Lanmaoa pallidorosea", false)], near: [], search_url: "s" } });
+  assert.equal(chain[1].text, "iNat's current name: Lanmaoa pallidorosea (also inactive)");
+});
+
+test("a name iNat has no taxon of, or not asked yet, links iNat's search", () => {
+  for (const status of ["not_found", "not_asked", "unavailable"] as const) {
+    const links = inatLinks({ inat: { status, asked: "A b", taxon: null, current: [], near: [],
+      search_url: "https://www.inaturalist.org/taxa/search?q=A%20b" } });
+    assert.deepEqual(links, [{ text: "Search iNaturalist", href: "https://www.inaturalist.org/taxa/search?q=A%20b" }]);
+  }
+});
+
+test("roles read as where the name is used", () => {
+  assert.equal(roleText(["records", "synonym list"]), "on the records · on MycoMap's synonym list");
+});
+
+test("a name item with no proposal offers no 'use iNat's name'; other items keep every option", () => {
+  const opts = [opt({ code: "accept" }), opt({ code: "keep" }), opt({ code: "rename" })];
+  const inactive = item({ item_type: "name_inactive_on_inat", proposed: "" });
+  assert.equal(noProposal(inactive), true);
+  assert.deepEqual(usableOptions(inactive, opts).map((o) => o.code), ["keep", "rename"]);
+  const proposed = item({ item_type: "name_inactive_on_inat", proposed: "A c" });
+  assert.deepEqual(usableOptions(proposed, opts).map((o) => o.code), ["accept", "keep", "rename"]);
+  assert.equal(noProposal(item({ item_type: "group_label", proposed: "" })), false);
+  assert.equal(isNameItem(item({ item_type: "name_retired" })), true);
 });

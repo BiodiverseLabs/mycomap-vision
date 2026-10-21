@@ -36,7 +36,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
+               name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, serving, sessions as session_store, sources, uploads,
                workqueue, yours)
 from .dates import real_date
@@ -318,6 +318,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                feedback_store: "feedback.Store | None" = None,
                feedback_org: "feedback_api.OrgClient | None" = None,
                feedback_places: "pair_places.PairPlaces | None" = None,
+               feedback_inat_names: "name_context.InatNames | None" = None,
                answer_cache: "answercache.AnswerCache | None" = None,
                linked_accounts: "yours.LinkedCache | None | bool" = True,
                run_store: "run_links.RunStore | None" = None,
@@ -1879,7 +1880,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         app, person=person, store=feedback_store, org=feedback_org, rescore=feedback_rescore,
         photos=photo_review.ReviewPhotos(q, permission_view), name_info=name_info,
         on_name_update_done=read_name_changes, places=feedback_places or pair_places.PairPlaces(
-            cached_mo_place), note=note)
+            cached_mo_place), inat_names=feedback_inat_names or name_context.InatNames(),
+        note=note)
     app.state.feedback_requests = feedback_requests
     if background and org_named:           # unfinished Name Updates, and the log beside them
         def follow_name_updates():

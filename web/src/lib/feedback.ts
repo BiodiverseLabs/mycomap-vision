@@ -7,8 +7,8 @@
 // which items they are.
 
 import type { BlastLink, FeedbackApplies, FeedbackDecisionBody, FeedbackItem, FeedbackOption,
-              FeedbackSummary, LiveSequence, Me, OrgChip, OrgRequest, OrgStep, RefreshedRecord, Revealed,
-              RevealedAnswer } from "./api";
+              FeedbackSummary, LiveSequence, Me, NameContextEntry, NameRole, OrgChip, OrgRequest, OrgStep,
+              RefreshedRecord, Revealed, RevealedAnswer } from "./api";
 import { ApiError } from "./api";
 
 export const FEEDBACK_PATH = "/feedback";
@@ -373,4 +373,51 @@ export function openQueue(o: {
   if (known(o.linkedType)) return o.linkedType;
   if (known(o.stored)) return o.stored;
   return null;
+}
+
+// --- The names behind a name item (Steve, 2026-10-21) ---------------------------------------
+// "Names iNaturalist no longer uses" and "Names retired on MycoMap's synonym list" show each
+// name with its iNat taxon, linked, and MycoMap's synonym list around it (name_context.py).
+
+export const NAME_ITEM_TYPES = ["name_retired", "name_inactive_on_inat"];
+
+export const isNameItem = (item: Pick<FeedbackItem, "item_type">): boolean =>
+  NAME_ITEM_TYPES.includes(item.item_type);
+
+const ROLE_WORDS: Record<NameRole, string> = {
+  records: "on the records", proposed: "proposed", "synonym list": "on MycoMap's synonym list",
+};
+
+/** "on the records · on MycoMap's synonym list". */
+export const roleText = (roles: NameRole[]): string => roles.map((r) => ROLE_WORDS[r] ?? r).join(" · ");
+
+export interface InatLink { text: string; href: string; strong?: boolean }
+
+/** The iNat links for one name: its own taxon (active or not), the current taxa an inactive one
+ *  points to, iNat's active writing of the same name; iNat's search when there is no taxon. */
+export function inatLinks(entry: Pick<NameContextEntry, "inat">): InatLink[] {
+  const { inat } = entry;
+  const out: InatLink[] = [];
+  if (inat.taxon) {
+    out.push({ text: `iNat taxon ${inat.taxon.id}${inat.taxon.active ? "" : " (inactive)"}`, href: inat.taxon.url });
+  }
+  for (const t of inat.current) {
+    out.push({ text: `iNat's current name: ${t.name}${t.active ? "" : " (also inactive)"}`, href: t.url, strong: true });
+  }
+  for (const t of inat.near) out.push({ text: `iNat writes it ${t.name}`, href: t.url, strong: true });
+  if (!inat.taxon) out.push({ text: "Search iNaturalist", href: inat.search_url });
+  return out;
+}
+
+/** A name item with nothing proposed: iNat names no current taxon, so "use iNat's name" has
+ *  nothing to use. The row says so instead of showing the name alone. */
+export const noProposal = (item: Pick<FeedbackItem, "item_type" | "proposed">): boolean =>
+  isNameItem(item) && !(item.proposed ?? "").trim();
+
+export const NO_PROPOSAL_TEXT = "no current name on iNaturalist";
+
+/** The options a reviewer can pick: without a proposal, not the one that uses it. */
+export function usableOptions<T extends Pick<FeedbackOption, "code">>(
+  item: Pick<FeedbackItem, "item_type" | "proposed">, options: T[]): T[] {
+  return noProposal(item) ? options.filter((o) => o.code !== "accept") : options;
 }

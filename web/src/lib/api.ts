@@ -590,6 +590,42 @@ export interface FeedbackItemDetail extends FeedbackItem {
 }
 
 /** Where one copy of a pair is, as its own site (MO, iNat) lists it: text, never a point. */
+/** An iNaturalist taxon as a name item shows it (name_context.py). */
+export interface InatTaxon {
+  id: number;
+  name: string;
+  rank: string | null;
+  active: boolean;
+  observations: number | null;
+  changes: number | null;
+  url: string;
+}
+
+/** How iNaturalist holds one name: its taxon, the current taxa an inactive one points to, and
+ *  active taxa of the same name written another way. not_asked: linked to iNat's search. */
+export interface InatName {
+  status: "active" | "inactive" | "not_found" | "unavailable" | "not_asked";
+  asked: string;
+  taxon: InatTaxon | null;
+  current: InatTaxon[];
+  near: InatTaxon[];
+  search_url: string;
+}
+
+export type NameRole = "records" | "proposed" | "synonym list";
+
+export interface NameContextEntry {
+  name: string;
+  roles: NameRole[];
+  inat: InatName;
+  about: string;
+}
+
+export interface NameContext {
+  names: NameContextEntry[];
+  synonyms: { status: "ok" | "unavailable" | "none"; rows: { retired: string; accepted: string }[]; more: number };
+}
+
 export interface PairPlace {
   site: "MO" | "iNat";
   text: string | null;
@@ -809,6 +845,7 @@ export const feedbackApi = {
   },
   item: (id: number) => getJson<FeedbackItemDetail>(fbItem(id)),
   places: (id: number) => getJson<{ places: Record<string, PairPlace> }>(`${fbItem(id)}/places`),
+  names: (id: number) => getJson<NameContext>(`${fbItem(id)}/names`),
   decide: (id: number, body: FeedbackDecisionBody) =>
     postJson<FeedbackItemDetail>(`${fbItem(id)}/decision`, body),
   reopen: (id: number) => postJson<FeedbackItemDetail>(`${fbItem(id)}/reopen`),
