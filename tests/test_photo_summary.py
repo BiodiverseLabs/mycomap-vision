@@ -62,7 +62,8 @@ def test_a_batch_writes_exactly_the_shown_split_and_nothing_before_it(conn, tmp_
         {"item_id": ids["inat:1000"], "decision": "exclude", "reason": "micrograph"},
         {"item_id": ids["inat:1001"], "decision": "exclude", "reason": "micrograph"},
         {"item_id": ids["inat:1100"], "decision": "keep"}]})            # kept in the lightbox
-    assert r.status_code == 200 and r.json() == {"excluded": 2, "kept": 1}
+    assert r.status_code == 200
+    assert (r.json()["excluded"], r.json()["kept"], r.json()["unchanged"]) == (2, 1, 0)
     assert fstore.excluded_photos() == {"inat:1000", "inat:1001"}
     kept = {ch["subject"]: ch["decision"] for ch in fstore.changes(applies="note")}
     assert kept == {"inat:1100": "keep_photo"}
@@ -120,3 +121,29 @@ def test_counts_are_cached_until_the_store_changes(conn, tmp_path, monkeypatch):
     after = {t["type"]: t for t in c.get("/api/feedback/summary").json()}
     assert len(calls) == 2                                    # a decision: counted afresh
     assert after["non_specimen_photo"]["open"] == first["non_specimen_photo"]["open"] - 1
+
+
+def test_flips_save_at_once_and_resending_the_same_state_adds_no_rows(conn, tmp_path):
+    """Steve, 2026-10-21: a tile's flipper is its saved decision; the default Exclude is saved
+    when the tile has been shown, a flip back to Include saves too, and the latest wins."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    tile = next(t for t in c.get("/api/feedback/photo-review/flagged").json()["tiles"]
+                if t["photo_key"] == "inat:1000")
+    shown = {"item_id": tile["item_id"], "decision": "exclude", "reason": "micrograph",
+             "note": "summary: shown"}
+    url = "/api/feedback/photo-review/batch"
+    assert c.post(url, json={"decisions": [shown]}).json()["excluded"] == 1
+    again = c.post(url, json={"decisions": [shown]}).json()          # a re-send: nothing new
+    assert (again["excluded"], again["unchanged"]) == (0, 1)
+    flip = c.post(url, json={"decisions": [{"item_id": tile["item_id"], "decision": "keep",
+                                            "note": "summary: flipped"}]}).json()
+    assert flip["kept"] == 1
+    rows = [(d["decision"], d["note"]) for d in fstore.get(tile["item_id"])["decisions"]]
+    assert rows == [("exclude_photo", "summary: shown"), ("keep_photo", "summary: flipped")]
+    assert "inat:1000" not in fstore.excluded_photos()                 # the latest wins
+    back = c.post(url, json={"decisions": [shown | {"note": "summary: flipped"}]}).json()
+    assert back["excluded"] == 1 and "inat:1000" in fstore.excluded_photos()
+    # A new reason is a new decision.
+    other = c.post(url, json={"decisions": [shown | {"reason": "slip"}]}).json()
+    assert other["excluded"] == 1 and len(fstore.get(tile["item_id"])["decisions"]) == 4

@@ -601,11 +601,14 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
 
 def batch_decide(store: fb.Store, decisions: list[dict], person: dict, note: str | None = None,
                  projects: set[str] | None = None) -> dict:
-    """The Summary's one commit: each {item_id, decision: exclude|keep, reason} on that photo's
-    queue item. Every entry is checked before anything is written (a photo item of this queue
-    the reviewer may see, a known decision, a reason for each exclusion, and the paper's seal on
-    its record), so a batch is written whole or not at all. Keeps are written too: a kept photo
-    does not come back."""
+    """The Summary's saves (Steve, 2026-10-21: a tile's Include/Exclude flipper IS its saved
+    decision; the default Exclude is saved once the tile has been shown): each
+    {item_id, decision: exclude|keep, reason, note?} on that photo's queue item. Every entry is
+    checked before anything is written (a photo item of this queue the reviewer may see, a
+    known decision, a reason for each exclusion, and the paper's seal on its record), so a
+    batch is written whole or not at all. Keeps are written too: a kept photo does not come
+    back. Idempotent: an entry equal to the item's latest decision (same decision and reason)
+    writes nothing, so re-sends and flips back add no duplicate rows; the latest row wins."""
     if not decisions:
         raise fb.FeedbackError("nothing to save")
     plan, seen = [], set()
@@ -632,10 +635,16 @@ def batch_decide(store: fb.Store, decisions: list[dict], person: dict, note: str
                                    f"({', '.join(REASON_CODES)})")
         if store.gate is not None and store.gate.judge_row(item)[0] != "ok":
             raise fb.FeedbackError(f"{item['subject']} is on a record in the paper's sealed test")
-        plan.append((item_id, decision, reason))
-    for item_id, decision, reason in plan:
-        store.decide(item_id, "exclude_photo" if decision == "exclude" else "keep_photo", person,
-                     value=reason if decision == "exclude" else None, note=note,
-                     projects=projects)
-    return {"excluded": sum(1 for _, d, _ in plan if d == "exclude"),
-            "kept": sum(1 for _, d, _ in plan if d == "keep")}
+        code = "exclude_photo" if decision == "exclude" else "keep_photo"
+        value = reason if decision == "exclude" else None
+        latest = (item.get("decisions") or [None])[-1]
+        same = (latest is not None and item["status"] == "decided"
+                and latest["decision"] == code and (latest.get("value") or None) == value)
+        plan.append((item_id, decision, code, value, d.get("note") or note, same))
+    for item_id, _, code, value, why, same in plan:
+        if not same:
+            store.decide(item_id, code, person, value=value, note=why, projects=projects)
+    return {"excluded": sum(1 for p in plan if p[1] == "exclude" and not p[5]),
+            "kept": sum(1 for p in plan if p[1] == "keep" and not p[5]),
+            "unchanged": sum(1 for p in plan if p[5]),
+            "saved": [p[0] for p in plan]}
