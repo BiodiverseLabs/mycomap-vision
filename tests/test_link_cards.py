@@ -6,13 +6,15 @@ who ran it; a deleted run's card is gone."""
 import html
 import io
 import re
+from types import SimpleNamespace
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
+from test_api_v1_by_observation import INAT_PHOTO, MO_PHOTO, SERVER, Response, fetcher
 from test_run_links import identify, jpeg_with_gps, person, site, visitor
 from test_signin import HERE
 
-from mycomap_vision import linkcards, runs
+from mycomap_vision import byobservation as bo, linkcards, runs
 from mycomap_vision.signin import SigninConfig, public_page, run_path
 
 SHELL = ('<!doctype html><html><head><meta charset="UTF-8" /><title>MycoMap Vision</title>'
@@ -221,7 +223,8 @@ def test_a_link_never_given_out_has_no_answer_in_its_card(conn, tmp_path):
     assert visitor(app).get(f"/api/runs/{rid}/card.jpg").status_code == 404
 
 
-def test_an_observation_runs_card_uses_the_site_image_and_names_no_observation(conn, tmp_path):
+def test_an_observation_run_with_no_cc0_or_cc_by_photo_uses_the_site_image(conn, tmp_path):
+    """The fake iNat's 555 states no licence: all rights reserved, never on a card."""
     app, store, _ = site(conn, tmp_path, by_observation=True, web_dist=dist(tmp_path))
     res = person(app, "user-1").post("/api/identify/observation",
                                      json={"source": "inat", "id": 555})
@@ -353,3 +356,309 @@ def test_a_card_image_made_before_a_run_was_deleted_is_never_served_after(conn, 
     assert anyone.get(f"/api/runs/{rid}/card.jpg").status_code == 200
     store.delete(rid)
     assert anyone.get(f"/api/runs/{rid}/card.jpg").status_code == 404
+
+
+# --- an iNat or MO run's card: the observation's own CC0 / CC BY photos, credited ------------
+
+PHOTOGRAPHER = "Jane Doe"
+RED, GREEN, GREY = (230, 20, 20), (20, 200, 20), (128, 128, 128)
+BLUE, YELLOW = (20, 20, 230), (230, 230, 20)
+# One find's photos, each under another licence: only 9101 (CC BY) and 9104 (CC0) may go on
+# its card; 9102 is non-commercial, 9103 all rights reserved, 9105 share-alike.
+LICENSED = [(9101, "cc-by", RED), (9102, "cc-by-nc", GREEN), (9103, None, GREY),
+            (9104, "cc0", BLUE), (9105, "cc-by-sa", YELLOW)]
+
+
+def licensed_source():
+    """The fake iNat (test_api_v1_by_observation) with observation 600: Jane Doe's photos."""
+    f = fetcher()
+    f.session.inat[600] = {
+        "id": 600, "observed_on": "2026-10-11", "location": "40.12,-82.98", "obscured": False,
+        "taxon": {"name": "A x", "rank": "species"},
+        "user": {"login": "jdoe", "name": PHOTOGRAPHER},
+        "observation_photos": [{"position": i, "photo": {
+            "id": pid, "url": INAT_PHOTO.format(id=pid, size="square"), "license_code": lic}}
+            for i, (pid, lic, _) in enumerate(LICENSED)]}
+    for pid, _, colour in LICENSED:
+        f.session.photos[pid] = photo(colour, (400, 300))
+    return f
+
+
+class Jobs(list):
+    """The card worker (create_app's card_writer) as a test runs it: jobs wait for run()."""
+
+    def __call__(self, job):
+        self.append(job)
+
+    def run(self):
+        while self:
+            self.pop(0)()
+
+
+def observation_run(conn, tmp_path, source=None, make_card=True):
+    """An iNat run of observation 600 on the site; its card job run unless make_card=False.
+    `identified`: how many photo reads the identification itself made."""
+    source = source or licensed_source()
+    jobs = Jobs()
+    app, store, bucket = site(conn, tmp_path, by_observation=True, web_dist=dist(tmp_path),
+                              observation_fetcher=source, card_writer=jobs)
+    owner = person(app, "user-1")
+    res = owner.post("/api/identify/observation", json={"source": "inat", "id": 600})
+    assert res.status_code == 200, res.text
+    run = SimpleNamespace(app=app, store=store, bucket=bucket, source=source.session,
+                          owner=owner, rid=res.json()["run"]["id"], jobs=jobs,
+                          identified=len(photo_reads(source.session)))
+    if make_card:
+        jobs.run()
+    return run
+
+
+def photo_reads(source) -> list[str]:
+    return [u for u in source.urls() if "/photos/" in u or "/images/" in u]
+
+
+def large(pid: int) -> str:
+    return INAT_PHOTO.format(id=pid, size="large")
+
+
+def card_file(r):
+    return r.bucket / runs.PREFIX / r.rid / runs.CARD
+
+
+def test_an_observation_runs_card_is_made_from_its_cc0_and_cc_by_photos_only(conn, tmp_path):
+    r = observation_run(conn, tmp_path)
+    kept = r.store.get(r.rid)["observation"]
+    # The run keeps each shown photo's licence and photographer (none for the reserved one).
+    assert [c and c["licence"] for c in kept["photos_credit"]] == [
+        "cc-by", "cc-by-nc", None, "cc0", "cc-by-sa"]
+    assert {c["by"] for c in kept["photos_credit"] if c} == {PHOTOGRAPHER}
+    # Only the CC BY and the CC0 photo were read for its card, in the page's order.
+    assert photo_reads(r.source)[r.identified:] == [large(9101), large(9104)]
+    assert card_of(visitor(r.app).get(f"/r/{r.rid}").text)["og:image"] == \
+        f"{HERE}/api/runs/{r.rid}/card.jpg"
+    res = visitor(r.app).get(f"/api/runs/{r.rid}/card.jpg")
+    assert res.status_code == 200 and res.headers["content-type"] == "image/jpeg"
+    assert res.headers["x-robots-tag"] == "noindex, nofollow"
+    img = Image.open(io.BytesIO(res.content))
+    assert img.size == (1200, 630) and not img.getexif()
+    red, green, blue = img.convert("RGB").getpixel((300, 300))          # 9101 leads
+    assert red > 200 and green < 60 and blue < 60
+    red, green, blue = img.convert("RGB").getpixel((900, 300))          # 9104 beside it
+    assert blue > 200 and red < 60 and green < 60
+
+
+def test_the_photographers_credit_is_printed_on_the_card(conn, tmp_path, monkeypatch):
+    drawn = []
+    real = ImageDraw.ImageDraw.text
+
+    def spy(self, xy, text, *a, **k):
+        drawn.append(text)
+        return real(self, xy, text, *a, **k)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", spy)
+    r = observation_run(conn, tmp_path)
+    assert visitor(r.app).get(f"/api/runs/{r.rid}/card.jpg").status_code == 200
+    assert "Jane Doe, CC BY via iNaturalist" in drawn
+    assert "Jane Doe, CC0 via iNaturalist" in drawn
+    assert not any("NC" in str(t) or "SA" in str(t) for t in drawn)
+
+
+def test_a_credit_sits_at_the_top_right_of_the_card():
+    h = linkcards.Headline("settled", "species", "A x", 0.9)
+    pale = [photo((235, 235, 235), (1200, 630))]
+    plain = Image.open(io.BytesIO(linkcards.run_card_jpeg(pale, h))).convert("RGB")
+    credited = Image.open(io.BytesIO(linkcards.run_card_jpeg(
+        pale, h, credits=["Jane Doe, CC BY via iNaturalist"] * 2))).convert("RGB")
+    assert min(plain.getpixel((1100, 31))) > 200
+    assert max(credited.getpixel((1100, 31))) < 120
+    # The same credit twice is printed once: nothing below the first pill.
+    assert min(credited.getpixel((1100, 80))) > 200
+    # A credit too long for the room is cut short, never drawn over the badge.
+    long_one = Image.open(io.BytesIO(linkcards.run_card_jpeg(
+        pale, h, credits=["A" * 300 + ", CC BY via iNaturalist"]))).convert("RGB")
+    assert long_one.getpixel((300, 47)) == plain.getpixel((300, 47))
+
+
+def test_only_cc0_cc_by_and_public_domain_get_a_credit_and_cc_by_needs_a_name():
+    assert linkcards.credit("inat", "cc-by", "Jane  Doe") == "Jane Doe, CC BY via iNaturalist"
+    assert linkcards.credit("inat", "cc0", None) == "CC0 via iNaturalist"
+    assert linkcards.credit("mo", "cc-by", "Ann") == "Ann, CC BY via Mushroom Observer"
+    assert linkcards.credit("mo", "pd", "Ann") == "Ann, public domain via Mushroom Observer"
+    for licence in ("cc-by-nc", "cc-by-sa", "cc-by-nd", "cc-by-nc-sa", "cc-by-nc-nd", "", None):
+        assert linkcards.credit("inat", licence, "Jane Doe") is None, licence
+    assert linkcards.credit("inat", "cc-by", "  ") is None
+    assert linkcards.credit("elsewhere", "cc0", "Jane Doe") is None
+    # A run kept before licences were, or an upload run, has none for its card.
+    assert linkcards.card_photos({"kind": "observation", "observation": {
+        "source": "inat", "photos_shown": ["https://x/1.jpg"]}}) == []
+    assert linkcards.card_photos({"kind": "photos", "photos": 2}) == []
+
+
+def test_an_observation_runs_card_is_made_when_the_run_is_kept_never_while_a_crawler_waits(
+        conn, tmp_path):
+    """Facebook's scraper gives up after a few seconds, and MO's pace alone is 5 s a photo:
+    the card is made on the card worker when the run is kept. Until it is kept, the tags
+    name the site image (so no crawler keeps a stand-in under the card's address) and the
+    card's address answers with the site image, reading nothing."""
+    r = observation_run(conn, tmp_path, make_card=False)
+    assert len(r.jobs) == 1                                  # queued when the run was kept
+    anyone = visitor(r.app)
+    assert card_of(anyone.get(f"/r/{r.rid}").text)["og:image"] == site_image(tmp_path)
+    early = anyone.get(f"/api/runs/{r.rid}/card.jpg")
+    assert early.status_code == 200
+    assert early.content == (tmp_path / "dist" / "og-card.jpg").read_bytes()
+    assert photo_reads(r.source)[r.identified:] == []        # nothing read on a request
+    assert len(r.jobs) == 1                                  # and no second job for it
+    assert not card_file(r).exists()
+    r.jobs.run()
+    assert photo_reads(r.source)[r.identified:] == [large(9101), large(9104)]
+    assert card_of(anyone.get(f"/r/{r.rid}").text)["og:image"] == \
+        f"{HERE}/api/runs/{r.rid}/card.jpg"
+    made = anyone.get(f"/api/runs/{r.rid}/card.jpg").content
+    assert made == card_file(r).read_bytes() != early.content
+
+
+def test_an_observation_runs_photos_are_read_from_the_source_once_and_kept_beside_it(
+        conn, tmp_path):
+    r = observation_run(conn, tmp_path)
+    anyone = visitor(r.app)
+    first = anyone.get(f"/api/runs/{r.rid}/card.jpg").content
+    for _ in range(3):
+        assert anyone.get(f"/api/runs/{r.rid}/card.jpg").content == first
+    assert anyone.head(f"/api/runs/{r.rid}/card.jpg").status_code == 200
+    anyone.get(f"/r/{r.rid}")
+    # Opening the observation again on the site: the same run, nothing made again.
+    again = person(r.app, "user-2").post("/api/identify/observation",
+                                         json={"source": "inat", "id": 600}).json()
+    assert again["run"]["id"] == r.rid
+    r.jobs.run()
+    assert len(photo_reads(r.source)) - r.identified == 2
+    assert card_file(r).read_bytes() == first
+    # At the photo host's pace, like every observation read.
+    t = [at for at, url in r.source.log if url in (large(9101), large(9104))][-2:]
+    assert t[1] - t[0] >= bo.INTERVALS[bo.STATIC_HOST]
+
+
+def test_a_card_kept_beside_the_run_is_served_without_reading_the_source(conn, tmp_path):
+    """After a restart, or made on another server: the bucket's card, not the source."""
+    r = observation_run(conn, tmp_path, make_card=False)
+    kept = photo((1, 2, 3), (1200, 630))
+    assert r.store.keep_card(r.rid, kept)
+    assert card_of(visitor(r.app).get(f"/r/{r.rid}").text)["og:image"] == \
+        f"{HERE}/api/runs/{r.rid}/card.jpg"
+    assert visitor(r.app).get(f"/api/runs/{r.rid}/card.jpg").content == kept
+    r.jobs.run()                                     # the job queued at keep finds it made
+    assert photo_reads(r.source)[r.identified:] == []
+
+
+def test_a_deleted_observation_runs_card_is_gone_with_it(conn, tmp_path):
+    r = observation_run(conn, tmp_path)
+    anyone = visitor(r.app)
+    assert anyone.get(f"/api/runs/{r.rid}/card.jpg").status_code == 200
+    assert card_file(r).is_file()
+    assert r.owner.delete(f"/api/runs/{r.rid}").status_code == 204
+    assert anyone.get(f"/api/runs/{r.rid}/card.jpg").status_code == 404
+    assert not card_file(r).exists()
+    page = anyone.get(f"/r/{r.rid}")
+    assert page.status_code == 404 and card_of(page.text)["og:image"] == site_image(tmp_path)
+
+
+def test_a_run_deleted_before_its_card_is_made_never_gets_one(conn, tmp_path):
+    r = observation_run(conn, tmp_path, make_card=False)
+    assert r.owner.delete(f"/api/runs/{r.rid}").status_code == 204
+    r.jobs.run()
+    assert photo_reads(r.source)[r.identified:] == [] and not card_file(r).exists()
+    assert visitor(r.app).get(f"/api/runs/{r.rid}/card.jpg").status_code == 404
+
+
+def test_an_observation_runs_tags_carry_no_place_observation_owner_or_photographer(
+        conn, tmp_path):
+    r = observation_run(conn, tmp_path)
+    page = visitor(r.app).get(f"/r/{r.rid}", headers={"user-agent": CRAWLERS[0]})
+    block = re.search(r"<!-- link preview -->.*?(?=</head>)", page.text, re.S).group(0)
+    assert card_of(page.text)["og:image"] == f"{HERE}/api/runs/{r.rid}/card.jpg"
+    for secret in ("600", "inaturalist", "static.", "jane doe", "jdoe", "user-1", "mycena fan",
+                   "40.1", "-83.0", "82.9", "2026-10-11",
+                   r.store.get(r.rid)["answered_at"][:10]):
+        assert secret not in block.lower(), secret
+
+
+def test_when_the_source_gives_no_photo_the_card_is_the_site_image_and_nothing_is_kept(
+        conn, tmp_path):
+    r = observation_run(conn, tmp_path, make_card=False)
+    for pid in (9101, 9104):
+        r.source.fail[large(pid)] = Response(503)
+    r.jobs.run()
+    assert len(photo_reads(r.source)) - r.identified == 2
+    assert not card_file(r).exists()
+    anyone = visitor(r.app)
+    assert card_of(anyone.get(f"/r/{r.rid}").text)["og:image"] == site_image(tmp_path)
+    res = anyone.get(f"/api/runs/{r.rid}/card.jpg")
+    assert res.status_code == 200
+    assert res.content == (tmp_path / "dist" / "og-card.jpg").read_bytes()
+    # Not asked again at once: a crawler's retries cost the source nothing.
+    r.jobs.run()
+    anyone.get(f"/api/runs/{r.rid}/card.jpg")
+    r.jobs.run()
+    assert len(photo_reads(r.source)) - r.identified == 2
+
+
+def test_the_api_answer_has_no_credits_but_the_sites_kept_copy_does(conn, tmp_path):
+    """identify-by-observation (docs/api.md section 3.2) keeps its shape; the site's copy of
+    the answer, which a run is made from, carries the credits."""
+    source = licensed_source()
+    source.session.inat[601] = {**source.session.inat[600], "id": 601}
+    app, store, _ = site(conn, tmp_path, by_observation=True, web_dist=dist(tmp_path),
+                         observation_fetcher=source)
+    want = ["cc-by", "cc-by-nc", None, "cc0", "cc-by-sa"]
+    # Asked through the API first: its answer has none, the site's copy has them.
+    api = visitor(app).post("/api/v1/identify/inat/600", headers=SERVER)
+    assert api.status_code == 200, api.text
+    assert "photos_credit" not in api.json()["observation"]
+    res = person(app, "user-1").post("/api/identify/observation",
+                                     json={"source": "inat", "id": 600})
+    assert res.json()["cached"] is True
+    credits = store.get(res.json()["run"]["id"])["observation"]["photos_credit"]
+    assert [c and c["licence"] for c in credits] == want
+    # Run on the site first, then served through the API from the site's copy: none.
+    res = person(app, "user-1").post("/api/identify/observation",
+                                     json={"source": "inat", "id": 601})
+    assert [c and c["licence"] for c in res.json()["observation"]["photos_credit"]] == want
+    again = visitor(app).post("/api/v1/identify/inat/601", headers=SERVER).json()
+    assert again["kept_from"] == "site" and "photos_credit" not in again["observation"]
+
+
+# --- reading the photographer and licence from iNat and MO ------------------------------------
+
+def test_an_inat_photo_is_credited_to_its_observer_by_name_else_login():
+    f = licensed_source()
+    obs = bo.parse_inat(f.session.inat[600])
+    assert obs.photo_credits == [PHOTOGRAPHER] * 5
+    assert bo.shown_photo_credit(obs, 0) == {"licence": "cc-by", "by": PHOTOGRAPHER}
+    assert bo.shown_photo_credit(obs, 2) is None                 # all rights reserved
+    raw = {**f.session.inat[600], "user": {"login": "jdoe", "name": ""}}
+    assert bo.parse_inat(raw).photo_credits[0] == "jdoe"
+    assert "user:(login:!t,name:!t)" in bo.INAT_FIELDS
+
+
+def test_an_mo_photo_is_credited_to_its_copyright_holder_and_its_licence_read_by_name():
+    raw = {"id": 777, "date": "2026-10-11", "consensus": {"name": "B y", "rank": "species"},
+           "owner": {"login_name": "obsowner", "legal_name": "Obs Owner"},
+           "primary_image": {"id": 5001, "original_url": MO_PHOTO.format(id=5001, size="orig"),
+                             "license": "Creative Commons Attribution v4.0 (Wikipedia compatible)",
+                             "copyright_holder": "Ann Smith"},
+           "images": [{"id": 5002, "original_url": MO_PHOTO.format(id=5002, size="orig"),
+                       "license": "Public Domain"}]}
+    obs = bo.parse_mo(raw)
+    assert obs.photo_credits == ["Ann Smith", "Obs Owner"]
+    assert bo.shown_photo_credit(obs, 0) == {"licence": "cc-by", "by": "Ann Smith"}
+    assert bo.shown_photo_credit(obs, 1) == {"licence": "pd", "by": "Obs Owner"}
+    assert bo.licence_code("mo", "Creative Commons Non-commercial v3.0") == "cc-by-nc-sa"
+
+
+def test_a_kept_runs_photos_are_read_only_from_the_sources_own_photo_hosts():
+    f = fetcher()
+    pairs = f.photos_at("inat", ["https://elsewhere.example/photos/9001/large.jpg",
+                                 "http://static.inaturalist.org/photos/9001/large.jpg",
+                                 MO_PHOTO.format(id=5001, size="960"), large(9001)])
+    assert [i for i, _ in pairs] == [3]
+    assert f.session.urls() == [large(9001)]
