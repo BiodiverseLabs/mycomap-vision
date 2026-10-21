@@ -213,6 +213,10 @@ create table if not exists reveals (
 create index if not exists reveals_item on reveals (item_id, by_user);
 """
 
+# Queues whose items are flags on one photo: a later seed adds its flag to an open item
+# (Store.seed) instead of leaving it out. The photo review reads every flag of an item.
+FLAG_MERGE_TYPES = {"non_specimen_photo"}
+
 SCHEMA = """
 create table if not exists items (
   id integer primary key, item_type text not null, subject text not null,
@@ -323,13 +327,16 @@ class Store:
         """Add queue items (dicts with item_type, subject, rule and optionally granularity,
         model_flagged, blind, record_keys, links, current, proposed, evidence, projects,
         records). An item already queued (same type and subject) is left as it is, decisions
-        and all. Refuses an unknown item type.
+        and all, with one exception: in a queue of FLAG_MERGE_TYPES an OPEN item gains the row's
+        rule as another flag ("rule; new rule"), so a photo already queued for one kind of flag
+        also shows in the new flag's tab ("flags_added"). A decided item never changes and is
+        never reopened ("already_decided"). Refuses an unknown item type.
 
         With a seal gate (SealGate), a row whose record was first green after the seal (the
         paper's sealed v1-test), or whose date the box cannot tell, is not added: the result
         counts them ("refused_sealed", "refused_unknown") and names their records."""
         now = time.time()
-        added = 0
+        added = flags_added = already_decided = 0
         refused = {"sealed": [], "unknown": []}
         with self._lock, self.conn:
             for r in rows:
@@ -351,9 +358,21 @@ class Store:
                      r.get("current"), r.get("proposed"), json.dumps(r.get("evidence") or {}),
                      json.dumps(r.get("projects") or []), int(r.get("records") or 1), name, now))
                 added += cur.rowcount
+                if cur.rowcount or t.code not in FLAG_MERGE_TYPES:
+                    continue
+                old = self.conn.execute("select id, rule, status from items where item_type = ? "
+                                        "and subject = ?", (t.code, r["subject"])).fetchone()
+                if old["status"] != "open":
+                    already_decided += 1
+                elif r["rule"] not in [x.strip() for x in old["rule"].split(";")]:
+                    self.conn.execute("update items set rule = ? where id = ?",
+                                      (f"{old['rule']}; {r['rule']}", old["id"]))
+                    flags_added += 1
             self.conn.execute("insert or replace into seeds values (?,?,?,?,?)",
                               (name, file_sha256, len(rows), added, now))
         out = {"seed": name, "rows": len(rows), "added": added}
+        if any(TYPES.get(r["item_type"]) and r["item_type"] in FLAG_MERGE_TYPES for r in rows):
+            out.update(flags_added=flags_added, already_decided=already_decided)
         if self.gate is not None:
             out.update(refused_sealed=len(refused["sealed"]),
                        refused_unknown=len(refused["unknown"]),

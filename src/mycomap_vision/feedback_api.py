@@ -191,7 +191,9 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         return tuple(store.conn.execute(
             "select (select count(*) from items), (select max(id) from items), "
             "(select max(id) from decisions), (select count(*) from decisions), "
-            "(select coalesce(sum(case when status = 'open' then 1 else 0 end), 0) from items)"
+            "(select coalesce(sum(case when status = 'open' then 1 else 0 end), 0) from items), "
+            # a seed may change open items' rules (another flag) without adding a row
+            "(select max(at) from seeds)"
         ).fetchone())
 
     def projkey(projects):

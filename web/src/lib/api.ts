@@ -617,7 +617,8 @@ export interface FeedbackDecisionBody {
 
 // --- The photo review: the "Photos that show no specimen" queue, a record at a time ---------
 
-export type PhotoReviewTab = "micrograph" | "slip" | "habitat" | "people" | "gate" | "other" | "all";
+export type PhotoReviewTab = "micrograph" | "slip" | "habitat" | "people" | "gate" | "uv" | "tree" | "drawing"
+  | "other" | "all";
 export type PhotoReviewSort = "p" | "p_asc" | "flagged";
 
 /** Why a rule flagged a photo: its tab, the probe or view, its p, and how strongly it counts. */

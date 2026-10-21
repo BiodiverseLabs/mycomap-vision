@@ -33,6 +33,9 @@ export const SUMMARY_TABS: { code: Exclude<PhotoReviewTab, "all">; title: string
   { code: "habitat", title: "Habitat and scenes" },
   { code: "people", title: "People" },
   { code: "gate", title: "Not a fungus (gate)" },
+  { code: "uv", title: "UV reactions" },
+  { code: "tree", title: "Phylogenetic trees and BLAST" },
+  { code: "drawing", title: "Drawings" },
   { code: "other", title: "Other" },
 ];
 
