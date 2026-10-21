@@ -223,3 +223,18 @@ def test_twin_location_conflicts_seed_without_coordinates_and_decide_on_org(tmp_
     d = s.decide(far["id"], "fix_inat_location", ANN)
     assert d["decisions"][-1]["applies"] == "org"
     assert [c["subject"] for c in s.changes(applies="org")] == ["mo:324331 + 172307494"]
+
+
+def test_one_find_two_places_asks_duplicate_use_inat_or_mo_or_not_duplicate():
+    """Steve, 2026-10-21: "Duplicate observation" with "Use iNat" / "Use MO" under it, and
+    "Not duplicate - leave both". Using a copy's place means fixing the other copy, so "Use
+    iNat" is the MO fix and "Use MO" the iNat fix; the codes stay as they were."""
+    t = next(t for t in fb.type_catalogue() if t["type"] == "twin_location_conflict")
+    by_short = {o["short"]: o for o in t["options"]}
+    assert list(by_short) == ["Use iNat", "Use MO", "Leave both"]
+    assert by_short["Use iNat"]["code"] == "fix_mo_location"
+    assert by_short["Use MO"]["code"] == "fix_inat_location"
+    assert by_short["Leave both"]["code"] == "both_right"
+    assert [o["group"] for o in t["options"]] == ["Duplicate observation"] * 2 + ["Not duplicate"]
+    assert by_short["Use iNat"]["label"].startswith("Duplicate observation")   # history reads whole
+    assert "both records' photos" in t["shows"]

@@ -59,7 +59,7 @@ class FakeOrg:
                                "results_url": f"{ORG}/blast-results/{key}/78", "saved_at": None}}]}
 
 
-def make_site(conn, tmp_path):
+def make_site(conn, tmp_path, places=None):
     store = seed_two_species(conn, tmp_path)
     root = tmp_path / "emb"
     embed_photos(conn, store, Const("m1"), photos_to_embed(conn, "m1", "large", store.location,
@@ -77,7 +77,7 @@ def make_site(conn, tmp_path):
                           secret=SECRET)
     app = create_app(tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
                      limits=open_limits(), signin=signin, feedback_store=fstore,
-                     feedback_org=org)
+                     feedback_org=org, feedback_places=places)
     return TestClient(app, follow_redirects=False), fstore, org
 
 
@@ -226,3 +226,58 @@ def test_blind_items_look_like_the_others_and_label_checks_hide_visions_answer(s
                   json={"decision": "hard_example"}).json()
     assert done["masked"] is False and "blind" not in done
     assert "check" not in done["rule"]                          # revealed after deciding
+
+
+def test_a_record_pair_shows_both_copies_photos_and_other_items_none(conn, tmp_path, monkeypatch):
+    """One find, two places (Steve, 2026-10-21): the item carries each copy's photos, so a
+    reviewer sees at once whether the two records are one find. A copy Vision holds no photos
+    of gets an empty list; a single-record item gets no photos here."""
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")   # mo:999 has no date; the seal: test_feedback_seal
+    c, fstore, _ = make_site(conn, tmp_path)
+    fstore.seed([{"item_type": "twin_location_conflict", "subject": "mo:999 + 101",
+                  "granularity": "record pair", "rule": "twins", "record_keys": ["mo:999", "101"],
+                  "records": 2, "projects": ["p1"]}], "twins")
+    as_user(c, "leader-1")
+    got = c.get(f"/api/feedback/items/{item_id(fstore, 'twin_location_conflict')}").json()
+    assert got["photos"]["mo:999"] == []
+    [ph] = got["photos"]["101"]
+    assert ph["photo_key"] == "inat:1001" and ph["shown"] == "public"
+    assert ph["thumb"].startswith("https://")
+    single = c.get(f"/api/feedback/items/{item_id(fstore, 'photos_unlike_label')}").json()
+    assert "photos" not in single
+
+
+def test_a_record_pair_lists_each_copys_place_as_its_site_does_and_no_coordinate(conn, tmp_path,
+                                                                                monkeypatch):
+    """Beside the photos, where MO and iNat each say the find is (Steve, 2026-10-21): the
+    place text only. Asked apart from the item; a single-record item gets none; a reviewer
+    who cannot open the item gets nothing."""
+    from mycomap_vision.pair_places import PairPlaces
+    asked = []
+
+    def get(url, params):
+        asked.append(params["id"])
+        if "mushroomobserver" in url:
+            return {"results": [{"id": 999, "latitude": 47.6, "longitude": -122.3,
+                                 "location": {"name": "Seattle, King Co., Washington, USA",
+                                              "latitude_north": 47.7}}]}
+        return {"results": [{"id": 101, "place_guess": "Hobart, Tasmania, Australia",
+                             "location": "-42.9,147.3"}]}
+
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    c, fstore, _ = make_site(conn, tmp_path, places=PairPlaces(get=get, mo_interval=0, inat_interval=0))
+    fstore.seed([{"item_type": "twin_location_conflict", "subject": "mo:999 + 101",
+                  "granularity": "record pair", "rule": "twins", "record_keys": ["mo:999", "101"],
+                  "records": 2, "projects": ["p1"]}], "twins")
+    pair = item_id(fstore, "twin_location_conflict")
+    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 401
+    as_user(c, "member-1")                                     # p2 only
+    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 404
+    assert asked == []
+    as_user(c, "leader-1")
+    got = c.get(f"/api/feedback/items/{pair}/places").json()["places"]
+    assert got == {"mo:999": {"site": "MO", "text": "Seattle, King Co., Washington, USA", "status": "ok"},
+                   "101": {"site": "iNat", "text": "Hobart, Tasmania, Australia", "status": "ok"}}
+    single = item_id(fstore, "photos_unlike_label")
+    assert c.get(f"/api/feedback/items/{single}/places").json() == {"places": {}}
+    assert asked == ["999", "101"]
