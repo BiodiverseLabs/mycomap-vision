@@ -29,9 +29,13 @@ def draw(photo: Path, credit: str, logo: Path, focus=(0.5, 0.5)) -> Image.Image:
     with Image.open(photo) as img:
         card = ImageOps.fit(ImageOps.exif_transpose(img).convert("RGB"), CARD_SIZE,
                             Image.LANCZOS, centering=focus).convert("RGBA")
-    # Dark on the left, where the words are, clearing to the right.
-    fade = Image.linear_gradient("L").rotate(90, expand=True).resize((W, H))
-    fade = fade.point(lambda v: int(40 + 175 * (v / 255) ** 1.6))
+    # Dark only behind the words on the left, clear from just past the middle, so the right
+    # half shows the photo as it is (Steve, 2026-10-20: "have it not go as dark black to the
+    # right").
+    reach = int(W * 0.66)
+    column = Image.new("L", (W, 1))
+    column.putdata([int(205 * max(0.0, 1 - x / reach) ** 1.25) for x in range(W)])
+    fade = column.resize((W, H))
     shade = Image.new("RGBA", CARD_SIZE, (8, 10, 6, 255))
     shade.putalpha(fade)
     card.alpha_composite(shade)
