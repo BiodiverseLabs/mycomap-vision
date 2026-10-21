@@ -111,6 +111,12 @@ def check_config(doc: dict) -> None:
                 raise ValueError(f"comparator {c['id']}: {c['method']} scores by reference "
                                  "record, so the config pins its cross-post twin groups "
                                  "(a top-level \"twins\" block)")
+        if c.get("reference") not in REFERENCES:
+            raise ValueError(f"comparator {c['id']}: reference is one of "
+                             f"{[r for r in REFERENCES if r]} (or none: every included photo), "
+                             f"not {c.get('reference')!r}")
+        if c.get("reference") and c["kind"] != "vision":
+            raise ValueError(f"comparator {c['id']}: a reference is for a Vision comparator")
         if c.get("place_setting"):
             if "place" not in str(c.get("method", "")):
                 raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "
@@ -484,6 +490,40 @@ def place_setting_used(name: str | None):
             os.environ.pop(env, None)
         else:
             os.environ[env] = before
+
+
+# A Vision comparator's reference: every included photo (none given) or the photos the
+# public model may learn from (O1: the headline public model with the openly licensed
+# reference). Its finds' depth and "observer new" are counted in that reference.
+REFERENCES = (None, "public_trainable_only")
+
+
+def reference_rows(base, ref_splits, reference: str | None) -> list[dict]:
+    """The reference records as release rows: every included record of `ref_splits`, or
+    with "public_trainable_only" those with at least one public-trainable included photo
+    (as Release.as_records keeps them)."""
+    rows = [dict(r) for r in base.records(ref_splits)]
+    if reference != "public_trainable_only":
+        return rows
+    keep = {str(k) for (k,) in base.db.execute(
+        "select distinct record_key from photos where included = 1 and public_trainable = 1")}
+    return [r for r in rows if str(r["record_key"]) in keep]
+
+
+def finds_in_reference(finds: list, scored_rows: list[dict], ref_rows: list[dict]) -> list:
+    """The same finds with depth (ReferenceDepth, answer-key units) and "observer_new"
+    counted in another reference (`ref_rows`); every other attribute as it was."""
+    from dataclasses import replace
+
+    from . import val_review as vr
+    from .name_equiv import ReferenceDepth
+    depth = ReferenceDepth(r["species"] for r in ref_rows if r.get("species"))
+    new = vr.unseen_observer([r.get("observer_login") for r in scored_rows],
+                             [r.get("observer_login") for r in ref_rows])
+    new_of = {str(r["record_key"]): bool(n) for r, n in zip(scored_rows, new.tolist())}
+    return [replace(f, depth=depth(f.species),
+                    attrs={**f.attrs, "observer_new": "new" if new_of.get(f.key) else "known"})
+            for f in finds]
 
 
 def check_place_pins(doc: dict) -> None:
@@ -1121,6 +1161,14 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             f.attrs["truth_genus_known"] = ("(no genus)" if not f.genus else
                                             "yes" if genus_known(taxonomy, f.genus, f.species)
                                             else "no")
+    # O1: a comparator with its own reference (the public model's openly licensed one) has
+    # its finds' depth and "observer new" counted there; every other comparator shares
+    # `finds`. The pairing of tests is by find key either way.
+    refs_used = sorted({c["reference"] for c in config["comparators"] if c.get("reference")})
+    ref_rows_of = {r: reference_rows(base, ref_splits, r) for r in refs_used}
+    finds_by_ref = {r: finds_in_reference(finds, scored_rows, ref_rows_of[r]) for r in refs_used}
+    finds_of = {c["id"]: finds_by_ref[c["reference"]] for c in config["comparators"]
+                if c.get("reference")}
     for comp in config["comparators"]:
         answers = None
         if comp["kind"] == "vision":
@@ -1215,9 +1263,18 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     # two denominators: (b, leading) every species name in the base release's records,
     # included or not; (a) the species in the reference this run scores against.
     recover_units, recover_cite, in_scope_primary = None, None, None
+    recover_units_of: dict = {}
     if config.get("recoverability"):
         recover_units, recover_cite = recoverability_units(base, ref_rows,
                                                            config["answer_key"])
+        # a comparator with its own reference: its species seen, and the release's names'
+        # depth, counted there
+        by_ref = {r: recoverability_units(base, ref_rows_of[r], config["answer_key"])
+                  for r in refs_used}
+        recover_units_of = {cid: by_ref[c["reference"]][0] for c in config["comparators"]
+                            for cid in [c["id"]] if c.get("reference")}
+        recover_cite = {"full reference": recover_cite,
+                        **{r: by_ref[r][1] for r in refs_used}} if refs_used else recover_cite
         in_scope_primary = pt.in_scope(finds, "primary", "all")
     gate_report = None
     if config.get("gate"):
@@ -1269,21 +1326,29 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "bootstrap": {"reps": reps, "seed": seed, "clusters": "observer"},
         "inputs": inputs,
         "finds": {"scored": len(finds), "by_name_kind": dict(Counter(f.name_kind for f in finds))},
-        "standard": pt.all_standard(finds, outcomes, reps, seed, **per_species_kw),
+        "standard": pt.all_standard(finds, outcomes, reps, seed, finds_of=finds_of,
+                                    **per_species_kw),
+        "references": {r: {"records": len(ref_rows_of[r]),
+                           "comparators": [c for c, fs in finds_of.items()
+                                           if fs is finds_by_ref[r]]} for r in refs_used},
         # The same tables on named subsets of the finds (config "subsets": {name: {attr:
         # value}}), e.g. val excluding the former held-out benchmark, the half that decides.
         "subsets": {name: {"filter": flt, **pt.all_standard(
             [f for f in finds if all(str(f.attrs.get(k)) == str(v) for k, v in flt.items())],
-            outcomes, reps, seed, **per_species_kw)}
+            outcomes, reps, seed, finds_of={
+                cid: [f for f in fs if all(str(f.attrs.get(k)) == str(v)
+                                           for k, v in flt.items())]
+                for cid, fs in finds_of.items()}, **per_species_kw)}
             for name, flt in (config.get("subsets") or {}).items()},
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
+                                  finds_of=finds_of, alpha=
                                   float(config.get("alpha", 0.05))),
         "per_photo": per_photo,
         # PLAN C4 (19 Oct): species recoverability, descriptive and model-based.
-        "recoverability": ({cid: pt.recoverability(in_scope_primary, o, recover_units, reps,
-                                                    seed)
-                            for cid, o in outcomes.items() if o}
-                           if config.get("recoverability") else None),
+        "recoverability": ({cid: pt.recoverability(
+            pt.in_scope(finds_of.get(cid, finds), "primary", "all"), o,
+            recover_units_of.get(cid, recover_units), reps, seed)
+            for cid, o in outcomes.items() if o} if config.get("recoverability") else None),
         "recoverability_units": recover_cite,
         "gate": gate_report,
         "calibration": calibration_report(finds, calib, outcomes,
@@ -1305,7 +1370,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                             config.get("slices", {}).get("cells", ["species_strict@1",
                                                                    "genus_strict@1"]),
                             config.get("slices", {}).get("comparators", list(outcomes)),
-                            reps, seed, int(config.get("slices", {}).get("min_finds", 30))),
+                            reps, seed, int(config.get("slices", {}).get("min_finds", 30)),
+                            finds_of=finds_of),
     }
     (out / "report.json").write_text(json.dumps(report, indent=1, default=str), encoding="utf-8")
     (out / "report.md").write_text(format_report(report, config), encoding="utf-8")
@@ -1505,7 +1571,9 @@ def format_report(report: dict, config: dict) -> str:
                   "block:", ""] + [f"- {d}" for d in diff[:40]] + [""]
     lines += ["## Hypotheses", ""]
     for fam, hyps in report["hypotheses"].items():
-        lines += [f"### Family {fam} (Holm within the family)", "",
+        lines += [f"### Family {fam} (" + ("outside Holm: disclosed, no decision"
+                                           if fam in pt.OUTSIDE_HOLM else
+                                           "Holm within the family") + ")", "",
                   "| | n | difference / slope | p | p (Holm) | reject |", "|---|---|---|---|---|---|"]
         for hid, h in hyps.items():
             if "not_tested" in h:
@@ -1520,8 +1588,9 @@ def format_report(report: dict, config: dict) -> str:
                 n = h["superiority"]["n"]
             else:
                 eff, n = f"{pts(h['difference'])} pts", h["n"]
-            lines.append(f"| {hid} | {n:,} | {eff} | {h['p_test']:.4g} | {h['p_holm']:.4g} | "
-                         f"{'yes' if h['reject'] else 'no'} |")
+            holm = "-" if h.get("p_holm") is None else f"{h['p_holm']:.4g}"
+            decision = "-" if h.get("reject") is None else ("yes" if h["reject"] else "no")
+            lines.append(f"| {hid} | {n:,} | {eff} | {h['p_test']:.4g} | {holm} | {decision} |")
         lines.append("")
     return "\n".join(lines) + "\n"
 

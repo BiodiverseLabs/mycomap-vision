@@ -510,6 +510,56 @@ def test_the_cc_reference_row_uses_only_photos_a_public_model_may_learn_from(wor
     assert cc == want and cc < full                 # the fixture's ARR photos leave
 
 
+
+def test_a_public_reference_counts_its_own_depth_and_new_observers(world):
+    """O1: the headline public model scores against the openly licensed reference, so its
+    finds' depth counts only the records there (fixture: 1 and 3 have all-rights-reserved
+    photos only, so A x keeps 2 and mo:9, B y keeps 4)."""
+    base = world["base"]
+    rows = paper_score.reference_rows(base, ("train",), "public_trainable_only")
+    assert sorted(str(r["record_key"]) for r in rows) == ["2", "4", "mo:9"]
+    assert len(paper_score.reference_rows(base, ("train",), None)) == 5
+    finds = [po.Find("5", "x", "A x", "A", "F", "formal", 3, 1, {"observer_new": "known"}),
+             po.Find("6", "y", "B y", "B", "F", "formal", 2, 1, {"observer_new": "known"})]
+    scored = [{"record_key": "5", "observer_login": "alice"},
+              {"record_key": "6", "observer_login": "zed"}]
+    own = paper_score.finds_in_reference(finds, scored, rows)
+    assert [f.depth for f in own] == [2, 1] and [f.depth for f in finds] == [3, 2]
+    assert own[1].attrs["observer_new"] == "new" and finds[1].attrs["observer_new"] == "known"
+
+
+def test_a_comparators_own_reference_reaches_its_tables_and_is_reported(world, tmp_path):
+    cfg = config(tmp_path, ["5", "6"], recoverability={"role": "C4"})
+    cfg["comparators"].append({"id": "public-photos", "kind": "vision", "backbone": "m1",
+                               "method": "nearest", "reference": "public_trainable_only"})
+    cfg["hypotheses"]["side"] = [{"id": "internal-public", "kind": "mcnemar",
+                                  "a": "vision-photos", "b": "public-photos",
+                                  "cell": "species_strict@1", "alternative": "two-sided"}]
+    rep = run(world, tmp_path, "val", cfg)
+    assert rep["references"] == {"public_trainable_only": {"records": 3,
+                                                           "comparators": ["public-photos"]}}
+    from mycomap_vision import paper_tables as pt
+    seen = rep["recoverability"]["public-photos"]["denominators"][pt.SEEN]
+    assert seen["species_by_band"]["1-4"] == 2
+    assert rep["recoverability_units"]["public_trainable_only"][pt.SEEN]["species"] == 2
+    side = rep["hypotheses"]["side"]["internal-public"]
+    assert side["outside_holm"] and side["p_holm"] is None and side["reject"] is None
+    assert rep["hypotheses"]["A"]["H1a"]["p_holm"] is not None          # others unchanged
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "### Family side (outside Holm: disclosed, no decision)" in md
+
+
+def test_a_reference_other_than_the_two_known_or_on_another_kind_is_refused():
+    base = {"format": 1, "answer_key": KEY}
+    with pytest.raises(ValueError, match="reference is one of"):
+        paper_score.check_config({**base, "comparators": [
+            {"id": "v", "kind": "vision", "backbone": "m1", "method": "nearest",
+             "reference": "cc_only"}]})
+    with pytest.raises(ValueError, match="for a Vision comparator"):
+        paper_score.check_config({**base, "comparators": [
+            {"id": "i", "kind": "inat", "file": "x", "reference": "public_trainable_only"}]})
+
+
 def test_the_attrs_file_is_pinned_by_the_config(world, tmp_path):
     attrs = tmp_path / "attrs.tsv"
     attrs.write_text("record_key\tdistance_band\n5\t<100\n6\t>1500\n", encoding="utf-8")

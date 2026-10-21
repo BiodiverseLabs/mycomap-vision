@@ -223,12 +223,16 @@ def standard(finds: list[Find], outcome: dict, reps: int, seed: int, ci_cells=No
 
 
 def all_standard(finds: list[Find], outcomes: dict[str, dict], reps: int, seed: int,
-                 per_species_rows: dict | None = None, species_key=None) -> dict:
-    """Every comparator's table, both denominators, both scopes; the near-duplicate count."""
+                 per_species_rows: dict | None = None, species_key=None,
+                 finds_of: dict[str, list[Find]] | None = None) -> dict:
+    """Every comparator's table, both denominators, both scopes; the near-duplicate count.
+    `finds_of`: a comparator's own finds (the same finds, depth counted in its reference),
+    when its reference is not the full one."""
     out = {"near_duplicates": near_duplicate_counts(finds), "comparators": {}}
     for cid, outcome in outcomes.items():
+        fs = (finds_of or {}).get(cid, finds)
         out["comparators"][cid] = {
-            scope: {den: standard(in_scope(finds, scope, den), outcome, reps, seed,
+            scope: {den: standard(in_scope(fs, scope, den), outcome, reps, seed,
                                   per_species_rows=per_species_rows, species_key=species_key)
                     for den in DENOMINATORS} for scope in SCOPES}
     return out
@@ -355,28 +359,46 @@ def _pairs(finds, a, b, cell):
     return np.array(xa), np.array(xb), who
 
 
+OUTSIDE_HOLM = ("side",)        # disclosed side comparisons, e.g. internal - public (O1)
+
+
+def finds_for(spec: dict, finds: list[Find], finds_of: dict | None) -> list[Find]:
+    """The finds a hypothesis is tested on: those of its comparator (gee_depth) or of its
+    "a" side (paired), so depth and reference attributes are counted in that comparator's
+    reference; the pairing is by find key either way."""
+    cid = spec.get("comparator") or spec.get("a")
+    return (finds_of or {}).get(cid, finds)
+
+
 def families(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int,
-             seed: int, alpha: float = 0.05) -> dict:
+             seed: int, alpha: float = 0.05, finds_of: dict | None = None) -> dict:
     """Every family's hypotheses tested and Holm-adjusted within the family. A hypothesis
     whose comparator has no outcomes (its input not given) is reported, not tested, and
-    leaves the family's Holm denominator unchanged (its p counts as 1)."""
+    leaves the family's Holm denominator unchanged (its p counts as 1). A family in
+    OUTSIDE_HOLM ("side") is tested and reported unadjusted, with no reject decision."""
     out = {}
     for fam, hyps in spec.items():
         results, pvals = {}, {}
         for h in hyps:
+            fs = finds_for(h, finds, finds_of)
             needed = [h[k] for k in ("a", "b", "comparator") if k in h] + h.get("has", [])
             missing = [c for c in needed if not outcomes.get(c)]
             if missing:
                 results[h["id"]] = {"not_tested": f"no outcomes for {missing}", "spec": h}
                 pvals[h["id"]] = 1.0
                 continue
-            results[h["id"]] = {**test_one(h, finds, outcomes, reps, seed), "spec": h}
+            results[h["id"]] = {**test_one(h, fs, outcomes, reps, seed), "spec": h}
             pvals[h["id"]] = results[h["id"]]["p_test"]
             if any(h.get(f) for f in TAXONOMY_FILTERS):
                 # sensitivity, not tested in the family: the same test with the truths
                 # iNat cannot name kept in (they count as the iNat side's misses)
                 kept = {k: v for k, v in h.items() if k not in TAXONOMY_FILTERS}
-                results[h["id"]]["kept_in"] = test_one(kept, finds, outcomes, reps, seed)
+                results[h["id"]]["kept_in"] = test_one(kept, fs, outcomes, reps, seed)
+        if fam in OUTSIDE_HOLM:
+            for r in results.values():
+                r.update(p_holm=None, reject=None, outside_holm=True)
+            out[fam] = results
+            continue
         adj = ps.holm(pvals, alpha)
         for hid, r in results.items():
             r.update(p_holm=adj[hid]["p_holm"], reject=adj[hid]["reject"]
@@ -386,22 +408,31 @@ def families(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
 
 
 def slices(finds: list[Find], outcomes: dict[str, dict], attrs: list[str], cells: list[str],
-           comparators: list[str], reps: int, seed: int, min_finds: int = 1) -> dict:
+           comparators: list[str], reps: int, seed: int, min_finds: int = 1,
+           finds_of: dict | None = None) -> dict:
     """Rates with intervals by each attribute's values (primary scope, every find); values
-    with fewer than `min_finds` finds are pooled as "(small)". No tests."""
-    base = in_scope(finds)
-    out = {}
-    for attr in attrs:
+    with fewer than `min_finds` finds are pooled as "(small)". No tests. A comparator with
+    its own finds (`finds_of`) is sliced by its own attribute values (e.g. observer new to
+    its reference)."""
+    def grouped(fs_all, attr):
         groups = defaultdict(list)
-        for f in base:
+        for f in in_scope(fs_all):
             groups[str(f.attrs.get(attr, "(unknown)"))].append(f)
         small = [v for v, fs in groups.items() if len(fs) < min_finds]
         if small:
             groups["(small)"] = [f for v in small for f in groups.pop(v)]
-        out[attr] = {v: {"finds": len(fs), **{cid: {c: rate(fs, outcomes[cid], c, reps, seed)
+        return groups
+    out = {}
+    for attr in attrs:
+        base = grouped(finds, attr)
+        own = {cid: grouped(finds_of[cid], attr) for cid in comparators
+               if cid in outcomes and cid in (finds_of or {})}
+        out[attr] = {v: {"finds": len(fs), **{cid: {c: rate(own[cid].get(v, []) if cid in own
+                                                             else fs, outcomes[cid], c, reps,
+                                                             seed)
                                                      for c in cells}
                                                for cid in comparators if cid in outcomes}}
-                     for v, fs in sorted(groups.items())}
+                     for v, fs in sorted(base.items())}
     return out
 
 
