@@ -284,3 +284,40 @@ def test_pooled_experts_take_the_first_id_by_any_identifier_with_a_thousand_ids_
     assert xo(line, tier="2")["species_strict@1"] is False
     assert xo(line, tier="1+2")["species_strict@1"] is False   # tier 2 was first
     assert xo(line, tier="1+2", view="best")["species_strict@1"] is True
+
+
+
+def test_each_comparator_is_tabled_tested_and_sliced_on_its_own_finds():
+    """O1: a comparator with its own reference (finds_of) gets its own depth bands, its own
+    finds in the hypotheses it leads, and its own attribute values in slices."""
+    finds = [po.Find(str(i), f"o{i}", "A x", "A", "F", "formal", 50, 1,
+                  {"observer_new": "known"}) for i in range(6)]
+    own = [po.Find(f.key, f.observer, f.species, f.genus, f.family, f.name_kind, 2, 1,
+                {"observer_new": "new"}) for f in finds]
+    outcomes = {"full": {f.key: {"species_strict@1": True} for f in finds},
+                "public": {f.key: {"species_strict@1": i % 2 == 0} for i, f in enumerate(finds)}}
+    t = pt.all_standard(finds, outcomes, 50, 0, finds_of={"public": own})["comparators"]
+    assert t["full"]["primary"]["all"]["species_by_reference_band"]["20-99"]["top1"]["n"] == 6
+    assert t["public"]["primary"]["all"]["species_by_reference_band"]["1-4"]["top1"]["n"] == 6
+    sl = pt.slices(finds, outcomes, ["observer_new"], ["species_strict@1"], ["full", "public"],
+                   50, 0, finds_of={"public": own})
+    assert sl["observer_new"]["known"]["full"]["species_strict@1"]["n"] == 6
+    assert sl["observer_new"]["known"]["public"]["species_strict@1"]["n"] == 0
+    seen = []
+    orig = pt.test_one
+    try:
+        pt.test_one = lambda spec, fs, *a, **k: seen.append((spec["id"], fs[0].depth)) or \
+            {"p_test": 0.5}
+        fam = pt.families({"B": [{"id": "pub-first", "kind": "mcnemar", "a": "public",
+                                  "b": "full", "cell": "species_strict@1"},
+                                 {"id": "full-first", "kind": "mcnemar", "a": "full",
+                                  "b": "public", "cell": "species_strict@1"}],
+                           "side": [{"id": "s", "kind": "mcnemar", "a": "full", "b": "public",
+                                     "cell": "species_strict@1"}]},
+                          finds, outcomes, 50, 0, finds_of={"public": own})
+    finally:
+        pt.test_one = orig
+    assert seen == [("pub-first", 2), ("full-first", 50), ("s", 50)]
+    assert fam["B"]["pub-first"]["p_holm"] == 1.0                       # Holm on 2 p of 0.5
+    assert fam["side"]["s"] == {"p_test": 0.5, "spec": fam["side"]["s"]["spec"],
+                                "p_holm": None, "reject": None, "outside_holm": True}
