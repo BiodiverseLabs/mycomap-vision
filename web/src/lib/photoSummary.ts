@@ -19,7 +19,11 @@ import type { FlaggedTile, PhotoBatchBody, PhotoBatchDecision, PhotoReviewTab } 
 import { recordLabel } from "./feedback";
 import { flagLabel, type Choice } from "./photoReview";
 
+/** The Summary's photos per page: the default, and the choices (Steve, 2026-10-21), each
+ *  remembered per viewer. The server serves at most the largest. */
 export const SUMMARY_PAGE_SIZE = 150;
+export const PAGE_SIZES = [150, 300, 500] as const;
+export type PageSize = (typeof PAGE_SIZES)[number];
 /** How often the shown tiles' default decisions are sent. */
 export const AUTOSAVE_MS = 2000;
 /** A tile counts as seen when this much of it has been in view for SEEN_MS. */
@@ -88,6 +92,11 @@ export const TILE_SIZE_STORAGE_KEY = "mycomap-vision.photo-review.tile-size";
 export const readTileSize = (storage: () => Store): TileSize =>
   readKey(storage, TILE_SIZE_STORAGE_KEY, ["s", "m", "l"] as const, "m");
 export const writeTileSize = (storage: () => Store, s: TileSize) => writeKey(storage, TILE_SIZE_STORAGE_KEY, s);
+
+export const PAGE_SIZE_STORAGE_KEY = "mycomap-vision.photo-review.page-size";
+export const readPageSize = (storage: () => Store): PageSize =>
+  Number(readKey(storage, PAGE_SIZE_STORAGE_KEY, PAGE_SIZES.map(String), String(SUMMARY_PAGE_SIZE))) as PageSize;
+export const writePageSize = (storage: () => Store, n: PageSize) => writeKey(storage, PAGE_SIZE_STORAGE_KEY, String(n));
 
 /** The grid's columns for a tile size: as many tiles of about that width as fit, never fewer
  *  than two across (a phone). `gapPx` is the grid's gap. */

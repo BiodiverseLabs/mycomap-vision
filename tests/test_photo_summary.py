@@ -193,3 +193,19 @@ def test_a_decided_photo_reclassified_full_screen_takes_its_new_decision(conn, t
     c.post("/api/feedback/photo-review/batch", json={"decisions": [
         {"item_id": ids["inat:1000"], "decision": "keep", "note": "summary: flipped"}]})
     assert fstore.excluded_photos() == {"inat:1100"}                # included again: leaves the list
+
+
+def test_the_summary_serves_pages_of_up_to_500_photos(conn, tmp_path):
+    """Steve, 2026-10-21: 150, 300 or 500 photos per page; the server serves up to 500."""
+    from mycomap_vision import feedback_api
+    from test_photo_review import photo_item
+    assert feedback_api.SUMMARY_MAX_PAGE == 500
+    c, fstore = site_with_photos(conn, tmp_path)
+    fstore.seed([photo_item(f"inat:{9000 + i}", "100", f"R6 micrograph probe p=0.{i % 90 + 10}")
+                 for i in range(520)], "many")
+    as_user(c, "admin-1")
+    page = lambda n: c.get("/api/feedback/photo-review/flagged", params={"limit": n}).json()  # noqa: E731
+    assert len(page(300)["tiles"]) == 300
+    assert len(page(500)["tiles"]) == 500
+    big = page(1000)
+    assert big["total"] == 523 and len(big["tiles"]) == 500                # capped at 500

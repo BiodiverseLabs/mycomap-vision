@@ -29,10 +29,10 @@ import { SaveBar } from "@/components/ReviewSave";
 
 type Reasons = FlaggedPage["reasons"];
 
-export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp, tileSize, onTotal, autosave, onPending, canLeave,
+export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp, tileSize, pageSize = SUMMARY_PAGE_SIZE, onTotal, autosave, onPending, canLeave,
                               discard }: {
   tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; band?: PhotoBandFilter; help: boolean;
-  onHelp: () => void; tileSize: TileSize; onTotal: (n: number | null) => void;
+  onHelp: () => void; tileSize: TileSize; pageSize?: number; onTotal: (n: number | null) => void;
   /** Auto-save on: saves as the reviewer goes. Off: only Save and Save page write. */
   autosave: boolean;
   /** The unsaved changes on the page (always 0 with Auto-save on). */
@@ -66,8 +66,8 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
   }, []);
 
   const list = useQuery({
-    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, offset, gen],
-    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, offset, limit: SUMMARY_PAGE_SIZE }),
+    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, pageSize, offset, gen],
+    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, offset, limit: pageSize }),
     placeholderData: (prev) => prev,
     refetchOnWindowFocus: false,
     staleTime: Infinity,
@@ -195,16 +195,17 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
   const seen = useCallback((id: number) => updateStates((s) => markSeen(s, id)), [updateStates]);
   const loaded = useCallback((id: number) => updateStates((s) => markLoaded(s, id)), [updateStates]);
 
-  // A filter change starts at the first page; the page shown is saved first.
-  const filters = useRef({ tab, status, sort, q });
+  // A filter change (or a new page size) starts at the first page; the page shown is saved first.
+  const filters = useRef({ tab, status, sort, q, band, pageSize });
   useEffect(() => {
     const f = filters.current;
-    if (f.tab === tab && f.status === status && f.sort === sort && f.q === q) return;
-    filters.current = { tab, status, sort, q };
+    if (f.tab === tab && f.status === status && f.sort === sort && f.q === q && f.band === band
+        && f.pageSize === pageSize) return;
+    filters.current = { tab, status, sort, q, band, pageSize };
     flushRef.current();
     setOffset(0);
     setGen((g) => g + 1);
-  }, [tab, status, sort, q]);
+  }, [tab, status, sort, q, band, pageSize]);
 
   const go = (next: number) => {
     if (!canLeave()) return;
@@ -273,9 +274,9 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
           <span className="text-muted-foreground">{pageText(offset, tiles.length, total)}</span>
           <span className="flex gap-2">
             <button type="button" className={BTN} disabled={offset === 0}
-                    onClick={() => go(offset - SUMMARY_PAGE_SIZE)}>Previous</button>
+                    onClick={() => go(offset - pageSize)}>Previous</button>
             <button type="button" className={BTN} disabled={offset + tiles.length >= total}
-                    onClick={() => go(nextOffset(status, offset, SUMMARY_PAGE_SIZE, savedOnPage))}>Next</button>
+                    onClick={() => go(nextOffset(status, offset, pageSize, savedOnPage))}>Next</button>
           </span>
         </div>
       )}
