@@ -654,7 +654,10 @@ export interface FeedbackDecisionBody {
 // --- The photo review: the "Photos that show no specimen" queue, a record at a time ---------
 
 export type PhotoReviewTab = "micrograph" | "slip" | "habitat" | "people" | "gate" | "uv" | "tree" | "drawing"
-  | "other" | "all";
+  | "chemical" | "spore_print" | "dried" | "specimen" | "other" | "all";
+/** Tagger v2's confidence bands (by-eye precision: high >= 85%, medium 50-85%, low below). */
+export type PhotoBand = "high" | "medium" | "low";
+export type PhotoBandFilter = PhotoBand | "all";
 export type PhotoReviewSort = "p" | "p_asc" | "flagged";
 
 /** Why a rule flagged a photo: its tab, the probe or view, its p, and how strongly it counts. */
@@ -683,6 +686,11 @@ export interface ReviewPhoto {
   /** The reason a flagged photo's exclusion starts at (its flag for the open tab, else its
    *  strongest); null for an unflagged photo. */
   suggested_reason: string | null;
+  /** How an open photo starts: "keep" when tagger v2 reads it as a specimen photo or in its
+   *  low band, else "exclude". Absent from older servers: treat as "exclude". */
+  suggested_decision?: "keep" | "exclude" | null;
+  /** Tagger v2's band for the photo, when it has a v2 flag. */
+  band?: PhotoBand | null;
   status: FeedbackStatus | null;
   decision: { decision: string; reason: string | null; by: string | null } | null;
 }
@@ -703,6 +711,8 @@ export interface PhotoReviewTabCount {
   title: string;
   open: number;
   decided: number;
+  /** Open photos of the tab by tagger v2 band. */
+  bands?: Record<PhotoBand, number>;
 }
 
 export interface PhotoReviewPage {
@@ -737,6 +747,11 @@ export interface FlaggedTile {
   flags: PhotoFlag[];
   strength: number;
   suggested_reason: string | null;
+  /** How an open photo starts: "keep" when tagger v2 reads it as a specimen photo or in its
+   *  low band, else "exclude". Absent from older servers: treat as "exclude". */
+  suggested_decision?: "keep" | "exclude" | null;
+  /** Tagger v2's band for the photo, when it has a v2 flag. */
+  band?: PhotoBand | null;
   status: FeedbackStatus;
   decision: { decision: string; reason: string | null } | null;
   shown: "public" | "private" | "hidden";
@@ -893,9 +908,10 @@ export const feedbackApi = {
   refresh: (id: number) =>
     postJson<{ item: FeedbackItemDetail; refreshed: RefreshedRecord[] }>(`${fbItem(id)}/refresh`),
   photoReview: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort;
-                     min_flagged?: number; q?: string; offset?: number; limit?: number }) => {
+                     min_flagged?: number; q?: string; offset?: number; limit?: number;
+                     band?: PhotoBandFilter }) => {
     const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
-                                     min_flagged: String(p.min_flagged ?? 1),
+                                     min_flagged: String(p.min_flagged ?? 1), band: p.band ?? "all",
                                      offset: String(p.offset ?? 0), limit: String(p.limit ?? 10) });
     return getJson<PhotoReviewPage>(`/api/feedback/photo-review?${qs}`);
   },
@@ -904,8 +920,9 @@ export const feedbackApi = {
       `/api/feedback/photo-review/${encodeURIComponent(recordKey)}/decision`, body),
   /** The Summary view's page of flagged photos (at most 200). */
   photoReviewFlagged: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort; q?: string;
-                            offset?: number; limit?: number }) => {
+                            offset?: number; limit?: number; band?: PhotoBandFilter }) => {
     const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
+                                     band: p.band ?? "all",
                                      offset: String(p.offset ?? 0), limit: String(p.limit ?? 150) });
     return getJson<FlaggedPage>(`/api/feedback/photo-review/flagged?${qs}`);
   },

@@ -6,11 +6,31 @@
 // Photo rule: a photo the server sends as "hidden" never gets an image URL here, and an admin's
 // "private" photo is only ever Vision's own same-origin copy, shown by a plain <img>.
 
-import type { PhotoFlag, PhotoReviewDecisionBody, PhotoReviewSort, PhotoReviewTab, ReviewPhoto,
+import type { PhotoFlag, PhotoReviewDecisionBody, PhotoBandFilter, PhotoReviewSort, PhotoReviewTab, ReviewPhoto,
               ReviewRecord } from "./api";
 
 export const PHOTO_REVIEW_TYPE = "non_specimen_photo";
 export const REVIEW_PAGE_SIZE = 10;
+
+/** Tagger v2's bands, for the filter (Steve, 2026-10-21). A photo with no v2 flag shows only
+ *  under "All". */
+export const BAND_FILTERS: { code: PhotoBandFilter; label: string }[] = [
+  { code: "all", label: "All confidence" },
+  { code: "high", label: "High" },
+  { code: "medium", label: "Medium" },
+  { code: "low", label: "Low" },
+];
+
+/** " (n)" after a band's name: the tab's open photos in that band, when the record view's
+ *  counts are loaded; nothing otherwise. */
+export function bandCount(data: { tabs?: { code: string; bands?: Record<string, number> }[] } | undefined,
+                          tab: string, band: PhotoBandFilter): string {
+  if (band === "all" || !data?.tabs) return "";
+  const n = tab === "all"
+    ? data.tabs.reduce((a, t) => a + (t.bands?.[band] ?? 0), 0)
+    : data.tabs.find((t) => t.code === tab)?.bands?.[band];
+  return n == null ? "" : ` (${n.toLocaleString("en-US")})`;
+}
 
 export const SORTS: { code: PhotoReviewSort; label: string }[] = [
   { code: "p", label: "Strongest flag first" },
@@ -102,9 +122,9 @@ export function flaggedForBulk(photo: Pick<ReviewPhoto, "flagged" | "in_tab">, t
 
 /** "Suggest" mode proposes leaving out an OPEN photo flagged in the tab shown; never a decided
  *  one, one flagged only for other tabs, or an unflagged one. */
-export const suggestsExclude = (photo: Pick<ReviewPhoto, "flagged" | "in_tab" | "status">,
+export const suggestsExclude = (photo: Pick<ReviewPhoto, "flagged" | "in_tab" | "status" | "suggested_decision">,
                                 tab: PhotoReviewTab): boolean =>
-  photo.status === "open" && flaggedForBulk(photo, tab);
+  photo.status === "open" && flaggedForBulk(photo, tab) && photo.suggested_decision !== "keep";
 
 /** The choices under a preselection mode: the reviewer's own choices stay, earlier suggestions
  *  go, and in "suggest" mode each suggestible photo with no choice starts as a suggested Exclude

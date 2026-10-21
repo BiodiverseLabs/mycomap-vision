@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Lock, RotateCcw, X } from "lucide-react";
 import { BODY, BTN, Ext, FIELD, INK, Placeholder, QuickReasons } from "@/components/ReviewPhotos";
-import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoReviewSort,
+import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoBandFilter, type PhotoReviewSort,
          type PhotoReviewTab } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { QUICK_REASONS, quickReasons, tileImage, type Choice } from "@/lib/photoReview";
@@ -29,9 +29,9 @@ import { SaveBar } from "@/components/ReviewSave";
 
 type Reasons = FlaggedPage["reasons"];
 
-export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onTotal, autosave, onPending, canLeave,
+export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp, tileSize, onTotal, autosave, onPending, canLeave,
                               discard }: {
-  tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; help: boolean;
+  tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; band?: PhotoBandFilter; help: boolean;
   onHelp: () => void; tileSize: TileSize; onTotal: (n: number | null) => void;
   /** Auto-save on: saves as the reviewer goes. Off: only Save and Save page write. */
   autosave: boolean;
@@ -66,8 +66,8 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
   }, []);
 
   const list = useQuery({
-    queryKey: ["feedback", "photo-summary", tab, status, sort, q, offset, gen],
-    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, offset, limit: SUMMARY_PAGE_SIZE }),
+    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, offset, gen],
+    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, offset, limit: SUMMARY_PAGE_SIZE }),
     placeholderData: (prev) => prev,
     refetchOnWindowFocus: false,
     staleTime: Infinity,
@@ -261,7 +261,7 @@ export function PhotoSummary({ tab, status, sort, q, help, onHelp, tileSize, onT
         </p>
       )}
       {fresh && tiles.length > 0 && (
-        <Grid key={`${tab}|${status}|${sort}|${q}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
+        <Grid key={`${tab}|${status}|${sort}|${q}|${band}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
               marks={marks} states={states} tileSize={tileSize} help={help} onHelp={onHelp} manual={!autosave}
               onFlip={flip} onReason={pickReason} onQuick={quick} onRetry={retryTile} onSave={saveTile} onSeen={seen} onLoaded={loaded} />
       )}

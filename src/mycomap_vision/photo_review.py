@@ -46,6 +46,12 @@ TABS: tuple[tuple[str, str], ...] = (
     ("uv", "UV reactions"),
     ("tree", "Phylogenetic trees and BLAST"),
     ("drawing", "Drawings"),
+    # Tagger v2 (Steve, 2026-10-21): every kind has a tab, and photos v2 reads as an ordinary
+    # specimen photo get one of their own (they start as Include).
+    ("chemical", "Chemical spot tests"),
+    ("spore_print", "Spore prints"),
+    ("dried", "Dried specimens"),
+    ("specimen", "Probably shows the specimen"),
     ("other", "Other"),
 )
 TAB_CODES = tuple(c for c, _ in TABS)
@@ -78,20 +84,36 @@ REASONS: tuple[tuple[str, str], ...] = (
 REASON_CODES = tuple(c for c, _ in REASONS)
 REASON_OF_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat",
                  "people": "people", "gate": "not_fungus", "uv": "uv", "tree": "phylo_tree",
-                 "drawing": "drawing_micro", "other": "other"}
+                 "drawing": "drawing_micro", "chemical": "chemical", "spore_print": "spore_print",
+                 "dried": "dried", "other": "other"}
 # The tab a photo left out for a reason belongs to, whatever flagged it (Steve, 2026-10-21: a
 # photo already excluded as, say, a UV reaction shows on that tab's Completed list).
-TAB_OF_REASON = {r: t for t, r in REASON_OF_TAB.items()}
+TAB_OF_REASON = {r: t for t, r in REASON_OF_TAB.items()} | {"drawing_specimen": "drawing"}
+# Tagger v2's bands (by-eye precision of its class x confidence ranges: high >= 85%, medium
+# 50-85%, low below), the order the band filter offers them.
+BANDS = ("high", "medium", "low")
 
 
 def suggested_reason(flags: list[dict], tab: str = "all") -> str | None:
     """The reason a flagged photo's picker starts at: its flag for the open tab when it has
-    one, else its strongest flag. None for a photo no rule flagged (the reviewer picks)."""
+    one, else its strongest flag. None for a photo no rule flagged (the reviewer picks), and
+    for one tagger v2 reads as a specimen photo."""
     if not flags:
         return None
     here = [f for f in flags if f["tab"] == tab] or flags
     best = max(here, key=lambda f: f.get("strength") or 0.0)
+    if best["tab"] == "specimen":
+        return None
     return REASON_OF_TAB.get(best["tab"], "other")
+
+
+def suggested_decision(flags: list[dict]) -> str:
+    """How an open photo starts: "keep" when tagger v2 reads it as a specimen photo or puts it
+    in its low band (most of those show the specimen), else "exclude"."""
+    v2 = [f for f in flags if f.get("v2")]
+    if v2 and (v2[-1]["tab"] == "specimen" or v2[-1].get("band") == "low"):
+        return "keep"
+    return "exclude"
 
 # The zero-shot views (the miss review's s6) by the tab they belong to.
 VIEW_TABS = {"habitat": "habitat", "scene": "habitat", "landscape": "habitat",
@@ -105,6 +127,12 @@ PROBE_TABS = ("micrograph", "uv", "tree", "drawing")
 _PROBE = re.compile(r"\b(" + "|".join(PROBE_TABS) + r") probe p=([0-9.]+)")
 _VIEW = re.compile(r"view (\w+) p=([0-9.]+)")
 _GATE = re.compile(r"gate not_fungus p\(fungus\)=([0-9.]+)")
+# Tagger v2 (one softmax over every kind, trained on Steve's decisions): "R9 v2 slip p=0.83
+# (high)". Its class names the tab; "specimen" is a photo it reads as an ordinary one.
+V2_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat", "people": "people",
+          "uv": "uv", "chemical": "chemical", "spore_print": "spore_print", "dried": "dried",
+          "tree": "tree", "drawing": "drawing", "not_fungus": "gate", "specimen": "specimen"}
+_V2 = re.compile(r"\bv2 (\w+) p=([0-9.]+)(?: \((high|medium|low)\))?")
 
 
 def parse_flags(rule: str) -> list[dict]:
@@ -113,7 +141,11 @@ def parse_flags(rule: str) -> list[dict]:
     view's p; for the gate, 1 - p(fungus)). A rule none of these match is one 'other' flag."""
     out = []
     for part in (rule or "").split(";"):
-        if m := _PROBE.search(part):
+        if (m := _V2.search(part)) and m.group(1) in V2_TAB:
+            p = float(m.group(2))
+            out.append({"tab": V2_TAB[m.group(1)], "kind": f"v2 {m.group(1)}", "p": p,
+                        "strength": p, "v2": True, "band": m.group(3)})
+        elif m := _PROBE.search(part):
             p = float(m.group(2))
             out.append({"tab": m.group(1), "kind": f"{m.group(1)} probe", "p": p, "strength": p})
         elif m := _GATE.search(part):
@@ -152,10 +184,27 @@ def reason_flag(item: dict) -> dict | None:
             "strength": 0.0, "by_reason": True}
 
 
+def placing_flags(rule: str) -> list[dict]:
+    """The flags that say where a photo belongs: tagger v2's latest flag alone when the rule
+    has one (it reads every kind at once, so it moves a field slip the micrograph probe caught
+    to Field slips), else every flag."""
+    flags = parse_flags(rule)
+    v2 = [f for f in flags if f.get("v2")]
+    return [v2[-1]] if v2 else flags
+
+
+def band_of(flags: list[dict], tab: str = "all") -> str | None:
+    """The v2 band of the photo's flag in `tab` (any tab for "all"), or None (no v2 flag)."""
+    for f in flags:
+        if f.get("v2") and (tab == "all" or f["tab"] == tab):
+            return f.get("band")
+    return None
+
+
 def tab_flags(item: dict) -> list[dict]:
-    """The flags that place a photo in tabs: its rule's flags, plus its exclusion reason's tab
-    when no flag puts it there already."""
-    flags = parse_flags(item.get("rule") or "")
+    """The flags that place a photo in tabs: its placing flags (placing_flags), plus its
+    exclusion reason's tab when no flag puts it there already."""
+    flags = placing_flags(item.get("rule") or "")
     rf = reason_flag(item)
     if rf and not any(f["tab"] == rf["tab"] for f in flags):
         flags = flags + [rf]
@@ -187,7 +236,7 @@ def record_counts(items: list[dict]) -> dict[str, int]:
 
 
 def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
-          min_flagged: int = 1, query: str = "") -> dict:
+          min_flagged: int = 1, query: str = "", band: str = "all") -> dict:
     """Group the queue's photo items by record. `tab` is one of TAB_CODES or 'all'; a record is
     in a tab when one of its photos is flagged for it, and `status` 'open' keeps records with an
     open photo in the tab ('decided': every photo in the tab decided; 'any': both). Sorted by the strongest
@@ -200,6 +249,8 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
         raise fb.FeedbackError("status is open, decided or any")
     if sort not in ("p", "p_asc", "flagged"):
         raise fb.FeedbackError("sort is p, p_asc or flagged")
+    if band != "all" and band not in BANDS:
+        raise fb.FeedbackError(f"band is all or one of {', '.join(BANDS)}")
     records: dict[str, dict] = {}
     for it in items:
         key = record_of_item(it)
@@ -216,11 +267,12 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
                                                      "by": last.get("by_name") or last.get("by_user")},
                                "rule": it.get("rule") or ""})
 
-    def in_tab(photo: dict, t: str) -> bool:
-        return t == "all" or any(f["tab"] == t for f in photo["flags"])
+    def in_tab(photo: dict, t: str, b: str = "all") -> bool:
+        return ((t == "all" or any(f["tab"] == t for f in photo["flags"]))
+                and (b == "all" or band_of(photo["flags"], t) == b))
 
-    def state(rec: dict, t: str) -> str | None:
-        ps = [p for p in rec["flagged"] if in_tab(p, t)]
+    def state(rec: dict, t: str, b: str = "all") -> str | None:
+        ps = [p for p in rec["flagged"] if in_tab(p, t, b)]
         if not ps:
             return None
         return "open" if any(p["status"] == "open" for p in ps) else "decided"
@@ -228,20 +280,24 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
     tabs = []
     for code, title in TABS:
         c = {"open": 0, "decided": 0}
+        bands = dict.fromkeys(BANDS, 0)               # open photos of the tab by v2 band
         for rec in records.values():
             s = state(rec, code)
             if s:
                 c[s] += 1
-        tabs.append({"code": code, "title": title, **c})
+            for p in rec["flagged"]:
+                if p["status"] == "open" and in_tab(p, code) and (b := band_of(p["flags"], code)):
+                    bands[b] += 1
+        tabs.append({"code": code, "title": title, **c, "bands": bands})
     chosen = []
     query = (query or "").strip().lower()
     for rec in records.values():
         if query and query not in rec["record_key"].lower() and query not in rec["label"].lower():
             continue
-        st = state(rec, tab)
+        st = state(rec, tab, band)
         if st is None or (status != "any" and st != status):
             continue
-        mine = [p for p in rec["flagged"] if in_tab(p, tab)]
+        mine = [p for p in rec["flagged"] if in_tab(p, tab, band)]
         if len(mine) < max(1, int(min_flagged or 1)):
             continue
         strongest = max((f["strength"] for p in mine for f in p["flags"]
@@ -611,7 +667,7 @@ def decide_record(store: fb.Store, record_key: str, photos: list[dict], person: 
 # --- the Summary view (Steve, 2026-10-21): the flagged photos alone, to scan and batch ---------
 
 def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
-                  query: str = "") -> list[dict]:
+                  query: str = "", band: str = "all") -> list[dict]:
     """The queue's flagged photos in `tab`, one tile each (not grouped by record), sorted like the
     record view: by the strongest flag in the tab (p: highest first, p_asc: lowest first), or
     'flagged': the records with most flagged photos first, their photos together."""
@@ -621,6 +677,8 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
         raise fb.FeedbackError("status is open or decided")
     if sort not in ("p", "p_asc", "flagged"):
         raise fb.FeedbackError("sort is p, p_asc or flagged")
+    if band != "all" and band not in BANDS:
+        raise fb.FeedbackError(f"band is all or one of {', '.join(BANDS)}")
     query = (query or "").strip().lower()
     tiles, per_record = [], {}
     for it in items:
@@ -634,10 +692,11 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
             continue
         flags = tab_flags(it)
         mine = [f for f in flags if tab == "all" or f["tab"] == tab]
-        if not mine:
+        if not mine or (band != "all" and band_of(mine) != band):
             continue
         last = it.get("last_decision") or None
-        tiles.append({"item_id": it["id"], "photo_key": it["subject"], "record_key": key,
+        tiles.append({"band": band_of(mine),
+                      "suggested_decision": suggested_decision(flags),"item_id": it["id"], "photo_key": it["subject"], "record_key": key,
                       "label": label, "link": fb.link(key), "flags": mine,
                       "strength": max(f["strength"] for f in mine),
                       "suggested_reason": suggested_reason([f for f in flags if not f.get("by_reason")]
