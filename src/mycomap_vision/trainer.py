@@ -517,7 +517,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     a second seed for the paper's spread, E22) and `public_trainable_only` (the public
     model, E23: only photos the released weights may learn from; needs `release`) are
     recorded in progress.json and result.json, and kept by a resumed attempt."""
-    if public_trainable_only and release is None:
+    if public_trainable_only and release is None and not picek_release:
         raise ValueError("public-trainable-only training needs the shipped release")
     data_dir = data_dir or config.DATA_DIR
     root = data_dir / "embeddings"
@@ -538,7 +538,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         place = (retrain.read_place_cells(picek_place_cells, picek_place_cells_sha256)
                  if picek_place_cells else None)
         snap = retrain.release_snapshot(rel, retrain.build_data_from_release(
-            conn, rel, store.location, size, place_cells=place), picek_exclude)
+            conn, rel, store.location, size, place_cells=place,
+            public_trainable_only=public_trainable_only), picek_exclude)
         release_cite = dataset.cite(rel)
         rel.close()
         log("record sources: " + retrain.format_sources(snap["record_sources"]))
@@ -686,7 +687,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
                         picek_allow_draft, picek_place_cells, picek_place_cells_sha256,
                         on_block=block_uploader(i, ckpt_key, progress, upload),
                         resume_from=ckpt if ckpt.is_file() else None,
-                        time_left=getattr(should_stop, "seconds_left", None)))(
+                        time_left=getattr(should_stop, "seconds_left", None),
+                        public_trainable_only=public_trainable_only))(
                         conn, s.spec, s.name, data_dir / "models")
                 else:
                     meta = (finetuner or _default_finetuner(store, size, test_days, log,
@@ -786,7 +788,8 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                            labels_hash: str | None = None, release: str | None = None,
                            release_manifest: str | None = None, allow_draft: bool = False,
                            place_cells: str | None = None, place_cells_sha256: str | None = None,
-                           on_block=None, resume_from: Path | None = None, time_left=None):
+                           on_block=None, resume_from: Path | None = None, time_left=None,
+                           public_trainable_only: bool = False):
     def run(conn, spec, name, models_dir):
         import os
 
@@ -800,7 +803,8 @@ def _default_picek_trainer(store, size, test_days, log, should_stop=None,
                           expect_labels_hash=labels_hash, release=release,
                           allow_draft=allow_draft, expect_release_manifest=release_manifest,
                           shipped_release=bool(release), place_cells_file=place_cells,
-                          expect_place_cells_sha256=place_cells_sha256)
+                          expect_place_cells_sha256=place_cells_sha256,
+                          public_trainable_only=public_trainable_only)
         return train(conn, store, size, name, cfg,
                      test_days=test_days, out_dir=models_dir, log=log, should_stop=should_stop,
                      on_block=on_block, resume_from=resume_from, time_left=time_left)

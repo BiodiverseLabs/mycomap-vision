@@ -442,7 +442,8 @@ def release_for_script(rel, place_doc: dict | None) -> dict:
 
 def picek_launch_labels(conn, store_location: str, size: str, test_days: int, exclude: str,
                         log=print, dry_run: bool = False, allowed_sources=None,
-                        release=None) -> tuple[dict, set[str] | None, dict | None]:
+                        release=None, public_trainable_only: bool = False
+                        ) -> tuple[dict, set[str] | None, dict | None]:
     """The labels a Picek run will train on, read now from this manifest (launch time),
     printed with the known label problems the manifest carries, the ids to ship when
     every benchmark is excluded, and (a release run) the place prior's counts, made here
@@ -457,7 +458,8 @@ def picek_launch_labels(conn, store_location: str, size: str, test_days: int, ex
         if not release.has_private:
             raise ValueError(f"release {release.id} has no private.sqlite here: a launch "
                              "makes the place prior's counts from it, on the laptop")
-        data = picek.build_data_from_release(conn, release, store_location, size)
+        data = picek.build_data_from_release(conn, release, store_location, size,
+                                             public_trainable_only=public_trainable_only)
         snap = picek.release_snapshot(release, data, exclude)
         log(picek.format_snapshot(snap))
         picek.require_allowed_sources(snap["record_sources"], dry_run=dry_run, log=log)
@@ -774,9 +776,10 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         raise ValueError("--spot-max-price needs --spot")
     if int(seed) < 0:
         raise ValueError(f"--seed is a whole number from 0, not {seed!r}")
-    if public_trainable_only and not resume and not (release and finetune):
-        raise ValueError("--public-trainable-only trains the fine-tune on a dataset "
-                         "release's public-trainable photos: give --release and --finetune")
+    if public_trainable_only and not resume and not (release and (finetune or picek)):
+        raise ValueError("--public-trainable-only trains the fine-tune (or the Picek recipe) "
+                         "on a dataset release's public-trainable photos: give --release and "
+                         "--finetune or --picek")
     rel = None
     if release:
         from .replications.fungitastic import dataset
@@ -847,7 +850,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     check_run_time(est, max_hours, allow_over_time, log)
     labels, exclude_ids, place_doc = (picek_launch_labels(conn, f"s3://{b}/", size,
                                                           test_days, picek_exclude, log,
-                                                          dry_run=dry_run, release=rel)
+                                                          dry_run=dry_run, release=rel,
+                                                          public_trainable_only=public_trainable_only)
                                       if picek else (None, None, None))
     labels_hash = labels["labels_hash"] if labels else None
     sha = release_commit(allow_dirty=allow_dirty, allow_unpushed=allow_unpushed, log=log)

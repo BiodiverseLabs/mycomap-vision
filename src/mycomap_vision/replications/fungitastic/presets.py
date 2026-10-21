@@ -102,6 +102,10 @@ class PicekConfig:
     amp: bool = True
     workers: int = 6
     seed: int = 0
+    # Only the photos the public model may learn from (CC including NC, or all-rights-reserved
+    # with the owner's permission), in training and validation alike, and the priors' counts
+    # from the same photos (paper E4-recipe beside the public model; Steve, 2026-10-21).
+    public_trainable_only: bool = False
     max_steps: int | None = None       # cap on optimizer steps (smoke tests)
     cell_degrees: float = 4.0          # the place prior's grid (our extension)
     # Training photos pre-resized once to this shorter side on local disk (cache_photos),
