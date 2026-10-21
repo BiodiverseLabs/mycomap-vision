@@ -5,10 +5,11 @@ import { PageHeader } from "@/components/Layout";
 import { RevealAnswer } from "@/components/RevealAnswer";
 import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem, type FeedbackItemDetail,
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
-         type LiveRecord, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
+         type LiveRecord, type NameContext, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
          type Top5 } from "@/lib/api";
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, groupBySection,
-         historyOrgText, itemBadges, linkedItem, openQueue, orgChipClass, PAGE_SIZE, pageText, prefillValue,
+         historyOrgText, inatLinks, isNameItem, itemBadges, linkedItem, NO_PROPOSAL_TEXT, noProposal, openQueue,
+         orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, usableOptions,
          queueParam, readLastQueue, recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
          statCardLines, valueBox, whenText, writeLastQueue, yes, type SectionGroup,
          type Verdict } from "@/lib/feedback";
@@ -313,7 +314,8 @@ function ItemRow({ item, type, me, open, onToggle }: {
           <span className={`block break-words font-semibold ${INK}`}><Name s={item.subject} /></span>
           <span className={`mt-0.5 block break-words text-sm ${BODY}`}>
             <Name s={item.current} />
-            {item.proposed ? <> <span className="text-muted-foreground">→</span> <Name s={item.proposed} /></> : null}
+            {item.proposed ? <> <span className="text-muted-foreground">→</span> <Name s={item.proposed} /></>
+              : noProposal(item) ? <> <span className="text-muted-foreground">→ {NO_PROPOSAL_TEXT}</span></> : null}
           </span>
           <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span>{item.records.toLocaleString("en-US")} record{item.records === 1 ? "" : "s"}</span>
@@ -371,6 +373,9 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
   // A pair's places as MO and iNat list them: asked apart, so the photos show first.
   const places = useQuery({ queryKey: ["feedback", "places", id], queryFn: () => feedbackApi.places(id),
                             enabled: sides.length > 0, staleTime: 10 * 60_000, retry: false });
+  // A name item's names on iNat and MycoMap's synonym list: asked apart, so the item opens first.
+  const names = useQuery({ queryKey: ["feedback", "names", id], queryFn: () => feedbackApi.names(id),
+                           enabled: !!item && isNameItem(item), staleTime: 10 * 60_000, retry: false });
   const chip = item?.org_request?.chip ?? null;
   useEffect(() => {          // opening the item read .org: its row's chip follows
     if (!chip) return;
@@ -402,6 +407,7 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
               ))}
             </dl>
           )}
+          {isNameItem(item) && <NameContextPanel data={names.data} loading={names.isPending} failed={!!names.error} />}
           {item.links.length > 0 && (
             <p className="flex flex-wrap gap-x-3 gap-y-1 text-sm">
               <span className="text-muted-foreground">Public pages:</span>
@@ -429,6 +435,54 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
         <OrgRequestBlock item={item} org={item.org_request} checking={q.isFetching} onCheck={() => q.refetch()} />
       )}
       <History item={item} type={type} />
+    </div>
+  );
+}
+
+/** Each name the item is about, how iNaturalist holds it (linked), and MycoMap's synonym list
+ *  around it (Steve, 2026-10-21): enough to see why the name was listed and what to do. */
+function NameContextPanel({ data, loading, failed }: { data: NameContext | undefined; loading: boolean; failed: boolean }) {
+  if (loading) return <p className="text-sm text-muted-foreground">Looking the names up on iNaturalist…</p>;
+  if (failed || !data) return <p className="text-sm text-muted-foreground">The names could not be looked up just now.</p>;
+  const rows = data.synonyms.rows;
+  return (
+    <div className="space-y-3" data-testid="feedback-name-context">
+      <div className="space-y-2">
+        <h3 className={`text-sm font-semibold ${INK}`}>The names on iNaturalist</h3>
+        <ul className="space-y-2">
+          {data.names.map((n) => (
+            <li key={n.name} className="min-w-0 rounded-md border border-[#A87146]/20 bg-[#faf9f7] p-2 text-sm dark:border-border dark:bg-muted/40">
+              <p className="flex flex-wrap items-baseline gap-x-2">
+                <span className={`font-medium ${INK}`}><Name s={n.name} /></span>
+                <span className="text-xs text-muted-foreground">{roleText(n.roles)}</span>
+              </p>
+              <p className={`text-xs ${BODY}`}>{n.about}</p>
+              <p className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+                {inatLinks(n).map((l) => (
+                  <Ext key={l.href + l.text} href={l.href} className={l.strong ? "font-medium" : ""}>{l.text}</Ext>
+                ))}
+              </p>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="space-y-1">
+        <h3 className={`text-sm font-semibold ${INK}`}>MycoMap's synonym list</h3>
+        {data.synonyms.status === "unavailable" ? (
+          <p className="text-xs text-muted-foreground">mycomap.org did not answer for its synonym list.</p>
+        ) : rows.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No synonyms of these names on MycoMap's list.</p>
+        ) : (
+          <ul className={`space-y-0.5 text-sm ${BODY}`}>
+            {rows.map((r) => (
+              <li key={`${r.retired}→${r.accepted}`} className="break-words">
+                <Name s={r.retired} /> <span className="text-muted-foreground">retired →</span> <Name s={r.accepted} />
+              </li>
+            ))}
+            {data.synonyms.more > 0 && <li className="text-xs text-muted-foreground">and {data.synonyms.more} more</li>}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }
@@ -542,7 +596,7 @@ function LiveCard({ r, me }: { r: LiveRecord; me: FeedbackMe }) {
 
 function Decide({ item, type, wide = false }: { item: FeedbackItemDetail; type?: FeedbackType; wide?: boolean }) {
   const update = useItemUpdate(item.id);
-  const options = type?.options ?? [];
+  const options = usableOptions(item, type?.options ?? []);
   const [choice, setChoice] = useState<FeedbackOption | null>(null);
   const [value, setValue] = useState("");
   const [note, setNote] = useState("");
@@ -596,6 +650,11 @@ function Decide({ item, type, wide = false }: { item: FeedbackItemDetail; type?:
     <div className="min-w-0 space-y-3">
       <h3 className={`text-sm font-semibold ${INK}`}>Decide</h3>
       {!options.length && <p className="text-sm text-muted-foreground">Loading the choices…</p>}
+      {noProposal(item) && options.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          iNaturalist names no current taxon for this name, so there is no name of theirs to use.
+        </p>
+      )}
       {/* Options of one group sit under its heading (e.g. Duplicate observation: Use iNat,
           Use MO); `wide` (a record pair, decided under the photos) lays the blocks in a row. */}
       <div className={wide ? "grid gap-3 sm:grid-cols-[2fr_1fr]" : "flex flex-col gap-2"}>

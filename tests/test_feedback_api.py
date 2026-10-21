@@ -59,7 +59,7 @@ class FakeOrg:
                                "results_url": f"{ORG}/blast-results/{key}/78", "saved_at": None}}]}
 
 
-def make_site(conn, tmp_path, places=None):
+def make_site(conn, tmp_path, places=None, inat_names=None):
     store = seed_two_species(conn, tmp_path)
     root = tmp_path / "emb"
     embed_photos(conn, store, Const("m1"), photos_to_embed(conn, "m1", "large", store.location,
@@ -77,7 +77,7 @@ def make_site(conn, tmp_path, places=None):
                           secret=SECRET)
     app = create_app(tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
                      limits=open_limits(), signin=signin, feedback_store=fstore,
-                     feedback_org=org, feedback_places=places)
+                     feedback_org=org, feedback_places=places, feedback_inat_names=inat_names)
     return TestClient(app, follow_redirects=False), fstore, org
 
 
@@ -281,3 +281,51 @@ def test_a_record_pair_lists_each_copys_place_as_its_site_does_and_no_coordinate
     single = item_id(fstore, "photos_unlike_label")
     assert c.get(f"/api/feedback/items/{single}/places").json() == {"places": {}}
     assert asked == ["999", "101"]
+
+
+def test_a_name_item_lists_its_names_with_inats_taxa_and_mycomaps_synonyms(conn, tmp_path,
+                                                                           monkeypatch):
+    """Names iNaturalist no longer uses (Steve, 2026-10-21): the item's names, each linked to
+    its iNat taxon, and MycoMap's synonym list around them. Asked apart from the item; other
+    item types get none; a reviewer who cannot open the item gets nothing."""
+    from mycomap_vision.name_context import AUTOCOMPLETE, InatNames
+    asked = []
+
+    def get(url, params):
+        asked.append(params.get("q"))
+        if url == AUTOCOMPLETE and params["q"] == "Callistosporium luteoolivaceum":
+            return {"results": [{"id": 1287172, "name": "Callistosporium luteoolivaceum",
+                                 "rank": "species", "is_active": False,
+                                 "current_synonymous_taxon_ids": [], "observations_count": 0,
+                                 "taxon_changes_count": 0, "ancestor_ids": [48460, 47170]}]}
+        if url == AUTOCOMPLETE and params["q"] == "Callistosporium luteo":
+            return {"results": [{"id": 118354, "name": "Callistosporium luteo-olivaceum",
+                                 "rank": "species", "is_active": True,
+                                 "ancestor_ids": [48460, 47170]}]}
+        return {"results": []}
+
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    c, fstore, org = make_site(conn, tmp_path, inat_names=InatNames(get=get, interval=0))
+    org.synonyms = lambda name: {"name": name, "rows": [
+        {"retired": "Callistosporium luteo-olivaceum", "accepted": "Callistosporium luteoolivaceum"}]}
+    fstore.seed([{"item_type": "name_inactive_on_inat", "subject": "Callistosporium luteoolivaceum",
+                  "granularity": "name", "rule": "R4", "current": "Callistosporium luteoolivaceum",
+                  "proposed": "", "records": 110, "projects": ["p1"]}], "r4")
+    nid = item_id(fstore, "name_inactive_on_inat")
+    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 401
+    as_user(c, "member-1")                                     # p2 only
+    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 404
+    assert asked == []
+    as_user(c, "leader-1")
+    got = c.get(f"/api/feedback/items/{nid}/names").json()
+    by_name = {e["name"]: e for e in got["names"]}
+    on_records = by_name["Callistosporium luteoolivaceum"]
+    assert on_records["roles"] == ["records", "synonym list"]
+    assert on_records["inat"]["taxon"]["url"] == "https://www.inaturalist.org/taxa/1287172"
+    assert on_records["inat"]["near"][0]["url"] == "https://www.inaturalist.org/taxa/118354"
+    assert "no current name" in on_records["about"]
+    assert got["synonyms"]["rows"] == [{"retired": "Callistosporium luteo-olivaceum",
+                                        "accepted": "Callistosporium luteoolivaceum"}]
+    other = item_id(fstore, "group_label")
+    as_user(c, "admin-1")
+    assert c.get(f"/api/feedback/items/{other}/names").json()["names"] == []

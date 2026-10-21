@@ -27,6 +27,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
+from . import name_context as nc
 from . import photo_review as pr
 from .pair_places import PairPlaces
 
@@ -64,6 +65,11 @@ class OrgClient:
         """The record as .org holds it now (see the module docstring), or None."""
         obs = record_key if record_key.startswith("mo:") else f"inat:{record_key}"
         return self._get("/api/vision/feedback/record", {"observation": obs})
+
+    def synonyms(self, name: str) -> dict | None:
+        """MycoMap's synonym list around a name: {"name", "rows": [{"retired", "accepted"}]}
+        (name_context.py), or None when .org does not answer it yet."""
+        return self._get("/api/vision/feedback/synonyms", {"name": name})
 
     # --- Name Update requests (feedback_org.py) and the name-change log (name_changes.py) ---
     def _send(self, method: str, path: str, body: dict | None = None) -> tuple[int | None, dict]:
@@ -127,6 +133,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                name_info: "fo.NameInfo | None" = None,
                on_name_update_done: Callable[[], object] | None = None,
                places: "PairPlaces | None" = None,
+               inat_names: "nc.InatNames | None" = None,
                note=print) -> fo.OrgRequests:
     """The routes. Returns the Name Update requests (feedback_org.OrgRequests), whose
     poll_once the server runs every feedback_org.POLL_SECONDS."""
@@ -306,6 +313,21 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         if item["granularity"] != "record pair" or places is None:
             return {"places": {}}
         return {"places": places.of(item["record_keys"][:4])}
+
+    @app.get("/api/feedback/items/{item_id}/names")
+    def fb_item_names(request: Request, item_id: int):
+        """The names a name item is about, each with how iNaturalist holds it (linked), and
+        MycoMap's synonym list around them (name_context.py). Asked apart from the item, so
+        the item opens before iNat answers."""
+        _, projects = access(request)
+        item = item_or_404(item_id, projects)
+        if item["item_type"] not in nc.NAME_TYPES or inat_names is None:
+            return {"names": [], "synonyms": {"status": "none", "rows": [], "more": 0}}
+
+        def synonyms(name: str) -> dict | None:
+            ask = getattr(org, "synonyms", None)
+            return ask(name) if ask else None
+        return nc.context(item, inat_names, synonyms)
 
     def with_request(item: dict) -> dict:
         return item | {"org_request": fo.request_view(requests_.for_item(item["id"]))}
