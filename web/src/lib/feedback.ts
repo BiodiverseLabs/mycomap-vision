@@ -234,12 +234,15 @@ export function historyOrgText(org: Pick<OrgRequest, "request_id" | "chip"> | nu
 
 // --- the page's two sections ------------------------------------------------------------------
 
-/** The page's sections, in order (Steve, 2026-10-18): mechanical fixes a rule found, then
- *  whether a record's label is right. */
+/** The page's sections, in order (Steve, 2026-10-18): mechanical fixes a rule found, what each
+ *  photo shows (Steve, 2026-10-21), then whether a record's label is right. */
 export const SECTIONS: { code: string; title: string; intro: string }[] = [
   { code: "cleanup", title: "Data cleanup",
     intro: "Fix what a rule found: photos that show no specimen, one name written several ways, "
       + "retired or inactive names, one find posted twice or placed in two places." },
+  { code: "views", title: "Photo views",
+    intro: "Say what each photo shows (cap top, gills, stem and base, in situ, …): confirm or "
+      + "correct the suggested tags." },
   { code: "validation", title: "Data validation",
     intro: "Is the record's label right? Look at the photos, its DNA and BLAST results, and decide "
       + "as a curator. Some queues are reviewed blind: Vision's answer stays hidden unless you "

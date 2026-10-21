@@ -757,6 +757,41 @@ export interface FlaggedPage {
   tiles: FlaggedTile[];
 }
 
+/** Photo views (Steve, 2026-10-21): one photo of the queue, with the tagger's suggested views
+ *  (strongest first) and, once decided, the confirmed set. */
+export interface PhotoViewTile {
+  item_id: number;
+  photo_key: string;
+  record_key: string;
+  label: string;
+  link: string;
+  status: FeedbackStatus;
+  suggested: { view: string; p: number }[];
+  confirmed: string[] | null;
+  decision: { decision: string; views: string[] | null } | null;
+  strength: number;
+  shown: "public" | "private" | "hidden";
+  thumb?: string;
+  full?: string;
+  hidden_reason?: string;
+  position: number | null;
+  license_code: string | null;
+  owner_login: string | null;
+  record_photos: number | null;
+}
+
+export interface PhotoViewsPage {
+  tabs: { code: string; title: string; open: number; decided: number }[];
+  total: number;
+  offset: number;
+  /** Every view a reviewer can set; `suggested` ones are the tagger's. */
+  views: { code: string; label: string; suggested: boolean }[];
+  tiles: PhotoViewTile[];
+}
+
+/** A photo's saved tag set, or "shows no specimen" (it goes to the exclusion review). */
+export type PhotoViewDecision = { item_id: number; views: string[] } | { item_id: number; no_specimen: true };
+
 /** One photo's decision in a Summary save; every exclusion carries a reason code. */
 export interface PhotoBatchDecision {
   item_id: number;
@@ -878,6 +913,15 @@ export const feedbackApi = {
    *  `keepalive`: sent as the page is hidden or left. */
   photoReviewBatch: (body: PhotoBatchBody, opts: { keepalive?: boolean } = {}) =>
     postJson<{ excluded: number; kept: number }>("/api/feedback/photo-review/batch", body, opts),
+  photoViews: (p: { tab: string; status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {
+    const qs = new URLSearchParams({ tab: p.tab, status: p.status, q: p.q ?? "",
+                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 60) });
+    return getJson<PhotoViewsPage>(`/api/feedback/photo-views?${qs}`);
+  },
+  /** A page of Photo views decisions, written whole or not at all (a 400 says why). */
+  photoViewsBatch: (decisions: PhotoViewDecision[]) =>
+    postJson<{ saved: number; unchanged: number; sent_to_exclusion_review: number }>(
+      "/api/feedback/photo-views/batch", { decisions }),
   labelReview: (p: { status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {
     const qs = new URLSearchParams({ status: p.status, q: p.q ?? "", offset: String(p.offset ?? 0),
                                      limit: String(p.limit ?? 10) });
