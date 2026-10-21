@@ -41,6 +41,11 @@ TABS: tuple[tuple[str, str], ...] = (
     ("habitat", "Habitat and scenes"),
     ("people", "People"),
     ("gate", "Not a fungus (gate)"),
+    # The photo-type tagger's tabs (Steve, 2026-10-21; probes checked >= 90% by eye on photos
+    # they never trained on: the research repo's experiments/photo-type-tagger).
+    ("uv", "UV reactions"),
+    ("tree", "Phylogenetic trees and BLAST"),
+    ("drawing", "Drawings"),
     ("other", "Other"),
 )
 TAB_CODES = tuple(c for c, _ in TABS)
@@ -70,7 +75,11 @@ REASONS: tuple[tuple[str, str], ...] = (
 )
 REASON_CODES = tuple(c for c, _ in REASONS)
 REASON_OF_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat",
-                 "people": "people", "gate": "not_fungus", "other": "other"}
+                 "people": "people", "gate": "not_fungus", "uv": "uv", "tree": "phylo_tree",
+                 "drawing": "drawing_micro", "other": "other"}
+# The tab a photo left out for a reason belongs to, whatever flagged it (Steve, 2026-10-21: a
+# photo already excluded as, say, a UV reaction shows on that tab's Completed list).
+TAB_OF_REASON = {r: t for t, r in REASON_OF_TAB.items()}
 
 
 def suggested_reason(flags: list[dict], tab: str = "all") -> str | None:
@@ -88,7 +97,10 @@ VIEW_TABS = {"habitat": "habitat", "scene": "habitat", "landscape": "habitat",
              "people": "people", "person": "people", "hand": "people",
              "micrograph": "micrograph", "microscope": "micrograph"}
 
-_PROBE = re.compile(r"micrograph probe p=([0-9.]+)")
+# A probe's flag names its tab: "micrograph probe p=0.62" (the miss review), "uv probe p=0.99",
+# "tree probe p=0.97", "drawing probe p=0.99" (the photo-type tagger).
+PROBE_TABS = ("micrograph", "uv", "tree", "drawing")
+_PROBE = re.compile(r"\b(" + "|".join(PROBE_TABS) + r") probe p=([0-9.]+)")
 _VIEW = re.compile(r"view (\w+) p=([0-9.]+)")
 _GATE = re.compile(r"gate not_fungus p\(fungus\)=([0-9.]+)")
 
@@ -100,8 +112,8 @@ def parse_flags(rule: str) -> list[dict]:
     out = []
     for part in (rule or "").split(";"):
         if m := _PROBE.search(part):
-            p = float(m.group(1))
-            out.append({"tab": "micrograph", "kind": "micrograph probe", "p": p, "strength": p})
+            p = float(m.group(2))
+            out.append({"tab": m.group(1), "kind": f"{m.group(1)} probe", "p": p, "strength": p})
         elif m := _GATE.search(part):
             p = float(m.group(1))
             out.append({"tab": "gate", "kind": "not-a-fungus gate", "p": p,
@@ -117,6 +129,35 @@ def parse_flags(rule: str) -> list[dict]:
 
 
 record_of_link = fb.record_of_link          # one rule for record links (feedback.py)
+
+
+def excluded_reason(item: dict) -> str | None:
+    """The reason an item's latest decision left its photo out for, or None."""
+    last = item.get("last_decision") or None
+    if not last or last.get("decision") != "exclude_photo":
+        return None
+    return last.get("value")
+
+
+def reason_flag(item: dict) -> dict | None:
+    """A decided photo's place by its reason: a flag-like {tab, kind, p, strength} for the tab
+    its exclusion reason belongs to (TAB_OF_REASON), or None. Its strength is 0, so it sorts
+    after the tab's flagged photos."""
+    tab = TAB_OF_REASON.get(excluded_reason(item) or "")
+    if tab is None:
+        return None
+    return {"tab": tab, "kind": f"left out as {excluded_reason(item)}", "p": None,
+            "strength": 0.0, "by_reason": True}
+
+
+def tab_flags(item: dict) -> list[dict]:
+    """The flags that place a photo in tabs: its rule's flags, plus its exclusion reason's tab
+    when no flag puts it there already."""
+    flags = parse_flags(item.get("rule") or "")
+    rf = reason_flag(item)
+    if rf and not any(f["tab"] == rf["tab"] for f in flags):
+        flags = flags + [rf]
+    return flags
 
 
 def record_of_item(item: dict) -> str | None:
@@ -166,7 +207,7 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
                                        "link": fb.link(key), "flagged": []})
         last = it.get("last_decision") or None
         rec["flagged"].append({"item_id": it["id"], "photo_key": it["subject"],
-                               "flags": parse_flags(it.get("rule") or ""),
+                               "flags": tab_flags(it),
                                "status": it["status"],
                                "decision": last and {"decision": last["decision"],
                                                      "reason": last.get("value"),
@@ -589,7 +630,7 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
         label = it.get("current") or ""
         if query and query not in key.lower() and query not in label.lower():
             continue
-        flags = parse_flags(it.get("rule") or "")
+        flags = tab_flags(it)
         mine = [f for f in flags if tab == "all" or f["tab"] == tab]
         if not mine:
             continue
@@ -597,7 +638,9 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
         tiles.append({"item_id": it["id"], "photo_key": it["subject"], "record_key": key,
                       "label": label, "link": fb.link(key), "flags": mine,
                       "strength": max(f["strength"] for f in mine),
-                      "suggested_reason": suggested_reason(flags, tab), "status": it["status"],
+                      "suggested_reason": suggested_reason([f for f in flags if not f.get("by_reason")]
+                                                           or flags, tab),
+                      "status": it["status"],
                       "decision": last and {"decision": last["decision"],
                                             "reason": last.get("value")}})
         per_record[key] = per_record.get(key, 0) + 1
