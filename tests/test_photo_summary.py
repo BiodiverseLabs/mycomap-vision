@@ -76,17 +76,19 @@ def test_a_batch_writes_exactly_the_shown_split_and_nothing_before_it(conn, tmp_
 
 def test_the_summary_offers_and_saves_uv_chemical_tests_trees_and_drawings(conn, tmp_path):
     """Steve, 2026-10-21: the Summary's reason picker has UV reaction, Chemical spot test,
-    Phylogenetic tree and the two drawings, and a batch saves each as the photo's reason."""
+    Phylogenetic tree / BLAST and the two drawings, and a batch saves each as the photo's reason."""
     c, fstore = site_with_photos(conn, tmp_path)
     as_user(c, "admin-1")
     body = c.get("/api/feedback/photo-review/flagged").json()
     offered = {r["code"]: r["label"] for r in body["reasons"]}
     assert offered["uv"] == "UV reaction" and offered["chemical"] == "Chemical spot test"
-    assert offered["phylo_tree"] == "Phylogenetic tree"
+    assert offered["phylo_tree"] == "Phylogenetic tree / BLAST"
     assert offered["drawing_micro"] == "Drawing – microscopy"
     assert offered["drawing_specimen"] == "Drawing – specimen"
+    assert offered["species_description"] == "Species description"
     ids = {t["photo_key"]: t["item_id"] for t in body["tiles"]}
-    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen"):
+    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen",
+                 "species_description"):
         r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
             {"item_id": ids["inat:1000"], "decision": "exclude", "reason": code}]})
         assert r.status_code == 200, code

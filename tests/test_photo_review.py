@@ -265,11 +265,13 @@ def test_uv_chemical_tests_trees_and_drawings_are_reasons_of_their_own(conn, tmp
     as_user(c, "admin-1")
     offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
     assert offered["uv"] == "UV reaction" and offered["chemical"] == "Chemical spot test"
-    assert offered["phylo_tree"] == "Phylogenetic tree"
+    assert offered["phylo_tree"] == "Phylogenetic tree / BLAST"
     assert offered["drawing_micro"] == "Drawing – microscopy"
     assert offered["drawing_specimen"] == "Drawing – specimen"
+    assert offered["species_description"] == "Species description"
     assert list(offered)[-1] == "other"                           # "Other" stays last
-    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen"):
+    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen",
+                 "species_description"):
         r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
             {"photo_key": "inat:1000", "decision": "exclude", "reason": code}]})
         assert r.status_code == 200, code
