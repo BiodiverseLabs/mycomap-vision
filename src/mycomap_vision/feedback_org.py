@@ -254,8 +254,7 @@ class OrgRequests:
         marks = ",".join("?" * len(item_ids))
         rows = self.store.conn.execute(
             f"select d.item_id, o.* from org_requests o join decisions d on d.id = o.decision_id "
-            f"where d.item_id in ({marks}) and d.id in (select max(id) from decisions "
-            f"group by item_id)", item_ids).fetchall()
+            f"where d.item_id in ({marks}) and {fb.LATEST_DECISION}", item_ids).fetchall()
         return {r["item_id"]: request_view(dict(r))["chip"] for r in rows}
 
     def unfinished(self) -> list[int]:

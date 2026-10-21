@@ -329,3 +329,37 @@ def test_a_name_item_lists_its_names_with_inats_taxa_and_mycomaps_synonyms(conn,
     other = item_id(fstore, "group_label")
     as_user(c, "admin-1")
     assert c.get(f"/api/feedback/items/{other}/names").json()["names"] == []
+
+
+def test_concurrent_requests_after_a_save_build_the_view_once():
+    """Every Save changes the store's version; the tiles, the summary and each private
+    photo's access check then all ask for the same view at once. One builds, the rest wait
+    for it (2026-10-21: each built its own, and one photo waited 106 s)."""
+    import threading
+    import time
+    version = [1]
+    builds = []
+
+    def build():
+        builds.append(version[0])
+        time.sleep(0.2)
+        return {"built": len(builds)}
+
+    cache = feedback_api.ViewCache(lambda: (version[0],))
+    start = threading.Barrier(8)
+    got = []
+
+    def ask():
+        start.wait()
+        got.append(cache("summary", build))
+
+    threads = [threading.Thread(target=ask) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert builds == [1] and got == [{"built": 1}] * 8
+    assert cache("summary", build) == {"built": 1}               # still fresh: no build
+    version[0] = 2                                                # a Save
+    assert cache("summary", build) == {"built": 2} and builds == [1, 2]
+    assert cache("other", build) == {"built": 3}                  # each key builds its own

@@ -35,6 +35,42 @@ from .pair_places import PairPlaces
 ROLE_TTL = 300.0
 
 
+class ViewCache:
+    """Values cached until `version()` changes, built once per key and version: a request that
+    finds the key being built waits for that build instead of starting its own. Every Save
+    changes the version, and without this each concurrent request (the tiles, the summary,
+    every private photo's access check) rebuilt at once on the one store connection: the
+    summary took 14 s and a photo 106 s (2026-10-21)."""
+
+    def __init__(self, version: Callable[[], tuple], limit: int = 64):
+        self.version = version
+        self.limit = limit
+        self.views: dict = {}
+        self.building: dict = {}           # key -> its build lock
+        self.lock = threading.Lock()
+
+    def _fresh(self, key, v) -> tuple | None:
+        with self.lock:
+            hit = self.views.get(key)
+        return hit if hit is not None and hit[0] == v else None
+
+    def __call__(self, key, build: Callable[[], object]):
+        if hit := self._fresh(key, self.version()):
+            return hit[1]
+        with self.lock:
+            building = self.building.setdefault(key, threading.Lock())
+        with building:
+            v = self.version()
+            if hit := self._fresh(key, v):    # built by the request this one waited for
+                return hit[1]
+            value = build()
+            with self.lock:
+                if len(self.views) > self.limit:
+                    self.views.clear()
+                self.views[key] = (v, value)
+        return value
+
+
 class OrgClient:
     """mycomap.org's Human Feedback endpoints, behind the Vision key (permissions.org_key)."""
 
@@ -190,11 +226,6 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def bad(e: Exception):
         raise HTTPException(400, str(e)) from e
 
-    # Counts and item lists cached until the store changes (any item or decision added):
-    # the page's first load reads 16,000+ photo items for its counts and lists.
-    views: dict = {}
-    views_lock = threading.Lock()
-
     def version() -> tuple:
         return tuple(store.conn.execute(
             "select (select count(*) from items), (select max(id) from items), "
@@ -207,18 +238,9 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def projkey(projects):
         return None if projects is None else tuple(sorted(projects))
 
-    def cached(key, build):
-        v = version()
-        with views_lock:
-            hit = views.get(key)
-            if hit and hit[0] == v:
-                return hit[1]
-        value = build()
-        with views_lock:
-            if len(views) > 64:
-                views.clear()
-            views[key] = (v, value)
-        return value
+    # Counts and item lists cached until the store changes (any item or decision added):
+    # the page's first load reads 16,000+ photo items for its counts and lists.
+    cached = ViewCache(version)
 
     def items_cached(item_type: str, projects):
         return cached(("items", item_type, projkey(projects)),
@@ -622,24 +644,20 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                      ["records"] if c["item_id"] == item_id), None)
         return {"record": label_card(card, projects is None) if card else None}
 
-    reachable: dict[frozenset | None, tuple[float, set[str]]] = {}
+    # Built once a minute: every private photo on a page asks at once.
+    reachable = ViewCache(lambda: (int(time.monotonic() // 60),))
 
     def records_reachable(projects: set[str] | None) -> set[str]:
         """The records of every queue item this reviewer can open (cached a minute)."""
-        key = None if projects is None else frozenset(projects)
-        with lock:
-            hit = reachable.get(key)
-        if hit and time.monotonic() - hit[0] < 60:
-            return hit[1]
-        out: set[str] = set()
-        for r in store._visible("select * from items", (), projects):
-            it = fb.Store._item(r)
-            out.update(it["record_keys"] or [])
-            if (k := pr.record_of_item(it)) is not None:
-                out.add(k)
-        with lock:
-            reachable[key] = (time.monotonic(), out)
-        return out
+        def build() -> set[str]:
+            out: set[str] = set()
+            for r in store._visible("select * from items", (), projects):
+                it = fb.Store._item(r)
+                out.update(it["record_keys"] or [])
+                if (k := pr.record_of_item(it)) is not None:
+                    out.add(k)
+            return out
+        return reachable(None if projects is None else frozenset(projects), build)
 
     @app.get("/api/feedback/photo/{photo_key}")
     def fb_photo(request: Request, photo_key: str, size: str = "thumb"):
