@@ -9,6 +9,75 @@ import { erratumReasons, shortHash, V1 } from "@/lib/datasetReleases";
 
 const body = "container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-3xl text-[#5c4a3a] leading-relaxed";
 const h2 = "font-display font-semibold text-xl text-[#4a3728] mt-8 mb-2";
+const link = "text-myco-green underline";
+
+/** The base model's own page: credit to its authors, not a release of ours. */
+const BIOCLIP2_URL = "https://huggingface.co/imageomics/bioclip-2";
+
+/** The works the identifier builds on or is compared with, as the paper draft cites them
+ *  (research repo, paper/draft.md, References). */
+const CITATIONS: { key: string; text: string; href: string }[] = [
+  { key: "Gu et al. 2025",
+    text: "Gu J, Stevens S, Campolongo EG, et al. 2025. BioCLIP 2: emergent properties from scaling hierarchical contrastive learning. arXiv:2505.23883.",
+    href: "https://arxiv.org/abs/2505.23883" },
+  { key: "Stevens et al. 2024",
+    text: "Stevens S, Wu J, Thompson MJ, et al. 2024. BioCLIP: a vision foundation model for the tree of life. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. doi:10.1109/CVPR52733.2024.01836.",
+    href: "https://doi.org/10.1109/CVPR52733.2024.01836" },
+  { key: "Picek et al. 2022",
+    text: "Picek L, Šulc M, Matas J, Jeppesen TS, Heilmann-Clausen J, Læssøe T, Frøslev T. 2022. Danish Fungi 2020 – not just another image recognition dataset. In: Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision. p. 1525–1535. doi:10.1109/WACV51458.2022.00334.",
+    href: "https://doi.org/10.1109/WACV51458.2022.00334" },
+  { key: "Picek et al. 2025",
+    text: "Picek L, et al. 2025. FungiTastic: a multi-modal dataset and benchmark for image categorization. arXiv:2408.13632.",
+    href: "https://arxiv.org/abs/2408.13632" },
+];
+
+/** What the identifier is built on and how it was fine-tuned (Steve, 2026-10-22). The recipe
+ *  is the finetunes row of the served model on the box (bioclip-2-336-ft-20261018-171420:
+ *  blocks_trained 4 of 24, 2 epochs, 155,781 records, 624,785 photos, 17,077 species); the
+ *  public model's 527,842 photos are from the research repo's paper/costs.csv (E23b). */
+function BaseModel() {
+  return (
+    <>
+      <h2 className={h2}>The base model: BioCLIP 2</h2>
+      <p>
+        MycoMap Vision is built on BioCLIP 2 (Gu et al. 2025), an image model for the tree of life
+        from the Imageomics Institute, the successor of BioCLIP (Stevens et al. 2024). Its weights
+        are at <a href={BIOCLIP2_URL} className={link} target="_blank" rel="noreferrer">huggingface.co/imageomics/bioclip-2</a>.
+      </p>
+      <h2 className={h2}>How it was fine-tuned</h2>
+      <p>
+        The last 4 of BioCLIP 2's 24 transformer blocks were trained for 2 epochs on dataset release{" "}
+        {V1.id}'s training split: 155,781 DNA-verified records, 624,785 photos and 17,077 species,
+        with classifiers at species, genus and family. The site's model (BioCLIP 2, 336 px,
+        fine-tuned, public + non-public training data) learned from all of those photos; the
+        paper's headline model (BioCLIP 2, 336 px, fine-tuned, open data only) was trained the same
+        way on the 527,842 Creative Commons photos among them. Earlier tests used the same recipe at
+        224 px.
+      </p>
+      <p className="mt-2">
+        "Frozen BioCLIP 2" in the results means BioCLIP 2's own image vectors, unchanged, used to
+        find the nearest DNA-verified records; it is not BioCLIP 2's zero-shot naming from text
+        prompts.
+      </p>
+    </>
+  );
+}
+
+function References() {
+  return (
+    <>
+      <h2 className={h2}>References</h2>
+      <ul className="space-y-2 text-sm">
+        {CITATIONS.map((c) => (
+          <li key={c.key}>
+            {c.text}{" "}
+            <a href={c.href} className={link} target="_blank" rel="noreferrer">Link</a>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
 
 export function ResearchPage() {
   const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
@@ -145,8 +214,11 @@ export function ProtocolsPage() {
         <h2 className={h2}>No number without its test</h2>
         <p>
           Every accuracy figure on this site names the records it was measured on and how many,
-          and whether the right answer had to be first or only near the top.
+          whether the right answer had to be first or only near the top, and the model: its base,
+          its image size (224 or 336 px), and whether it is frozen or fine-tuned, and on what
+          training data.
         </p>
+        <BaseModel />
         <h2 className={h2}>Keeping tests clean</h2>
         <p>
           A test record is never a reference or training record. Held-out sets are listed before
@@ -154,6 +226,7 @@ export function ProtocolsPage() {
           by whether the same observer recorded a reference on the same day, and whether a photo
           duplicates a reference photo.
         </p>
+        <References />
       </div>
     </>
   );
@@ -170,14 +243,15 @@ export function ForResearchersPage() {
         <p>
           A paper describing the method and its tests is in preparation. Until
           it is published, please cite the site: MycoMap Vision, https://vision.mycomap.org,
-          accessed (date).
+          accessed (date), and the base model it is built on, BioCLIP 2 (Gu et al. 2025).
         </p>
+        <BaseModel />
         <h2 className={h2}>Test your model on our records</h2>
         <p>
           Every result now comes from dataset release {V1.id}, frozen with release hash{" "}
           <span className="font-mono">{shortHash(V1.releaseHash)}…</span> (see{" "}
           <Link href="/research/data" className="text-myco-green underline">Reference data</Link>). Its
-          public variant (Creative Commons photos only) is planned on Zenodo with a DOI, so other
+          public variant (Creative Commons photos only) is planned with the paper, so other
           models can be scored on the same records with the same protocols. If this would help your work, tell us at{" "}
           <a href="mailto:info@mycomap.org" className="text-myco-green underline">info@mycomap.org</a>.
         </p>
@@ -187,6 +261,7 @@ export function ForResearchersPage() {
           in MycoMap projects. See{" "}
           <Link href="/research/data" className="text-myco-green underline">Reference data</Link>.
         </p>
+        <References />
       </div>
     </>
   );
