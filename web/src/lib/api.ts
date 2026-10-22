@@ -245,6 +245,27 @@ export interface ScoreRun {
   dataset_release?: string | null;
 }
 
+/** How often the right name was among the first k answers (k = 1, 3, 5, 10), over n records. */
+export interface TopK { n: number; top1: number | null; top3: number | null; top5: number | null;
+                        top10: number | null }
+/** How it works' "How good is it" (GET /api/how-good, howgood.py): the served model's newest
+ *  open run. A part its report lacks is null; never a sealed-test run. */
+export interface HowGood {
+  run: { id: number; backbone: string; method: string; cutoff: string; test_days: number;
+         n_test: number; n_reference: number } | null;
+  top1?: { species: number | null; genus: number | null; family: number | null };
+  top_k?: ({ k: number[] } & Partial<Record<Rank, TopK | null>>) | null;
+  /** Species by how many DNA-verified records the true species has (bands "0" … "100+"). */
+  species_by_depth?: (TopK & { band: string })[] | null;
+  /** The same records answered from their first photo only, beside all their photos. */
+  first_photo?: { n: number; first_photo_top1: number; all_photos_n: number | null;
+                  all_photos_top1: number | null } | null;
+  inat?: { method: string; n_test: number | null; species_top1: number | null;
+           genus_top1: number | null; family_top1: number | null } | null;
+}
+/** One UTC day's average seconds per photo (GET /api/speed/daily); never how many photos. */
+export interface SpeedDay { day: string; seconds_per_photo: number }
+
 export type BucketScores = Record<string, { n: number; top1: number; top5: number }>;
 export interface GroupScore { name: string; n: number; species_top1: number | null; genus_top1: number | null }
 export type EvalResult = Record<Rank, BucketScores> & {
@@ -978,6 +999,8 @@ export const api = {
   stats: () => getJson<Stats>("/api/stats"),
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
   run: (id: number) => getJson<RunReport>(`/api/scoreboard/${id}`),
+  howGood: () => getJson<HowGood>("/api/how-good"),
+  speedDaily: () => getJson<{ days: SpeedDay[] }>("/api/speed/daily"),
   /** `onWait(attempt, seconds)`: the server was busy and the photos wait in line.
    *  `onSent(fraction)`: how much of the photos has been sent, 0 to 1, for each try. */
   async identify(photos: File[], models: string[], where: Where = {},
