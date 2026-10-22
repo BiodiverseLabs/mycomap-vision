@@ -77,16 +77,18 @@ test("a signed-out visitor reads the API page and the whole Research section, an
     assert.equal(mustSignIn(visitor, page), false, page);
   }
   assert.equal(mustSignIn(visitor, "/feedback"), false, "Human Feedback, read-only");
-  for (const page of ["/", "/about", "/feedbackx", "/researchx"]) {
+  assert.equal(mustSignIn(visitor, "/about"), false, "How it works, open to anyone");
+  for (const page of ["/", "/get-involved", "/aboutx", "/feedbackx", "/researchx"]) {
     assert.equal(mustSignIn(visitor, page), true, page);
   }
 });
 
 test("the pages whose link card crawlers may read still send a signed-out person to sign in", () => {
   // The server answers /, /about and /get-involved with the shell and its link-preview card
-  // (signin.SHARE_PAGES, linkcards.py); the app is what sends a signed-out person on.
+  // (signin.SHARE_PAGES, linkcards.py); the app sends a signed-out person on from / and
+  // /get-involved (How it works is open to anyone).
   const visitor = me("all", null);
-  for (const page of ["/", "/about", "/get-involved"]) {
+  for (const page of ["/", "/get-involved"]) {
     assert.equal(mustSignIn(visitor, page), true, page);
   }
 });
