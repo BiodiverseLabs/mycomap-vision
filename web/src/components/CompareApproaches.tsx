@@ -14,26 +14,34 @@ const RANK_LABEL: Record<Rank, string> = { species: "Species", genus: "Genus", f
 
 interface Approach { name: string; how: string; trained: string; names: string; status: string }
 
-/** How the approaches differ. Rows without results yet say so. */
+/** How the approaches differ. Rows without results yet say so. The served method is
+ *  nearest+mean-records-balanced+place (methods.NearestAndMeanRecordsBalanced, k 2, weight 0.6;
+ *  placeprior, setting penalty-500-s30-2026-10-19, its own calibration). */
 const APPROACHES: Approach[] = [
-  { name: "Nearest + species average + place and date", how: "Nearest + species average, then each name weighed by how near and how in season its DNA-verified records are, when a place or date is given",
-    trained: "Same model; DNA-verified records and iNaturalist's open fungus records for range and season", names: "Same as nearest + species average",
-    status: "On the site: the default when a find has a place or date (October 2026); confirmed on held-out records" },
-  { name: "Nearest + species average", how: "Blends each photo's two best matching reference photos (they can be two photos of one specimen) with the species' average look",
-    trained: "BioCLIP 2, last 4 of 24 blocks fine-tuned on our records; the v1 model learned from dataset release v1's training split only", names: "Any species with one DNA-verified record; new records added nightly",
-    status: "On the site for photos without a place or date (the default since October 2026); confirmed on held-out records" },
+  { name: "Record-grouped scoring + place and date",
+    how: "For each of your photos, every DNA-verified reference record scores by its best-matching photo, and a species takes the average of its two best records, so its two matches come from two different specimens (an iNaturalist and a Mushroom Observer post of one specimen count as one). That is blended with the species' average look, in which every record counts the same however many photos it has, and averaged over your photos. When a place or date is given, species with DNA-verified records nearby and in season move up, and species known only more than 500 km away, or out of season, move down",
+    trained: "BioCLIP 2, 336 px, fine-tuned (public + non-public training data): last 4 of 24 blocks, on dataset release v1's training split; DNA-verified records and iNaturalist's open fungus records for range and season",
+    names: "Any species with one DNA-verified record; new records added nightly",
+    status: "On the site since October 2026 (336 px from 20 October); its stated confidence calibrated on its own results. With no place or date, its answer is the photos-only one below" },
+  { name: "Record-grouped scoring, photos only",
+    how: "The same, from the photos alone",
+    trained: "Same model", names: "Same as above",
+    status: "On the site for finds without a place or date" },
+  { name: "Nearest + species average", how: "Blends each photo's two best matching reference photos (they can be two photos of one specimen) with the species' average look, in which a record with many photos weighs more",
+    trained: "Same model", names: "Same as above",
+    status: "Tested; the site's method before record-grouped scoring (October 2026)" },
   { name: "Nearest specimen", how: "Finds the most similar DNA-verified specimens; each species scored by its best match to all your photos",
-    trained: "Same model", names: "Same as above", status: "Tested; the site's method until October 2026" },
+    trained: "Same model, or BioCLIP 2 frozen (its image vectors unchanged)", names: "Same as above", status: "Tested; the site's method until October 2026" },
   { name: "Species average", how: "Compares your photos with each species' average photo", trained: "Same model",
     names: "Same as nearest specimen", status: "Tested" },
   { name: "Trained classifier (small)", how: "A classifier trained on top of finished image features",
     trained: "Only the classifier; the image model unchanged", names: "Species in its training list", status: "Tested: lost to nearest specimen" },
   { name: "iNaturalist computer vision", how: "iNat's own model; best score across your photos, with or without location",
     trained: "Community-identified iNat observations", names: "Species iNat has as taxa (few provisional names)",
-    status: "Outside baseline; being measured on the newest test and held-out records" },
-  { name: "Danish Fungi method on our records", how: "Whole network retrained as a classifier (BEiT, 384 px, rare-class loss), photo probabilities averaged, month prior",
-    trained: "Our DNA-verified records", names: "Species in its training list; a new species needs a retrain",
-    status: "Being built (replication of Picek et al.)" },
+    status: "Outside baseline: to be scored on the sealed test after the analysis freeze" },
+  { name: "Danish Fungi method on our records", how: "Whole network retrained as a classifier (BEiT-B, 384 px, rare-class loss), photo probabilities averaged, month prior",
+    trained: "Dataset release v1's training split, open data only (Creative Commons photos)", names: "Species in its training list; a new species needs a retrain",
+    status: "Running (launched 21 October 2026; replication of Picek et al.)" },
   { name: "Published Danish Fungi / FungiTastic models", how: "The published models, unchanged",
     trained: "Danish Fungal Atlas records (expert-checked)", names: "Mostly European species",
     status: "Tested on held-out development records: can name 13-19% of formally named North American records; behind on the species they share" },
