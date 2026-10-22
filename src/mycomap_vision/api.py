@@ -688,15 +688,40 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         ident.warm()
         return ident
 
+    def same_permissions(old: tuple, new: tuple) -> bool:
+        """Two index versions that differ in nothing about who may be shown (the third
+        part of index_version) or which cross-posts are one find (the last): the old index
+        may answer while the new one builds."""
+        return (isinstance(old, tuple) and isinstance(new, tuple) and len(old) == len(new)
+                and old[2] == new[2] and old[-1] == new[-1])
+
     # Rebuilt (someone withdrew, a new calibration) on its own thread and swapped in
     # whole; the old index is released after, and serves on if a build fails.
     indexes = serving.ServedIndexes(build_index, note=note, release=models.release_memory,
-                                    wait=_setting_number("MV_INDEX_WAIT_SECONDS") or 20.0)
+                                    wait=_setting_number("MV_INDEX_WAIT_SECONDS") or 20.0,
+                                    may_serve_old=same_permissions)
 
     def identifier(backbone: str, method: str, view: permissions.PermissionView) -> Identifier:
-        """The index as the data stand now. May wait for a rebuild (serving.Updating if
-        it takes too long); never call it holding gpu_lock."""
-        return indexes.get((backbone, method), index_version(backbone, method, view))
+        """The index as the data stand now. While a rebuild that changes no one's
+        permission runs (a rename, the night's records, a calibration), the old index
+        answers; after a withdrawal it waits for the rebuild (serving.Updating if that
+        takes too long). Never call it holding gpu_lock."""
+        return indexes.get((backbone, method), index_version(backbone, method, view),
+                           stale_ok=True)
+
+    def rebuild_behind(why: str) -> None:
+        """Start rebuilding every served index for the data as they stand now, the old one
+        answering meanwhile, so the next person doesn't wait for it."""
+        for backbone, method in indexes.served():
+            try:
+                indexes.get((backbone, method),
+                            index_version(backbone, method, permission_view()), wait=0,
+                            stale_ok=True)
+            except serving.Updating:
+                pass                                  # a withdrawal: building, callers wait
+            except Exception as e:  # noqa: BLE001 - the next identification retries
+                note(f"[index] rebuilding {backbone}/{method} after {why} failed: "
+                     f"{type(e).__name__}: {e}")
 
     def index_version(backbone: str, method: str, view: permissions.PermissionView) -> tuple:
         n = embedded_counts().get(backbone, 0)
@@ -709,14 +734,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             excluded = feedback.exclusions_fingerprint(conn)
             # Renames read from mycomap.org's name-change log between nights (name_changes.py).
             renamed = name_changes.version(conn) if layer else 0
+        # view.fingerprint() stays third and the twins last: same_permissions reads them.
         return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded, renamed,
                 twins.version(twins_path()))
 
     def answers_version(backbone: str, method: str, view: permissions.PermissionView) -> str:
         """What this model answers from now (answercache.answers_version): the release and
-        the served index's version. A kept observation answer is served only under it."""
-        return answercache.answers_version(model_card().get("version"),
-                                           index_version(backbone, method, view))
+        the served index's version (the old one's while a rebuild runs behind it). A kept
+        observation answer is served only under it."""
+        return answercache.answers_version(model_card().get("version"), indexes.answering(
+            (backbone, method), index_version(backbone, method, view)))
 
     # --- the identification log (identifylog.py) -----------------------------------------
     def release_now() -> str | None:
@@ -1725,8 +1752,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                  layer_db, note=note)
     app.state.name_change_reader = name_change_reader
 
-    def read_name_changes() -> dict | None:
-        return name_change_reader.run() if name_change_reader else None
+    def read_name_changes(rebuild: bool = True) -> dict | None:
+        """Read .org's renames; when one reached the layer, the indexes are rebuilt behind
+        the ones answering (not in the night, which rebuilds after its own changes)."""
+        out = name_change_reader.run() if name_change_reader else None
+        if rebuild and out and (out.get("renamed") or out.get("name_moved")):
+            rebuild_behind("a rename")
+        return out
+    app.state.read_name_changes = read_name_changes
 
     def run_nightly(accept_removals: bool = False) -> dict:
         """One nightly update, then the preloaded indexes rebuilt so the first person
@@ -1738,7 +1771,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return base_url, key
         with db_lock:                      # Human Feedback's photo decisions, once a night
             note(f"[feedback] photo exclusions: {feedback.sync_exclusions(feedback_store, conn)}")
-        read_name_changes()                # .org's renames first: tonight counts only the rest
+        read_name_changes(rebuild=False)   # .org's renames first: tonight counts only the rest
         fetch = nightly_fetch or (lambda: nightly.fetch_green(*org(), log=note))
         fetch_pending = nightly_fetch_pending or (lambda: nightly.fetch_pending(*org(), log=note))
 
@@ -1759,7 +1792,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if confused_with is not None:          # tonight's table, if the read took
             confused_with.reload()
         if report["changed"]:
-            for spec in warm.models:
+            # Every index answering now, waited for: the night's people get tonight's.
+            served_now = {"/".join(k) for k in indexes.served()}
+            for spec in [*warm.models, *sorted(served_now - set(warm.models))]:
                 backbone, _, method = spec.partition("/")
                 try:
                     indexes.get((backbone, method),

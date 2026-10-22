@@ -202,6 +202,57 @@ def test_a_rebuild_is_swapped_in_whole_and_callers_meanwhile_hear_updating():
     assert served.current("k")[0] == 2
 
 
+def test_a_change_that_withdraws_no_one_is_answered_from_the_old_index_while_it_builds():
+    """Steve, 2026-10-22: a rename or a calibration rebuilds behind the index answering;
+    only a change in who may be shown makes callers wait for the new one."""
+    go, calls = threading.Event(), []
+
+    def build(key, version):
+        calls.append(version)
+        if version != (1, "a"):
+            assert go.wait(5)
+        return Built(version)
+    served = ServedIndexes(build, wait=0.1, note=lambda s: None,
+                           may_serve_old=lambda old, new: old[1] == new[1])
+    v1 = served.get("k", (1, "a"))
+    assert served.get("k", (2, "a"), stale_ok=True) is v1          # at once, no Updating
+    assert served.get("k", (2, "a"), stale_ok=True) is v1
+    assert calls == [(1, "a"), (2, "a")], "one build behind, however many callers ask"
+    assert served.answering("k", (2, "a")) == (1, "a"), "answers say which index gave them"
+    with pytest.raises(Updating):
+        served.get("k", (2, "a"))                  # a caller that must have the new one waits
+    go.set()
+    end = time.monotonic() + 5
+    while served.current("k")[0] != (2, "a"):
+        assert time.monotonic() < end
+        time.sleep(0.01)
+    assert served.answering("k", (2, "a")) == (2, "a")
+    go.clear()
+    with pytest.raises(Updating, match="being updated"):
+        served.get("k", (3, "b"), stale_ok=True)   # who may be shown changed: never the old
+    go.set()
+
+
+def test_a_rebuild_behind_that_fails_keeps_the_old_index_answering_without_retrying_each_ask():
+    now, calls = [0.0], []
+
+    def build(key, version):
+        calls.append(version)
+        if version == (2, "a"):
+            raise OSError("release file unreadable")
+        return Built(version)
+    served = ServedIndexes(build, wait=5, retry_seconds=60, note=lambda s: None,
+                           clock=lambda: now[0], may_serve_old=lambda old, new: True)
+    v1 = served.get("k", (1, "a"))
+    assert served.get("k", (2, "a"), stale_ok=True) is v1
+    end = time.monotonic() + 5
+    while "k" not in served._failed:
+        assert time.monotonic() < end
+        time.sleep(0.01)
+    assert served.get("k", (2, "a"), stale_ok=True) is v1
+    assert calls == [(1, "a"), (2, "a")]
+
+
 def test_a_failed_build_leaves_the_old_index_serving_and_is_retried_later():
     now = [0.0]
     fail = [True]
