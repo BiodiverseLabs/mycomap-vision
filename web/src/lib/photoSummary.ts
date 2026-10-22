@@ -117,8 +117,8 @@ export type Marks = Record<number, Mark>;
 
 type MarkTile = Pick<FlaggedTile, "item_id" | "status" | "decision" | "suggested_reason" | "suggested_decision">;
 
-/** How a page starts: an open tile as Exclude with its suggested reason, or as Include when the
- *  server suggests keeping it (tagger v2 reads it as a specimen photo, or in its low band); a
+/** How a page starts: an open tile as Exclude with its suggested reason, in every band, or as
+ *  Include when the server suggests keeping it (tagger v2 reads it as a specimen photo); a
  *  decided tile shows its stored decision, read-only. */
 export function initialMarks(tiles: MarkTile[]): Marks {
   const out: Marks = {};

@@ -2,8 +2,8 @@
 manually do all the field slips out of microscopy, and we have more levels and results for all
 categories"). A v2 flag ("R9 v2 slip p=0.83 (high)") decides the photo's tab over the older
 flags it carries, so a field slip the micrograph probe caught moves to Field slips; its band
-(high / medium / low) filters every tab; a photo v2 reads as a specimen photo, or puts in its
-low band, starts as Include."""
+(high / medium / low) filters every tab; a photo v2 reads as a specimen photo starts as
+Include, and every other one as Exclude, low band included (Steve, 2026-10-21)."""
 
 import pytest
 from test_feedback_api import as_user
@@ -58,10 +58,10 @@ def test_bands_filter_every_tab_and_the_tabs_count_them():
         pr.flagged_tiles(items(), "uv", band="certain")
 
 
-def test_specimen_and_low_band_photos_start_as_include():
+def test_only_specimen_photos_start_as_include_a_low_band_photo_in_a_group_starts_excluded():
     t = {x["photo_key"]: x for x in pr.flagged_tiles(items(), "all")}
     assert t["inat:3"]["suggested_decision"] == "keep" and t["inat:3"]["suggested_reason"] is None
-    assert t["inat:4"]["suggested_decision"] == "keep" and t["inat:4"]["suggested_reason"] == "uv"
+    assert t["inat:4"]["suggested_decision"] == "exclude" and t["inat:4"]["suggested_reason"] == "uv"
     assert t["inat:5"]["suggested_decision"] == "exclude"
     assert t["inat:1"]["suggested_decision"] == "exclude" and t["inat:1"]["suggested_reason"] == "slip"
     assert t["inat:6"]["suggested_decision"] == "exclude"                   # v1 flags as before

@@ -108,10 +108,11 @@ def suggested_reason(flags: list[dict], tab: str = "all") -> str | None:
 
 
 def suggested_decision(flags: list[dict]) -> str:
-    """How an open photo starts: "keep" when tagger v2 reads it as a specimen photo or puts it
-    in its low band (most of those show the specimen), else "exclude"."""
+    """How an open photo starts: "keep" when tagger v2 reads it as a specimen photo, else
+    "exclude" with its suggested reason, whatever its band (Steve, 2026-10-21: a low-confidence
+    photo in a group still starts as Exclude; the band filter is how to look at those first)."""
     v2 = [f for f in flags if f.get("v2")]
-    if v2 and (v2[-1]["tab"] == "specimen" or v2[-1].get("band") == "low"):
+    if v2 and v2[-1]["tab"] == "specimen":
         return "keep"
     return "exclude"
 
