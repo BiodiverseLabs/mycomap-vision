@@ -233,7 +233,7 @@ def test_only_a_runs_own_three_addresses_are_open_while_the_site_needs_sign_in(c
     # The page itself (the shell; the site's catch-all) is not sent to sign in.
     assert anyone.get(f"/r/{rid}").status_code != 302
     # Everything else still is: other pages, identifying, deleting, other API routes.
-    assert anyone.get("/research").status_code == 302
+    assert anyone.get("/admin").status_code == 302      # /research is open to anyone now
     assert anyone.get(f"/r/{rid}/x").status_code == 302
     assert identify(anyone).status_code == 401
     assert anyone.delete(f"/api/runs/{rid}").status_code == 401
