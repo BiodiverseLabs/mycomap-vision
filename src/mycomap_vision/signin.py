@@ -81,7 +81,10 @@ SHARE_PAGES = ("/", "/about", "/get-involved")
 # opens, and asks a signed-out visitor to sign in to read them).
 RESEARCH_PAGES = ("/models", "/data")
 RESEARCH_API = ("/api/stats", "/api/models", "/api/scoreboard", "/api/prospective",
-                "/api/benchmarks")
+                "/api/benchmarks",
+                # How it works (a share page, open to anyone): its accuracy summary, never the
+                # sealed test (howgood.py), and the daily seconds per photo, averages only.
+                "/api/how-good", "/api/speed/daily")
 _RESEARCH_RUN = re.compile(r"^/api/scoreboard/\d{1,9}$")
 
 

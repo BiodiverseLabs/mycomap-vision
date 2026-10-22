@@ -125,13 +125,13 @@ def test_the_route_answers_for_the_served_model_and_method(conn, tmp_path):
     assert out["run"]["id"] == run and out["top_k"]["species"]["top3"] == 0.753
 
 
-def test_with_the_site_signed_in_the_page_data_answers_members_and_not_strangers(conn, tmp_path):
-    """How it works stays behind sign-in (MV_SIGNIN=all): its new data answers a signed-in
-    member, and nobody signed out, like the page."""
+def test_with_the_site_signed_in_the_page_data_still_answers_anyone(conn, tmp_path):
+    """How it works is a share page, open to anyone even with MV_SIGNIN=all (Steve,
+    2026-10-22): its data must answer a signed-out visitor too, or they see an empty page."""
     c = gated_site_with_pages(conn, tmp_path)
     add_run(conn)
-    for path in ("/api/how-good", "/api/speed/daily"):
-        assert c.get(path).status_code == 401, path
-    sign_in(c)
     assert c.get("/api/how-good").status_code == 200
     assert c.get("/api/speed/daily").json() == {"days": []}
+    assert c.post("/api/how-good").status_code in (401, 405)        # reads only
+    sign_in(c)
+    assert c.get("/api/how-good").status_code == 200
