@@ -259,6 +259,8 @@ export interface RunReport {
   // External baselines (iNat) add these.
   species_names_inat_knows?: number;
   species_by_observed_year?: Record<string, { n: number; top1: number; top5: number } | null>;
+  /** The reference's species per depth band (evaluate.reference_species_of), when known. */
+  reference_species?: { answer_key: string; records: number; species: number; bands: Record<string, number> } | null;
 }
 
 const METHOD_LABEL: Record<string, string> = {

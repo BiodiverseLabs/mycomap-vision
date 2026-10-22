@@ -235,3 +235,25 @@ export function heldoutDepth(b: PublishedBenchmark): { key: string; backbone: st
     cells: STANDARD_BANDS.map((band) => bands[band]?.species ?? null),
   }));
 }
+
+/** The reference's species per depth band (evaluate.reference_species): a species is never in
+ *  band 0, so the bands are 1-4 to 100+. */
+export interface ReferenceSpecies { answer_key: string; records: number; species: number; bands: Record<string, number> }
+export interface Segment { band: string; n: number; share: number }
+
+/** The heatmap's companion (Steve, 2026-10-22): the reference's species and the test finds
+ *  over the same depth bands, each as whole-percent shares. Species bars null when the
+ *  comparison carries no species counts; a band with no count is left out. */
+export function companionBars(species: ReferenceSpecies | null | undefined,
+                              finds: (number | null)[]): { species: Segment[] | null; finds: Segment[] } {
+  const segs = (bands: readonly string[], counts: (number | null)[]): Segment[] => {
+    const shares = bandShares(counts);
+    return bands.map((band, i) => ({ band, n: counts[i] ?? 0, share: shares[i] ?? 0 }))
+      .filter((s, i) => counts[i] != null);
+  };
+  const speciesBands = STANDARD_BANDS.slice(1);
+  return {
+    species: species ? segs(speciesBands, speciesBands.map((b) => species.bands[b] ?? 0)) : null,
+    finds: segs(STANDARD_BANDS, finds),
+  };
+}

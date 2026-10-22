@@ -22,6 +22,8 @@ import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 
@@ -355,6 +357,40 @@ def standard_band(n: int) -> str:
         if lo <= n <= hi:
             return label
     return STANDARD_DEPTH[-1][2]
+
+
+def reference_species(ref, answer_key: str | None = None) -> dict:
+    """How many species the reference holds in each depth band (Steve, 2026-10-22: the Results
+    heatmap's companion). A species is a strict species label as the bands key it
+    (name_equiv.ReferenceDepth with the comparison's answer key), counted over the reference
+    records that carry one; its band is standard_band of its record count, as for a find's
+    true species. Never 0: a reference species has a record."""
+    depth = name_equiv.ReferenceDepth((r.species for r in ref if r.species),
+                                      answer_key or name_equiv.ANSWER_KEY)
+    bands = Counter(standard_band(n) for n in depth.counts.values())
+    return {"answer_key": depth.rule, "records": len(ref), "species": len(depth.counts),
+            "bands": {b: bands.get(b, 0) for _, _, b in STANDARD_DEPTH[1:]}}
+
+
+REFERENCE_SPECIES_FILE = Path(__file__).with_name("reference_species.json")
+
+
+@lru_cache(maxsize=1)
+def _reference_species_shipped() -> dict:
+    try:
+        return json.loads(REFERENCE_SPECIES_FILE.read_text(encoding="utf-8"))["by_record_set"]
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def reference_species_of(report: dict, record_set: str | None) -> dict | None:
+    """A run's reference species per band: saved with the run (compare, since 2026-10-22), or
+    for the v1 comparisons scored before, as computed from the release and shipped in
+    reference_species.json (by record set and the run's answer key); None otherwise."""
+    if report.get("reference_species"):
+        return report["reference_species"]
+    key = (report.get("all_photos") or {}).get("answer_key") or "exact"
+    return _reference_species_shipped().get(str(record_set or "")[:12], {}).get(key)
 
 
 def truth(rec: Record, rank: str) -> str:
@@ -914,6 +950,9 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
         comparison_id = (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-"
                          + shared.record_set[:6])
     runs = []
+    # Species per depth band in this reference (the Results heatmap's companion), saved with
+    # every row: the same reference for all of them.
+    ref_species = reference_species(ref, answer_key)
     for b, (ids, vecs) in shared.loaded.items():
         row_of = {int(p): i for i, p in enumerate(ids.tolist())}
         ref_b, test_b = with_rows(ref, row_of), with_rows(test, row_of)
@@ -925,7 +964,7 @@ def compare(conn: sqlite3.Connection, backbones: list[str], methods: list[str] |
             spec = (twins_mod.specimen_of(twin_groups, ref_b)
                     if twin_groups is not None and twins_mod.is_grouped(m) else None)
             fitted = fit_method(vecs, ref_b, m, backbone=b, specimen_of=spec)
-            row_extra = {**(extra or {}),
+            row_extra = {**(extra or {}), "reference_species": ref_species,
                          **(getattr(fitted[1], "scoreboard_extra", lambda: None)() or {})}
             if twins_mod.is_grouped(m):
                 row_extra["twins"] = ({**(twins_cite or {}), "records_grouped": len(spec)}
