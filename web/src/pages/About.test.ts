@@ -82,7 +82,7 @@ test("with no speed recorded the chart says so and shows no figure", () => {
   const html = page({ speed: [] });
   assert.match(html, /data-testid="speed-chart" data-state="none"/);
   assert.match(text(html), /No day recorded yet/);
-  assert.doesNotMatch(html, /Recording since|speed-latest|Clean measurement/);
+  assert.doesNotMatch(html, /Recording since|speed-latest|speed-rolling|Clean measurement/);
 });
 
 test("with one day the day is shown with when recording began, and no line", () => {
@@ -92,15 +92,20 @@ test("with one day the day is shown with when recording began, and no line", () 
   assert.match(t, /1\.24 s per photo on 22 October 2026/);
   assert.match(t, /Recording since 22 October 2026\./);
   assert.match(t, /1\.24 s per photo, today/);
-  assert.doesNotMatch(html, /speed-table|Clean measurement/, "no line from one day");
-  assert.match(text(page({ speed: days(2) })), /The daily chart starts once there are 3 days/);
+  assert.doesNotMatch(html, /speed-table|speed-rolling|7-day average:|Clean measurement/, "no line, no average from one day");
+  const two = text(page({ speed: [{ day: "2026-10-21", seconds_per_photo: 1.2 }, { day: TODAY, seconds_per_photo: 1.5 }] }));
+  assert.match(two, /The daily chart starts once there are 3 days/);
+  assert.match(two, /7-day average: 1\.35 s per photo/, "from 2 days, their 7-day average");
 });
 
-test("with thirty days the line is drawn with the clean measurement and the newest figure", () => {
+test("with thirty days the daily line is drawn with its 7-day average and the newest figure", () => {
   const html = page();
   assert.match(html, /data-state="chart"/);
   const t = text(html);
-  assert.match(t, /Clean measurement, 1\.1 s/);
+  assert.doesNotMatch(t, /Clean measurement|1\.1 s/, "no fixed reference figure");
+  assert.match(html, /data-testid="speed-rolling-line"/);
+  assert.match(html, /data-testid="speed-legend"[^]*Daily average[^]*7-day average/);
+  assert.match(t, /22 Oct: 2\.28 s \(7-day average 1\.\d\d s\)/, "the table gives each day's average too");
   assert.match(t, /2\.28 s today/);
   assert.match(t, /Recording since 23 September 2026\./);
   assert.match(t, /23 Sep/);

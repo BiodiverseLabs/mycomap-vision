@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  CLEAN_LABEL, CLEAN_SECONDS, depthLabel, latestLabel, modelCredit, namesByRecords,
-  nearestPoint, recordingSince, servedModel, shortDate, speedView, topKRows,
+  depthLabel, latestLabel, modelCredit, namesByRecords, nearestPoint, recordingSince,
+  rollingAverage, ROLLING_LABEL, servedModel, shortDate, speedView, topKRows,
 } from "./howItWorks";
 import type { HowGood, ModelsInfo, SpeedDay, Stats } from "./api";
 
@@ -33,9 +33,11 @@ test("with fewer than three days the days are listed with when recording began, 
   assert.ok(two.state === "few");
   assert.deepEqual(two.days.map((d) => d.day), ["2026-10-22", "2026-10-23"], "oldest first");
   assert.equal(two.latest.day, "2026-10-23");
+  assert.equal(one.state === "few" && one.rolling, null, "one day has no 7-day average");
+  assert.equal(two.rolling, 1.5, "two days do");
 });
 
-test("thirty days make a line from 0 up, by date, with the clean measurement drawn across", () => {
+test("thirty days make a line from 0 up, by date, with its 7-day average beside it", () => {
   const v = speedView(days(30));
   assert.ok(v.state === "chart");
   assert.equal(v.points.length, 30);
@@ -47,22 +49,59 @@ test("thirty days make a line from 0 up, by date, with the clean measurement dra
   assert.equal(v.yTicks[0].y, 1);
   assert.ok(v.yMax >= 2.2 * 1.1 - 1e-9, "room above the slowest day");
   assert.equal(v.yTicks[v.yTicks.length - 1].v, v.yMax);
-  assert.equal(v.ref.v, CLEAN_SECONDS);
-  assert.ok(Math.abs(v.ref.y - (1 - CLEAN_SECONDS / v.yMax)) < 1e-9);
-  assert.equal(CLEAN_LABEL, "Clean measurement, 1.1 s");
-  for (const p of v.points) assert.ok(Math.abs(p.y - (1 - p.seconds_per_photo / v.yMax)) < 1e-9);
+  assert.equal(v.hasRolling, true);
+  assert.equal(ROLLING_LABEL, "7-day average");
+  for (const p of v.points) {
+    assert.ok(Math.abs(p.y - (1 - p.seconds_per_photo / v.yMax)) < 1e-9);
+    assert.ok(p.rolling != null && Math.abs(p.ry! - (1 - p.rolling / v.yMax)) < 1e-9);
+  }
+  assert.ok(Math.abs(v.points[29].rolling! - rollingAverage(days(30))[29].seconds) < 1e-12);
   assert.deepEqual(v.xTicks.map((t) => t.label)[0], "23 Sep");
   assert.equal(v.xTicks[v.xTicks.length - 1].label, "22 Oct");
   assert.ok(v.xTicks.length <= 5);
 });
 
-test("a day without photos leaves its gap in time, and a fast week still shows the reference", () => {
+test("a day without photos leaves its gap in time, and the axis fits a fast week", () => {
   const v = speedView([{ day: "2026-10-01", seconds_per_photo: 0.4 },
                        { day: "2026-10-02", seconds_per_photo: 0.5 },
                        { day: "2026-10-11", seconds_per_photo: 0.6 }]);
   assert.ok(v.state === "chart");
   assert.ok(Math.abs(v.points[1].x - 0.1) < 1e-9, "1 day of 10, not 1 point of 2");
-  assert.ok(v.yMax > CLEAN_SECONDS, "the 1.1 s line fits even when every day was faster");
+  assert.ok(v.yMax >= 0.66 - 1e-9 && v.yMax <= 1, "the axis is sized to the days, not to a fixed figure");
+});
+
+// The 7-day average (Steve, 2026-10-22): each day with the recorded days among the 6 before it,
+// an unweighted mean of daily averages; a day without photos is skipped, never a 0.
+test("the 7-day average needs 2 days: none for 0 or 1", () => {
+  assert.deepEqual(rollingAverage([]), []);
+  assert.deepEqual(rollingAverage([{ day: "2026-10-22", seconds_per_photo: 1.2 }]), []);
+});
+
+test("with 2 days the 7-day average is their plain mean from the second day", () => {
+  assert.deepEqual(rollingAverage([{ day: "2026-10-21", seconds_per_photo: 1 },
+                                   { day: "2026-10-22", seconds_per_photo: 2 }]),
+                   [{ day: "2026-10-21", seconds: 1 }, { day: "2026-10-22", seconds: 1.5 }]);
+});
+
+test("over 10 days with a gap, each day averages the recorded days in its 7 calendar days", () => {
+  // 1-4 October and 7-12 October: 5 and 6 October had no photos.
+  const d = ["01", "02", "03", "04", "07", "08", "09", "10", "11", "12"]
+    .map((dd, i) => ({ day: `2026-10-${dd}`, seconds_per_photo: i + 1 }));
+  const r = rollingAverage(d);
+  assert.equal(r.length, 10);
+  const mean = (...xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  assert.equal(r[0].seconds, 1);
+  assert.equal(r[3].seconds, mean(1, 2, 3, 4));
+  // 7 Oct: the window is 1-7 Oct; the 2 empty days are skipped, not counted as 0.
+  assert.equal(r[4].day, "2026-10-07");
+  assert.equal(r[4].seconds, mean(1, 2, 3, 4, 5));
+  // 8 Oct: 2-8 Oct, so 1 Oct has left the window.
+  assert.equal(r[5].seconds, mean(2, 3, 4, 5, 6));
+  // 12 Oct: 6-12 Oct, six recorded days.
+  assert.equal(r[9].seconds, mean(5, 6, 7, 8, 9, 10));
+  const v = speedView(d);
+  assert.ok(v.state === "chart");
+  assert.deepEqual(v.points.map((p) => p.rolling), r.map((x) => x.seconds));
 });
 
 test("the crosshair snaps to the nearest day", () => {

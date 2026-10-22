@@ -12,8 +12,8 @@ import {
 import { publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { JOIN_URL, longDate, SEQUENCING_URL, shareWords } from "@/lib/publicView";
 import {
-  CLEAN_LABEL, depthLabel, latestLabel, modelCredit, namesByRecords, nearestPoint,
-  recordingSince, seconds, servedModel, shortDate, speedView, topKRows, MIN_CHART_DAYS,
+  depthLabel, latestLabel, modelCredit, namesByRecords, nearestPoint, recordingSince,
+  seconds, servedModel, shortDate, speedView, topKRows, MIN_CHART_DAYS, ROLLING_LABEL,
   type SpeedView,
 } from "@/lib/howItWorks";
 
@@ -642,6 +642,9 @@ function SpeedCard({ days, today }: { days?: SpeedDay[]; today: string }) {
             {view.days.map((d) => (
               <li key={d.day}><Ink>{seconds(d.seconds_per_photo)}</Ink> per photo on {longDate(d.day)}</li>
             ))}
+            {view.rolling != null && (
+              <li data-testid="speed-rolling">{ROLLING_LABEL}: <Ink>{seconds(view.rolling)}</Ink> per photo</li>
+            )}
           </ul>
         )}
         {view.state === "none" && (
@@ -651,7 +654,8 @@ function SpeedCard({ days, today }: { days?: SpeedDay[]; today: string }) {
         )}
       </div>
       <Cap>
-        Lower is faster. Each point is one day's average across every photo identified that day.
+        Lower is faster. Each point is one day's average across every photo identified that day;
+        the {ROLLING_LABEL} is the mean of the days recorded in the 7 days to each day.
         {view.state !== "none" && <> {recordingSince(view.since)}.</>}
         {view.state === "few" && <> The daily chart starts once there are {MIN_CHART_DAYS} days.</>}
       </Cap>
@@ -666,6 +670,8 @@ function SpeedLine({ view, today }: { view: Extract<SpeedView, { state: "chart" 
   const [hover, setHover] = useState<number | null>(null);
   const pts = view.points;
   const line = pts.map((p, i) => `${i ? "L" : "M"}${(p.x * 300).toFixed(2)} ${(p.y * 100).toFixed(2)}`).join(" ");
+  const avg = pts.filter((p) => p.ry != null)
+    .map((p, i) => `${i ? "L" : "M"}${(p.x * 300).toFixed(2)} ${(p.ry! * 100).toFixed(2)}`).join(" ");
   const shown = hover == null ? null : pts[hover];
   const move = (e: React.PointerEvent<HTMLDivElement>) => {
     const r = e.currentTarget.getBoundingClientRect();
@@ -674,6 +680,12 @@ function SpeedLine({ view, today }: { view: Extract<SpeedView, { state: "chart" 
   };
   return (
     <div className="relative mt-3.5">
+      <div className="mb-3 flex flex-wrap gap-4 text-[13px]" data-testid="speed-legend">
+        <span className="inline-flex items-center gap-1.5"><i className="h-0.5 w-4 rounded" style={{ background: C.s1 }} />Daily average</span>
+        {view.hasRolling && (
+          <span className="inline-flex items-center gap-1.5"><i className="h-[3px] w-4 rounded" style={{ background: C.s2 }} />{ROLLING_LABEL}</span>
+        )}
+      </div>
       <div className="relative ml-10 h-[220px]" onPointerMove={move} onPointerDown={move}
            onPointerLeave={() => setHover(null)} role="img"
            aria-label={`Average seconds per photo by day, ${pts.length} days from ${longDate(view.since)}; newest ${latestLabel(view.latest, today)}`}>
@@ -681,17 +693,17 @@ function SpeedLine({ view, today }: { view: Extract<SpeedView, { state: "chart" 
           {view.yTicks.map((t) => (
             <line key={t.v} x1="0" x2="300" y1={t.y * 100} y2={t.y * 100} stroke="#ece6de" strokeWidth="1" vectorEffect="non-scaling-stroke" />
           ))}
-          <line x1="0" x2="300" y1={view.ref.y * 100} y2={view.ref.y * 100} stroke="#b9a48f" strokeWidth="1"
-                strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
           <path d={`${line} L300 100 L0 100 Z`} fill={C.s1} fillOpacity=".10" />
           <path d={line} fill="none" stroke={C.s1} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+          {view.hasRolling && (
+            <path d={avg} fill="none" stroke={C.s2} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
+                  vectorEffect="non-scaling-stroke" data-testid="speed-rolling-line" />
+          )}
         </svg>
         {view.yTicks.map((t) => (
           <span key={t.v} className="absolute -left-10 w-8 -translate-y-1/2 text-right text-[11px] text-muted-foreground tabular-nums"
                 style={{ top: `${t.y * 100}%` }}>{tickLabel(t.v)}</span>
         ))}
-        <span className="absolute left-1.5 translate-y-1 rounded-sm bg-white/80 px-1 text-[11px] text-[#7a6650]"
-              style={{ top: `${view.ref.y * 100}%` }} data-testid="speed-reference">{CLEAN_LABEL}</span>
         <span className="absolute -right-[5px] h-2.5 w-2.5 -translate-y-1/2 rounded-full shadow-[0_0_0_2px_#fff]"
               style={{ top: `${view.latest.y * 100}%`, background: C.s1 }} />
         <span className="absolute right-2.5 -translate-y-[130%] rounded-sm bg-white/85 px-1 text-xs font-semibold text-[#4a3728]"
@@ -701,9 +713,18 @@ function SpeedLine({ view, today }: { view: Extract<SpeedView, { state: "chart" 
             <div className="pointer-events-none absolute inset-y-0 w-px bg-[#b9a48f]" style={{ left: `${shown.x * 100}%` }} />
             <div className="pointer-events-none absolute z-10 whitespace-nowrap rounded-md border border-[#A87146]/20 bg-white px-2.5 py-1.5 text-xs shadow-md"
                  style={{ left: `clamp(0px, calc(${shown.x * 100}% - 65px), calc(100% - 130px))`,
-                          top: `max(0px, calc(${shown.y * 100}% - 58px))` }}>
-              <b className="block text-sm text-[#4a3728]">{seconds(shown.seconds_per_photo)} per photo</b>
-              <span>{longDate(shown.day)}</span>
+                          top: `max(0px, calc(${shown.y * 100}% - 82px))` }}>
+              <span className="flex items-center gap-1.5">
+                <i className="h-0.5 w-3 rounded" style={{ background: C.s1 }} />
+                <b className="text-sm text-[#4a3728]">{seconds(shown.seconds_per_photo)} per photo</b>
+              </span>
+              {shown.rolling != null && (
+                <span className="flex items-center gap-1.5">
+                  <i className="h-[3px] w-3 rounded" style={{ background: C.s2 }} />
+                  <span><b className="text-[#4a3728]">{seconds(shown.rolling)}</b> {ROLLING_LABEL}</span>
+                </span>
+              )}
+              <span className="block text-muted-foreground">{longDate(shown.day)}</span>
             </div>
           </>
         )}
@@ -719,8 +740,13 @@ function SpeedLine({ view, today }: { view: Extract<SpeedView, { state: "chart" 
       </div>
       <details className="mt-3 text-[13px]">
         <summary className="cursor-pointer font-medium text-[#4a3728]">Every day's figure</summary>
-        <ul className="mt-2 columns-2 sm:columns-4 tabular-nums" data-testid="speed-table">
-          {[...pts].reverse().map((p) => <li key={p.day}>{shortDate(p.day)}: {seconds(p.seconds_per_photo)}</li>)}
+        <ul className="mt-2 sm:columns-2 tabular-nums" data-testid="speed-table">
+          {[...pts].reverse().map((p) => (
+            <li key={p.day}>
+              {shortDate(p.day)}: {seconds(p.seconds_per_photo)}
+              {p.rolling != null && <span className="text-muted-foreground"> ({ROLLING_LABEL} {seconds(p.rolling)})</span>}
+            </li>
+          ))}
         </ul>
       </details>
     </div>
