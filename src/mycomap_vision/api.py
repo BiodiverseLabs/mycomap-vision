@@ -975,6 +975,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"models": research_public.prospective(models_, person(request) is not None),
                 "sealed_after": prospective.seal_time()}
 
+    @app.get("/api/how-good")
+    def how_good_report():
+        """How it works' "How good is it" (howgood.py): the served model's newest open run,
+        top 1/3/5/10, species by reference depth, first photo only. Never the sealed test."""
+        from . import howgood
+        served, method = ready_backbones(), default_method()
+        with db_lock:
+            return howgood.how_good(conn, served, method)
+
     @app.get("/api/benchmarks")
     def benchmarks(request: Request):
         """Held-out benchmark results imported with mv benchmark-import (aggregates only)."""

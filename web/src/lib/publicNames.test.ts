@@ -83,3 +83,11 @@ test("pages outside Research show no comparison run id", () => {
     assert.doesNotMatch(src, /\{[^}]*comparisonId[^}]*\}/, `${f}: a comparison id rendered`);
   }
 });
+
+// The one exception (Steve, 2026-10-22, the approved How it works redesign): its small model
+// credit and "Model in use" card name the base model, through modelCredit (howItWorks.ts).
+// No other page outside Research uses it, and the page's own text still never names it.
+test("only How it works' model credit names the base model, and only through modelCredit", () => {
+  const users = publicSources().filter((f) => /\bmodelCredit\(/.test(read(f)));
+  assert.deepEqual(users, ["pages/About.tsx"]);
+});
