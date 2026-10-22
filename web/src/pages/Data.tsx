@@ -62,9 +62,7 @@ export function DataPage() {
                   <Bars data={Object.fromEntries(Object.entries(s.photos_by_license).map(([k, v]) => [LICENSE_LABEL[k] ?? k, v]))}
                         total={s.photos} />
                   <p className="text-xs text-muted-foreground mt-3">
-                    Open: CC0, CC-BY, CC-BY-SA. Non-commercial: CC licences with NC or ND.{" "}
-                    {num(s.contributors_arr)} photographers have all-rights-reserved photos in
-                    the set.
+                    Open: CC0, CC-BY, CC-BY-SA. Non-commercial: CC licences with NC or ND.
                   </p>
                   <p className="text-xs text-muted-foreground mt-2" data-testid="text-permissions">
                     <PhotoPermissionLine kind="control" />

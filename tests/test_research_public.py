@@ -114,8 +114,10 @@ def test_photographer_permission_counts_are_in_no_answer(conn, tmp_path):
     for who in ("signed out", "member"):
         if who == "member":
             sign_in(c)
-        p = c.get("/api/stats").json()["permissions"]
+        s = c.get("/api/stats").json()
+        p = s["permissions"]
         assert set(p) == {"last_good_sync", "fresh_for_showing", "last_attempt"}, who
+        assert "contributors_arr" not in s, who        # no photographer count by rights
         assert p["last_attempt"] == {"attempted_at": "2026-10-22T00:00:00+00:00", "ok": False}
 
 

@@ -205,7 +205,6 @@ export interface Stats {
   inat_missing: number;
   photos: number;
   photos_by_license: Record<string, number>;
-  contributors_arr: number;
   embedded: Record<string, number>;
   /** Whether photographers' answers are fresh enough to show photos; never their counts
    *  (research_public.permission_status). */
