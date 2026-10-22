@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { api, modelLabel, num, pct, type Rank, type RunReport, type ScoreRun } from "@/lib/api";
+import { DepthCompanion } from "@/components/DepthCompanion";
 import { bandShares, bars, comparisons, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth,
          onRelease, orderBenchmarks,
          heldoutKs, kChoices, STANDARD_BANDS, type Bar, type PublishedBenchmark } from "@/lib/compareView";
@@ -238,6 +239,9 @@ function DepthTable({ group, reports }: { group: ScoreRun[]; reports: Map<number
   const { rows, missing } = depthRows(group, reports);
   const counts = STANDARD_BANDS.map((_, i) => rows[0]?.cells[i]?.n ?? null);
   const shares = bandShares(counts);
+  // The reference's species per band: the top row's report, else any in the comparison.
+  const species = (rows[0] && reports.get(rows[0].id)?.reference_species)
+    || group.map((r) => reports.get(r.id)?.reference_species).find(Boolean) || null;
   return (
     <div className="rounded-lg border border-[#A87146]/20 bg-white p-4" data-testid="chart-depth">
       <h3 className="font-semibold text-[#4a3728]">Species right first time, by how many DNA-verified records the species has</h3>
@@ -245,6 +249,7 @@ function DepthTable({ group, reports }: { group: ScoreRun[]; reports: Map<number
         Darker = more often right. A species with no reference record can't be named by any
         approach that learns from references.
       </p>
+      {rows.length > 0 && <DepthCompanion species={species} finds={counts} />}
       {rows.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           These results were saved before the depth bands were recorded; they appear once the
@@ -309,8 +314,9 @@ function BandHead({ band, n, share }: { band: string; n: number | null; share: n
   return (
     <>
       {band} records<br />
-      <span className="font-normal">{n != null ? `${num(n)} finds` : ""}</span>
-      {share != null && <><br /><span className="font-normal">{share}%</span></>}
+      <span className="font-normal" title="Test finds whose true species has this many reference records">
+        {n != null ? `${num(n)} finds of these species${share != null ? ` (${share}%)` : ""}` : ""}
+      </span>
     </>
   );
 }

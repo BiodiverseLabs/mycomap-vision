@@ -1,0 +1,15 @@
+{
+  "about": "Species per depth band in the reference of the dataset release v1 comparisons scored before reports carried it (evaluate.reference_species), by record set and answer key. Computed 2026-10-22 from release v1's train split (with the erratum each comparison used: none, r3, r4) by evaluate.reference_species; each count of records equals the comparison's n_reference. Aggregates only.",
+  "by_record_set": {
+    "d7bd133c0a25": {
+      "exact": {"answer_key": "exact", "records": 155781, "species": 17077, "bands": {"1-4": 11377, "5-19": 3728, "20-99": 1790, "100+": 182}},
+      "species-rank-2026-10-18": {"answer_key": "species-rank-2026-10-18", "records": 155781, "species": 16925, "bands": {"1-4": 11247, "5-19": 3710, "20-99": 1781, "100+": 187}}
+    },
+    "9d963d520999": {
+      "exact": {"answer_key": "exact", "records": 155648, "species": 16959, "bands": {"1-4": 11259, "5-19": 3728, "20-99": 1790, "100+": 182}}
+    },
+    "36fd876aa871": {
+      "species-rank-2026-10-18": {"answer_key": "species-rank-2026-10-18", "records": 155648, "species": 16809, "bands": {"1-4": 11131, "5-19": 3710, "20-99": 1781, "100+": 187}}
+    }
+  }
+}

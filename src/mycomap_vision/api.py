@@ -994,7 +994,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         signed_in = person(request) is not None
         if report is None or (not signed_in and research_public.sealed_run(run or {})):
             raise HTTPException(404, "no such run")
-        return research_public.run_report(report, signed_in)
+        # The reference's species per depth band, for the heatmap's companion (aggregates only).
+        species = evaluate.reference_species_of(report, (run or {}).get("record_set"))
+        return research_public.run_report({**report, "reference_species": species}
+                                          if species else report, signed_in)
 
     # A plain (not async) route: FastAPI runs it in a worker thread, so GPU work
     # never blocks the event loop and other requests keep being answered.

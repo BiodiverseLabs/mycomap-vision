@@ -163,3 +163,49 @@ def test_file_paths_are_cut_to_their_name_and_nothing_else_changes():
                  "1-4 refs", "names iNat knows", "2026-10-19T21:57:19+00:00"):
         assert strip(kept) == kept
     assert strip({"a": [{"file": "/srv/x/y.tsv"}], "n": 3}) == {"a": [{"file": "y.tsv"}], "n": 3}
+
+
+# --- the heatmap's companion: species per depth band in the comparison's reference ---------
+
+def ref_record(i, species, genus="G"):
+    return evaluate.Record(f"r{i}", species, genus, "F", "2026-01-01", "someone", [i])
+
+
+def test_reference_species_are_counted_per_band_by_their_reference_records():
+    # Each species at a band's edge: 100 (100+), 99 (20-99), 19 (5-19), 4 and 1 (1-4).
+    sizes = {"A x": 100, "B y": 99, "C z": 19, "D w": 4, "E v": 1}
+    ref = [ref_record(1000 * k + i, name) for k, (name, n) in enumerate(sizes.items())
+           for i in range(n)] + [ref_record(9999, "", genus="Russula")]   # no species: not one
+    got = evaluate.reference_species(ref, "exact")
+    assert got == {"answer_key": "exact", "records": 224, "species": 5,
+                   "bands": {"1-4": 2, "5-19": 1, "20-99": 1, "100+": 1}}
+    # The answer key pools a species' writings, as the heatmap's bands do.
+    pooled = evaluate.reference_species([ref_record(1, "A x var. y"), ref_record(2, "A x")])
+    assert pooled["species"] == 1 and pooled["bands"]["1-4"] == 1
+
+
+def test_a_comparison_saves_its_reference_species_and_they_are_served_signed_out(conn,
+                                                                                tmp_path):
+    c = gated_site_with_pages(conn, tmp_path)           # seeds two species, embeds m1
+    result = evaluate.compare(conn, ["m1"], ["nearest"], test_days=28,
+                              embeddings_root=tmp_path / "emb", log=lambda s: None)
+    run = result["runs"][0]
+    assert run["reference_species"]["records"] == result["reference_records"] == 6
+    assert run["reference_species"]["bands"] == {"1-4": 2, "5-19": 0, "20-99": 0, "100+": 0}
+    [row] = c.get("/api/scoreboard").json()["runs"]
+    served = c.get(f"/api/scoreboard/{row['id']}").json()        # signed out
+    assert served["reference_species"] == run["reference_species"]
+
+
+def test_the_v1_comparisons_scored_before_get_the_shipped_reference_species(conn, tmp_path):
+    c = gated_site_with_pages(conn, tmp_path)
+    run = add_run(conn)
+    conn.execute("update eval_runs set record_set = '36fd876aa871', report_json = "
+                 "json_set(report_json, '$.all_photos.answer_key', 'species-rank-2026-10-18') "
+                 "where id = ?", (run,))
+    conn.commit()
+    got = c.get(f"/api/scoreboard/{run}").json()["reference_species"]
+    assert got["records"] == 155648 and got["species"] == 16809
+    assert got["bands"] == {"1-4": 11131, "5-19": 3710, "20-99": 1781, "100+": 187}
+    other = add_run(conn, cutoff="2026-08-18")           # no such record set: nothing invented
+    assert "reference_species" not in c.get(f"/api/scoreboard/{other}").json()
