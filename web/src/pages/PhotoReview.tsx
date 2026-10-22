@@ -148,7 +148,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
           </select>
         </label>
         <label className="flex min-w-0 items-center gap-2 text-sm"
-               title="Tagger v2's confidence: High is checked at 85% or better by eye, Medium 50-85%, Low below. Low photos start as Include.">
+               title="Tagger v2's confidence: High is checked at 85% or better by eye, Medium 50-85%, Low below. Every band starts as Exclude; only “Probably shows the specimen” starts as Include.">
           <span className="text-muted-foreground">Confidence</span>
           <select className={FIELD} value={band} onChange={(e) => setBand(e.target.value as PhotoBandFilter)}
                   data-testid="photo-review-band">

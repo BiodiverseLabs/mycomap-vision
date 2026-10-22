@@ -686,8 +686,8 @@ export interface ReviewPhoto {
   /** The reason a flagged photo's exclusion starts at (its flag for the open tab, else its
    *  strongest); null for an unflagged photo. */
   suggested_reason: string | null;
-  /** How an open photo starts: "keep" when tagger v2 reads it as a specimen photo or in its
-   *  low band, else "exclude". Absent from older servers: treat as "exclude". */
+  /** How an open photo starts: "keep" when tagger v2 reads it as a specimen photo, else
+   *  "exclude", in every band. Absent from older servers: treat as "exclude". */
   suggested_decision?: "keep" | "exclude" | null;
   /** Tagger v2's band for the photo, when it has a v2 flag. */
   band?: PhotoBand | null;
@@ -747,8 +747,8 @@ export interface FlaggedTile {
   flags: PhotoFlag[];
   strength: number;
   suggested_reason: string | null;
-  /** How an open photo starts: "keep" when tagger v2 reads it as a specimen photo or in its
-   *  low band, else "exclude". Absent from older servers: treat as "exclude". */
+  /** How an open photo starts: "keep" when tagger v2 reads it as a specimen photo, else
+   *  "exclude", in every band. Absent from older servers: treat as "exclude". */
   suggested_decision?: "keep" | "exclude" | null;
   /** Tagger v2's band for the photo, when it has a v2 flag. */
   band?: PhotoBand | null;

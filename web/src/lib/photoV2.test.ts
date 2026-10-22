@@ -4,14 +4,15 @@ import type { FlaggedTile, ReviewPhoto } from "./api";
 import { initialMarks, SUMMARY_TABS } from "./photoSummary";
 import { BAND_FILTERS, bandCount, suggestsExclude } from "./photoReview";
 
-// Tagger v2 (Steve, 2026-10-21): a photo it reads as a specimen photo, or puts in its low band,
-// starts as Include; the review filters by its bands; every kind has a tab.
+// Tagger v2 (Steve, 2026-10-21): a photo it reads as a specimen photo starts as Include (a
+// low-band photo in a group still starts as Exclude); the review filters by its bands; every
+// kind has a tab.
 
 const tile = (id: number, over: Partial<FlaggedTile> = {}) => ({
   item_id: id, status: "open" as const, decision: null, suggested_reason: "slip", ...over,
 });
 
-test("the Summary starts a v2 specimen or low-band photo as Include, any other open photo as Exclude", () => {
+test("the Summary starts a photo the server suggests keeping as Include, any other open photo as Exclude", () => {
   const m = initialMarks([
     tile(1),
     tile(2, { suggested_decision: "keep", suggested_reason: null }),
