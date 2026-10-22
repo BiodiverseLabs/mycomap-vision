@@ -15,8 +15,9 @@ export const FEEDBACK_PATH = "/feedback";
 export const FEEDBACK_NAV = { href: FEEDBACK_PATH, label: "Human Feedback" };
 export const PAGE_SIZE = 25;
 
-/** The menu shows Human Feedback only to signed-in people (the server decides who may use it). */
-export const showsFeedbackNav = (me: Me | null | undefined): boolean => !!me?.user;
+/** The menu shows Human Feedback to everyone (Steve, 2026-10-22): reviewers review there, anyone
+ *  else browses it read-only (the server decides which: /api/feedback/me). */
+export const showsFeedbackNav = (me: Me | null | undefined): boolean => !!me;
 
 /** What /api/feedback/me's refusal means for the page. */
 export function feedbackAccess(error: unknown): "signin" | "forbidden" | "error" | null {

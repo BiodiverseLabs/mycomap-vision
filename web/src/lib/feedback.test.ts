@@ -38,11 +38,11 @@ test("no BLAST link from the server: nothing is shown (the admin address is neve
   assert.equal(blastAnchor({ blast_link: { href: "", kind: "admin" } }), null);
 });
 
-test("the menu offers Human Feedback only to signed-in people", () => {
+test("the menu offers Human Feedback to everyone: reviewers review, anyone else reads", () => {
   assert.equal(showsFeedbackNav({ signin: "all", user: { id: "1", name: "A" } }), true);
-  assert.equal(showsFeedbackNav({ signin: "all", user: null }), false);
-  assert.equal(showsFeedbackNav({ signin: "off", user: null }), false);
-  assert.equal(showsFeedbackNav(undefined), false);
+  assert.equal(showsFeedbackNav({ signin: "all", user: null }), true);
+  assert.equal(showsFeedbackNav({ signin: "off", user: null }), true);
+  assert.equal(showsFeedbackNav(undefined), false, "not known yet: wait for /api/me");
 });
 
 test("401 asks to sign in, 403 says who the page is for", () => {
