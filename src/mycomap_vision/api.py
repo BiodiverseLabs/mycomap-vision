@@ -34,7 +34,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest,
+from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, research_public, serving, sessions as session_store, sources,
@@ -313,6 +313,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                dataset_root: Path | None = None, dataset_store: str | None = None,
                dataset_store_reader=None, dataset_allow_draft: bool = False,
                fungus_gate: "fungusgate.FungusGate | None | bool" = True,
+               photo_tagger: "phototypes.PhotoTagger | None | bool" = True,
                place_search: "geocode.PlaceSearch | None" = None,
                place_suggest: "geocode.PlaceSuggest | None" = None,
                confused_with: "confusions.Served | None | bool" = True,
@@ -354,6 +355,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
     gate); a FungusGate uses that one; None or False runs ungated.
 
+    `photo_tagger`: the photo-type tagger (phototypes.py) on the gate's frozen vectors:
+    micrograph, label and habitat photos tagged in the high band are left out of the
+    answer. True loads the file MV_PHOTO_TAGGER names (unset: no tagger, nothing tagged; a
+    file that fails its checks is refused and reported); None or False: no tagger.
+
     `linked_accounts`: a signed-in person's verified iNat and MO accounts from mycomap.org,
     for "Your collections" on the Identify result (yours.py). True reads them with
     MV_ORG_BASE_URL and the server key (neither set: no panel); tests pass a LinkedCache.
@@ -380,6 +386,54 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         fungus_gate = (fungusgate.FungusGate.load()
                        if config.setting("MV_FUNGUS_GATE", "1") != "0" else None)
     fungus_gate = fungus_gate or None
+    tagger_error: list[str] = []
+    if photo_tagger is True:
+        try:
+            photo_tagger = phototypes.PhotoTagger.from_setting()
+        except (phototypes.Refused, OSError, ValueError, KeyError) as e:
+            tagger_error.append(f"{type(e).__name__}: {e}")
+            note(f"[photo-tagger] not served: {tagger_error[0]}")
+            photo_tagger = None
+    photo_tagger = photo_tagger or None
+    if photo_tagger is not None and fungus_gate is not None and photo_tagger.base != fungus_gate.base:
+        # It must read the vector the gate already computes, never a second tower's.
+        tagger_error.append(phototypes.base_mismatch(photo_tagger.base, fungus_gate.base))
+        note(f"[photo-tagger] not served: {tagger_error[-1]}")
+        photo_tagger = None
+    if photo_tagger is not None:
+        note(f"[photo-tagger] {photo_tagger.version} ({photo_tagger.fingerprint()}) tags every "
+             "identified photo")
+
+    def type_options(include=()) -> dict:
+        """What a kept observation answer is keyed on besides model, place and date: the
+        photos counted anyway, so an answer kept without a photo is never served for a call
+        that includes it. The tagger itself is not in the key: it is part of the answers
+        version (with_tagger), so an answer kept before it, or under an older one, is still
+        served, marked not current, until someone runs it again (Steve, 2026-10-22). Nothing
+        without a tagger or an include list (keys as before)."""
+        if photo_tagger is None or not include:
+            return {}
+        return {"include": ".".join(str(i) for i in sorted(include))}
+
+    def with_tagger(index_version: tuple) -> tuple:
+        """An index version with the photo-type tagger in it, when one is served: a new
+        tagger, like a new release, makes every kept answer not current."""
+        if photo_tagger is None:
+            return index_version
+        return (*index_version, f"photo-tagger:{photo_tagger.fingerprint()}")
+
+    def tagger_mark(payload: dict) -> dict:
+        """A kept answer with the version of the tagger that made it (absent without one)."""
+        if photo_tagger is not None:
+            payload["photo_tagger"] = photo_tagger.version
+        return payload
+
+    def asked_include(value, photos: int | None = None) -> list[int]:
+        """The photos to count anyway (phototypes.parse_include) when a tagger is served; none
+        otherwise, so without one the request is answered exactly as before."""
+        if photo_tagger is None:
+            return []
+        return phototypes.parse_include(value, photos)
     signin = signin or SigninConfig.from_settings()
     if linked_accounts is True:
         linked_accounts = yours.LinkedCache.from_settings()
@@ -673,7 +727,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                train=limits.fit_on_demand, photo_info=False,
                                layer_root=layer.embeddings if layer else None,
                                gate=fungus_gate, twins_file=twins_path(),
-                               specimen_groups=served_groups())
+                               specimen_groups=served_groups(), tagger=photo_tagger)
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
@@ -749,8 +803,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         """What this model answers from now (answercache.answers_version): the release and
         the served index's version (the old one's while a rebuild runs behind it). A kept
         observation answer is served only under it."""
-        return answercache.answers_version(model_card().get("version"), indexes.answering(
-            (backbone, method), index_version(backbone, method, view)))
+        return answercache.answers_version(model_card().get("version"), with_tagger(
+            indexes.answering((backbone, method), index_version(backbone, method, view))))
 
     # --- the identification log (identifylog.py) -----------------------------------------
     def release_now() -> str | None:
@@ -766,7 +820,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return None
         if cur is None or cur[1] is not ident:
             return None
-        return lambda: answercache.answers_version(release_now(), cur[0])
+        return lambda: answercache.answers_version(release_now(), with_tagger(cur[0]))
 
     def log_answer(path: str, **fields) -> None:
         """One row of the identification log. Never raises and never waits: the row is
@@ -846,6 +900,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "sessions": (app.state.sessions.state()
                              if getattr(app.state, "sessions", None) else None),
                 "fungus_gate": fungus_gate.summary() if fungus_gate else None,
+                "photo_tagger": (photo_tagger.summary() if photo_tagger else
+                                 {"error": tagger_error[0]} if tagger_error else None),
                 "vectors": vector_storage()}
         given = request.headers.get("authorization", "")
         if org_secret and secrets.compare_digest(given.encode(),
@@ -1053,7 +1109,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     @app.post("/api/identify")
     def identify(request: Request, photos: list[UploadFile] = File(...),
                  models_: str = Form("", alias="models"), lat: float | None = Form(None),
-                 lng: float | None = Form(None), observed_on: str | None = Form(None)):
+                 lng: float | None = Form(None), observed_on: str | None = Form(None),
+                 include: str = Form("")):
         client = request.client.host if request.client else "unknown"
         wait = rate.check(client)
         if wait:
@@ -1073,6 +1130,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if lat is not None and not -90 <= lat <= 90 or lng is not None and not -180 <= lng <= 180:
             in_flight.leave()
             raise HTTPException(400, "latitude or longitude out of range")
+        try:
+            counted_anyway = asked_include(include, len(photos))
+        except ValueError as e:
+            in_flight.leave()
+            raise HTTPException(400, str(e)) from None
         context = Context(lat, lng, observed_on)
         timer = apiv1.Timer()
         try:
@@ -1082,7 +1144,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise HTTPException(503, "busy identifying other photos; try again shortly",
                                     headers={"Retry-After": str(int(e.wait_seconds) + 1)}) from e
             out = run_identify(photos, models_, context, timer, linked_of(request),
-                               person(request))
+                               person(request), counted_anyway)
         finally:
             in_flight.leave()
         out["timing"] = timer.block()
@@ -1098,7 +1160,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def embed_one(ident: Identifier, model, image) -> tuple:
         """One photo -> (its unit vector, float32; the gate's base vector or None when it is
-        the vector itself or the gate can't run; the gate's verdict or None). Every photo
+        the vector itself or the gate can't run; the gate's verdict or None; its photo-type
+        tag (phototypes.py) or None). The tagger reads the same base vector as the gate, so
+        the tower runs once for both. Every photo
         is embedded on its own, by /identify and by sessions alike, so the same photo
         always gets the same vector: a forward pass over a batch differs from one over a
         single photo by ~1e-4, enough to swap near-tied names (integration testing,
@@ -1108,46 +1172,57 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         vector = normalise(vecs)[0].astype(np.float32)
         gate = getattr(ident, "gate", None)
         verdict = gate.judge(base)[0] if gate is not None and base is not None else None
-        return vector, (None if base is None or base is vecs else np.asarray(base[0])), verdict
+        tagger = getattr(ident, "tagger", None)
+        tag = tagger.tag(base)[0] if tagger is not None and base is not None else None
+        return (vector, (None if base is None or base is vecs else np.asarray(base[0])), verdict,
+                tag)
 
     def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
                         may_show, timer: "apiv1.Timer", top_k: int = 5,
                         interactive: bool = True, higher: bool = False,
                         hidden: np.ndarray | None = None, n_specimens: int = 6,
-                        vectors: list | None = None, pooled: list | None = None) -> dict:
+                        vectors: list | None = None, pooled: list | None = None,
+                        include=()) -> dict:
         """One model's answer through the queue, timed: waiting, embedding, scoring.
         `hidden`: reference columns left out (Identifier.identify_vectors). `vectors`, when
         given, gets the photos' vectors appended (for yours.for_person). `pooled`, when
         given, gets the site's answer from the same photos appended (site_answer), so one
-        run answers the API and the Identify page alike."""
+        run answers the API and the Identify page alike. `include`: photos to count even
+        though their photo-type tag would leave them out (phototypes.decide)."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
             parts = [embed_one(ident, model, im) for im in images]
-            judged = [v for _, _, v in parts]
+            judged = [v for _, _, v, _ in parts]
             verdicts.append(judged if all(v is not None for v in judged) else None)
-            return np.stack([vec for vec, _, _ in parts])
+            tagged = [t for _, _, _, t in parts]
+            tags.append(tagged if all(t is not None for t in tagged) else None)
+            return np.stack([vec for vec, _, _, _ in parts])
 
         def finish(vecs, sims):
             if vectors is not None:
                 vectors.append(np.asarray(vecs, dtype=np.float32))
             if pooled is not None:
                 pooled.append(site_answer(ident, vecs, sims, context, may_show, verdicts[0],
-                                          hidden))
+                                          hidden, tags[0], include))
             return ident.identify_vectors(vecs, top_k, n_specimens=n_specimens, context=context,
                                           sims=sims, photo_lookup=photo_lookup,
                                           may_show=may_show, gate=verdicts[0],
-                                          higher_ranks=higher, hidden=hidden)
+                                          higher_ranks=higher, hidden=hidden, types=tags[0],
+                                          include=include)
         verdicts: list = []
+        tags: list = []
         return model_queue.run(workqueue.Job(
             key=id(ident), photos=len(images), embed=embed, search=ident.nearest.photo_sims,
             finish=finish, interactive=interactive, timer=timer))
 
-    def site_answer(ident: Identifier, vecs, sims, context, may_show, gate, hidden) -> dict:
+    def site_answer(ident: Identifier, vecs, sims, context, may_show, gate, hidden,
+                    types=None, include=()) -> dict:
         """The Identify page's answer from photos already embedded: the top 5, the pool of
         specimens the person's own part draws on (yours.POOL), no ranks above family."""
         return ident.identify_vectors(vecs, 5, n_specimens=yours.POOL, context=context,
                                       sims=sims, photo_lookup=photo_lookup, may_show=may_show,
-                                      gate=gate, higher_ranks=False, hidden=hidden)
+                                      gate=gate, higher_ranks=False, hidden=hidden,
+                                      types=types, include=include)
 
     def site_kept(pooled: dict, vecs, hidden, used: dict, about: dict) -> tuple[dict, dict, list]:
         """(what is kept for the Identify page, its plain answer, its spare specimens).
@@ -1233,9 +1308,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context",
                      timer: "apiv1.Timer", linked: "yours.Linked | None" = None,
-                     who: dict | None = None) -> dict:
+                     who: dict | None = None, include=()) -> dict:
         """The Identify page's answer to uploaded photos; with run links on, kept under
-        its own link (`run`), small copies of the photos with it."""
+        its own link (`run`), small copies of the photos with it. `include`: photos to count
+        though their photo-type tag would leave them out ("Include anyway")."""
         hashes = [] if upload_meter.hashing() else None
         bodies = [] if run_store is not None else None
         read = decode_photos(photos, timer, hashes, bodies)
@@ -1252,7 +1328,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             ident = site_index(backbone, method, view, timer)
             vectors: list = []
             pooled = embed_and_score(ident, backbone, images, context, may_show, timer,
-                                     n_specimens=yours.POOL, vectors=vectors)
+                                     n_specimens=yours.POOL, vectors=vectors, include=include)
             answered.append((backbone, method, served_version(backbone, method, ident)))
             result, spare = yours.split_pool(pooled)
             vecs = vectors[0] if vectors else None
@@ -2055,7 +2131,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def v1_identify(request: Request, photos: list[UploadFile] = File(...),
                         latitude: float | None = Form(None), longitude: float | None = Form(None),
                         observed_on: str | None = Form(None), model: str | None = Form(None),
-                        top_k: int = Form(5), client_ref: str | None = Form(None)):
+                        top_k: int = Form(5), client_ref: str | None = Form(None),
+                        include: str | None = Form(None)):
             timer = apiv1.Timer()
             cred: apiv1.Credential = request.state.credential
             if not 1 <= len(photos) <= MAX_PHOTOS:
@@ -2066,6 +2143,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not 1 <= top_k <= 10:
                 raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
             check_context(latitude, longitude, observed_on or None)
+            try:
+                counted_anyway = asked_include(include, len(photos))
+            except ValueError as e:
+                raise apiv1.V1Error(400, "bad_request", str(e)) from None
             backbone, method = v1_model(model)
             if client_ref is not None and not (
                     1 <= len(client_ref) <= session_store.MAX_REF_LENGTH):
@@ -2090,7 +2171,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 result = embed_and_score(
                     ident, backbone, [img for img, _ in read], context,
                     lambda info: view.may_show(info.license_class, info.owner_user_id),
-                    timer, top_k, interactive=cred.interactive, higher=True)
+                    timer, top_k, interactive=cred.interactive, higher=True,
+                    include=counted_anyway)
             finally:
                 in_flight.leave()
             upload_meter.record("api", len(read), hashes)
@@ -2181,7 +2263,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 return v
 
             def held_v1(source: str, number: str, backbone: str, method: str, top_k: int,
-                        use_place: bool, use_date: bool, view, timer) -> dict | None:
+                        use_place: bool, use_date: bool, view, timer,
+                        include=()) -> dict | None:
                 """The answer Vision holds for an observation, in the v1 shape: the newer of
                 identify-by-observation's (`kept_from` api) and the site's Identify page's
                 ("from a link", `kept_from` site; same model, place and date), under
@@ -2192,10 +2275,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 version = answers_version(backbone, method, view)
                 api = answer_cache.held(answercache.answer_key(
                     "v1", source, number, backbone, method,
-                    {"top_k": top_k, "place": use_place, "date": use_date}))
+                    {"top_k": top_k, "place": use_place, "date": use_date,
+                     **type_options(include)}))
                 site = answer_cache.held(answercache.answer_key(
                     "site", source, number, backbone, method,
-                    {"place": use_place, "date": use_date}))
+                    {"place": use_place, "date": use_date, **type_options(include)}))
                 # An older answer that matched the observation to itself is not served.
                 ident = None
                 if any(k is not None and k.version != version for k in (api, site)):
@@ -2212,6 +2296,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if site is None or (api is not None and api.answered_at >= site.answered_at):
                     kept, kept_from = api, "api"
                     body = {**kept.payload, "request_id": "r_" + secrets.token_urlsafe(12)}
+                    body.pop("photo_tagger", None)          # said in `answered`
                     if kept.version != version:
                         reshow_kept(ident, body, view)
                     confusions.annotate(body, confused_table())
@@ -2267,6 +2352,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 rerun = payload.get("rerun", False)
                 if not isinstance(rerun, bool):
                     raise apiv1.V1Error(400, "bad_request", "rerun is true or false")
+                try:
+                    counted_anyway = asked_include(payload.get("include"))
+                except ValueError as e:
+                    raise apiv1.V1Error(400, "bad_request", str(e)) from None
                 model = payload.get("model")
                 if model is not None and not isinstance(model, str):
                     raise apiv1.V1Error(400, "bad_request", "model is a string")
@@ -2286,11 +2375,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 version = answers_version(backbone, method, view)
                 kept_key = answercache.answer_key(
                     "v1", source, number, backbone, method,
-                    {"top_k": top_k, "place": use_place, "date": use_date})
+                    {"top_k": top_k, "place": use_place, "date": use_date,
+                     **type_options(counted_anyway)})
                 site_key = answercache.answer_key("site", source, number, backbone, method,
-                                                  {"place": use_place, "date": use_date})
+                                                  {"place": use_place, "date": use_date,
+                                                   **type_options(counted_anyway)})
                 body = None if rerun else held_v1(source, number, backbone, method, top_k,
-                                                  use_place, use_date, view, timer)
+                                                  use_place, use_date, view, timer,
+                                                  counted_anyway)
                 if body is not None:
                     quotas.count(cred, 0 if same_find else 1, 0)
                     if not same_find:
@@ -2412,7 +2504,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                  may_show, timer, top_k, interactive=False,
                                                  higher=True,
                                                  hidden=hidden if len(hidden) else None,
-                                                 vectors=got, pooled=pooled)
+                                                 vectors=got, pooled=pooled,
+                                                 include=counted_anyway)
                         scored_vecs = got[0] if got else None
                 finally:
                     in_flight.leave()
@@ -2436,9 +2529,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                           photos_credit=[None] * n_photos)
                     kept_site, _, _ = site_kept(pooled[0], scored_vecs, hidden, used, site_about)
                     kept_site["release"] = model_card().get("version")
-                    answer_cache.put(site_key, version, kept_site, who)
-                answer_cache.put(kept_key, version, answercache.without_confusions(
-                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")}),
+                    answer_cache.put(site_key, version, tagger_mark(kept_site), who)
+                answer_cache.put(kept_key, version, tagger_mark(answercache.without_confusions(
+                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")})),
                     who)
                 body["answered"] = answer_cache.held(kept_key).about(version)
                 body["cached"] = False
@@ -2460,7 +2553,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # can show a record's answer the moment it exists. 404 `not_answered` otherwise.
             def v1_kept_answer(request: Request, source: str, observation_id: str,
                                model: str | None = None, top_k: int = 5,
-                               use_place: bool = True, use_date: bool = True):
+                               use_place: bool = True, use_date: bool = True,
+                               include: str = ""):
                 timer = apiv1.Timer()
                 cred: apiv1.Credential = request.state.credential
                 if source not in byobservation.SOURCES:
@@ -2470,18 +2564,24 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise apiv1.V1Error(400, "bad_request", "the observation number is digits")
                 if not 1 <= top_k <= 10:
                     raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
+                try:
+                    counted_anyway = asked_include(include)
+                except ValueError as e:
+                    raise apiv1.V1Error(400, "bad_request", str(e)) from None
                 backbone, method = v1_model(model)
                 body = held_v1(source, number, backbone, method, top_k, use_place, use_date,
-                               permission_view(), timer)
+                               permission_view(), timer, counted_anyway)
                 if body is None:
                     raise apiv1.V1Error(404, "not_answered", "Vision holds no answer for "
                                         "this observation")
                 log_kept_v1(identifylog.V1_ANSWERS, body, source, number, backbone, method,
                             answercache.answer_key("v1", source, number, backbone, method,
                                                    {"top_k": top_k, "place": use_place,
-                                                    "date": use_date}),
+                                                    "date": use_date,
+                                                    **type_options(counted_anyway)}),
                             answercache.answer_key("site", source, number, backbone, method,
-                                                   {"place": use_place, "date": use_date}),
+                                                   {"place": use_place, "date": use_date,
+                                                    **type_options(counted_anyway)}),
                             cred)
                 body.update(timing=timer.block(), usage=quotas.usage(cred))
                 return JSONResponse(body, headers={"Cache-Control": "no-store"})
@@ -2516,13 +2616,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                        for k in ("use_place", "use_date"))
                 # Run it again (the page's "Run again"): never served from what is kept.
                 rerun = payload.get("rerun", False) is True
+                # "Include anyway": photos counted though their photo-type tag would leave
+                # them out; an answer kept for another set of photos is never served for it.
+                try:
+                    counted_anyway = asked_include(payload.get("include"))
+                except ValueError as e:
+                    raise HTTPException(400, str(e)) from None
                 wanted = site_models(models_)
                 timer = apiv1.Timer()
                 timer.ms["fetch_ms"] = 0
                 view = permission_view()
                 versions = [answers_version(b, m, view) for b, m in wanted]
                 keys = [answercache.answer_key("site", source, number, b, m,
-                                               {"place": use_place, "date": use_date})
+                                               {"place": use_place, "date": use_date,
+                                                **type_options(counted_anyway)})
                         for b, m in wanted]
                 # Kept here, or by identify-by-observation (mycomap.org's Validate Records
                 # keeps the site's answer too): served under whichever version it was given
@@ -2646,7 +2753,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         results.append(embed_and_score(
                             ident, backbone, images, context, may_show, timer,
                             hidden=hidden if len(hidden) else None, n_specimens=yours.POOL,
-                            vectors=vectors))
+                            vectors=vectors, include=counted_anyway))
                         scored.append((ident, vectors[0] if vectors else None, hidden))
                 finally:
                     in_flight.leave()
@@ -2672,7 +2779,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                                        scored):
                     kept, result, spare = site_kept(pooled, vecs, hidden, used, about)
                     kept["release"] = model_card().get("version")
-                    answer_cache.put(key, version, kept, "site")
+                    answer_cache.put(key, version, tagger_mark(kept), "site")
                     mine = yours.for_person(ident, result, spare, vecs, hidden, linked,
                                             photo_lookup, may_show)
                     confusions.annotate(mine, table)
@@ -2727,32 +2834,43 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             ident = v1_index(s.backbone, s.method, view, timer)
             gate = getattr(ident, "gate", None)
             fingerprint = gate.fingerprint() if gate is not None else None
+            tagger = getattr(ident, "tagger", None)
+            type_print = tagger.fingerprint() if tagger is not None else None
             added: list = []
 
             def embed():                                # the worker holds gpu_lock
                 if image is not None:
-                    vector, base, verdict = embed_one(ident, backbone_model(s.backbone), image)
+                    vector, base, verdict, tag = embed_one(ident, backbone_model(s.backbone),
+                                                           image)
                     added.append(session_store.Photo(
                         ref=ref, vector=vector, base=base, verdict=verdict,
-                        gate_fingerprint=fingerprint if verdict else None, found=found))
+                        gate_fingerprint=fingerprint if verdict else None, found=found,
+                        photo_type=tag, type_fingerprint=type_print if tag else None))
                 for p in s.photos:                      # judged by an older gate: again
+                    base = p.base if p.base is not None else (
+                        p.vector if ident.backbone == ident.base_name() else None)
                     if gate is not None and p.gate_fingerprint != fingerprint:
-                        base = p.base if p.base is not None else (
-                            p.vector if ident.backbone == gate.base else None)
                         if base is not None:
                             p.verdict = gate.judge(np.asarray(base)[None])[0]
                             p.gate_fingerprint = fingerprint
+                    if tagger is not None and p.type_fingerprint != type_print:
+                        if base is not None:            # tagged by an older tagger: again
+                            p.photo_type = tagger.tag(np.asarray(base)[None])[0]
+                            p.type_fingerprint = type_print
                 return np.stack([p.vector for p in [*s.photos, *added]])
 
             def finish(vecs, sims):
                 photos = [*s.photos, *added]
                 verdicts = [p.verdict for p in photos]
+                tags = [p.photo_type for p in photos]
                 context, _ = entered_context(s, photos)
                 return ident.identify_vectors(
                     vecs, s.top_k, context=context, sims=sims,
                     gate=verdicts if gate is not None and all(verdicts) else None,
                     photo_lookup=photo_lookup, higher_ranks=True,
-                    may_show=lambda info: view.may_show(info.license_class, info.owner_user_id))
+                    may_show=lambda info: view.may_show(info.license_class, info.owner_user_id),
+                    types=tags if tagger is not None and all(tags) else None,
+                    include=[i for i, p in enumerate(photos) if p.ref in s.include])
             result = model_queue.run(workqueue.Job(
                 key=id(ident), photos=1 if image is not None else 0, embed=embed,
                 search=ident.nearest.photo_sims, finish=finish,
@@ -2883,8 +3001,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def v1_session_context(request: Request, sid: str, payload: dict | None = Body(None)):
             if not isinstance(payload, dict):
                 raise apiv1.V1Error(400, "bad_request", "send a JSON object")
+            include = payload.get("include_photos")
+            if include is not None and (not isinstance(include, list) or not all(
+                    isinstance(r, str) for r in include)):
+                raise apiv1.V1Error(400, "bad_request", "include_photos is a list of photo_refs")
             s = session_of(request, sid)
             with s.lock:
+                if include is not None and photo_tagger is not None:
+                    s.include = set(include)
                 s.entered = {**s.entered, **context_fields(payload)}
                 s.entered = {k: v for k, v in s.entered.items() if v is not None}
                 check_context(s.entered.get("latitude"), s.entered.get("longitude"),

@@ -1018,6 +1018,41 @@ def cmd_fungus_gate(conn, args) -> None:
     print(f"saved {gate.save()}")
 
 
+def cmd_photo_tagger(conn, args) -> None:
+    """The photo-type tagger served on Identify (phototypes.py): build its file from the
+    research output (a pinned model and the bands it was seeded with), or show one."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from . import config, phototypes
+    if args.action == "build":
+        if not (args.model and args.bands):
+            raise SystemExit("build needs --model (PT_OUT/t10/model.npz) and --bands "
+                             "(PT_OUT/t13_v2_seed.json)")
+        try:
+            tagger = phototypes.build(Path(args.model), Path(args.bands),
+                                      built_at=datetime.now(timezone.utc).isoformat(
+                                          timespec="seconds"))
+        except phototypes.Refused as e:
+            raise SystemExit(f"refused: {e}") from None
+        out = Path(args.out) if args.out else config.DATA_DIR / "models" / f"{phototypes.NAME}.npz"
+        tagger.save(out)
+        print(f"saved {out} and {phototypes.sidecar(out).name} (tagger {tagger.version}, "
+              f"fingerprint {tagger.fingerprint()}, sha256 {phototypes.sha256_file(out)})")
+        print(f"serve it with {phototypes.SETTING}={out}")
+        return
+    named = args.out or config.setting(phototypes.SETTING)
+    if not named:
+        print(f"No photo-type tagger: {phototypes.SETTING} is unset, so photos are not tagged.")
+        return
+    try:
+        tagger = phototypes.PhotoTagger.load(Path(named))
+    except phototypes.Refused as e:
+        raise SystemExit(f"{named} would be refused: {e}") from None
+    print(json.dumps({**tagger.summary(), "bands": tagger.bands, "floor": tagger.floor,
+                      "provenance": tagger.provenance}, indent=2))
+
+
 def cmd_serve(conn, args) -> None:
     from .api import serve
     conn.close()
@@ -2326,6 +2361,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--note", default="")
     release_options(p)            # with --errata: its records are never probe positives
 
+    p = sub.add_parser("photo-tagger", help="the photo-type tagger on Identify (micrograph, "
+                       "label and habitat photos left out of the answer): build its file from "
+                       "the research output, or show the one MV_PHOTO_TAGGER names")
+    p.add_argument("action", choices=["build", "show"])
+    p.add_argument("--model", help="build: the research tagger's model.npz (PT_OUT/t10)")
+    p.add_argument("--bands", help="build: the seed summary holding its bands "
+                                   "(PT_OUT/t13_v2_seed.json)")
+    p.add_argument("--out", help="build: the .npz to write (default data/models/"
+                                 "photo-tagger.npz); show: the file to show")
+
     p = sub.add_parser("serve", help="run the API for the frontend")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8010)
@@ -2818,6 +2863,7 @@ def main(argv: list[str] | None = None) -> int:
         "benchmark-import": cmd_benchmark_import,
         "models": cmd_models,
         "fungus-gate": cmd_fungus_gate,
+        "photo-tagger": cmd_photo_tagger,
         "serve": cmd_serve,
         "status": cmd_status,
         "release": cmd_release,

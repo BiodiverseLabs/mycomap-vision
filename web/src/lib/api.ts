@@ -109,6 +109,29 @@ export interface FindGate {
   photos: PhotoGate[];
 }
 
+/** A photo's type (phototypes.py): "specimen" for an ordinary photo of the fungus. */
+export interface PhotoType {
+  type: string;
+  p: number;
+  /** How often such a tag was right when checked by eye; null for a specimen photo. */
+  band: "high" | "medium" | "low" | null;
+  /** The chip's words, or null for no chip. */
+  label: string | null;
+  /** Left out of the answer (a micrograph, label or habitat photo, high band). */
+  left_out: boolean;
+  /** Counted although its type would have left it out (the request's `include`). */
+  included: boolean;
+}
+
+/** What the photo-type tags did to an answer; missing when the server tags no photos. */
+export interface PhotoTypes {
+  left_out: number[];
+  included: number[];
+  /** Every photo would have been left out, so none was. */
+  kept_all: boolean;
+  photos: (PhotoType | null)[];
+}
+
 /** What the model says from one of your photos on its own. */
 export interface PhotoResult {
   /** Index into the photos sent (0-based). */
@@ -118,6 +141,8 @@ export interface PhotoResult {
   specimens: Specimen[];
   /** Missing when the gate didn't run. */
   gate?: PhotoGate;
+  /** Missing when the server tags no photos. */
+  photo_type?: PhotoType | null;
 }
 
 /** The names worth considering at one rank, and how often such a list held the right
@@ -151,6 +176,8 @@ export interface IdentifyResult {
   gate?: FindGate | null;
   /** True when no chance is stated anywhere: the gate isn't sure this is a fungus. */
   confidence_withheld?: boolean;
+  /** Photo types, and the photos they left out; missing when the server tags no photos. */
+  photo_types?: PhotoTypes;
   /** Per rank, the top name from the photos alone when the place and date changed it
    *  (reserved for the place lane). */
   photo_only_top?: Partial<Record<Rank, string>>;
@@ -1005,11 +1032,13 @@ export const api = {
    *  `onSent(fraction)`: how much of the photos has been sent, 0 to 1, for each try. */
   async identify(photos: File[], models: string[], where: Where = {},
                  onWait?: (attempt: number, seconds: number) => void,
-                 onSent?: (fraction: number) => void):
+                 onSent?: (fraction: number) => void, include: number[] = []):
       Promise<{ results: IdentifyResult[]; context_used: ContextUsed; run?: RunRef }> {
     const form = new FormData();
     photos.forEach((p) => form.append("photos", p));
     form.append("models", models.join(","));
+    // "Include anyway": photos counted though their type would leave them out.
+    if (include.length) form.append("include", include.join(","));
     if (where.lat?.trim() && where.lng?.trim()) {
       form.append("lat", where.lat.trim());
       form.append("lng", where.lng.trim());
@@ -1023,13 +1052,15 @@ export const api = {
   /** An iNat or MO observation's own photos, place and date, read by Vision: the answer
    *  kept from an earlier run (here, mycomap.org or the app) unless `rerun`. */
   async identifyObservation(source: "inat" | "mo", id: string, models: string[],
-                            onWait?: (attempt: number, seconds: number) => void, rerun = false):
+                            onWait?: (attempt: number, seconds: number) => void, rerun = false,
+                            include: number[] = []):
       Promise<{ results: IdentifyResult[]; context_used: ContextUsed; observation: LinkedObservation;
                 cached?: boolean; answered?: Answered; run?: RunRef }> {
     const res = await sendWaitingInLine(() => fetch("/api/identify/observation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source, id, models: models.join(","), ...(rerun ? { rerun: true } : {}) }),
+      body: JSON.stringify({ source, id, models: models.join(","), ...(rerun ? { rerun: true } : {}),
+                             ...(include.length ? { include } : {}) }),
     }), onWait);
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();

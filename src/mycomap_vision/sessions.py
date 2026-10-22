@@ -2,7 +2,8 @@
 
 The app opens a session when someone starts photographing a find, and sends each photo
 as it is taken. Each photo is embedded once. Its vectors (this model's, and the gate's
-base vectors) and its gate verdict are kept here; the photo itself never is. Every change
+base vectors), its gate verdict and its photo-type tag are kept here; the photo itself
+never is. Every change
 (a photo added or removed, place or date set) re-scores all of the session's stored
 vectors together, so the combined answer is exactly what identifying all its photos at
 once would give, and the app never merges answers itself.
@@ -45,6 +46,8 @@ class Photo:
     verdict: dict | None                  # the gate's verdict, when judged
     gate_fingerprint: str | None          # which gate judged it (re-judged when it changes)
     found: tuple = (None, None, None)     # its EXIF (latitude, longitude, date), for gaps
+    photo_type: dict | None = None        # its photo-type tag (phototypes.py), when tagged
+    type_fingerprint: str | None = None   # which tagger tagged it (tagged again when it changes)
 
     @property
     def nbytes(self) -> int:
@@ -66,6 +69,7 @@ class Session:
     photos: list[Photo] = field(default_factory=list)
     combined: dict | None = None          # the last answer, as sent
     counted: bool = False                 # counted against quota (at its first photo)
+    include: set = field(default_factory=set)  # photo_refs counted whatever their photo type
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _answer_bytes: int = 0
 

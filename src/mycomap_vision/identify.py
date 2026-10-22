@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 import numpy as np
 
-from . import config, fungusgate, likely, taxonomy, twins
+from . import config, fungusgate, likely, phototypes, taxonomy, twins
 from .embed import normalise
 from .methods import rows_at
 from .serving import map_embeddings
@@ -226,7 +226,8 @@ class Identifier:
                  layer_root: Path | None = None, release=None,
                  gate: "fungusgate.FungusGate | None" = None,
                  twins_file: Path | None = None,
-                 specimen_groups: dict[str, str] | None = None):
+                 specimen_groups: dict[str, str] | None = None,
+                 tagger: "phototypes.PhotoTagger | None" = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         if specimen_groups is None and twins.is_grouped(method):
@@ -236,6 +237,11 @@ class Identifier:
         self.backbone, self.method = backbone, method
         # The not-a-fungus gate (fungusgate.py), or None: answers are then ungated.
         self.gate = gate
+        # The photo-type tagger (phototypes.py), or None: photos are then not tagged. It
+        # reads the same frozen base vector as the gate, so it runs only when its base is
+        # the gate's (or there is no gate).
+        self.tagger = (tagger if tagger is not None and (gate is None or tagger.base == gate.base)
+                       else None)
         ids, vecs = map_embeddings(conn, backbone, embeddings_root, layer_root)
         if not len(ids):
             raise ValueError(f"no embeddings for {backbone!r}")
@@ -390,7 +396,8 @@ class Identifier:
                          may_show: Callable[[PhotoInfo], bool] = only_open_licences,
                          n_photo_specimens: int = 3, gate: list[dict] | None = None,
                          higher_ranks: bool = False, sims: np.ndarray | None = None,
-                         hidden: np.ndarray | None = None) -> dict:
+                         hidden: np.ndarray | None = None,
+                         types: list[dict | None] | None = None, include=()) -> dict:
         """identify_vectors_ungated, behind the fungus gate (fungusgate.py) when `gate`
         holds a verdict per photo. A photo judged not a fungus is left out of the answer
         (a duck among mushroom photos doesn't sink the find); when every photo is, there
@@ -398,19 +405,30 @@ class Identifier:
         no stated chance: calibration holds only for fungus photos. `result["gate"]` is
         None when the gate didn't run. `higher_ranks` and `sims` as in
         identify_vectors_ungated (only the kept photos' rows of `sims` are used), and
-        `hidden`."""
+        `hidden`.
+
+        `types`: each photo's photo-type tag (phototypes.py), or None when the tagger
+        didn't run. A micrograph, label or habitat photo tagged in the high band is left
+        out too, unless its index is in `include` or every photo the gate kept would be
+        (phototypes.decide); `result["photo_types"]` and each per-photo `photo_type` say
+        what was tagged and left out. Neither key is there when `types` is None."""
         kw = dict(top_k=top_k, n_specimens=n_specimens, context=context,
                   photo_lookup=photo_lookup, may_show=may_show,
                   n_photo_specimens=n_photo_specimens, higher_ranks=higher_ranks,
                   hidden=hidden)
-        if gate is None:
+        if types is not None and len(types) != len(query):
+            raise ValueError(f"{len(types)} photo-type tags for {len(query)} photos")
+        if gate is None and types is None:
             return {**self.identify_vectors_ungated(query, sims=sims, **kw), "gate": None,
                     "confidence_withheld": False}
-        if len(gate) != len(query):
+        if gate is not None and len(gate) != len(query):
             raise ValueError(f"{len(gate)} gate verdicts for {len(query)} photos")
-        verdicts = [g["verdict"] for g in gate]
-        kept = [i for i, v in enumerate(verdicts) if v != fungusgate.NOT_FUNGUS]
-        overall = fungusgate.observation_verdict(verdicts)
+        verdicts = [g["verdict"] for g in gate] if gate is not None else None
+        kept = [i for i in range(len(query))
+                if verdicts is None or verdicts[i] != fungusgate.NOT_FUNGUS]
+        typed = phototypes.decide(types, kept, include) if types is not None else None
+        if typed is not None:
+            kept = [i for i in kept if i not in typed["left_out"]]
         if kept:
             out = self.identify_vectors_ungated(
                 query[kept], sims=None if sims is None else sims[kept], **kw)
@@ -421,19 +439,32 @@ class Identifier:
             for ranks in [out["ranks"], *(p["ranks"] for p in out["per_photo"])]:
                 for rank in HIGHER_RANKS:
                     ranks.setdefault(rank, [])
+        out["confidence_withheld"] = False
+        type_hints = []
+        if typed is not None:
+            tagged = phototypes.annotate(types, typed)
+            for p in out["per_photo"]:
+                p["photo_type"] = tagged[p["photo"]]
+            out["photo_types"] = {**typed, "photos": tagged}
+            type_hints = phototypes.hints(types, typed)
+        if gate is None:
+            out["hints"] = type_hints + out["hints"]
+            out["gate"] = None
+            return out
+        overall = fungusgate.observation_verdict(verdicts)
         for p in out["per_photo"]:
             p["gate"] = gate[p["photo"]]
-        out["confidence_withheld"] = False
         if overall != fungusgate.FUNGUS:
             withhold_confidence(out)
         like = fungusgate.find_looks_like(gate, overall)
-        out["hints"] = fungusgate.gate_hints(verdicts, overall, like) + (
+        out["hints"] = fungusgate.gate_hints(verdicts, overall, like) + type_hints + (
             out["hints"] if overall == fungusgate.FUNGUS else [])
         out["gate"] = {"verdict": overall,
                        "message": (fungusgate.LOOKS_LIKE[like]["message"] if like
                                    else fungusgate.MESSAGES.get(overall)),
                        "looks_like": like,
-                       "left_out": [i for i in range(len(query)) if i not in kept],
+                       "left_out": [i for i in range(len(query))
+                                    if verdicts[i] == fungusgate.NOT_FUNGUS],
                        "photos": gate}
         return out
 
@@ -785,19 +816,34 @@ class Identifier:
         return normalise(vecs), verdicts
 
     def encode(self, backbone_model, items: list) -> tuple[np.ndarray, np.ndarray | None]:
-        """(this model's vectors, the gate's base-model vectors or None when the gate
-        can't run on this backbone). A fine-tuned BioCLIP 2 gives both from one pass."""
-        gate = self.gate
-        if gate is not None:
+        """(this model's vectors, the base-model vectors the gate and the photo-type tagger
+        read, or None when neither can run on this backbone). A fine-tuned BioCLIP 2 gives
+        both from one pass."""
+        base = self.base_name()
+        if base is not None:
             both = getattr(backbone_model, "encode_with_base", None)
-            if both is not None and getattr(backbone_model, "base_name", None) == gate.base:
+            if both is not None and getattr(backbone_model, "base_name", None) == base:
                 pair = both(items)
                 if pair is not None:
                     return pair
-            if self.backbone == gate.base:
+            if self.backbone == base:
                 vecs = backbone_model.encode(items)
                 return vecs, vecs
         return backbone_model.encode(items), None
+
+    def base_name(self) -> str | None:
+        """The base model whose frozen vectors the gate and the photo-type tagger read (one
+        and the same vector), or None when neither is served."""
+        for reader in (self.gate, getattr(self, "tagger", None)):
+            if reader is not None:
+                return reader.base
+        return None
+
+
+def left_out_photos(result: dict) -> set[int]:
+    """The photos (indices) an answer left out: by the gate, or by their photo-type tag."""
+    return (set((result.get("gate") or {}).get("left_out") or [])
+            | set((result.get("photo_types") or {}).get("left_out") or []))
 
 
 def renumber(result: dict, kept: list[int], n_q: int) -> None:

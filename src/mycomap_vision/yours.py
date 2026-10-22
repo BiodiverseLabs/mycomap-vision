@@ -264,8 +264,10 @@ def for_person(ident, result: dict, spare: list, vecs: np.ndarray | None,
     if not len(recs):
         return personalize(result, spare, linked, set(), 0, [])
     keys = {str(ident.col_record.obs[r]) for r in recs.tolist()}
-    # The photos the answer used: a photo the fungus gate left out is left out here too.
-    left = set((result.get("gate") or {}).get("left_out") or [])
+    # The photos the answer used: a photo the fungus gate or its photo-type tag left out
+    # is left out here too.
+    from .identify import left_out_photos
+    left = left_out_photos(result)
     kept = [i for i in range(len(vecs)) if i not in left]
     mine = ident.own_specimens(np.asarray(vecs)[kept], recs, hidden, SHOWN,
                                photo_lookup=photo_lookup, may_show=may_show)

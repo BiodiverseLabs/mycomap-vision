@@ -208,7 +208,9 @@ def test_no_photo_is_kept_only_its_vector(conn, tmp_path):
     add(client, sid, 247, "p1")
     [s] = client.app.state.sessions._by_id.values()
     [photo] = s.photos
-    assert set(vars(photo)) == {"ref", "vector", "base", "verdict", "gate_fingerprint", "found"}
+    # Its photo-type tag (phototypes.py) is a few words about it, not the photo.
+    assert set(vars(photo)) == {"ref", "vector", "base", "verdict", "gate_fingerprint", "found",
+                                "photo_type", "type_fingerprint"}
     assert isinstance(photo.vector, np.ndarray) and photo.vector.ndim == 1
 
 
