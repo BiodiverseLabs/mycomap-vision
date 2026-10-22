@@ -958,7 +958,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def stats():
         # Photographers' answers are cheap and change any minute: always the current ones.
         # Never their counts (research_public.permission_status).
-        return {**stats_cache.get(),
+        return {**research_public.stats(stats_cache.get()),
                 "permissions": research_public.permission_status(permission_status())}
 
     @app.get("/api/scoreboard")

@@ -13,7 +13,7 @@ signin.research_path). Before they are, each answer is cut to what may be public
   how many advance predictions fall in it;
 - no photographer permission counts (Steve, 2026-10-21: no grant or decline counts on any
   public page), for anyone: /api/stats keeps only whether the answers are fresh enough to
-  show photos.
+  show photos; and no count of photographers by the rights on their photos (STATS_HIDDEN).
 
 The paper draft and the experiment registry are not here: they stay members only
 (signin.MEMBERS_ONLY).
@@ -86,6 +86,15 @@ def prospective(models: list[dict], signed_in: bool) -> list[dict]:
     if signed_in:
         return models
     return [{k: v for k, v in m.items() if k != "sealed"} for m in models]
+
+
+# Counts of photographers by the rights on their photos (Steve, 2026-10-22): never served.
+STATS_HIDDEN = ("contributors_arr",)
+
+
+def stats(figures: dict) -> dict:
+    """The reference set's figures (/api/stats) without STATS_HIDDEN."""
+    return {k: v for k, v in figures.items() if k not in STATS_HIDDEN}
 
 
 def permission_status(status: dict) -> dict:

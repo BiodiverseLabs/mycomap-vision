@@ -95,7 +95,8 @@ def research_path(method: str, path: str) -> bool:
 
 # Human Feedback, read-only to anyone (Steve, 2026-10-22): its page and every read of its API
 # pass here; feedback_api.py decides what each viewer sees (a reviewer everything they had,
-# anyone else the items of no project, cut by feedback_public.py) and refuses every write to
+# anyone else every photo item and the other items of no project, cut by feedback_public.py)
+# and refuses every write to
 # anyone but a reviewer (401 signed out, 403 signed in).
 FEEDBACK_PAGE = "/feedback"
 

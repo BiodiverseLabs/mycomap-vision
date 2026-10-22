@@ -2,7 +2,8 @@
 
 Who may use it: a signed-in mycomap.org admin (every item), project leader or contributor (the
 items of their projects). Anyone else, signed in or not, may browse it read-only (Steve,
-2026-10-22): the items of no project, cut by feedback_public.py, and every write refuses them
+2026-10-22): every photo item, and the other items of no project (feedback.PUBLIC_ITEMS), cut
+by feedback_public.py, and every write refuses them
 (401 signed out, 403 signed in). Roles come from mycomap.org (GET /api/vision/feedback/roles, behind
 the Vision key), cached a few minutes; until .org answers it, MV_FEEDBACK_ADMINS (comma-
 separated mycomap.org user ids) names the admins and nobody else gets in.
@@ -226,8 +227,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     def viewer(request: Request) -> tuple[dict | None, set[str] | None, dict, bool]:
         """(person, projects, roles, read_only) for a page that only reads. A reviewer as
-        access_roles has them; anyone else read-only, seeing the items of no project
-        (fb.PUBLIC_ITEMS). Writes keep access(), which refuses a read-only viewer."""
+        access_roles has them; anyone else read-only, seeing every photo item and the other
+        items of no project (fb.PUBLIC_ITEMS). Writes keep access(), which refuses a read-only viewer."""
         if not person(request):
             return None, fb.PUBLIC_ITEMS, {}, True
         try:

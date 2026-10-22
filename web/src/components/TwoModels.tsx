@@ -22,8 +22,7 @@ export function TwoModels() {
         <ul className="list-disc pl-5 space-y-1">
           <li>
             <span className="font-medium">{twoModelLabel(site)}</span>: the model this site serves.
-            It learned from every training photo, including all-rights-reserved photos from
-            iNaturalist and Mushroom Observer.
+            It learned from every training photo, public and non-public.
           </li>
           <li>
             <span className="font-medium">{twoModelLabel(open)}</span>: the paper's headline model.
