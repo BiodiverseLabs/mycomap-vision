@@ -279,3 +279,46 @@ def test_one_find_two_places_asks_duplicate_use_inat_or_mo_or_not_duplicate():
     assert [o["group"] for o in t["options"]] == ["Duplicate observation"] * 2 + ["Not duplicate"]
     assert by_short["Use iNat"]["label"].startswith("Duplicate observation")   # history reads whole
     assert "both records' photos" in t["shows"]
+
+
+def test_requests_reading_the_store_at_once_never_see_each_others_statements(tmp_path):
+    """The store's one connection is shared by every request thread. A summary once read
+    an empty row because another request stepped the connection at the same moment
+    (2026-10-22, feedback_api version()); each statement now runs and reads under the
+    store's lock."""
+    import threading
+    store = fb.Store(tmp_path / "fb.sqlite")
+    with store.conn:
+        store.conn.executemany(
+            "insert into seeds values (?, ?, ?, ?, ?)",
+            [(f"s{i}", None, 0, 0, 1.0 * i) for i in range(50)])
+    sql = ("select (select count(*) from items), (select max(id) from items), "
+           "(select max(at) from seeds)")
+    empty, errors = [], []
+
+    def read():
+        try:
+            for _ in range(300):
+                row = store.conn.execute(sql).fetchone()
+                if row is None:
+                    empty.append(1)
+                list(store.conn.execute("select * from seeds"))
+        except Exception as e:  # noqa: BLE001 - collected for the assertion
+            errors.append(e)
+    threads = [threading.Thread(target=read) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not errors and not empty
+
+
+def test_a_write_inside_the_store_lock_still_commits_and_rolls_back(tmp_path):
+    store = fb.Store(tmp_path / "fb.sqlite")
+    with store._lock, store.conn:
+        store.conn.execute("insert into seeds values ('a', null, 0, 0, 1.0)")
+    with pytest.raises(RuntimeError):
+        with store._lock, store.conn:
+            store.conn.execute("insert into seeds values ('b', null, 0, 0, 2.0)")
+            raise RuntimeError("abandoned")
+    assert [r[0] for r in store.conn.execute("select name from seeds")] == ["a"]

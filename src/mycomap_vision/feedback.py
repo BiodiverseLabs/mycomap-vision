@@ -321,10 +321,76 @@ def default_path(manifest_path: Path | None = None) -> Path:
     return Path(manifest_path or config.MANIFEST_PATH).parent / STORE_FILE
 
 
+class _Rows:
+    """A statement's rows, read in full while the connection was held (LockedConnection)."""
+
+    def __init__(self, cur: sqlite3.Cursor):
+        self.rowcount, self.lastrowid = cur.rowcount, cur.lastrowid
+        self._rows = cur.fetchall() if cur.description is not None else []
+        self._next = 0
+
+    def fetchone(self):
+        if self._next >= len(self._rows):
+            return None
+        self._next += 1
+        return self._rows[self._next - 1]
+
+    def fetchall(self) -> list:
+        rest, self._next = self._rows[self._next:], len(self._rows)
+        return rest
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class LockedConnection:
+    """The store's one connection, shared by every request thread: each statement runs
+    and reads its rows while holding the store's lock, so two requests never step on one
+    another's statements (a summary read once came back empty that way, 2026-10-22)."""
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
+        self._conn, self._lock = conn, lock
+
+    def execute(self, sql: str, params=()) -> _Rows:
+        with self._lock:
+            return _Rows(self._conn.execute(sql, params))
+
+    def executemany(self, sql: str, rows) -> _Rows:
+        with self._lock:
+            return _Rows(self._conn.executemany(sql, rows))
+
+    def executescript(self, script: str) -> None:
+        with self._lock:
+            self._conn.executescript(script)
+
+    def __enter__(self):
+        self._lock.acquire()
+        try:
+            return self._conn.__enter__()
+        except BaseException:
+            self._lock.release()
+            raise
+
+    def __exit__(self, *exc):
+        try:
+            return self._conn.__exit__(*exc)
+        finally:
+            self._lock.release()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        if name in ("_conn", "_lock"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._conn, name, value)
+
+
 @dataclass
 class Store:
     path: Path
-    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     # The paper's seal on the queues (SealGate): set where the store is opened on the box and
     # by seed_files; None only in tests that seed records with no dates on purpose.
     gate: "SealGate | None" = field(default=None, repr=False)
@@ -332,7 +398,8 @@ class Store:
     def __post_init__(self):
         self.path = Path(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn = LockedConnection(sqlite3.connect(self.path, check_same_thread=False),
+                                     self._lock)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("pragma journal_mode=wal")
         self.conn.executescript(SCHEMA)

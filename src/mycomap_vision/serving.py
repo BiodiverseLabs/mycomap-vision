@@ -284,13 +284,19 @@ class ServedIndexes:
     failure is noted); the new version is tried again after `retry_seconds`.
 
     Builds run one at a time, so two builds' working memory never add up, and the old
-    index is released as soon as the new one is in (`release` runs after that)."""
+    index is released as soon as the new one is in (`release` runs after that).
+
+    `may_serve_old(old_version, new_version)` names the changes that do not need that
+    strictness (a rename, a calibration; Steve, 2026-10-22): a caller that passes
+    stale_ok gets the old index at once while the new one builds. Off by default."""
 
     def __init__(self, build: Callable[[Hashable, Hashable], object], wait: float = 20.0,
                  retry_seconds: float = 60.0, note: Callable[[str], None] = print,
                  release: Callable[[], None] = lambda: None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 may_serve_old: Callable[[Hashable, Hashable], bool] = lambda old, new: False):
         self._build, self.wait, self.retry_seconds = build, wait, retry_seconds
+        self.may_serve_old = may_serve_old
         self.note, self.release, self.clock = note, release, clock
         self._lock = threading.Condition()
         self._one_build = threading.Lock()
@@ -308,15 +314,33 @@ class ServedIndexes:
         with self._lock:
             return {k: idx for k, (_v, idx) in self._served.items()}
 
-    def get(self, key, version, wait=_DEFAULT_WAIT):
+    def answering(self, key, version, stale_ok: bool = True):
+        """The version get(key, version, stale_ok=stale_ok) answers from right now."""
+        with self._lock:
+            served = self._served.get(key)
+            return served[0] if served and self._old_will_do(served, version, stale_ok)                 else version
+
+    def _old_will_do(self, served, version, stale_ok) -> bool:
+        return bool(stale_ok) and served[0] != version and self.may_serve_old(served[0], version)
+
+    def get(self, key, version, wait=_DEFAULT_WAIT, stale_ok: bool = False):
         """The index for `version`. `wait`: seconds to wait for a rebuild when an older
-        index exists (default: the instance's); None waits as long as it takes."""
+        index exists (default: the instance's); None waits as long as it takes.
+        `stale_ok`: the older index answers at once when may_serve_old allows it, and
+        the build of `version` starts behind it."""
         wait = self.wait if wait is _DEFAULT_WAIT else wait
         deadline = None
         with self._lock:
             while True:
                 served = self._served.get(key)
                 if served and served[0] == version:
+                    return served[1]
+                if served and self._old_will_do(served, version, stale_ok):
+                    failed = self._failed.get(key)
+                    recent = (failed and failed[0] == version
+                              and self.clock() - failed[1] < self.retry_seconds)
+                    if self._building.get(key) is None and not recent:
+                        self._start(key, version)
                     return served[1]
                 failed = self._failed.get(key)
                 if failed and failed[0] == version and self.clock() - failed[1] < self.retry_seconds:

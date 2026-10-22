@@ -9,6 +9,8 @@ import hashlib
 import os
 import sqlite3
 import stat
+import threading
+import time
 
 import pytest
 import requests
@@ -18,7 +20,7 @@ from test_models_and_scoreboard import Const
 from test_nightly import QUIET, RID, FakeOutside, box, names_in, row, seed_rows, top_species  # noqa: F401
 
 from mycomap_vision import feedback as fb
-from mycomap_vision import manifest, name_changes, nightly
+from mycomap_vision import api, manifest, name_changes, nightly
 from mycomap_vision.api import create_app
 
 
@@ -237,10 +239,43 @@ def test_a_rename_from_the_log_reaches_the_served_index_without_waiting_for_the_
     client = site(box, tmp_path, layer, seed_rows(), log)
     assert top_species(client, 12) == "B y"
     log.add(1, "B y", "B org", [f"inat:{100 + i}" for i in (3, 4, 5, 7)])
-    out = client.app.state.name_change_reader.run()
+    out = client.app.state.read_name_changes()
     assert out["renamed"] == 4
-    assert top_species(client, 12) == "B org"
+    assert eventually(lambda: top_species(client, 12)) == "B org"
     assert (box / "state" / "org-name-changes.sqlite").is_file()
+
+
+def eventually(read, want="B org", seconds=10.0):
+    """What `read` gives once it gives `want` (a rebuild running behind), else its last."""
+    end = time.monotonic() + seconds
+    while (got := read()) != want and time.monotonic() < end:
+        time.sleep(0.05)
+    return got
+
+
+def test_a_rename_is_answered_from_the_old_index_while_the_new_one_builds_behind_it(
+        tmp_path, box, monkeypatch):
+    """A rename never makes Identify refuse (Steve, 2026-10-22: six 503s an afternoon, one
+    per rename): the index answering keeps answering while the renamed one builds, which
+    starts as soon as the rename is read, not when the next person asks."""
+    monkeypatch.setenv("MV_INDEX_WAIT_SECONDS", "0.2")
+    layer = nightly.prepare(box, **QUIET)
+    log = FakeLog()
+    client = site(box, tmp_path, layer, seed_rows(), log)
+    assert top_species(client, 12) == "B y"
+    real, go, started = api.Identifier, threading.Event(), threading.Event()
+
+    def slow(*a, **kw):
+        started.set()
+        assert go.wait(10)
+        return real(*a, **kw)
+    monkeypatch.setattr(api, "Identifier", slow)
+    log.add(1, "B y", "B org", [f"inat:{100 + i}" for i in (3, 4, 5, 7)])
+    assert client.app.state.read_name_changes()["renamed"] == 4
+    assert started.wait(5), "the rebuild starts when the rename is read"
+    assert top_species(client, 12) == "B y", "answered at once, from the old index"
+    go.set()
+    assert eventually(lambda: top_species(client, 12)) == "B org"
 
 
 def test_the_nightly_reads_the_log_first_so_it_counts_only_the_rest(tmp_path, box):
