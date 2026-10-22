@@ -5,6 +5,7 @@ import type { Me } from "./api";
 import { showsMembersPages } from "./publicView";
 import { V1, utcDay, utcMinute } from "./datasetReleases";
 import { isRunPath } from "./runLink";
+import { FEEDBACK_PATH } from "./feedback";
 
 export interface NavItem { href: string; label: string; blurb?: string }
 
@@ -59,14 +60,15 @@ export const isResearchPath = (path: string) => path === "/research" || path.sta
 
 /** Whether this visitor must sign in before seeing `path`: only when every page needs it
  * (signin "all"), they aren't signed in, and it isn't one of PUBLIC_PAGES, the Research
- * section (open to anyone, Steve, 2026-10-22: signin.research_path; Experiments then asks
+ * section and Human Feedback (open to anyone, read-only for Feedback, Steve, 2026-10-22:
+ * signin.research_path, signin.feedback_read_path; Experiments then asks
  * them to sign in to read the entries) or a run's own link (/r/<id>, open to whoever has
  * it: signin.run_path). The server already sends them to sign in on a full page load; this
  * covers moving on inside the site. Never for the sign-in pages themselves, or a page shown
  * at one would loop. */
 export function mustSignIn(me: Me | null | undefined, path: string): boolean {
   return !!me && me.signin === "all" && !me.user && !PUBLIC_PAGES.includes(path)
-    && !isResearchPath(path) && !isRunPath(path) && !path.startsWith("/auth/");
+    && !isResearchPath(path) && path !== FEEDBACK_PATH && !isRunPath(path) && !path.startsWith("/auth/");
 }
 
 /** "history": measured before dataset release v1 and kept as development history. */

@@ -76,7 +76,8 @@ test("a signed-out visitor reads the API page and the whole Research section, an
                       "/research/for-researchers", "/models", "/data"]) {
     assert.equal(mustSignIn(visitor, page), false, page);
   }
-  for (const page of ["/", "/about", "/feedback", "/researchx"]) {
+  assert.equal(mustSignIn(visitor, "/feedback"), false, "Human Feedback, read-only");
+  for (const page of ["/", "/about", "/feedbackx", "/researchx"]) {
     assert.equal(mustSignIn(visitor, page), true, page);
   }
 });

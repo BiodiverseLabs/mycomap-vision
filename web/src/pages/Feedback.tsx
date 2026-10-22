@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowUpRight, ChevronDown, Download, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/Layout";
 import { RevealAnswer } from "@/components/RevealAnswer";
+import { ReadOnlyContext, ReadOnlyNote, useReadOnly } from "@/components/ReadOnlyReview";
 import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem, type FeedbackItemDetail,
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
          type LiveRecord, type NameContext, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
@@ -69,6 +70,16 @@ function AccessNote({ error }: { error: unknown }) {
 }
 
 export function FeedbackPage() {
+  // Read-only viewers (Steve, 2026-10-22: anyone who is not a reviewer) get no control that writes.
+  const me = useQuery({ queryKey: ["feedback", "me"], queryFn: feedbackApi.me, retry: false });
+  return (
+    <ReadOnlyContext.Provider value={!!me.data?.read_only}>
+      <FeedbackBody />
+    </ReadOnlyContext.Provider>
+  );
+}
+
+function FeedbackBody() {
   const me = useQuery({ queryKey: ["feedback", "me"], queryFn: feedbackApi.me, retry: false });
   const ok = !!me.data;
   const summary = useQuery({ queryKey: ["feedback", "summary"], queryFn: feedbackApi.summary, enabled: ok });
@@ -105,6 +116,7 @@ export function FeedbackPage() {
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-6xl space-y-6">
         {me.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
         <AccessNote error={me.error} />
+        <ReadOnlyNote me={me.data} />
         {me.data && (
           <>
             {me.data.admin && <AdminDownloads />}
@@ -374,6 +386,7 @@ function OrgChipBadge({ chip }: { chip: OrgChip }) {
 
 function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: FeedbackMe }) {
   const qc = useQueryClient();
+  const readOnly = useReadOnly();
   const q = useQuery({ queryKey: ["feedback", "item", id], queryFn: () => feedbackApi.item(id) });
   const item = q.data;
   const sides = item ? pairSides(item) : [];
@@ -400,7 +413,7 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
         {/* A record pair: both copies' photos side by side, then the decision under them. */}
         <PairCompare sides={sides} distanceKm={item.evidence?.distance_km} likelyWrong={item.evidence?.likely_wrong_copy}
                      places={places.data?.places} placesLoading={places.isPending} />
-        <Decide item={item} type={type} wide />
+        {readOnly ? <Outcome item={item} /> : <Decide item={item} type={type} wide />}
       </>) : (
       <div className="grid gap-5 lg:grid-cols-2">
         <div className="min-w-0 space-y-3">
@@ -424,11 +437,13 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
             </p>
           )}
         </div>
-        <Decide item={item} type={type} />
+        {readOnly ? <Outcome item={item} /> : <Decide item={item} type={type} />}
       </div>
       )}
       <LiveRecords item={item} reloading={q.isFetching} onReload={() => q.refetch()} me={me} />
-      {item.masked ? (
+      {readOnly ? (item.masked && (
+        <p className="text-xs text-muted-foreground">Vision's answer stays hidden until a reviewer decides.</p>
+      )) : item.masked ? (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">
             Judge the label from the photos and the record. Refresh appears after your decision.
@@ -597,6 +612,18 @@ function LiveCard({ r, me }: { r: LiveRecord; me: FeedbackMe }) {
       ) : (
         <p className="mt-2 text-xs text-muted-foreground">No sequences on this record.</p>
       )}
+    </div>
+  );
+}
+
+/** Where an item stands, for a read-only viewer: open, or decided (the outcome is in History). */
+function Outcome({ item }: { item: FeedbackItemDetail }) {
+  return (
+    <div className="min-w-0 space-y-1" data-testid="feedback-outcome">
+      <h3 className={`text-sm font-semibold ${INK}`}>{item.status === "decided" ? "Decided" : "Open"}</h3>
+      <p className="text-sm text-muted-foreground">
+        {item.status === "decided" ? "The decision is below." : "Not decided yet."}
+      </p>
     </div>
   );
 }
@@ -849,6 +876,7 @@ function OrgRequestBlock({ item, org, checking, onCheck }: {
 }) {
   const update = useItemUpdate(item.id);
   const send = useMutation({ mutationFn: () => feedbackApi.sendAgain(item.id), onSuccess: update });
+  const readOnly = useReadOnly();
   return (
     <div className="space-y-2" data-testid="feedback-org-request">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -882,7 +910,7 @@ function OrgRequestBlock({ item, org, checking, onCheck }: {
           </p>
         )}
         {org.note && <p className="mt-2 text-amber-800 dark:text-amber-200">{org.note}</p>}
-        {org.can_send && (
+        {org.can_send && !readOnly && (
           <button type="button" onClick={() => send.mutate()} disabled={send.isPending} className={`${PAGER} mt-2`}>
             {send.isPending ? "Sending…" : "Send again"}
           </button>

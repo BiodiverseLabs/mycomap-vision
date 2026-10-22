@@ -375,7 +375,10 @@ export interface Me {
 
 /** Who may review, and where: admins see every item, others their projects' items. */
 export interface FeedbackMe {
-  user: { id: string; name: string | null };
+  /** null for a signed-out visitor (read-only). */
+  user: { id: string; name: string | null } | null;
+  /** Not a reviewer: browses, decides nothing (Steve, 2026-10-22; feedback_public.py). */
+  read_only?: boolean;
   admin: boolean;
   /** mycomap.org's staff flag: BLAST links open the admin results form. */
   staff?: boolean;

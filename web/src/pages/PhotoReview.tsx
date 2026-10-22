@@ -18,6 +18,7 @@ import { PAGE_SIZES, readPageSize, readTileSize, readView, SUMMARY_KEY_HELP, SUM
          writeTileSize, writeView, type PageSize, type ReviewView, type TileSize } from "@/lib/photoSummary";
 import { autosaveOnText, changedPhotos, pageSaves, readAutosave, writeAutosave } from "@/lib/reviewSave";
 import { AutosaveToggle, SaveBar, useLeaveGuard } from "@/components/ReviewSave";
+import { ReadOnlyPhotoReview, useReadOnly } from "@/components/ReadOnlyReview";
 import { PhotoSummary } from "./PhotoSummary";
 
 // The Human Feedback photo review (Steve, 2026-10-18): the "Photos that show no specimen" queue
@@ -102,6 +103,8 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
     writeTileSize(browserStorage, t);
   };
   const [summaryTotal, setSummaryTotal] = useState<number | null>(null);
+  // A read-only viewer (Steve, 2026-10-22): the same filters, no Auto-save, no choices.
+  const readOnly = useReadOnly();
   // The reasons this reviewer picked, by photo: kept across tabs and pages (Board remounts).
   const [picked, setPicked] = useState<PickedReasons>({});
   const pickMode = (on: boolean) => {
@@ -135,10 +138,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       <Tabs data={full ? data : undefined} photos={full ? null : summaryTotal} tab={tab} status={status}
             onPick={setTab} />
       <div className="flex flex-wrap items-center gap-3">
-        <AutosaveToggle on={autosave} onChange={pickAutosave}
+        {!readOnly && <AutosaveToggle on={autosave} onChange={pickAutosave}
                         title={autosave
                           ? "On: Summary saves each photo once you have seen it and each flip at once. Click to save only when you press Save."
-                          : "Off: nothing is saved until you press Save (a photo's, a record's, or Save page). Click to save as you go."} />
+                          : "Off: nothing is saved until you press Save (a photo's, a record's, or Save page). Click to save as you go."} />}
         <ViewToggle view={view} onChange={pickView} />
         <StatusToggle status={status} onChange={setStatus} />
         <label className="flex min-w-0 items-center gap-2 text-sm">
@@ -166,7 +169,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
         <input type="search" value={text} onChange={(e) => setText(e.target.value)}
                placeholder="Record or name" aria-label="Search records or names"
                className={`${FIELD} w-full min-w-[12rem] basis-full sm:basis-auto sm:flex-1 sm:max-w-xs`} data-testid="photo-review-search" />
-        {full && <label className="flex min-h-10 min-w-0 items-center gap-2 text-sm"
+        {full && !readOnly && <label className="flex min-h-10 min-w-0 items-center gap-2 text-sm"
                title="Open flagged photos in this tab start as Exclude with their suggested reason, shown dashed until you confirm or keep them. Save sends them too.">
           <input type="checkbox" className="h-4 w-4 accent-myco-green" checked={mode === "suggest"}
                  onChange={(e) => pickMode(e.target.checked)} data-testid="photo-review-suggest" />
@@ -180,22 +183,26 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
             {PAGE_SIZES.map((n) => <option key={n} value={n}>{n} photos</option>)}
           </select>
         </label>}
-        <button type="button" className={BTN} aria-pressed={help} onClick={() => setHelp((h) => !h)}>
+        {!readOnly && <button type="button" className={BTN} aria-pressed={help} onClick={() => setHelp((h) => !h)}>
           <Keyboard className="h-4 w-4" aria-hidden /> Keys
-        </button>
+        </button>}
         {full && list.isFetching && <span className="text-xs text-muted-foreground">Loading…</span>}
       </div>
-      {help && <KeyHelp rows={full ? KEY_HELP : SUMMARY_KEY_HELP} />}
-      {!full && (
+      {help && !readOnly && <KeyHelp rows={full ? KEY_HELP : SUMMARY_KEY_HELP} />}
+      {readOnly && (
+        <ReadOnlyPhotoReview key={`${view}|${tab}|${status}|${sort}|${q}|${band}|${pageSize}`} view={view === "full" ? "full" : "summary"}
+                             tab={tab} status={status} sort={sort} q={q} band={band} pageSize={pageSize} />
+      )}
+      {!full && !readOnly && (
         <PhotoSummary tab={tab} status={status} sort={sort} q={q} band={band} help={help} onHelp={() => setHelp((h) => !h)}
                       tileSize={tileSize} pageSize={pageSize} onTotal={setSummaryTotal} autosave={autosave} onPending={setUnsaved}
                       canLeave={canLeave} discard={discard} />
       )}
-      {full && list.error && (
+      {full && !readOnly && list.error && (
         <p className={BODY}>{list.error instanceof ApiError ? list.error.message : "The photo review could not be loaded."}</p>
       )}
-      {full && data && list.isPlaceholderData && <p className="text-sm text-muted-foreground">Loading the next records…</p>}
-      {full && data && !list.isPlaceholderData && (
+      {full && !readOnly && data && list.isPlaceholderData && <p className="text-sm text-muted-foreground">Loading the next records…</p>}
+      {full && !readOnly && data && !list.isPlaceholderData && (
         <Board key={`${tab}|${status}|${sort}|${minFlagged}|${q}|${band}|${offset}|${gen}`} data={data} tab={tab}
                status={status} searching={!!q} offset={offset} help={help} onHelp={() => setHelp((h) => !h)}
                mode={mode} picked={picked} onPick={(photoKey, r) => setPicked((x) => ({ ...x, [photoKey]: r }))}
