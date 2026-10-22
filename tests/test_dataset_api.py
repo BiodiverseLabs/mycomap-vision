@@ -128,5 +128,5 @@ def test_images_follow_the_sites_signin_unless_opened(released, dataset_public, 
     world, base, pub = released
     client = site(world, mode="all", dataset_public=dataset_public)
     assert client.get(f"/api/dataset/{pub}/photos/inat:11").status_code == expected
-    # Opening the dataset images opens nothing else.
-    assert client.get("/api/scoreboard").status_code == 401
+    # Opening the dataset images opens nothing else (the Research data is open on its own).
+    assert client.get("/api/runs").status_code == 401
