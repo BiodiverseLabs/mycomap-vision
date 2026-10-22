@@ -113,6 +113,14 @@ export function depthRows(runs: ScoreRun[], reports: Map<number, RunReport>,
   return { rows, missing };
 }
 
+/** Each depth band's share of all the finds in the comparison (the sum over the bands), in
+ *  whole percent, for the heatmap's column heads (Steve, 2026-10-22); null where a band's
+ *  count is unknown, or when no count is. */
+export function bandShares(counts: (number | null | undefined)[]): (number | null)[] {
+  const total = counts.reduce<number>((s, n) => s + (n ?? 0), 0);
+  return counts.map((n) => (n == null || total <= 0 ? null : Math.round((100 * n) / total)));
+}
+
 /** Sequential ramp (one hue, light to dark) for a 0-1 share; ink flips to white on dark steps. */
 const RAMP = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
               "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"];

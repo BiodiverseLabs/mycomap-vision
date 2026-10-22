@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bars, comparisons, releaseResultsPending, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth, heldoutKs,
+import { bandShares, bars, comparisons, releaseResultsPending, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth, heldoutKs,
          onRelease, orderBenchmarks,
          kChoices, splitModelKey, type PublishedBenchmark } from "./compareView";
 import type { RunReport, ScoreRun } from "./api";
@@ -170,4 +170,14 @@ test("the Results page says release results are still to come until one is publi
   assert.equal(releaseResultsPending(preFreeze, [old, val]), false, "an imported v1 benchmark");
   const onV1 = [run(3, "ft-v1", "nearest", { record_set: "rs2", dataset_release: "v1" })];
   assert.equal(releaseResultsPending([...preFreeze, ...onV1], []), false, "a v1 comparison");
+});
+
+test("each depth band's head shows its share of all the comparison's finds, in whole percent", () => {
+  // Dataset release v1's validation split, species (run 169 on the box): 12,798 finds.
+  assert.deepEqual(bandShares([649, 1391, 2864, 5736, 2158]), [5, 11, 22, 45, 17]);
+  assert.deepEqual(bandShares([0, 1, 1, 2, 0]), [0, 25, 25, 50, 0]);
+  // A band whose count is unknown has no share; the others still share the known finds.
+  assert.deepEqual(bandShares([null, 50, 50, null, null]), [null, 50, 50, null, null]);
+  assert.deepEqual(bandShares([null, null, null, null, null]), [null, null, null, null, null]);
+  assert.deepEqual(bandShares([0, 0, 0, 0, 0]), [null, null, null, null, null]);
 });

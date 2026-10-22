@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { api, modelLabel, num, pct, type Rank, type RunReport, type ScoreRun } from "@/lib/api";
-import { bars, comparisons, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth,
+import { bandShares, bars, comparisons, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth,
          onRelease, orderBenchmarks,
          heldoutKs, kChoices, STANDARD_BANDS, type Bar, type PublishedBenchmark } from "@/lib/compareView";
 
@@ -229,6 +229,7 @@ function BarRow({ b, hover, onHover, rank, k }: {
 function DepthTable({ group, reports }: { group: ScoreRun[]; reports: Map<number, RunReport> }) {
   const { rows, missing } = depthRows(group, reports);
   const counts = STANDARD_BANDS.map((_, i) => rows[0]?.cells[i]?.n ?? null);
+  const shares = bandShares(counts);
   return (
     <div className="rounded-lg border border-[#A87146]/20 bg-white p-4" data-testid="chart-depth">
       <h3 className="font-semibold text-[#4a3728]">Species right first time, by how many DNA-verified records the species has</h3>
@@ -249,8 +250,7 @@ function DepthTable({ group, reports }: { group: ScoreRun[]; reports: Map<number
                 <th className="text-left font-medium pr-4 py-1">Approach</th>
                 {STANDARD_BANDS.map((band, i) => (
                   <th key={band} className="font-medium px-1 text-center min-w-[4.5rem]">
-                    {band} records<br />
-                    <span className="font-normal">{counts[i] != null ? `${num(counts[i])} finds` : ""}</span>
+                    <BandHead band={band} n={counts[i]} share={shares[i]} />
                   </th>
                 ))}
               </tr>
@@ -293,6 +293,17 @@ function DepthTable({ group, reports }: { group: ScoreRun[]; reports: Map<number
         </p>
       )}
     </div>
+  );
+}
+
+/** A depth column's head: the band, its finds and their share of all finds. */
+function BandHead({ band, n, share }: { band: string; n: number | null; share: number | null }) {
+  return (
+    <>
+      {band} records<br />
+      <span className="font-normal">{n != null ? `${num(n)} finds` : ""}</span>
+      {share != null && <><br /><span className="font-normal">{share}%</span></>}
+    </>
   );
 }
 
@@ -340,6 +351,8 @@ function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
   const k = ks.includes(kPick) ? kPick : 1;
   const rows = heldoutBars(b, rank, k);
   const depth = heldoutDepth(b);
+  const depthCounts = STANDARD_BANDS.map((_, i) => depth[0]?.cells[i]?.n ?? null);
+  const depthShares = bandShares(depthCounts);
   const anyOutside = rows.some((r) => r.external);
   return (
     <>
@@ -412,10 +425,7 @@ function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
                 <th className="text-left font-medium pr-4 py-1">Approach</th>
                 {STANDARD_BANDS.map((band, i) => (
                   <th key={band} className="font-medium px-1 text-center min-w-[4.5rem]">
-                    {band} records<br />
-                    <span className="font-normal">
-                      {depth[0].cells[i] ? `${num(depth[0].cells[i]!.n)} finds` : ""}
-                    </span>
+                    <BandHead band={band} n={depthCounts[i]} share={depthShares[i]} />
                   </th>
                 ))}
               </tr>
