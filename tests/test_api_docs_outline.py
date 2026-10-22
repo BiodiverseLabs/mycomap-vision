@@ -80,7 +80,7 @@ def test_the_outline_is_open_to_anyone_from_any_site(conn, tmp_path):
     assert res.headers["access-control-allow-origin"] == "*"
     assert "max-age" in res.headers["cache-control"]
     # The rest of the site still needs the sign-in.
-    assert client.get("/api/stats").status_code == 401
+    assert client.get("/api/paper").status_code == 401
 
 
 def test_the_outline_names_no_backbone_or_method():

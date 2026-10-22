@@ -5,6 +5,7 @@ import { BODY, BTN, Ext, FIELD, INK, Placeholder, StatusToggle } from "@/compone
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type PhotoViewTile,
          type PhotoViewsPage } from "@/lib/api";
 import { recordLabel } from "@/lib/feedback";
+import { ReadOnlyPhotoViewsSection, useReadOnly } from "@/components/ReadOnlyReview";
 import { tileImage } from "@/lib/photoReview";
 import { batchFor, chips, choiceOf, LEAVE_PROMPT, markSaved, needsSave, saveLine, setNoSpecimen, toggleView,
          VIEWS_PAGE_SIZE, type ViewChoices } from "@/lib/photoViews";
@@ -20,7 +21,12 @@ const PRIMARY = "inline-flex min-h-10 items-center justify-center gap-1 rounded-
   + "px-3 py-1.5 text-sm font-medium text-white hover:bg-myco-green/90 disabled:pointer-events-none disabled:opacity-40";
 
 
+/** A read-only viewer (Steve, 2026-10-22) gets the photos and their views with nothing to tag. */
 export function PhotoViews({ summary }: { summary: FeedbackSummary }) {
+  return useReadOnly() ? <ReadOnlyPhotoViewsSection summary={summary} /> : <ReviewerPhotoViews summary={summary} />;
+}
+
+function ReviewerPhotoViews({ summary }: { summary: FeedbackSummary }) {
   const qc = useQueryClient();
   const [tab, setTab] = useState("all");
   const [status, setStatus] = useState<FeedbackStatus>("open");

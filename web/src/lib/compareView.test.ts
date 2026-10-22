@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bars, comparisons, releaseResultsPending, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth, heldoutKs,
+import { bandShares, bars, comparisons, incompleteRun, releaseResultsPending, scoreboardSections, defaultComparison, depthRows, groupRelease, heat, heldoutBars, heldoutDepth, heldoutKs,
          onRelease, orderBenchmarks,
          kChoices, splitModelKey, type PublishedBenchmark } from "./compareView";
 import type { RunReport, ScoreRun } from "./api";
@@ -170,4 +170,42 @@ test("the Results page says release results are still to come until one is publi
   assert.equal(releaseResultsPending(preFreeze, [old, val]), false, "an imported v1 benchmark");
   const onV1 = [run(3, "ft-v1", "nearest", { record_set: "rs2", dataset_release: "v1" })];
   assert.equal(releaseResultsPending([...preFreeze, ...onV1], []), false, "a v1 comparison");
+});
+
+test("each depth band's head shows its share of all the comparison's finds, in whole percent", () => {
+  // Dataset release v1's validation split, species (run 169 on the box): 12,798 finds.
+  assert.deepEqual(bandShares([649, 1391, 2864, 5736, 2158]), [5, 11, 22, 45, 17]);
+  assert.deepEqual(bandShares([0, 1, 1, 2, 0]), [0, 25, 25, 50, 0]);
+  // A band whose count is unknown has no share; the others still share the known finds.
+  assert.deepEqual(bandShares([null, 50, 50, null, null]), [null, 50, 50, null, null]);
+  assert.deepEqual(bandShares([null, null, null, null, null]), [null, null, null, null, null]);
+  assert.deepEqual(bandShares([0, 0, 0, 0, 0]), [null, null, null, null, null]);
+});
+
+test("the scoreboard puts every dataset release comparison above development history, frozen against fine-tuned first", () => {
+  const v1 = (id: number, backbone: string, method: string, set: string, n_test: number, species: number,
+              created = "2026-10-19") =>
+    run(id, backbone, method, { record_set: set, n_test, dataset_release: "v1", species_top1: species,
+                                cutoff: "2026-08-17", created_at: created, comparison_id: `c-${id}` });
+  const runs = [
+    // The box's v1 comparisons (runs 168/169: 12,874 records, after the erratum; 163/166:
+    // 13,354 records, frozen and fine-tuned), each saved under several comparison ids.
+    v1(169, "bioclip-2-336-ft-20261018-171420", "nearest+mean-records-balanced+place", "36fd87", 12874, 0.5917, "2026-10-19T21"),
+    v1(168, "bioclip-2-336-ft-20261018-171420", "nearest+mean-records-balanced", "36fd87", 12874, 0.5632, "2026-10-19T19"),
+    v1(166, "bioclip-2-336-ft-20261018-171420", "nearest+mean", "d7bd13", 13354, 0.5726, "2026-10-19T06"),
+    v1(163, "bioclip-2-336", "nearest+mean", "d7bd13", 13354, 0.5279, "2026-10-19T05"),
+    v1(145, "bioclip-2-ft-20261013-003428", "nearest+mean", "d7bd13", 13354, 0.5513, "2026-10-13"),
+    run(139, "bioclip-2-ft-20261007-165400", "nearest+mean", { record_set: "4ef7b0", n_test: 1152, comparison_id: "20261008-012435-4ef7b0" }),
+    run(132, "external:inat-cv", "vision-max", { record_set: "4ef7b0", n_test: 1152, comparison_id: "20261008-012435-4ef7b0", species_top1: 0.0107 }),
+    run(133, "external:inat-cv", "combined-max", { record_set: "4ef7b0", n_test: 1152, comparison_id: "20261008-012435-4ef7b0", species_top1: 0.0116 }),
+  ];
+  const { release, history } = scoreboardSections(runs);
+  assert.deepEqual(release.map((g) => g.map((r) => r.id)), [[166, 145, 163], [169, 168]]);
+  assert.deepEqual(history.map((g) => g.map((r) => r.id)), [[139]]);
+});
+
+test("iNaturalist's incomplete development run of 8 October is left out, and only that one", () => {
+  assert.ok(incompleteRun(run(132, "external:inat-cv", "vision-max", { comparison_id: "20261008-012435-4ef7b0" })));
+  assert.ok(!incompleteRun(run(139, "bioclip-2", "nearest", { comparison_id: "20261008-012435-4ef7b0" })));
+  assert.ok(!incompleteRun(run(116, "external:inat-cv", "vision-max", { comparison_id: "20261006-183858-b9ca61" })));
 });

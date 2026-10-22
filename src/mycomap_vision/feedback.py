@@ -308,6 +308,16 @@ class FeedbackError(ValueError):
     pass
 
 
+class PublicItems(frozenset):
+    """The items a read-only viewer may browse (Steve, 2026-10-22: anyone signed out, and
+    signed-in people who review nothing): only those that belong to no project. Passed where a
+    reviewer's projects go; never a reviewer's own (a contributor sees their projects' items,
+    and an item with no project is not one of them)."""
+
+
+PUBLIC_ITEMS = PublicItems()
+
+
 STORE_FILE = "human-feedback.sqlite"
 
 
@@ -624,7 +634,10 @@ class Store:
 
     @staticmethod
     def _in(row, projects: set[str]) -> bool:
-        return bool(set(json.loads(row["projects"] or "[]")) & projects)
+        mine = set(json.loads(row["projects"] or "[]"))
+        if isinstance(projects, PublicItems):
+            return not mine
+        return bool(mine & projects)
 
     @staticmethod
     def _item(r) -> dict:

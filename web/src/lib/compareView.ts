@@ -42,6 +42,35 @@ export function comparisons(runs: ScoreRun[]): ScoreRun[][] {
 export const groupRelease = (g: ScoreRun[]): string | null =>
   g.find((r) => r.dataset_release)?.dataset_release ?? null;
 
+/** Runs the Results page leaves out: iNaturalist's computer vision on the 1,152 newest records
+ *  of 8 October 2026 (runs 132 and 133, species top-1 1.1% and 1.2%) was an incomplete
+ *  development run, not a fair comparison; that comparison is still to come (Steve,
+ *  2026-10-22). */
+const INCOMPLETE_RUNS: { comparison_id: string; backbone: string }[] = [
+  { comparison_id: "20261008-012435-4ef7b0", backbone: "external:inat-cv" },
+];
+export const incompleteRun = (r: ScoreRun) =>
+  INCOMPLETE_RUNS.some((x) => x.comparison_id === r.comparison_id && x.backbone === r.backbone);
+
+const fineTuned = (backbone: string) => /-ft-/.test(backbone);
+const frozen = (backbone: string) => !fineTuned(backbone) && !isExternal(backbone)
+  && !backbone.startsWith("picek-");
+
+/** The Results scoreboard: comparisons on a dataset release first, those that score frozen and
+ *  fine-tuned models side by side ahead of the rest (newest first otherwise); then the
+ *  development history from before the release. Comparisons of the same records merge
+ *  (comparisons()), so one release's tests never sit under development history; each lists
+ *  its runs best species top-1 first. */
+export function scoreboardSections(runs: ScoreRun[]): { release: ScoreRun[][]; history: ScoreRun[][] } {
+  const groups = comparisons(runs.filter((r) => !incompleteRun(r)))
+    .map((g) => [...g].sort((a, b) => (b.species_top1 ?? -1) - (a.species_top1 ?? -1)));
+  const both = (g: ScoreRun[]) => g.some((r) => frozen(r.backbone)) && g.some((r) => fineTuned(r.backbone));
+  const release = groups.filter((g) => groupRelease(g) !== null)
+    .map((g, i) => ({ g, i })).sort((x, y) => Number(both(y.g)) - Number(both(x.g)) || x.i - y.i)
+    .map(({ g }) => g);
+  return { release, history: groups.filter((g) => groupRelease(g) === null) };
+}
+
 /** The comparison shown first: one measured on a dataset release, if any (the most recent);
  *  else the most recently measured one that scores the model the site serves next to at least
  *  one other approach; else any with two approaches; else the first. */
@@ -111,6 +140,14 @@ export function depthRows(runs: ScoreRun[], reports: Map<number, RunReport>,
   rows.sort((a, b) => (b.cells.reduce((s, c) => s + (c?.top1 ?? 0) * (c?.n ?? 0), 0))
                       - (a.cells.reduce((s, c) => s + (c?.top1 ?? 0) * (c?.n ?? 0), 0)));
   return { rows, missing };
+}
+
+/** Each depth band's share of all the finds in the comparison (the sum over the bands), in
+ *  whole percent, for the heatmap's column heads (Steve, 2026-10-22); null where a band's
+ *  count is unknown, or when no count is. */
+export function bandShares(counts: (number | null | undefined)[]): (number | null)[] {
+  const total = counts.reduce<number>((s, n) => s + (n ?? 0), 0);
+  return counts.map((n) => (n == null || total <= 0 ? null : Math.round((100 * n) / total)));
 }
 
 /** Sequential ramp (one hue, light to dark) for a 0-1 share; ink flips to white on dark steps. */

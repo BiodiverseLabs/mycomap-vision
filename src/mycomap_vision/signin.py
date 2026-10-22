@@ -21,7 +21,10 @@ Settings (see .env.example):
                                identify: only POST /api/identify and the members'
                                routes (MEMBERS_ONLY: the paper draft) need a session
                                all: every page and API route does, except
-                               /api/health, /api/me and /auth/*
+                               /api/health, /api/me, /auth/*, the API page, the
+                               pages people share, the Research section
+                               (research_path) and Human Feedback's reads
+                               (feedback_read_path)
     MV_PUBLIC_ORIGIN           this site, e.g. https://vision.mycomap.org (the token's aud)
     MV_SIGNIN_ISSUER           default https://mycomap.org
     MV_SIGNIN_PUBLIC_KEY_FILE  the issuer's Ed25519 public key (PEM)
@@ -69,6 +72,38 @@ PUBLIC_FILE_DIRS = ("/assets/",)
 # it; the app sends a signed-out person on to sign in, as a full page load would
 # (web/src/lib/research.ts mustSignIn), and every answer stays behind /api/.
 SHARE_PAGES = ("/", "/about", "/get-involved")
+
+
+# The Research section, open to anyone (Steve, 2026-10-22): its pages (and the old addresses
+# of two of them, which lead there) and the data they load, read-only. What those answers
+# may say to someone signed out is cut in research_public.py. MEMBERS_ONLY stays signed-in
+# even under /research: the paper draft and the experiment registry (the Experiments page
+# opens, and asks a signed-out visitor to sign in to read them).
+RESEARCH_PAGES = ("/models", "/data")
+RESEARCH_API = ("/api/stats", "/api/models", "/api/scoreboard", "/api/prospective",
+                "/api/benchmarks")
+_RESEARCH_RUN = re.compile(r"^/api/scoreboard/\d{1,9}$")
+
+
+def research_path(method: str, path: str) -> bool:
+    """A Research page or the data it loads (GET or HEAD only); never MEMBERS_ONLY."""
+    if method not in ("GET", "HEAD") or members_only(path):
+        return False
+    return (path == "/research" or path.startswith("/research/") or path in RESEARCH_PAGES
+            or path in RESEARCH_API or bool(_RESEARCH_RUN.match(path)))
+
+
+# Human Feedback, read-only to anyone (Steve, 2026-10-22): its page and every read of its API
+# pass here; feedback_api.py decides what each viewer sees (a reviewer everything they had,
+# anyone else the items of no project, cut by feedback_public.py) and refuses every write to
+# anyone but a reviewer (401 signed out, 403 signed in).
+FEEDBACK_PAGE = "/feedback"
+
+
+def feedback_read_path(method: str, path: str) -> bool:
+    return method in ("GET", "HEAD") and (
+        path == FEEDBACK_PAGE or path.startswith(FEEDBACK_PAGE + "/")
+        or path.startswith("/api/feedback/"))
 
 
 # Routes that check their caller themselves: the identification log's read for the paper
@@ -277,7 +312,9 @@ class SigninConfig:
         # and its outline is public (apidocs.py; mycomap.org/api-docs shows it too).
         if path.startswith("/api/v1/") or path == "/api/v1" or path.startswith("/api/docs/"):
             return False
-        if public_page(method, path):
+        if public_page(method, path) or research_path(method, path):
+            return False
+        if feedback_read_path(method, path):
             return False
         # Checks its own caller (mycomap.org's server key, or a signed-in admin), so a
         # server-key call without a cookie reaches it.

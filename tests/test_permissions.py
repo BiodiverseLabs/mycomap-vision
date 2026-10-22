@@ -353,7 +353,10 @@ def test_stats_report_where_the_answers_stand(conn, tmp_path):
     permissions.save_snapshot(conn, answer((1, "granted"), (2, "withdrawn"), (3, "granted")),
                               datetime.now(timezone.utc))
     p = client.get("/api/stats").json()["permissions"]
-    assert (p["granted"], p["withdrawn"], p["fresh_for_showing"]) == (2, 1, True)
+    # Whether the answers are fresh enough to show photos; never how many said yes or no
+    # (Steve, 2026-10-21; research_public.permission_status).
+    assert p["fresh_for_showing"] is True and p["last_good_sync"]
+    assert "granted" not in p and "withdrawn" not in p
 
 
 # --- background work ----------------------------------------------------------

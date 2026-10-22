@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ReadOnlyLabelReviewSection, useReadOnly } from "@/components/ReadOnlyReview";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Keyboard } from "lucide-react";
 import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, StatusToggle,
@@ -30,7 +31,12 @@ import { nextPageOffset, nextUnsaved, offsetWhenPageDone, openOnLabel, step, tog
 const OUTCOME_BTN = `${BTN} w-full sm:w-auto`;
 const LEFT_OUT_BADGE: Record<Choice, string> = { keep: "Kept", exclude: "Left out" };
 
+/** A read-only viewer (Steve, 2026-10-22) gets the records and photos with no outcome to pick. */
 export function LabelReview({ summary }: { summary: FeedbackSummary }) {
+  return useReadOnly() ? <ReadOnlyLabelReviewSection summary={summary} /> : <ReviewerLabelReview summary={summary} />;
+}
+
+function ReviewerLabelReview({ summary }: { summary: FeedbackSummary }) {
   const qc = useQueryClient();
   const [status, setStatus] = useState<FeedbackStatus>("open");
   const [text, setText] = useState("");

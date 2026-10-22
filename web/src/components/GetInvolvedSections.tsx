@@ -4,6 +4,7 @@ import { api, num } from "@/lib/api";
 import {
   JOIN_URL, PHOTO_CHECKLIST, recentWeekLine, RESEARCH_PATH, SEQUENCING_URL,
 } from "@/lib/publicView";
+import { PhotoPermissionLine } from "@/components/PhotoPermissionLine";
 
 // The Get involved page's content: ways to help, each with a real mycomap.org page, and
 // real counts from /api/stats where they help (left out when the server doesn't send them).
@@ -56,15 +57,7 @@ export function GetInvolvedSections() {
 
       <Way icon={ImageUp} title="Let your photos be shown" testId="way-permission">
         <p>
-          Vision shows a reference photo only when it is Creative Commons licensed or its
-          photographer has said yes.
-          {s && s.contributors_arr > 0 && (
-            <> {num(s.contributors_arr)} photographers have all-rights-reserved photos in the
-            reference set.</>
-          )}
-          {" "}If MycoMap has asked about yours, answer on the{" "}
-          <Out href={`${ORG}/profile?tab=photo-permission`}>AI photo permission tab</Out> of your
-          mycomap.org profile. You can change your answer at any time.
+          <PhotoPermissionLine kind="learn" />
         </p>
       </Way>
 

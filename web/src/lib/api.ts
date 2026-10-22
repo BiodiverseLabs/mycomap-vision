@@ -207,11 +207,11 @@ export interface Stats {
   photos_by_license: Record<string, number>;
   contributors_arr: number;
   embedded: Record<string, number>;
+  /** Whether photographers' answers are fresh enough to show photos; never their counts
+   *  (research_public.permission_status). */
   permissions: {
-    granted: number;
-    withdrawn: number;
     last_good_sync: string | null;
-    last_attempt: { attempted_at: string; ok: boolean; error: string | null } | null;
+    last_attempt: { attempted_at: string; ok: boolean } | null;
     fresh_for_showing: boolean;
   };
   names: number;
@@ -249,7 +249,8 @@ export interface ScoreRun {
 export type BucketScores = Record<string, { n: number; top1: number; top5: number }>;
 export interface GroupScore { name: string; n: number; species_top1: number | null; genus_top1: number | null }
 export type EvalResult = Record<Rank, BucketScores> & {
-  groups?: { project: GroupScore[]; observer: GroupScore[] };
+  /** By observer only for a signed-in member (research_public.run_report): it names people. */
+  groups?: { project: GroupScore[]; observer?: GroupScore[] };
 };
 export interface RunReport {
   backbone: string;
@@ -272,6 +273,7 @@ const METHOD_LABEL: Record<string, string> = {
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",
   linear: "trained classifier",
+  "ft-head": "the fine-tune's own classifier",
   hybrid: "classifier + nearest specimen",
   "linear+prior": "trained classifier + range and season",
   "hybrid+prior": "classifier + nearest + range and season",
@@ -374,7 +376,10 @@ export interface Me {
 
 /** Who may review, and where: admins see every item, others their projects' items. */
 export interface FeedbackMe {
-  user: { id: string; name: string | null };
+  /** null for a signed-out visitor (read-only). */
+  user: { id: string; name: string | null } | null;
+  /** Not a reviewer: browses, decides nothing (Steve, 2026-10-22; feedback_public.py). */
+  read_only?: boolean;
   admin: boolean;
   /** mycomap.org's staff flag: BLAST links open the admin results form. */
   staff?: boolean;

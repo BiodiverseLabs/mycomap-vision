@@ -7,7 +7,8 @@ import { PageHeader } from "@/components/Layout";
 import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
 import { modelName } from "@/lib/publicView";
 import { CompareApproaches } from "@/components/CompareApproaches";
-import { releaseResultsPending } from "@/lib/compareView";
+import { TwoModels } from "@/components/TwoModels";
+import { incompleteRun, releaseResultsPending, scoreboardSections } from "@/lib/compareView";
 import { utcDay, V1 } from "@/lib/datasetReleases";
 
 const BUCKET_ORDER = ["all", "names iNat knows", "novel (0 refs)", "1 ref", "2 refs", "3-5 refs",
@@ -18,7 +19,13 @@ export function ModelsPage() {
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const benchmarks = useQuery({ queryKey: ["benchmarks"], queryFn: api.benchmarks });
   const [open, setOpen] = useState<number | null>(null);
-  const groups = groupBy(board.data?.runs ?? [], (r) => r.comparison_id);
+  // iNaturalist's incomplete development run is left out everywhere here (compareView.incompleteRun).
+  const runs = (board.data?.runs ?? []).filter((r) => !incompleteRun(r));
+  const { release, history } = scoreboardSections(runs);
+  // Without a release comparison yet, the newest development test leads, as before.
+  const top = release.length ? release : history.slice(0, 1);
+  const earlier = release.length ? history : history.slice(1);
+  const leftOut = (board.data?.runs ?? []).some(incompleteRun);
 
   return (
     <>
@@ -36,8 +43,9 @@ export function ModelsPage() {
             below are development history from before the release was frozen.
           </p>
         )}
-        {board.data && board.data.runs.length > 0 && (
-          <CompareApproaches runs={board.data.runs} served={models.data?.ready ?? []}
+        <TwoModels />
+        {board.data && runs.length > 0 && (
+          <CompareApproaches runs={runs} served={models.data?.ready ?? []}
                              servedMethod={models.data?.default_method ?? "nearest"} />
         )}
         <section>
@@ -47,18 +55,25 @@ export function ModelsPage() {
             <p className="text-sm text-muted-foreground">No tests published yet.</p>
           )}
           <div className="space-y-6">
-            {groups.slice(0, 1).map(([cid, runs]) => (
-              <Comparison key={cid} cid={cid} runs={runs} open={open} setOpen={setOpen} />
+            {top.map((g) => (
+              <Comparison key={g[0].id} runs={g} open={open} setOpen={setOpen} />
             ))}
-            {groups.length > 1 && (
+            {earlier.length > 0 && (
               <details className="rounded-lg border border-[#A87146]/20 p-4">
                 <summary className="cursor-pointer text-sm text-muted-foreground">
-                  Earlier tests ({groups.length - 1}), from development, on smaller sets
+                  Earlier tests ({earlier.length}), from development before dataset release {V1.id}, on the live data
                 </summary>
                 <div className="space-y-6 mt-4">
-                  {groups.slice(1).map(([cid, runs]) => (
-                    <Comparison key={cid} cid={cid} runs={runs} open={open} setOpen={setOpen} />
+                  {earlier.map((g) => (
+                    <Comparison key={g[0].id} runs={g} open={open} setOpen={setOpen} />
                   ))}
+                  {leftOut && (
+                    <p className="text-xs text-muted-foreground" data-testid="text-inat-incomplete">
+                      iNaturalist's computer vision on the 1,152 records of the 8 October 2026 test is
+                      not shown: that was an incomplete development run, not a fair comparison. It
+                      will be scored on the sealed test after the analysis freeze.
+                    </p>
+                  )}
                 </div>
               </details>
             )}
@@ -88,17 +103,20 @@ export function ModelsPage() {
   );
 }
 
-function Comparison({ cid, runs, open, setOpen }: {
-  cid: string; runs: ScoreRun[]; open: number | null; setOpen: (id: number | null) => void;
+function Comparison({ runs, open, setOpen }: {
+  runs: ScoreRun[]; open: number | null; setOpen: (id: number | null) => void;
 }) {
+  const release = runs.find((r) => r.dataset_release)?.dataset_release;
+  const ids = [...new Set(runs.map((r) => r.comparison_id))].join(", ");
   return (
-              <Card key={cid}>
+              <Card>
                 <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <CardTitle className="text-base text-[#4a3728]">
-                      Test on {num(runs[0].n_test)} records validated after {runs[0].cutoff}
+                      {release ? `Dataset release ${release}, validation split: ` : "Test on "}
+                      {num(runs[0].n_test)} records validated after {runs[0].cutoff}
                     </CardTitle>
-                    <span className="text-xs text-muted-foreground" title={`comparison ${cid}, set ${runs[0].record_set}`}>
+                    <span className="text-xs text-muted-foreground" title={`comparison ${ids}, set ${runs[0].record_set}`}>
                       identified from {num(runs[0].n_reference)} earlier DNA-verified records
                     </span>
                   </div>
@@ -270,7 +288,7 @@ function RunDetail({ id }: { id: number }) {
       </table>
       {q.data.all_photos.groups && (
         <div className="mt-4 grid gap-4 md:grid-cols-2">
-          {(["project", "observer"] as const).map((kind) => (
+          {(["project", "observer"] as const).filter((kind) => q.data.all_photos.groups![kind]).map((kind) => (
             <div key={kind}>
               <p className="text-xs text-muted-foreground mb-1">
                 By {kind} (largest first; batches can be dominated by one {kind}):
@@ -285,7 +303,7 @@ function RunDetail({ id }: { id: number }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {q.data.all_photos.groups![kind].map((g) => (
+                  {q.data.all_photos.groups![kind]!.map((g) => (
                     <tr key={g.name}>
                       <td className="py-0.5 pr-2 truncate max-w-[14rem]" title={g.name}>{g.name}</td>
                       <td className="text-right tabular-nums">{num(g.n)}</td>
@@ -324,8 +342,3 @@ function RunDetail({ id }: { id: number }) {
   );
 }
 
-function groupBy<T>(items: T[], key: (t: T) => string): [string, T[]][] {
-  const m = new Map<string, T[]>();
-  for (const it of items) m.set(key(it), [...(m.get(key(it)) ?? []), it]);
-  return [...m.entries()];
-}

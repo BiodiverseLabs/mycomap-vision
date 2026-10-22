@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, headlineModel, identifyGate, LIKELY_COPY, longDate, modelName, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
+import { coverageWords, headline, headlineModel, identifyGate, LIKELY_COPY, longDate, MANAGE_PERMISSIONS, modelName, PERMISSION_LINE, PHOTO_PERMISSIONS_URL, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -26,21 +26,32 @@ test("the list's sentence states the tested coverage for its rank", () => {
   assert.match(LIKELY_COPY.coverage("species", 0.55), /about 55% of the time/);
 });
 
-test("visitors read a model's name, not its file name", () => {
+test("visitors read a model's name, its image size and its training data, not its file name", () => {
+  // The site's model and the paper's headline model (Steve, 2026-10-21).
+  assert.equal(modelName("bioclip-2-336-ft-20261018-171420"),
+    "BioCLIP 2, 336 px, fine-tuned (public + non-public training data)");
+  assert.equal(modelName("bioclip-2-336-ft-20261020-173106"),
+    "BioCLIP 2, 336 px, fine-tuned (open data only)");
+  assert.equal(modelName("bioclip-2-ft-20261013-003428"),
+    "BioCLIP 2, 224 px, fine-tuned (public + non-public training data)");
+  assert.equal(modelName("bioclip-2-ft-20261014-003539"), "BioCLIP 2, 224 px, fine-tuned (open data only)");
   assert.equal(modelName("bioclip-2-ft-20261007-165400"),
-    "BioCLIP 2, fine-tuned on DNA-verified records (October 2026)");
-  assert.equal(modelName("bioclip-2"), "BioCLIP 2");
-  assert.equal(modelName("bioclip-2-ft-sample"), "BioCLIP 2, fine-tuned on a sample (test model)");
+    "BioCLIP 2, 224 px, fine-tuned (public + non-public training data)");
+  assert.equal(modelName("bioclip-2"), "BioCLIP 2, 224 px, frozen");
+  assert.equal(modelName("bioclip-2-336"), "BioCLIP 2, 336 px, frozen");
+  assert.equal(modelName("bioclip-2-ft-sample"), "BioCLIP 2, 224 px, fine-tuned on a sample (test model)");
   assert.equal(modelName("external:inat-cv"), "iNaturalist's computer vision");
   assert.equal(modelName("external:df20-vit-l384"),
-    "Danish Fungi 2020 ViT-L (Picek et al., Danish records)");
+    "Danish Fungi 2020 ViT-L, 384 px (Picek et al., Danish records)");
   assert.equal(modelName("external:fungitastic-beit-b384"),
-    "FungiTastic BEiT-B (Picek et al., Danish records)");
-  assert.equal(modelName("dinov3-l16-512"), "dinov3-l16-512");
+    "FungiTastic BEiT-B, 384 px (Picek et al., Danish records)");
+  assert.equal(modelName("dinov3-l16-512"), "DINOv3 large, 512 px, frozen");
+  assert.equal(modelName("eva02-l14-448"), "EVA-02 large, 448 px, frozen");
+  assert.equal(modelName("some-new-model"), "some-new-model");
   assert.equal(modelName("picek-fungitastic-beit-b384-20261012-080000"),
-    "Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records");
+    "Danish Fungi method (BEiT-B, 384 px, Picek et al.), trained on our DNA-verified records");
   assert.equal(modelName("picek-fungitastic-beit-b384-smoke"),
-    "Danish Fungi method (BEiT, Picek et al.), trained on our DNA-verified records (test model)");
+    "Danish Fungi method (BEiT-B, 384 px, Picek et al.), trained on our DNA-verified records (test model)");
   assert.equal(modelName("picek-unknown-preset-20261012-080000"),
     "picek-unknown-preset-20261012-080000");
 });
@@ -155,4 +166,13 @@ test("the headline names the method its numbers come from: the served default", 
   assert.equal(h.ours.species_top1, 0.41);
   assert.match(headlineModel(h), /closest specimens \+ species average \+ place and date$/);
   assert.match(headlineModel(headline(runs, ["bioclip-2-ft-x"], "nearest")!), /, closest specimens?$/);
+});
+
+test("photographers read only the two approved lines, each leading to their permissions on mycomap.org", () => {
+  assert.deepEqual(Object.values(PERMISSION_LINE), [
+    "Photographers stay in control of how their photos are used in MycoMap Vision.",
+    "Your photos help MycoMap Vision learn, and you decide how they're used.",
+  ]);
+  assert.equal(MANAGE_PERMISSIONS, "Manage your photo permissions →");
+  assert.equal(PHOTO_PERMISSIONS_URL, "https://mycomap.org/profile?tab=photo-permission");
 });

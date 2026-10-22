@@ -1,7 +1,9 @@
 """The Human Feedback page's API (feedback.py): /api/feedback/...
 
 Who may use it: a signed-in mycomap.org admin (every item), project leader or contributor (the
-items of their projects). Roles come from mycomap.org (GET /api/vision/feedback/roles, behind
+items of their projects). Anyone else, signed in or not, may browse it read-only (Steve,
+2026-10-22): the items of no project, cut by feedback_public.py, and every write refuses them
+(401 signed out, 403 signed in). Roles come from mycomap.org (GET /api/vision/feedback/roles, behind
 the Vision key), cached a few minutes; until .org answers it, MV_FEEDBACK_ADMINS (comma-
 separated mycomap.org user ids) names the admins and nobody else gets in.
 
@@ -27,6 +29,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
+from . import feedback_public as fp
 from . import name_context as nc
 from . import photo_review as pr
 from . import photo_views as pv
@@ -221,6 +224,20 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                                      "leaders and contributors")
         return who, projects, roles
 
+    def viewer(request: Request) -> tuple[dict | None, set[str] | None, dict, bool]:
+        """(person, projects, roles, read_only) for a page that only reads. A reviewer as
+        access_roles has them; anyone else read-only, seeing the items of no project
+        (fb.PUBLIC_ITEMS). Writes keep access(), which refuses a read-only viewer."""
+        if not person(request):
+            return None, fb.PUBLIC_ITEMS, {}, True
+        try:
+            who, projects, roles = access_roles(request)
+        except HTTPException as e:
+            if e.status_code != 403:
+                raise
+            return person(request), fb.PUBLIC_ITEMS, {}, True
+        return who, projects, roles, False
+
     def admin_only(request: Request) -> dict:
         who, projects = access(request)
         if projects is not None:
@@ -240,6 +257,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         ).fetchone())
 
     def projkey(projects):
+        if isinstance(projects, fb.PublicItems):
+            return "read-only"
         return None if projects is None else tuple(sorted(projects))
 
     # Counts and item lists cached until the store changes (any item or decision added):
@@ -252,14 +271,14 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
-        who, projects, roles = access_roles(request)
-        return {"user": {"id": who["sub"], "name": who.get("name")},
+        who, projects, roles, ro = viewer(request)
+        return {"user": who and {"id": who["sub"], "name": who.get("name")},
                 "admin": projects is None, "staff": bool(roles.get("staff")),
-                "projects": sorted(projects or [])}
+                "projects": [] if ro else sorted(projects or []), "read_only": ro}
 
     @app.get("/api/feedback/catalogue")
     def fb_catalogue(request: Request):
-        access(request)
+        viewer(request)
         out = fb.type_catalogue()
         for t in out:                # which options open a Name Update (feedback_org.KINDS)
             for o in t["options"]:
@@ -272,7 +291,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def fb_summary(request: Request):
         """Per queue, open and decided items; for a photo queue also the observations they
         are in (records_open, records_decided). Cached until the store changes."""
-        _, projects = access(request)
+        _, projects, _, _ = viewer(request)
 
         def build():
             out = store.summary(projects)
@@ -286,7 +305,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.get("/api/feedback/items")
     def fb_items(request: Request, type: str, status: str = "open", q: str = "",
                  offset: int = 0, limit: int = 25):
-        _, projects = access(request)
+        _, projects, _, ro = viewer(request)
         if status not in ("open", "decided"):
             bad(ValueError("status is open or decided"))
         try:
@@ -296,7 +315,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             chips = requests_.chips([i["id"] for i in out["items"]])
             for i in out["items"]:
                 i["org_chip"] = chips.get(i["id"])
-            return out
+            return fp.read_only(out) if ro else out
         except fb.FeedbackError as e:
             bad(e)
 
@@ -308,7 +327,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.get("/api/feedback/items/{item_id}")
     def fb_item(request: Request, item_id: int):
-        _, projects, roles = access_roles(request)
+        who, projects, roles, ro = viewer(request)
         item = item_or_404(item_id, projects)
         live = []
         for key in item["record_keys"][:4]:
@@ -318,18 +337,24 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                 rec = {"unavailable": True, "error": str(e)[:200]}
             for seq in rec.get("sequences") or []:
                 seq["blast_link"] = blast_link(seq, bool(roles.get("staff")))
-            live.append({"record_key": key, **rec})
+            rec = {"record_key": key, **rec}
+            live.append(fp.live_record(rec) if ro else rec)
         item["live"] = live
         if item["granularity"] == "record pair" and photos is not None:
             # Both copies' photos side by side (Steve, 2026-10-21: one look tells whether the
             # two records are one find). A record Vision has no photos of gets an empty list.
-            item["photos"] = {key: photos.for_viewer(photos.of_record(key))
+            item["photos"] = {key: [fp.photo(p) if ro else p for p in
+                                    photos.for_viewer(photos.of_record(key), reviewer=not ro)]
                               for key in item["record_keys"][:4]}
-        requests_.check_item(item_id)                  # the Name Update as .org has it now
-        item["org_request"] = fo.request_view(requests_.for_item(item_id))
+        if not ro:                                     # the Name Update as .org has it now
+            requests_.check_item(item_id)
+        view = fo.request_view(requests_.for_item(item_id))
+        item["org_request"] = fp.org_request(view) if ro else view
         out = fb.reviewer_view(item)
+        if ro:
+            return fp.read_only(out)                   # blind items stay blind: no reveal
         if out["masked"]:
-            out["revealed"] = store.revealed(item_id, str(person(request)["sub"]))
+            out["revealed"] = store.revealed(item_id, str(who["sub"]))
         return out
 
     @app.get("/api/feedback/items/{item_id}/places")
@@ -337,7 +362,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         """Where each copy of a record pair is, as MO and iNat list it (pair_places.py): the
         place text only, never a coordinate. Asked apart from the item, so its photos show
         before MO and iNat answer."""
-        _, projects = access(request)
+        _, projects, _, _ = viewer(request)
         item = item_or_404(item_id, projects)
         if item["granularity"] != "record pair" or places is None:
             return {"places": {}}
@@ -348,7 +373,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         """The names a name item is about, each with how iNaturalist holds it (linked), and
         MycoMap's synonym list around them (name_context.py). Asked apart from the item, so
         the item opens before iNat answers."""
-        _, projects = access(request)
+        _, projects, _, _ = viewer(request)
         item = item_or_404(item_id, projects)
         if item["item_type"] not in nc.NAME_TYPES or inat_names is None:
             return {"names": [], "synonyms": {"status": "none", "rows": [], "more": 0}}
@@ -471,9 +496,10 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             raise HTTPException(503, "photo review needs the served manifest")
         return photos
 
-    def card(rec: dict, admin: bool) -> dict:
+    def card(rec: dict, admin: bool, ro: bool = False) -> dict:
         rows = need_photos().of_record(rec["record_key"])
-        shown = {p["photo_key"]: p for p in need_photos().for_viewer(rows, thumb="grid")}
+        shown = {p["photo_key"]: p for p in need_photos().for_viewer(rows, reviewer=not ro,
+                                                                      thumb="grid")}
         flagged = {f["photo_key"]: f for f in rec["flagged"]}
         out = []
         for key in [r.key for r in rows] + [k for k in flagged if k not in shown]:
@@ -488,7 +514,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                         "band": pr.band_of(f["flags"]) if f else None,
                         "status": f["status"] if f else None,
                         "decision": f["decision"] if f else None})
-        return {k: v for k, v in rec.items() if k not in ("flagged", "in_tab")} | {"photos": out}
+        out = {k: v for k, v in rec.items() if k not in ("flagged", "in_tab")} | {"photos": out}
+        return fp.read_only(out) if ro else out
 
     @app.get("/api/feedback/photo-review/flagged")
     def fb_photo_review_flagged(request: Request, tab: str = "all", status: str = "open",
@@ -498,7 +525,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         each, paged (at most SUMMARY_MAX_PAGE), with the record's name and link, the flags, the
         suggested reason, and a small thumbnail: public photos straight from their source, others
         from /api/feedback/photo/…?size=grid (private, no-store)."""
-        _, projects = access(request)
+        _, projects, _, ro = viewer(request)
         try:
             tiles = pr.flagged_tiles(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, q,
                                      band)
@@ -506,20 +533,26 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             bad(e)
         start = max(0, offset)
         page = tiles[start:start + min(max(1, limit), SUMMARY_MAX_PAGE)]
+        out = photo_tiles(page, ro)
+        return {"total": len(tiles), "offset": start, "tiles": out,
+                "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
+
+    def photo_tiles(page: list[dict], ro: bool) -> list[dict]:
+        """A page of tiles with each photo as this viewer may see it (Summary, Photo views)."""
         info = need_photos().many([(t["photo_key"], t["record_key"]) for t in page])
         shown = {d["photo_key"]: d for d in need_photos().for_viewer(
-            [i["row"] for i in info.values()], thumb="grid")}
+            [i["row"] for i in info.values()], reviewer=not ro, thumb="grid")}
         out = []
         for t in page:
             i = info.get(t["photo_key"])
             ph = shown.get(t["photo_key"]) or {"photo_key": t["photo_key"], "position": None,
                                                "shown": "hidden",
                                                "hidden_reason": "not in Vision's photo list now"}
-            out.append(t | ph | {"owner_login": i and i["owner_login"],
-                                 "license_code": i and i["license_code"],
-                                 "record_photos": i and i["record_photos"]})
-        return {"total": len(tiles), "offset": start, "tiles": out,
-                "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
+            tile = t | ph | {"owner_login": i and i["owner_login"],
+                             "license_code": i and i["license_code"],
+                             "record_photos": i and i["record_photos"]}
+            out.append(fp.read_only(fp.photo(tile)) if ro else tile)
+        return out
 
     @app.get("/api/feedback/photo-views")
     def fb_photo_views(request: Request, tab: str = "all", status: str = "open", q: str = "",
@@ -527,7 +560,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         """Photo views (Steve, 2026-10-21): the queue's photos in a view's tab, one tile each,
         paged (at most 200), with the suggested and confirmed tags and a small thumbnail (public
         photos from their source, others from /api/feedback/photo/…?size=grid)."""
-        _, projects = access(request)
+        _, projects, _, ro = viewer(request)
         items = items_cached(pv.ITEM_TYPE, projects)
         try:
             tiles = pv.tiles(items, tab, status, q)
@@ -535,18 +568,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             bad(e)
         start = max(0, offset)
         page = tiles[start:start + min(max(1, limit), 200)]
-        info = need_photos().many([(t["photo_key"], t["record_key"]) for t in page])
-        shown = {d["photo_key"]: d for d in need_photos().for_viewer(
-            [i["row"] for i in info.values()], thumb="grid")}
-        out = []
-        for t in page:
-            i = info.get(t["photo_key"])
-            ph = shown.get(t["photo_key"]) or {"photo_key": t["photo_key"], "position": None,
-                                               "shown": "hidden",
-                                               "hidden_reason": "not in Vision's photo list now"}
-            out.append(t | ph | {"owner_login": i and i["owner_login"],
-                                 "license_code": i and i["license_code"],
-                                 "record_photos": i and i["record_photos"]})
+        out = photo_tiles(page, ro)
         return {"tabs": pv.tab_counts(items), "total": len(tiles), "offset": start,
                 "views": [{"code": c, "label": t, "suggested": c in pv.SUGGESTED}
                           for c, t in pv.VIEWS],
@@ -578,7 +600,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def fb_photo_review(request: Request, tab: str = "all", status: str = "open",
                         sort: str = "p", min_flagged: int = 1, q: str = "", offset: int = 0,
                         limit: int = 10, band: str = "all"):
-        _, projects = access(request)
+        _, projects, _, ro = viewer(request)
         try:
             out = pr.cards(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged,
                            q, band)
@@ -587,7 +609,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]
         return {"tabs": out["tabs"], "total": out["total"], "reasons": [
                     {"code": c, "label": t} for c, t in pr.REASONS],
-                "records": [card(r, projects is None) for r in page]}
+                "records": [card(r, projects is None, ro) for r in page]}
 
     @app.post("/api/feedback/photo-review/{record_key}/decision")
     def fb_photo_review_decide(request: Request, record_key: str, payload: dict = Body(...)):
@@ -605,31 +627,32 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         return {**done, "record": card(rec, projects is None) if rec else None}
 
     # --- the label review: the blind "Photos unlike the label" queue as cards (label_review) --
-    def label_card(c: dict, admin: bool) -> dict:
+    def label_card(c: dict, admin: bool, ro: bool = False) -> dict:
         rows = need_photos().of_record(c["record_key"])
         excluded = set(((c.get("decision") or {}).get("photo_keys")) or [])
-        return c | {"photos": [p | {"excluded": p["photo_key"] in excluded}
-                               for p in need_photos().for_viewer(rows, thumb="grid")]}
+        out = c | {"photos": [p | {"excluded": p["photo_key"] in excluded}
+                              for p in need_photos().for_viewer(rows, reviewer=not ro,
+                                                                thumb="grid")]}
+        return fp.read_only(out | {"photos": [fp.photo(p) for p in out["photos"]]}) if ro else out
 
     @app.get("/api/feedback/label-review")
     def fb_label_review(request: Request, status: str = "open", q: str = "", offset: int = 0,
                         limit: int = 10):
-        _, projects = access(request)
+        who, projects, _, ro = viewer(request)
         try:
             out = lr.cards(store.items_of(lr.ITEM_TYPE, projects), status, q)
         except fb.FeedbackError as e:
             bad(e)
         page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]
-        me = str(person(request)["sub"])
         for c in page:
-            if c["masked"]:
-                c["revealed"] = store.revealed(c["item_id"], me)
+            if c["masked"] and not ro:                 # blind stays blind read-only
+                c["revealed"] = store.revealed(c["item_id"], str(who["sub"]))
         return {"total": out["total"],
                 "reasons": [{"code": c, "label": t} for c, t in lr.REASONS],
                 "outcomes": [{"code": o.code, "label": o.label, "applies": o.applies,
                               "needs_value": o.needs_value}
                              for o in fb.TYPES[lr.ITEM_TYPE].options],
-                "records": [label_card(c, projects is None) for c in page]}
+                "records": [label_card(c, projects is None, ro) for c in page]}
 
     @app.post("/api/feedback/label-review/{item_id}/decision")
     def fb_label_review_decide(request: Request, item_id: int, payload: dict = Body(...)):
@@ -671,8 +694,10 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def fb_photo(request: Request, photo_key: str, size: str = "thumb"):
         """A photo for the review pages (Steve, 2026-10-18): to any Human Feedback reviewer
         with access to a queued record of the photo, private, never stored by the browser or a
-        proxy, and never a photo whose owner declined. From Vision's copy or its source."""
-        _, projects = access(request)
+        proxy, and never a photo whose owner declined. From Vision's copy or its source. A
+        read-only viewer gets only a photo anyone may see (feedback_public.py), never an
+        all-rights-reserved one."""
+        _, projects, _, ro = viewer(request)
         if size not in ("grid", "thumb", "full"):
             bad(ValueError("size is grid, thumb or full"))
         row = need_photos().one(photo_key)
@@ -680,8 +705,11 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             raise HTTPException(404, "no such photo")
         if not (need_photos().records_of(row) & records_reachable(projects)):
             raise HTTPException(403, "this photo is not on a record you review")
-        if need_photos().declined(row, need_photos().permission_view()):
+        view = need_photos().permission_view()
+        if need_photos().declined(row, view):
             raise HTTPException(403, "the photo's owner declined")
+        if ro and not view.may_show(row.license_class, row.owner_user_id):
+            raise HTTPException(403, "this photo is shown only to the record's reviewers")
         got = need_photos().image(row, size)
         if got is None:
             raise HTTPException(404, "the photo could not be read just now")
