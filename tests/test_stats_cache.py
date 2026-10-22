@@ -82,8 +82,12 @@ def test_the_figures_are_counted_once_an_hour_but_photographers_answers_are_curr
     save_records(conn, build_records([{"source": "iNaturalist", "observation_id": "999", "scientific_name": "Z z",
                                        "continent": "North America",
                                        "validation_status_1": "yes"}], "t2"))
-    conn.execute("insert into photo_permissions (inat_user_id, status) values (7, 'granted')")
+    conn.execute("insert into permission_syncs (attempted_at, ok) values "
+                 "('2026-10-22T00:00:00+00:00', 1)")
     conn.commit()
     again = client.get("/api/stats").json()
     assert again["records"] == first["records"]                     # not counted again yet
-    assert again["permissions"]["granted"] == first["permissions"]["granted"] + 1
+    assert first["permissions"]["last_good_sync"] is None
+    assert again["permissions"]["last_good_sync"].startswith("2026-10-22")
+    # Never how many said yes or no (research_public.permission_status).
+    assert "granted" not in again["permissions"] and "withdrawn" not in again["permissions"]

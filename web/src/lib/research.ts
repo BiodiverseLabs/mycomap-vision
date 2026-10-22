@@ -51,20 +51,23 @@ export const MOVED: Record<string, string> = {
   "/api-docs": API_PATH,
 };
 
-/** Pages a signed-out visitor may read when the site needs sign-in (signin.PUBLIC_PAGES). */
-export const PUBLIC_PAGES = [API_PATH, "/api-docs"];
-
-/** Whether this visitor must sign in before seeing `path`: only when every page needs it
- * (signin "all"), they aren't signed in, and it isn't one of PUBLIC_PAGES or a run's own
- * link (/r/<id>, open to whoever has it: signin.run_path). The server
- * already sends them to sign in on a full page load; this covers moving on inside the site.
- * Never for the sign-in pages themselves, or a page shown at one would loop. */
-export function mustSignIn(me: Me | null | undefined, path: string): boolean {
-  return !!me && me.signin === "all" && !me.user && !PUBLIC_PAGES.includes(path)
-    && !isRunPath(path) && !path.startsWith("/auth/");
-}
+/** Pages a signed-out visitor may read when the site needs sign-in (signin.PUBLIC_PAGES, and
+ *  signin.RESEARCH_PAGES: the old addresses of Results and Reference data). */
+export const PUBLIC_PAGES = [API_PATH, "/api-docs", "/models", "/data"];
 
 export const isResearchPath = (path: string) => path === "/research" || path.startsWith("/research/");
+
+/** Whether this visitor must sign in before seeing `path`: only when every page needs it
+ * (signin "all"), they aren't signed in, and it isn't one of PUBLIC_PAGES, the Research
+ * section (open to anyone, Steve, 2026-10-22: signin.research_path; Experiments then asks
+ * them to sign in to read the entries) or a run's own link (/r/<id>, open to whoever has
+ * it: signin.run_path). The server already sends them to sign in on a full page load; this
+ * covers moving on inside the site. Never for the sign-in pages themselves, or a page shown
+ * at one would loop. */
+export function mustSignIn(me: Me | null | undefined, path: string): boolean {
+  return !!me && me.signin === "all" && !me.user && !PUBLIC_PAGES.includes(path)
+    && !isResearchPath(path) && !isRunPath(path) && !path.startsWith("/auth/");
+}
 
 /** "history": measured before dataset release v1 and kept as development history. */
 export type BenchmarkStatus = "running" | "partial" | "planned" | "history";

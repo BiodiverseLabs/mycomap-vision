@@ -105,11 +105,13 @@ def site(conn, tmp_path, mode):
     return TestClient(app, follow_redirects=False)
 
 
-def test_the_models_page_reads_imported_benchmarks_behind_the_sites_sign_in(conn, tmp_path):
+def test_the_results_page_reads_imported_benchmarks_signed_in_or_not(conn, tmp_path):
+    # The Research section is open to anyone (Steve, 2026-10-22; test_research_public.py).
     benchmark_io.import_summary(conn, benchmark_io.export_summary(report(), "a"))
     conn.commit()
     c = site(conn, tmp_path, "all")
-    assert c.get("/api/benchmarks").status_code == 401
-    sign_in(c)
-    got = c.get("/api/benchmarks").json()["benchmarks"]
-    assert [b["split"] for b in got] == ["dev"] and "label_audit" not in json.dumps(got)
+    for who in ("signed out", "member"):
+        if who == "member":
+            sign_in(c)
+        got = c.get("/api/benchmarks").json()["benchmarks"]
+        assert [b["split"] for b in got] == ["dev"] and "label_audit" not in json.dumps(got), who

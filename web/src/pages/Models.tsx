@@ -270,7 +270,7 @@ function RunDetail({ id }: { id: number }) {
       </table>
       {q.data.all_photos.groups && (
         <div className="mt-4 grid gap-4 md:grid-cols-2">
-          {(["project", "observer"] as const).map((kind) => (
+          {(["project", "observer"] as const).filter((kind) => q.data.all_photos.groups![kind]).map((kind) => (
             <div key={kind}>
               <p className="text-xs text-muted-foreground mb-1">
                 By {kind} (largest first; batches can be dominated by one {kind}):
@@ -285,7 +285,7 @@ function RunDetail({ id }: { id: number }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {q.data.all_photos.groups![kind].map((g) => (
+                  {q.data.all_photos.groups![kind]!.map((g) => (
                     <tr key={g.name}>
                       <td className="py-0.5 pr-2 truncate max-w-[14rem]" title={g.name}>{g.name}</td>
                       <td className="text-right tabular-nums">{num(g.n)}</td>

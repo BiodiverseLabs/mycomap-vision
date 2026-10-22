@@ -67,11 +67,16 @@ test("API is the last item under Research, for visitors and members alike", () =
   assert.equal(API_PATH, "/research/api");
 });
 
-test("a signed-out visitor reads the API page but signs in for any other page", () => {
+test("a signed-out visitor reads the API page and the whole Research section, and signs in for the rest", () => {
   const visitor = me("all", null);
   assert.equal(mustSignIn(visitor, "/research/api"), false);
   assert.equal(mustSignIn(visitor, "/api-docs"), false);
-  for (const page of ["/", "/research", "/research/results", "/research/paper", "/about"]) {
+  for (const page of ["/research", "/research/results", "/research/data", "/research/protocols",
+                      "/research/benchmarks/sealed-test", "/research/experiments",
+                      "/research/for-researchers", "/models", "/data"]) {
+    assert.equal(mustSignIn(visitor, page), false, page);
+  }
+  for (const page of ["/", "/about", "/feedback", "/researchx"]) {
     assert.equal(mustSignIn(visitor, page), true, page);
   }
 });

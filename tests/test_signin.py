@@ -145,17 +145,17 @@ def sign_in(client, return_to="/"):
                       params={"token": mint(good_claims(nonce=q["nonce"][0]))})
 
 
-def test_with_the_whole_site_gated_nothing_but_health_answers_before_sign_in(conn, tmp_path):
+def test_with_the_whole_site_gated_nothing_outside_the_open_pages_answers_before_sign_in(conn, tmp_path):
     c = site(conn, tmp_path, "all")
     assert c.get("/api/health").status_code == 200
     assert c.get("/api/me").json() == {"signin": "all", "user": None}
-    r = c.get("/api/stats")
+    r = c.get("/api/paper")
     assert r.status_code == 401 and r.json()["signin"] == "/auth/signin"
-    assert c.get("/api/scoreboard").status_code == 401
+    assert c.get("/api/geocode/search").status_code == 401
     assert post_photos(c, [247], "m1/nearest").status_code == 401
-    page = c.get("/models?x=1")
+    page = c.get("/feedback?x=1")
     assert page.status_code == 302
-    assert page.headers["location"] == "/auth/signin?returnTo=%2Fmodels%3Fx%3D1"
+    assert page.headers["location"] == "/auth/signin?returnTo=%2Ffeedback%3Fx%3D1"
 
 
 def test_sign_in_goes_to_mycomap_org_for_this_site_and_comes_back_signed_in(conn, tmp_path):
@@ -168,7 +168,7 @@ def test_sign_in_goes_to_mycomap_org_for_this_site_and_comes_back_signed_in(conn
     back = c.get("/auth/dev-bridge/callback",
                  params={"token": mint(good_claims(nonce=q["nonce"][0]))})
     assert back.status_code == 302 and back.headers["location"] == "/models"
-    assert c.get("/api/stats").status_code == 200
+    assert c.get("/api/paper").status_code != 401
     assert c.get("/api/me").json()["user"] == {"id": "user-42", "name": "Mycena Fan"}
     assert post_photos(c, [247], "m1/nearest").status_code == 200
 
@@ -186,7 +186,7 @@ def test_a_token_is_useless_in_a_browser_that_did_not_start_the_sign_in(conn, tm
     other = TestClient(c.app, follow_redirects=False)
     r = other.get("/auth/dev-bridge/callback", params={"token": mint(good_claims(nonce=nonce))})
     assert r.status_code == 401 and SESSION_COOKIE not in r.cookies
-    assert other.get("/api/stats").status_code == 401
+    assert other.get("/api/paper").status_code == 401
 
 
 def test_a_token_minted_for_another_site_does_not_sign_anyone_in(conn, tmp_path):
@@ -196,23 +196,23 @@ def test_a_token_minted_for_another_site_does_not_sign_anyone_in(conn, tmp_path)
     r = c.get("/auth/dev-bridge/callback",
               params={"token": mint(good_claims(nonce=nonce, aud="https://dev.mycomap.org"))})
     assert r.status_code == 401
-    assert c.get("/api/stats").status_code == 401
+    assert c.get("/api/paper").status_code == 401
 
 
 def test_a_forged_session_cookie_is_not_a_session(conn, tmp_path):
     c = site(conn, tmp_path, "all")
     forged = CookieSigner(b"x" * 48, "session").sign({"sub": "u", "exp": time.time() + 60})
     c.cookies.set(SESSION_COOKIE, forged)
-    assert c.get("/api/stats").status_code == 401
+    assert c.get("/api/paper").status_code == 401
 
 
 def test_signing_out_ends_the_session(conn, tmp_path):
     c = site(conn, tmp_path, "all")
     sign_in(c)
-    assert c.get("/api/stats").status_code == 200
+    assert c.get("/api/me").json()["user"] is not None
     out = c.post("/auth/signout")
     assert out.status_code == 200
-    assert c.get("/api/stats").status_code == 401
+    assert c.get("/api/paper").status_code == 401
 
 
 def test_signing_out_lands_on_an_open_page_not_one_that_signs_you_back_in(conn, tmp_path):
@@ -270,7 +270,7 @@ def gated_site_with_pages(conn, tmp_path):
                                  signin=signin, web_dist=dist), follow_redirects=False)
 
 
-def test_the_api_page_is_open_to_all_while_every_other_page_needs_sign_in(conn, tmp_path):
+def test_the_api_page_is_open_to_all_while_pages_outside_research_need_sign_in(conn, tmp_path):
     c = gated_site_with_pages(conn, tmp_path)
     # The API page, its old address and the shell's files load signed out.
     for path in ("/research/api", "/api-docs", "/assets/index-abc123.js", "/favicon.png"):
@@ -279,15 +279,15 @@ def test_the_api_page_is_open_to_all_while_every_other_page_needs_sign_in(conn, 
     assert "<title>site</title>" in c.get("/research/api").text
     assert c.head("/research/api").status_code in (200, 405)       # never sent to sign in
     assert c.get("/api/docs/v1.json").status_code == 200           # the page's only data
-    # Everything else still sends people to sign in, or refuses. (/, /about and
-    # /get-involved answer with the shell and its link card; the app sends people on:
-    # test_link_cards.py.)
-    for path in ("/research", "/research/results", "/research/paper", "/models",
-                 "/research/api/extra", "/api-docsx", "/assetsx.js"):
+    # Everything else outside Research still sends people to sign in, or refuses. (/, /about
+    # and /get-involved answer with the shell and its link card; the app sends people on:
+    # test_link_cards.py. The Research section is open: test_research_public.py.)
+    for path in ("/feedback", "/r/short", "/api-docsx", "/assetsx.js", "/researchx",
+                 "/modelsx"):
         res = c.get(path)
         assert res.status_code == 302 and res.headers["location"].startswith("/auth/signin"), path
     assert c.post("/research/api").status_code == 302
-    for api_path in ("/api/stats", "/api/models", "/api/paper", "/api/experiments"):
+    for api_path in ("/api/paper", "/api/experiments", "/api/feedback/me", "/api/runs"):
         assert c.get(api_path).status_code == 401, api_path
 
 

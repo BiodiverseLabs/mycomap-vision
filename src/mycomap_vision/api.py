@@ -37,7 +37,7 @@ from PIL import Image
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
-               quotas as quota_rules, serving, sessions as session_store, sources, uploads,
+               quotas as quota_rules, research_public, serving, sessions as session_store, sources, uploads,
                workqueue, yours)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
@@ -912,28 +912,36 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         places, status = suggestions.suggest(q, request.client.host if request.client else "unknown")
         return JSONResponse(places, headers={"X-Suggest-Status": status})
 
+    # The Research section's data, open to anyone (signin.research_path): what a signed-out
+    # caller may read is cut in research_public.py.
     @app.get("/api/stats")
     def stats():
         # Photographers' answers are cheap and change any minute: always the current ones.
-        return {**stats_cache.get(), "permissions": permission_status()}
+        # Never their counts (research_public.permission_status).
+        return {**stats_cache.get(),
+                "permissions": research_public.permission_status(permission_status())}
 
     @app.get("/api/scoreboard")
-    def scoreboard():
+    def scoreboard(request: Request):
         with db_lock:
-            return {"runs": evaluate.scoreboard(conn)}
+            runs = evaluate.scoreboard(conn)
+        return {"runs": research_public.scoreboard(runs, person(request) is not None)}
 
     @app.get("/api/prospective")
-    def prospective_report():
+    def prospective_report(request: Request):
         from . import prospective
         with db_lock:
-            return {"models": prospective.report(conn), "sealed_after": prospective.seal_time()}
+            models_ = prospective.report(conn)
+        return {"models": research_public.prospective(models_, person(request) is not None),
+                "sealed_after": prospective.seal_time()}
 
     @app.get("/api/benchmarks")
-    def benchmarks():
+    def benchmarks(request: Request):
         """Held-out benchmark results imported with mv benchmark-import (aggregates only)."""
         from . import benchmark_io
         with db_lock:
-            return {"benchmarks": benchmark_io.published(conn)}
+            found = benchmark_io.published(conn)
+        return {"benchmarks": research_public.benchmarks(found, person(request) is not None)}
 
     from . import experiments
 
@@ -979,12 +987,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return JSONResponse({"markdown": text}, headers={"Cache-Control": "private, no-store"})
 
     @app.get("/api/scoreboard/{run_id}")
-    def scoreboard_run(run_id: int):
+    def scoreboard_run(run_id: int, request: Request):
         with db_lock:
             report = evaluate.run_report(conn, run_id)
-        if report is None:
+            run = evaluate.run_row(conn, run_id)
+        signed_in = person(request) is not None
+        if report is None or (not signed_in and research_public.sealed_run(run or {})):
             raise HTTPException(404, "no such run")
-        return report
+        return research_public.run_report(report, signed_in)
 
     # A plain (not async) route: FastAPI runs it in a worker thread, so GPU work
     # never blocks the event loop and other requests keep being answered.

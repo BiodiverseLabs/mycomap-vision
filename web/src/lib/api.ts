@@ -249,7 +249,8 @@ export interface ScoreRun {
 export type BucketScores = Record<string, { n: number; top1: number; top5: number }>;
 export interface GroupScore { name: string; n: number; species_top1: number | null; genus_top1: number | null }
 export type EvalResult = Record<Rank, BucketScores> & {
-  groups?: { project: GroupScore[]; observer: GroupScore[] };
+  /** By observer only for a signed-in member (research_public.run_report): it names people. */
+  groups?: { project: GroupScore[]; observer?: GroupScore[] };
 };
 export interface RunReport {
   backbone: string;

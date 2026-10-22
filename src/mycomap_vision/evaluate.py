@@ -1031,6 +1031,15 @@ def scoreboard(conn: sqlite3.Connection, comparison_id: str | None = None) -> li
              "dataset_release": None if r[-1] else r[-2]} for r in rows]
 
 
+def run_row(conn: sqlite3.Connection, run_id: int) -> dict | None:
+    """One run's scoreboard row (as scoreboard() lists it), or None."""
+    conn.executescript(SCOREBOARD_SCHEMA)
+    row = conn.execute("select comparison_id from eval_runs where id = ?", (run_id,)).fetchone()
+    if not row:
+        return None
+    return next((r for r in scoreboard(conn, row[0]) if r["id"] == run_id), None)
+
+
 def run_report(conn: sqlite3.Connection, run_id: int) -> dict | None:
     conn.executescript(SCOREBOARD_SCHEMA)
     row = conn.execute("select report_json from eval_runs where id = ?", (run_id,)).fetchone()
