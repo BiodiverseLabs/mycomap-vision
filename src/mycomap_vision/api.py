@@ -690,9 +690,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def same_permissions(old: tuple, new: tuple) -> bool:
         """Two index versions that differ in nothing about who may be shown (the third
-        part of index_version): the old index may answer while the new one builds."""
+        part of index_version) or which cross-posts are one find (the last): the old index
+        may answer while the new one builds."""
         return (isinstance(old, tuple) and isinstance(new, tuple) and len(old) == len(new)
-                and old[2] == new[2])
+                and old[2] == new[2] and old[-1] == new[-1])
 
     # Rebuilt (someone withdrew, a new calibration) on its own thread and swapped in
     # whole; the old index is released after, and serves on if a build fails.
@@ -733,7 +734,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             excluded = feedback.exclusions_fingerprint(conn)
             # Renames read from mycomap.org's name-change log between nights (name_changes.py).
             renamed = name_changes.version(conn) if layer else 0
-        # view.fingerprint() stays third: same_permissions reads it there.
+        # view.fingerprint() stays third and the twins last: same_permissions reads them.
         return (n, cal["run_id"] if cal else None, view.fingerprint(), night, excluded, renamed,
                 twins.version(twins_path()))
 
@@ -1791,7 +1792,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if confused_with is not None:          # tonight's table, if the read took
             confused_with.reload()
         if report["changed"]:
-            for spec in warm.models:
+            # Every index answering now, waited for: the night's people get tonight's.
+            served_now = {"/".join(k) for k in indexes.served()}
+            for spec in [*warm.models, *sorted(served_now - set(warm.models))]:
                 backbone, _, method = spec.partition("/")
                 try:
                     indexes.get((backbone, method),

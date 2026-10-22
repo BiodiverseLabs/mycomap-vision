@@ -1,6 +1,8 @@
 import io
 from collections import Counter
 
+import time
+
 import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -138,7 +140,11 @@ def test_confidence_uses_the_models_latest_calibration_once_compared(conn, tmp_p
     before = post_photos(client, [247], "m1/nearest").json()["results"][0]
     assert before["calibration"] is None and "Not calibrated" in before["confidence_note"]
     evaluate.compare(conn, ["m1"], embeddings_root=tmp_path / "emb", log=lambda s: None)
-    after = post_photos(client, [247], "m1/nearest").json()["results"][0]
+    # A new calibration rebuilds behind the index answering (no one waits for it).
+    end = time.monotonic() + 10
+    while (after := post_photos(client, [247], "m1/nearest").json()["results"][0])[
+            "calibration"] is None and time.monotonic() < end:
+        time.sleep(0.05)
     assert after["calibration"]["comparison_id"]
     assert "Calibrated on" in after["confidence_note"]
     # Calibration is fitted per model or release (v1 onwards), not weekly.
