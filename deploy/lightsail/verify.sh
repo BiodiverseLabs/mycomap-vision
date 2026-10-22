@@ -36,9 +36,12 @@ check "health"                            body_has '"ok":true' "$BASE/api/health
 check "sign-in mode is $SIGNIN"           body_has "\"signin\":\"$SIGNIN\"" "$BASE/api/me"
 
 if [ "$SIGNIN" = "all" ]; then
-  check "API refuses before sign-in"      status_is 401 "$BASE/api/stats"
+  check "API refuses before sign-in"      status_is 401 "$BASE/api/runs"
   check "identify refuses before sign-in" status_is 401 -X POST "$BASE/api/identify"
-  check "pages send people to sign in"    redirects_to "$BASE/auth/signin?returnTo=" "$BASE/models"
+  check "pages send people to sign in"    redirects_to "$BASE/auth/signin?returnTo=" "$BASE/admin"
+  check "Research is open to anyone"      status_is 200 "$BASE/api/scoreboard"
+  check "the draft paper stays signed-in" status_is 401 "$BASE/api/paper"
+  check "Human Feedback writes refused"   status_is 401 -X POST "$BASE/api/feedback/items/1/decide"
   check "the API page is open to all"     status_is 200 "$BASE/research/api"
 fi
 # Link previews (linkcards.py): Facebook, X, iMessage and Slack read Vision's own card.
