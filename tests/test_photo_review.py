@@ -161,10 +161,10 @@ def test_admins_get_cards_and_see_all_rights_reserved_photos_privately(conn, tmp
 def test_any_reviewer_with_access_to_the_record_sees_its_photos_and_nobody_else(conn,
                                                                                  tmp_path):
     c, _ = site_with_photos(conn, tmp_path)
-    c.cookies.clear()
-    assert c.get("/api/feedback/photo/inat:1100").status_code == 401
+    c.cookies.clear()                     # read-only (test_feedback_read_only.py): never served
+    assert c.get("/api/feedback/photo/inat:1100").status_code == 403
     assert c.get("/api/feedback/photo/inat:1100",
-                 headers={"Authorization": "Bearer some-v1-key"}).status_code == 401
+                 headers={"Authorization": "Bearer some-v1-key"}).status_code == 403
     as_user(c, "leader-1")                                    # a leader of the item's project
     card = c.get("/api/feedback/photo-review").json()["records"][0]
     arr = photo_of(card, "inat:1100")

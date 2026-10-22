@@ -22,8 +22,9 @@ Settings (see .env.example):
                                routes (MEMBERS_ONLY: the paper draft) need a session
                                all: every page and API route does, except
                                /api/health, /api/me, /auth/*, the API page, the
-                               pages people share and the Research section
-                               (research_path)
+                               pages people share, the Research section
+                               (research_path) and Human Feedback's reads
+                               (feedback_read_path)
     MV_PUBLIC_ORIGIN           this site, e.g. https://vision.mycomap.org (the token's aud)
     MV_SIGNIN_ISSUER           default https://mycomap.org
     MV_SIGNIN_PUBLIC_KEY_FILE  the issuer's Ed25519 public key (PEM)
@@ -90,6 +91,19 @@ def research_path(method: str, path: str) -> bool:
         return False
     return (path == "/research" or path.startswith("/research/") or path in RESEARCH_PAGES
             or path in RESEARCH_API or bool(_RESEARCH_RUN.match(path)))
+
+
+# Human Feedback, read-only to anyone (Steve, 2026-10-22): its page and every read of its API
+# pass here; feedback_api.py decides what each viewer sees (a reviewer everything they had,
+# anyone else the items of no project, cut by feedback_public.py) and refuses every write to
+# anyone but a reviewer (401 signed out, 403 signed in).
+FEEDBACK_PAGE = "/feedback"
+
+
+def feedback_read_path(method: str, path: str) -> bool:
+    return method in ("GET", "HEAD") and (
+        path == FEEDBACK_PAGE or path.startswith(FEEDBACK_PAGE + "/")
+        or path.startswith("/api/feedback/"))
 
 
 # Routes that check their caller themselves: the identification log's read for the paper
@@ -299,6 +313,8 @@ class SigninConfig:
         if path.startswith("/api/v1/") or path == "/api/v1" or path.startswith("/api/docs/"):
             return False
         if public_page(method, path) or research_path(method, path):
+            return False
+        if feedback_read_path(method, path):
             return False
         # Checks its own caller (mycomap.org's server key, or a signed-in admin), so a
         # server-key call without a cookie reaches it.

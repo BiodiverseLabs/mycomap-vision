@@ -115,7 +115,7 @@ def test_a_shared_page_gives_a_signed_out_visitor_only_the_shell_and_its_card(co
     block = re.search(r"<!-- link preview -->.*?(?=</head>)", page, re.S).group(0)
     assert page.replace(block, "") == SHELL
     assert identify(anyone).status_code == 401
-    for path in ("/api/experiments", "/api/runs", "/api/feedback/queue", "/api/paper"):
+    for path in ("/api/experiments", "/api/runs", "/api/feedback/changes.tsv", "/api/paper"):
         assert anyone.get(path).status_code == 401, path
 
 
@@ -123,7 +123,8 @@ def test_every_other_page_still_sends_a_signed_out_visitor_to_sign_in(conn, tmp_
     app, _, _ = site(conn, tmp_path, web_dist=dist(tmp_path))
     anyone = visitor(app)
     # (The Research section is open to anyone: test_research_public.py.)
-    for path in ("/feedback", "/about/x", "/get-involved/", "/r/short", "/researchx"):
+    # (Human Feedback reads are open too: test_feedback_read_only.py.)
+    for path in ("/feedbackx", "/about/x", "/get-involved/", "/r/short", "/researchx"):
         res = anyone.get(path)
         assert res.status_code == 302 and res.headers["location"].startswith("/auth/signin"), path
     # Only reading: a shared page refuses anything else without sign-in.

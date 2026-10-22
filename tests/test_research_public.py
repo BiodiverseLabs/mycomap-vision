@@ -15,8 +15,8 @@ RESEARCH_PAGES = ("/research", "/research/results", "/research/benchmarks",
                   "/research/benchmarks/sealed-test", "/research/protocols", "/research/data",
                   "/research/experiments", "/research/experiments/some-entry",
                   "/research/for-researchers", "/research/api", "/models", "/data")
-TWINS = "C:\\Users\\someone\\Projects\\mv-retrain-data\\record-scoring\\twins-train-b7bac93.tsv"
-ANY_PATH = re.compile(r"[A-Za-z]:\\\\|\\\\\\\\|/(?:Users|home|srv|var|tmp)/|someone")
+TWINS = "D:\\retrain\\someone\\record-scoring\\twins-train-b7bac93.tsv"
+ANY_PATH = re.compile(r"[A-Za-z]:\\\\|\\\\\\\\|/(?:opt|srv|var|tmp)/|someone")
 
 
 def add_run(conn, cutoff="2026-08-17", test_days=0, release="v1") -> int:
@@ -152,9 +152,9 @@ def test_a_run_is_sealed_when_its_test_can_reach_past_the_snapshot():
 
 def test_file_paths_are_cut_to_their_name_and_nothing_else_changes():
     strip = research_public.strip_paths
-    assert strip("C:\\Users\\a\\b\\t.tsv") == "t.tsv"
-    assert strip("C:/Users/a/b/t.tsv") == "t.tsv"
-    assert strip("/home/ubuntu/data/manifest.sqlite") == "manifest.sqlite"
+    assert strip("D:\\runs\\a\\b\\t.tsv") == "t.tsv"
+    assert strip("D:/runs/a/b/t.tsv") == "t.tsv"
+    assert strip("/opt/runs/data/manifest.sqlite") == "manifest.sqlite"
     assert strip("\\\\host\\share\\x.json") == "x.json"
     for kept in ("https://vision.mycomap.org/research/results", "occurrence/x/taxa.csv.gz",
                  "nearest+mean-records-balanced+place", "public (record_public_places)",

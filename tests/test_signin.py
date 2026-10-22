@@ -153,9 +153,9 @@ def test_with_the_whole_site_gated_nothing_outside_the_open_pages_answers_before
     assert r.status_code == 401 and r.json()["signin"] == "/auth/signin"
     assert c.get("/api/geocode/search").status_code == 401
     assert post_photos(c, [247], "m1/nearest").status_code == 401
-    page = c.get("/feedback?x=1")
+    page = c.get("/r/x?x=1")
     assert page.status_code == 302
-    assert page.headers["location"] == "/auth/signin?returnTo=%2Ffeedback%3Fx%3D1"
+    assert page.headers["location"] == "/auth/signin?returnTo=%2Fr%2Fx%3Fx%3D1"
 
 
 def test_sign_in_goes_to_mycomap_org_for_this_site_and_comes_back_signed_in(conn, tmp_path):
@@ -282,12 +282,12 @@ def test_the_api_page_is_open_to_all_while_pages_outside_research_need_sign_in(c
     # Everything else outside Research still sends people to sign in, or refuses. (/, /about
     # and /get-involved answer with the shell and its link card; the app sends people on:
     # test_link_cards.py. The Research section is open: test_research_public.py.)
-    for path in ("/feedback", "/r/short", "/api-docsx", "/assetsx.js", "/researchx",
+    for path in ("/feedbackx", "/r/short", "/api-docsx", "/assetsx.js", "/researchx",
                  "/modelsx"):
         res = c.get(path)
         assert res.status_code == 302 and res.headers["location"].startswith("/auth/signin"), path
     assert c.post("/research/api").status_code == 302
-    for api_path in ("/api/paper", "/api/experiments", "/api/feedback/me", "/api/runs"):
+    for api_path in ("/api/paper", "/api/experiments", "/api/feedback/changes.tsv", "/api/runs"):
         assert c.get(api_path).status_code == 401, api_path
 
 

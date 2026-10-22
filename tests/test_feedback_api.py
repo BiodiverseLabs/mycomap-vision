@@ -99,11 +99,18 @@ def item_id(fstore, item_type):
     return fstore.items(item_type)["items"][0]["id"]
 
 
-def test_signed_out_and_people_without_a_role_get_nothing(site):
-    c, _, _ = site
-    assert c.get("/api/feedback/summary").status_code == 401
-    as_user(c, "nobody-1")
-    r = c.get("/api/feedback/summary")
+def test_signed_out_and_people_without_a_role_only_read_and_see_no_project_items(site):
+    # Read-only for them (Steve, 2026-10-22; test_feedback_read_only.py): both seeded items
+    # belong to a project, so they see neither, and they decide nothing.
+    c, fstore, _ = site
+    for who, refused in ((None, 401), ("nobody-1", 403)):
+        if who:
+            as_user(c, who)
+        assert all(s["open"] == 0 for s in c.get("/api/feedback/summary").json()), who
+        r = c.post(f"/api/feedback/items/{item_id(fstore, 'group_label')}/decision",
+                   json={"decision": "keep"})
+        assert r.status_code == refused, who
+    r = c.post(f"/api/feedback/items/{item_id(fstore, 'group_label')}/reopen")
     assert r.status_code == 403 and "admins, project leaders and contributors" in r.json()["detail"]
 
 
@@ -128,7 +135,7 @@ def test_an_allowlisted_admin_gets_in_before_org_answers_roles(conn, tmp_path, m
     me = c.get("/api/feedback/me").json()
     assert me["admin"] is True and me["staff"] is True
     as_user(c, "stranger-5")
-    assert c.get("/api/feedback/me").status_code == 403
+    assert c.get("/api/feedback/me").json()["read_only"] is True
 
 
 def test_the_blast_link_follows_orgs_staff_rule_admin_form_or_public_job(site):
@@ -270,7 +277,8 @@ def test_a_record_pair_lists_each_copys_place_as_its_site_does_and_no_coordinate
                   "granularity": "record pair", "rule": "twins", "record_keys": ["mo:999", "101"],
                   "records": 2, "projects": ["p1"]}], "twins")
     pair = item_id(fstore, "twin_location_conflict")
-    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 401
+    # Signed out it is read-only, and a project's item is not among what that shows.
+    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 404
     as_user(c, "member-1")                                     # p2 only
     assert c.get(f"/api/feedback/items/{pair}/places").status_code == 404
     assert asked == []
@@ -312,7 +320,7 @@ def test_a_name_item_lists_its_names_with_inats_taxa_and_mycomaps_synonyms(conn,
                   "granularity": "name", "rule": "R4", "current": "Callistosporium luteoolivaceum",
                   "proposed": "", "records": 110, "projects": ["p1"]}], "r4")
     nid = item_id(fstore, "name_inactive_on_inat")
-    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 401
+    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 404     # read-only: no p1
     as_user(c, "member-1")                                     # p2 only
     assert c.get(f"/api/feedback/items/{nid}/names").status_code == 404
     assert asked == []
