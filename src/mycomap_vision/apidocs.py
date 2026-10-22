@@ -97,6 +97,7 @@ def outline(enabled: dict[str, bool]) -> dict:
         ["observed_on", "YYYY-MM-DD", "no", "The day it was found, used like the place. Read from the photo's EXIF date when not sent."],
         ["top_k", "1–10", "no", "Candidates per rank (default 5)."],
         ["client_ref", "string ≤ 64", "no", "Your id for the find. The same find identified again within a day (or after its session) isn't counted twice."],
+        ["include", "photo indices", "no", "Photos to count even though their photo type would leave them out (0-based, comma-separated, such as `1,3`); see `photo_types`. Ignored while photo types are off."],
     ]
     return {
         "title": "MycoMap Vision API",
@@ -154,7 +155,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                             ["use_date", "boolean", "no", "Use its date (default true)."],
                             ["top_k", "1–10", "no", "Candidates per rank."],
                             ["client_ref", "string ≤ 64", "no", "Defaults to inat:<id>, so the same observation within a day is counted once."],
-                            ["rerun", "boolean", "no", "Run it afresh and replace the kept answer (default false)."]],
+                            ["rerun", "boolean", "no", "Run it afresh and replace the kept answer (default false)."],
+                            ["include", "list of photo indices", "no", "As for identify (`[1]`). An answer is kept for each set of photos counted, so one kept without a photo is never served for a call that includes it."]],
                  "request": ("curl -X POST " + BASE_URL + "/identify/inat/123456789 \\\n"
                              "  -H 'Authorization: Bearer YOUR_TOKEN' \\\n"
                              "  -H 'Content-Type: application/json' -d '{\"top_k\": 5}'"),
@@ -187,7 +189,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                             ["use_date", "boolean", "no", "As above."],
                             ["top_k", "1–10", "no", "Candidates per rank."],
                             ["client_ref", "string ≤ 64", "no", "Defaults to mo:<id>."],
-                            ["rerun", "boolean", "no", "As above."]],
+                            ["rerun", "boolean", "no", "As above."],
+                            ["include", "list of photo indices", "no", "As above."]],
                  "notes": ["Mushroom Observer asks for one request every 5 seconds, photos "
                            "included, so expect about 5 seconds a photo the first time; a kept "
                            "answer comes back at once, as for iNaturalist."]},
@@ -197,7 +200,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                  "auth": "Vision token",
                  "fields": [["use_place", "boolean", "no", "As for identify (default true)."],
                             ["use_date", "boolean", "no", "As for identify (default true)."],
-                            ["top_k", "1–10", "no", "As for identify (default 5)."]],
+                            ["top_k", "1–10", "no", "As for identify (default 5)."],
+                            ["include", "photo indices", "no", "As for identify (comma-separated): the answer kept with those photos counted."]],
                  "request": ("curl " + BASE_URL + "/answers/inat/123456789 \\\n"
                              "  -H 'Authorization: Bearer YOUR_TOKEN'"),
                  "notes": ["Returns the kept answer, under whichever `model.answers_version` "
@@ -235,7 +239,8 @@ def outline(enabled: dict[str, bool]) -> dict:
                 {"type": "endpoint", "method": "PATCH", "path": "/sessions/{session_id}",
                  "status": status("sessions"), "summary": "Set or change the place and date.",
                  "auth": "Vision token",
-                 "fields": [["latitude, longitude, observed_on", "", "no", "As above."]]},
+                 "fields": [["latitude, longitude, observed_on", "", "no", "As above."],
+                            ["include_photos", "list of photo_ref", "no", "Photos to count even though their photo type would leave them out (see `photo_types`); replaces the list sent before."]]},
                 {"type": "endpoint", "method": "GET", "path": "/sessions/{session_id}",
                  "status": status("sessions"), "summary": "The current combined answer.",
                  "auth": "Vision token"},
@@ -300,6 +305,7 @@ def outline(enabled: dict[str, bool]) -> dict:
                     ["`species_url`", "The top species' page on mycomap.org, or `null`."],
                     ["`confidence_withheld`", "`true` when no photo clearly shows a fungus, so every `confidence` is `null` and nothing is `confident`."],
                     ["`gate`", f"Whether each photo shows a fungus (`fungus`, `unsure`, `not_fungus`), with `p_fungus`; below {GATE_NOT_SURE_BELOW:.2f} a photo is at best `unsure` (the gate was re-tuned on dataset release v1). A photo that isn't one is left out; when none clearly is, names are given without a confidence."],
+                    ["`photo_types`", "What kind of photo each one is, when photo types are on (absent otherwise): `per_photo[i].photo_type` is `{type, p, band, label, left_out, included}`. `type` is `specimen` for an ordinary photo of the fungus, else `micrograph`, `slip` (a label or field slip), `habitat`, `uv`, `chemical`, `spore_print`, `dried`, `people`, `tree`, `drawing` or `not_fungus`; `band` is `high`, `medium` or `low` (how often such a tag was right when checked by eye); `label` is the words to show beside the photo, or `null` for none. A `micrograph`, `slip` or `habitat` photo in the `high` band is left out of the answer (`photo_types.left_out`) unless you send it in `include` (`photo_types.included`); every other type still counts. When every photo would be left out, none is (`photo_types.kept_all`) and a hint says so."],
                     ["`hints`", "Short suggestions, such as which photo would help most."],
                     ["`model`", "`{name, version, data, calibrated_on}`. `version` names the DNA-verified data the model learned from: the date it was exported from mycomap.org, then .2, .3 for later builds on it. Store it with a suggestion to know which model made it. `data` gives that snapshot's date and size (records, species, genera)."],
                     ["`context_used`", "The place (rounded to 0.1°) and date that were used, and whether each came from you or the photo."],

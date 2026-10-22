@@ -28,6 +28,9 @@ import {
   type Specimen,
 } from "@/lib/api";
 import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, whatNext, type GateBanner } from "@/lib/gate";
+import {
+  includeOffers, includedAnyway, includedNow, leftOutByType, leftOutNotice, photoTypeChip, withIncluded, withoutIncluded,
+} from "@/lib/photoTypes";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import { applyPick } from "@/lib/mapPick";
@@ -89,8 +92,9 @@ export function IdentifyPage() {
   const [waiting, setWaiting] = useState<number | null>(null);
   const [sentPart, setSentPart] = useState<number | null>(null);
   const run = useMutation({
-    mutationFn: (sent: { where: Where; files: File[] }) =>
-      api.identify(sent.files, chosen, sent.where, (_attempt, seconds) => setWaiting(seconds), setSentPart),
+    mutationFn: (sent: { where: Where; files: File[]; include?: number[] }) =>
+      api.identify(sent.files, chosen, sent.where, (_attempt, seconds) => setWaiting(seconds), setSentPart,
+                   sent.include ?? []),
     onMutate: () => setSentPart(null),
     onSettled: () => {
       setWaiting(null);
@@ -106,8 +110,9 @@ export function IdentifyPage() {
   const [link, setLink] = useState(fromQuery?.text ?? "");
   const [mode, setMode] = useState<"photos" | "link">("photos");
   const byLink = useMutation({
-    mutationFn: (ref: ObservationRef & { rerun?: boolean }) =>
-      api.identifyObservation(ref.source, ref.id, chosen, (_attempt, seconds) => setWaiting(seconds), ref.rerun),
+    mutationFn: (ref: ObservationRef & { rerun?: boolean; include?: number[] }) =>
+      api.identifyObservation(ref.source, ref.id, chosen, (_attempt, seconds) => setWaiting(seconds), ref.rerun,
+                              ref.include ?? []),
     onSettled: () => setWaiting(null),
   });
   const viaLink = mode === "link";
@@ -122,7 +127,20 @@ export function IdentifyPage() {
   // Run again: the kept answer is replaced by a fresh run of the same observation.
   const runLinkAgain = () => {
     const o = byLink.data?.observation;
-    if (o) byLink.mutate({ source: o.source, id: o.id, rerun: true });
+    if (o) byLink.mutate({ source: o.source, id: o.id, rerun: true, include: byLink.variables?.include });
+  };
+  // "Include anyway" (lib/photoTypes.ts): the same photos or observation again, with a photo
+  // its type left out counted (or, from "Leave it out", left out again).
+  const includePhoto = (photo: number, on: boolean) => {
+    const now = (viaLink ? byLink.variables?.include : run.variables?.include)
+      ?? (answer?.results[0] ? includedNow(answer.results[0]) : []);
+    const include = on ? withIncluded(now, photo) : withoutIncluded(now, photo);
+    if (viaLink) {
+      const o = byLink.data?.observation;
+      if (o) byLink.mutate({ source: o.source, id: o.id, include });
+    } else if (run.variables) {
+      run.mutate({ ...run.variables, include });
+    }
   };
   // ...and identifies it once, when the person is signed in and a model is chosen.
   const autoStarted = useRef(false);
@@ -301,7 +319,8 @@ export function IdentifyPage() {
             >
               {answer.results.map((r) => (
                 <ResultCard key={`${modelKey(r.model.backbone, r.model.method)}@${submittedAt}`}
-                            r={r} urls={shownUrls} photos={shownPhotos ?? r.photos} />
+                            r={r} urls={shownUrls} photos={shownPhotos ?? r.photos}
+                            onInclude={pending ? undefined : includePhoto} />
               ))}
             </div>
           )}
@@ -1017,7 +1036,11 @@ export function WhatNext({ results }: { results: IdentifyResult[] }) {
   );
 }
 
-export function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: string[]; photos: number }) {
+export function ResultCard({ r, urls, photos, onInclude }: {
+  r: IdentifyResult; urls: string[]; photos: number;
+  /** Runs it again with a photo counted (true) or left out again (false); none on a run's page. */
+  onInclude?: (photo: number, on: boolean) => void;
+}) {
   // null: all photos together (the main answer). A number: that photo on its own.
   const [view, setView] = useState<number | null>(null);
   const [details, setDetails] = useState(false);
@@ -1030,7 +1053,7 @@ export function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: strin
   const gate = { notFungus: banner?.verdict === "not_fungus", withheld: chanceWithheld(r) };
   const answer = answerFor(r, gate);
   const hints = pageHints(r);
-  const noRanks = gate.notFungus || (photo != null && leftOut(photo));
+  const noRanks = gate.notFungus || (photo != null && (leftOut(photo) || leftOutByType(photo)));
   const found = gate.withheld ? "look-alikes" : "specimens";
   const coverage = coverageSummary(r.likely);
   const topSpecies = answerSpecies(answer);
@@ -1048,7 +1071,9 @@ export function ResultCard({ r, urls, photos }: { r: IdentifyResult; urls: strin
           {r.per_photo.length > 1 && (
             <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} />
           )}
-          {photo && <PhotoVerdict p={photo} />}
+          {!photo && <LeftOutByType r={r} onInclude={onInclude} />}
+          {r.per_photo.length === 1 && <OnePhotoType p={r.per_photo[0]} />}
+          {photo && <PhotoVerdict p={photo} onInclude={onInclude} />}
           <div className="space-y-4">
           {!noRanks && answer && (
             <button type="button" onClick={() => setFolded(!folded)} aria-expanded={!folded}
@@ -1315,7 +1340,8 @@ function PhotoSwitcher({ r, urls, view, setView }: {
         {r.per_photo.map((p) => {
           const place = p.overall_top.species;
           const agrees = place?.position === 1;
-          const label = photoGateLabel(p);
+          const label = photoGateLabel(p) ?? (leftOutByType(p) ? "left out" : null);
+          const chip = photoTypeChip(p);
           return (
             <button
               key={p.photo}
@@ -1326,6 +1352,7 @@ function PhotoSwitcher({ r, urls, view, setView }: {
               onClick={() => setView(p.photo)}
               title={leftOut(p)
                 ? `Photo ${p.photo + 1} doesn't look like a fungus and was left out`
+                : leftOutByType(p) ? leftOutNotice(p)
                 : place ? `Photo ${p.photo + 1} on its own puts ${place.name} ${ordinal(place.position)}` : undefined}
             >
               <span className="relative h-14 w-14 overflow-hidden rounded border bg-muted">
@@ -1336,6 +1363,7 @@ function PhotoSwitcher({ r, urls, view, setView }: {
                   {p.photo + 1}
                 </span>
               </span>
+              {chip && <PhotoTypeChip label={chip} leftOut={leftOutByType(p)} testId={`photo-type-${p.photo}`} />}
               {label ? (
                 <span className="text-[11px] font-medium text-amber-700" data-testid={`photo-gate-${p.photo}`}>
                   {label}
@@ -1353,10 +1381,19 @@ function PhotoSwitcher({ r, urls, view, setView }: {
   );
 }
 
-function PhotoVerdict({ p }: { p: PhotoResult }) {
+function PhotoVerdict({ p, onInclude }: { p: PhotoResult; onInclude?: (photo: number, on: boolean) => void }) {
   const species = p.overall_top.species;
   const genus = p.overall_top.genus;
   const n = p.photo + 1;
+  if (leftOutByType(p) && !leftOut(p)) {
+    return (
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+           data-testid={`photo-left-out-${p.photo}`}>
+        <span>{leftOutNotice(p)}</span>
+        {onInclude && <IncludeButton photo={p.photo} onInclude={onInclude} />}
+      </div>
+    );
+  }
   if (leftOut(p)) {
     return (
       <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
@@ -1366,8 +1403,25 @@ function PhotoVerdict({ p }: { p: PhotoResult }) {
     );
   }
   const chance = (c: number | null) => (c == null ? "" : ` (${pct(c)})`);
+  const chip = photoTypeChip(p);
   return (
     <div className="rounded-md border border-[#A87146]/20 bg-[#faf9f7] p-3 text-sm text-[#5c4a3a]">
+      {chip && (
+        <p className="mb-1.5 flex flex-wrap items-center gap-2 text-xs">
+          <PhotoTypeChip label={chip} leftOut={false} />
+          {includedAnyway(p) && (
+            <>
+              <span>Counted, as you asked.</span>
+              {onInclude && (
+                <button type="button" className="underline decoration-dotted underline-offset-2 hover:text-myco-green"
+                        onClick={() => onInclude(p.photo, false)} data-testid={`button-leave-out-${p.photo}`}>
+                  Leave it out
+                </button>
+              )}
+            </>
+          )}
+        </p>
+      )}
       <span className="font-semibold text-[#4a3728]">Photo {n} on its own.</span>{" "}
       {species &&
         (species.position === 1 ? (
@@ -1391,6 +1445,57 @@ function PhotoVerdict({ p }: { p: PhotoResult }) {
   );
 }
 
+
+/** A photo's type (lib/photoTypes.ts): "Habitat", "Microscopy", "UV", … Amber when its type
+ *  left it out of the answer. */
+function PhotoTypeChip({ label, leftOut: out, testId }: { label: string; leftOut: boolean; testId?: string }) {
+  return (
+    <span className={`inline-flex items-center rounded-full border px-1.5 py-px text-[10px] font-medium leading-4 ${
+      out ? "border-amber-300 bg-amber-50 text-amber-800" : "border-[#A87146]/30 bg-[#fbf7f0] text-[#5c4a3a]"}`}
+          title={label === "Tree" ? "Phylogenetic tree or BLAST result" : undefined} data-testid={testId}>
+      {label}
+    </span>
+  );
+}
+
+function IncludeButton({ photo, onInclude }: { photo: number; onInclude: (photo: number, on: boolean) => void }) {
+  return (
+    <Button type="button" variant="outline" size="sm" className="h-7 border-amber-300 bg-white px-2.5 text-xs text-amber-900 hover:bg-amber-100"
+            onClick={() => onInclude(photo, true)} data-testid={`button-include-${photo}`}>
+      Include anyway
+    </Button>
+  );
+}
+
+/** Under the photos: each photo its type left out of the answer, with "Include anyway". */
+function LeftOutByType({ r, onInclude }: { r: IdentifyResult; onInclude?: (photo: number, on: boolean) => void }) {
+  const offers = includeOffers(r);
+  if (!offers.length) return null;
+  return (
+    <div className="space-y-1.5 rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-900"
+         data-testid="section-left-out-by-type">
+      {offers.map((o) => (
+        <div key={o.photo} className="flex flex-wrap items-center gap-2">
+          <span>Photo {o.photo + 1}</span>
+          <PhotoTypeChip label={o.label} leftOut />
+          <span>left out of the answer.</span>
+          {onInclude && <IncludeButton photo={o.photo} onInclude={onInclude} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** One photo: no photo switcher, so its type (if it isn't a specimen photo) goes here. */
+function OnePhotoType({ p }: { p: PhotoResult }) {
+  const chip = photoTypeChip(p);
+  if (!chip) return null;
+  return (
+    <p className="flex items-center gap-2 text-xs text-muted-foreground" data-testid="text-one-photo-type">
+      This photo looks like: <PhotoTypeChip label={chip} leftOut={false} testId="photo-type-0" />
+    </p>
+  );
+}
 
 /** A rank's likely list first: every name worth considering with its calibrated chance,
  *  and how often such a list held the right name in testing. */

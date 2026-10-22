@@ -417,9 +417,12 @@ def public_health(full: dict, served: str | None, backbones) -> dict:
     for state in (body.get("embed") or {}).values():
         if isinstance(state, dict):
             state.pop("reason", None)
-    gate = body.get("fungus_gate")
-    if isinstance(gate, dict):
-        gate.pop("base", None)
+    for name in ("fungus_gate", "photo_tagger"):
+        reader = body.get(name)
+        if isinstance(reader, dict):
+            reader.pop("base", None)
+            if reader.get("error"):
+                reader["error"] = "not served; see the server log"
     return scrub(body)
 
 

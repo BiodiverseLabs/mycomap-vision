@@ -61,6 +61,7 @@ answered from a proxy's cache.
 | `model` | string, optional | one of `GET /api/v1/models`; default the served default. One model per request |
 | `top_k` | int 1–10, optional | candidates per rank, default 5 |
 | `client_ref` | string 1–64, optional | the caller's id for the find: the same find counted in the last 24 h (by its session or an earlier call) isn't counted again (§6.4) |
+| `include` | photo indices, optional | 0-based, comma-separated: photos to count even though their photo type would leave them out (`photo_types`, §4). Ignored while photo types are off |
 
 **Input guidance** (also on the developer page):
 
@@ -197,9 +198,12 @@ Why sessions rather than stateless calls:
   still answered from the first (the app must not reuse refs).
 - `PATCH` → `{"context_used", "combined"}`; `GET` → `{"combined", "context_used",
   "expires_at"}` (`combined.per_photo` holds every photo); `DELETE …/photos/{photo_ref}`
-  → `{"combined"}`; `DELETE` session → 204.
+  → `{"combined"}`; `DELETE` session → 204. `PATCH` also takes `include_photos`, a list
+  of `photo_ref`s to count even though their photo type would leave them out
+  (`photo_types`, §4); it replaces the list sent before.
 - **What is kept.** Per photo: its vector for the served model, the gate's base vector and
-  verdict with `p_fungus` (so a gate threshold change can re-judge it), and its
+  verdict with `p_fungus` (so a gate threshold change can re-judge it), its photo-type
+  tag (re-tagged when the tagger changes), and its
   per-photo answer, all computed once on upload. The photo itself is decoded, embedded
   and dropped in that call; **no photo bytes are kept**. Re-scoring after a new photo,
   a removed one or a place/date change runs `identify_vectors` over the stored vectors
@@ -356,6 +360,22 @@ model's result, not a `results` list.
   when `p_fungus` is below 0.05 and `unsure` below 0.50 (was 0.70 before v1). The cut-offs
   belong to the served gate and may change with it; callers read the verdict, not
   `p_fungus`.
+- **`photo_types`** (photo-type tags, Steve 2026-10-22; `phototypes.py`): absent while the
+  server has no tagger file (`MV_PHOTO_TAGGER`). Each photo's frozen BioCLIP 2 vector, the
+  one the gate reads, goes through the photo-type tagger v2 (a softmax head trained on
+  Human Feedback decisions). `per_photo[i].photo_type` is `{type, p, band, label, left_out,
+  included}`: `type` `specimen` (an ordinary photo of the fungus), `micrograph`, `slip`,
+  `habitat`, `uv`, `chemical`, `spore_print`, `dried`, `people`, `tree`, `drawing` or
+  `not_fungus`; `band` `high` / `medium` / `low` by the precision measured by eye (null for
+  `specimen`); `label` the chip text, null for a specimen photo or a low band. A
+  `micrograph`, `slip` or `habitat` photo in the `high` band is left out of the combined
+  answer like a gated photo (`photo_types.left_out`), unless the call names it in
+  `include` (`photo_types.included`). Every other type is tagged only and still counts.
+  When every photo the gate kept would be left out, none is: `photo_types.kept_all` is
+  `true` and a hint says so (unlike the gate, which gives no answer then: a micrograph or
+  habitat photo of a fungus still carries some of it). Kept observation answers and run
+  links are keyed on the tagger and the `include` list, so an answer is never served for
+  another set of photos.
 - **`confident`** (per candidate; Vision owns the rule, so the website, the app and
   mycomap.org's importance score never set a threshold of their own): `true` for a rank's
   top name when the gate verdict is `fungus` and the name is settled:
@@ -742,6 +762,7 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_TWIN_GROUPS` | the cross-post twin groups (`mv twin-groups`) the specimen scoring needs; default: `twin-groups.tsv` in the served release |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |
+| `MV_PHOTO_TAGGER` | the photo-type tagger file (`mv photo-tagger build`): photo types and the micrograph/label/habitat leave-out (§4 `photo_types`). Unset: no tagging |
 | `MV_PHOTOS_PER_MINUTE`, `MV_QUEUE_MAX_WAIT`, `MV_SESSIONS_MAX_MB`, `MV_QUOTA_DEFAULT_MONTHLY`, `MV_USAGE_REPORT_SECONDS` | limits, defaults in .env.example |
 
 mycomap.org's side: the `vision` service in its service keys, the introspection fields,
