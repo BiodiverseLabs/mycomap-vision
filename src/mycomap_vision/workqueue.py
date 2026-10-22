@@ -57,8 +57,12 @@ class ModelQueue:
     def __init__(self, lock: threading.Lock, max_wait: float = 20.0,
                  max_batch_photos: int = 20, embed_seconds: float = 1.6,
                  search_seconds: float = 2.0, clock: Callable[[], float] = time.monotonic,
-                 note=print, start: bool = True):
+                 note=print, start: bool = True,
+                 on_batch: Callable[[int, float], None] | None = None):
         self.lock, self.max_wait, self.max_batch_photos = lock, max_wait, max_batch_photos
+        # (photos embedded, seconds embedding and searching them) after every batch: the
+        # daily speed chart (speedlog.py). Never lets a failure reach the callers.
+        self.on_batch = on_batch
         self.embed_seconds, self.search_seconds = embed_seconds, search_seconds
         self.clock, self.note = clock, note
         self._jobs: list[Job] = []
@@ -178,6 +182,13 @@ class ModelQueue:
                     job.timer.photos_reused += max(0, len(vecs) - job.photos)
                 job.future.set_result(answer)
         self._learn(sum(len(v) for _, v, _ in done), sum(e for _, _, e in done), searched)
+        if self.on_batch is not None:
+            # Photos embedded now: a session's stored vectors are scored, not embedded.
+            fresh = sum(min(job.photos, len(vecs)) for job, vecs, _ in done)
+            try:
+                self.on_batch(fresh, sum(e for _, _, e in done) + searched)
+            except Exception as e:  # noqa: BLE001 - the answers are already given
+                self.note(f"[queue] speed not recorded: {type(e).__name__}: {e}")
 
     def _learn(self, photos: int, embedded: float, searched: float, alpha: float = 0.3) -> None:
         """Move the estimates toward what this batch took (so throttling shows at once)."""

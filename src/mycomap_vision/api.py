@@ -37,7 +37,7 @@ from PIL import Image
 from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
-               quotas as quota_rules, serving, sessions as session_store, sources, uploads,
+               quotas as quota_rules, serving, sessions as session_store, sources, speedlog, uploads,
                workqueue, yours)
 from .dates import real_date
 from .embed import SCHEMA as EMBED_SCHEMA
@@ -570,9 +570,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     backbones: dict[str, object] = {}
     # Every identification goes through one queue in front of the model (workqueue.py):
     # interactive calls first, and calls waiting on the same index share one search.
+    # Seconds per photo, one row per day (speedlog.py), beside the other state files.
+    speed_log = speedlog.SpeedLog(
+        (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT
+         else Path(manifest_path or config.MANIFEST_PATH).parent) / speedlog.FILE, note=note)
+    app.state.speed_log = speed_log
     model_queue = workqueue.ModelQueue(
         gpu_lock, max_wait=_setting_number("MV_QUEUE_MAX_WAIT") or 20.0,
-        max_batch_photos=int(_setting_number("MV_QUEUE_BATCH_PHOTOS") or 20), note=note)
+        max_batch_photos=int(_setting_number("MV_QUEUE_BATCH_PHOTOS") or 20), note=note,
+        on_batch=speed_log.record)
     app.state.model_queue = model_queue
     # Quotas (quotas.py, MV_QUOTAS off|count|enforce): monthly identifications per member,
     # counted here, durable on the box, reported to mycomap.org every few minutes.
@@ -938,6 +944,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def geocode_suggest(request: Request, q: str = ""):
         places, status = suggestions.suggest(q, request.client.host if request.client else "unknown")
         return JSONResponse(places, headers={"X-Suggest-Status": status})
+
+    @app.get("/api/speed/daily")
+    def speed_daily(days: int = 365):
+        """Average seconds per photo, day by day (UTC): the How it works chart. Averages
+        only, never how many photos."""
+        return {"days": speed_log.daily(min(max(days, 1), 3650))}
 
     @app.get("/api/stats")
     def stats():

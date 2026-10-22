@@ -192,3 +192,22 @@ def test_a_job_scoring_stored_vectors_reports_them_as_reused():
     q.run_batch(q._take_batch())
     assert j.future.result(0) == 4
     assert (t.photos_embedded, t.photos_reused) == (1, 3)
+
+
+def test_every_batch_reports_the_photos_it_embedded_and_the_time_it_took():
+    """The daily speed chart (speedlog.py) adds each batch's embedding and search time."""
+    seen = []
+    q = queue(on_batch=lambda photos, seconds: seen.append((photos, seconds)))
+    job(q, photos=2, embed_s=1.5)
+    job(q, photos=3, embed_s=2.5)
+    q.run_batch(q._take_batch())
+    assert seen == [(5, 1.5 + 2.5 + 2.0)]          # two embeds and the one shared search
+
+
+def test_a_failing_speed_recorder_never_costs_an_answer():
+    def broken(photos, seconds):
+        raise OSError("disk full")
+    q = queue(on_batch=broken)
+    j = job(q, photos=1)
+    q.run_batch(q._take_batch())
+    assert j.future.result(timeout=1)["vecs"] == [0.0]
