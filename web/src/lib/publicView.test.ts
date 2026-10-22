@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, headlineModel, identifyGate, LIKELY_COPY, longDate, modelName, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
+import { coverageWords, headline, headlineModel, identifyGate, LIKELY_COPY, longDate, MANAGE_PERMISSIONS, modelName, PERMISSION_LINE, PHOTO_PERMISSIONS_URL, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -166,4 +166,13 @@ test("the headline names the method its numbers come from: the served default", 
   assert.equal(h.ours.species_top1, 0.41);
   assert.match(headlineModel(h), /closest specimens \+ species average \+ place and date$/);
   assert.match(headlineModel(headline(runs, ["bioclip-2-ft-x"], "nearest")!), /, closest specimens?$/);
+});
+
+test("photographers read only the two approved lines, each leading to their permissions on mycomap.org", () => {
+  assert.deepEqual(Object.values(PERMISSION_LINE), [
+    "Photographers stay in control of how their photos are used in MycoMap Vision.",
+    "Your photos help MycoMap Vision learn, and you decide how they're used.",
+  ]);
+  assert.equal(MANAGE_PERMISSIONS, "Manage your photo permissions →");
+  assert.equal(PHOTO_PERMISSIONS_URL, "https://mycomap.org/profile?tab=photo-permission");
 });

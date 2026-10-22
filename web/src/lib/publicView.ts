@@ -211,3 +211,17 @@ export function releaseNote(b: { backbone: string; embedded_photos: number;
   parts.push(`Compares your photos with ${b.embedded_photos.toLocaleString("en-US")} reference photos.`);
   return parts.join(" ");
 }
+
+/** Where a photographer manages their answer: the AI photo permission tab of their
+ *  mycomap.org profile. */
+export const PHOTO_PERMISSIONS_URL = "https://mycomap.org/profile?tab=photo-permission";
+
+/** The only lines that speak to photographers about their photos (Steve, 2026-10-21), each
+ *  followed by MANAGE_PERMISSIONS linking to PHOTO_PERMISSIONS_URL: "control" where the page
+ *  describes the photos, "learn" where it thanks the people behind them. Never a count of
+ *  who said yes or no, and never a list of them. */
+export const PERMISSION_LINE = {
+  control: "Photographers stay in control of how their photos are used in MycoMap Vision.",
+  learn: "Your photos help MycoMap Vision learn, and you decide how they're used.",
+} as const;
+export const MANAGE_PERMISSIONS = "Manage your photo permissions →";

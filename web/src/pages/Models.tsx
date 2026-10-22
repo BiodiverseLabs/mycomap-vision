@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/Layout";
 import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
 import { modelName } from "@/lib/publicView";
 import { CompareApproaches } from "@/components/CompareApproaches";
+import { TwoModels } from "@/components/TwoModels";
 import { incompleteRun, releaseResultsPending, scoreboardSections } from "@/lib/compareView";
 import { utcDay, V1 } from "@/lib/datasetReleases";
 
@@ -42,6 +43,7 @@ export function ModelsPage() {
             below are development history from before the release was frozen.
           </p>
         )}
+        <TwoModels />
         {board.data && runs.length > 0 && (
           <CompareApproaches runs={runs} served={models.data?.ready ?? []}
                              servedMethod={models.data?.default_method ?? "nearest"} />
