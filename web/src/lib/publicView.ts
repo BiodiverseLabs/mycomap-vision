@@ -6,25 +6,49 @@ import { publicMethodLabel, publicModelName } from "./publicNames";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
-const BASE_NAME: Record<string, string> = { "bioclip-2": "BioCLIP 2" };
+/** Each base model (models.ALIASES) by name and the image size it reads (Steve, 2026-10-22:
+ *  every number names its model and its image size). */
+const BASE_NAME: Record<string, string> = {
+  "bioclip-2": "BioCLIP 2, 224 px",
+  "bioclip-2-336": "BioCLIP 2, 336 px",
+  "bioclip-2-448": "BioCLIP 2, 448 px",
+  bioclip: "BioCLIP, 224 px",
+  "dinov2-b14": "DINOv2 base, 518 px",
+  "dinov2-l14": "DINOv2 large, 518 px",
+  "dinov3-b16": "DINOv3 base, 256 px",
+  "dinov3-l16": "DINOv3 large, 256 px",
+  "dinov3-b16-512": "DINOv3 base, 512 px",
+  "dinov3-l16-512": "DINOv3 large, 512 px",
+  "siglip2-l16-384": "SigLIP 2 large, 384 px",
+  "eva02-l14-448": "EVA-02 large, 448 px",
+  "convnextv2-l": "ConvNeXt V2 large, 384 px",
+};
+/** The two kinds of fine-tune (Steve, 2026-10-21), named in every label. The public models
+ *  were trained only on openly licensed (Creative Commons, incl. non-commercial) photos
+ *  (`--public-trainable-only`; the 336 px one is the paper's headline); every other
+ *  fine-tune learned from all its training photos. */
+export const PUBLIC_TRAINED = new Set(["bioclip-2-336-ft-20261020-173106",
+                                       "bioclip-2-ft-20261014-003539"]);
+export const TRAINING_DATA = { public: "open data only", internal: "public + non-public training data" };
 /** The Picek group's classifier recipe replicated on our records (retrain.py), named
- *  `picek-<preset>-<run>`: the architecture each preset trains. */
+ *  `picek-<preset>-<run>`: the architecture each preset trains, at its input size. */
 const PICEK_NAME: Record<string, string> = {
-  "fungitastic-beit-b384": "BEiT",
-  "fungitastic-beit-b224": "BEiT at 224 px",
-  "vit-b384-ce": "ViT-B",
-  "df20-vit-l384": "ViT-L",
+  "fungitastic-beit-b384": "BEiT-B, 384 px",
+  "fungitastic-beit-b224": "BEiT-B, 224 px",
+  "vit-b384-ce": "ViT-B, 384 px",
+  "df20-vit-l384": "ViT-L, 384 px",
 };
 /** Published classifiers run as outside baselines (published.py): the authors' models,
  *  trained on Danish records, never retrained by us. */
 const EXTERNAL_NAME: Record<string, string> = {
-  "external:fungitastic-beit-b384": "FungiTastic BEiT-B (Picek et al., Danish records)",
-  "external:fungitastic-vit-b384": "FungiTastic ViT-B (Picek et al., Danish records)",
-  "external:df20-vit-l384": "Danish Fungi 2020 ViT-L (Picek et al., Danish records)",
+  "external:fungitastic-beit-b384": "FungiTastic BEiT-B, 384 px (Picek et al., Danish records)",
+  "external:fungitastic-vit-b384": "FungiTastic ViT-B, 384 px (Picek et al., Danish records)",
+  "external:df20-vit-l384": "Danish Fungi 2020 ViT-L, 384 px (Picek et al., Danish records)",
 };
 
-/** A model as a visitor should read it. Fine-tuned models are named `<base>-ft-<YYYYMMDD>-…`
- *  (finetune.py); the internal name stays available for a tooltip. */
+/** A model as a visitor should read it, with its image size: "BioCLIP 2, 336 px, fine-tuned
+ *  (public + non-public training data)", "BioCLIP 2, 336 px, frozen". Fine-tuned models are
+ *  named `<base>-ft-<YYYYMMDD>-…` (finetune.py); the internal name stays for a tooltip. */
 export function modelName(backbone: string): string {
   if (backbone === "external:inat-cv") return "iNaturalist's computer vision";
   const picek = /^picek-(.+?)-(\d{8}-\d{6}|smoke)$/.exec(backbone);
@@ -34,16 +58,16 @@ export function modelName(backbone: string): string {
       `DNA-verified records${test}`;
   }
   if (backbone in EXTERNAL_NAME) return EXTERNAL_NAME[backbone];
-  const ft = /^(.+)-ft-(\d{4})(\d{2})\d{2}-\d+$/.exec(backbone);
+  const ft = /^(.+)-ft-\d{8}-\d+$/.exec(backbone);
   if (ft) {
-    const base = BASE_NAME[ft[1]] ?? ft[1];
-    return `${base}, fine-tuned on DNA-verified records (${MONTHS[Number(ft[3]) - 1]} ${ft[2]})`;
+    const data = PUBLIC_TRAINED.has(backbone) ? TRAINING_DATA.public : TRAINING_DATA.internal;
+    return `${BASE_NAME[ft[1]] ?? ft[1]}, fine-tuned (${data})`;
   }
   if (backbone.endsWith("-ft-sample")) {
     const base = backbone.slice(0, -"-ft-sample".length);
     return `${BASE_NAME[base] ?? base}, fine-tuned on a sample (test model)`;
   }
-  return BASE_NAME[backbone] ?? backbone;
+  return backbone in BASE_NAME ? `${BASE_NAME[backbone]}, frozen` : backbone;
 }
 
 export interface Headline {
