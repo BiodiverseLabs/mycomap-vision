@@ -273,6 +273,7 @@ const METHOD_LABEL: Record<string, string> = {
   "vision-max": "photo only, best photo",
   "combined-max": "with location, best photo",
   linear: "trained classifier",
+  "ft-head": "the fine-tune's own classifier",
   hybrid: "classifier + nearest specimen",
   "linear+prior": "trained classifier + range and season",
   "hybrid+prior": "classifier + nearest + range and season",
