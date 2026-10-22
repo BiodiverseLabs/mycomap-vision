@@ -207,11 +207,11 @@ export interface Stats {
   photos_by_license: Record<string, number>;
   contributors_arr: number;
   embedded: Record<string, number>;
+  /** Whether photographers' answers are fresh enough to show photos; never their counts
+   *  (research_public.permission_status). */
   permissions: {
-    granted: number;
-    withdrawn: number;
     last_good_sync: string | null;
-    last_attempt: { attempted_at: string; ok: boolean; error: string | null } | null;
+    last_attempt: { attempted_at: string; ok: boolean } | null;
     fresh_for_showing: boolean;
   };
   names: number;

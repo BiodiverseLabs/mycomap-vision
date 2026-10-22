@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/Layout";
 import { api, num, pct } from "@/lib/api";
 import { modelName } from "@/lib/publicView";
+import { PhotoPermissionLine } from "@/components/PhotoPermissionLine";
 import { erratumReasons, shortHash, V1, type DatasetRelease } from "@/lib/datasetReleases";
 
 const LICENSE_LABEL: Record<string, string> = {
@@ -63,16 +64,10 @@ export function DataPage() {
                   <p className="text-xs text-muted-foreground mt-3">
                     Open: CC0, CC-BY, CC-BY-SA. Non-commercial: CC licences with NC or ND.{" "}
                     {num(s.contributors_arr)} photographers have all-rights-reserved photos in
-                    the set; their photos are used for training only while permission is sought,
-                    and shown only once they grant it.
+                    the set.
                   </p>
                   <p className="text-xs text-muted-foreground mt-2" data-testid="text-permissions">
-                    Permission from mycomap.org: {num(s.permissions.granted)} granted,{" "}
-                    {num(s.permissions.withdrawn)} declined or withdrawn (their all-rights-reserved
-                    photos are left out).{" "}
-                    {s.permissions.last_good_sync
-                      ? `Last read ${new Date(s.permissions.last_good_sync).toLocaleString()}${s.permissions.fresh_for_showing ? "" : " (too long ago: all-rights-reserved photos are hidden until it is read again)"}.`
-                      : "Not read yet: all-rights-reserved photos are hidden."}
+                    <PhotoPermissionLine kind="control" />
                   </p>
                 </CardContent>
               </Card>
@@ -141,7 +136,7 @@ function ReleaseCard({ r }: { r: DatasetRelease }) {
           <dd className="font-mono break-all">{r.codeCommit.slice(0, 7)}</dd>
           <dt className="text-muted-foreground">Public files</dt>
           <dd>{r.doi ? <a href={`https://doi.org/${r.doi}`} className="text-myco-green underline">{r.doi}</a>
-                     : "On Zenodo with a DOI (Creative Commons photos only), coming with the paper"}</dd>
+                     : "Creative Commons photos only, coming with the paper"}</dd>
         </dl>
         <p className="text-xs text-muted-foreground">
           {num(r.records.candidates - r.records.included)} of the {num(r.records.candidates)} candidate
@@ -182,7 +177,7 @@ function GetTheImages() {
         </p>
         <p>
           Only openly licensed (Creative Commons) photos can be fetched this way. Photos whose
-          owners reserve all rights are used with their permission and are not redistributed.
+          owners reserve all rights are never redistributed.
         </p>
         <p className="text-muted-foreground">
           Dataset release v1 lists the recipe and checksums. The download address and an example

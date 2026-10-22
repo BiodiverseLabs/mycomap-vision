@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowUpRight, Check } from "lucide-react";
 import { PageHeader } from "@/components/Layout";
 import { SafetyNote } from "@/components/SafetyNote";
+import { PhotoPermissionLine } from "@/components/PhotoPermissionLine";
 import { api, num, pct, type Stats } from "@/lib/api";
 import { publicModelName } from "@/lib/publicNames";
 import {
@@ -141,7 +142,6 @@ const STANDARDS = [
   "Tested on the newest weeks of records, never on a random split, and ahead of the DNA on records still waiting for their sequence.",
   "Every accuracy figure comes with its test set and rank.",
   "North America only: a find from elsewhere is compared with North American species.",
-  "Photos are shown only when Creative Commons licensed or their photographer has given permission.",
   "Locations hidden on iNaturalist stay hidden.",
 ];
 
@@ -155,6 +155,10 @@ function Standards() {
             <span>{t}</span>
           </li>
         ))}
+        <li className="flex gap-2" data-testid="standard-photographers">
+          <Check className="h-4 w-4 mt-1 shrink-0 text-myco-green" aria-hidden />
+          <span><PhotoPermissionLine kind="control" /></span>
+        </li>
       </ul>
     </Block>
   );
@@ -178,10 +182,7 @@ function Contributors({ s }: { s?: Stats }) {
         The photos come from iNaturalist and Mushroom Observer, where the finds were posted, and
         stay their
         photographers' own.
-        {s && s.permissions.granted > 0 && (
-          <> Thank you to the {num(s.permissions.granted)} photographers who gave permission for
-          their photos to be shown here.</>
-        )}
+        {" "}<PhotoPermissionLine kind="learn" />
       </p>
     </Block>
   );
@@ -213,7 +214,7 @@ function Openness() {
           Vision (vision.mycomap.org) with the date you used it.
         </li>
         <li>
-          Photo licences, and which photographers have given permission, are on the{" "}
+          Photo licences are on the{" "}
           <a className="underline" href="/research/data">Reference data page</a>.
         </li>
         <li>

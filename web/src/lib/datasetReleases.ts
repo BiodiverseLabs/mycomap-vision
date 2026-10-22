@@ -16,7 +16,7 @@ export interface DatasetRelease {
   releaseHash: string;
   referenceHash: string;
   codeCommit: string;
-  /** The Zenodo DOI of its public (Creative Commons) variant, once deposited. */
+  /** The DOI of its public (Creative Commons) variant, once deposited with the paper. */
   doi: string | null;
   /** The erratum in use (docs/dataset-release.md, Errata): records found faulty after the cut,
    *  left out of references, training and scoring. The release itself never changes. */
