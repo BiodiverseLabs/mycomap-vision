@@ -4,7 +4,8 @@ Anyone signed out, and signed-in mycomap.org people who are not admins, project 
 contributors, may browse Human Feedback: its sections, queues, Summary and record views, and
 item detail. They change nothing (every write refuses them: feedback_api.access), and see:
 
-- only the items that belong to no project (feedback.PUBLIC_ITEMS);
+- every photo item (the photo review's queue and Photo views), whatever its project, and of
+  the record and name items only those that belong to no project (feedback.PUBLIC_ITEMS);
 - each decision's outcome and date, never who decided, their note, or whether they had seen
   Vision's answer (PERSONAL);
 - blind items still blind: reviewer_view masks them as for reviewers, and revealing is a write;

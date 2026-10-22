@@ -1,6 +1,7 @@
 """Human Feedback, read-only to anyone (Steve, 2026-10-22): signed out, or signed in without a
 reviewer's role, a person browses the queues, the Summary and record views and item detail,
-and changes nothing. They see only items of no project, each decision's outcome and date but
+and changes nothing. They see every photo item whatever its project, the other items only when
+they belong to no project, each decision's outcome and date but
 never who made it or their note, blind items still blind, and only photos anyone may see.
 Reviewers keep exactly what they had (test_feedback_api.py, test_photo_review.py)."""
 
@@ -88,15 +89,20 @@ def test_a_signed_in_person_who_reviews_nothing_reads_the_same_as_a_visitor(site
     assert r.status_code == 200 and '"by_user":' not in r.text and "my private note" not in r.text
 
 
-def test_only_items_of_no_project_are_listed_or_opened_read_only(site):
+def test_every_photo_item_but_only_record_items_of_no_project_are_shown_read_only(site):
+    # Steve, 2026-10-22: the photo queues whatever their project; a project's record and name
+    # items (label doubts, groups, twins) stay with its reviewers.
     c, fstore, _ = site
     by_type = {s["type"]: s["open"] + s["decided"] for s in c.get("/api/feedback/summary").json()}
-    assert by_type["non_specimen_photo"] == 2 and by_type["photos_unlike_label"] == 1
+    assert by_type["non_specimen_photo"] == 3 and by_type["photos_unlike_label"] == 1
     assert by_type["group_label"] == 0
     flagged = c.get("/api/feedback/photo-review/flagged", params={"status": "open"}).json()
-    assert {t["photo_key"] for t in flagged["tiles"]} == {"inat:1100"}
-    for subject, kind in (("100", "photos_unlike_label"), ("Laccaria laccata group", "group_label"),
-                          ("inat:1002", "non_specimen_photo")):
+    tiles = {t["photo_key"]: t for t in flagged["tiles"]}
+    assert set(tiles) == {"inat:1100", "inat:1002"}
+    assert tiles["inat:1002"]["shown"] == "public"            # a p1 item, a Creative Commons photo
+    project_photo = item(fstore, "non_specimen_photo", "inat:1002")
+    assert c.get(f"/api/feedback/items/{project_photo}").status_code == 200
+    for subject, kind in (("100", "photos_unlike_label"), ("Laccaria laccata group", "group_label")):
         assert c.get(f"/api/feedback/items/{item(fstore, kind, subject)}").status_code == 404
     listed = c.get("/api/feedback/items", params={"type": "photos_unlike_label"}).json()
     assert [i["subject"] for i in listed["items"]] == ["104"]
@@ -207,10 +213,15 @@ def test_the_read_only_cut_drops_who_decided_at_any_depth_and_keeps_the_outcome(
     assert fp.photo({"shown": "public", "owner_login": "x"})["owner_login"] == "x"
 
 
-def test_items_of_no_project_are_the_only_ones_a_public_view_holds(tmp_path):
+def test_a_public_view_holds_every_photo_item_and_record_items_of_no_project(tmp_path):
     s = fb.Store(tmp_path / "hf.sqlite")
     s.seed([{"item_type": "group_label", "subject": "a", "rule": "R", "projects": []},
-            {"item_type": "group_label", "subject": "b", "rule": "R", "projects": ["p1"]}], "t")
+            {"item_type": "group_label", "subject": "b", "rule": "R", "projects": ["p1"]},
+            {"item_type": "photo_view", "subject": "inat:9", "rule": "R8", "granularity": "photo",
+             "projects": ["p1"]}], "t")
     assert [i["subject"] for i in s.items_of("group_label", fb.PUBLIC_ITEMS)] == ["a"]
+    assert [i["subject"] for i in s.items_of("photo_view", fb.PUBLIC_ITEMS)] == ["inat:9"]
     assert [i["subject"] for i in s.items_of("group_label", {"p1"})] == ["b"]
+    assert s.items_of("photo_view", {"p2"}) == []             # a reviewer keeps their own scope
     assert len(s.items_of("group_label", None)) == 2
+    assert fb.PUBLIC_PHOTO_TYPES == {"non_specimen_photo", "photo_view"}

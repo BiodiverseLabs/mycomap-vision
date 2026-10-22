@@ -310,12 +310,17 @@ class FeedbackError(ValueError):
 
 class PublicItems(frozenset):
     """The items a read-only viewer may browse (Steve, 2026-10-22: anyone signed out, and
-    signed-in people who review nothing): only those that belong to no project. Passed where a
+    signed-in people who review nothing): every photo item (PUBLIC_PHOTO_TYPES), whatever its
+    project, each photo still shown only as the photo rule allows (feedback_public.py); of
+    the record and name items, only those that belong to no project. Passed where a
     reviewer's projects go; never a reviewer's own (a contributor sees their projects' items,
     and an item with no project is not one of them)."""
 
 
 PUBLIC_ITEMS = PublicItems()
+# The photo queues (one photo per item: the photo review's tabs and Photo views), open to
+# read-only viewers in every project.
+PUBLIC_PHOTO_TYPES = frozenset(t.code for t in TYPES.values() if t.granularity == "photo")
 
 
 STORE_FILE = "human-feedback.sqlite"
@@ -569,7 +574,7 @@ class Store:
     def _in(row, projects: set[str]) -> bool:
         mine = set(json.loads(row["projects"] or "[]"))
         if isinstance(projects, PublicItems):
-            return not mine
+            return not mine or row["item_type"] in PUBLIC_PHOTO_TYPES
         return bool(mine & projects)
 
     @staticmethod
