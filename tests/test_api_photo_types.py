@@ -15,7 +15,7 @@ from test_identify_log import rows
 from test_models_and_scoreboard import Const, seed_two_species
 from test_signin import HERE, PUBLIC_KEY
 
-from mycomap_vision import apiv1, phototypes, runs
+from mycomap_vision import answercache, apiv1, phototypes, runs
 from mycomap_vision.api import create_app
 from mycomap_vision.embed import embed_photos, photos_to_embed
 from mycomap_vision.phototypes import HIGH, LOW, MEDIUM, PhotoTagger
@@ -59,7 +59,8 @@ def observations(photos=None):
     return f
 
 
-def make_app(conn, tmp_path, tagger, seeded, gate=None, run_store=None, site=None):
+def make_app(conn, tmp_path, tagger, seeded, gate=None, run_store=None, site=None,
+             answer_cache=None):
     if not seeded:
         store = seed_two_species(conn, tmp_path)
         embed_photos(conn, store, Const("m1"),
@@ -71,7 +72,8 @@ def make_app(conn, tmp_path, tagger, seeded, gate=None, run_store=None, site=Non
         limits=open_limits(), background=False, server_key=SERVER_KEY, api_v1=True,
         sessions=True, by_observation=True, observation_fetcher=observations(site),
         app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE), introspect=FakeOrg(),
-        fungus_gate=gate, photo_tagger=tagger, run_store=run_store, note=lambda s: None))
+        fungus_gate=gate, photo_tagger=tagger, run_store=run_store, note=lambda s: None,
+        answer_cache=answer_cache))
 
 
 @pytest.fixture
@@ -153,7 +155,8 @@ def test_when_every_photo_would_be_left_out_the_answer_is_from_all_of_them_and_s
     r = upload(tagged, [HABITAT, MICRO])
     assert r["photo_types"] == {**r["photo_types"], "left_out": [], "kept_all": True}
     assert answer(r) == answer(upload(plain, [HABITAT, MICRO]))
-    assert any(h.startswith("Every photo looks like") for h in r["hints"])
+    assert "Only non-specimen photos: this answer is less reliable." in r["hints"]
+    assert r["confidence_withheld"] is False                 # the chance is still stated
     assert r["ranks"]["species"], "an answer, not the gate's refusal"
 
 
@@ -218,7 +221,7 @@ def test_a_tagger_for_other_vectors_than_the_gates_is_not_served(conn, tmp_path)
                                    background=False, fungus_gate=gate,
                                    photo_tagger=StubTagger(), note=notes.append))
     assert "photo_types" not in upload(client, [247, HABITAT])
-    assert any("the gate bioclip-2-336" in n for n in notes)
+    assert any("serve a head trained on bioclip-2-336 frozen vectors" in n for n in notes)
 
 
 def test_a_bad_include_is_refused(apps):
@@ -294,9 +297,53 @@ def test_a_kept_observation_answer_is_never_served_for_another_set_of_photos(con
                                 "include": [1]}).json()
     assert site_in["results"][0]["photo_types"]["included"] == [1]
     keys = {r["answer_key"] for r in rows(client.app) if r["source"] == "inat"}
-    types = "types=" + StubTagger().fingerprint()[:8]
-    assert any("include=1," in k and k.endswith(types) for k in keys)
-    assert any("include" not in k and k.endswith(types) for k in keys)
+    assert any(":date=True,include=1,place=True,top_k=5" in k for k in keys)
+    assert any(k.endswith(":date=True,place=True,top_k=5") for k in keys)
+    assert not any("types" in k for k in keys), "the tagger is a version, not a key"
+
+
+def test_an_answer_kept_before_the_tagger_is_still_served_marked_not_current(conn, tmp_path):
+    kept = answercache.AnswerCache(None)
+    site = {9002: png(HABITAT)}
+    before = make_app(conn, tmp_path, None, seeded=False, site=site, answer_cache=kept)
+    old = before.post("/api/v1/identify/inat/555", json={}, headers=SERVER).json()
+    assert old["cached"] is False and "photo_tagger" not in old["answered"]
+    assert "photo_types" not in old
+    after = make_app(conn, tmp_path, StubTagger(), seeded=True, site=site, answer_cache=kept)
+    # The tagger is switched on: the old answer is served, as an older answers version is.
+    again = after.post("/api/v1/identify/inat/555", json={}, headers=SERVER).json()
+    assert again["cached"] is True and again["ranks"] == old["ranks"]
+    assert again["answered"]["current"] is False and "photo_tagger" not in again["answered"]
+    assert again["answered"]["answers_version"] == old["answered"]["answers_version"]
+    shown = after.get("/api/v1/answers/inat/555", headers=SERVER)
+    assert shown.status_code == 200 and shown.json()["ranks"] == old["ranks"]
+    assert shown.json()["answered"]["current"] is False
+    site_view = after.post("/api/identify/observation",
+                           json={"source": "inat", "id": 555, "models": "m1/nearest+mean"}).json()
+    assert site_view["cached"] is True and site_view["answered"]["current"] is False
+    # Run again: a new answer, made with the tagger, which says which one.
+    fresh = after.post("/api/v1/identify/inat/555", json={"rerun": True}, headers=SERVER).json()
+    assert fresh["cached"] is False and fresh["photo_types"]["left_out"] == [1]
+    assert fresh["answered"] == {**fresh["answered"], "current": True, "photo_tagger": "stub"}
+    assert "photo_tagger" not in fresh                      # said in `answered` only
+    served = after.get("/api/v1/answers/inat/555", headers=SERVER).json()
+    assert served["answered"]["photo_tagger"] == "stub" and served["answered"]["current"] is True
+    assert "photo_tagger" not in served
+    # Under a newer tagger, that answer is served again, not current.
+    newer = StubTagger()
+    newer.floor = 0.3                                       # another fingerprint
+    later = make_app(conn, tmp_path, newer, seeded=True, site=site, answer_cache=kept)
+    held = later.get("/api/v1/answers/inat/555", headers=SERVER).json()
+    assert held["answered"]["current"] is False and held["answered"]["photo_tagger"] == "stub"
+
+
+def test_a_site_answer_kept_under_the_tagger_says_which_tagger_made_it(conn, tmp_path):
+    client = make_app(conn, tmp_path, StubTagger(), seeded=False, site={9002: png(HABITAT)})
+    ask = {"source": "inat", "id": 555, "models": "m1/nearest+mean"}
+    first = client.post("/api/identify/observation", json=ask).json()
+    assert first["answered"]["photo_tagger"] == "stub"
+    assert client.post("/api/identify/observation", json=ask).json()["answered"][
+        "photo_tagger"] == "stub"
 
 
 def test_without_the_tagger_kept_answers_keep_their_old_keys(conn, tmp_path, monkeypatch):

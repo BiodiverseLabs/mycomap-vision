@@ -372,10 +372,14 @@ model's result, not a `results` list.
   answer like a gated photo (`photo_types.left_out`), unless the call names it in
   `include` (`photo_types.included`). Every other type is tagged only and still counts.
   When every photo the gate kept would be left out, none is: `photo_types.kept_all` is
-  `true` and a hint says so (unlike the gate, which gives no answer then: a micrograph or
+  `true`, the chance is still stated, and a hint says "Only non-specimen photos: this
+  answer is less reliable." (unlike the gate, which gives no answer then: a micrograph or
   habitat photo of a fungus still carries some of it). Kept observation answers and run
-  links are keyed on the tagger and the `include` list, so an answer is never served for
-  another set of photos.
+  links are keyed on the `include` list, so one kept without a photo is never served for
+  a call that includes it. The tagger is part of the answers version, like a release: an
+  answer kept before it, or under an older tagger, is still served with
+  `answered.current: false` until someone runs it again, and `answered.photo_tagger`
+  names the tagger that made a kept answer (`"v2"`; absent: made without one).
 - **`confident`** (per candidate; Vision owns the rule, so the website, the app and
   mycomap.org's importance score never set a threshold of their own): `true` for a rank's
   top name when the gate verdict is `fungus` and the name is settled:

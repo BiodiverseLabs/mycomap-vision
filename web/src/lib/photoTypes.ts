@@ -43,6 +43,25 @@ export function withoutIncluded(include: number[], photo: number): number[] {
   return include.filter((i) => i !== photo);
 }
 
+/** The server's note when every photo would have been left out, so none was (and the answer
+ *  still states its chance). */
+export const KEPT_ALL_NOTE = "Only non-specimen photos: this answer is less reliable.";
+
+/** The note to show above the answer, or null: only when its photos are all non-specimen. */
+export function keptAllNote(r: Pick<IdentifyResult, "photo_types">): string | null {
+  return r.photo_types?.kept_all ? KEPT_ALL_NOTE : null;
+}
+
+/** The hints the answer box lists, less the note shown on its own. */
+export function withoutKeptAllNote(hints: string[]): string[] {
+  return hints.filter((h) => h !== KEPT_ALL_NOTE);
+}
+
+/** The chip's tooltip, where its word needs one. */
+export function chipTitle(label: string): string | undefined {
+  return label === "Phylo tree" ? "Phylogenetic tree or BLAST result" : undefined;
+}
+
 /** What a left-out photo's notice says when it is picked on its own. */
 export function leftOutNotice(p: Pick<PhotoResult, "photo" | "photo_type">): string {
   const what = LOOKS[p.photo_type?.type ?? ""] ?? "not a photo of the fungus itself";

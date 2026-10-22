@@ -29,7 +29,8 @@ import {
 } from "@/lib/api";
 import { chanceWithheld, gateBanner, leftOut, pageHints, photoGateLabel, whatNext, type GateBanner } from "@/lib/gate";
 import {
-  includeOffers, includedAnyway, includedNow, leftOutByType, leftOutNotice, photoTypeChip, withIncluded, withoutIncluded,
+  chipTitle, includeOffers, includedAnyway, includedNow, keptAllNote, leftOutByType, leftOutNotice, photoTypeChip,
+  withIncluded, withoutIncluded, withoutKeptAllNote,
 } from "@/lib/photoTypes";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
@@ -1052,7 +1053,7 @@ export function ResultCard({ r, urls, photos, onInclude }: {
   const banner = gateBanner(r);
   const gate = { notFungus: banner?.verdict === "not_fungus", withheld: chanceWithheld(r) };
   const answer = answerFor(r, gate);
-  const hints = pageHints(r);
+  const hints = withoutKeptAllNote(pageHints(r));
   const noRanks = gate.notFungus || (photo != null && (leftOut(photo) || leftOutByType(photo)));
   const found = gate.withheld ? "look-alikes" : "specimens";
   const coverage = coverageSummary(r.likely);
@@ -1452,7 +1453,7 @@ function PhotoTypeChip({ label, leftOut: out, testId }: { label: string; leftOut
   return (
     <span className={`inline-flex items-center rounded-full border px-1.5 py-px text-[10px] font-medium leading-4 ${
       out ? "border-amber-300 bg-amber-50 text-amber-800" : "border-[#A87146]/30 bg-[#fbf7f0] text-[#5c4a3a]"}`}
-          title={label === "Tree" ? "Phylogenetic tree or BLAST result" : undefined} data-testid={testId}>
+          title={chipTitle(label)} data-testid={testId}>
       {label}
     </span>
   );
@@ -1470,6 +1471,15 @@ function IncludeButton({ photo, onInclude }: { photo: number; onInclude: (photo:
 /** Under the photos: each photo its type left out of the answer, with "Include anyway". */
 function LeftOutByType({ r, onInclude }: { r: IdentifyResult; onInclude?: (photo: number, on: boolean) => void }) {
   const offers = includeOffers(r);
+  const note = keptAllNote(r);
+  if (note) {
+    return (
+      <p className="rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-900"
+         data-testid="text-kept-all">
+        {note}
+      </p>
+    );
+  }
   if (!offers.length) return null;
   return (
     <div className="space-y-1.5 rounded-md border border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-900"

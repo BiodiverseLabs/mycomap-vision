@@ -23,7 +23,11 @@ The head is a deploy-time file (`mv photo-tagger build` makes it from the resear
 never committed: trained models count as data until their photos' permissions allow
 release (CLAUDE.md). It is served only when MV_PHOTO_TAGGER names it, so code without the
 file changes nothing. Its json sidecar holds the .npz's sha256 (checked at load) and the
-research model's sha256, which must be a pinned one (PINNED): v2.1 (t15) is not.
+research model's sha256, which must be a pinned one (PINNED): v2.1 (t15) is not. A head
+reads the frozen vectors of ONE base model, the one it was trained on (v2: bioclip-2, the
+224 px BioCLIP 2); it is served only where the gate reads that same base. A head trained on
+another base's vectors (bioclip-2-336, for a 336 px served model) is pinned with its own
+sha and base.
 """
 
 from __future__ import annotations
@@ -40,8 +44,12 @@ from . import config
 NAME = "photo-tagger"
 SETTING = "MV_PHOTO_TAGGER"
 
-# Research models this server may serve, by the sha256 of their model.npz.
-PINNED = {"526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1": "v2"}
+# Research models this server may serve, by the sha256 of their model.npz: the version's
+# name and the base model whose frozen vectors it was trained on (and so must read).
+PINNED = {
+    "526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1":
+        {"version": "v2", "base": "bioclip-2"},
+}
 
 SPECIMEN = "specimen"
 HIGH, MEDIUM, LOW = "high", "medium", "low"
@@ -55,13 +63,24 @@ CHIP_BANDS = (HIGH, MEDIUM)
 LABELS = {
     "micrograph": "Microscopy", "slip": "Label", "habitat": "Habitat", "uv": "UV",
     "chemical": "Chemical test", "spore_print": "Spore print", "dried": "Dried",
-    "people": "People", "tree": "Tree", "drawing": "Drawing", "not_fungus": "Not a fungus",
+    "people": "People", "tree": "Phylo tree", "drawing": "Drawing", "not_fungus": "Not a fungus",
 }
 # How a hint names a left-out kind.
 LOOKS = {"micrograph": "a micrograph", "slip": "a label or field slip",
          "habitat": "a habitat photo"}
 LOOK_MANY = {"micrograph": "micrographs", "slip": "labels or field slips",
              "habitat": "habitat photos"}
+
+
+# When every photo would be left out, none is; the answer says this (Steve, 2026-10-22).
+KEPT_ALL_NOTE = "Only non-specimen photos: this answer is less reliable."
+
+
+def base_mismatch(tagger_base: str, gate_base: str) -> str:
+    """Why a tagger can't be served beside this gate: it would need another tower's vectors."""
+    return (f"the tagger head reads {tagger_base} frozen vectors but the gate reads "
+            f"{gate_base}; serve a head trained on {gate_base} frozen vectors (pinned with its "
+            "own sha in phototypes.PINNED)")
 
 
 class Refused(ValueError):
@@ -185,9 +204,13 @@ class PhotoTagger:
         source = (meta.get("provenance") or {}).get("source_sha256")
         if source not in PINNED:
             raise Refused(f"the research model {str(source)[:12]}… is not a pinned one")
+        pin = PINNED[source]
+        if meta.get("base") != pin["base"]:
+            raise Refused(f"{path.name} says it reads {meta.get('base')} vectors, but tagger "
+                          f"{pin['version']} was trained on {pin['base']} vectors")
         with np.load(path) as f:
             return cls(f["W"], f["b"], tuple(str(c) for c in f["classes"]), meta["bands"],
-                       float(meta["floor"]), meta.get("base", "bioclip-2"), PINNED[source],
+                       float(meta["floor"]), pin["base"], pin["version"],
                        meta.get("provenance") or {})
 
     @classmethod
@@ -202,11 +225,11 @@ def sidecar(path: Path) -> Path:
     return Path(path).with_suffix(".json")
 
 
-def build(model_npz: Path, seed_json: Path, base: str = "bioclip-2",
-          built_at: str | None = None) -> PhotoTagger:
+def build(model_npz: Path, seed_json: Path, built_at: str | None = None) -> PhotoTagger:
     """The served tagger from the research output: PT_OUT/t10/model.npz (W, b, classes) and
     PT_OUT/t13_v2_seed.json (the bands and floor v2 was seeded with, which records the
-    model's sha256). Refused unless the model is PINNED and the seed file names it."""
+    model's sha256). Refused unless the model is PINNED and the seed file names it. Its
+    base is the one PINNED records for it (v2: bioclip-2)."""
     model_sha = sha256_file(Path(model_npz))
     if model_sha not in PINNED:
         raise Refused(f"{model_npz} (sha256 {model_sha[:12]}…) is not a pinned tagger model")
@@ -217,7 +240,8 @@ def build(model_npz: Path, seed_json: Path, base: str = "bioclip-2",
     with np.load(model_npz) as f:
         W, b, classes = f["W"], f["b"], tuple(str(c) for c in f["classes"])
     bands = {k: [[float(lo), str(band)] for lo, band in v] for k, v in seed["bands"].items()}
-    return PhotoTagger(W, b, classes, bands, float(seed["floor"]), base, PINNED[model_sha],
+    pin = PINNED[model_sha]
+    return PhotoTagger(W, b, classes, bands, float(seed["floor"]), pin["base"], pin["version"],
                        {"source_sha256": model_sha,
                         "seed_sha256": sha256_file(Path(seed_json)),
                         "source": "photo-type tagger t10 (research exp/photo-type-tagger)",
@@ -260,9 +284,7 @@ def _photos(numbers: list[int]) -> str:
 def hints(tags: list[dict | None], decision: dict) -> list[str]:
     """What the page and API say about the photos the tags left out (or would have)."""
     if decision["kept_all"]:
-        return ["Every photo looks like a micrograph, a label or a habitat photo, so none was "
-                "left out: the answer is from all of them, and may be weaker than one from "
-                "photos of the fungus itself."]
+        return [KEPT_ALL_NOTE]
     left = decision["left_out"]
     if not left:
         return []

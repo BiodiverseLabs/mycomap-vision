@@ -396,7 +396,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     photo_tagger = photo_tagger or None
     if photo_tagger is not None and fungus_gate is not None and photo_tagger.base != fungus_gate.base:
         # It must read the vector the gate already computes, never a second tower's.
-        tagger_error.append(f"it reads {photo_tagger.base} vectors, the gate {fungus_gate.base}")
+        tagger_error.append(phototypes.base_mismatch(photo_tagger.base, fungus_gate.base))
         note(f"[photo-tagger] not served: {tagger_error[-1]}")
         photo_tagger = None
     if photo_tagger is not None:
@@ -405,14 +405,27 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def type_options(include=()) -> dict:
         """What a kept observation answer is keyed on besides model, place and date: the
-        tagger that chose its left-out photos and the photos counted anyway, so an answer is
-        never served for another set of photos. Nothing without a tagger (keys as before)."""
-        if photo_tagger is None:
+        photos counted anyway, so an answer kept without a photo is never served for a call
+        that includes it. The tagger itself is not in the key: it is part of the answers
+        version (with_tagger), so an answer kept before it, or under an older one, is still
+        served, marked not current, until someone runs it again (Steve, 2026-10-22). Nothing
+        without a tagger or an include list (keys as before)."""
+        if photo_tagger is None or not include:
             return {}
-        out = {"types": photo_tagger.fingerprint()[:8]}
-        if include:
-            out["include"] = ".".join(str(i) for i in sorted(include))
-        return out
+        return {"include": ".".join(str(i) for i in sorted(include))}
+
+    def with_tagger(index_version: tuple) -> tuple:
+        """An index version with the photo-type tagger in it, when one is served: a new
+        tagger, like a new release, makes every kept answer not current."""
+        if photo_tagger is None:
+            return index_version
+        return (*index_version, f"photo-tagger:{photo_tagger.fingerprint()}")
+
+    def tagger_mark(payload: dict) -> dict:
+        """A kept answer with the version of the tagger that made it (absent without one)."""
+        if photo_tagger is not None:
+            payload["photo_tagger"] = photo_tagger.version
+        return payload
 
     def asked_include(value, photos: int | None = None) -> list[int]:
         """The photos to count anyway (phototypes.parse_include) when a tagger is served; none
@@ -783,8 +796,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         """What this model answers from now (answercache.answers_version): the release and
         the served index's version (the old one's while a rebuild runs behind it). A kept
         observation answer is served only under it."""
-        return answercache.answers_version(model_card().get("version"), indexes.answering(
-            (backbone, method), index_version(backbone, method, view)))
+        return answercache.answers_version(model_card().get("version"), with_tagger(
+            indexes.answering((backbone, method), index_version(backbone, method, view))))
 
     # --- the identification log (identifylog.py) -----------------------------------------
     def release_now() -> str | None:
@@ -800,7 +813,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return None
         if cur is None or cur[1] is not ident:
             return None
-        return lambda: answercache.answers_version(release_now(), cur[0])
+        return lambda: answercache.answers_version(release_now(), with_tagger(cur[0]))
 
     def log_answer(path: str, **fields) -> None:
         """One row of the identification log. Never raises and never waits: the row is
@@ -2248,6 +2261,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if site is None or (api is not None and api.answered_at >= site.answered_at):
                     kept, kept_from = api, "api"
                     body = {**kept.payload, "request_id": "r_" + secrets.token_urlsafe(12)}
+                    body.pop("photo_tagger", None)          # said in `answered`
                     if kept.version != version:
                         reshow_kept(ident, body, view)
                     confusions.annotate(body, confused_table())
@@ -2480,9 +2494,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                           photos_credit=[None] * n_photos)
                     kept_site, _, _ = site_kept(pooled[0], scored_vecs, hidden, used, site_about)
                     kept_site["release"] = model_card().get("version")
-                    answer_cache.put(site_key, version, kept_site, who)
-                answer_cache.put(kept_key, version, answercache.without_confusions(
-                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")}),
+                    answer_cache.put(site_key, version, tagger_mark(kept_site), who)
+                answer_cache.put(kept_key, version, tagger_mark(answercache.without_confusions(
+                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")})),
                     who)
                 body["answered"] = answer_cache.held(kept_key).about(version)
                 body["cached"] = False
@@ -2730,7 +2744,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                                        scored):
                     kept, result, spare = site_kept(pooled, vecs, hidden, used, about)
                     kept["release"] = model_card().get("version")
-                    answer_cache.put(key, version, kept, "site")
+                    answer_cache.put(key, version, tagger_mark(kept), "site")
                     mine = yours.for_person(ident, result, spare, vecs, hidden, linked,
                                             photo_lookup, may_show)
                     confusions.annotate(mine, table)

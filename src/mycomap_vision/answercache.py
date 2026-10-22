@@ -52,9 +52,14 @@ class Kept:
     def about(self, current_version: str | None) -> dict:
         """The run's details, as answers carry them (`answered`): when (UTC, ISO 8601),
         who asked, and whether Vision still answers from what it was answered from."""
-        return {"at": iso_utc(self.answered_at), "by": self.asked_by,
-                "answers_version": self.version,
-                "current": current_version is not None and self.version == current_version}
+        out = {"at": iso_utc(self.answered_at), "by": self.asked_by,
+               "answers_version": self.version,
+               "current": current_version is not None and self.version == current_version}
+        # The photo-type tagger that tagged its photos ("v2"; phototypes.py), on answers kept
+        # while one was served. Absent: kept without one.
+        if "photo_tagger" in self.payload:
+            out["photo_tagger"] = self.payload["photo_tagger"]
+        return out
 
 
 def iso_utc(t: float) -> str:

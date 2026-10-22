@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  includeOffers, includedAnyway, includedNow, leftOutByType, leftOutNotice, photoTypeChip,
+  chipTitle, KEPT_ALL_NOTE, keptAllNote, withoutKeptAllNote, includeOffers, includedAnyway, includedNow, leftOutByType, leftOutNotice, photoTypeChip,
   withIncluded, withoutIncluded,
 } from "./photoTypes";
 import type { PhotoResult, PhotoType } from "./api";
@@ -57,4 +57,18 @@ test("a left-out photo picked on its own says why it was left out", () => {
                "Photo 2 looks like a habitat photo, so it was left out of the answer.");
   assert.equal(leftOutNotice(photo(0, tag("slip", { left_out: true }))),
                "Photo 1 looks like a label or field slip, so it was left out of the answer.");
+});
+
+test("only non-specimen photos: the answer keeps its chance and says it is less reliable", () => {
+  const all = { photo_types: { left_out: [], included: [], kept_all: true, photos: [] } };
+  assert.equal(keptAllNote(all), "Only non-specimen photos: this answer is less reliable.");
+  assert.equal(keptAllNote({ photo_types: { ...all.photo_types, kept_all: false } }), null);
+  assert.equal(keptAllNote({}), null);
+  assert.deepEqual(withoutKeptAllNote([KEPT_ALL_NOTE, "Add a photo of the underside."]),
+                   ["Add a photo of the underside."], "shown once, on its own");
+});
+
+test("a phylogenetic tree or BLAST screen reads Phylo tree, with a tooltip saying what it is", () => {
+  assert.equal(chipTitle("Phylo tree"), "Phylogenetic tree or BLAST result");
+  assert.equal(chipTitle("Habitat"), undefined);
 });

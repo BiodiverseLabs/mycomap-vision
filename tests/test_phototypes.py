@@ -56,6 +56,7 @@ def test_the_tagger_names_the_top_class_and_shows_a_chip_only_for_high_and_mediu
     assert [x["type"] for x in out] == ["habitat", "specimen", "not_fungus", "uv"]
     assert [x["band"] for x in out] == [HIGH, None, LOW, MEDIUM]
     assert [x["label"] for x in out] == ["Habitat", None, None, "UV"]
+    assert phototypes.LABELS["tree"] == "Phylo tree"
     assert 0.99 < out[0]["p"] <= 1
 
 
@@ -110,7 +111,7 @@ def test_the_hints_name_the_left_out_photos_and_say_when_all_were_used():
     same = phototypes.hints(tags, phototypes.decide(tags, [1, 2, 3]))
     assert same == ["Photos 3 and 4 look like micrographs, so they were left out of the answer."]
     every = phototypes.hints(tags, phototypes.decide(tags, [0, 2]))
-    assert every and every[0].startswith("Every photo looks like")
+    assert every == ["Only non-specimen photos: this answer is less reliable."]
     assert phototypes.hints(tags, phototypes.decide(tags, [1])) == []
 
 
@@ -149,7 +150,7 @@ def test_build_refuses_a_research_model_that_is_not_pinned(tmp_path):
 
 def test_built_saved_and_loaded_the_tagger_tags_as_before(tmp_path, monkeypatch):
     model, seed, sha = research_output(tmp_path)
-    monkeypatch.setitem(phototypes.PINNED, sha, "test")
+    monkeypatch.setitem(phototypes.PINNED, sha, {"version": "test", "base": "bioclip-2"})
     built = phototypes.build(model, seed)
     path = built.save(tmp_path / "out" / "photo-tagger.npz")
     loaded = PhotoTagger.load(path)
@@ -161,7 +162,7 @@ def test_built_saved_and_loaded_the_tagger_tags_as_before(tmp_path, monkeypatch)
 
 def test_a_seed_file_made_for_another_model_is_refused(tmp_path, monkeypatch):
     model, seed, sha = research_output(tmp_path)
-    monkeypatch.setitem(phototypes.PINNED, sha, "test")
+    monkeypatch.setitem(phototypes.PINNED, sha, {"version": "test", "base": "bioclip-2"})
     seed.write_text(json.dumps({"model_sha256": "0" * 64, "floor": 0.35, "bands": BANDS}))
     with pytest.raises(Refused, match="bands were made for model"):
         phototypes.build(model, seed)
@@ -169,7 +170,7 @@ def test_a_seed_file_made_for_another_model_is_refused(tmp_path, monkeypatch):
 
 def test_a_tagger_file_changed_after_it_was_built_is_refused(tmp_path, monkeypatch):
     model, seed, sha = research_output(tmp_path)
-    monkeypatch.setitem(phototypes.PINNED, sha, "test")
+    monkeypatch.setitem(phototypes.PINNED, sha, {"version": "test", "base": "bioclip-2"})
     path = phototypes.build(model, seed).save(tmp_path / "photo-tagger.npz")
     np.savez(path, W=np.eye(12, dtype=np.float32), b=np.ones(12, np.float32),
              classes=np.array(CLASSES))
@@ -179,7 +180,7 @@ def test_a_tagger_file_changed_after_it_was_built_is_refused(tmp_path, monkeypat
 
 def test_a_tagger_file_from_an_unpinned_model_is_refused_at_load(tmp_path, monkeypatch):
     model, seed, sha = research_output(tmp_path)
-    monkeypatch.setitem(phototypes.PINNED, sha, "test")
+    monkeypatch.setitem(phototypes.PINNED, sha, {"version": "test", "base": "bioclip-2"})
     path = phototypes.build(model, seed).save(tmp_path / "photo-tagger.npz")
     monkeypatch.delitem(phototypes.PINNED, sha)
     with pytest.raises(Refused, match="not a pinned"):
@@ -193,4 +194,31 @@ def test_without_the_setting_there_is_no_tagger(monkeypatch):
 
 def test_v2_is_the_only_pinned_model():
     assert phototypes.PINNED == {
-        "526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1": "v2"}
+        "526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1":
+            {"version": "v2", "base": "bioclip-2"}}
+
+
+def test_a_head_trained_on_336_px_vectors_is_pinned_with_its_base_and_reads_that_base(
+        tmp_path, monkeypatch):
+    model, seed, sha = research_output(tmp_path)
+    monkeypatch.setitem(phototypes.PINNED, sha, {"version": "v2-336", "base": "bioclip-2-336"})
+    path = phototypes.build(model, seed).save(tmp_path / "photo-tagger.npz")
+    loaded = PhotoTagger.load(path)
+    assert (loaded.base, loaded.version) == ("bioclip-2-336", "v2-336")
+
+
+def test_a_file_claiming_another_base_than_its_pinned_head_was_trained_on_is_refused(
+        tmp_path, monkeypatch):
+    model, seed, sha = research_output(tmp_path)
+    monkeypatch.setitem(phototypes.PINNED, sha, {"version": "v2", "base": "bioclip-2"})
+    path = phototypes.build(model, seed).save(tmp_path / "photo-tagger.npz")
+    meta = json.loads(phototypes.sidecar(path).read_text())
+    phototypes.sidecar(path).write_text(json.dumps({**meta, "base": "bioclip-2-336"}))
+    with pytest.raises(Refused, match="trained on bioclip-2 vectors"):
+        PhotoTagger.load(path)
+
+
+def test_the_refusal_beside_another_gate_names_the_base_the_head_needs():
+    why = phototypes.base_mismatch("bioclip-2", "bioclip-2-336")
+    assert "reads bioclip-2 frozen vectors" in why
+    assert "serve a head trained on bioclip-2-336 frozen vectors" in why
