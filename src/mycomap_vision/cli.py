@@ -2452,8 +2452,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--note", default="")
     release_options(p)            # with --errata: its records are never probe positives
 
-    p = sub.add_parser("photo-tagger", help="the photo-type tagger on Identify (micrograph, "
-                       "label and habitat photos left out of the answer): build its file from "
+    p = sub.add_parser("photo-tagger", help="the photo-type tagger on Identify (micrograph "
+                       "and label photos left out of the answer): build its file from "
                        "the research output, or show the one MV_PHOTO_TAGGER names")
     p.add_argument("action", choices=["build", "show"])
     p.add_argument("--model", help="build: the research tagger's model.npz (PT_OUT/t20 for "

@@ -8,14 +8,15 @@ v2") and banded per class and confidence by eye (t11; the bands t13 seeded with)
 a measured precision of 85% or more, medium 50-85%, low below.
 
 What a tag does:
-  - micrograph, slip (a label or field slip) and habitat photos in the HIGH band are left
-    out of the observation's answer, the way a gated photo is. Each can be counted anyway
-    (`include`: the photo indices asked for).
-  - every other kind (UV, chemical, spore print, dried, people, tree, drawing, not_fungus)
-    is tagged only, and still counts.
+  - micrograph and slip (a label or field slip) photos in the HIGH band are left out of
+    the observation's answer, the way a gated photo is. Each can be counted anyway
+    (`include`: the photo indices asked for). (Steve, 2026-10-23: micrograph and slip;
+    habitat tag-only.)
+  - every other kind (habitat, UV, chemical, spore print, dried, people, tree, drawing,
+    not_fungus) is tagged only: its chip shows, and the photo still counts.
   - when every photo the gate kept would be left out, none is: the answer is made from all
     of them and says so. The gate refuses when every photo is gated, because a photo that
-    isn't a fungus can't be named; a micrograph, label or habitat photo of a fungus still
+    isn't a fungus can't be named; a micrograph or label photo of a fungus still
     carries some of it (the DNA references hold such photos too), so a weaker answer beats
     none, and the left-out set would be empty anyway.
 
@@ -63,8 +64,9 @@ PINNED = {
 SPECIMEN = "specimen"
 HIGH, MEDIUM, LOW = "high", "medium", "low"
 BANDS = (HIGH, MEDIUM, LOW)
-# Kinds left out of the answer when tagged in the HIGH band (Steve, 2026-10-22).
-LEAVE_OUT = ("micrograph", "slip", "habitat")
+# Kinds left out of the answer when tagged in the HIGH band (Steve, 2026-10-23: micrograph
+# and slip; habitat tag-only).
+LEAVE_OUT = ("micrograph", "slip")
 # A chip on the page for these bands; a low-band tag is mostly wrong, so it shows none.
 CHIP_BANDS = (HIGH, MEDIUM)
 
@@ -75,10 +77,8 @@ LABELS = {
     "people": "People", "tree": "Phylo tree", "drawing": "Drawing", "not_fungus": "Not a fungus",
 }
 # How a hint names a left-out kind.
-LOOKS = {"micrograph": "a micrograph", "slip": "a label or field slip",
-         "habitat": "a habitat photo"}
-LOOK_MANY = {"micrograph": "micrographs", "slip": "labels or field slips",
-             "habitat": "habitat photos"}
+LOOKS = {"micrograph": "a micrograph", "slip": "a label or field slip"}
+LOOK_MANY = {"micrograph": "micrographs", "slip": "labels or field slips"}
 
 
 # When every photo would be left out, none is; the answer says this (Steve, 2026-10-22).
@@ -303,7 +303,7 @@ def hints(tags: list[dict | None], decision: dict) -> list[str]:
         return [f"{_photos(left)} looks like {LOOKS[next(iter(kinds))]}, so it was left out "
                 "of the answer."]
     what = (LOOK_MANY[next(iter(kinds))] if len(kinds) == 1
-            else "micrographs, labels or habitat photos")
+            else "micrographs or labels")
     return [f"{_photos(left)} look like {what}, so they were left out of the answer."]
 
 

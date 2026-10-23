@@ -117,7 +117,7 @@ export interface PhotoType {
   band: "high" | "medium" | "low" | null;
   /** The chip's words, or null for no chip. */
   label: string | null;
-  /** Left out of the answer (a micrograph, label or habitat photo, high band). */
+  /** Left out of the answer (a micrograph or label photo, high band). */
   left_out: boolean;
   /** Counted although its type would have left it out (the request's `include`). */
   included: boolean;
