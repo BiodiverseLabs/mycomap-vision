@@ -4,7 +4,8 @@ keeps going, for How it works).
 Every batch the model queue runs (workqueue.ModelQueue) adds the photos it embedded and
 the seconds it spent embedding them and searching the reference set. A day's figure is
 its total seconds over its total photos, so a busy hour weighs as much as its photos. The
-day is UTC. Only the averages are served: the photo counts stay on the box.
+day is US Eastern time (Steve, 2026-10-22: a UTC day turned over at 8 pm for the people
+reading it). Only the averages are served: the photo counts stay on the box.
 
 Recording never fails or slows an identification: a write that fails is noted and
 dropped. Kept beside the other state files, across releases.
@@ -14,21 +15,38 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 FILE = "speed-daily.sqlite"
 SCHEMA = """
 create table if not exists speed_daily (
-  day text primary key,          -- UTC, YYYY-MM-DD
+  day text primary key,          -- US Eastern, YYYY-MM-DD
   seconds real not null,         -- embedding and search time, summed
   photos integer not null        -- photos embedded
 );
 """
 
 
+def _nth_sunday(year: int, month: int, n: int) -> int:
+    """Day of the month of the n-th Sunday."""
+    first = datetime(year, month, 1).weekday()          # Monday 0 ... Sunday 6
+    return 1 + (6 - first) % 7 + 7 * (n - 1)
+
+
+def eastern_offset(at: float) -> timedelta:
+    """US Eastern's offset from UTC at `at`: EDT (-4 h) from 2 am EST on the second Sunday
+    of March to 2 am EDT on the first Sunday of November, else EST (-5 h). Written out, not
+    zoneinfo: a Windows laptop has no time zone database for the tests."""
+    year = datetime.fromtimestamp(at, timezone.utc).year
+    starts = datetime(year, 3, _nth_sunday(year, 3, 2), 7, tzinfo=timezone.utc).timestamp()
+    ends = datetime(year, 11, _nth_sunday(year, 11, 1), 6, tzinfo=timezone.utc).timestamp()
+    return timedelta(hours=-4 if starts <= at < ends else -5)
+
+
 def day_of(at: float) -> str:
-    return datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%d")
+    """The US Eastern day of `at`, YYYY-MM-DD."""
+    return (datetime.fromtimestamp(at, timezone.utc) + eastern_offset(at)).strftime("%Y-%m-%d")
 
 
 class SpeedLog:

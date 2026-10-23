@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  depthLabel, latestLabel, modelCredit, namesByRecords, nearestPoint, recordingSince,
+  depthLabel, easternDay, latestLabel, modelCredit, namesByRecords, nearestPoint, recordingSince,
   rollingAverage, ROLLING_LABEL, servedModel, shortDate, speedView, topKRows,
 } from "./howItWorks";
 import type { HowGood, ModelsInfo, SpeedDay, Stats } from "./api";
@@ -157,4 +157,10 @@ test("the small model credit names the base model, its size, its training data a
   assert.equal(c.detail, "(public + non-public training data)");
   assert.equal(c.madeBy, "Built on BioCLIP 2 by Imageomics, fine-tuned on DNA-verified MycoMap records.");
   assert.equal(modelCredit("dinov2-b14").madeBy, null, "no credit made up for another base");
+});
+
+test("today beside the speed figure is the US Eastern day, as the server counts it", () => {
+  assert.equal(easternDay(new Date("2026-10-23T02:30:00Z")), "2026-10-22");   // 10:30 pm EDT
+  assert.equal(easternDay(new Date("2026-10-23T04:00:00Z")), "2026-10-23");   // midnight EDT
+  assert.equal(easternDay(new Date("2026-12-01T04:59:00Z")), "2026-11-30");   // 11:59 pm EST
 });

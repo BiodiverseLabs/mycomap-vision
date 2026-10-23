@@ -15,7 +15,7 @@ const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "S
                       "Nov", "Dec"];
 const DAY_MS = 86_400_000;
 
-/** "2026-10-22" -> "22 Oct", as written (UTC days, no time zone shift). */
+/** "2026-10-22" -> "22 Oct", as written (the server's US Eastern days, no time zone shift). */
 export function shortDate(iso: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
   return m ? `${Number(m[3])} ${SHORT_MONTHS[Number(m[2]) - 1]}` : iso;
@@ -169,4 +169,11 @@ export function modelCredit(backbone: string): { name: string; title: string; de
     : null;
   return { name, title: cut > 0 ? name.slice(0, cut) : name,
            detail: cut > 0 ? name.slice(cut + 1) : null, madeBy };
+}
+
+/** The US Eastern day of `now`, YYYY-MM-DD: the server counts speed days in Eastern time
+ *  (speedlog.py), so "today" beside the newest figure must too. */
+export function easternDay(now: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric",
+                                            month: "2-digit", day: "2-digit" }).format(now);
 }

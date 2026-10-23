@@ -15,7 +15,7 @@ import {
 import { publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { JOIN_URL, longDate, SEQUENCING_URL, shareWords } from "@/lib/publicView";
 import {
-  depthLabel, latestLabel, modelCredit, namesByRecords, nearestPoint, recordingSince,
+  depthLabel, easternDay, latestLabel, modelCredit, namesByRecords, nearestPoint, recordingSince,
   seconds, servedModel, shortDate, speedView, topKRows, MIN_CHART_DAYS, ROLLING_LABEL,
   type SpeedView,
 } from "@/lib/howItWorks";
@@ -28,7 +28,7 @@ export interface HowItWorksData {
   models?: ModelsInfo;
   howGood?: HowGood;
   speed?: SpeedDay[];
-  /** Today, UTC (YYYY-MM-DD), for "today" beside the newest speed figure. */
+  /** Today, US Eastern (YYYY-MM-DD), for "today" beside the newest speed figure. */
   today: string;
   loading?: boolean;
 }
@@ -40,7 +40,7 @@ export function AboutPage() {
   const speed = useQuery({ queryKey: ["speed-daily"], queryFn: api.speedDaily });
   return (
     <HowItWorks stats={stats.data} models={models.data} howGood={howGood.data}
-                speed={speed.data?.days} today={new Date().toISOString().slice(0, 10)}
+                speed={speed.data?.days} today={easternDay(new Date())}
                 loading={howGood.isLoading || models.isLoading} />
   );
 }
@@ -516,7 +516,7 @@ function SpeedCard({ days, today }: { days?: SpeedDay[]; today: string }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <H3>How fast is it</H3>
-          <Small>Average time per photo, day by day (seconds, UTC days)</Small>
+          <Small>Average time per photo, day by day (seconds, US Eastern time)</Small>
         </div>
         {latest && (
           <div className="text-right" data-testid="speed-latest">
