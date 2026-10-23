@@ -357,8 +357,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     gate); a FungusGate uses that one; None or False runs ungated.
 
     `photo_tagger`: the photo-type tagger (phototypes.py) on the gate's frozen vectors:
-    micrograph, label and habitat photos tagged in the high band are left out of the
-    answer. True loads the file MV_PHOTO_TAGGER names (unset: no tagger, nothing tagged; a
+    micrograph and label photos tagged in the high band are left out of the answer
+    (habitat is tagged only). True loads the file MV_PHOTO_TAGGER names (unset: no tagger, nothing tagged; a
     file that fails its checks is refused and reported); None or False: no tagger.
 
     `linked_accounts`: a signed-in person's verified iNat and MO accounts from mycomap.org,

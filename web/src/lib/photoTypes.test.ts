@@ -9,7 +9,7 @@ import type { PhotoResult, PhotoType } from "./api";
 
 const tag = (type: string, over: Partial<PhotoType> = {}): PhotoType => ({
   type, p: 0.9, band: type === "specimen" ? null : "high",
-  label: type === "specimen" ? null : ({ habitat: "Habitat", uv: "UV", micrograph: "Microscopy" } as Record<string, string>)[type] ?? type,
+  label: type === "specimen" ? null : ({ habitat: "Habitat", uv: "UV", micrograph: "Microscopy", slip: "Label" } as Record<string, string>)[type] ?? type,
   left_out: false, included: false, ...over,
 });
 const photo = (i: number, t?: PhotoType | null): PhotoResult => ({
@@ -30,15 +30,18 @@ test("only a photo its type left out is offered Include anyway, with its chip", 
   const r = {
     per_photo: [
       photo(0, tag("specimen")),
-      photo(1, tag("habitat", { left_out: true })),
+      photo(1, tag("slip", { left_out: true })),
       photo(2, tag("uv")),                                 // tagged only: still counts
       photo(3, tag("micrograph", { included: true })),     // already counted anyway
       photo(4),
+      photo(5, tag("habitat")),                            // tag-only (Steve, 2026-10-23)
     ],
   };
-  assert.deepEqual(includeOffers(r), [{ photo: 1, label: "Habitat" }]);
+  assert.deepEqual(includeOffers(r), [{ photo: 1, label: "Label" }]);
   assert.equal(leftOutByType(r.per_photo[1]), true);
   assert.equal(leftOutByType(r.per_photo[2]), false);
+  assert.equal(leftOutByType(r.per_photo[5]), false);
+  assert.equal(photoTypeChip(r.per_photo[5]), "Habitat", "a habitat photo keeps its chip");
   assert.equal(includedAnyway(r.per_photo[3]), true);
   assert.deepEqual(includeOffers({ per_photo: [photo(0), photo(1)] }), [], "no tagger: nothing offered");
 });
@@ -53,8 +56,8 @@ test("Include anyway runs again with the photo added to what was already counted
 });
 
 test("a left-out photo picked on its own says why it was left out", () => {
-  assert.equal(leftOutNotice(photo(1, tag("habitat", { left_out: true }))),
-               "Photo 2 looks like a habitat photo, so it was left out of the answer.");
+  assert.equal(leftOutNotice(photo(1, tag("micrograph", { left_out: true }))),
+               "Photo 2 looks like a micrograph, so it was left out of the answer.");
   assert.equal(leftOutNotice(photo(0, tag("slip", { left_out: true }))),
                "Photo 1 looks like a label or field slip, so it was left out of the answer.");
 });

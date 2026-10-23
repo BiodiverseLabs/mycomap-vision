@@ -8,14 +8,15 @@ v2") and banded per class and confidence by eye (t11; the bands t13 seeded with)
 a measured precision of 85% or more, medium 50-85%, low below.
 
 What a tag does:
-  - micrograph, slip (a label or field slip) and habitat photos in the HIGH band are left
-    out of the observation's answer, the way a gated photo is. Each can be counted anyway
-    (`include`: the photo indices asked for).
-  - every other kind (UV, chemical, spore print, dried, people, tree, drawing, not_fungus)
-    is tagged only, and still counts.
+  - micrograph and slip (a label or field slip) photos in the HIGH band are left out of
+    the observation's answer, the way a gated photo is. Each can be counted anyway
+    (`include`: the photo indices asked for). (Steve, 2026-10-23: micrograph and slip;
+    habitat tag-only.)
+  - every other kind (habitat, UV, chemical, spore print, dried, people, tree, drawing,
+    not_fungus) is tagged only: its chip shows, and the photo still counts.
   - when every photo the gate kept would be left out, none is: the answer is made from all
     of them and says so. The gate refuses when every photo is gated, because a photo that
-    isn't a fungus can't be named; a micrograph, label or habitat photo of a fungus still
+    isn't a fungus can't be named; a micrograph or label photo of a fungus still
     carries some of it (the DNA references hold such photos too), so a weaker answer beats
     none, and the left-out set would be empty anyway.
 
@@ -26,8 +27,9 @@ file changes nothing. Its json sidecar holds the .npz's sha256 (checked at load)
 research model's sha256, which must be a pinned one (PINNED): v2.1 (t15) is not. A head
 reads the frozen vectors of ONE base model, the one it was trained on (v2: bioclip-2, the
 224 px BioCLIP 2); it is served only where the gate reads that same base. A head trained on
-another base's vectors (bioclip-2-336, for a 336 px served model) is pinned with its own
-sha and base.
+another base's vectors is pinned with its own sha and base: v2.1-336 (research t20, v2.1's
+recipe on bioclip-2-336 vectors, banded by eye in t21; Steve approved the refit 2026-10-22)
+is the head for the 336 px gate the site serves.
 """
 
 from __future__ import annotations
@@ -45,17 +47,26 @@ NAME = "photo-tagger"
 SETTING = "MV_PHOTO_TAGGER"
 
 # Research models this server may serve, by the sha256 of their model.npz: the version's
-# name and the base model whose frozen vectors it was trained on (and so must read).
+# name, the base model whose frozen vectors it was trained on (and so must read), and where
+# the model and its bands came from in the research repo (exp/photo-type-tagger).
 PINNED = {
     "526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1":
-        {"version": "v2", "base": "bioclip-2"},
+        {"version": "v2", "base": "bioclip-2",
+         "source": "photo-type tagger t10 (research exp/photo-type-tagger)",
+         "bands_from": "t13_v2_seed.json (by-eye bands, t11)"},
+    # v2.1's recipe on bioclip-2-336 vectors, for the 336 px gate (t20; research a27bb67).
+    "128f4f874dad41253e57433ddd196a54e2f8929600df82bf706986db86ada1e6":
+        {"version": "v2.1-336", "base": "bioclip-2-336",
+         "source": "photo-type tagger t20 (research exp/photo-type-tagger a27bb67)",
+         "bands_from": "t21_336_bands.json (by-eye bands, t21)"},
 }
 
 SPECIMEN = "specimen"
 HIGH, MEDIUM, LOW = "high", "medium", "low"
 BANDS = (HIGH, MEDIUM, LOW)
-# Kinds left out of the answer when tagged in the HIGH band (Steve, 2026-10-22).
-LEAVE_OUT = ("micrograph", "slip", "habitat")
+# Kinds left out of the answer when tagged in the HIGH band (Steve, 2026-10-23: micrograph
+# and slip; habitat tag-only).
+LEAVE_OUT = ("micrograph", "slip")
 # A chip on the page for these bands; a low-band tag is mostly wrong, so it shows none.
 CHIP_BANDS = (HIGH, MEDIUM)
 
@@ -66,10 +77,8 @@ LABELS = {
     "people": "People", "tree": "Phylo tree", "drawing": "Drawing", "not_fungus": "Not a fungus",
 }
 # How a hint names a left-out kind.
-LOOKS = {"micrograph": "a micrograph", "slip": "a label or field slip",
-         "habitat": "a habitat photo"}
-LOOK_MANY = {"micrograph": "micrographs", "slip": "labels or field slips",
-             "habitat": "habitat photos"}
+LOOKS = {"micrograph": "a micrograph", "slip": "a label or field slip"}
+LOOK_MANY = {"micrograph": "micrographs", "slip": "labels or field slips"}
 
 
 # When every photo would be left out, none is; the answer says this (Steve, 2026-10-22).
@@ -226,10 +235,11 @@ def sidecar(path: Path) -> Path:
 
 
 def build(model_npz: Path, seed_json: Path, built_at: str | None = None) -> PhotoTagger:
-    """The served tagger from the research output: PT_OUT/t10/model.npz (W, b, classes) and
-    PT_OUT/t13_v2_seed.json (the bands and floor v2 was seeded with, which records the
-    model's sha256). Refused unless the model is PINNED and the seed file names it. Its
-    base is the one PINNED records for it (v2: bioclip-2)."""
+    """The served tagger from the research output: a pinned model.npz (W, b, classes; v2:
+    PT_OUT/t10, v2.1-336: PT_OUT/t20) and the bands json made for it, which records the
+    model's sha256 (v2: PT_OUT/t13_v2_seed.json, v2.1-336: PT_OUT/t21_336_bands.json).
+    Refused unless the model is PINNED and the bands file names it. Its base is the one
+    PINNED records for it (v2: bioclip-2, v2.1-336: bioclip-2-336)."""
     model_sha = sha256_file(Path(model_npz))
     if model_sha not in PINNED:
         raise Refused(f"{model_npz} (sha256 {model_sha[:12]}…) is not a pinned tagger model")
@@ -244,8 +254,8 @@ def build(model_npz: Path, seed_json: Path, built_at: str | None = None) -> Phot
     return PhotoTagger(W, b, classes, bands, float(seed["floor"]), pin["base"], pin["version"],
                        {"source_sha256": model_sha,
                         "seed_sha256": sha256_file(Path(seed_json)),
-                        "source": "photo-type tagger t10 (research exp/photo-type-tagger)",
-                        "bands_from": "t13_v2_seed.json (by-eye bands, t11)",
+                        "source": pin.get("source"),
+                        "bands_from": pin.get("bands_from"),
                         "built_at": built_at})
 
 
@@ -293,7 +303,7 @@ def hints(tags: list[dict | None], decision: dict) -> list[str]:
         return [f"{_photos(left)} looks like {LOOKS[next(iter(kinds))]}, so it was left out "
                 "of the answer."]
     what = (LOOK_MANY[next(iter(kinds))] if len(kinds) == 1
-            else "micrographs, labels or habitat photos")
+            else "micrographs or labels")
     return [f"{_photos(left)} look like {what}, so they were left out of the answer."]
 
 

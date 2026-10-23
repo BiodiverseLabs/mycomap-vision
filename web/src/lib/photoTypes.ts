@@ -10,8 +10,8 @@ export function photoTypeChip(p: Pick<PhotoResult, "photo_type">): string | null
   return p.photo_type?.label ?? null;
 }
 
-/** True when this photo's type left it out of the answer (a micrograph, label or habitat
- *  photo), as the gate leaves out a photo that isn't a fungus. */
+/** True when this photo's type left it out of the answer (a micrograph or label
+ *  photo; a habitat photo is tagged only), as the gate leaves out a photo that isn't a fungus. */
 export function leftOutByType(p: Pick<PhotoResult, "photo_type">): boolean {
   return !!p.photo_type?.left_out;
 }
@@ -71,5 +71,4 @@ export function leftOutNotice(p: Pick<PhotoResult, "photo" | "photo_type">): str
 const LOOKS: Record<string, string> = {
   micrograph: "a micrograph",
   slip: "a label or field slip",
-  habitat: "a habitat photo",
 };

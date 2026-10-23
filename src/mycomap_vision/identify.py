@@ -412,7 +412,7 @@ class Identifier:
         `hidden`.
 
         `types`: each photo's photo-type tag (phototypes.py), or None when the tagger
-        didn't run. A micrograph, label or habitat photo tagged in the high band is left
+        didn't run. A micrograph or label photo tagged in the high band is left
         out too, unless its index is in `include` or every photo the gate kept would be
         (phototypes.decide); `result["photo_types"]` and each per-photo `photo_type` say
         what was tagged and left out. Neither key is there when `types` is None.

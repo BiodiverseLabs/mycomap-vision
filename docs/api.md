@@ -362,19 +362,20 @@ model's result, not a `results` list.
   `p_fungus`.
 - **`photo_types`** (photo-type tags, Steve 2026-10-22; `phototypes.py`): absent while the
   server has no tagger file (`MV_PHOTO_TAGGER`). Each photo's frozen BioCLIP 2 vector, the
-  one the gate reads, goes through the photo-type tagger v2 (a softmax head trained on
-  Human Feedback decisions). `per_photo[i].photo_type` is `{type, p, band, label, left_out,
+  one the gate reads, goes through the photo-type tagger trained on that same base's vectors
+  (v2 for the 224 px gate, v2.1-336 for the 336 px gate; a softmax head trained on Human
+  Feedback decisions; `/api/health` `photo_tagger.version` says which). `per_photo[i].photo_type` is `{type, p, band, label, left_out,
   included}`: `type` `specimen` (an ordinary photo of the fungus), `micrograph`, `slip`,
   `habitat`, `uv`, `chemical`, `spore_print`, `dried`, `people`, `tree`, `drawing` or
   `not_fungus`; `band` `high` / `medium` / `low` by the precision measured by eye (null for
   `specimen`); `label` the chip text, null for a specimen photo or a low band. A
-  `micrograph`, `slip` or `habitat` photo in the `high` band is left out of the combined
+  `micrograph` or `slip` photo in the `high` band is left out of the combined
   answer like a gated photo (`photo_types.left_out`), unless the call names it in
-  `include` (`photo_types.included`). Every other type is tagged only and still counts.
+  `include` (`photo_types.included`). Every other type (`habitat` included) is tagged only and still counts.
   When every photo the gate kept would be left out, none is: `photo_types.kept_all` is
   `true`, the chance is still stated, and a hint says "Only non-specimen photos: this
   answer is less reliable." (unlike the gate, which gives no answer then: a micrograph or
-  habitat photo of a fungus still carries some of it). Kept observation answers and run
+  label photo of a fungus still carries some of it). Kept observation answers and run
   links are keyed on the `include` list, so one kept without a photo is never served for
   a call that includes it. The tagger is part of the answers version, like a release: an
   answer kept before it, or under an older tagger, is still served with
@@ -766,7 +767,7 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_TWIN_GROUPS` | the cross-post twin groups (`mv twin-groups`) the specimen scoring needs; default: `twin-groups.tsv` in the served release |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |
-| `MV_PHOTO_TAGGER` | the photo-type tagger file (`mv photo-tagger build`): photo types and the micrograph/label/habitat leave-out (§4 `photo_types`). Unset: no tagging |
+| `MV_PHOTO_TAGGER` | the photo-type tagger file (`mv photo-tagger build`): photo types and the micrograph/label leave-out (§4 `photo_types`). Unset: no tagging |
 | `MV_PHOTOS_PER_MINUTE`, `MV_QUEUE_MAX_WAIT`, `MV_SESSIONS_MAX_MB`, `MV_QUOTA_DEFAULT_MONTHLY`, `MV_USAGE_REPORT_SECONDS` | limits, defaults in .env.example |
 
 mycomap.org's side: the `vision` service in its service keys, the introspection fields,

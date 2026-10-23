@@ -1098,8 +1098,9 @@ def cmd_photo_tagger(conn, args) -> None:
     from . import config, phototypes
     if args.action == "build":
         if not (args.model and args.bands):
-            raise SystemExit("build needs --model (PT_OUT/t10/model.npz) and --bands "
-                             "(PT_OUT/t13_v2_seed.json)")
+            raise SystemExit("build needs --model (a pinned research model.npz: PT_OUT/t20 for "
+                             "the bioclip-2-336 gate, PT_OUT/t10 for bioclip-2) and --bands "
+                             "(its bands: PT_OUT/t21_336_bands.json, PT_OUT/t13_v2_seed.json)")
         try:
             tagger = phototypes.build(Path(args.model), Path(args.bands),
                                       built_at=datetime.now(timezone.utc).isoformat(
@@ -2451,13 +2452,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--note", default="")
     release_options(p)            # with --errata: its records are never probe positives
 
-    p = sub.add_parser("photo-tagger", help="the photo-type tagger on Identify (micrograph, "
-                       "label and habitat photos left out of the answer): build its file from "
+    p = sub.add_parser("photo-tagger", help="the photo-type tagger on Identify (micrograph "
+                       "and label photos left out of the answer): build its file from "
                        "the research output, or show the one MV_PHOTO_TAGGER names")
     p.add_argument("action", choices=["build", "show"])
-    p.add_argument("--model", help="build: the research tagger's model.npz (PT_OUT/t10)")
-    p.add_argument("--bands", help="build: the seed summary holding its bands "
-                                   "(PT_OUT/t13_v2_seed.json)")
+    p.add_argument("--model", help="build: the research tagger's model.npz (PT_OUT/t20 for "
+                                   "the bioclip-2-336 gate; PT_OUT/t10 for bioclip-2)")
+    p.add_argument("--bands", help="build: the bands json made for that model "
+                                   "(PT_OUT/t21_336_bands.json; PT_OUT/t13_v2_seed.json)")
     p.add_argument("--out", help="build: the .npz to write (default data/models/"
                                  "photo-tagger.npz); show: the file to show")
 

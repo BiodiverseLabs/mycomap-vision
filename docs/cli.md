@@ -83,7 +83,7 @@ when iNat is down; `--no-taxonomy` skips it.
 | `calibrate-sets` | fit "likely" name lists that hold the right name about 9 times in 10 |
 | `inat-baseline` | add iNat's computer vision to a comparison, on the same records |
 | `fungus-gate` | the not-a-fungus gate in front of Identify (`tune --release` re-tunes it on a dataset release) |
-| `photo-tagger` | the photo-type tagger on Identify: `build --model PT_OUT/t10/model.npz --bands PT_OUT/t13_v2_seed.json` makes the file `MV_PHOTO_TAGGER` names; `show` checks one |
+| `photo-tagger` | the photo-type tagger on Identify: `build --model PT_OUT/t20/model.npz --bands PT_OUT/t21_336_bands.json` (v2.1-336, for the bioclip-2-336 gate; v2 for bioclip-2: `PT_OUT/t10/model.npz`, `PT_OUT/t13_v2_seed.json`) makes the file `MV_PHOTO_TAGGER` names; `show` checks one |
 | `ood-set` | build the sealed not-a-fungus test set (CC0 / CC BY photos the gate never saw) |
 | `export-onnx` | the image tower as ONNX, checked against torch (`MV_EMBED_ONNX` on the server) |
 | `int8-check` | score a release with float16 vs int8 reference vectors |
