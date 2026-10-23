@@ -224,6 +224,63 @@ def test_a_tagger_for_other_vectors_than_the_gates_is_not_served(conn, tmp_path)
     assert any("serve a head trained on bioclip-2-336 frozen vectors" in n for n in notes)
 
 
+def pinned_336_file(tmp_path, base="bioclip-2-336"):
+    """The tagger file `mv photo-tagger build` makes from the pinned v2.1-336 research model
+    (stand-in weights: the server's checks read the pin and the base)."""
+    t = PhotoTagger(np.zeros((2, len(CLASSES)), np.float32), np.zeros(len(CLASSES)), CLASSES,
+                    BANDS, 0.35, base, None, {"source_sha256": next(
+                        sha for sha, pin in phototypes.PINNED.items()
+                        if pin["version"] == "v2.1-336")})
+    return t.save(tmp_path / "models" / "photo-tagger.npz")
+
+
+def gated_app(conn, tmp_path, gate, notes):
+    store = seed_two_species(conn, tmp_path)
+    embed_photos(conn, store, Const("m1"),
+                 photos_to_embed(conn, "m1", "large", store.location, "local"),
+                 tmp_path / "emb" / "m1", log=lambda s: None)
+    conn.commit()
+    return TestClient(create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
+                                 backbone_loader=lambda n: Const(n), limits=open_limits(),
+                                 background=False, server_key=SERVER_KEY, fungus_gate=gate,
+                                 photo_tagger=True, note=notes.append))
+
+
+def test_the_pinned_336_head_is_served_beside_a_336_gate(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv(phototypes.SETTING, str(pinned_336_file(tmp_path)))
+    gate, notes = FakeGate(), []
+    gate.base = "bioclip-2-336"
+    client = gated_app(conn, tmp_path, gate, notes)
+    health = client.get("/api/health", headers=SERVER).json()["photo_tagger"]
+    assert (health["version"], health["base"]) == ("v2.1-336", "bioclip-2-336")
+    assert health["leave_out"] == ["micrograph", "slip", "habitat"]
+    assert any("[photo-tagger] v2.1-336" in n for n in notes)
+    # The public health (the deploy check) names the version, never the base.
+    public = client.get("/api/health").json()["photo_tagger"]
+    assert public["version"] == "v2.1-336" and "base" not in public
+
+
+def test_the_pinned_336_head_is_not_served_beside_a_224_gate(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv(phototypes.SETTING, str(pinned_336_file(tmp_path)))
+    gate, notes = FakeGate(), []
+    gate.base = "bioclip-2"
+    client = gated_app(conn, tmp_path, gate, notes)
+    assert "photo_types" not in upload(client, [247, HABITAT])
+    assert any("serve a head trained on bioclip-2 frozen vectors" in n for n in notes)
+    assert "reads bioclip-2-336 frozen vectors" in client.get(
+        "/api/health", headers=SERVER).json()["photo_tagger"]["error"]
+
+
+def test_a_336_head_file_claiming_bioclip_2_is_refused_at_load(conn, tmp_path, monkeypatch):
+    monkeypatch.setenv(phototypes.SETTING, str(pinned_336_file(tmp_path, base="bioclip-2")))
+    gate, notes = FakeGate(), []
+    gate.base = "bioclip-2"
+    client = gated_app(conn, tmp_path, gate, notes)
+    assert "photo_types" not in upload(client, [247, HABITAT])
+    assert "trained on bioclip-2-336 vectors" in client.get(
+        "/api/health", headers=SERVER).json()["photo_tagger"]["error"]
+
+
 def test_a_bad_include_is_refused(apps):
     tagged, _ = apps
     files = [("photos", ("p.png", png(247), "image/png"))]

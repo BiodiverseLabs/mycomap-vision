@@ -192,10 +192,47 @@ def test_without_the_setting_there_is_no_tagger(monkeypatch):
     assert PhotoTagger.from_setting() is None
 
 
-def test_v2_is_the_only_pinned_model():
-    assert phototypes.PINNED == {
-        "526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1":
-            {"version": "v2", "base": "bioclip-2"}}
+V2 = "526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1"
+V21_336 = "128f4f874dad41253e57433ddd196a54e2f8929600df82bf706986db86ada1e6"
+
+
+def test_v2_and_v2_1_336_are_the_only_pinned_models_each_with_its_base():
+    assert {sha: (pin["version"], pin["base"]) for sha, pin in phototypes.PINNED.items()} == {
+        V2: ("v2", "bioclip-2"), V21_336: ("v2.1-336", "bioclip-2-336")}
+
+
+def pinned_file(tmp_path, source_sha, base):
+    """A tagger file as `mv photo-tagger build` saves it from the research model with that
+    sha256 (the weights are a stand-in: the pin is what the checks read)."""
+    t = PhotoTagger(np.eye(12, dtype=np.float32) * 20, np.zeros(12, np.float32), CLASSES,
+                    BANDS, 0.35, base, None, {"source_sha256": source_sha})
+    return t.save(tmp_path / "photo-tagger.npz")
+
+
+def test_the_336_head_loads_as_v2_1_336_reading_bioclip_2_336_vectors(tmp_path):
+    loaded = PhotoTagger.load(pinned_file(tmp_path, V21_336, "bioclip-2-336"))
+    assert (loaded.version, loaded.base) == ("v2.1-336", "bioclip-2-336")
+    assert loaded.summary()["leave_out"] == ["micrograph", "slip", "habitat"]
+
+
+def test_the_336_head_is_refused_when_its_file_says_it_reads_bioclip_2_vectors(tmp_path):
+    with pytest.raises(Refused, match="tagger v2.1-336 was trained on bioclip-2-336 vectors"):
+        PhotoTagger.load(pinned_file(tmp_path, V21_336, "bioclip-2"))
+
+
+def test_v2_still_loads_on_bioclip_2_and_is_refused_as_a_336_head(tmp_path):
+    assert PhotoTagger.load(pinned_file(tmp_path, V2, "bioclip-2")).version == "v2"
+    with pytest.raises(Refused, match="tagger v2 was trained on bioclip-2 vectors"):
+        PhotoTagger.load(pinned_file(tmp_path, V2, "bioclip-2-336"))
+
+
+def test_a_build_records_where_its_pinned_model_and_bands_came_from(tmp_path, monkeypatch):
+    model, seed, sha = research_output(tmp_path)
+    monkeypatch.setitem(phototypes.PINNED, sha, {**phototypes.PINNED[V21_336]})
+    built = phototypes.build(model, seed)
+    assert (built.version, built.base) == ("v2.1-336", "bioclip-2-336")
+    assert "t20" in built.provenance["source"]
+    assert built.provenance["bands_from"].startswith("t21_336_bands.json")
 
 
 def test_a_head_trained_on_336_px_vectors_is_pinned_with_its_base_and_reads_that_base(

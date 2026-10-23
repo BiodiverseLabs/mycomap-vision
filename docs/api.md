@@ -362,8 +362,9 @@ model's result, not a `results` list.
   `p_fungus`.
 - **`photo_types`** (photo-type tags, Steve 2026-10-22; `phototypes.py`): absent while the
   server has no tagger file (`MV_PHOTO_TAGGER`). Each photo's frozen BioCLIP 2 vector, the
-  one the gate reads, goes through the photo-type tagger v2 (a softmax head trained on
-  Human Feedback decisions). `per_photo[i].photo_type` is `{type, p, band, label, left_out,
+  one the gate reads, goes through the photo-type tagger trained on that same base's vectors
+  (v2 for the 224 px gate, v2.1-336 for the 336 px gate; a softmax head trained on Human
+  Feedback decisions; `/api/health` `photo_tagger.version` says which). `per_photo[i].photo_type` is `{type, p, band, label, left_out,
   included}`: `type` `specimen` (an ordinary photo of the fungus), `micrograph`, `slip`,
   `habitat`, `uv`, `chemical`, `spore_print`, `dried`, `people`, `tree`, `drawing` or
   `not_fungus`; `band` `high` / `medium` / `low` by the precision measured by eye (null for
