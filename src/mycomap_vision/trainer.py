@@ -77,8 +77,13 @@ for _alias, (_embed, _train) in INPUT_SIZE_COST.items():
 # 224 px 179/s; ViT-L not measured) and scaled by L4_TRAIN_FACTOR, an ESTIMATE (the
 # BioCLIP fine-tune ran 83/s on the laptop and 106/s in its L4 rehearsal). Replace with the
 # first run's own speeds (progress.json).
-PICEK_LOADER_RATES = {"fungitastic-beit-b384": 59.0, "fungitastic-beit-b224": 100.0,
-                      "vit-b384-ce": 59.0, "df20-vit-l384": 59.0}
+# MEASURED 2026-10-21 (E4, run 20261021-141123, g6.xlarge, BEiT-B 384, 16,257 classes):
+# 34.4 photos/s overall through two epochs, validation included (4,100 steps x 256 photos
+# in ~8.5 h), against the 59 assumed. Taken as the 384 px loader's rate on 4 vCPU (the same
+# decode + RandAugment for the other 384 px presets); the step log's loader-wait share on the
+# next run says whether the loader or the L4 sets it.
+PICEK_LOADER_RATES = {"fungitastic-beit-b384": 34.4, "fungitastic-beit-b224": 100.0,
+                      "vit-b384-ce": 34.4, "df20-vit-l384": 34.4}
 L4_TRAIN_FACTOR = 1.1
 PICEK_GPU_RATES = {"fungitastic-beit-b384": 55.0 * L4_TRAIN_FACTOR,
                    "fungitastic-beit-b224": 179.0 * L4_TRAIN_FACTOR,
@@ -770,9 +775,10 @@ PICEK_FILES = (".pt", ".json", ".classifier.npz", ".records.csv")
 
 
 def block_uploader(i: int, key: str, progress: "Progress", upload):
-    """on_block for a Picek stage with the epoch rule: the block checkpoint goes to S3
-    first, then progress.json with the curve and every block decision so far, both before
-    the next block starts, so an interruption costs at most one block."""
+    """on_block for a Picek stage: after every epoch its checkpoint goes to S3 first, then
+    progress.json with the curve and every block decision so far, both before the next
+    epoch starts, so an interruption costs at most the epoch it was in (E4, 2026-10-21, lost
+    two epochs when checkpoints came only at the epoch rule's block boundaries)."""
     def on_block(path: Path, state: dict) -> None:
         upload(path, key)
         last = state["blocks"][-1] if state["blocks"] else {}

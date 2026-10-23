@@ -952,23 +952,40 @@ def fit_temperature(logits: np.ndarray, labels: np.ndarray, groups: np.ndarray |
     """The temperature T minimising the NLL of softmax(mean over an observation's photos of
     logits / T) on the validation set (temperature scaling, Guo et al. 2017), only on
     photos whose class the model has. `groups`: each photo's observation; None = per photo."""
-    keep = labels >= 0
-    z, y = logits[keep].astype(np.float64), labels[keep]
+    keep = np.flatnonzero(labels >= 0)
     if groups is not None:
+        # an observation's mean logits, made a few observations at a time (float64 sums,
+        # kept as float32): never a float64 copy of every photo's logits (E4, 2026-10-22)
         g = np.asarray(groups)[keep]
         order = np.argsort(g, kind="stable")
-        z, y, g = z[order], y[order], g[order]
+        idx, g = keep[order], g[order]
         starts = np.flatnonzero(np.r_[True, g[1:] != g[:-1]])
-        z = np.add.reduceat(z, starts, axis=0) / np.diff(np.r_[starts, len(g)])[:, None]
-        y = y[starts]
+        ends = np.r_[starts[1:], len(g)]
+        z = np.empty((len(starts), logits.shape[1]), np.float32)
+        for a in range(0, len(starts), 128):
+            b = min(a + 128, len(starts))
+            part = logits[idx[starts[a]:ends[b - 1]]].astype(np.float64)
+            z[a:b] = np.add.reduceat(part, starts[a:b] - starts[a], axis=0) \
+                / (ends[a:b] - starts[a:b])[:, None]
+            del part
+        y = labels[idx[starts]]
+        take = None
+    else:
+        z, y, take = logits, labels[keep], keep
     if not len(y):
         return 1.0
 
     def nll(t):
-        s = z / t
-        s = s - s.max(axis=1, keepdims=True)
-        lse = np.log(np.exp(s).sum(axis=1))
-        return float(np.mean(lse - s[np.arange(len(y)), y]))
+        total = 0.0
+        for a in range(0, len(y), 1024):            # float64 a block of rows at a time
+            rows = take[a:a + 1024] if take is not None else slice(a, a + 1024)
+            s = z[rows].astype(np.float64)
+            s /= t
+            s -= s.max(axis=1, keepdims=True)
+            picked = s[np.arange(len(s)), y[a:a + 1024]]
+            lse = np.log(np.exp(s, out=s).sum(axis=1))
+            total += float(np.sum(lse - picked))
+        return total / len(y)
     grid = np.geomspace(0.05, 20.0, 60)
     best = grid[int(np.argmin([nll(t) for t in grid]))]
     lo, hi = best / 1.15, best * 1.15          # refine: golden section in log space
@@ -1020,39 +1037,49 @@ def features_and_logits(model, x):
 
 
 def run_validation(model, loader, device, n_classes: int, loss_fn, amp_dtype=None) -> dict:
-    """Per-photo logits, features' lengths and labels over the validation photos."""
+    """Per-photo logits, features' lengths and labels over the validation photos.
+
+    The logits are written into one matrix made for the whole pass and never copied: with
+    16,257 classes and 47,136 photos it is 3.1 GB, and E4's first run (2026-10-21) was
+    OOM-killed on a 16 GB instance when a list of parts, their concatenation and a copy of
+    the known rows were held at once."""
     import torch
     model.eval()
-    logits, labels, rows, norms = [], [], [], []
+    room = len(loader.dataset)
+    z = np.empty((room, n_classes), np.float32)
+    y, rows, norms = np.empty(room, np.int64), np.empty(room, np.int64), np.empty(room)
+    n = 0
     with torch.inference_mode():
         for batch in loader:
             if batch is None:
                 continue
-            x, y, i = batch
+            x, yb, i = batch
             with torch.autocast(device, dtype=amp_dtype or torch.float32,
                                 enabled=amp_dtype is not None):
-                f, z = features_and_logits(model, x.to(device, non_blocking=True))
-            logits.append(z.float().cpu().numpy())
-            norms.append(f.float().norm(dim=1).cpu().numpy())
-            labels.append(y.numpy())
-            rows.append(i.numpy())
+                f, zb = features_and_logits(model, x.to(device, non_blocking=True))
+            k = len(yb)
+            z[n:n + k] = zb.float().cpu().numpy()
+            norms[n:n + k] = f.float().norm(dim=1).cpu().numpy()
+            y[n:n + k], rows[n:n + k] = yb.numpy(), i.numpy()
+            n += k
     model.train()
-    if not logits:
+    if not n:
         return {"logits": np.zeros((0, n_classes), np.float32), "labels": np.zeros(0, int),
                 "rows": np.zeros(0, int), "norms": np.zeros(0), "loss": None, "macro_f1": None,
                 "top1": None, "n": 0}
-    z, y = np.concatenate(logits), np.concatenate(labels)
+    z, y, rows, norms = z[:n], y[:n], rows[:n], norms[:n]        # views: nothing is copied
     known = y >= 0
-    loss = None
+    loss, total = None, 0.0
+    for s in range(0, n, 1024):                     # B x C temporaries stay small
+        part = known[s:s + 1024]
+        if part.any():
+            out = loss_fn(torch.from_numpy(z[s:s + 1024][part]),
+                          torch.from_numpy(y[s:s + 1024][part]))
+            total += float(out) * int(part.sum())
     if known.any():
-        import torch
-        zk, yk, total = z[known], y[known], 0.0
-        for s in range(0, len(yk), 1024):           # B x C temporaries stay small
-            part = loss_fn(torch.from_numpy(zk[s:s + 1024]), torch.from_numpy(yk[s:s + 1024]))
-            total += float(part) * len(yk[s:s + 1024])
-        loss = total / len(yk)
+        loss = total / int(known.sum())
     pred = z.argmax(axis=1)
-    return {"logits": z, "labels": y, "rows": np.concatenate(rows), "norms": np.concatenate(norms),
+    return {"logits": z, "labels": y, "rows": rows, "norms": norms,
             "loss": loss, "n": int(known.sum()),
             "macro_f1": macro_f1(y[known].tolist(), pred[known].tolist()),
             "top1": float((pred[known] == y[known]).mean()) if known.any() else None}
@@ -1063,6 +1090,7 @@ def models_dir() -> Path:
     return md()
 
 
+STEP_LOG_EVERY = 20                   # optimizer steps between progress lines
 CHECKPOINT_SUFFIX = ".block.pt"       # the epoch rule's block checkpoint, beside the model
 
 
@@ -1181,12 +1209,11 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
     start_epoch, resumed_from = 0, None
     stop_reason = None
     epoch_seconds: list[float] = []      # this attempt's epochs, validation included
+    saved_epoch = 0                      # the epoch the checkpoint on disk holds
     ckpt_path = out_dir / f"{name}{CHECKPOINT_SUFFIX}"
     ckpt_identity = {"name": name, "preset": cfg.preset, "labels_hash": snapshot["labels_hash"],
                      "epoch_rule": asdict(rule) if rule else None, "seed": cfg.seed}
     if resume_from is not None and Path(resume_from).is_file():
-        if rule is None:
-            raise ValueError("a block checkpoint resumes only a run with an epoch rule")
         ck = torch.load(resume_from, map_location="cpu", weights_only=True)
         if ck.get("identity") != ckpt_identity:
             raise ValueError(f"{resume_from} is not a checkpoint of this run "
@@ -1199,7 +1226,7 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
                 "state": ck["best_state"]}            # its validation pass is redone at the end
         history, blocks = list(ck["history"]), list(ck["blocks"])
         step, seen = int(ck["step"]), int(ck["seen"])
-        start_epoch = resumed_from = int(ck["epoch"])
+        start_epoch = resumed_from = saved_epoch = int(ck["epoch"])
         log(f"[{name}] RESUMED from the block checkpoint after epoch {start_epoch} (best "
             f"val macro-F1 {best['macro_f1']:.4f} at epoch {best['epoch']})")
         if blocks and blocks[-1]["decision"] == "stop":
@@ -1246,8 +1273,8 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
                                            lambda: micro, fell_back):
             wait_seconds += time.monotonic() - t_wait
             if should_stop is not None and should_stop():
-                kept = (f"the block checkpoint after epoch {blocks[-1]['epoch']} is kept; "
-                        "resume the run to carry on from it" if blocks else "not saved")
+                kept = (f"the checkpoint after epoch {saved_epoch} is kept; "
+                        "resume the run to carry on from it" if saved_epoch else "not saved")
                 raise Stopped(f"stopped in epoch {epoch + 1} at step {step:,} (time limit); "
                               + kept)
             if batch is None:
@@ -1269,10 +1296,12 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
                 scaler.update()
                 opt.zero_grad(set_to_none=True)
                 step += 1
-                if step % 20 == 0:
+                if step % STEP_LOG_EVERY == 0:
                     rate = seen / max(time.monotonic() - started, 1e-6)
+                    busy = train_seconds + (time.monotonic() - t_epoch)
                     log(f"[{name}] epoch {epoch + 1}, step {step:,}, loss "
-                        f"{np.mean(losses[-20 * accum:]):.3f}, {rate:.1f} photos/s overall")
+                        f"{np.mean(losses[-20 * accum:]):.3f}, {rate:.1f} photos/s overall, "
+                        f"{wait_seconds / max(busy, 1e-6):.0%} of training waiting for photos")
                 if cfg.max_steps and step >= cfg.max_steps:
                     stopped_early = True
                     break
@@ -1280,6 +1309,10 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
         if device == "cuda":
             torch.cuda.synchronize()
         train_seconds += time.monotonic() - t_epoch
+        # One validation pass's logits at a time (3.1 GB for E4): the last pass and the best
+        # epoch's are let go first; the best epoch is scored again at the end if needed.
+        v = None
+        best.pop("val", None)
         v = run_validation(model, val_loader, device, n_classes, loss_fn, amp_dtype)
         if v["loss"] is not None:
             plateau.step(v["loss"])
@@ -1302,7 +1335,10 @@ def train(conn, store, size: str, name: str, cfg: PicekConfig | None = None,
         if decision is not None:
             blocks.append(decision)
             log(f"[{name}] epoch rule after epoch {epoch + 1}: {json.dumps(decision)}")
-            save_block(epoch + 1)
+        # after every epoch, so a killed run loses at most the epoch it was in
+        save_block(epoch + 1)
+        saved_epoch = epoch + 1
+        if decision is not None:
             if decision["decision"] == "stop":
                 stop_reason = decision["reason"]
                 break

@@ -48,7 +48,7 @@ def test_training_stops_when_a_block_adds_too_little_and_keeps_the_best_epoch_ov
     assert meta["blocks"][-1]["gain"] == pytest.approx(0.002)
     assert "rose only" in meta["stop_reason"]
     assert meta["best_epoch"] == 6 and meta["best_val_macro_f1"] == pytest.approx(0.312)
-    assert blocks == [2, 4, 6]                           # a checkpoint at every boundary
+    assert blocks == [1, 2, 3, 4, 5, 6]                  # a checkpoint after every epoch
     assert meta["epoch_rule"] == {"min_epochs": 2, "max_epochs": 8, "block": 2,
                                   "min_gain": 0.005}
     assert [h["val_macro_f1"] for h in meta["history"]] == scripted["f1"][:6]
@@ -96,20 +96,21 @@ def test_an_interruption_mid_block_keeps_the_last_block_and_resumes_from_it(
     scripted["f1"], scripted["calls"] = f1, 0
     whole = picek.train(conn, store, "large", "picek-whole", rule_cfg(tiny), log=lambda s: None)
 
-    # Stop as soon as epoch 4 begins (after 3 validation passes): mid-block 3-4.
+    # Stop as soon as epoch 4 begins (after 3 validation passes): mid-block 3-4. Epoch 3's
+    # checkpoint is kept (one after every epoch, not only at block boundaries).
     scripted["calls"] = 0
-    with pytest.raises(Stopped, match="block checkpoint after epoch 2 is kept"):
+    with pytest.raises(Stopped, match="checkpoint after epoch 3 is kept"):
         picek.train(conn, store, "large", "picek-tiny", rule_cfg(tiny), log=lambda s: None,
                     should_stop=lambda: scripted["calls"] >= 3)
     ckpt = config.DATA_DIR / "models" / f"picek-tiny{picek.CHECKPOINT_SUFFIX}"
-    assert torch.load(ckpt, map_location="cpu", weights_only=True)["epoch"] == 2
+    assert torch.load(ckpt, map_location="cpu", weights_only=True)["epoch"] == 3
     assert not (config.DATA_DIR / "models" / "picek-tiny.pt").exists()
 
-    # Resumed: epochs 3.. are trained again, the decisions are the uninterrupted run's.
-    scripted["calls"] = 2
+    # Resumed: epochs 4.. are trained again, the decisions are the uninterrupted run's.
+    scripted["calls"] = 3
     meta = picek.train(conn, store, "large", "picek-tiny", rule_cfg(tiny), log=lambda s: None,
                        resume_from=ckpt)
-    assert meta["resumed_from_epoch"] == 2
+    assert meta["resumed_from_epoch"] == 3
     assert meta["epochs_run"] == whole["epochs_run"] == 6
     assert [b["decision"] for b in meta["blocks"]] == [b["decision"] for b in whole["blocks"]]
     assert [h["epoch"] for h in meta["history"]] == list(range(1, 7))
@@ -190,12 +191,14 @@ def test_a_checkpoint_of_another_run_is_refused(conn, tmp_path, tiny, scripted):
                     resume_from=ckpt)
 
 
-def test_a_fixed_length_run_is_unchanged(conn, tmp_path, tiny, scripted):  # noqa: F811
+def test_a_fixed_length_run_makes_no_block_decisions_but_checkpoints_every_epoch(
+        conn, tmp_path, tiny, scripted):  # noqa: F811
     store = seed_two_species(conn, tmp_path)
     scripted["f1"] = [0.3, 0.2, 0.1]
     blocks = []
     meta = picek.train(conn, store, "large", "picek-tiny", tiny, log=lambda s: None,
                        on_block=lambda p, s: blocks.append(s))
     assert meta["epochs_run"] == 3 and meta["epoch_rule"] is None and meta["blocks"] == []
-    assert meta["stop_reason"] == "fixed length: 3 epochs" and blocks == []
-    assert not (config.DATA_DIR / "models" / f"picek-tiny{picek.CHECKPOINT_SUFFIX}").exists()
+    assert meta["stop_reason"] == "fixed length: 3 epochs"
+    assert [b["epochs_done"] for b in blocks] == [1, 2, 3]
+    assert (config.DATA_DIR / "models" / f"picek-tiny{picek.CHECKPOINT_SUFFIX}").exists()
