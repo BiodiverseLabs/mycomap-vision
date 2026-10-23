@@ -3,7 +3,7 @@
 // /api/how-good, /api/speed/daily); a part the server doesn't send is left out, never made up.
 
 import type { HowGood, ModelsInfo, SpeedDay, Stats, TopK } from "./api";
-import { longDate, modelName } from "./publicView";
+import { longDate, MODEL_CREDIT_LINE, modelName } from "./publicView";
 
 /** Fewer days than this are listed, not drawn as a line. */
 export const MIN_CHART_DAYS = 3;
@@ -157,16 +157,14 @@ export function servedModel(m: ModelsInfo | undefined, prefer?: string | null) {
 }
 
 /** The small model credit, the only place How it works names the base model (Steve,
- *  2026-10-22, approved mockup): "BioCLIP 2, 336 px, fine-tuned" and its training data, and
- *  who made the base model. The product stays MycoMap Vision everywhere else. */
+ *  2026-10-22 approved mockup; names 2026-10-23): the version and its training data,
+ *  "MycoMap Vision v1 (public + non-public training data)", and the credit line saying what
+ *  it is built on. The rest of the page says MycoMap Vision only. */
 export function modelCredit(backbone: string): { name: string; title: string; detail: string | null;
                                                  madeBy: string | null } {
   const name = modelName(backbone);
   const cut = name.indexOf(" (");
-  const fineTuned = /-ft-/.test(backbone);
-  const madeBy = /^bioclip-2/.test(backbone)
-    ? `Built on BioCLIP 2 by Imageomics${fineTuned ? ", fine-tuned on DNA-verified MycoMap records" : ""}.`
-    : null;
+  const madeBy = /^bioclip-2(-\d+)?-ft-/.test(backbone) ? MODEL_CREDIT_LINE : null;
   return { name, title: cut > 0 ? name.slice(0, cut) : name,
            detail: cut > 0 ? name.slice(cut + 1) : null, madeBy };
 }

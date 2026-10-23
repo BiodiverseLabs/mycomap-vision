@@ -3,7 +3,7 @@
 import type { Answered } from "./keptRun";
 import type { PublishedBenchmark } from "./compareView";
 import type { Experiment, ExperimentSummary } from "./experiments";
-import { modelName, sendWaitingInLine } from "./publicView";
+import { modelName, modelTooltip, sendWaitingInLine } from "./publicView";
 
 export type Rank = "family" | "genus" | "species";
 export const RANKS: Rank[] = ["family", "genus", "species"];
@@ -331,8 +331,8 @@ const METHOD_LABEL: Record<string, string> = {
 };
 
 /** Human names for scoreboard rows: iNat's model and our methods in plain words. */
-export function modelLabel(backbone: string, method: string): { name: string; how: string } {
-  return { name: modelName(backbone), how: METHOD_LABEL[method] ?? method };
+export function modelLabel(backbone: string, method: string): { name: string; how: string; tip: string } {
+  return { name: modelName(backbone), how: METHOD_LABEL[method] ?? method, tip: modelTooltip(backbone) };
 }
 
 /** An API refusal, with its HTTP status (401: sign in). */

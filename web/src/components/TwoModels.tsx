@@ -1,6 +1,7 @@
 import { num, pct } from "@/lib/api";
 import { utcDay, V1 } from "@/lib/datasetReleases";
-import { pointsDiff, twoModelLabel, TWO_MODELS, type TopK } from "@/lib/twoModels";
+import { MODEL_CREDIT_LINE } from "@/lib/publicView";
+import { pointsDiff, twoModelLabel, twoModelTip, TWO_MODELS, type TopK } from "@/lib/twoModels";
 import { PhotoPermissionLine } from "@/components/PhotoPermissionLine";
 
 // "The two models" on the Results page (Steve, 2026-10-22): what the site serves, what the
@@ -15,8 +16,9 @@ export function TwoModels() {
     <section data-testid="section-two-models" className="space-y-3">
       <h2 className="font-display font-semibold text-2xl text-[#4a3728]">The two models</h2>
       <div className="text-sm text-[#5c4a3a] max-w-3xl space-y-2 leading-relaxed">
+        <p data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</p>
         <p>
-          Both start from BioCLIP 2 at 336 px and are fine-tuned the same way on dataset release{" "}
+          Both read photos at 336 px and were fine-tuned the same way on dataset release{" "}
           {V1.id}'s training split. They differ only in the photos they learned from:
         </p>
         <ul className="list-disc pl-5 space-y-1">
@@ -45,7 +47,7 @@ export function TwoModels() {
           <tbody>
             {TWO_MODELS.models.flatMap((m) => (["species", "genus"] as const).map((rank, i) => (
               <tr key={`${m.backbone}/${rank}`} className={i === 0 ? "border-t" : ""}>
-                <td className="px-3 py-1.5 font-medium text-[#4a3728]" title={m.backbone}>
+                <td className="px-3 py-1.5 font-medium text-[#4a3728]" title={twoModelTip(m)}>
                   {i === 0 ? <>{twoModelLabel(m)}<br /><span className="font-normal text-xs text-muted-foreground">{m.role}</span></> : null}
                 </td>
                 <td className="px-3 py-1.5 capitalize">{rank}</td>
@@ -75,7 +77,7 @@ export function TwoModels() {
           <tbody>
             {TWO_MODELS.models.map((m) => (
               <tr key={m.backbone} className="border-t">
-                <td className="px-3 py-1.5" title={m.backbone}>{twoModelLabel(m)}</td>
+                <td className="px-3 py-1.5" title={twoModelTip(m)}>{twoModelLabel(m)}</td>
                 {BANDS.map((b) => (
                   <td key={b} className="px-2 py-1.5 text-center tabular-nums">
                     {pct(m.depth[b].top1, 1)} / {pct(m.depth[b].top5, 1)}

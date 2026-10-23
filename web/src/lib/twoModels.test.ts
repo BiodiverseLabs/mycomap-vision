@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pointsDiff, twoModelLabel, TWO_MODELS } from "./twoModels";
+import { pointsDiff, twoModelLabel, twoModelTip, TWO_MODELS } from "./twoModels";
 
-test("the two models are named with their image size and training data", () => {
+test("the two models are MycoMap Vision v1 and v1-open, with their training data; the size in the tooltip", () => {
   assert.deepEqual(TWO_MODELS.models.map(twoModelLabel), [
-    "BioCLIP 2, 336 px, fine-tuned (public + non-public training data)",
-    "BioCLIP 2, 336 px, fine-tuned (open data only)",
+    "MycoMap Vision v1 (public + non-public training data)",
+    "MycoMap Vision v1-open (open data only)",
+  ]);
+  assert.deepEqual(TWO_MODELS.models.map(twoModelTip), [
+    "336 px · bioclip-2-336-ft-20261018-171420",
+    "336 px · bioclip-2-336-ft-20261020-173106",
   ]);
 });
 

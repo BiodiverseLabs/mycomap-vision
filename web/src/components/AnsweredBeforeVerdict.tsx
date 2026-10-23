@@ -45,7 +45,7 @@ function Group({ g }: { g: EarlyAnswersGroup }) {
     <Card>
       <CardHeader className="bg-[#f8f5f0] border-b border-[#A87146]/10 py-3">
         <CardTitle className="text-base text-[#4a3728]">
-          <span title={g.backbone}>{label.name}</span>{" "}
+          <span title={label.tip}>{label.name}</span>{" "}
           <span className="text-muted-foreground font-normal">· {label.how} · {g.context}</span>
         </CardTitle>
         <p className="text-xs text-muted-foreground" data-testid="early-answers-meta">

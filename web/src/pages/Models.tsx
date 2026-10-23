@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/Layout";
 import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from "@/lib/api";
-import { modelName } from "@/lib/publicView";
+import { modelName, modelTooltip } from "@/lib/publicView";
 import { CompareApproaches } from "@/components/CompareApproaches";
 import { TwoModels } from "@/components/TwoModels";
 import { AnsweredBeforeVerdictCard } from "@/components/AnsweredBeforeVerdict";
@@ -92,7 +92,7 @@ export function ModelsPage() {
               <Card key={b.backbone}>
                 <CardContent className="pt-4">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-[#4a3728]" title={b.backbone}>{modelName(b.backbone)}</span>
+                    <span className="font-semibold text-[#4a3728]" title={modelTooltip(b.backbone)}>{modelName(b.backbone)}</span>
                     <Badge variant="default">{num(b.embedded_photos)} photos</Badge>
                   </div>
                   {b.note && <p className="text-sm text-muted-foreground mt-1">{b.note}</p>}
@@ -194,7 +194,7 @@ function Prospective() {
                   return (
                     <tr key={`${r.backbone}/${r.method}`} className="border-b">
                       <td className="px-4 py-2">
-                        <span className="font-medium">{label.name}</span>{" "}
+                        <span className="font-medium" title={label.tip}>{label.name}</span>{" "}
                         <span className="text-muted-foreground">· {label.how}</span>
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums">{num(r.predicted)}</td>
@@ -233,7 +233,7 @@ function RunRow({ r, best, open, onToggle }: {
       <tr className={`border-b hover:bg-myco-green/5 cursor-pointer ${external ? "bg-[#fbf7f0]" : ""}`}
           onClick={onToggle}>
         <td className="px-4 py-2">
-          <span className="font-medium">{label.name}</span>{" "}
+          <span className="font-medium" title={label.tip}>{label.name}</span>{" "}
           <span className="text-muted-foreground">· {label.how}</span>
           {best && <Trophy className="inline h-3.5 w-3.5 ml-1.5 text-myco-green" />}
           {external && <Badge variant="outline" className="ml-2 px-1.5 py-0 text-[10px] font-normal">baseline</Badge>}

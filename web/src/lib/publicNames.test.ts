@@ -1,21 +1,31 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName } from "./publicNames";
-import { releaseNote } from "./publicView";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { OPEN_V1, PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName, SERVED_V1 } from "./publicNames";
+import { MODEL_CREDIT_LINE, modelName, releaseNote } from "./publicView";
+import { modelCredit } from "./howItWorks";
+import { modelLabel } from "./api";
 import { BASE_LABEL } from "./modelChoice";
+import { twoModelLabel, TWO_MODELS } from "./twoModels";
+import { TwoModels } from "../components/TwoModels";
 
 // Steve, 2026-10-11: outside the Research section the site says "MycoMap Vision", never
 // the backbone it was built on.
 const BACKBONE_WORDS = /bioclip|fine-?tun/i;
 
-const BACKBONES = ["bioclip-2-ft-20261007-165400", "bioclip-2-ft-20270115-090000", "bioclip-2",
-                   "bioclip-2-ft-sample", "dinov2-b14", "dinov3-l16"];
+const BACKBONES = [SERVED_V1, OPEN_V1, "bioclip-2-ft-20261007-165400", "bioclip-2-ft-20261014-003539",
+                   "bioclip-2-448-ft-20261030-120000", "bioclip-2", "bioclip-2-ft-sample", "dinov2-b14",
+                   "dinov3-l16"];
 
-test("every model is MycoMap Vision to visitors, dated by the records it learned from", () => {
-  assert.equal(publicModelName("bioclip-2-ft-20261007-165400"), "MycoMap Vision · October 2026 model");
-  assert.equal(publicModelName("bioclip-2-ft-20270115-090000"), "MycoMap Vision · January 2027 model");
-  assert.equal(publicModelName("bioclip-2-ft-sample"), "MycoMap Vision · test model");
+test("every model is MycoMap Vision to visitors, by its version", () => {
+  assert.equal(publicModelName(SERVED_V1), "MycoMap Vision v1");
+  assert.equal(publicModelName(OPEN_V1), "MycoMap Vision v1-open");
+  assert.equal(publicModelName("bioclip-2-ft-20261007-165400"), "MycoMap Vision v0");
+  assert.equal(publicModelName("bioclip-2-ft-20261014-003539"), "MycoMap Vision v0-open");
+  assert.equal(publicModelName("bioclip-2-448-ft-20261030-120000"), "MycoMap Vision (development, 448 px)");
+  assert.equal(publicModelName("bioclip-2-ft-sample"), "MycoMap Vision (development, 224 px)");
   assert.equal(publicModelName("bioclip-2"), "MycoMap Vision");
   for (const b of BACKBONES) {
     assert.doesNotMatch(publicModelName(b), BACKBONE_WORDS, b);
@@ -90,4 +100,74 @@ test("pages outside Research show no comparison run id", () => {
 test("only How it works' model credit names the base model, and only through modelCredit", () => {
   const users = publicSources().filter((f) => /\bmodelCredit\(/.test(read(f)));
   assert.deepEqual(users, ["pages/About.tsx"]);
+});
+
+// Steve, 2026-10-23: the models' names. The site's 336 px fine-tune is MycoMap Vision v1, the
+// paper's open-data one v1-open, and the unchanged base model is BioCLIP 2, said as such.
+test("the served model is MycoMap Vision v1, the paper's open model v1-open, the base model BioCLIP 2 unchanged", () => {
+  assert.equal(SERVED_V1, "bioclip-2-336-ft-20261018-171420");
+  assert.equal(OPEN_V1, "bioclip-2-336-ft-20261020-173106");
+  assert.equal(publicModelName(SERVED_V1), "MycoMap Vision v1");
+  assert.equal(modelName(SERVED_V1), "MycoMap Vision v1 (public + non-public training data)");
+  assert.equal(publicModelName(OPEN_V1), "MycoMap Vision v1-open");
+  assert.equal(modelName(OPEN_V1), "MycoMap Vision v1-open (open data only)");
+  assert.deepEqual(TWO_MODELS.models.map((m) => m.backbone), [SERVED_V1, OPEN_V1]);
+  for (const base of ["bioclip-2", "bioclip-2-336", "bioclip-2-448"]) {
+    assert.ok(modelName(base).startsWith("BioCLIP 2 (base model, not fine-tuned)"), modelName(base));
+  }
+});
+
+const WEB_SRC = new URL("../", import.meta.url);
+function sources(dir = WEB_SRC): { file: string; text: string }[] {
+  const out: { file: string; text: string }[] = [];
+  for (const name of readdirSync(dir)) {
+    const url = new URL(name, dir);
+    if (statSync(url).isDirectory()) out.push(...sources(new URL(`${name}/`, dir)));
+    else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)) {
+      out.push({ file: url.pathname.split("/src/").pop()!, text: readFileSync(url, "utf-8") });
+    }
+  }
+  return out;
+}
+/** Source text without its comments: what can reach a page. */
+const code = (src: string) => src.replace(/\/\*[^]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+test("no fine-tuned model is named BioCLIP 2 anywhere: it is the base model, the credit line or a citation", () => {
+  const all = sources();
+  assert.ok(all.some((s) => s.file === "pages/Research.tsx"), all.map((s) => s.file).join(","));
+  // Every fine-tune id the site's code knows, plus each kind of name.
+  const ids = new Set(["bioclip-2-448-ft-20261030-120000", "bioclip-2-ft-sample", "dinov3-l16-ft-20261101-000000"]);
+  for (const { text } of all) for (const m of text.matchAll(/\b[a-z0-9-]+-ft-(?:\d{8}-\d{6}|sample)\b/g)) ids.add(m[0]);
+  assert.ok(ids.has(SERVED_V1) && ids.has(OPEN_V1));
+  for (const id of ids) {
+    const credit = modelCredit(id);
+    for (const label of [modelName(id), publicModelName(id), modelLabel(id, "nearest").name, credit.name, credit.title]) {
+      assert.doesNotMatch(label, /bioclip|fine-?tun|frozen/i, `${id}: ${label}`);
+      assert.match(label, /^MycoMap Vision/, `${id}: ${label}`);
+    }
+  }
+  for (const m of TWO_MODELS.models) assert.doesNotMatch(twoModelLabel(m), /bioclip/i);
+  // Written out in the code, "BioCLIP 2" is only the base model as itself, the credit line, its
+  // citation, its zero-shot gate, or the base model's own name in the table of bases.
+  const allowed = /BioCLIP 2(?= \(base model, not fine-tuned| \(Imageomics\) fine-tuned on DNA-verified records\.|: emergent properties|'s zero-shot| \(Gu et al\. 2025\)|")/g;
+  for (const { file, text } of all) {
+    const left = code(text).replace(allowed, "");
+    assert.doesNotMatch(left, /BioCLIP 2/, `${file}: BioCLIP 2 named outside the base model and its credit`);
+    assert.doesNotMatch(code(text), /BioCLIP 2,[^\n]*fine-?tuned|frozen BioCLIP|BioCLIP 2 frozen/i, file);
+  }
+});
+
+test("the credit line is said where the models are explained: Research's two models, Protocols / For researchers, How it works", () => {
+  assert.equal(MODEL_CREDIT_LINE, "MycoMap Vision is BioCLIP 2 (Imageomics) fine-tuned on DNA-verified records.");
+  const html = renderToStaticMarkup(createElement(TwoModels));
+  const text = html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'");
+  assert.ok(text.includes(MODEL_CREDIT_LINE));
+  assert.equal((text.match(/BioCLIP/g) ?? []).length, 1, "the two models section names BioCLIP 2 only in the credit line");
+  assert.match(text, /MycoMap Vision v1 \(public \+ non-public training data\)/);
+  assert.match(text, /MycoMap Vision v1-open \(open data only\)/);
+  // Protocols and For researchers both render BaseModel, which says the line.
+  const research = read("pages/Research.tsx");
+  assert.match(research, /function BaseModel\(\)[^]*?\{MODEL_CREDIT_LINE\}/);
+  assert.equal((research.match(/<BaseModel \/>/g) ?? []).length, 2, "Protocols and For researchers");
+  assert.equal(modelCredit(SERVED_V1).madeBy, MODEL_CREDIT_LINE, "How it works' model credit");
 });

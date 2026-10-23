@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { coverageWords, headline, headlineModel, identifyGate, LIKELY_COPY, longDate, MANAGE_PERMISSIONS, modelName, PERMISSION_LINE, PHOTO_PERMISSIONS_URL, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
+import { coverageWords, headline, headlineModel, identifyGate, LIKELY_COPY, longDate, MANAGE_PERMISSIONS, modelName, modelTooltip, PERMISSION_LINE, PHOTO_PERMISSIONS_URL, recentWeekLine, releaseNote, sendWaitingInLine, shareWords, showsMembersPages } from "./publicView";
 import type { Me, ScoreRun } from "./api";
 
 test("a signed-out visitor is asked to sign in before picking photos, only when identifying needs it", () => {
@@ -26,27 +26,26 @@ test("the list's sentence states the tested coverage for its rank", () => {
   assert.match(LIKELY_COPY.coverage("species", 0.55), /about 55% of the time/);
 });
 
-test("visitors read a model's name, its image size and its training data, not its file name", () => {
-  // The site's model and the paper's headline model (Steve, 2026-10-21).
+test("Research names each model by its MycoMap Vision version and training data, not its file name", () => {
+  // Steve, 2026-10-23: the site's model, the paper's open model, the 224 px fine-tunes.
   assert.equal(modelName("bioclip-2-336-ft-20261018-171420"),
-    "BioCLIP 2, 336 px, fine-tuned (public + non-public training data)");
-  assert.equal(modelName("bioclip-2-336-ft-20261020-173106"),
-    "BioCLIP 2, 336 px, fine-tuned (open data only)");
-  assert.equal(modelName("bioclip-2-ft-20261013-003428"),
-    "BioCLIP 2, 224 px, fine-tuned (public + non-public training data)");
-  assert.equal(modelName("bioclip-2-ft-20261014-003539"), "BioCLIP 2, 224 px, fine-tuned (open data only)");
-  assert.equal(modelName("bioclip-2-ft-20261007-165400"),
-    "BioCLIP 2, 224 px, fine-tuned (public + non-public training data)");
-  assert.equal(modelName("bioclip-2"), "BioCLIP 2, 224 px, frozen");
-  assert.equal(modelName("bioclip-2-336"), "BioCLIP 2, 336 px, frozen");
-  assert.equal(modelName("bioclip-2-ft-sample"), "BioCLIP 2, 224 px, fine-tuned on a sample (test model)");
+    "MycoMap Vision v1 (public + non-public training data)");
+  assert.equal(modelName("bioclip-2-336-ft-20261020-173106"), "MycoMap Vision v1-open (open data only)");
+  assert.equal(modelName("bioclip-2-ft-20261013-003428"), "MycoMap Vision v0 (224 px, development)");
+  assert.equal(modelName("bioclip-2-ft-20261014-003539"), "MycoMap Vision v0-open (224 px, development)");
+  assert.equal(modelName("bioclip-2-ft-20261007-165400"), "MycoMap Vision v0 (224 px, development)");
+  assert.equal(modelName("bioclip-2-448-ft-20261030-120000"), "MycoMap Vision (development, 448 px)");
+  assert.equal(modelName("bioclip-2-ft-sample"), "MycoMap Vision (development, 224 px)");
+  // The unchanged base model, its sizes the only difference between them.
+  assert.equal(modelName("bioclip-2"), "BioCLIP 2 (base model, not fine-tuned), 224 px");
+  assert.equal(modelName("bioclip-2-336"), "BioCLIP 2 (base model, not fine-tuned), 336 px");
   assert.equal(modelName("external:inat-cv"), "iNaturalist's computer vision");
   assert.equal(modelName("external:df20-vit-l384"),
     "Danish Fungi 2020 ViT-L, 384 px (Picek et al., Danish records)");
   assert.equal(modelName("external:fungitastic-beit-b384"),
     "FungiTastic BEiT-B, 384 px (Picek et al., Danish records)");
-  assert.equal(modelName("dinov3-l16-512"), "DINOv3 large, 512 px, frozen");
-  assert.equal(modelName("eva02-l14-448"), "EVA-02 large, 448 px, frozen");
+  assert.equal(modelName("dinov3-l16-512"), "DINOv3 large (base model, not fine-tuned), 512 px");
+  assert.equal(modelName("eva02-l14-448"), "EVA-02 large (base model, not fine-tuned), 448 px");
   assert.equal(modelName("some-new-model"), "some-new-model");
   assert.equal(modelName("picek-fungitastic-beit-b384-20261012-080000"),
     "Danish Fungi method (BEiT-B, 384 px, Picek et al.), trained on our DNA-verified records");
@@ -137,11 +136,18 @@ test("the provisional share is said from the data, never hard-coded as half", ()
   assert.equal(shareWords(0, 0), "None");
 });
 
+test("the image size and the internal id stay in the tooltip", () => {
+  assert.equal(modelTooltip("bioclip-2-336-ft-20261018-171420"), "336 px · bioclip-2-336-ft-20261018-171420");
+  assert.equal(modelTooltip("bioclip-2-ft-20261014-003539"), "224 px · bioclip-2-ft-20261014-003539");
+  assert.equal(modelTooltip("bioclip-2"), "224 px · bioclip-2");
+  assert.equal(modelTooltip("external:inat-cv"), "external:inat-cv");
+});
+
 test("a model's release note names it MycoMap Vision and says what it learned from", () => {
   assert.equal(
-    releaseNote({ backbone: "bioclip-2-ft-20261007-165400", embedded_photos: 152915,
+    releaseNote({ backbone: "bioclip-2-336-ft-20261018-171420", embedded_photos: 152915,
                   trained_through: "2026-09-07" }),
-    "MycoMap Vision · October 2026 model. Names learned from DNA-verified " +
+    "MycoMap Vision v1. Names learned from DNA-verified " +
     "records validated up to 7 September 2026. Compares your photos with 152,915 reference photos.");
   assert.equal(releaseNote({ backbone: "bioclip-2", embedded_photos: 10, trained_through: null }),
     "MycoMap Vision. Compares your photos with 10 reference photos.");

@@ -2,34 +2,33 @@
 // results, and waiting in line instead of an error when the server is busy.
 
 import type { Me, ScoreRun } from "./api";
-import { publicMethodLabel, publicModelName } from "./publicNames";
+import { BASE_PX, publicMethodLabel, publicModelName, visionVersion } from "./publicNames";
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
-/** Each base model (models.ALIASES) by name and the image size it reads (Steve, 2026-10-22:
- *  every number names its model and its image size). */
+/** Each base model (models.ALIASES) by the name its makers give it; its image size is
+ *  publicNames.BASE_PX (Steve, 2026-10-22: every number names its model and its image size). */
 const BASE_NAME: Record<string, string> = {
-  "bioclip-2": "BioCLIP 2, 224 px",
-  "bioclip-2-336": "BioCLIP 2, 336 px",
-  "bioclip-2-448": "BioCLIP 2, 448 px",
-  bioclip: "BioCLIP, 224 px",
-  "dinov2-b14": "DINOv2 base, 518 px",
-  "dinov2-l14": "DINOv2 large, 518 px",
-  "dinov3-b16": "DINOv3 base, 256 px",
-  "dinov3-l16": "DINOv3 large, 256 px",
-  "dinov3-b16-512": "DINOv3 base, 512 px",
-  "dinov3-l16-512": "DINOv3 large, 512 px",
-  "siglip2-l16-384": "SigLIP 2 large, 384 px",
-  "eva02-l14-448": "EVA-02 large, 448 px",
-  "convnextv2-l": "ConvNeXt V2 large, 384 px",
+  "bioclip-2": "BioCLIP 2",
+  "bioclip-2-336": "BioCLIP 2",
+  "bioclip-2-448": "BioCLIP 2",
+  bioclip: "BioCLIP",
+  "dinov2-b14": "DINOv2 base",
+  "dinov2-l14": "DINOv2 large",
+  "dinov3-b16": "DINOv3 base",
+  "dinov3-l16": "DINOv3 large",
+  "dinov3-b16-512": "DINOv3 base",
+  "dinov3-l16-512": "DINOv3 large",
+  "siglip2-l16-384": "SigLIP 2 large",
+  "eva02-l14-448": "EVA-02 large",
+  "convnextv2-l": "ConvNeXt V2 large",
 };
-/** The two kinds of fine-tune (Steve, 2026-10-21), named in every label. The public models
- *  were trained only on openly licensed (Creative Commons, incl. non-commercial) photos
- *  (`--public-trainable-only`; the 336 px one is the paper's headline); every other
- *  fine-tune learned from all its training photos. */
-export const PUBLIC_TRAINED = new Set(["bioclip-2-336-ft-20261020-173106",
-                                       "bioclip-2-ft-20261014-003539"]);
+export { PUBLIC_TRAINED } from "./publicNames";
+/** What each MycoMap Vision v1 learned from (Steve, 2026-10-21/23), the qualifier after its name. */
 export const TRAINING_DATA = { public: "open data only", internal: "public + non-public training data" };
+/** Said once wherever the models are explained (Steve, 2026-10-23): Research's two models,
+ *  Protocols / For researchers, and How it works' model credit. */
+export const MODEL_CREDIT_LINE = "MycoMap Vision is BioCLIP 2 (Imageomics) fine-tuned on DNA-verified records.";
 /** The Picek group's classifier recipe replicated on our records (retrain.py), named
  *  `picek-<preset>-<run>`: the architecture each preset trains, at its input size. */
 const PICEK_NAME: Record<string, string> = {
@@ -46,9 +45,12 @@ const EXTERNAL_NAME: Record<string, string> = {
   "external:df20-vit-l384": "Danish Fungi 2020 ViT-L, 384 px (Picek et al., Danish records)",
 };
 
-/** A model as a visitor should read it, with its image size: "BioCLIP 2, 336 px, fine-tuned
- *  (public + non-public training data)", "BioCLIP 2, 336 px, frozen". Fine-tuned models are
- *  named `<base>-ft-<YYYYMMDD>-…` (finetune.py); the internal name stays for a tooltip. */
+/** A model as the Research section names it (Steve, 2026-10-23): our fine-tunes by version
+ *  with what sets them apart, "MycoMap Vision v1 (public + non-public training data)",
+ *  "MycoMap Vision v1-open (open data only)", "MycoMap Vision v0 (224 px, development)",
+ *  "MycoMap Vision (development, 448 px)"; an unchanged base model as "BioCLIP 2 (base model,
+ *  not fine-tuned), 336 px" (the sizes are the only difference between those); outside
+ *  models by their own names. The internal name stays for a tooltip (modelTooltip). */
 export function modelName(backbone: string): string {
   if (backbone === "external:inat-cv") return "iNaturalist's computer vision";
   const picek = /^picek-(.+?)-(\d{8}-\d{6}|smoke)$/.exec(backbone);
@@ -58,16 +60,16 @@ export function modelName(backbone: string): string {
       `DNA-verified records${test}`;
   }
   if (backbone in EXTERNAL_NAME) return EXTERNAL_NAME[backbone];
-  const ft = /^(.+)-ft-\d{8}-\d+$/.exec(backbone);
-  if (ft) {
-    const data = PUBLIC_TRAINED.has(backbone) ? TRAINING_DATA.public : TRAINING_DATA.internal;
-    return `${BASE_NAME[ft[1]] ?? ft[1]}, fine-tuned (${data})`;
-  }
-  if (backbone.endsWith("-ft-sample")) {
-    const base = backbone.slice(0, -"-ft-sample".length);
-    return `${BASE_NAME[base] ?? base}, fine-tuned on a sample (test model)`;
-  }
-  return backbone in BASE_NAME ? `${BASE_NAME[backbone]}, frozen` : backbone;
+  const v = visionVersion(backbone);
+  if (v) return v.qualifier ? `${v.name} (${v.qualifier})` : v.name;
+  return backbone in BASE_NAME
+    ? `${BASE_NAME[backbone]} (base model, not fine-tuned), ${BASE_PX[backbone]} px` : backbone;
+}
+
+/** A model's tooltip: its image size, where known, and its internal id. */
+export function modelTooltip(backbone: string): string {
+  const px = visionVersion(backbone)?.px ?? BASE_PX[backbone];
+  return px ? `${px} px · ${backbone}` : backbone;
 }
 
 export interface Headline {
