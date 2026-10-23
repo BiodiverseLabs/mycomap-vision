@@ -8,6 +8,7 @@ import { api, modelLabel, num, pct, RANKS, type RunReport, type ScoreRun } from 
 import { modelName } from "@/lib/publicView";
 import { CompareApproaches } from "@/components/CompareApproaches";
 import { TwoModels } from "@/components/TwoModels";
+import { AnsweredBeforeVerdictCard } from "@/components/AnsweredBeforeVerdict";
 import { incompleteRun, releaseResultsPending, scoreboardSections } from "@/lib/compareView";
 import { utcDay, V1 } from "@/lib/datasetReleases";
 
@@ -81,6 +82,8 @@ export function ModelsPage() {
         </section>
 
         <Prospective />
+
+        <AnsweredBeforeVerdict />
 
         <section>
           <h2 className="font-display font-semibold text-2xl text-[#4a3728] mb-3">Models in use</h2>
@@ -212,6 +215,12 @@ function Prospective() {
       )}
     </section>
   );
+}
+
+function AnsweredBeforeVerdict() {
+  const q = useQuery({ queryKey: ["early-answers"], queryFn: api.earlyAnswers });
+  return <AnsweredBeforeVerdictCard groups={q.data?.groups ?? []} sealedAfter={q.data?.sealed_after}
+                                    loading={q.isLoading} />;
 }
 
 function RunRow({ r, best, open, onToggle }: {

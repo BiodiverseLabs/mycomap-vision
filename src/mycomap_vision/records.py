@@ -79,6 +79,49 @@ def parse_validation_date(s: str | None) -> str | None:
     return real_date(iso)
 
 
+# Fields mycomap.org's green-records feed may carry beyond EXPORT_SQL's columns (additive; the
+# names are .org's and are kept here only, so a rename there is a one-line change here):
+#
+# VISION_ASSISTED_FIELD: the record was green-checked by .org's "DNA + MycoMap Vision" rule
+#   (Vision's top species above 50% and equal to the DNA analysis's species, accepted with a
+#   low DNA score; Steve, 2026-10-23). Scoring Vision against such a verdict is circular, so
+#   the benchmark of Vision's answers leaves these records out (early_answers.py). Read
+#   leniently: true, a method string equal to VISION_ASSISTED_METHOD, or a list holding it.
+#   PROVISIONAL NAME: .org's feat/vision-agreement-autovalidate fixes the final one.
+# FIRST_GREEN_FIELD: the moment (UTC, ISO 8601) the record first turned green, when the feed
+#   gives one. Without it only the day (validation_date_N) is known. Also provisional.
+VISION_ASSISTED_FIELD = "validated_with_vision"
+VISION_ASSISTED_METHOD = "DNA + MycoMap Vision"
+FIRST_GREEN_FIELD = "first_green_at"
+
+
+def vision_assisted(value) -> bool:
+    """Whether a feed row's VISION_ASSISTED_FIELD says the verdict came with Vision's help."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        v = " ".join(value.split()).lower()
+        return v in ("true", "yes", "1", VISION_ASSISTED_METHOD.lower())
+    if isinstance(value, (list, tuple)):
+        return any(vision_assisted(v) for v in value)
+    return False
+
+
+def _moment(value) -> str | None:
+    """An ISO 8601 moment as UTC 'YYYY-MM-DDTHH:MM:SS+00:00', or None when unreadable."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        t = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def _num(v) -> float | None:
     if v is None or v == "":
         return None
@@ -129,6 +172,7 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
                     dates.append(d)
         lat, lng = _num(first.get("latitude")), _num(first.get("longitude"))
         seq = first.get("sequence_id")
+        greens = [m for g in group if (m := _moment(g.get(FIRST_GREEN_FIELD)))]
         records.append({
             "observation_id": oid,
             "source": sources.normalise(org_source),
@@ -152,6 +196,10 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
             "label_conflict": int(len(names) > 1),
             "names_json": json.dumps(names),
             "exported_at": exported_at,
+            # Any of its rows green by the DNA + Vision rule marks the record.
+            "vision_assisted": int(any(vision_assisted(g.get(VISION_ASSISTED_FIELD))
+                                       for g in group)),
+            "first_green_at": min(greens) if greens else None,
         })
     return records
 
@@ -183,8 +231,10 @@ _COLUMNS = [
     "observation_id", "source", "org_source", "source_id", "scientific_name", "phylum", "class", "order", "family",
     "genus", "species", "infraspecies", "latitude", "longitude", "observed_on", "state",
     "country", "continent", "north_america", "sequence_id", "green_projects", "validated_on",
-    "label_conflict", "names_json", "exported_at",
+    "label_conflict", "names_json", "exported_at", "vision_assisted", "first_green_at",
 ]
+# Columns a record dict built by older code may lack, and what they are then.
+_LATER_DEFAULTS = {"vision_assisted": 0, "first_green_at": None}
 
 
 def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
@@ -223,7 +273,8 @@ def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:
         conn.executemany(
             f"insert into records ({cols}) values ({marks}) "
             f"on conflict(observation_id) do update set {updates}",
-            [[r[c] for c in _COLUMNS] + [r["exported_at"]] for r in records],
+            [[r[c] if c in r else _LATER_DEFAULTS[c] for c in _COLUMNS] + [r["exported_at"]]
+             for r in records],
         )
         keep = {r["observation_id"] for r in records}
         stale = [oid for oid in before if oid not in keep]

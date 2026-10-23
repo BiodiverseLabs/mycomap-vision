@@ -40,6 +40,9 @@ from .yours import OwnerIndex
 
 CONFIDENCE_TEMPERATURE = 0.02
 ORG_SPECIES_URL = "https://mycomap.org/species/"
+# How deep an answer's ranked names are kept for scoring at top 1/3/5/10 (identify_vectors's
+# `deep`), whatever the caller asked to be shown.
+DEEP_RANKS = 10
 
 
 def softmax_confidence(scores: np.ndarray, temperature: float = CONFIDENCE_TEMPERATURE) -> np.ndarray:
@@ -397,7 +400,8 @@ class Identifier:
                          n_photo_specimens: int = 3, gate: list[dict] | None = None,
                          higher_ranks: bool = False, sims: np.ndarray | None = None,
                          hidden: np.ndarray | None = None,
-                         types: list[dict | None] | None = None, include=()) -> dict:
+                         types: list[dict | None] | None = None, include=(),
+                         deep: list | None = None) -> dict:
         """identify_vectors_ungated, behind the fungus gate (fungusgate.py) when `gate`
         holds a verdict per photo. A photo judged not a fungus is left out of the answer
         (a duck among mushroom photos doesn't sink the find); when every photo is, there
@@ -411,11 +415,16 @@ class Identifier:
         didn't run. A micrograph, label or habitat photo tagged in the high band is left
         out too, unless its index is in `include` or every photo the gate kept would be
         (phototypes.decide); `result["photo_types"]` and each per-photo `photo_type` say
-        what was tagged and left out. Neither key is there when `types` is None."""
+        what was tagged and left out. Neither key is there when `types` is None.
+
+        `deep`, when given, gets the answer's ranked names appended DEEP_RANKS deep
+        whatever `top_k` is (identify_vectors_ungated), for the copy frozen for the
+        benchmark of answers given before the DNA verdict (early_answers.py). Nothing is
+        appended when no photo is left to answer from."""
         kw = dict(top_k=top_k, n_specimens=n_specimens, context=context,
                   photo_lookup=photo_lookup, may_show=may_show,
                   n_photo_specimens=n_photo_specimens, higher_ranks=higher_ranks,
-                  hidden=hidden)
+                  hidden=hidden, deep=deep)
         if types is not None and len(types) != len(query):
             raise ValueError(f"{len(types)} photo-type tags for {len(query)} photos")
         if gate is None and types is None:
@@ -495,7 +504,8 @@ class Identifier:
                                  may_show: Callable[[PhotoInfo], bool] = only_open_licences,
                                  n_photo_specimens: int = 3, higher_ranks: bool = False,
                                  sims: np.ndarray | None = None,
-                                 hidden: np.ndarray | None = None) -> dict:
+                                 hidden: np.ndarray | None = None,
+                                 deep: list | None = None) -> dict:
         """Query photo vectors (already normalised) -> ranks, specimens, hints.
         `context` (place and date) is used by methods with a range-and-season score.
         `higher_ranks` adds order, class and phylum (higher.py) to the combined and
@@ -555,6 +565,11 @@ class Identifier:
             per_photo = (np.stack([self._species_scores(query[i:i + 1], context)
                                    for i in range(n_q)]) if n_q > 1 else scores[None, :])
         ranks = self._ranks(scores, top_k, higher=higher_ranks)
+        if deep is not None:
+            # The same scores ranked DEEP_RANKS deep, names and confidences only (`deep`).
+            longer = ranks if top_k >= DEEP_RANKS else self._ranks(scores, DEEP_RANKS)
+            deep.append({rank: [{"name": c["name"], "confidence": c["confidence"]}
+                                for c in longer[rank][:DEEP_RANKS]] for rank in RANKS})
         applied = shift is not None if hasattr(self.model, "place_shift") else False
         # Where the place and date changed the top answer, what the photos alone said.
         photo_only_top = {}
