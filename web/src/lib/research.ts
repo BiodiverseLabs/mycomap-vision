@@ -53,9 +53,11 @@ export const MOVED: Record<string, string> = {
 };
 
 /** Pages a signed-out visitor may read when the site needs sign-in (signin.PUBLIC_PAGES, and
- *  signin.RESEARCH_PAGES: the old addresses of Results and Reference data), and How it works
- *  (Steve, 2026-10-22: the site's open explainer; the server already sends it, a share page). */
-export const PUBLIC_PAGES = [API_PATH, "/api-docs", "/models", "/data", "/about"];
+ *  signin.RESEARCH_PAGES: the old addresses of Results and Reference data), How it works
+ *  (Steve, 2026-10-22: the site's open explainer; the server already sends it, a share page)
+ *  and Get involved (Steve, 2026-10-22: the approved redesign, a share page too; every feed it
+ *  reads answers signed out, tests/test_get_involved.py). */
+export const PUBLIC_PAGES = [API_PATH, "/api-docs", "/models", "/data", "/about", "/get-involved"];
 
 export const isResearchPath = (path: string) => path === "/research" || path.startsWith("/research/");
 
