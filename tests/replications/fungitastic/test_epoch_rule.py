@@ -124,8 +124,8 @@ def test_a_resumed_rule_run_is_estimated_for_the_epochs_it_still_has_to_train():
     assert "30 done in its checkpoint" in left["stage"]
 
 
-def test_a_rule_run_gets_disk_for_its_block_checkpoint():
-    assert aws.picek_checkpoint_gb(["fungitastic-beit-b384@15"]) == 0
+def test_every_picek_stage_gets_disk_for_its_checkpoint():
+    assert aws.picek_checkpoint_gb(["fungitastic-beit-b384@15"]) == 4     # checkpoints too
     assert aws.picek_checkpoint_gb(["fungitastic-beit-b384@15-50"]) == 4
 
 

@@ -535,11 +535,10 @@ def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
 
 
 def picek_checkpoint_gb(picek: list[str] | None) -> int:
-    """Disk for the epoch rule's block checkpoint (preset@min-max): weights, optimizer
-    momentum and the best epoch's weights, ~1.2 GB for BEiT-B with ~18,000 classes, twice
-    while the new one is written; 4 GB per rule run."""
-    from .replications.fungitastic.retrain import epoch_rule_of
-    return 4 * sum(epoch_rule_of(spec) is not None for spec in picek or [])
+    """Disk for a Picek stage's checkpoint, written after every epoch (fixed length or epoch
+    rule): weights, optimizer momentum and the best epoch's weights, ~1.2 GB for BEiT-B with
+    ~18,000 classes, twice while the new one is written; 4 GB per Picek stage."""
+    return 4 * len(picek or [])
 
 
 def spot_market_options(max_price: float | None = None) -> dict:
