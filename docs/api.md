@@ -69,7 +69,7 @@ answered from a proxy's cache.
   shorter side and shrinks anything larger. **A long side of 640–1024 px is plenty**,
   JPEG quality 80–85, roughly 100–250 KB. Bigger files cost upload and decode time and
   change nothing: vectors from a 448-px copy match the full-size photo's at
-  cosine ≥ 0.9997. Hard limits: 25 MB a file, 80 MB a request, 40 MP.
+  cosine ≥ 0.9997. Hard limits: 25 MB a file, 80 MB a request, 210 MP for a JPEG (decoded at reduced size), 60 MP for other formats.
 - **Date.** Keep EXIF `DateTimeOriginal`, or send `observed_on`. Many resizers drop EXIF;
   send `observed_on` then.
 - **Place.** Optional: fields or EXIF GPS, used for scoring only, never kept. Strip GPS
@@ -528,7 +528,7 @@ the website's routes). Retryable ones carry `Retry-After` and `retry_after_secon
 | 403 | `key_inactive` | key pending, disabled, revoked or owner inactive (`reason`) |
 | 404 | `session_gone` | unknown, expired or lost to a restart, or someone else's |
 | 404 | `observation_not_found` | |
-| 413 | `too_large` | file > 25 MB, request > 80 MB, image > 40 MP |
+| 413 | `too_large` | file > 25 MB, request > 80 MB, image > 210 MP (JPEG) or 60 MP (other formats) |
 | 415 | `unsupported_image` | |
 | 422 | `no_usable_photos` | an observation with no photo Vision can use |
 | 429 | `rate_limited` | the short window (per minute), `Retry-After` |

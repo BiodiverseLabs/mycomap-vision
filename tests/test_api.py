@@ -4,6 +4,7 @@ from collections import Counter
 import time
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -253,9 +254,35 @@ def test_every_offered_method_answers_and_gives_each_photo_its_own_answer(conn, 
 def test_an_image_too_large_in_pixels_is_refused_before_decoding(conn, tmp_path):
     client = app_with_model(conn, tmp_path)
     buf = io.BytesIO()
-    Image.new("L", (8000, 6000)).save(buf, "PNG")           # 48 MP, a small file
+    Image.new("L", (8000, 8000)).save(buf, "PNG")           # 64 MP PNG, a small file
     res = client.post("/api/identify", files=[("photos", ("big.png", buf.getvalue(), "image/png"))])
     assert res.status_code == 413 and "MP limit" in res.json()["detail"]
+
+
+def test_a_48_megapixel_phone_jpeg_is_identified_not_refused(conn, tmp_path):
+    """Three 413s on 2026-10-23: a 48.8 MP phone photo was over the old 40 MP limit."""
+    client = app_with_model(conn, tmp_path)
+    buf = io.BytesIO()
+    Image.new("RGB", (8064, 6048), (247, 0, 0)).save(buf, "JPEG", quality=70)   # 48.8 MP
+    res = client.post("/api/identify", files=[("photos", ("phone.jpg", buf.getvalue(),
+                                                          "image/jpeg"))],
+                      data={"models": "m1/nearest"})
+    assert res.status_code == 200, res.text
+    assert res.json()["results"][0]["ranks"]["species"][0]["name"] == "A x"
+
+
+def test_the_jpeg_limit_is_far_higher_but_not_unlimited():
+    from mycomap_vision.guards import MAX_JPEG_PIXELS, MAX_PIXELS, TooLarge, check_image_size
+
+    class Declared:                                         # a size, no pixels decoded
+        def __init__(self, w, h, fmt):
+            self.size, self.format = (w, h), fmt
+    check_image_size(Declared(16320, 12240, "JPEG"))        # 200 MP phone JPEG
+    with pytest.raises(TooLarge):
+        check_image_size(Declared(16320, 12240, "PNG"))     # the same pixels as a PNG
+    with pytest.raises(TooLarge):
+        check_image_size(Declared(16000, 14000, "JPEG"))    # 224 MP
+    assert MAX_PIXELS < 200_000_000 < MAX_JPEG_PIXELS
 
 
 def test_a_request_declaring_too_many_bytes_is_refused(conn, tmp_path):

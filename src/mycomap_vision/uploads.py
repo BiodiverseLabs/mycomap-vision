@@ -1,7 +1,7 @@
 """Uploaded photos, kept no bigger than the models need.
 
-A phone photo decoded at full size is 36 MB (12 MP) to 120 MB (40 MP, the most
-guards.py lets in), and an identification used to hold every photo of the request
+A phone photo decoded at full size is 36 MB (12 MP) to 180 MB (60 MP, the most
+guards.py lets in for a non-JPEG; a JPEG up to 210 MP is decoded in draft), and an identification used to hold every photo of the request
 that way (up to MAX_PHOTOS) while each model ran. Now each photo is decoded once as
 it is read: its EXIF place and date are read first (fill_context and the Identify
 page use them, and shrinking drops the EXIF), it is turned upright, and it is shrunk

@@ -18,18 +18,26 @@ from . import config, models
 MAX_PHOTOS = 10
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_REQUEST_BYTES = 80 * 1024 * 1024
-MAX_PIXELS = 40_000_000           # 40 MP: bigger than any phone photo, far below a bomb
+# Pixel limits, checked from the declared size before anything is decoded. A JPEG is
+# decoded at a reduced scale (uploads.decode_upload, dhash.dhash64: JPEG draft), so a
+# 48-200 MP phone photo costs little memory; any other format is decoded whole. The old
+# single 40 MP limit refused 48 MP phone photos (three 413s on 2026-10-23).
+MAX_PIXELS = 60_000_000           # PNG, WebP, ...: decoded whole
+MAX_JPEG_PIXELS = 210_000_000     # JPEG: the 200 MP phones, decoded in draft
 
 # Pillow refuses anything past twice this on its own; keep that backstop in line.
-Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+Image.MAX_IMAGE_PIXELS = MAX_JPEG_PIXELS
 
 
 class TooLarge(ValueError):
     pass
 
 
-def check_image_size(img: Image.Image, max_pixels: int = MAX_PIXELS) -> None:
-    """Refuse an image by its declared size, before its pixels are decoded."""
+def check_image_size(img: Image.Image, max_pixels: int | None = None) -> None:
+    """Refuse an image by its declared size, before its pixels are decoded: past
+    MAX_JPEG_PIXELS for a JPEG (decoded in draft), past MAX_PIXELS for anything else."""
+    if max_pixels is None:
+        max_pixels = MAX_JPEG_PIXELS if img.format == "JPEG" else MAX_PIXELS
     w, h = img.size
     if w * h > max_pixels:
         raise TooLarge(f"{w}x{h} pixels is over the {max_pixels // 1_000_000} MP limit")

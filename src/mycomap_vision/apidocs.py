@@ -335,7 +335,7 @@ def outline(enabled: dict[str, bool]) -> dict:
                     ["401", "`invalid_token`, `token_expired`", "No token, or one Vision doesn't accept."],
                     ["403", "`key_inactive`", "The token is pending approval, disabled or revoked."],
                     ["404", "`not_found`, `session_gone`, `observation_not_found`", "No such route (or not open yet), session or observation."],
-                    ["413 / 415", "`too_large`, `unsupported_image`", "Over 25 MB a file, 80 MB a call or 40 MP; not an image."],
+                    ["413 / 415", "`too_large`, `unsupported_image`", "Over 25 MB a file, 80 MB a call, 210 MP for a JPEG or 60 MP for other formats; not an image."],
                     ["429", "`rate_limited`, `quota_exceeded`", "Too many photos this minute; this month's identifications used up."],
                     ["503", "`busy`, `updating`, `auth_unavailable`", "Vision is busy or updating; try again after `Retry-After` seconds."],
                 ]},

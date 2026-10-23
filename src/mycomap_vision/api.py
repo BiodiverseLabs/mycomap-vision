@@ -238,17 +238,18 @@ def read_photo(upload: UploadFile, side: int = uploads.kept_side([]),
         raise HTTPException(413, f"{upload.filename} is over {MAX_FILE_BYTES // 2**20} MB")
     if bodies is not None:
         bodies.append(body)
-    if hashes is not None:
-        try:
-            hashes.append(dhash.dhash64(body))
-        except Exception:                   # decode_upload says what is wrong with it
-            hashes.append(None)
     try:
-        return uploads.decode_upload(body, side)
+        decoded = uploads.decode_upload(body, side)
     except TooLarge as e:
         raise HTTPException(413, f"{upload.filename}: {e}")
     except Exception:
         raise HTTPException(400, f"{upload.filename} is not an image we can read")
+    if hashes is not None:                  # after the size check: never hash a bomb
+        try:
+            hashes.append(dhash.dhash64(body))
+        except Exception:
+            hashes.append(None)
+    return decoded
 
 
 def fill_context(entered: Context, from_photos: list[tuple]) -> tuple[Context, dict]:
