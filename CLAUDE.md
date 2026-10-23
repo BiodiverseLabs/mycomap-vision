@@ -67,6 +67,12 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   table refuses); write only through `log_answer` in `api.py`, which queues and never
   raises. New code that answers an identification logs it there. Kept until the paper
   closes.
+- **By-observation answers are frozen, insert-only** (Steve, 2026-10-23; `early_answers.py`).
+  Every fresh answer about an iNat or MO observation (v1 by-observation, the site's "from a
+  link") is kept ten deep in `state/early-answers.sqlite`, never changed or deleted; the first
+  per observation and model is scored once the record turns green, only if given before the
+  verdict, never on a record validated with Vision's help, and never shown for the sealed test.
+  New by-observation paths freeze their answers through `freeze_answer` in `api.py`.
 - **Unpublished results stay out of this public repo.** Experiment entries and the paper
   draft live in the private research checkout (`config.RESEARCH_DIR`: `MV_RESEARCH_DIR`, or
   `../mycomap-vision-research`), under `experiments/` and `paper/`; the site shows them to

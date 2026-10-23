@@ -416,6 +416,37 @@ export interface ProspectiveModel {
   serving_release?: string | null;
 }
 
+/** One cell row of the answered-before-the-verdict table: top 1/3/5/10 rates; top 10 only
+ *  over answers kept ten deep (`n_top10`). */
+export interface EarlyTopK {
+  n: number;
+  top1: number | null;
+  top3: number | null;
+  top5: number | null;
+  top10: number | null;
+  n_top10: number;
+}
+
+/** Answered before the DNA verdict (GET /api/early-answers; early_answers.py): aggregates per
+ *  model and context, never a record. */
+export interface EarlyAnswersGroup {
+  backbone: string;
+  method: string;
+  context: "photos + place/date" | "photos only";
+  answers: number;
+  scored: number;
+  awaiting_verdict: number;
+  /** Signed in only: answers held back for the paper's sealed test. */
+  sealed?: number;
+  asked_by: Record<string, number>;
+  left_out: Record<string, number>;
+  answered: { from: string | null; through: string | null };
+  validated: { from: string | null; through: string | null };
+  top_k: Record<string, EarlyTopK>;
+  species_by_true_species_reference_records: Record<string, { n: number; top1: number | null; top5: number | null }>;
+  inat_cv: { status: string };
+}
+
 export interface Me {
   signin: "off" | "identify" | "all";
   user: { id: string; name: string | null } | null;
@@ -1016,6 +1047,8 @@ export const api = {
     return typeof body.next === "string" ? body.next : "/";
   },
   prospective: () => getJson<{ models: ProspectiveModel[]; sealed_after?: string | null }>("/api/prospective"),
+  /** Answers given before the DNA verdict, scored once the record turned green (aggregates). */
+  earlyAnswers: () => getJson<{ groups: EarlyAnswersGroup[]; sealed_after: string }>("/api/early-answers"),
   /** Held-out benchmark results imported on the server (aggregates only). */
   benchmarks: () => getJson<{ benchmarks: PublishedBenchmark[] }>("/api/benchmarks"),
   /** The experiment registry, for signed-in members only. */

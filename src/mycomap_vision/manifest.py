@@ -32,7 +32,9 @@ create table if not exists records (
   label_conflict   integer not null default 0,  -- .org holds more than one name for the record
   names_json       text,
   exported_at      text not null,
-  first_seen_at    text                -- export that first listed it; null = before tracking
+  first_seen_at    text,               -- export that first listed it; null = before tracking
+  vision_assisted  integer not null default 0,  -- green by .org's DNA + MycoMap Vision rule (records.VISION_ASSISTED_FIELD)
+  first_green_at   text                -- .org's first green moment (UTC) when its feed gives one (records.FIRST_GREEN_FIELD)
 );
 
 create table if not exists inat_observations (
@@ -161,7 +163,8 @@ _LATER_COLUMNS = {
                # wrong record were iNat's): 'inat' is a fact for those rows, not a guess.
                "source": "text not null default 'inat'", "source_photo_id": "integer",
                "source_owner_id": "integer", "license_text": "text", "ok_for_export": "integer"},
-    "records": {"first_seen_at": "text", "org_source": "text", "source_id": "text"},
+    "records": {"first_seen_at": "text", "org_source": "text", "source_id": "text",
+                "vision_assisted": "integer not null default 0", "first_green_at": "text"},
 }
 
 

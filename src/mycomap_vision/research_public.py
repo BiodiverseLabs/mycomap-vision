@@ -11,6 +11,8 @@ signin.research_path). Before they are, each answer is cut to what may be public
   release v1's label snapshot) before the paper is submitted: no imported sealed
   benchmark, no scoreboard run whose test records start after the snapshot, and not even
   how many advance predictions fall in it;
+  the same for answers given before the DNA verdict (early_answers.py: no sealed score for
+  anyone, the held-back count for signed-in members only);
 - no photographer permission counts (Steve, 2026-10-21: no grant or decline counts on any
   public page), for anyone: /api/stats keeps only whether the answers are fresh enough to
   show photos; and no count of photographers by the rights on their photos (STATS_HIDDEN).
@@ -86,6 +88,25 @@ def prospective(models: list[dict], signed_in: bool) -> list[dict]:
     if signed_in:
         return models
     return [{k: v for k, v in m.items() if k != "sealed"} for m in models]
+
+
+def early_answers(groups: list[dict], signed_in: bool) -> list[dict]:
+    """Answered before the DNA verdict (early_answers.report, made with SEAL): aggregates
+    only; signed out, without the count held for the sealed test, as advance predictions.
+    Refuses anything that could name a record or a person."""
+    for g in groups:
+        bad = PER_RECORD_KEYS & set(g)
+        if bad:
+            raise ValueError(f"per-record fields in a public report: {sorted(bad)}")
+    if signed_in:
+        return groups
+    return [{k: v for k, v in g.items() if k != "sealed"} for g in groups]
+
+
+# Fields that would name a record or a person; never in an aggregate report.
+PER_RECORD_KEYS = frozenset({"observation_id", "observations", "record_key", "records_list",
+                             "observer", "asked_by_id", "asked_by_name", "answer_id",
+                             "scored_rows", "rows"})
 
 
 # Counts of photographers by the rights on their photos (Steve, 2026-10-22): never served.

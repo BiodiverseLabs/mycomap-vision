@@ -425,6 +425,77 @@ def cmd_archive_embeddings(conn, args) -> None:
         print(json.dumps(embed.archive_embeddings(conn, models.storage_name(b), args.label)))
 
 
+def _read_only(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+
+
+def cmd_early_answers(args) -> None:
+    """Answered before the DNA verdict (early_answers.py): the standard summary, deciding the
+    answers whose records are green now, or a backfill from older stores (dry run unless
+    --apply)."""
+    from . import early_answers as ea
+    store_path = Path(args.store) if args.store else ea.default_path()
+    manifest_path = Path(args.manifest) if args.manifest else config.MANIFEST_PATH
+    if args.action == "backfill":
+        if not (args.answers or args.org_runs or args.org_sql):
+            raise SystemExit("give --answers and/or --org-runs / --org-sql")
+        store = ea.connect(store_path if args.apply else None)
+        if not args.apply and store_path.is_file():
+            with _read_only(store_path) as src:      # the dry run starts from what is kept
+                src.backup(store)
+        runs = None
+        if args.org_runs:
+            runs = [json.loads(line) for line in Path(args.org_runs).read_text(
+                encoding="utf-8").splitlines() if line.strip().startswith("{")]
+        elif args.org_sql:
+            from .records import fetch_export, parse_export
+            runs = parse_export(fetch_export(ea.ORG_RUNS_SQL))
+        out = ea.backfill(store, Path(args.answers) if args.answers else None, runs,
+                          apply=args.apply, default_model=args.org_model)
+        if not args.apply:
+            # What the rows would come to tonight, on this manifest: the dry run's store is
+            # in memory, so it is filled here and dropped after.
+            rows, _ = (ea.rows_from_answer_cache(Path(args.answers)) if args.answers
+                       else ([], None))
+            if runs is not None:
+                versions = ea.models_by_version(Path(args.answers)) if args.answers else {}
+                rows += ea.rows_from_org_runs(runs, versions, args.org_model)[0]
+            with store:
+                store.executemany(ea.INSERT, ea.without_repeats(rows, store))
+            if manifest_path.is_file():
+                manifest_conn = _read_only(manifest_path)
+                try:
+                    exact = None
+                    if args.org_sql:
+                        from .records import fetch_export
+                        keys = sorted({ea._record_key(a["source"], a["observation_id"])
+                                       for a in ea.first_answers(store)})
+                        exact = ea.org_first_green(keys, fetch_export)
+                    out["preview"] = ea.preview(store, manifest_conn, exact)
+                finally:
+                    manifest_conn.close()
+        print(json.dumps(out, indent=2))
+        if not args.apply:
+            print("dry run: nothing was written (--apply keeps the new rows)", file=sys.stderr)
+        return
+    if not store_path.is_file():
+        raise SystemExit(f"no kept answers at {store_path}")
+    store = ea.connect(store_path)
+    manifest_conn = _read_only(manifest_path) if manifest_path.is_file() else None
+    try:
+        if args.action == "score":
+            if manifest_conn is None:
+                raise SystemExit(f"no manifest at {manifest_path}")
+            print(json.dumps(ea.score_pending(store, manifest_conn), indent=2))
+            return
+        groups = ea.report(store, manifest_conn)
+        print(json.dumps(groups, indent=2) if args.json else ea.format_report(groups), end="")
+    finally:
+        store.close()
+        if manifest_conn is not None:
+            manifest_conn.close()
+
+
 def cmd_identify_log(args) -> None:
     """The identification log (identifylog.py): its rows per path, the first answer per
     observation for the paper, or a one-off, labelled import of what older stores hold."""
@@ -2257,6 +2328,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--accept-removals", action="store_true",
                    help="with --now: take an answer that removes more records than the limit")
     sub.add_parser("prospective", help="how advance predictions fared once the DNA came in")
+    p = sub.add_parser("early-answers", help="answers Vision gave an observation before its "
+                       "DNA verdict, scored once it turned green: summary, score, or backfill "
+                       "(a dry run unless --apply)")
+    p.add_argument("action", nargs="?", default="report", choices=["report", "score", "backfill"])
+    p.add_argument("--store", help="the kept answers (default: state/early-answers.sqlite on "
+                                   "the box, beside the manifest elsewhere)")
+    p.add_argument("--manifest", help="the manifest whose green records decide (default: "
+                                      "MV_MANIFEST); read only")
+    p.add_argument("--json", action="store_true", help="report: the aggregates as JSON")
+    p.add_argument("--answers", help="backfill: an observation-answers.sqlite to recover from")
+    p.add_argument("--org-runs", help="backfill: mycomap.org's record_vision_runs as JSON lines "
+                                      "(early_answers.ORG_RUNS_SQL)")
+    p.add_argument("--org-sql", action="store_true", help="backfill: read record_vision_runs "
+                   "through the read-only SQL route (MV_ORG_SQL_SSH_HOST); the preview also "
+                   "reads .org's first green moments there")
+    p.add_argument("--org-model", help="backfill: backbone/method of a .org run whose answers "
+                   "version the answer cache does not know (the model served by default then)")
+    p.add_argument("--apply", action="store_true", help="backfill: keep the new rows (refused "
+                                                        "for a source imported before)")
     p = sub.add_parser("identify-log", help="the append-only log of every answer Vision gave "
                        "or served: rows per path, the first answer per observation (paper), "
                        "or a one-off labelled import of older stores")
@@ -2778,6 +2868,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "identify-log":        # its own store only: no manifest
         cmd_identify_log(args)
+        return 0
+    if args.command == "early-answers":       # its own store; the manifest read only
+        cmd_early_answers(args)
         return 0
     if args.command == "twin-groups":         # reads only a dataset release
         cmd_twin_groups(args)

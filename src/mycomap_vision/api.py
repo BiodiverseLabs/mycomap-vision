@@ -34,7 +34,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (answercache, apidocs, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest, phototypes,
+from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, research_public, serving, sessions as session_store, sources,
@@ -325,7 +325,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                linked_accounts: "yours.LinkedCache | None | bool" = True,
                run_store: "run_links.RunStore | None" = None,
                run_secret: bytes | None = None,
-               identify_log: "identifylog.IdentifyLog | None" = None) -> FastAPI:
+               identify_log: "identifylog.IdentifyLog | None" = None,
+               early_store: "early_answers.Store | None" = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -678,6 +679,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         identify_log = identifylog.IdentifyLog(identifylog.default_path(manifest_path),
                                                note=note)
     app.state.identify_log = identify_log
+    # Answers given an observation before its DNA verdict (early_answers.py; Steve,
+    # 2026-10-23): every fresh by-observation answer, frozen ten deep, insert-only, scored
+    # nightly once the record turns green. Beside the identification log.
+    if early_store is None:
+        early_store = early_answers.Store(early_answers.default_path(manifest_path), note=note)
+    app.state.early_store = early_store
 
     def q(sql: str, params: tuple = ()):
         with db_lock:
@@ -821,6 +828,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if cur is None or cur[1] is not ident:
             return None
         return lambda: answercache.answers_version(release_now(), with_tagger(cur[0]))
+
+    def freeze_answer(**fields) -> None:
+        """Keeps a fresh by-observation answer for the benchmark of answers given before the
+        DNA verdict (early_answers.Store.record). Never raises, never waits."""
+        try:
+            early_store.record(code_version=config.code_version(), **fields)
+        except Exception as e:  # noqa: BLE001 - the answer goes out regardless
+            note(f"[early-answers] {type(e).__name__}: {e}")
 
     def log_answer(path: str, **fields) -> None:
         """One row of the identification log. Never raises and never waits: the row is
@@ -1031,6 +1046,18 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"models": research_public.prospective(models_, person(request) is not None),
                 "sealed_after": prospective.seal_time()}
 
+    @app.get("/api/early-answers")
+    def early_answers_report(request: Request):
+        """Answered before the DNA verdict (early_answers.py): aggregates per model and
+        context. Always cut at the paper's fixed seal (research_public.SEAL), whatever
+        MV_PROSPECTIVE_SEAL says: no sealed-test score on any page before submission."""
+        with db_lock:
+            groups = early_answers.report(early_store.conn, conn,
+                                          sealed_after=research_public.SEAL,
+                                          lock=early_store.lock)
+        return {"groups": research_public.early_answers(groups, person(request) is not None),
+                "sealed_after": research_public.SEAL}
+
     @app.get("/api/how-good")
     def how_good_report():
         """How it works' "How good is it" (howgood.py): the served model's newest open run,
@@ -1182,13 +1209,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         interactive: bool = True, higher: bool = False,
                         hidden: np.ndarray | None = None, n_specimens: int = 6,
                         vectors: list | None = None, pooled: list | None = None,
-                        include=()) -> dict:
+                        include=(), deep: list | None = None) -> dict:
         """One model's answer through the queue, timed: waiting, embedding, scoring.
         `hidden`: reference columns left out (Identifier.identify_vectors). `vectors`, when
         given, gets the photos' vectors appended (for yours.for_person). `pooled`, when
         given, gets the site's answer from the same photos appended (site_answer), so one
         run answers the API and the Identify page alike. `include`: photos to count even
-        though their photo-type tag would leave them out (phototypes.decide)."""
+        though their photo-type tag would leave them out (phototypes.decide). `deep`, when
+        given, gets the answer's names ten deep (Identifier.identify_vectors)."""
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
             parts = [embed_one(ident, model, im) for im in images]
@@ -1208,7 +1236,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                           sims=sims, photo_lookup=photo_lookup,
                                           may_show=may_show, gate=verdicts[0],
                                           higher_ranks=higher, hidden=hidden, types=tags[0],
-                                          include=include)
+                                          include=include, deep=deep)
         verdicts: list = []
         tags: list = []
         return model_queue.run(workqueue.Job(
@@ -1916,7 +1944,23 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         # rebuilt: what it says before the DNA answer, scored once the record turns green.
         if nightly_settings.predict > 0 and warm.models:
             report["predictions"] = predict_pending_tonight(report["id"], fetch_pending)
+        report["early_answers"] = score_early_answers_tonight()
         return report
+
+    def score_early_answers_tonight() -> dict:
+        """Answers given before the DNA verdict, decided now that tonight's green records are
+        in (early_answers.score_pending). Never fails the night."""
+        own = manifest.connect(manifest_path)
+        own.execute("pragma busy_timeout = 30000")
+        try:
+            out = early_answers.score_pending(early_store.conn, own, lock=early_store.lock)
+            note(f"[nightly] answered before the verdict: {out}")
+            return out
+        except Exception as e:  # noqa: BLE001 - the reference set is already updated
+            note(f"[nightly] answered before the verdict failed: {type(e).__name__}: {e}")
+            return {"error": f"{type(e).__name__}: {e}"[:500]}
+        finally:
+            own.close()
 
     def predict_pending_tonight(run_id: int, fetch_pending) -> dict:
         from .prospective import PhotoFetcher
@@ -2485,6 +2529,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     # The site's answer comes from the same photos (pooled), kept for the
                     # Identify page so opening the observation there runs nothing again.
                     pooled: list = []
+                    deep: list = []             # the names ten deep, for early_answers
                     if len(own):
                         def finish(v, sims):
                             pooled.append(site_answer(ident, v, sims, None, may_show, None,
@@ -2492,7 +2537,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                             return ident.identify_vectors(
                                 v, top_k, context=None, sims=sims, photo_lookup=photo_lookup,
                                 may_show=may_show, gate=None, higher_ranks=True,
-                                hidden=hidden)
+                                hidden=hidden, deep=deep)
                         result = model_queue.run(workqueue.Job(
                             key=id(ident), photos=0, embed=lambda: vecs,
                             search=ident.nearest.photo_sims, finish=finish,
@@ -2505,7 +2550,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                  higher=True,
                                                  hidden=hidden if len(hidden) else None,
                                                  vectors=got, pooled=pooled,
-                                                 include=counted_anyway)
+                                                 include=counted_anyway, deep=deep)
                         scored_vecs = got[0] if got else None
                 finally:
                     in_flight.leave()
@@ -2536,6 +2581,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 body["answered"] = answer_cache.held(kept_key).about(version)
                 body["cached"] = False
                 body["usage"] = quotas.usage(cred)
+                lists, depth = early_answers.ranked_lists(deep, body.get("ranks"), top_k)
+                freeze_answer(source=source, observation_id=number,
+                              model=f"{backbone}/{method}",
+                              path=early_answers.V1_OBSERVATION, lists=lists, depth=depth,
+                              asked_by=who, release=release_now(), answers_version=version,
+                              place_used=bool(used.get("place_from")),
+                              date_used=bool(used.get("date_from")),
+                              excluded_reference=bool(len(own)),
+                              left_out_photos=int(len(hidden)))
                 log_answer(identifylog.V1_OBSERVATION, fresh=True, source=source,
                            observation_id=number, answer_key=kept_key, answers_version=version,
                            model=f"{backbone}/{method}", release=release_now,
@@ -2727,6 +2781,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                             ) from e
                     results, used, own_any, left = [], None, False, 0
                     scored = []                 # per model: (index, vectors, hidden columns)
+                    frozen = []                 # per model: what early_answers keeps
                     for backbone, method in wanted:
                         ident = site_index(backbone, method, view, timer)
                         hidden, own = ident.left_out(source, number, obs.photo_ids,
@@ -2750,11 +2805,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         used = used or this_used
                         own_any, left = own_any or bool(len(own)), max(left, int(len(hidden)))
                         vectors: list = []
+                        deep: list = []
                         results.append(embed_and_score(
                             ident, backbone, images, context, may_show, timer,
                             hidden=hidden if len(hidden) else None, n_specimens=yours.POOL,
-                            vectors=vectors, include=counted_anyway))
+                            vectors=vectors, include=counted_anyway, deep=deep))
                         scored.append((ident, vectors[0] if vectors else None, hidden))
+                        frozen.append((deep, bool(len(own)), int(len(hidden)), this_used))
                 finally:
                     in_flight.leave()
                 about = {
@@ -2789,6 +2846,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                       [answer_cache.held(k) for k in keys], wanted, view,
                                       timer, about)
                 release = model_card().get("version")
+                for (backbone, method), version, pooled, (deep, own_m, left_m, used_m) in zip(
+                        wanted, versions, results, frozen):
+                    lists, depth = early_answers.ranked_lists(deep, pooled.get("ranks"), 5)
+                    freeze_answer(source=source, observation_id=number,
+                                  model=f"{backbone}/{method}",
+                                  path=early_answers.SITE_OBSERVATION, lists=lists, depth=depth,
+                                  asked_by="site", release=release, answers_version=version,
+                                  place_used=bool(used_m.get("place_from")),
+                                  date_used=bool(used_m.get("date_from")),
+                                  excluded_reference=own_m, left_out_photos=left_m)
                 for (backbone, method), key, version in zip(wanted, keys, versions):
                     log_answer(identifylog.SITE_OBSERVATION, fresh=True, source=source,
                                observation_id=number, answer_key=key, answers_version=version,
