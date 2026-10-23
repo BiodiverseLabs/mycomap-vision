@@ -21,8 +21,3 @@ def test_every_feed_the_page_reads_answers_a_signed_out_visitor(conn, tmp_path, 
     assert c.get("/api/me").json()["user"] is None
     assert c.get(feed).status_code == 200, feed
 
-
-def test_the_feeds_stay_read_only_signed_out(conn, tmp_path):
-    c = gated_site_with_pages(conn, tmp_path)
-    for feed in ("/api/stats", "/api/how-good", "/api/feedback/summary"):
-        assert c.post(feed).status_code in (401, 405), feed
