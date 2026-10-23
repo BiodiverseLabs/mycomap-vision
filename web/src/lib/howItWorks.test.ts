@@ -150,12 +150,13 @@ test("the model card is the served model the results are for", () => {
   assert.equal(servedModel(undefined), null);
 });
 
-test("the small model credit names the base model, its size, its training data and who made it", () => {
+test("the small model credit names the version, its training data, and what it is built on", () => {
   const c = modelCredit("bioclip-2-336-ft-20261018-171420");
-  assert.equal(c.name, "BioCLIP 2, 336 px, fine-tuned (public + non-public training data)");
-  assert.equal(c.title, "BioCLIP 2, 336 px, fine-tuned");
+  assert.equal(c.name, "MycoMap Vision v1 (public + non-public training data)");
+  assert.equal(c.title, "MycoMap Vision v1");
   assert.equal(c.detail, "(public + non-public training data)");
-  assert.equal(c.madeBy, "Built on BioCLIP 2 by Imageomics, fine-tuned on DNA-verified MycoMap records.");
+  assert.equal(c.madeBy, "MycoMap Vision is BioCLIP 2 (Imageomics) fine-tuned on DNA-verified records.");
+  assert.equal(modelCredit("bioclip-2-336-ft-20261020-173106").title, "MycoMap Vision v1-open");
   assert.equal(modelCredit("dinov2-b14").madeBy, null, "no credit made up for another base");
 });
 

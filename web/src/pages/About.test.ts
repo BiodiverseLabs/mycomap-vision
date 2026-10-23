@@ -130,12 +130,12 @@ test("photographers read only the two approved lines, each with its link, and no
   assert.ok(!t.includes("777"), "never how many photographers keep all rights");
 });
 
-test("BioCLIP 2 is named only in the small model credit", () => {
+test("BioCLIP 2 is named only in the small model credit's credit line", () => {
   const html = page();
   const t = text(html);
-  assert.match(t, /Model: BioCLIP 2, 336 px, fine-tuned \(public \+ non-public training data\), closest specimens/);
-  assert.match(t, /Built on BioCLIP 2 by Imageomics/);
-  assert.equal((t.match(/BioCLIP/g) ?? []).length, 3, "the credit line, the card's title and its credit");
+  assert.match(t, /Model: MycoMap Vision v1 \(public \+ non-public training data\), closest specimens/);
+  assert.match(t, /MycoMap Vision is BioCLIP 2 \(Imageomics\) fine-tuned on DNA-verified records\./);
+  assert.equal((t.match(/BioCLIP/g) ?? []).length, 1, "the credit line only");
   assert.ok(t.includes("MycoMap Vision"));
 });
 

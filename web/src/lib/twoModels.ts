@@ -6,7 +6,7 @@
 // reference, record set 36fd876aa871, the answer key species-rank-2026-10-18, erratum r4,
 // observer-clustered bootstrap (2,000 draws). Never v1-test numbers.
 
-import { modelName } from "./publicView";
+import { modelName, modelTooltip } from "./publicView";
 
 export interface TopK { n: number; top1: number; top3: number; top5: number; top10: number }
 export interface ModelFigures {
@@ -57,5 +57,8 @@ export function pointsDiff(diff: number, ci: [number, number]): string {
   return `${p(diff)} [${p(ci[0])}, ${p(ci[1])}]`;
 }
 
-/** Each model's label as everywhere on the site (publicView.modelName). */
+/** Each model's label as everywhere on the site (publicView.modelName): "MycoMap Vision v1
+ *  (public + non-public training data)", "MycoMap Vision v1-open (open data only)". */
 export const twoModelLabel = (m: ModelFigures) => modelName(m.backbone);
+/** Its tooltip: the image size and the internal id. */
+export const twoModelTip = (m: ModelFigures) => modelTooltip(m.backbone);

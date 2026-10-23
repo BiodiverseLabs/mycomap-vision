@@ -4,6 +4,8 @@ import { PageHeader } from "@/components/Layout";
 import { api } from "@/lib/api";
 import { BENCHMARKS, researchNav, STATUS_LABEL, type Benchmark } from "@/lib/research";
 import { erratumReasons, shortHash, V1 } from "@/lib/datasetReleases";
+import { OPEN_V1, SERVED_V1 } from "@/lib/publicNames";
+import { MODEL_CREDIT_LINE, modelName } from "@/lib/publicView";
 
 // The Research section (Steve, 2026-10-09): everything detailed, one level below the tool.
 
@@ -31,33 +33,36 @@ const CITATIONS: { key: string; text: string; href: string }[] = [
     href: "https://arxiv.org/abs/2408.13632" },
 ];
 
-/** What the identifier is built on and how it was fine-tuned (Steve, 2026-10-22). The recipe
- *  is the finetunes row of the served model on the box (bioclip-2-336-ft-20261018-171420:
- *  blocks_trained 4 of 24, 2 epochs, 155,781 records, 624,785 photos, 17,077 species); the
- *  public model's 527,842 photos are from the research repo's paper/costs.csv (E23b). */
+/** What the identifier is built on and how it was fine-tuned (Steve, 2026-10-22; names
+ *  2026-10-23). The recipe is the finetunes row of the served model on the box
+ *  (bioclip-2-336-ft-20261018-171420: blocks_trained 4 of 24, 2 epochs, 155,781 records,
+ *  624,785 photos, 17,077 species); the public model's 527,842 photos are from the research
+ *  repo's paper/costs.csv (E23b). BioCLIP 2 is named here only as the base model: the credit
+ *  line, its citation, and the base-model comparison. */
 function BaseModel() {
   return (
     <>
-      <h2 className={h2}>The base model: BioCLIP 2</h2>
-      <p>
-        MycoMap Vision is built on BioCLIP 2 (Gu et al. 2025), an image model for the tree of life
-        from the Imageomics Institute, the successor of BioCLIP (Stevens et al. 2024). Its weights
-        are at <a href={BIOCLIP2_URL} className={link} target="_blank" rel="noreferrer">huggingface.co/imageomics/bioclip-2</a>.
+      <h2 className={h2}>What MycoMap Vision is built on</h2>
+      <p data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</p>
+      <p className="mt-2">
+        The base model (Gu et al. 2025) is an image model for the tree of life from the Imageomics
+        Institute, the successor of BioCLIP (Stevens et al. 2024). Its weights are at{" "}
+        <a href={BIOCLIP2_URL} className={link} target="_blank" rel="noreferrer">huggingface.co/imageomics/bioclip-2</a>.
       </p>
       <h2 className={h2}>How it was fine-tuned</h2>
       <p>
-        The last 4 of BioCLIP 2's 24 transformer blocks were trained for 2 epochs on dataset release{" "}
-        {V1.id}'s training split: 155,781 DNA-verified records, 624,785 photos and 17,077 species,
-        with classifiers at species, genus and family. The site's model (BioCLIP 2, 336 px,
-        fine-tuned, public + non-public training data) learned from all of those photos; the
-        paper's headline model (BioCLIP 2, 336 px, fine-tuned, open data only) was trained the same
-        way on the 527,842 Creative Commons photos among them. Earlier tests used the same recipe at
-        224 px.
+        The last 4 of the base model's 24 transformer blocks were trained for 2 epochs at 336 px on
+        dataset release {V1.id}'s training split: 155,781 DNA-verified records, 624,785 photos and
+        17,077 species, with classifiers at species, genus and family. The site's model,{" "}
+        {modelName(SERVED_V1)}, learned from all of those photos; the paper's headline model,{" "}
+        {modelName(OPEN_V1)}, was trained the same way on the 527,842 Creative Commons photos among
+        them. Earlier tests used the same recipe at 224 px: MycoMap Vision v0 (v0-open on open data
+        only).
       </p>
       <p className="mt-2">
-        "Frozen BioCLIP 2" in the results means BioCLIP 2's own image vectors, unchanged, used to
-        find the nearest DNA-verified records; it is not BioCLIP 2's zero-shot naming from text
-        prompts.
+        "{modelName("bioclip-2-336")}" in the results means the base model's own image vectors,
+        unchanged, used to find the nearest DNA-verified records; it is not BioCLIP 2's zero-shot
+        naming from text prompts.
       </p>
     </>
   );
@@ -214,9 +219,9 @@ export function ProtocolsPage() {
         <h2 className={h2}>No number without its test</h2>
         <p>
           Every accuracy figure on this site names the records it was measured on and how many,
-          whether the right answer had to be first or only near the top, and the model: its base,
-          its image size (224 or 336 px), and whether it is frozen or fine-tuned, and on what
-          training data.
+          whether the right answer had to be first or only near the top, and the model: which
+          MycoMap Vision version (v1, v1-open, or an earlier v0 or development model) or which
+          outside model, its image size, and on what training data.
         </p>
         <BaseModel />
         <h2 className={h2}>Keeping tests clean</h2>

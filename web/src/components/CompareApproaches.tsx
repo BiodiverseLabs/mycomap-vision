@@ -21,7 +21,7 @@ interface Approach { name: string; how: string; trained: string; names: string; 
 const APPROACHES: Approach[] = [
   { name: "Record-grouped scoring + place and date",
     how: "For each of your photos, every DNA-verified reference record scores by its best-matching photo, and a species takes the average of its two best records, so its two matches come from two different specimens (an iNaturalist and a Mushroom Observer post of one specimen count as one). That is blended with the species' average look, in which every record counts the same however many photos it has, and averaged over your photos. When a place or date is given, species with DNA-verified records nearby and in season move up, and species known only more than 500 km away, or out of season, move down",
-    trained: "BioCLIP 2, 336 px, fine-tuned (public + non-public training data): last 4 of 24 blocks, on dataset release v1's training split; DNA-verified records and iNaturalist's open fungus records for range and season",
+    trained: "MycoMap Vision v1 (public + non-public training data): its last 4 of 24 blocks trained on dataset release v1's training split; DNA-verified records and iNaturalist's open fungus records for range and season",
     names: "Any species with one DNA-verified record; new records added nightly",
     status: "On the site since October 2026 (336 px from 20 October); its stated confidence calibrated on its own results. With no place or date, its answer is the photos-only one below" },
   { name: "Record-grouped scoring, photos only",
@@ -32,7 +32,7 @@ const APPROACHES: Approach[] = [
     trained: "Same model", names: "Same as above",
     status: "Tested; the site's method before record-grouped scoring (October 2026)" },
   { name: "Nearest specimen", how: "Finds the most similar DNA-verified specimens; each species scored by its best match to all your photos",
-    trained: "Same model, or BioCLIP 2 frozen (its image vectors unchanged)", names: "Same as above", status: "Tested; the site's method until October 2026" },
+    trained: "Same model, or BioCLIP 2 (base model, not fine-tuned: its image vectors unchanged)", names: "Same as above", status: "Tested; the site's method until October 2026" },
   { name: "Species average", how: "Compares your photos with each species' average photo", trained: "Same model",
     names: "Same as nearest specimen", status: "Tested" },
   { name: "Trained classifier (small)", how: "A classifier trained on top of finished image features",
@@ -213,7 +213,7 @@ function BarRow({ b, hover, onHover, rank, k }: {
     <div className="grid grid-cols-[minmax(0,16rem)_1fr] items-center gap-3 relative"
          onMouseEnter={() => onHover(b.id)} onMouseLeave={() => onHover(null)}>
       <div className="text-sm leading-tight min-w-0">
-        <span className="font-medium text-[#4a3728]">{label.name}</span>{" "}
+        <span className="font-medium text-[#4a3728]" title={label.tip}>{label.name}</span>{" "}
         <span className="text-muted-foreground">· {label.how}</span>
         {b.served && <span className="ml-1.5 text-[10px] uppercase tracking-wide text-myco-green">on the site</span>}
       </div>
@@ -276,7 +276,7 @@ function DepthTable({ group, reports }: { group: ScoreRun[]; reports: Map<number
                     <td className="pr-4 py-0.5">
                       <span className="inline-flex items-center gap-1.5">
                         <Swatch c={r.external ? OUTSIDE : OURS} />
-                        <span className="font-medium text-[#4a3728]">{label.name}</span>
+                        <span className="font-medium text-[#4a3728]" title={label.tip}>{label.name}</span>
                         <span className="text-muted-foreground">· {label.how}</span>
                       </span>
                     </td>
@@ -410,7 +410,7 @@ function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
             return (
               <div key={r.key} className="grid grid-cols-[minmax(0,16rem)_1fr] items-center gap-3">
                 <div className="text-sm leading-tight min-w-0">
-                  <span className="font-medium text-[#4a3728]">{label.name}</span>{" "}
+                  <span className="font-medium text-[#4a3728]" title={label.tip}>{label.name}</span>{" "}
                   <span className="text-muted-foreground">· {label.how}</span>
                 </div>
                 <div className="flex items-center gap-2 h-6"
@@ -450,7 +450,7 @@ function HeldOutBody({ b, list, pick, setPick, rank, setRank, kPick, setK }: {
                 return (
                   <tr key={row.key}>
                     <td className="pr-4 py-0.5">
-                      <span className="font-medium text-[#4a3728]">{label.name}</span>{" "}
+                      <span className="font-medium text-[#4a3728]" title={label.tip}>{label.name}</span>{" "}
                       <span className="text-muted-foreground">· {label.how}</span>
                     </td>
                     {row.cells.map((c, i) => {
