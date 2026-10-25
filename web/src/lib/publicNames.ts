@@ -77,6 +77,11 @@ export const PUBLIC_METHOD_LABEL: Record<string, string> = {
   "hybrid+prior": "trained classifier + closest specimens + range and season",
   "nearest+prior": "closest specimen + range and season",
   "species-mean+prior": "species average + range and season",
+  "ft-head": "its own classifier",
+  // iNaturalist's computer vision: the best score across a find's photos, with and without
+  // the find's location.
+  "vision-max": "photos only",
+  "combined-max": "photos + location",
 };
 
 export function publicMethodLabel(method: string): string {

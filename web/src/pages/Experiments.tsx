@@ -1,11 +1,16 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { PageHeader } from "@/components/Layout";
+import { Lock } from "lucide-react";
 import { Markdown } from "@/components/Markdown";
-import { api, ApiError, signInUrl } from "@/lib/api";
-import { awaitsDecision, datasetChoices, datasetOf, defaultDataset, EXPERIMENT_STATUSES, filterExperiments,
-         PRE_V1, reproducibilityWords, STATUS_WORDS, statusCounts, type ExperimentStatus } from "@/lib/experiments";
+import { api, ApiError, signInUrl, type Me } from "@/lib/api";
+import { awaitsDecision, datasetOf, EXPERIMENT_STATUSES, PRE_V1, reproducibilityWords, STATUS_WORDS,
+         type ExperimentStatus, type ExperimentSummary } from "@/lib/experiments";
+import { entriesByDay, entryCounts, excerpt, filterEntries, NO_EXPERIMENT_FILTER, nf, shortDay, TEST_SET_LABEL,
+         TEST_SETS, toggle, type ExperimentFilter } from "@/lib/researchView";
+import { ChartCard, ChipRow, ResearchHero, ResearchShell, SearchBox, Section, SourceLine, StatusPill, Tile,
+         Tiles } from "@/components/ResearchKit";
+import { PRIMARY_BUTTON } from "@/components/Explainer";
 
 // Research > Experiments (Steve, 2026-10-09): every experiment recorded so it can be reviewed.
 // Members only: development numbers and unpublished results (experiments/README.md in the private research repo).
@@ -39,75 +44,114 @@ function SignInNote({ error }: { error: unknown }) {
   return <p>The experiments could not be loaded.</p>;
 }
 
+const STATUS_DOT: Record<ExperimentStatus, React.CSSProperties> = {
+  running: { background: "#3987e5" }, adopted: { background: "var(--s1)" }, done: { background: "#a87146" },
+  dropped: { background: "#cfc3b6" }, planned: { background: "#fff", boxShadow: "inset 0 0 0 1.5px #a8968a" },
+};
+const STRIP_ORDER: ExperimentStatus[] = ["running", "adopted", "done", "dropped", "planned"];
+const STATUS_NAMES = Object.fromEntries(EXPERIMENT_STATUSES.map((st) => [st, STATUS_WORDS[st].label])) as Record<ExperimentStatus, string>;
+const DATASET_TABS: ["all" | "v1" | "pre", string][] = [["all", "All"], ["v1", "Release v1"], ["pre", "Pre-v1"]];
+
+export interface ExperimentsData { me?: Me | null; list?: ExperimentSummary[]; skipped?: number; error?: unknown; loading?: boolean }
+
 export function ExperimentsPage() {
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, retry: false });
   const q = useQuery({ queryKey: ["experiments"], queryFn: api.experiments, retry: false });
-  const [status, setStatus] = useState<ExperimentStatus | null>(null);
-  const [picked, setDataset] = useState<string | null>(null);
-  const all = q.data?.experiments ?? [];
-  const choices = datasetChoices(all);
-  const dataset = picked ?? defaultDataset(all);
-  const inDataset = all.filter((e) => datasetOf(e) === dataset);
-  const counts = statusCounts(inDataset);
-  const shown = filterExperiments(all, status, dataset);
-  const chip = (on: boolean) => `rounded-full border px-3 py-1 text-sm ${
-    on ? "border-myco-green bg-myco-green/10 text-myco-green" : "border-[#A87146]/30 bg-white text-gray-700 hover:bg-myco-green/5"}`;
+  return <Experiments me={me.data} list={q.data?.experiments} skipped={q.data?.skipped} error={q.error} loading={q.isPending} />;
+}
+
+/** Research > Experiments (Steve, 2026-10-25: the approved redesign): the registry, members
+ *  only. Signed out, the header and a sign-in button, never the entries (the server refuses
+ *  them, and no count is published). Real titles and short excerpts; no names. */
+export function Experiments(d: ExperimentsData & { initial?: ExperimentFilter }) {
+  const [f, setF] = useState<ExperimentFilter>(d.initial ?? NO_EXPERIMENT_FILTER);
+  const all = d.list ?? [];
+  const c = entryCounts(all);
+  const shown = filterEntries(all, f);
+  const filtered = !!f.q.trim() || f.dataset !== "all" || f.status.length > 0 || f.sets.length > 0;
+  const locked = d.error instanceof ApiError && d.error.status === 401;
+  const tabCount = { all: c.all, v1: c.v1, pre: c.pre };
   return (
-    <>
-      <PageHeader title="Experiments">
-        Every experiment on MycoMap Vision: the question, everything tried, the numbers, and what
-        was decided. Development results, for mycomap.org members. Results come from dataset release
-        v1, which anyone can rebuild; the earlier experiments on the pre-v1 exploratory data are
-        kept, one choice away, as the record of how we got here.
-      </PageHeader>
-      <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-4xl space-y-4">
-        {q.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
-        <SignInNote error={q.error} />
-        {(q.data?.skipped ?? 0) > 0 && (
-          <p className="text-xs text-[#7a5a3a]" data-testid="experiments-skipped">
-            {q.data!.skipped} {q.data!.skipped === 1 ? "entry is" : "entries are"} not shown: still
-            being written, or not yet meeting the registry's rules.
+    <ResearchShell me={d.me}>
+      <ResearchHero crumbs={[{ href: "/research", label: "Research" }, { label: "Experiments" }]} title="Experiments"
+                    top={<StatusPill status="members" label="For mycomap.org members" />}
+                    lede="Every experiment on MycoMap Vision: the question, everything tried, the numbers, and what was decided. Results come from dataset release v1, which anyone can rebuild; earlier entries on the pre-v1 data stay as the record of how we got here.">
+        {all.length > 0 && (
+          <Tiles testId="experiments-tiles">
+            <Tile highlight value={nf(c.all)} label="entries in the registry" />
+            <Tile value={nf(c.v1)} label="rebuilt on dataset release v1" note="same release, code and command give the same numbers" />
+            <Tile value={nf(c.pre)} label="pre-v1 exploratory" note="kept as development history" />
+            <Tile value={nf(c.pending)} label="decisions pending" />
+          </Tiles>
+        )}
+        {all.length > 0 && <SourceLine parts={["/api/experiments (the research repo's experiments/*.md front matter, members only)"]} />}
+      </ResearchHero>
+      <Section testId="section-experiments">
+        {d.loading && !d.error && <p className="small">Loading…</p>}
+        {locked && (
+          <div className="signedout" data-testid="experiments-signed-out">
+            <span className="ic b" style={{ margin: 0, flex: "none" }}><Lock className="h-[18px] w-[18px]" /></span>
+            <div>Experiments are for mycomap.org members.{" "}
+              <a href={signInUrl()} className={`${PRIMARY_BUTTON} ml-1 !py-1.5`}>Sign in</a> to read them.</div>
+          </div>
+        )}
+        {!!d.error && !locked && <p data-testid="experiments-error">The experiments could not be loaded.</p>}
+        {(d.skipped ?? 0) > 0 && (
+          <p className="text-xs text-[#7a5a3a] mb-3" data-testid="experiments-skipped">
+            {d.skipped} {d.skipped === 1 ? "entry is" : "entries are"} not shown: still being written, or not yet meeting the registry's rules.
           </p>
         )}
         {all.length > 0 && (
-          <label className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Dataset:</span>
-            <select className="rounded-md border border-[#A87146]/30 bg-white px-2 py-1 max-w-full min-w-0"
-                    value={dataset} data-testid="experiments-dataset"
-                    onChange={(ev) => { setDataset(ev.target.value); setStatus(null); }}>
-              {choices.map((c) => <option key={c.id} value={c.id}>{c.label} ({c.n})</option>)}
-              {choices.every((c) => c.id === PRE_V1) && (
-                <option value="v1" disabled>Dataset release v1 (first entries coming)</option>
-              )}
-            </select>
-          </label>
+          <>
+            <ChartCard className="mb-3.5" testId="entries-by-day">
+              <div className="flex flex-wrap justify-between gap-2"><h3 className="font-display font-semibold text-[#4a3728]">Entries by day</h3>
+                <div className="legend" style={{ margin: 0 }}>{STRIP_ORDER.map((st) => <span key={st}><i style={{ ...STATUS_DOT[st], borderRadius: "50%" }} />{STATUS_NAMES[st]}</span>)}</div></div>
+              <div className="tline mt-2.5">
+                {entriesByDay(all).map((x) => (
+                  <div key={x.day} className="tcol">
+                    <div className="dots2">{[...x.statuses].sort((a, b) => STRIP_ORDER.indexOf(a) - STRIP_ORDER.indexOf(b)).map((st, i) => (
+                      <i key={i} style={STATUS_DOT[st]} data-tip={`${shortDay(x.day)}|${STATUS_NAMES[st]}`} />))}</div>
+                    <span>{shortDay(x.day).split(" ").slice(0, 2).join(" ")}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="small mt-1.5">Release v1 was cut on 12 October 2026; entries from 13 October on are rebuilt on it.</p>
+            </ChartCard>
+            <div className="fbar" data-testid="experiments-filter">
+              <div className="row">
+                <SearchBox value={f.q} onChange={(q) => setF({ ...f, q })} placeholder="Search: place prior, fine-tune, not a fungus…" label="Search experiments" />
+                <div className="seg ml-auto" role="group" aria-label="Dataset">
+                  {DATASET_TABS.map(([v, l]) => (
+                    <button key={v} type="button" className={f.dataset === v ? "on" : ""} aria-pressed={f.dataset === v}
+                            onClick={() => setF({ ...f, dataset: v })} data-testid={`dataset-${v}`}>{l} {tabCount[v]}</button>
+                  ))}
+                </div>
+              </div>
+              <ChipRow label="Status" values={STRIP_ORDER} chosen={f.status} counts={c.status} words={STATUS_NAMES}
+                       onToggle={(v) => setF({ ...f, status: toggle(f.status, v) })} />
+              <ChipRow label="Test set" values={TEST_SETS} chosen={f.sets} counts={c.sets} words={TEST_SET_LABEL}
+                       onToggle={(v) => setF({ ...f, sets: toggle(f.sets, v) })} />
+            </div>
+            <div className="fsum">
+              <span data-testid="experiments-shown">{filtered ? `Showing ${shown.length} of ${all.length} entries, newest first` : `Showing all ${all.length} entries, newest first`}</span>
+              {filtered && <button type="button" className="clear" onClick={() => setF(NO_EXPERIMENT_FILTER)}>Clear filters</button>}
+            </div>
+            <div className="xlist" data-testid="experiment-list">
+              {shown.map((e) => (
+                <Link key={e.slug} href={`/research/experiments/${e.slug}`} className="xrow" data-testid={`experiment-${e.slug}`}>
+                  <span className="xd">{shortDay(e.date)}</span>
+                  <span className="xm"><b>{e.title}</b><small>{excerpt(e.headline)}</small></span>
+                  <span className="xs"><StatusPill status={e.status} />
+                    <span className={`tag ${datasetOf(e) === PRE_V1 ? "" : "d"}`}>{datasetOf(e) === PRE_V1 ? "Pre-v1 exploratory" : `Release ${datasetOf(e)}`}</span>
+                    {awaitsDecision(e) && <span className="tag" style={{ background: "#fff7e6", color: "#92400e" }}>decision pending</span>}</span>
+                </Link>
+              ))}
+            </div>
+            {!shown.length && <p className="small py-8 text-center" data-testid="experiments-none">No entry matches. <button type="button" className="clear" onClick={() => setF(NO_EXPERIMENT_FILTER)}>Clear filters</button></p>}
+          </>
         )}
-        {inDataset.length > 0 && (
-          <div className="flex flex-wrap gap-2" role="group" aria-label="Filter by status">
-            <button className={chip(status === null)} onClick={() => setStatus(null)}>All ({inDataset.length})</button>
-            {EXPERIMENT_STATUSES.map((s) => (
-              <button key={s} className={chip(status === s)} onClick={() => setStatus(s)}
-                      disabled={!counts[s]}>
-                {STATUS_WORDS[s].label} ({counts[s]})
-              </button>
-            ))}
-          </div>
-        )}
-        {shown.map((e) => (
-          <Link key={e.slug} href={`/research/experiments/${e.slug}`}
-                className="block rounded-lg border border-[#A87146]/20 bg-white p-4 hover:border-myco-green/50 hover:bg-myco-green/5">
-            <span className="flex flex-wrap items-center gap-2">
-              <span className="font-semibold text-[#4a3728]">{e.title}</span>
-              <Status s={e.status} />
-              <Repro r={e.reproducibility} on={e.reproduced_on} />
-              {awaitsDecision(e) && <span className="text-xs text-[#7a5a3a]">decision pending</span>}
-              <span className="text-xs text-muted-foreground ml-auto">{e.date}</span>
-            </span>
-            <p className="text-sm mt-1 text-[#5c4a3a]">{e.headline}</p>
-            <p className="text-sm mt-1 text-muted-foreground">{e.verdict}</p>
-          </Link>
-        ))}
-      </div>
-    </>
+      </Section>
+    </ResearchShell>
   );
 }
 
@@ -122,8 +166,10 @@ export function ExperimentPage({ slug }: { slug: string }) {
     ["Code commit", e.code_commit], ["Reproduce with", e.reproduce_command],
   ] : [];
   return (
-    <>
-      <PageHeader title={e?.title ?? "Experiment"}>{e && e.headline}</PageHeader>
+    <ResearchShell>
+      <ResearchHero crumbs={[{ href: "/research", label: "Research" }, { href: "/research/experiments", label: "Experiments" }, { label: e?.title ?? "Experiment" }]}
+                    title={e?.title ?? "Experiment"} lede={e?.headline}
+                    top={e ? <div className="flex flex-wrap items-center gap-2"><StatusPill status={e.status} /><StatusPill status="members" /></div> : undefined} />
       <article className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-3xl text-[#5c4a3a] leading-relaxed">
         {q.isPending && <p>Loading…</p>}
         {q.error instanceof ApiError && q.error.status === 404 && <p>No such experiment.</p>}
@@ -169,6 +215,6 @@ export function ExperimentPage({ slug }: { slug: string }) {
         )}
         <p className="mt-8 text-sm"><Link href="/research/experiments" className="text-myco-green underline">All experiments</Link></p>
       </article>
-    </>
+    </ResearchShell>
   );
 }

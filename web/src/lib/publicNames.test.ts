@@ -9,7 +9,7 @@ import { modelCredit } from "./howItWorks";
 import { modelLabel } from "./api";
 import { BASE_LABEL } from "./modelChoice";
 import { twoModelLabel, TWO_MODELS } from "./twoModels";
-import { TwoModels } from "../components/TwoModels";
+import { TwoModelsSection } from "../pages/Results";
 
 // Steve, 2026-10-11: outside the Research section the site says "MycoMap Vision", never
 // the backbone it was built on.
@@ -134,7 +134,7 @@ const code = (src: string) => src.replace(/\/\*[^]*?\*\//g, "").replace(/^\s*\/\
 
 test("no fine-tuned model is named BioCLIP 2 anywhere: it is the base model, the credit line or a citation", () => {
   const all = sources();
-  assert.ok(all.some((s) => s.file === "pages/Research.tsx"), all.map((s) => s.file).join(","));
+  assert.ok(all.some((s) => s.file === "pages/Results.tsx"), all.map((s) => s.file).join(","));
   // Every fine-tune id the site's code knows, plus each kind of name.
   const ids = new Set(["bioclip-2-448-ft-20261030-120000", "bioclip-2-ft-sample", "dinov3-l16-ft-20261101-000000"]);
   for (const { text } of all) for (const m of text.matchAll(/\b[a-z0-9-]+-ft-(?:\d{8}-\d{6}|sample)\b/g)) ids.add(m[0]);
@@ -148,8 +148,8 @@ test("no fine-tuned model is named BioCLIP 2 anywhere: it is the base model, the
   }
   for (const m of TWO_MODELS.models) assert.doesNotMatch(twoModelLabel(m), /bioclip/i);
   // Written out in the code, "BioCLIP 2" is only the base model as itself, the credit line, its
-  // citation, its zero-shot gate, or the base model's own name in the table of bases.
-  const allowed = /BioCLIP 2(?= \(base model, not fine-tuned| \(Imageomics\) fine-tuned on DNA-verified records\.|: emergent properties|'s zero-shot| \(Gu et al\. 2025\)|")/g;
+  // citation (its text or BibTeX title), its zero-shot gate, or the base model's own name in a table of bases.
+  const allowed = /BioCLIP 2(?= \(base model, not fine-tuned| \(Imageomics\) fine-tuned on DNA-verified records\.|: [eE]mergent [pP]roperties|'s zero-shot| \(Gu et al\. 2025\)|")/g;
   for (const { file, text } of all) {
     const left = code(text).replace(allowed, "");
     assert.doesNotMatch(left, /BioCLIP 2/, `${file}: BioCLIP 2 named outside the base model and its credit`);
@@ -159,15 +159,17 @@ test("no fine-tuned model is named BioCLIP 2 anywhere: it is the base model, the
 
 test("the credit line is said where the models are explained: Research's two models, Protocols / For researchers, How it works", () => {
   assert.equal(MODEL_CREDIT_LINE, "MycoMap Vision is BioCLIP 2 (Imageomics) fine-tuned on DNA-verified records.");
-  const html = renderToStaticMarkup(createElement(TwoModels));
+  const html = renderToStaticMarkup(createElement(TwoModelsSection));
   const text = html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'");
   assert.ok(text.includes(MODEL_CREDIT_LINE));
   assert.equal((text.match(/BioCLIP/g) ?? []).length, 1, "the two models section names BioCLIP 2 only in the credit line");
-  assert.match(text, /MycoMap Vision v1 \(public \+ non-public training data\)/);
-  assert.match(text, /MycoMap Vision v1-open \(open data only\)/);
-  // Protocols and For researchers both render BaseModel, which says the line.
-  const research = read("pages/Research.tsx");
-  assert.match(research, /function BaseModel\(\)[^]*?\{MODEL_CREDIT_LINE\}/);
-  assert.equal((research.match(/<BaseModel \/>/g) ?? []).length, 2, "Protocols and For researchers");
+  assert.match(text, /MycoMap Vision v1\b/);
+  assert.match(text, /public \+ non-public training data/);
+  assert.match(text, /MycoMap Vision v1-open/);
+  assert.match(text, /open data only/);
+  // Protocols and For researchers both say the line where they explain the models.
+  for (const page of ["pages/Protocols.tsx", "pages/ForResearchers.tsx", "pages/ResearchLanding.tsx"]) {
+    assert.match(read(page), /\{MODEL_CREDIT_LINE\}/, page);
+  }
   assert.equal(modelCredit(SERVED_V1).madeBy, MODEL_CREDIT_LINE, "How it works' model credit");
 });

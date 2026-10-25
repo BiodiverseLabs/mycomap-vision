@@ -64,3 +64,48 @@ export async function fetchOutline(url = "/api/docs/v1.json"): Promise<Outline> 
   if (!res.ok) throw new Error(`The API outline didn't load (${res.status}).`);
   return res.json();
 }
+
+// --- the docs layout (Research > API, the approved redesign) --------------------------------
+
+export type EndpointBlock = Extract<Block, { type: "endpoint" }>;
+
+/** Every endpoint in the outline, in its order, with the section it is in. */
+export function endpointIndex(o: Outline): (EndpointBlock & { section: string })[] {
+  return o.sections.flatMap((s) => s.blocks.filter((b): b is EndpointBlock => b.type === "endpoint")
+    .map((b) => ({ ...b, section: s.id })));
+}
+
+/** How many endpoints answer now, of all listed. */
+export function endpointCounts(o: Outline): { available: number; total: number } {
+  const all = endpointIndex(o);
+  return { available: all.filter((b) => b.status === "available").length, total: all.length };
+}
+
+/** A table of field names and what they mean ("Field", ...): shown as a field list. */
+export const isFieldTable = (b: Block) => b.type === "table" && b.columns[0] === "Field" && b.columns.length === 2;
+/** The errors table ("Status", "code", "When"): each status as a coloured badge. */
+export const isStatusTable = (b: Block) => b.type === "table" && b.columns[0] === "Status";
+/** A status badge's class: 5xx red, everything else amber. */
+export const statusClass = (status: string) => (/^5/.test(status.trim()) ? "e5" : "e4");
+
+export type DocPart =
+  | { kind: "section"; id: string; title: string; blocks: Block[] }
+  | { kind: "cards"; id: string; title: string; cards: { title: string; items: string[] }[] };
+
+/** The page's parts in order: each section as it is, except a run of sections that hold only
+ *  a list (limits, photos, rules), which become one part of side-by-side cards. */
+export function docParts(o: Outline): DocPart[] {
+  const out: DocPart[] = [];
+  for (const s of o.sections) {
+    const onlyList = s.blocks.length > 0 && s.blocks.every((b) => b.type === "list");
+    const last = out[out.length - 1];
+    if (onlyList) {
+      const card = { title: s.title, items: s.blocks.flatMap((b) => (b.type === "list" ? b.items : [])) };
+      if (last?.kind === "cards") { last.cards.push(card); last.title = `${last.title}, ${s.title.toLowerCase()}`; continue; }
+      out.push({ kind: "cards", id: s.id, title: s.title, cards: [card] });
+      continue;
+    }
+    out.push({ kind: "section", id: s.id, title: s.title, blocks: s.blocks });
+  }
+  return out;
+}

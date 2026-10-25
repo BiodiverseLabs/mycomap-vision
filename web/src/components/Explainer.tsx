@@ -67,11 +67,20 @@ export function ExternalLinkText({ href, children }: { href: string; children: R
   );
 }
 
-export function Tile({ value, label }: { value: string; label: string }) {
+/** A hero tile. Research pages add `note` (the test or source under the number, below a
+ *  dashed rule) and `highlight` (the headline tile, ringed in green). */
+export function Tile({ value, label, note, highlight, testId }: {
+  value: string; label: string; note?: React.ReactNode; highlight?: boolean; testId?: string;
+}) {
   return (
-    <div className="min-w-0 rounded-lg border border-[#A87146]/20 bg-white px-4 py-3.5">
+    <div data-testid={testId}
+         className={`min-w-0 rounded-lg border bg-white px-4 py-3.5 ${highlight
+           ? "border-myco-green/55 shadow-[0_0_0_3px_hsl(82_53%_51%/.10)]" : "border-[#A87146]/20"}`}>
       <div className="text-2xl sm:text-[30px] font-semibold leading-tight text-[#4a3728] tabular-nums">{value}</div>
       <div className="text-[13px] leading-snug text-muted-foreground mt-1">{label}</div>
+      {note && (
+        <div className="mt-1.5 border-t border-dashed border-[#ece6de] pt-1.5 text-[11.5px] leading-snug text-[#8a7a6a]">{note}</div>
+      )}
     </div>
   );
 }

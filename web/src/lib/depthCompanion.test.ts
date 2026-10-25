@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DepthCompanion } from "../components/DepthCompanion";
+import { DepthShareBars } from "../components/ResearchKit";
 import { companionBars } from "./compareView";
 
 // Dataset release v1's validation split, the served comparison (record set 36fd876aa871): the
@@ -21,14 +21,17 @@ test("the companion's two bars share out the reference's species and the test fi
 });
 
 test("the chart renders both bars, with each band's share", () => {
-  const html = renderToStaticMarkup(createElement(DepthCompanion, { species: SPECIES, finds: FINDS }));
-  assert.match(html, /data-testid="companion-species"/);
-  assert.match(html, /data-testid="companion-finds"/);
+  const bars = companionBars(SPECIES, FINDS);
+  const html = renderToStaticMarkup(createElement(DepthShareBars, { species: bars.species, finds: bars.finds,
+                                                                     speciesTotal: SPECIES.species }));
+  assert.match(html, /data-testid="depth-bar-species"/);
+  assert.match(html, /data-testid="depth-bar-finds"/);
   assert.match(html, /Species in the reference set \(16,809\)/);
   assert.match(html, /Test finds \(12,798\)/);
-  assert.match(html, /1-4: 66%/);
-  assert.match(html, /1-4: 11%/);
-  assert.match(html, /most finds are of common species/);
-  // Without the reference's species there is nothing to set the finds against.
-  assert.equal(renderToStaticMarkup(createElement(DepthCompanion, { species: null, finds: FINDS })), "");
+  assert.match(html, /1-4 records 66%/);
+  assert.match(html, /1-4 records 11%/);
+  // Without the reference's species, only the finds' bar is drawn.
+  const finds = renderToStaticMarkup(createElement(DepthShareBars, { species: null, finds: bars.finds }));
+  assert.doesNotMatch(finds, /depth-bar-species/);
+  assert.match(finds, /depth-bar-finds/);
 });
