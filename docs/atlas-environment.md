@@ -24,7 +24,7 @@ leave-`val`-out Atlas fit (~$1–8).
 | Prior export (Atlas `feat/vision-prior`, in the final merge batch) | 20 km Albers cells, rank 0–100 (uint8) per taxon, strong maps only, ~5–15 MB; private trained-ids list per release | Atlas memory, 10/9 |
 | Production layers | elevation, bioclim (bio1–19), terrain, soil (SoilGrids), landcover, hosts (genera) + `host_known`, hostsdecay (10 genera), foresttype + `forest_known`. Carbonate bedrock and landform (TWI, northness, heat load) were **dropped** in the 9/30 sweep | `R/layersweep.R` `ATLAS_PRODUCTION_LAYERS`, `R/layers.R` |
 | Grids | live release `draft` = 2.5′ (~5 km); `production` = 0.5′ (~1 km) | `atlas_source_resolution` |
-| Vision box | 4 GB, cgroup cap 3.5 GB; projected v1 working set ~3.1 GB with int8 vectors, so **~0.4 GB headroom** | `docs/retrain-v1.md` §5 |
+| Vision box | 4 GB, cgroup cap 3.5 GB; projected v1 working set ~3.1 GB with int8 vectors, so **~0.4 GB headroom** (status as of 2026-10-25: now 16 GB / 4 vCPU, cap 12G, see §4) | `docs/retrain-v1.md` §5 |
 
 Where the served prior loses records (experiment entry `2026-10-09-prior-tuning`). Test
 split, every truth with a DNA reference, species top-1, nearest + species average → setting
@@ -330,6 +330,11 @@ every reference). **Decided: B (Steve, 2026-10-12).**
   external rasters.
 
 ## 4. Serving cost on the 4 GB box
+
+> **Status as of 2026-10-25:** written for the original 4 GB box (cgroup cap 3.5 GB). The
+> box is now Lightsail 16 GB / 4 vCPU, with a systemd drop-in that raises the server's `MemoryMax` to 12G, so the headroom
+> below is far larger than stated; the table's verdicts were made on the tighter budget
+> and still hold.
 
 | option | RAM | disk | latency | verdict |
 |---|---|---|---|---|

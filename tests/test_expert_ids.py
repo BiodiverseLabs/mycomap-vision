@@ -254,6 +254,11 @@ def test_fetcher_backs_off_on_429_then_caches_so_a_rerun_costs_nothing(tmp_path)
     sleeps = []
     s = FakeSession([FakeResponse(429, headers={"Retry-After": "120"}), FakeResponse(200, RAILS)])
     c = E.HistoryClient(tmp_path, session=s, sleep=sleeps.append)
+    # Time stands still (the sleeps are recorded, not taken): on the real clock a few
+    # microseconds pass between the 429 and the next wait, so the wait was 119.99999 s on a
+    # Linux runner (CI failed on it from 2026-10-13) and exactly 120 only where the clock
+    # is coarse (Windows, ~15 ms).
+    c.pace._clock = lambda: 0.0
     got = c.observation("42")
     assert got["user_id"] == 1 and c.calls == 2
     assert max(sleeps) >= 120                       # honoured Retry-After

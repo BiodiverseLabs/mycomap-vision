@@ -11,7 +11,7 @@ as a **release** in S3.
 
 | Piece | Where |
 | --- | --- |
-| Instance | Lightsail, Ohio (us-east-2, the bucket's region), Ubuntu 24.04, **4 GB RAM**, 2 vCPUs, + 4 GB swap |
+| Instance | Lightsail, Ohio (us-east-2, the bucket's region), Ubuntu 24.04, **16 GB RAM**, 4 vCPUs (as of 2026-10-25; built on the 4 GB, 2 vCPU plan), + 4 GB swap |
 | App | `/var/www/mycomap-vision`, a clone of the repo; `.venv` with CPU-only torch |
 | Research pages | `/var/www/mycomap-vision-research`, a clone of the private research repo (experiments, paper draft) |
 | Server | systemd unit `mycomap-vision`: `mv serve` on 127.0.0.1:8010 (API **and** the built site) |
@@ -39,7 +39,8 @@ the project owner; the rest are run over SSH by an operator.
 ### 1. Create the instance (Steve, Lightsail console)
 
 1. Create instance: **Ohio (us-east-2)**, Linux/Unix, **OS only → Ubuntu 24.04 LTS**,
-   the **4 GB RAM** plan. Name it `mycomap-vision`.
+   the **16 GB RAM** plan (the box began on 4 GB; this guide's memory notes were
+   written for that). Name it `mycomap-vision`.
 2. Networking → **attach a static IP**.
 3. Networking → firewall (IPv4 and IPv6): SSH 22, HTTP 80, HTTPS 443.
 4. Snapshots → turn on **automatic snapshots**.
@@ -391,6 +392,11 @@ fresh layer starts (nearly) empty.
 
 ## Memory on the 4 GB box
 
+> **Status as of 2026-10-25:** this section was written for the original 4 GB box. The box
+> is now Lightsail 16 GB / 4 vCPU, with a systemd drop-in that raises the server's `MemoryMax` to 12G (an override file under
+> `/etc/systemd/system/mycomap-vision.service.d/`). The measurements below still describe
+> what the server uses.
+
 Since 2026-10-12 (Steve: v1 stays on the 4 GB box) the reference vectors can ship as int8
 (`mv release --int8-vectors`): half the vector memory, the same answers within the
 pre-declared check (docs/retrain-v1.md section 5); `/api/health` → `vectors` says which a
@@ -420,10 +426,11 @@ What is where:
   `MV_INDEX_WAIT_SECONDS`, default 20) or get "try again shortly".
 - The index's own tables, ~70 MB (`identify.Specimens`). Building one needs
   ~0.5 GB for a few seconds while the records are read.
-- Uploaded photos, kept at twice the model's input size (448 px for BioCLIP 2),
+- Uploaded photos, kept at twice the model's input size (672 px for the 336 px v1),
   ~1 MB each (`uploads.py`).
 
-`MemoryMax=3500M` in the unit makes the server restart rather than starve sshd.
+`MemoryMax=3500M` in the unit (12G on the 16 GB box, through its drop-in) makes the
+server restart rather than starve sshd.
 `journalctl -u mycomap-vision` shows when that happens.
 
 ## Human Feedback queues and the paper's seal

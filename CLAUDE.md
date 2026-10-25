@@ -93,3 +93,32 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
 - Tests next to every change: `.venv/Scripts/python -m pytest -q`. Name tests
   after the rule they protect, and check a new test fails when the guard is broken.
 - Windows host: use Git Bash or PowerShell, not WSL.
+
+## Running the tests (notes for agents)
+
+- **The full Python suite is slow:** about 10–15 minutes on a laptop CPU, about 7 minutes
+  on CI. Run the files you touched while you work and the full suite once before you
+  finish, with a command timeout to match.
+- **Run it CPU-only by patching torch, never with `CUDA_VISIBLE_DEVICES=-1`** (that
+  segfaults the torch suites, and an empty value doesn't hide the GPU). Use a small
+  wrapper, kept outside the repo, that makes torch report no GPU before pytest starts:
+  ```python
+  # cpu_pytest.py
+  import sys, torch
+  torch.cuda.is_available = lambda: False
+  import pytest
+  sys.exit(pytest.main(sys.argv[1:]))
+  ```
+  Then `PYTHONPATH=src .venv/Scripts/python cpu_pytest.py -q`. CI installs no torch, so
+  the torch tests skip there.
+- **On Linux, raise the open-file limit first** (`ulimit -n 65536`, as on CI's runners).
+  The full suite holds over 2,500 files open at once (SQLite stores the tests leave open),
+  so under the common soft limit of 1024 most tests past the first tenth error out.
+- **Web tests one file at a time, with a memory cap.** From `web/`:
+  `NODE_OPTIONS=--max-old-space-size=4096 node --import tsx --test src/lib/<file>.test.ts`.
+  `pnpm test` runs every file in one process; that is fine on CI's own runner, but on a
+  shared machine a runaway render test can take all its memory.
+- **Tests need no private data and no network.** A test that truly needs a private file
+  or service skips with its reason (`pytest.skip(...)`). CI runs on a clean Linux runner
+  with `requirements/dev.txt` only, so a test that passes on your laptop because of your
+  `data/`, `.env`, torch or the research checkout fails there.

@@ -4,6 +4,10 @@ Status: **specification (2026-10-09); the builder is on main** (`mv dataset ...`
 `dataset_release.py`). Release v1 is **not** cut until the project owner gives the freeze
 trigger (docs/PLAN.md, "a reproducible dataset release": freeze gate G1–G8).
 
+> **Status as of 2026-10-25:** release v1 was cut on 2026-10-12 (169,135 records: 155,781
+> train, 13,354 validation; 680,047 photos). The status line above is the specification as
+> written before the cut.
+
 Steve, 2026-10-09: every experiment so far is exploratory because the data drifted. Once
 labelling and photo inclusion are final, we cut an immutable **dataset release** and re-run
 every experiment on it, reproducible by anyone. The Picek/FungiTastic replication and Vision

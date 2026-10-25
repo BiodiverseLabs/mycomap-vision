@@ -2,7 +2,7 @@
 # Installed by provision.sh as /etc/systemd/system/mycomap-vision.service.
 #
 # One process on purpose: the model and the reference vectors live in its memory,
-# and a second worker would need a second copy the 4 GB box doesn't have.
+# and a second worker would need a second copy of them.
 
 [Unit]
 Description=MycoMap Vision (API and site)
@@ -17,8 +17,11 @@ EnvironmentFile=/etc/mycomap-vision/vision.env
 ExecStart=/var/www/mycomap-vision/.venv/bin/mv serve --host 127.0.0.1 --port 8010
 Restart=on-failure
 RestartSec=5
-# Leave room for nginx and sshd on the 4 GB box: the server is killed and
-# restarted before it can starve the machine.
+# Leave room for nginx and sshd: the server is killed and restarted before it
+# can starve the machine. 3500M suits a 4 GB box, where this unit began; the live
+# box (16 GB / 4 vCPU as of 2026-10-25) raises it to 12G with a drop-in,
+# /etc/systemd/system/mycomap-vision.service.d/*.conf ([Service] MemoryMax=12G).
+# Size it to the box: total RAM less ~0.5 GB for the rest.
 MemoryMax=3500M
 NoNewPrivileges=true
 PrivateTmp=true

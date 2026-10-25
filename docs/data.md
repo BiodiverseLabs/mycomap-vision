@@ -91,7 +91,9 @@ read.
 
 ## Photo permission
 
-Photographers answer on mycomap.org (its `docs/vision-photo-permissions.md`).
+Photographers grant, decline or withdraw permission on mycomap.org, signed in to their
+account there. (How mycomap.org asks and stores those answers is documented in its own
+codebase, which is not public.)
 `mv serve` reads the answers every 5 minutes from mycomap.org's
 `/api/vision/photo-permissions` (settings `MV_ORG_BASE_URL`, `MV_ORG_VISION_KEY`;
 `mv permissions --sync` does it by hand, `mv permissions` shows where they stand):

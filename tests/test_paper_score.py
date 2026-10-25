@@ -492,11 +492,14 @@ def test_the_configs_erratum_is_pinned_and_a_different_cli_one_is_refused(world,
         run(world, tmp_path, "val", config(tmp_path, ["5", "6"], errata=block))
 
 
-def test_config_paths_resolve_under_the_data_folder_and_the_research_repo():
+def test_config_paths_resolve_under_the_data_folder_and_the_research_repo(tmp_path):
     from mycomap_vision import config as cfg
     assert paper_score.resolve("data/x/y.tsv") == cfg.DATA_DIR / "x" / "y.tsv"
     assert paper_score.resolve("paper/e21.csv") == cfg.RESEARCH_DIR / "paper" / "e21.csv"
-    assert paper_score.resolve("C:/abs/z.tsv").is_absolute()
+    # An absolute path is kept as given. tmp_path is absolute on every platform; "C:/..."
+    # is absolute only on Windows, so this failed on CI's Linux runner.
+    absolute = tmp_path / "abs" / "z.tsv"
+    assert paper_score.resolve(str(absolute)) == absolute
 
 
 def test_the_cc_reference_row_uses_only_photos_a_public_model_may_learn_from(world, tmp_path):
