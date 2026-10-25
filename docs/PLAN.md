@@ -833,7 +833,7 @@ recipe is the paper's baseline. It separates method from data: if it does about 
 as Vision on the same records, the gap to the published Danish numbers is data; if it
 does better, so is the method.
 
-**Recipe** (`replications/fungitastic/retrain.py`, its constants in `presets.py`; preset
+**Recipe** (`src/mycomap_vision/replications/fungitastic/retrain.py`, its constants in `presets.py`; preset
 `fungitastic-beit-b384`; sources are the HF config of
 BVRA/beit_base_patch16_384.in1k_ft_fungitastic_384, BohemianVRA/FungiTastic
 baselines/closed_set/train.py and the fgvc library):
@@ -1196,7 +1196,8 @@ merged the branch.
 - API for mycomap.org (FungAI, Validate Records, record pages).
 
 Hosting kit built 2026-09-29 (docs/deploy.md, deploy/lightsail/): 4 GB Lightsail
-box (Steve's choice; 8 GB if the full index won't fit), CPU inference only, all GPU
+box (Steve's choice; 8 GB if the full index won't fit; status as of 2026-10-25: now
+Lightsail 16 GB / 4 vCPU, the server capped by a `MemoryMax=12G` drop-in), CPU inference only, all GPU
 work stays on the self-terminating instances. The site reads **releases** from S3
 (`mv release` / `mv pull-release`, checksummed, previous kept for rollback) through
 a read-only IAM user. Sign-in reuses mycomap.org's bridge (Steve: anyone with a
@@ -1207,7 +1208,8 @@ the public key.
 
 The box only answers; **all training runs on the EC2 GPU instance** (the box has
 MV_FIT_ON_DEMAND=0 and offers only methods whose training ships in a release).
-Today: nearest specimen, ~2-3 s a photo on the 4 GB box, fine while use is light.
+Then (2026-09-29): nearest specimen, ~2-3 s a photo on the 4 GB box, fine while use is
+light (the box is now 16 GB / 4 vCPU, status as of 2026-10-25).
 Lightsail CPUs are burstable: sustained use (or any heavy job) spends the credits
 and throttles the box to ~1/5 speed, so real traffic means moving the answering to
 a non-burstable compute instance.

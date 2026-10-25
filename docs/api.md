@@ -65,11 +65,11 @@ answered from a proxy's cache.
 
 **Input guidance** (also on the developer page):
 
-- **Size.** The model sees 224 × 224 px. Vision keeps each photo at 448 px on its
-  shorter side and shrinks anything larger. **A long side of 640–1024 px is plenty**,
+- **Size.** The model sees 336 × 336 px. Vision keeps each photo at twice that on its
+  shorter side (672 px) and shrinks anything larger. **A long side of 640–1024 px is plenty**,
   JPEG quality 80–85, roughly 100–250 KB. Bigger files cost upload and decode time and
-  change nothing: vectors from a 448-px copy match the full-size photo's at
-  cosine ≥ 0.9997. Hard limits: 25 MB a file, 80 MB a request, 210 MP for a JPEG (decoded at reduced size), 60 MP for other formats.
+  change nothing: vectors from a copy at twice the model's input match the full-size
+  photo's at cosine ≥ 0.9997. Hard limits: 25 MB a file, 80 MB a request, 210 MP for a JPEG (decoded at reduced size), 60 MP for other formats.
 - **Date.** Keep EXIF `DateTimeOriginal`, or send `observed_on`. Many resizers drop EXIF;
   send `observed_on` then.
 - **Place.** Optional: fields or EXIF GPS, used for scoring only, never kept. Strip GPS

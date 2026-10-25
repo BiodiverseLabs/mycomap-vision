@@ -27,9 +27,12 @@ never will be:
 ## The public API
 
 `mv serve` limits what a caller can make it do: at most 10 photos and 80 MB per
-request, 25 MB and 40 megapixels per photo (checked before decoding), a request
-rate per address (`MV_RATE_LIMIT`), a cap on identifications waiting for the GPU
-(`MV_MAX_QUEUE`), and only approved backbones (`MV_ALLOWED_BACKBONES`). It only
+request, 25 MB per photo, and a pixel limit checked before decoding: a JPEG up to
+210 megapixels (decoded at reduced size) and any other format up to 60 megapixels.
+Only photo formats are decoded: JPEG (including MPO, as many phones save it), PNG,
+WebP, HEIC/HEIF and AVIF; anything else is refused unread. It also limits the request
+rate per address (`MV_RATE_LIMIT`), caps the identifications waiting for the GPU
+(`MV_MAX_QUEUE`), and loads only approved backbones (`MV_ALLOWED_BACKBONES`). It only
 reads its data. When it runs behind a proxy, configure the proxy to pass the real
 client address (and uvicorn's `--proxy-headers` with a trusted `--forwarded-allow-ips`)
 so the per-address limit applies to callers, not to the proxy.

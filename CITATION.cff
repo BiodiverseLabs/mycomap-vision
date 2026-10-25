@@ -7,6 +7,11 @@ authors:
     family-names: Russell
     affiliation: MycoMap.org
   - name: "MycoMap contributors"
+# MycoMap Vision v1: BioCLIP 2 fine-tuned at 336 px on dataset release v1 (frozen
+# 2026-10-12), named v1 on the site on 2026-10-23. A preferred-citation is added once a
+# release has a DOI.
+version: "v1"
+date-released: "2026-10-23"
 license: MIT
 url: "https://vision.mycomap.org"
 repository-code: "https://github.com/BiodiverseLabs/mycomap-vision"
@@ -16,3 +21,24 @@ keywords:
   - computer vision
   - biodiversity
   - DNA barcoding
+references:
+  # The base model MycoMap Vision fine-tunes (https://imageomics.github.io/bioclip-2/).
+  - type: article
+    title: "BioCLIP 2: emergent properties from scaling hierarchical contrastive learning"
+    authors:
+      - family-names: Gu
+        given-names: Jianyang
+      - family-names: Stevens
+        given-names: Samuel
+      - family-names: Campolongo
+        given-names: Elizabeth G.
+      - name: "et al."
+    year: 2025
+    journal: arXiv
+    identifiers:
+      - type: other
+        value: "arXiv:2505.23883"
+        description: "arXiv identifier"
+    url: "https://arxiv.org/abs/2505.23883"
+    institution:
+      name: Imageomics Institute

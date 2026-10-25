@@ -40,8 +40,9 @@ sudo apt-get install -y -qq git curl build-essential python3 python3-venv python
   sqlite3 nginx certbot fonts-dejavu-core   # fonts: link-preview cards (linkcards.py)
 command -v aws >/dev/null || sudo snap install aws-cli --classic
 
-# The model (~1.7 GB), the reference vectors and the manifest share 4 GB of RAM;
-# swap keeps a spike from killing the server.
+# The model (~1.7 GB), the reference vectors and the manifest share the box's RAM
+# (4 GB when this was written; 16 GB as of 2026-10-25); swap keeps a spike from
+# killing the server.
 if ! swapon --show | grep -q /swapfile; then
   echo "==> Adding ${SWAP_GB} GB swap"
   sudo fallocate -l "${SWAP_GB}G" /swapfile

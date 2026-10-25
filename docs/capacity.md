@@ -6,12 +6,16 @@ done; the server was untouched and healthy before and after. CPU steal was 0–2
 runs, so the box had **full CPU credits**: these are best-case figures. Steve decides the
 box; the recommendation is at the end.
 
+> **Status as of 2026-10-25:** this note is historical. Its figures were measured on the
+> original 4 GB, 2 vCPU box. The box has since moved to Lightsail 16 GB / 4 vCPU, with a systemd drop-in that raises the server's `MemoryMax` to 12G (option F
+> below). Read the 4 GB limits here as the reasons for that move, not as today's box.
+
 ## The box
 
 Lightsail 4 GB, "2 vCPUs" = **one physical core with hyperthreading** (Xeon Platinum
 8259CL, Cascade Lake, AVX-512 VNNI), burstable on CPU credits. 605,204 reference photos
 (592,926 in the release + 12,278 added by nightly runs), 174,462 records, 19,728 names,
-1,545 genera. It is staying 4 GB for now (Steve).
+1,545 genera. It was staying 4 GB at the time (Steve); see the status note above.
 
 ## What one identification costs
 

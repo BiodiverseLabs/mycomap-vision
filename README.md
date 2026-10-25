@@ -23,28 +23,41 @@ updates as new records are validated on mycomap.org; and a public API (v1) for
 developers, mycomap.org and its mobile app, with keys from mycomap.org
 ([docs/api.md](docs/api.md), [vision.mycomap.org/research/api](https://vision.mycomap.org/research/api)).
 
-**Accuracy so far** (top-1; exploratory, measured on a dataset that was still
-changing, see below):
+**The model, MycoMap Vision v1**, is [BioCLIP 2](https://imageomics.github.io/bioclip-2/)
+(Imageomics) fine-tuned on the DNA-verified records of dataset release v1, reading
+photos at 336 × 336 px. A twin, **MycoMap Vision v1-open**, is trained the same way on
+openly licensed (Creative Commons) photos only, so that it can one day be released
+with its data; on photos alone it scores within half a point of v1 (species top-1
+55.9% vs 56.3% on the same finds).
 
-| Benchmark | Species | Genus | Family |
-| --- | --- | --- | --- |
-| Newest 4 weeks of validated records (1,152 records), nearest specimen | 34.5% | 71.6% | 79.7% |
-| Same records, nearest + species average (served) | 38.4% | | |
-| Held-out test set (10,143 records), nearest + species average | 54.2% | 83.5% | |
+**Accuracy** of v1 as served (photos plus the place prior) on dataset release v1's
+validation split, record-grouped (each find counts once, scored over all its photos):
 
-Accuracy follows how many DNA-verified references a species has: on a sample,
-genera with 100+ references matched iNaturalist's model, and the gap was in genera
-with few or none. A full
+| Rank | n | Top-1 | Top-3 | Top-5 | Top-10 |
+| --- | --- | --- | --- | --- | --- |
+| Species | 12,798 | 59.2% | 75.3% | 80.2% | 85.1% |
+| Genus | 12,865 | 85.8% | 93.9% | 95.7% | 97.3% |
+| Family | 12,759 | 90.6% | 96.3% | 97.6% | 98.5% |
+
+The live figures are public at
+[vision.mycomap.org/api/how-good](https://vision.mycomap.org/api/how-good); the method,
+breakdowns and benchmarks are on the site's [Research](https://vision.mycomap.org/research)
+pages ([Results](https://vision.mycomap.org/research/results)). These are validation
+numbers, not a final test: a sealed test set (`v1-test`, records validated after v1 was
+cut) is scored once, after it closes.
+
+Accuracy follows how many DNA-verified references a species has: species with 100+
+references are named first about 77% of the time, species with 1–4 about 20%, and a
+species with none cannot be named at all. On a sample, genera with 100+ references
+matched iNaturalist's model, and the gap was in genera with few or none. A full
 comparison with iNaturalist's computer vision is still to come.
 
 **Dataset release v1** was frozen on 12 October 2026: 169,135 records (155,781 train,
 13,354 validation) and 680,047 photos, so anyone can reproduce every result
-([docs/dataset-release.md](docs/dataset-release.md)). The model retrained on it under a
-pre-declared evaluation ([docs/retrain-v1.md](docs/retrain-v1.md)) is adopted and goes
-live shortly; its official numbers on v1's validation split will be on the site's
-Results page, and every earlier experiment is being re-run on v1. The numbers above are
-development numbers, not final results. A sealed test set (`v1-test`, records validated
-after v1 was cut) is scored once, after it closes.
+([docs/dataset-release.md](docs/dataset-release.md)). The v1 retrain followed a
+pre-declared evaluation ([docs/retrain-v1.md](docs/retrain-v1.md)). Lower numbers
+elsewhere in the docs (for example 34.5% or 54.2% species top-1) are development
+numbers from earlier models on a dataset that was still changing, kept as history.
 
 ## How it works
 
@@ -118,6 +131,7 @@ shadows the Unix `mv` in an activated venv.
 
 | Doc | For | What it covers |
 | --- | --- | --- |
+| [docs/README.md](docs/README.md) | everyone | every doc, one line each, with the historical ones marked |
 | [docs/data.md](docs/data.md) | everyone | which records are used; labels, photos, licences, photographer permissions |
 | [docs/cli.md](docs/cli.md) | developers | the pipeline and every `mv` command |
 | [docs/api.md](docs/api.md) | developers | the public API (v1): credentials, requests, the answer, errors, quotas |
@@ -182,4 +196,8 @@ tests. Report security problems privately (see [SECURITY.md](SECURITY.md)). Cont
 The code is released under the [MIT License](LICENSE). The licence covers this
 repository's code and documentation only. It does not cover the photos, records or
 trained models, which are not in the repository (see [Data and privacy](#data-and-privacy)).
+One image in the repository is not MIT: the photo in `web/public/og-card.jpg` (the site's
+link-preview card) is Jesse Bauer's, from [Unsplash](https://unsplash.com/photos/pzwH-a4aF3s),
+used under the [Unsplash License](https://unsplash.com/license); its source is recorded
+in `scripts/make_og_card.py`.
 If you use MycoMap Vision in research, please cite it ([CITATION.cff](CITATION.cff)).
