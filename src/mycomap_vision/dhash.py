@@ -53,8 +53,9 @@ def pillow_version() -> str:
 def dhash64(body: bytes) -> int:
     """The 64-bit difference hash of an image file's bytes."""
     from PIL import Image, ImageOps
-    img = Image.open(io.BytesIO(body))
-    if img.format == "JPEG":
+    from .guards import JPEG_FAMILY, photo_formats
+    img = Image.open(io.BytesIO(body), formats=photo_formats())
+    if img.format in JPEG_FAMILY:
         img.draft("L", (64, 64))
     img = ImageOps.exif_transpose(img).convert("L")
     px = np.asarray(img.resize((9, 8), Image.Resampling.LANCZOS), dtype=np.int16)

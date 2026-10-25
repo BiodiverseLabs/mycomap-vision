@@ -389,7 +389,8 @@ def _shrink(body: bytes, max_side: int) -> bytes:
     import io
 
     from PIL import Image, ImageOps
-    img = ImageOps.exif_transpose(Image.open(io.BytesIO(body))).convert("RGB")
+    from .guards import photo_formats
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(body), formats=photo_formats())).convert("RGB")
     if max(img.size) <= max_side:
         return body
     img.thumbnail((max_side, max_side))

@@ -36,6 +36,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from .guards import photo_formats
 from .settled import runner_up, settled
 
 SITE_NAME = "MycoMap Vision"
@@ -407,7 +408,7 @@ def run_card_jpeg(photos: list[bytes], h: Headline, logo: Image.Image | None = N
     card = Image.new("RGBA", CARD_SIZE, (24, 24, 22, 255))
     shown = photos[:5]
     for body, (x, y, w, hh) in zip(shown, tiles(len(shown))):
-        with Image.open(io.BytesIO(body)) as img:
+        with Image.open(io.BytesIO(body), formats=photo_formats()) as img:
             img = ImageOps.exif_transpose(img).convert("RGB")
             card.paste(ImageOps.fit(img, (w, hh), Image.LANCZOS), (x, y))
     band = 230

@@ -28,6 +28,21 @@ MAX_JPEG_PIXELS = 210_000_000     # JPEG: the 200 MP phones, decoded in draft
 # Pillow refuses anything past twice this on its own; keep that backstop in line.
 Image.MAX_IMAGE_PIXELS = MAX_JPEG_PIXELS
 
+# The only decoders a photo from outside (an upload, iNat, Mushroom Observer) ever reaches:
+# Image.open(..., formats=PHOTO_FORMATS). Pillow has dozens more (TIFF, FPX, MIC, PDF, ...),
+# where most of its advisories live (41 against 12.3.0, October 2026); none is needed for a
+# photo. MPO is how Pillow names many phone JPEGs; HEIF comes from pillow-heif.
+PHOTO_FORMATS = ("JPEG", "MPO", "PNG", "WEBP", "HEIF", "AVIF")
+JPEG_FAMILY = ("JPEG", "MPO")      # decoded in draft (reduced scale)
+
+
+def photo_formats() -> tuple[str, ...]:
+    """PHOTO_FORMATS this Pillow can open, for Image.open(formats=...): every plugin
+    registered first (Pillow raises KeyError on a format it hasn't loaded yet), and one
+    that isn't installed (HEIF without pillow-heif, AVIF on an old Pillow) left out."""
+    Image.init()
+    return tuple(f for f in PHOTO_FORMATS if f in Image.OPEN)
+
 
 class TooLarge(ValueError):
     pass
@@ -37,7 +52,7 @@ def check_image_size(img: Image.Image, max_pixels: int | None = None) -> None:
     """Refuse an image by its declared size, before its pixels are decoded: past
     MAX_JPEG_PIXELS for a JPEG (decoded in draft), past MAX_PIXELS for anything else."""
     if max_pixels is None:
-        max_pixels = MAX_JPEG_PIXELS if img.format == "JPEG" else MAX_PIXELS
+        max_pixels = MAX_JPEG_PIXELS if img.format in JPEG_FAMILY else MAX_PIXELS
     w, h = img.size
     if w * h > max_pixels:
         raise TooLarge(f"{w}x{h} pixels is over the {max_pixels // 1_000_000} MP limit")

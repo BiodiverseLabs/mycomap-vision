@@ -53,7 +53,8 @@ class Backbone(Protocol):
 
 
 def decode(body: bytes) -> Image.Image:
-    img = Image.open(io.BytesIO(body))
+    from .guards import photo_formats
+    img = Image.open(io.BytesIO(body), formats=photo_formats())
     img = ImageOps.exif_transpose(img)
     return img.convert("RGB")
 

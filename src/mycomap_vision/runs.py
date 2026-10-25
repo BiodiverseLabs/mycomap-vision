@@ -55,7 +55,7 @@ from typing import Callable
 
 from PIL import Image, ImageOps
 
-from .guards import check_image_size
+from .guards import check_image_size, photo_formats
 
 ID_BYTES = 12                              # 16 url-safe characters
 ID_PATTERN = r"[A-Za-z0-9_-]{16}"
@@ -85,7 +85,7 @@ def observation_run_id(secret: bytes, answer_key: str, answered_at: str) -> str:
 def small_copy(body: bytes, side: int = COPY_SIDE) -> bytes:
     """A JPEG at most `side` px on its long side, drawn from the photo's pixels (turned the
     way its EXIF says first): nothing of the file's metadata is written."""
-    with Image.open(io.BytesIO(body)) as img:
+    with Image.open(io.BytesIO(body), formats=photo_formats()) as img:
         check_image_size(img)
         img = ImageOps.exif_transpose(img).convert("RGB")
         img.thumbnail((side, side), Image.LANCZOS)

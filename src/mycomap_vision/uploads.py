@@ -24,7 +24,7 @@ import warnings
 from PIL import Image, ImageOps
 
 from .exif import place_and_date
-from .guards import check_image_size
+from .guards import JPEG_FAMILY, check_image_size, photo_formats
 
 # HEIC/HEIF, the format iPhones and Samsung phones save by default: refused as "not an
 # image we can read" until 2026-10-25 (three refusals in a day's log). pillow-heif is in
@@ -75,10 +75,10 @@ def decode_upload(body: bytes, side: int) -> tuple[Image.Image, tuple]:
     date)). Refuses an image too large in pixels before decoding it (TooLarge)."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-        img = Image.open(io.BytesIO(body))
+        img = Image.open(io.BytesIO(body), formats=photo_formats())
     check_image_size(img)
     found = place_and_date(img)              # first: shrinking drops the EXIF
-    if img.format == "JPEG":
+    if img.format in JPEG_FAMILY:
         draft = side * DRAFT_MARGIN
         img.draft("RGB", (draft, draft))
     ImageOps.exif_transpose(img, in_place=True)

@@ -296,6 +296,22 @@ def test_an_unreadable_upload_is_refused_and_logged_with_its_type_and_reason(
     assert "UnidentifiedImageError" in line[0] and "x.jpg" not in line[0]
 
 
+def test_only_photo_formats_are_ever_decoded(conn, tmp_path):
+    """A TIFF (or any format past JPEG/MPO/PNG/WebP/HEIF/AVIF) never reaches its decoder:
+    Pillow's other decoders carry most of its advisories (41 against 12.3.0)."""
+    client = app_with_model(conn, tmp_path)
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (247, 0, 0)).save(buf, "TIFF")
+    res = client.post("/api/identify", files=[("photos", ("x.tif", buf.getvalue(), "image/tiff"))])
+    assert res.status_code == 400 and "not an image we can read" in res.json()["detail"]
+    for fmt in ("PNG", "WEBP", "JPEG"):
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 48), (247, 0, 0)).save(buf, fmt)
+        ok = client.post("/api/identify", files=[("photos", (f"x.{fmt}", buf.getvalue(),
+                                                             f"image/{fmt.lower()}"))])
+        assert ok.status_code == 200, (fmt, ok.text)
+
+
 def test_the_jpeg_limit_is_far_higher_but_not_unlimited():
     from mycomap_vision.guards import MAX_JPEG_PIXELS, MAX_PIXELS, TooLarge, check_image_size
 
