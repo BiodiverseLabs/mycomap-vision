@@ -26,6 +26,16 @@ from PIL import Image, ImageOps
 from .exif import place_and_date
 from .guards import check_image_size
 
+# HEIC/HEIF, the format iPhones and Samsung phones save by default: refused as "not an
+# image we can read" until 2026-10-25 (three refusals in a day's log). pillow-heif is in
+# the serve extra; without it (a laptop with only the dev extra) HEIC stays unreadable.
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HEIF = True
+except ImportError:                                   # pragma: no cover - serve extra
+    HEIF = False
+
 SIDE_MARGIN = 2          # kept shorter side = 2 x the model's input side
 DRAFT_MARGIN = 4         # JPEG draft decoding only down to 4 x the kept side
 # Before any model is loaded: the largest input side among the offered backbones

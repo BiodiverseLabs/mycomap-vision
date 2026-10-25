@@ -242,7 +242,10 @@ def read_photo(upload: UploadFile, side: int = uploads.kept_side([]),
         decoded = uploads.decode_upload(body, side)
     except TooLarge as e:
         raise HTTPException(413, f"{upload.filename}: {e}")
-    except Exception:
+    except Exception as e:
+        # What it was and why, so a refusal can be traced (the bytes and name stay out).
+        print(f"[upload] unreadable: {upload.content_type or '?'}, {len(body)} bytes, "
+              f"starts {body[:12].hex()}: {type(e).__name__}: {str(e)[:160]}", flush=True)
         raise HTTPException(400, f"{upload.filename} is not an image we can read")
     if hashes is not None:                  # after the size check: never hash a bomb
         try:

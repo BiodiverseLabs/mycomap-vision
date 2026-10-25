@@ -271,6 +271,31 @@ def test_a_48_megapixel_phone_jpeg_is_identified_not_refused(conn, tmp_path):
     assert res.json()["results"][0]["ranks"]["species"][0]["name"] == "A x"
 
 
+def test_a_heic_phone_photo_is_identified_not_refused(conn, tmp_path):
+    """iPhones and Samsung phones save HEIC; three were refused as unreadable on 2026-10-24."""
+    pillow_heif = pytest.importorskip("pillow_heif")
+    client = app_with_model(conn, tmp_path)
+    heif = pillow_heif.from_pillow(Image.new("RGB", (640, 480), (247, 0, 0)))
+    buf = io.BytesIO()
+    heif.save(buf, quality=90)
+    res = client.post("/api/identify", files=[("photos", ("IMG_0001.HEIC", buf.getvalue(),
+                                                          "image/heic"))],
+                      data={"models": "m1/nearest"})
+    assert res.status_code == 200, res.text
+    assert res.json()["results"][0]["ranks"]["species"][0]["name"] == "A x"
+
+
+def test_an_unreadable_upload_is_refused_and_logged_with_its_type_and_reason(
+        conn, tmp_path, capsys):
+    client = app_with_model(conn, tmp_path)
+    res = client.post("/api/identify", files=[("photos", ("x.jpg", b"not a photo at all",
+                                                          "image/jpeg"))])
+    assert res.status_code == 400 and "not an image we can read" in res.json()["detail"]
+    line = [x for x in capsys.readouterr().out.splitlines() if x.startswith("[upload]")]
+    assert line and "image/jpeg" in line[0] and "18 bytes" in line[0]
+    assert "UnidentifiedImageError" in line[0] and "x.jpg" not in line[0]
+
+
 def test_the_jpeg_limit_is_far_higher_but_not_unlimited():
     from mycomap_vision.guards import MAX_JPEG_PIXELS, MAX_PIXELS, TooLarge, check_image_size
 
