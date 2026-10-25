@@ -3,6 +3,7 @@
 import type { Answered } from "./keptRun";
 import type { PublishedBenchmark } from "./compareView";
 import type { Experiment, ExperimentSummary } from "./experiments";
+import type { InatView } from "./inatSuggestions";
 import { modelName, modelTooltip, sendWaitingInLine } from "./publicView";
 
 export type Rank = "family" | "genus" | "species";
@@ -1065,8 +1066,8 @@ export const api = {
    *  `onSent(fraction)`: how much of the photos has been sent, 0 to 1, for each try. */
   async identify(photos: File[], models: string[], where: Where = {},
                  onWait?: (attempt: number, seconds: number) => void,
-                 onSent?: (fraction: number) => void, include: number[] = []):
-      Promise<{ results: IdentifyResult[]; context_used: ContextUsed; run?: RunRef }> {
+                 onSent?: (fraction: number) => void, include: number[] = [], inatRef?: string):
+      Promise<{ results: IdentifyResult[]; context_used: ContextUsed; run?: RunRef; inat?: InatView }> {
     const form = new FormData();
     photos.forEach((p) => form.append("photos", p));
     form.append("models", models.join(","));
@@ -1077,6 +1078,7 @@ export const api = {
       form.append("lng", where.lng.trim());
     }
     if (where.observedOn) form.append("observed_on", where.observedOn);
+    if (inatRef) form.append("inat_ref", inatRef);
     const res = await sendWaitingInLine(
       () => postWithProgress("/api/identify", form, onSent), onWait);
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
@@ -1118,7 +1120,15 @@ export interface RunView {
   photos: number;
   mine: boolean;
   can_delete: boolean;
+  /** iNaturalist's suggestions, for the person who ran it only (inat_suggest.py). */
+  inat?: InatView;
 }
+
+/** iNaturalist's suggestions while they are still on their way (inat_suggest.py). */
+export const inatApi = {
+  now: (ref: string, visionFailed = false) => getJson<{ inat: InatView | null }>(
+    `/api/inat-suggestions/${encodeURIComponent(ref)}${visionFailed ? "?vision=failed" : ""}`),
+};
 
 export const runApi = {
   open: (id: string) => getJson<RunView>(`/api/runs/${encodeURIComponent(id)}`),

@@ -65,6 +65,7 @@ COPY_SIDE = 1024
 COPY_QUALITY = 80
 KINDS = ("photos", "observation")
 CARD = "card.jpg"                          # the run's link-preview image, beside it
+INAT = "inat.json"                         # iNat's suggestions for its owner (inat_suggest.py)
 
 
 def new_id() -> str:
@@ -437,6 +438,29 @@ class RunStore:
             return False
         return True
 
+    def keep_inat(self, rid: str, merged: dict) -> bool:
+        """Keeps iNat's answer to the run's photos beside it (shown only to its owner);
+        False (and nothing kept) when the run is gone."""
+        if self.get(rid) is None:
+            return False
+        self.objects.put(self._key(rid, INAT), json.dumps(merged, separators=(",", ":")).encode(),
+                         "application/json")
+        if self.get(rid) is None:           # deleted while it was being kept
+            self.objects.delete(self._key(rid, INAT))
+            return False
+        return True
+
+    def inat(self, rid: str) -> dict | None:
+        """iNat's answer kept beside the run, or None."""
+        if self.get(rid) is None:
+            return None
+        body = self.objects.get(self._key(rid, INAT))
+        try:
+            kept = json.loads(body) if body else None
+        except ValueError:
+            return None
+        return kept if isinstance(kept, dict) else None
+
     def delete(self, rid: str) -> bool:
         """Removes the run, its photo copies, its card and its place on every owner's list;
         False when there was none."""
@@ -446,6 +470,7 @@ class RunStore:
         for n in range(int(run.get("photos") or 0)):
             self.objects.delete(self._key(rid, f"{n}.jpg"))
         self.objects.delete(self._key(rid, CARD))
+        self.objects.delete(self._key(rid, INAT))
         self.objects.delete(self._key(rid, "run.json"))
         with self._lock:
             self._remember(rid, None)

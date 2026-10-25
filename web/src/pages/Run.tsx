@@ -10,6 +10,7 @@ import { sourceName } from "@/lib/observationLink";
 import { publicModelName } from "@/lib/publicNames";
 import { runPhotos } from "@/lib/runLink";
 import { OthersRun, ResultCard, WhatNext } from "@/pages/Identify";
+import { InatSuggestions } from "@/components/InatSuggestions";
 
 /** A run's own link, /r/<id>: the answer as it was given, read-only, to anyone with the
  *  link. Whoever ran it also gets their own part and Delete; signed-in viewers can identify
@@ -77,6 +78,7 @@ export function RunPage({ id }: { id: string }) {
                             photos={r.kind === "photos" ? r.photos : r.observation?.photos_used ?? res.photos} />
               ))}
             </div>
+            {r.mine && r.inat && <InatSuggestions initial={r.inat} />}
             <WhatNext results={r.results} />
           </OthersRun.Provider>
         </div>

@@ -16,6 +16,11 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   (`feedback_org.py`), which changes nothing outside .org until a person with Name
   Update rights there presses Fix; renames come back through .org's name-change log
   into the nightly layer only (`name_changes.py`), never a frozen release.
+  A second exception (Steve, 2026-10-25): for a signed-in member with a linked iNat
+  account, vision.mycomap.org forwards their photos server to server to mycomap.org's
+  `POST /api/vision/inat-suggestions/photos` for iNat's suggestions (`inat_suggest.py`,
+  off unless `MV_INAT_SUGGESTIONS`), a website find's place only rounded to 0.1 degree;
+  nothing else is written to mycomap.org or iNat.
 - **Respect iNat's limits.** API: 1 request/s at most (iNat asks for ≤60/min).
   Media: CC photos from the AWS Open Data bucket; all-rights-reserved photos from
   `static.inaturalist.org` under 5 GB/hour and 24 GB/day (we cap at 4 and 20).

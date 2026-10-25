@@ -69,6 +69,9 @@ class Credential:
     plan: str | None = None
     limit: dict | None = field(default=None, hash=False, compare=False)
     limit_source: str | None = None
+    # The member's real mycomap.org id, in app tokens only (claim "uid"): whose linked iNat
+    # account asks for iNat's suggestions (inat_suggest.py). Quotas stay keyed on `subject`.
+    uid: str | None = field(default=None, hash=False, compare=False)
 
     @property
     def interactive(self) -> bool:
@@ -159,8 +162,10 @@ class AppTokens:
         if (claims["exp"] < now - CLOCK_SKEW_SECONDS
                 or claims.get("iat", 0) > now + CLOCK_SKEW_SECONDS):
             raise V1Error(401, "token_expired", "The app token has expired; get a new one.")
+        uid = claims.get("uid")
         return Credential("app", subject=claims["sub"], plan=claims.get("plan"),
-                          limit=limit_of(claims), limit_source="plan")
+                          limit=limit_of(claims), limit_source="plan",
+                          uid=uid if isinstance(uid, str) and uid else None)
 
 
 class Introspector:
