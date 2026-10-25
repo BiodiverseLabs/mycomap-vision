@@ -24,7 +24,7 @@ import { ForResearchers } from "./ForResearchers";
 import { ApiDocs } from "./ApiDocs";
 
 const render = (el: ReactElement, path = "/research") => renderToStaticMarkup(
-  createElement(QueryClientProvider, { client: new QueryClient() }, createElement(Router, { ssrPath: path }, el)));
+  createElement(QueryClientProvider, { client: new QueryClient() }, createElement(Router, { ssrPath: path, children: el })));
 const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, "'").replace(/&amp;/g, "&")
   .replace(/&quot;/g, '"').replace(/\s+/g, " ");
 const count = (html: string, re: RegExp) => (html.match(re) ?? []).length;
