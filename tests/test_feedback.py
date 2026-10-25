@@ -104,7 +104,10 @@ def test_latest_decisions_stay_fast_on_a_live_sized_store(store):
     t0 = time.perf_counter()
     items = store.items_of("non_specimen_photo")
     store.changes(pending_only=False)
-    assert time.perf_counter() - t0 < 2.0
+    # The slow query took 28 s; the fixed one well under a second on a laptop. 6 s leaves
+    # room for a busy shared CI runner (4.2 s seen in a loaded container) and still fails
+    # the old query by a wide margin.
+    assert time.perf_counter() - t0 < 6.0
     assert len(items) > 14_000 and sum(1 for i in items if i["last_decision"]) > 4_000
 
 
