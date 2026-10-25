@@ -111,6 +111,9 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   ```
   Then `PYTHONPATH=src .venv/Scripts/python cpu_pytest.py -q`. CI installs no torch, so
   the torch tests skip there.
+- **On Linux, raise the open-file limit first** (`ulimit -n 65536`, as on CI's runners).
+  The full suite holds over 2,500 files open at once (SQLite stores the tests leave open),
+  so under the common soft limit of 1024 most tests past the first tenth error out.
 - **Web tests one file at a time, with a memory cap.** From `web/`:
   `NODE_OPTIONS=--max-old-space-size=4096 node --import tsx --test src/lib/<file>.test.ts`.
   `pnpm test` runs every file in one process; that is fine on CI's own runner, but on a
