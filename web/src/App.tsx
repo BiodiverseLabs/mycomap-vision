@@ -2,13 +2,15 @@ import { useQuery } from "@tanstack/react-query";
 import { Redirect, Route, Switch, useLocation } from "wouter";
 import { Layout, PageHeader } from "@/components/Layout";
 import { IdentifyPage } from "@/pages/Identify";
-import { ModelsPage } from "@/pages/Models";
+import { ResultsPage } from "@/pages/Results";
 import { DataPage } from "@/pages/Data";
 import { AboutPage } from "@/pages/About";
 import { GetInvolvedPage } from "@/pages/GetInvolved";
 import { ApiDocsPage } from "@/pages/ApiDocs";
-import { BenchmarkPage, BenchmarksPage, ForResearchersPage, ProtocolsPage,
-         ResearchPage } from "@/pages/Research";
+import { ResearchPage } from "@/pages/ResearchLanding";
+import { BenchmarkPage, BenchmarksPage } from "@/pages/Benchmarks";
+import { ProtocolsPage } from "@/pages/Protocols";
+import { ForResearchersPage } from "@/pages/ForResearchers";
 import { ExperimentPage, ExperimentsPage } from "@/pages/Experiments";
 import { FeedbackPage } from "@/pages/Feedback";
 import { RunPage } from "@/pages/Run";
@@ -35,7 +37,7 @@ export function App() {
         <Route path="/about" component={AboutPage} />
         <Route path="/get-involved" component={GetInvolvedPage} />
         <Route path="/research" component={ResearchPage} />
-        <Route path="/research/results" component={ModelsPage} />
+        <Route path="/research/results" component={ResultsPage} />
         <Route path="/research/benchmarks" component={BenchmarksPage} />
         <Route path="/research/benchmarks/:slug">
           {(params) => <BenchmarkPage slug={params.slug} />}

@@ -62,3 +62,36 @@ export function pointsDiff(diff: number, ci: [number, number]): string {
 export const twoModelLabel = (m: ModelFigures) => modelName(m.backbone);
 /** Its tooltip: the image size and the internal id. */
 export const twoModelTip = (m: ModelFigures) => modelTooltip(m.backbone);
+
+/** The same two models answered from the openly licensed reference only (Steve, 2026-10-25):
+ *  the paper's headline setup, where MycoMap Vision v1-open names 55.3% of species first. Copied
+ *  from the research repo's paper/o1/o1-336-c-cc.json (commit e9df6e4): reference
+ *  "public-trainable" (134,942 records), record set 8951e6f53b28, the same 12,874 val finds
+ *  (12,798 with a species), erratum r4, observer-clustered bootstrap (2,000 draws). */
+export const OPEN_REFERENCE = {
+  referenceRecords: 134942,
+  source: "paper/o1/o1-336-c-cc.json (research repo, e9df6e4)",
+  species: {
+    "bioclip-2-336-ft-20261018-171420": { n: 12798, top1: 0.5556, top3: 0.7285, top5: 0.7804, top10: 0.8341 },
+    "bioclip-2-336-ft-20261020-173106": { n: 12798, top1: 0.5531, top3: 0.7261, top5: 0.7765, top10: 0.8329 },
+  } as Record<string, TopK>,
+  genus: {
+    "bioclip-2-336-ft-20261018-171420": { n: 12865, top1: 0.8497, top3: 0.9373, top5: 0.9545, top10: 0.9698 },
+    "bioclip-2-336-ft-20261020-173106": { n: 12865, top1: 0.849, top3: 0.9356, top5: 0.9528, top10: 0.9695 },
+  } as Record<string, TopK>,
+  /** v1-open minus v1, species top 1, on the open reference. */
+  paired: { n: 12798, observers: 752, diff: -0.0025, ci95: [-0.0061, 0.001] as [number, number] },
+};
+
+/** The two references a v1-open number can come from, each labelled (Steve, 2026-10-25): the
+ *  open reference is the paper's headline setup; the full one is what the site answers from. */
+export const REFERENCE_LABEL = {
+  open: "against the openly licensed reference only (the paper's headline setup)",
+  full: "against the full reference",
+} as const;
+
+/** v1-open's species top 1 on each reference, for the places that quote it. */
+export function openModelHeadline(): { open: TopK; full: TopK } {
+  const open = OPEN_REFERENCE.species[TWO_MODELS.models[1].backbone];
+  return { open, full: TWO_MODELS.models[1].species };
+}

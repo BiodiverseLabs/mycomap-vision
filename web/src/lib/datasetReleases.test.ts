@@ -23,16 +23,23 @@ test("v1 is the release the paper's numbers come from", () => {
 
 test("an erratum's reasons add up to its records, each reason in plain words", () => {
   for (const r of DATASET_RELEASES) {
-    if (!r.erratum) continue;
-    const parts = Object.entries(r.erratum.byReason);
-    assert.equal(parts.reduce((n, [, v]) => n + v, 0), r.erratum.records, `${r.id} erratum`);
-    for (const [why] of parts) assert.ok(ERRATUM_REASON[why as keyof typeof ERRATUM_REASON], why);
-    assert.ok(r.erratum.records < r.records.included);
+    for (const e of [r.erratum, ...r.erratumHistory]) {
+      if (!e) continue;
+      const parts = Object.entries(e.byReason);
+      assert.equal(parts.reduce((n, [, v]) => n + v, 0), e.records, `${r.id} erratum ${e.id}`);
+      for (const [why] of parts) assert.ok(ERRATUM_REASON[why as keyof typeof ERRATUM_REASON], why);
+      assert.ok(e.records < r.records.included);
+    }
   }
-  assert.deepEqual(V1.erratum, { id: "r3", records: 175,
-                                 byReason: { mo_twin_as_inat: 72, nonfungal_label: 103 } });
-  assert.equal(erratumReasons(V1.erratum!),
-    "72 Mushroom Observer finds held as iNaturalist records, 103 labels that name no fungus");
+});
+
+test("v1 is scored with erratum r4, the one every published v1 run uses; r3 stays as history", () => {
+  assert.deepEqual(V1.erratum, { id: "r4", records: 650,
+                                 byReason: { crosspost_twin: 475, mo_twin_as_inat: 72, nonfungal_label: 103 } });
+  assert.deepEqual(V1.erratumHistory.map((e) => [e.id, e.records]), [["r3", 175]]);
+  assert.match(erratumReasons(V1.erratum!), /^475 cross-posted twins .*, 72 Mushroom Observer finds held as iNaturalist records, 103 labels that name no fungus$/);
+  assert.equal(erratumReasons(V1.erratumHistory[0]),
+    "72 Mushroom Observer finds held as iNaturalist records, 103 labels that name no fungus", "a reason with no records is left out");
 });
 
 test("release dates read in UTC, whatever the reader's time zone", () => {

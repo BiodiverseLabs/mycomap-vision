@@ -21,21 +21,24 @@ export interface DatasetRelease {
   /** The erratum in use (docs/dataset-release.md, Errata): records found faulty after the cut,
    *  left out of references, training and scoring. The release itself never changes. */
   erratum: Erratum | null;
+  /** Earlier revisions of the erratum, oldest first: kept as history, never used to score. */
+  erratumHistory: Erratum[];
 }
 
-export type ErratumReason = "mo_twin_as_inat" | "nonfungal_label";
+export type ErratumReason = "crosspost_twin" | "mo_twin_as_inat" | "nonfungal_label";
 
 export interface Erratum { id: string; records: number; byReason: Record<ErratumReason, number> }
 
 /** Each reason in plain words, for a count of records. */
 export const ERRATUM_REASON: Record<ErratumReason, string> = {
+  crosspost_twin: "cross-posted twins (one find posted to both iNaturalist and Mushroom Observer)",
   mo_twin_as_inat: "Mushroom Observer finds held as iNaturalist records",
   nonfungal_label: "labels that name no fungus",
 };
 
 /** An erratum's records by reason, in words: "72 Mushroom Observer finds held as …, 103 …". */
 export const erratumReasons = (e: Erratum): string =>
-  (Object.entries(e.byReason) as [ErratumReason, number][])
+  (Object.entries(e.byReason) as [ErratumReason, number][]).filter(([, n]) => n > 0)
     .map(([why, n]) => `${n.toLocaleString("en-US")} ${ERRATUM_REASON[why]}`).join(", ");
 
 export const V1: DatasetRelease = {
@@ -52,7 +55,14 @@ export const V1: DatasetRelease = {
   referenceHash: "5e59b79a40987a3bb62405732062f8d74f016798184cba991d2fb785268d7457",
   codeCommit: "f38b82b344511eb0c882cde11afc43b6816e0449",
   doi: null,
-  erratum: { id: "r3", records: 175, byReason: { mo_twin_as_inat: 72, nonfungal_label: 103 } },
+  // r4 (Steve, 2026-10-25): the erratum every published v1 run is scored with (the run reports'
+  // dataset_release.errata: v1-errata-r4.tsv, sha256 4ab7a16c…, 650 records; research repo
+  // paper/o1/o1-336-c-full.json, e9df6e4). r3 (175 records) is kept as history.
+  erratum: { id: "r4", records: 650,
+             byReason: { crosspost_twin: 475, mo_twin_as_inat: 72, nonfungal_label: 103 } },
+  erratumHistory: [
+    { id: "r3", records: 175, byReason: { crosspost_twin: 0, mo_twin_as_inat: 72, nonfungal_label: 103 } },
+  ],
 };
 
 export const DATASET_RELEASES: DatasetRelease[] = [V1];
