@@ -114,10 +114,8 @@ test("the base-model screen quotes its committed entry: one run, FungiTastic BEi
   assert.match(BASE_MODEL_SCREEN.source, /experiments\/2026-10-13-v1-backbone-screen\.md, addendum of 25 Oct \(origin\/main ef3a8df\)/);
   assert.deepEqual(BASE_MODEL_SCREEN.rows.map((r) => [r.name, r.top1, r.top3, r.top5, r.top10]), [
     ["BioCLIP 2", 70.9, 85.2, 88.9, 92.6], ["FungiTastic BEiT-B (frozen)", 68.8, 81.3, 84.5, 88.5],
-    ["BioCLIP", 58.3, 72.6, 78.0, 83.4], ["DINOv3 large", 54.7, 70.2, 76.0, 80.1],
-    ["SigLIP 2 large", 38.7, 52.7, 59.2, 67.3]]);
-  assert.deepEqual(BASE_MODEL_SCREEN.rows.filter((r) => r.run).map((r) => [r.name, r.run]), [["SigLIP 2 large", "13 Oct run"]],
-                   "a row from another run says so");
+    ["BioCLIP", 58.3, 72.6, 78.0, 83.4], ["DINOv3 large", 54.7, 70.2, 76.0, 80.1]]);
+  assert.deepEqual(BASE_MODEL_SCREEN.rows.filter((r) => r.run), [], "one run only: no row from another run");
   assert.ok(!BASE_MODEL_SCREEN.rows.some((r) => /MycoMap Vision|fine-tun/i.test(r.name)), "base models only");
   for (const r of BASE_MODEL_SCREEN.rows) assert.ok(r.top1 <= r.top3 && r.top3 <= r.top5 && r.top5 <= r.top10, r.name);
   assert.deepEqual(screenLead(BASE_MODEL_SCREEN.rows), { best: BASE_MODEL_SCREEN.rows[0], points: 2.1 });

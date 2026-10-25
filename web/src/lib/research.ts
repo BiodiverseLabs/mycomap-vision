@@ -363,9 +363,8 @@ export interface ScreenRow { name: string; detail: string; top1: number; top3: n
  *  queries of a seeded v1 val subset (2,096 species). Copied from the research repo's
  *  experiments/2026-10-13-v1-backbone-screen.md at origin/main ef3a8df: its 25 Oct addendum
  *  (comparison 20261025-163049-1a3990), one run for every row it lists, with FungiTastic BEiT-B
- *  (frozen) beside BioCLIP 2, BioCLIP and DINOv3-L 512. SigLIP 2 L 384 is not in the
- *  addendum's table: its row is the original 13 Oct run's (the re-run moved the rows it lists
- *  by at most 0.2 points) and says so. The screen's fine-tuned row (the 224 px v0 fine-tune) is
+ *  (frozen) beside BioCLIP 2, BioCLIP and DINOv3-L 512. SigLIP 2 L 384 is left out (Steve,
+ *  2026-10-25): it isn't in the addendum's run, and the table shows one run only. The screen's fine-tuned row (the 224 px v0 fine-tune) is
  *  left out: this table is base models only. Data-driven: a row is added only once committed. */
 export const BASE_MODEL_SCREEN = {
   queries: 664,
@@ -377,8 +376,6 @@ export const BASE_MODEL_SCREEN = {
       top1: 68.8, top3: 81.3, top5: 84.5, top10: 88.5 },
     { name: "BioCLIP", detail: "224 px · Imageomics, first version", top1: 58.3, top3: 72.6, top5: 78.0, top10: 83.4 },
     { name: "DINOv3 large", detail: "512 px · Meta, general purpose", top1: 54.7, top3: 70.2, top5: 76.0, top10: 80.1 },
-    { name: "SigLIP 2 large", detail: "384 px · Google, image-text", top1: 38.7, top3: 52.7, top5: 59.2, top10: 67.3,
-      run: "13 Oct run" },
   ] as ScreenRow[],
 };
 
