@@ -383,17 +383,16 @@ export interface ScreenRow { name: string; detail: string; top1: number; top3: n
  *  summary; 2026-10-26: "add 2.5 with the 664 as a starting point for 224 and 336"). Frozen
  *  base models, nearest + species average, photos only, on the 664 deciding queries of a seeded
  *  v1 val subset (2,096 species, 15,993 references). Copied from the research repo's
- *  experiments/2026-10-13-v1-backbone-screen.md at origin/main 25a9036: its 26 Oct addendum,
+ *  experiments/2026-10-13-v1-backbone-screen.md at origin/main 4ecd155: its 26 Oct addendum,
  *  ONE `mv backbone-screen score` over every row (comparison 20261026-163000-1a3990, one
  *  declared validation look). Only rows that addendum's table lists are shown, so the table is
- *  one run: BioCLIP (the first version) was rescored in that run but its number isn't in the
- *  entry, so it is left out until it is; the fine-tuned rows (MycoMap Vision v1, v1-open, the
- *  224 px fine-tune) are left out too: this table is base models only. Data-driven: a row is
+ *  one run (BioCLIP's row was added to it at 4ecd155); the fine-tuned rows (MycoMap Vision v1,
+ *  v1-open, the 224 px fine-tune) are left out: this table is base models only. Data-driven: a row is
  *  added only once committed. */
 export const BASE_MODEL_SCREEN = {
   queries: 664,
   species: 2096,
-  source: "research repo, experiments/2026-10-13-v1-backbone-screen.md, addendum of 26 Oct (origin/main 25a9036)",
+  source: "research repo, experiments/2026-10-13-v1-backbone-screen.md, addendum of 26 Oct (origin/main 4ecd155)",
   comparison: "20261026-163000-1a3990",
   rows: [
     { name: "BioCLIP 2.5 Huge (base model, not fine-tuned)", detail: "336 px · Imageomics",
@@ -404,6 +403,7 @@ export const BASE_MODEL_SCREEN = {
     { name: "BioCLIP 2", detail: "224 px · Imageomics", top1: 70.9, top3: 85.2, top5: 88.9, top10: 92.6 },
     { name: "FungiTastic BEiT-B (frozen)", detail: "384 px · fungus classifier's features, head not used",
       top1: 68.8, top3: 81.3, top5: 84.5, top10: 88.5 },
+    { name: "BioCLIP", detail: "224 px · Imageomics, first version", top1: 58.3, top3: 72.6, top5: 78.0, top10: 83.4 },
     { name: "DINOv3 large", detail: "512 px · Meta, general purpose", top1: 54.7, top3: 70.2, top5: 76.0, top10: 80.1 },
   ] as ScreenRow[],
 };
