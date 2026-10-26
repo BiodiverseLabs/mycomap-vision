@@ -563,6 +563,54 @@ def test_a_reference_other_than_the_two_known_or_on_another_kind_is_refused():
             {"id": "i", "kind": "inat", "file": "x", "reference": "public_trainable_only"}]})
 
 
+
+def test_a_resumed_run_reuses_only_checkpoints_of_the_same_config_code_and_comparator(
+        world, tmp_path, monkeypatch):
+    """A run that dies keeps each finished Vision comparator's predictions and stamp; with
+    resume they are loaded instead of scored again, and the report is the same. A changed
+    config, or no resume, scores again."""
+    cfg = config(tmp_path, ["5", "6"])
+    first = run(world, tmp_path, "val", cfg)
+    pred = tmp_path / "out" / "predictions"
+    meta = json.loads((pred / "vision-photos.meta.json").read_text(encoding="utf-8"))
+    assert meta["answers"] == 2 and meta["finds"] == 2 and len(meta["config_sha256"]) == 64
+    assert not list(pred.glob("*.tmp"))
+    scored = []
+    real = paper_score.vision_answers
+
+    def counting(*a, **k):
+        scored.append(a[3])
+        return real(*a, **k)
+    monkeypatch.setattr(paper_score, "vision_answers", counting)
+    again = run(world, tmp_path, "val", cfg, resume=True)
+    assert scored == []                                   # every Vision row from its checkpoint
+    assert again["standard"] == first["standard"]
+    assert again["hypotheses"] == first["hypotheses"]
+    run(world, tmp_path, "val", cfg)                      # no resume: scored again
+    assert scored == ["nearest", "nearest+mean"]
+    scored.clear()
+    cfg2 = config(tmp_path, ["5", "6"], top_k=5)          # another config: its stamp differs
+    run(world, tmp_path, "val", cfg2, resume=True)
+    assert scored == ["nearest", "nearest+mean"]
+
+
+def test_a_checkpoint_is_reused_only_when_every_part_of_its_stamp_matches(tmp_path):
+    path = tmp_path / "v.jsonl"
+    answers = {"2": {"species": [{"name": "B y"}]}, "1": {"species": [{"name": "A x"}]}}
+    stamp = paper_score.checkpoint_stamp(b"cfg", "abc1234", {"id": "v", "method": "m"}, 2)
+    paper_score.write_checkpoint(path, answers, stamp, {"place_setting": "s"})
+    info: dict = {}
+    assert paper_score.load_checkpoint(path, stamp, info) == answers
+    assert info == {"place_setting": "s"}
+    for changed in (paper_score.checkpoint_stamp(b"cfg2", "abc1234", {"id": "v", "method": "m"}, 2),
+                    paper_score.checkpoint_stamp(b"cfg", "def5678", {"id": "v", "method": "m"}, 2),
+                    paper_score.checkpoint_stamp(b"cfg", "abc1234", {"id": "v", "method": "x"}, 2),
+                    paper_score.checkpoint_stamp(b"cfg", "abc1234", {"id": "v", "method": "m"}, 3)):
+        assert paper_score.load_checkpoint(path, changed, {}) is None
+    path.write_text(path.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
+    assert paper_score.load_checkpoint(path, stamp, {}) is None      # a truncated file
+
+
 def test_the_attrs_file_is_pinned_by_the_config(world, tmp_path):
     attrs = tmp_path / "attrs.tsv"
     attrs.write_text("record_key\tdistance_band\n5\t<100\n6\t>1500\n", encoding="utf-8")

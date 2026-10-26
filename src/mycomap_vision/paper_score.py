@@ -1060,10 +1060,52 @@ def outcomes_for(comp: dict, finds: list[po.Find], answers: dict | None = None,
     return out, info
 
 
+def checkpoint_stamp(config_bytes: bytes, code_commit: str, comp: dict, finds: int) -> dict:
+    """What a comparator's checkpoint must match to be reused: the config byte for byte, the
+    code that scored it, the comparator's own entry, and the number of finds scored."""
+    return {"config_sha256": sha256_bytes(config_bytes), "code_commit": code_commit,
+            "comparator_sha256": sha256_bytes(json.dumps(comp, sort_keys=True).encode()),
+            "finds": finds}
+
+
+def write_checkpoint(path: Path, answers: dict, stamp: dict, info: dict) -> None:
+    """The comparator's predictions (record_key + answer per line, sorted), written to a
+    temporary file and moved into place, then its stamp beside it (<id>.meta.json): a run
+    that dies mid-write leaves no checkpoint that looks complete."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for k in sorted(answers):
+            fh.write(json.dumps({"record_key": k, **answers[k]}) + "\n")
+    os.replace(tmp, path)
+    meta = path.with_name(path.stem + ".meta.json")
+    meta.write_text(json.dumps({**stamp, "answers": len(answers), "info": info}, indent=1),
+                    encoding="utf-8")
+
+
+def load_checkpoint(path: Path, stamp: dict, info: dict) -> dict | None:
+    """The comparator's answers from its checkpoint when its stamp matches `stamp` in every
+    part (and `info`, e.g. the place setting used, restored); None otherwise."""
+    meta = path.with_name(path.stem + ".meta.json")
+    if not (path.is_file() and meta.is_file()):
+        return None
+    m = json.loads(meta.read_text(encoding="utf-8"))
+    if any(m.get(k) != v for k, v in stamp.items()):
+        return None
+    answers = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            row = json.loads(line)
+            answers[row.pop("record_key")] = row
+    if len(answers) != m.get("answers"):
+        return None
+    info.update(m.get("info") or {})
+    return answers
+
+
 def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         attrs_path=None, allow_code: str | None = None,
         research_dir: Path | None = None, embed_missing=None, gate_embed=None,
-        log=print) -> dict:
+        log=print, resume: bool = False) -> dict:
     """Score every comparator of `config` on `test` ("val" or a test release of `base`)
     and write report.json, report.md and the Vision predictions under `out`."""
     from .embed import load_embeddings
@@ -1237,16 +1279,21 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             kw = {"top_k": int(config.get("top_k", 10)), "calibration": comp.get("calibration"),
                   "truths": truths, "place_setting": comp.get("place_setting"),
                   "info": place_info, "twins": groups}
-            answers = (vision_answers_leave_out(vecs, ref, scored, comp["method"], b,
-                                                comp["leave_out"], **kw)
-                       if comp.get("leave_out") else
-                       vision_answers(vecs, ref, scored, comp["method"], b, **kw))
+            # A checkpoint per comparator (--resume): reused only when the config, the code
+            # and this comparator's entry are the ones that scored it.
+            path = out / "predictions" / f"{comp['id']}.jsonl"
+            stamp = checkpoint_stamp(config_bytes, code_commit, comp, len(scored))
+            answers = load_checkpoint(path, stamp, place_info) if resume else None
+            if answers is not None:
+                log(f"[{comp['id']}] resumed from its checkpoint ({len(answers):,} finds)")
+            else:
+                answers = (vision_answers_leave_out(vecs, ref, scored, comp["method"], b,
+                                                    comp["leave_out"], **kw)
+                           if comp.get("leave_out") else
+                           vision_answers(vecs, ref, scored, comp["method"], b, **kw))
+                write_checkpoint(path, answers, stamp, place_info)
             if comp.get("calibration"):
                 calib[comp["id"]] = {k: a["cal"] for k, a in answers.items() if "cal" in a}
-            path = out / "predictions" / f"{comp['id']}.jsonl"
-            with open(path, "w", encoding="utf-8") as fh:
-                for k in sorted(answers):
-                    fh.write(json.dumps({"record_key": k, **answers[k]}) + "\n")
         outcomes[comp["id"]], inputs[comp["id"]] = outcomes_for(
             comp, finds, answers, conn, keys[comp["id"]])
         top1[comp["id"]] = top_answers(comp, answers)
