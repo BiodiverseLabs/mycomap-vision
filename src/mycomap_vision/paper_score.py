@@ -731,10 +731,21 @@ def masked_leave_out_answers(vectors, ref_records, scored_records, method, backb
                 col_of_row[int(p)] for p in r.photo_rows if int(p) in col_of_row)
     hidden_of = {k: np.unique(np.asarray(v, dtype=np.int64)) for k, v in hidden_of.items()}
     empty = np.zeros(0, dtype=np.int64)
+    # The query-free part of the leave-out (the kept columns, the averages taken again) is
+    # the same for every find of a group: built once per group (model.leave_out_plan), the
+    # finds taken group by group so only the current group's plan is held.
+    plan_of: dict = {}
+
+    def plan(key, hidden):
+        if key not in plan_of:
+            plan_of.clear()
+            plan_of[key] = model.leave_out_plan(hidden)
+        return plan_of[key]
 
     def score(rec):
         q = np.asarray(vectors[rec.photo_rows], dtype=np.float32)
-        hidden = hidden_of.get(leave_out_key(rec, mode), empty) if rec.observer else empty
+        key = leave_out_key(rec, mode) if rec.observer else None
+        hidden = hidden_of.get(key, empty) if rec.observer else empty
         sims = model.photo_sims(q)
         if method == "nearest":
             if len(hidden):
@@ -743,9 +754,12 @@ def masked_leave_out_answers(vectors, ref_records, scored_records, method, backb
             return methods.species_scores(sims, index)
         per = model.per_photo_scores(sims, q)
         if len(hidden):
-            per = model.leave_out(per, sims, q, hidden)
+            per = model.leave_out_apply(per, sims, q, plan(key, hidden))
         return per.mean(axis=0)
-    return answers_from(index, scored_records, score, top_k, calibration, truths)
+    by_group = sorted(scored_records, key=lambda r: (not r.observer,
+                                                     repr(leave_out_key(r, mode))
+                                                     if r.observer else ""))
+    return answers_from(index, by_group, score, top_k, calibration, truths)
 
 
 def refit_leave_out_answers(vectors, ref_records, scored_records, method, backbone, mode,

@@ -387,6 +387,25 @@ def record_balanced_species_means(vectors, index, chunk: int = 2048) -> np.ndarr
     return _unit(out)
 
 
+class LeaveOutPlan:
+    """The part of a masked leave-out that depends only on the hidden reference columns,
+    not on the find (NearestAndMean.leave_out_plan): the species touched, those left with
+    nothing (-inf), the kept columns of the others one species after another, where each
+    species' columns (and, for the record arms, each record's) begin among them, and each
+    species' average taken again without the hidden columns (float16-rounded, as fit keeps
+    the averages). Built once per group of finds sharing the hidden set."""
+
+    def __init__(self, species, empty, cols, starts, means, rec_starts=None,
+                 sp_rec_starts=None):
+        self.species = np.asarray(species, dtype=np.int64)
+        self.empty = np.asarray(empty, dtype=np.int64)
+        self.cols = np.asarray(cols, dtype=np.int64)
+        self.starts = np.asarray(starts, dtype=np.int64)
+        self.means = means
+        self.rec_starts = rec_starts
+        self.sp_rec_starts = sp_rec_starts
+
+
 class NearestAndMean:
     """Score = weight x (mean of the two best matching reference PHOTOS of the species) +
     (1 - weight) x the similarity to the species' average photo vector, per query photo,
@@ -419,31 +438,83 @@ class NearestAndMean:
         nearest = top_k_species_scores_per_photo(photo_sims, self.index, self.k)
         return self.weight * nearest + (1 - self.weight) * self.means.sims(query)
 
+    PLAN_CHUNK = 65536          # reference rows gathered at a time to rebuild averages
+
     def leave_out(self, per_photo: np.ndarray, photo_sims: np.ndarray, query: np.ndarray,
                   hidden: np.ndarray) -> np.ndarray:
         """`per_photo` (per_photo_scores, from unmasked `photo_sims`) as if the reference
         columns `hidden` had never been there: each species they belong to gets its two
         best photo matches and its average taken again without them, and -inf when nothing of
         it is left. Equal to a NearestAndMean fitted without those columns (tests), with
-        no refit: only the few species touched are recomputed."""
+        no refit: only the few species touched are recomputed. For many finds sharing the
+        hidden set, build leave_out_plan(hidden) once and leave_out_apply it per find."""
+        return self.leave_out_apply(per_photo, photo_sims, query, self.leave_out_plan(hidden))
+
+    def leave_out_plan(self, hidden: np.ndarray) -> LeaveOutPlan:
+        """The query-free part of leave_out for these hidden columns (LeaveOutPlan)."""
         starts = self.index.starts
         n_cols = len(self.index.cols)
         hidden = np.unique(np.asarray(hidden, dtype=np.int64))
-        q = np.asarray(query, dtype=np.float32)
-        out = np.array(per_photo, dtype=np.float32, copy=True)
+        species, empty, keeps = [], [], []
         for u in np.unique(np.searchsorted(starts, hidden, side="right") - 1).tolist():
             lo = int(starts[u])
             hi = int(starts[u + 1]) if u + 1 < len(starts) else n_cols
             keep = np.setdiff1d(np.arange(lo, hi), hidden)
-            if not len(keep):
-                out[:, u] = -np.inf
-                continue
-            best = -np.sort(-photo_sims[:, keep], axis=1)[:, :self.k]
-            nearest = best.sum(axis=1, dtype=np.float32) / np.float32(best.shape[1])
-            mean = rows_at(self.scorer.ref, keep).sum(axis=0)
-            mean = (mean / max(float(np.linalg.norm(mean)), 1e-12)).astype(np.float16)
-            out[:, u] = (self.weight * nearest
-                         + (1 - self.weight) * (q @ mean.astype(np.float32)))
+            if len(keep):
+                species.append(u)
+                keeps.append(keep)
+            else:
+                empty.append(u)
+        sizes = np.array([len(k) for k in keeps], dtype=np.int64)
+        col_starts = np.concatenate([[0], np.cumsum(sizes)[:-1]]) if len(keeps) else sizes
+        cols = np.concatenate(keeps) if keeps else np.zeros(0, dtype=np.int64)
+        means = np.zeros((len(keeps), self.index_dim()), dtype=np.float32)
+        # the averages from the same float32 rows rows_at gives, summed in the same order
+        # (a contiguous block per species), so they are bit for bit leave_out's of before
+        i = 0
+        while i < len(keeps):
+            j, n = i, 0
+            while j < len(keeps) and (n == 0 or n + len(keeps[j]) <= self.PLAN_CHUNK):
+                n += len(keeps[j])
+                j += 1
+            v = rows_at(self.scorer.ref, np.concatenate(keeps[i:j]))
+            at = 0
+            for t in range(i, j):
+                block = v[at:at + len(keeps[t])]
+                at += len(keeps[t])
+                means[t] = self._mean_without(species[t], keeps[t], block).astype(
+                    np.float16).astype(np.float32)
+            i = j
+        return self._plan(species, empty, cols, col_starts, keeps, means)
+
+    def index_dim(self) -> int:
+        ref = self.scorer.ref
+        return int(ref.shape[1]) if hasattr(ref, "shape") else int(len(rows_at(ref, [0])[0]))
+
+    def _mean_without(self, u: int, keep: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """Species u's average from its kept columns' vectors `v` (photo-weighted)."""
+        mean = v.sum(axis=0)
+        return mean / max(float(np.linalg.norm(mean)), 1e-12)
+
+    def _plan(self, species, empty, cols, col_starts, keeps, means) -> LeaveOutPlan:
+        return LeaveOutPlan(species, empty, cols, col_starts, means)
+
+    def _plan_nearest(self, kept_sims: np.ndarray, plan: LeaveOutPlan) -> np.ndarray:
+        """(n_query_photos, n_species in plan): the k best kept photo matches' mean."""
+        return top_k_within(kept_sims, plan.starts, self.k)
+
+    def leave_out_apply(self, per_photo: np.ndarray, photo_sims: np.ndarray,
+                        query: np.ndarray, plan: LeaveOutPlan) -> np.ndarray:
+        """leave_out for one find from a plan of its hidden set: the touched species'
+        nearest part from the kept columns, their averages scored in one product."""
+        out = np.array(per_photo, dtype=np.float32, copy=True)
+        if len(plan.empty):
+            out[:, plan.empty] = -np.inf
+        if len(plan.species):
+            q = np.asarray(query, dtype=np.float32)
+            nearest = self._plan_nearest(photo_sims[:, plan.cols], plan)
+            out[:, plan.species] = (self.weight * nearest
+                                    + (1 - self.weight) * (q @ plan.means.T))
         return out
 
     def species_scores(self, query: np.ndarray) -> np.ndarray:
@@ -484,44 +555,54 @@ class NearestAndMeanRecords(NearestAndMean):
         return (self.weight * self.nearest_part(photo_sims)
                 + (1 - self.weight) * self.means.sims(query))
 
-    def _species_mean_without(self, keep: np.ndarray, rec_bounds: np.ndarray) -> np.ndarray:
+    def _species_mean_without(self, keep: np.ndarray, rec_bounds: np.ndarray,
+                              v: np.ndarray | None = None) -> np.ndarray:
         """The species' average from the kept columns only (`rec_bounds`: the species'
-        record starts and its end), as fit makes it."""
-        v = rows_at(self.scorer.ref, keep)
+        record starts and its end), as fit makes it; `v`: those columns' vectors, when
+        already gathered."""
+        v = rows_at(self.scorer.ref, keep) if v is None else v
         if not self.balanced:
             return _unit(v.sum(axis=0))
         rec = np.searchsorted(rec_bounds, keep, side="right") - 1
         firsts = np.flatnonzero(np.diff(rec, prepend=-1) != 0)
         return _unit(_unit(np.add.reduceat(v, firsts, axis=0)).sum(axis=0))
 
-    def leave_out(self, per_photo: np.ndarray, photo_sims: np.ndarray, query: np.ndarray,
-                  hidden: np.ndarray) -> np.ndarray:
-        """`per_photo` as if the reference columns `hidden` had never been there (as
-        NearestAndMean.leave_out): a record with every photo hidden drops out, a record
-        with some keeps the rest; only the species touched are recomputed."""
+    # leave_out (NearestAndMean's: plan, then apply) by record: a record with every photo
+    # hidden drops out, a record with some keeps the rest; only the species touched are
+    # recomputed.
+
+    def _bounds(self, u: int) -> np.ndarray:
+        """Species u's record starts and its end, as column positions."""
         starts, rec_starts = self.index.starts, self.index.rec_starts
-        n_cols = len(self.index.cols)
-        hidden = np.unique(np.asarray(hidden, dtype=np.int64))
-        q = np.asarray(query, dtype=np.float32)
-        out = np.array(per_photo, dtype=np.float32, copy=True)
-        for u in np.unique(np.searchsorted(starts, hidden, side="right") - 1).tolist():
-            lo = int(starts[u])
-            hi = int(starts[u + 1]) if u + 1 < len(starts) else n_cols
-            keep = np.setdiff1d(np.arange(lo, hi), hidden)
-            if not len(keep):
-                out[:, u] = -np.inf
-                continue
-            r_hi = int(self.rec_species[u + 1]) if u + 1 < len(starts) else len(rec_starts)
-            bounds = np.append(rec_starts[int(self.rec_species[u]):r_hi], hi)
-            rec = np.searchsorted(bounds, keep, side="right") - 1
-            firsts = np.flatnonzero(np.diff(rec, prepend=-1) != 0)
-            best = np.maximum.reduceat(photo_sims[:, keep], firsts, axis=1)
-            best = -np.sort(-best, axis=1)[:, :self.k]
-            nearest = best.sum(axis=1, dtype=np.float32) / np.float32(best.shape[1])
-            mean = self._species_mean_without(keep, bounds).astype(np.float16)
-            out[:, u] = (self.weight * nearest
-                         + (1 - self.weight) * (q @ mean.astype(np.float32)))
-        return out
+        hi = int(starts[u + 1]) if u + 1 < len(starts) else len(self.index.cols)
+        r_hi = int(self.rec_species[u + 1]) if u + 1 < len(starts) else len(rec_starts)
+        return np.append(rec_starts[int(self.rec_species[u]):r_hi], hi)
+
+    @staticmethod
+    def _record_firsts(keep: np.ndarray, bounds: np.ndarray) -> np.ndarray:
+        """Where each kept record's columns begin within `keep`."""
+        rec = np.searchsorted(bounds, keep, side="right") - 1
+        return np.flatnonzero(np.diff(rec, prepend=-1) != 0)
+
+    def _mean_without(self, u: int, keep: np.ndarray, v: np.ndarray) -> np.ndarray:
+        return self._species_mean_without(keep, self._bounds(u), v)
+
+    def _plan(self, species, empty, cols, col_starts, keeps, means) -> LeaveOutPlan:
+        rec_starts, sp_rec_starts, n_rec = [], [], 0
+        for u, keep, at in zip(species, keeps, col_starts.tolist()):
+            firsts = self._record_firsts(keep, self._bounds(u))
+            sp_rec_starts.append(n_rec)
+            rec_starts.append(firsts + at)
+            n_rec += len(firsts)
+        return LeaveOutPlan(species, empty, cols, col_starts, means,
+                            np.concatenate(rec_starts) if rec_starts else np.zeros(0, np.int64),
+                            np.asarray(sp_rec_starts, dtype=np.int64))
+
+    def _plan_nearest(self, kept_sims: np.ndarray, plan: LeaveOutPlan) -> np.ndarray:
+        """(n_query_photos, n_species in plan): the k best kept records' mean, a record
+        scoring by its best kept photo."""
+        best = np.maximum.reduceat(kept_sims, plan.rec_starts, axis=1)
+        return top_k_within(best, plan.sp_rec_starts, self.k)
 
 
 class NearestAndMeanRecordsBalanced(NearestAndMeanRecords):
@@ -562,6 +643,10 @@ class NearestAndMeanViews(NearestAndMeanRecordsBalanced):
         return self.find_scores(self.scorer.sims(query), query)
 
     def leave_out(self, *args, **kwargs):
+        raise NotImplementedError("nearest+mean-views can't leave records out yet "
+                                  "(research only)")
+
+    def leave_out_plan(self, *args, **kwargs):
         raise NotImplementedError("nearest+mean-views can't leave records out yet "
                                   "(research only)")
 
