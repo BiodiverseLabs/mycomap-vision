@@ -75,6 +75,39 @@ create table if not exists prediction_provenance (
 );
 """
 
+# The rest of the served state at write time (the Paper Coordinator, 2026-10-26, for E28):
+# added to prediction_provenance on first use, so older rows read null. The calibration in
+# force (evaluate.latest_calibration: its eval run and comparison), when a night last changed
+# the reference set (nightly.layer_version's run: when it finished), and the Human Feedback
+# photo exclusions and specimen crops the index was built with (their fingerprints, as in the
+# served index's version).
+STATE_COLUMNS = (("calibration_run", "integer"), ("calibration_comparison", "integer"),
+                 ("nightly_layer_at", "text"), ("exclusions_version", "text"),
+                 ("crops_version", "text"))
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA)
+    have = {r[1] for r in conn.execute("pragma table_info(prediction_provenance)")}
+    for name, kind in STATE_COLUMNS:
+        if name not in have:
+            conn.execute(f"alter table prediction_provenance add column {name} {kind}")
+
+
+def served_state(conn: sqlite3.Connection, backbone: str, method: str) -> dict:
+    """The served state beyond the model and release (STATE_COLUMNS), read from the manifest
+    Vision serves from."""
+    from . import evaluate, feedback, nightly
+    cal = evaluate.latest_calibration(conn, backbone, method)
+    night = nightly.layer_version(conn)
+    at = conn.execute("select finished_at from nightly_runs where id = ?",
+                      (night,)).fetchone() if night else None
+    return {"calibration_run": cal["run_id"] if cal else None,
+            "calibration_comparison": cal["comparison_id"] if cal else None,
+            "nightly_layer_at": at[0] if at else None,
+            "exclusions_version": feedback.exclusions_fingerprint(conn),
+            "crops_version": feedback.crops_fingerprint(conn)}
+
 # The paper's sealed test (v1-test) is every record first validated after dataset release
 # v1's label snapshot. Advance predictions keep being made for such records, but how they
 # fared stays hidden until the paper's analysis is frozen and the test is opened: until
@@ -192,12 +225,19 @@ def summarise(result: dict, top: int = 5) -> dict:
 
 
 def predict_pending(conn: sqlite3.Connection, identifier, backbone_model, ids: list[str],
-                    fetcher, log=print, provenance: tuple[str | None, str | None] | None = None
-                    ) -> dict:
+                    fetcher, log=print, provenance: tuple[str | None, str | None] | None = None,
+                    state: dict | None = None) -> dict:
     """Identify each candidate from its iNat photos and save the prediction, with the served
-    model's version and release (`provenance`, default: served_provenance)."""
-    conn.executescript(SCHEMA)
+    model's version and release (`provenance`, default: served_provenance) and the rest of
+    the served state (`state`, default: served_state, read once before the first)."""
+    ensure_schema(conn)
     version, serving = provenance if provenance is not None         else served_provenance(identifier.backbone)
+    state = state if state is not None else served_state(conn, identifier.backbone,
+                                                         identifier.method)
+    cols = ("observation_id", "backbone", "method", "model_version", "serving_release",
+            *(c for c, _ in STATE_COLUMNS))
+    insert = (f"insert or replace into prediction_provenance ({', '.join(cols)}) values "
+              f"({', '.join('?' * len(cols))})")
     stats = Counter()
     observations = fetcher.observations(ids)
     for i, oid in enumerate(ids, 1):
@@ -234,8 +274,8 @@ def predict_pending(conn: sqlite3.Connection, identifier, backbone_model, ids: l
                 "insert or replace into predictions values (?, ?, ?, ?, ?, ?, ?, ?)",
                 (oid, identifier.backbone, identifier.method, now_iso(), config.code_version(),
                  identifier.records, len(images), json.dumps(summarise(result))))
-            conn.execute("insert or replace into prediction_provenance values (?, ?, ?, ?, ?)",
-                         (oid, identifier.backbone, identifier.method, version, serving))
+            conn.execute(insert, (oid, identifier.backbone, identifier.method, version, serving,
+                                  *(state.get(c) for c, _ in STATE_COLUMNS)))
         stats["predicted"] += 1
         if i % 25 == 0:
             log(f"  {i}/{len(ids)} candidates, {stats['predicted']} predicted")

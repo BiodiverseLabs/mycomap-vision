@@ -418,9 +418,11 @@ def test_the_job_reads_slips_from_a_copy_writes_seed_lines_and_resumes(tmp_path,
                 "slip_area": 0.4, "specimen_area": 0.1, "on_slip_area": 0.0,
                 "crops": [{"box": [0, 0, 5, 5], "area": 0.1}] if len(seen) == 1 else []}
     out = tmp_path / "seed.tsv"
-    first = rl.run_slip_crops(picks, lambda p: Image.new("RGB", (20, 10)), detect, out, limit=1)
+    check = rl.v1_check({"10": "train", "11": "val"}, fb.SealGate(lambda key: None, seal=None))
+    first = rl.run_slip_crops(picks, lambda p: Image.new("RGB", (20, 10)), detect, out, check,
+                              limit=1)
     assert (first["photos"], first["with_crops"], first["already_done"]) == (1, 1, 0)
-    second = rl.run_slip_crops(picks, lambda p: Image.new("RGB", (20, 10)), detect, out)
+    second = rl.run_slip_crops(picks, lambda p: Image.new("RGB", (20, 10)), detect, out, check)
     assert (second["photos"], second["no_specimen"], second["already_done"]) == (1, 1, 1)
     rows, counts = rl.rows_from_slip_crops(out)
     assert [r["subject"] for r in rows] == ["inat:2"] and counts == {"no_specimen": 1}
@@ -515,3 +517,30 @@ def test_a_night_fetches_embeds_and_counts_a_kept_crop_once_and_a_zero_cap_skips
                      ).fetchone()[0] == 1
     c.close()
     assert -16001 in np.load(next((layer.embeddings / "m1").glob("*.ids.npy"))).tolist()
+
+
+def test_the_job_reads_only_v1_train_and_val_photos_and_never_a_v1_test_record(tmp_path):
+    """The Paper Coordinator, 2026-10-26: never a v1-test record's photo before the unseal, and
+    the paper's seal asserted on each photo besides (records first green after the seal)."""
+    seal = "2026-10-12T13:17:51+00:00"
+    dates = {"10": "2026-09-01", "11": "2026-09-02", "12": "2026-10-20", "14": "2026-10-20"}
+    gate = fb.SealGate(dates.get, seal=seal)
+    splits = {"10": "train", "11": "val", "12": "test", "14": "train"}   # 14: a stale split
+    check = rl.v1_check(splits, gate)
+    picks = [{"photo_key": f"inat:{r}", "record_key": r, "label": "A x", "slip_p": 0.8}
+             for r in ("10", "11", "12", "13", "14")]
+    ok, refused = rl.job_photos(picks, check)
+    assert [p["record_key"] for p in ok] == ["10", "11"]
+    assert refused == {"v1 test": 1, "not a v1 train or val record": 1, "seal: sealed": 1}
+    read = []
+
+    def image(p):
+        read.append(p["photo_key"])
+        return Image.new("RGB", (20, 10))
+
+    def detect(img):
+        return {"version": "v", "width": 20, "height": 10, "slip_area": 0.4,
+                "specimen_area": 0.1, "on_slip_area": 0.0, "crops": []}
+    with pytest.raises(fb.FeedbackError, match="v1 test"):
+        rl.run_slip_crops([picks[0], picks[2]], image, detect, tmp_path / "seed.tsv", check)
+    assert read == ["inat:10"]                 # stopped before the v1-test photo was read

@@ -327,12 +327,44 @@ def slip_photos_in_copy(conn) -> list[dict]:
     return out
 
 
-def run_slip_crops(photos: list[dict], image, detect, out_path, limit: int | None = None,
-                   log=print) -> dict:
+TRAINABLE = ("train", "val")
+
+
+def v1_check(splits: dict[str, str], gate: "fb.SealGate"):
+    """Whether the job may read a photo (the Paper Coordinator, 2026-10-26): only one a person
+    left out of a v1 train or val record (`splits`: release v1's record key -> split), never a
+    v1-test record before the unseal, and its record must pass the paper's seal (SealGate) as
+    well. Gives check(photo) -> None when allowed, else why not."""
+    def check(photo: dict) -> str | None:
+        split = splits.get(photo.get("record_key"))
+        if split == "test":
+            return "v1 test"
+        if split not in TRAINABLE:
+            return "not a v1 train or val record"
+        verdict = gate.judge(photo["record_key"])
+        return None if verdict == "ok" else f"seal: {verdict}"
+    return check
+
+
+def job_photos(picks: list[dict], check) -> tuple[list[dict], dict]:
+    """The picks the job may read (v1_check), and how many were refused, by reason."""
+    ok, refused = [], {}
+    for p in picks:
+        why = check(p)
+        if why is None:
+            ok.append(p)
+        else:
+            refused[why] = refused.get(why, 0) + 1
+    return ok, refused
+
+
+def run_slip_crops(photos: list[dict], image, detect, out_path, check,
+                   limit: int | None = None, log=print) -> dict:
     """Run the detector on each photo and append its seed line to `out_path` (a header first
     when the file is new). `image(photo)` gives the photo as a PIL image (EXIF applied) or
-    None; `detect(img)` is slipcrop.Detector.detect. A photo already in the file is skipped,
-    so a stopped run carries on where it left off."""
+    None; `detect(img)` is slipcrop.Detector.detect. `check` is v1_check: a photo it refuses
+    stops the run before that photo is read (job_photos should have left it out). A photo
+    already in the file is skipped, so a stopped run carries on where it left off."""
     import time
     from pathlib import Path
     out_path = Path(out_path)
@@ -351,6 +383,9 @@ def run_slip_crops(photos: list[dict], image, detect, out_path, limit: int | Non
         if new:
             w.writeheader()
         for i, p in enumerate(todo, 1):
+            if (why := check(p)) is not None:
+                raise fb.FeedbackError(f"{p['photo_key']} may not be read ({why}): the crop job "
+                                       "reads only v1 train or val photos under the seal")
             img = image(p)
             if img is None:
                 counts["unreadable"] += 1

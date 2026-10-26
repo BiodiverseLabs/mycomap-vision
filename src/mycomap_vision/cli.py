@@ -1389,6 +1389,17 @@ def _slip_crops(conn, args) -> None:
         raise SystemExit(f"slip-crops refused: {e}") from None
     picks = [p for p in rl.slip_photos_in_copy(copy) if p["tranche"] in tranches]
     copy.close()
+    # Only v1 train or val photos, never a v1-test record before the unseal; the paper's seal
+    # is asserted on each photo as well (recovered_labels.v1_check).
+    import sqlite3
+    rel = sqlite3.connect(f"file:{Path(args.release).as_posix()}?mode=ro", uri=True)
+    splits = dict(rel.execute("select record_key, split from records"))
+    rel.close()
+    seal = feedback.SealGate.from_manifest(conn)
+    check = rl.v1_check(splits, seal)
+    picks, refused = rl.job_photos(picks, check)
+    if refused:
+        print(f"slip-crops: refused {refused}", file=sys.stderr)
     photos = pr.ReviewPhotos(lambda sql, params: conn.execute(sql, params).fetchall(),
                              permission_view=lambda: None)
 
@@ -1418,9 +1429,10 @@ def _slip_crops(conn, args) -> None:
         torch.cuda.set_per_process_memory_fraction(min(1.0, args.gpu_memory_gb * 2**30 / total))
     detector = slipcrop.Detector(device=args.device, threads=args.threads)
     print(f"slip-crops: {len(picks):,} slip photos in {sorted(tranches)}", file=sys.stderr)
-    out = rl.run_slip_crops(picks, image, detector.detect, Path(args.out), limit=args.limit,
-                            log=lambda s: print(s, file=sys.stderr))
-    print(json.dumps({"out": args.out, "tranches": sorted(tranches), **out}, indent=2))
+    out = rl.run_slip_crops(picks, image, detector.detect, Path(args.out), check,
+                            limit=args.limit, log=lambda s: print(s, file=sys.stderr))
+    print(json.dumps({"out": args.out, "tranches": sorted(tranches), "refused": refused, **out},
+                     indent=2))
 
 
 def cmd_holdout(conn, args) -> None:
@@ -2759,6 +2771,9 @@ def main(argv: list[str] | None = None) -> int:
                              "`seed --slip-crops` (slipcrop.py; needs transformers)")
     q.add_argument("--store-copy", required=True,
                    help="a copy made with: sqlite3 <store> '.backup <copy>'")
+    q.add_argument("--release", required=True,
+                   help="research-releases/v1/release.sqlite: only its train and val records' "
+                        "photos are read, never a v1-test record's")
     q.add_argument("--tranche", default="high",
                    help="comma-separated: high (p >= 0.6), medium, low, rule (default high: "
                         "Steve, 2026-10-26)")
