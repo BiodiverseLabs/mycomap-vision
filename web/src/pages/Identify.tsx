@@ -1,12 +1,12 @@
 import { createContext, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type Dispatch, type ReactNode,
          type RefObject, type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
-import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, Dna, ImagePlus,
-         Lightbulb, Link2, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, RotateCcw, X } from "lucide-react";
+import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, Cpu, Dna, ImagePlus,
+         Lightbulb, Link2, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, Pencil, Plus, RotateCcw,
+         TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { PageHeader } from "@/components/Layout";
 import {
   api,
   runApi,
@@ -42,9 +42,7 @@ import { keptLine, liveRuns, RUN_ID, runPath, runPhotos } from "@/lib/runLink";
 
 // The map (Leaflet) loads only when someone opens it: the Identify page stays light.
 const LocationPicker = lazy(() => import("@/components/LocationPicker"));
-import {
-  identifyGate, LIKELY_COPY, PHOTO_CHECKLIST, SAFETY_LINE, SEQUENCING_URL,
-} from "@/lib/publicView";
+import { identifyGate, LIKELY_COPY, SAFETY_LINE, SEQUENCING_URL } from "@/lib/publicView";
 import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
@@ -53,7 +51,9 @@ import {
   alsoPossible, answerFor, boxHints, breakdownLabel, breakdownOpen, confusedNote, coverageSummary, listedNames,
   photoOnlyNote, placeLines, placeWarns, publicNote, usesPlace, type Answer, type Named,
 } from "@/lib/answer";
-import { shouldScrollTo, showPinnedBar, waitingSteps, type Step } from "@/lib/phoneFlow";
+import { shouldScrollTo, showPinnedBar, SINGLE_COLUMN_BELOW, waitingSteps, type Step } from "@/lib/phoneFlow";
+import { homeStage } from "@/lib/identifyHome";
+import { ExampleAnswer, PhotoGuide, ViewsChecklist, ViewsRow, WhyVision } from "@/components/IdentifyHome";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -171,7 +171,8 @@ export function IdentifyPage() {
     setMode("photos");
     window.history.replaceState(null, "", "/");
     window.scrollTo({ top: 0, behavior: "smooth" });
-    pickZone.current?.focus({ preventScroll: true });
+    // The drop zone is drawn again once the photos are gone.
+    setTimeout(() => pickZone.current?.focus({ preventScroll: true }), 0);
   };
 
   // Every run has its own link (lib/runLink.ts): the address becomes /r/<id> as the answer
@@ -236,44 +237,104 @@ export function IdentifyPage() {
   const referencePhotos = models.data?.backbones.find((b) => chosen[0]?.startsWith(`${b.backbone}/`))
     ?.embedded_photos ?? null;
 
+  // The page's three stages (lib/identifyHome.ts, Steve's approved redesign 2026-10-26): the
+  // photo box with an example answer, the photos ready to identify, then the answer as the
+  // page with the photo box folded beside it.
+  const stage = homeStage({ photos: files.length, pending, answered: !!answer });
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (stage !== "answer") setEditing(false); }, [stage]);
+  const wide = useMemo(() => window.matchMedia?.(`(min-width: ${SINGLE_COLUMN_BELOW}px)`).matches ?? true, []);
+  const stats = useQuery({ queryKey: ["stats"], queryFn: api.stats, enabled: stage === "empty" });
+  const howGood = useQuery({ queryKey: ["how-good"], queryFn: api.howGood, enabled: stage === "empty" });
+  const onAnswer = stage === "answer";
+
   return (
     <>
-      <PageHeader title="Identify a fungus">
-        From all your photos of one find, compared with DNA-sequenced specimens, not community
-        votes. Free, from the nonprofit MycoMap.
-      </PageHeader>
-      <div className={`container mx-auto px-4 sm:px-6 lg:px-8 pt-8 lg:pb-8 grid gap-8 lg:grid-cols-[360px_1fr] ${
-        pinned ? "pb-28" : "pb-8"}`}>
-        <div className="space-y-6">
-          {gate === "sign-in" && <SignInFirst />}
-          <PhotoPicker files={files} setFiles={setFiles} zone={pickZone}
-                       onStartOver={restart} canStartOver={clearable} />
-          <LinkBox value={link} setValue={setLink} pending={byLink.isPending} waiting={viaLink ? waiting : null}
-                   disabled={!chosen.length || pending || gate !== "ready"} signIn={gate === "sign-in"}
-                   onRun={startLink} />
-          <PhotoChecklist hasPhotos={files.length > 0} />
-          <WhereWhen where={where} setWhere={setWhere}
-                     noPlace={noPhotoPlace({ found: files.map((f) => found.get(f)), where, platform })} />
-          <ModelPicker models={models} onChange={setChosen} />
-          {gate === "sign-in" ? (
-            <Button asChild size="lg" className="w-full" data-testid="button-signin-to-identify">
-              <a href={signInUrl()}>Sign in to identify</a>
-            </Button>
-          ) : (
-            <div ref={inlineButton}>{identify}</div>
-          )}
-          {failed && (
-            <p className="text-sm text-destructive">
-              {(failed as Error).message}
-              {failed instanceof ApiError && failed.status === 401 && (
-                <> <a className="underline font-medium" href={signInUrl()}>Sign in</a></>
+      <div className={onAnswer ? "" : "border-b border-[#A87146]/10 bg-[#f8f5f0]"}>
+        {onAnswer ? (
+          <FindBar urls={shownUrls} photos={viaLink ? (byLink.data?.observation.photos_used ?? 0) : sentUrls.length}>
+            {answer && (
+              <div className="flex min-w-0 basis-full sm:basis-0 sm:flex-1">
+                <ContextLine used={answer.context_used} sent={viaLink ? undefined : run.variables?.where}
+                             placeModel={usesPlace(answer.results.map((r) => r.model.method))} />
+              </div>
+            )}
+            <div className="flex gap-2 sm:ml-auto">
+              {shownRun && <CopyLink id={shownRun.id} />}
+              <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-top" />
+            </div>
+            {shownRun && (
+              <p className="w-full text-xs text-muted-foreground" data-testid="text-run-link">
+                {keptLine(viaLink ? "observation" : "photos")}{" "}
+                {!viaLink && (
+                  <button type="button" className="underline decoration-dotted underline-offset-2 hover:text-destructive"
+                          onClick={deleteRun} data-testid="button-delete-run">
+                    Delete it
+                  </button>
+                )}
+              </p>
+            )}
+            {runRef && deletedRun === runRef.id && (
+              <p className="w-full text-xs text-muted-foreground" data-testid="text-run-deleted">
+                Deleted: the link no longer works, and the copies of your photos are gone.
+              </p>
+            )}
+          </FindBar>
+        ) : null}
+        {/* Before an answer the hero lines up with the sections under it (Explainer's Wrap). */}
+        <div className={`mx-auto grid items-start ${onAnswer
+          ? "container gap-4 px-4 pt-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-7 lg:px-8 lg:pt-6"
+          : "max-w-[1080px] px-4 pt-5 sm:px-8 sm:pt-9 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] lg:gap-10"} ${
+          pinned ? "pb-28" : onAnswer ? "pb-12" : "pb-7 sm:pb-11"}`}>
+          {/* The photo box is one element in every stage, so the photos, the link, the place
+              and the model chosen (the picker keeps its own state) stay as they are. */}
+          <div className={onAnswer ? "order-2 min-w-0 space-y-4 lg:sticky lg:top-20" : "min-w-0"}>
+            {!onAnswer && <HomeTitle full={stage === "empty"} />}
+            {onAnswer && (
+              <AnswerSide results={answer?.results} editing={editing} onEdit={() => setEditing(!editing)}
+                          onStartOver={restart} canStartOver={clearable} />
+            )}
+            <div className={onAnswer && !editing ? "hidden" : ""} data-testid="box-find-wrap">
+              {gate === "sign-in" && <div className="mt-4 sm:mt-6"><SignInFirst /></div>}
+              <div className={`${onAnswer ? "" : "mt-4 sm:mt-6"} overflow-hidden rounded-2xl border border-[#A87146]/20 bg-white shadow-[0_1px_2px_rgba(74,55,40,.06),0_10px_30px_-12px_rgba(74,55,40,.18)]`}
+                   data-testid="box-find">
+                <PhotoPicker files={files} setFiles={setFiles} zone={pickZone}
+                             onStartOver={restart} canStartOver={clearable} />
+                <LinkBox value={link} setValue={setLink} pending={byLink.isPending} waiting={viaLink ? waiting : null}
+                         disabled={!chosen.length || pending || gate !== "ready"} signIn={gate === "sign-in"}
+                         onRun={startLink} folded={files.length > 0} />
+                <WhereWhen where={where} setWhere={setWhere} open={files.length > 0}
+                           noPlace={noPhotoPlace({ found: files.map((f) => found.get(f)), where, platform })} />
+                <div className={`space-y-3 px-3 sm:px-4 ${files.length || gate === "sign-in" ? "border-t border-[#A87146]/10 py-3 sm:py-4" : "pb-3"}`}>
+                  {gate === "sign-in" ? (
+                    <Button asChild size="lg" className="w-full" data-testid="button-signin-to-identify">
+                      <a href={signInUrl()}>Sign in to identify</a>
+                    </Button>
+                  ) : files.length > 0 && (
+                    <div ref={inlineButton}>{identify}</div>
+                  )}
+                  {failed && (
+                    <p className="text-sm text-destructive">
+                      {(failed as Error).message}
+                      {failed instanceof ApiError && failed.status === 401 && (
+                        <> <a className="underline font-medium" href={signInUrl()}>Sign in</a></>
+                      )}
+                    </p>
+                  )}
+                  <ModelPicker models={models} onChange={setChosen} />
+                </div>
+              </div>
+              {!onAnswer && (
+                <p className="mt-3.5 flex items-center gap-2 text-[13px] font-semibold text-[#78350f]" data-testid="text-safety-line">
+                  <TriangleAlert className="h-4 w-4 shrink-0 text-amber-600" aria-hidden />{SAFETY_LINE}
+                </p>
               )}
-            </p>
-          )}
-        </div>
+            </div>
+          </div>
 
-        <div className="min-w-0 scroll-mt-20" ref={results}>
-          {!answer && !pending && <EmptyState />}
+          <div className="min-w-0 scroll-mt-20" ref={results}>
+          {stage === "empty" && <ExampleAnswer />}
+          {stage === "photos" && <ViewsChecklist wide={wide} />}
           {pending && viaLink && byLink.variables && (
             <LinkWaitingCard observation={byLink.variables} waitSeconds={waiting} />
           )}
@@ -289,32 +350,6 @@ export function IdentifyPage() {
                                    busy={pending || gate !== "ready"} />
           )}
           {answer && (
-            <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
-              <ContextLine used={answer.context_used} sent={viaLink ? undefined : run.variables?.where}
-                           placeModel={usesPlace(answer.results.map((r) => r.model.method))} />
-              <div className="flex gap-2">
-                {shownRun && <CopyLink id={shownRun.id} />}
-                <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-top" />
-              </div>
-              {shownRun && (
-                <p className="w-full text-xs text-muted-foreground" data-testid="text-run-link">
-                  {keptLine(viaLink ? "observation" : "photos")}{" "}
-                  {!viaLink && (
-                    <button type="button" className="underline decoration-dotted underline-offset-2 hover:text-destructive"
-                            onClick={deleteRun} data-testid="button-delete-run">
-                      Delete it
-                    </button>
-                  )}
-                </p>
-              )}
-              {runRef && deletedRun === runRef.id && (
-                <p className="w-full text-xs text-muted-foreground" data-testid="text-run-deleted">
-                  Deleted: the link no longer works, and the copies of your photos are gone.
-                </p>
-              )}
-            </div>
-          )}
-          {answer && (
             <div
               className={`grid gap-6 ${answer.results.length > 1 ? "xl:grid-cols-2" : ""}`}
             >
@@ -325,16 +360,11 @@ export function IdentifyPage() {
               ))}
             </div>
           )}
-          {answer && <WhatNext results={answer.results} />}
-          {answer && (
-            <div className="mt-6 flex justify-center">
-              <StartOverButton onClick={restart} disabled={!clearable} testId="button-start-over-bottom">
-                Start over with another find
-              </StartOverButton>
-            </div>
-          )}
+          </div>
         </div>
       </div>
+      {stage === "empty" && <PhotoGuide />}
+      {stage === "empty" && <WhyVision stats={stats.data} howGood={howGood.data} />}
       {pinned && (
         <div className="lg:hidden fixed inset-x-0 bottom-0 z-40 flex items-center gap-2 border-t border-[#A87146]/15 bg-white/95 px-4 pt-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom))] shadow-[0_-4px_16px_rgba(74,55,40,0.12)] backdrop-blur"
              data-testid="bar-identify-pinned">
@@ -350,8 +380,9 @@ export function IdentifyPage() {
   );
 }
 
-/** Identify from a link: one iNat or MO observation, its photos, place and date read by Vision. */
-function LinkBox({ value, setValue, pending, waiting, disabled, signIn, onRun }: {
+/** Identify from a link: one iNat or MO observation, its photos, place and date read by Vision.
+ *  `folded` (photos are in): one line that opens it, unless a link is already typed. */
+function LinkBox({ value, setValue, pending, waiting, disabled, signIn, onRun, folded }: {
   value: string;
   setValue: (v: string) => void;
   pending: boolean;
@@ -359,20 +390,37 @@ function LinkBox({ value, setValue, pending, waiting, disabled, signIn, onRun }:
   disabled: boolean;
   signIn: boolean;
   onRun: (ref: ObservationRef) => void;
+  folded: boolean;
 }) {
+  const [opened, setOpened] = useState(false);
   const parsed = parseObservationLink(value);
   const typed = value.trim().length > 0;
+  if (folded && !typed && !opened) {
+    return (
+      <div className="px-3 pb-3 sm:px-4">
+        <button type="button" onClick={() => setOpened(true)} data-testid="button-open-link"
+                className="inline-flex items-start gap-1.5 text-left text-sm text-[#4a3728] underline decoration-dotted underline-offset-2 hover:text-myco-green">
+          <Link2 className="mt-[3px] h-3.5 w-3.5 shrink-0" aria-hidden /> Paste an iNaturalist or Mushroom Observer link instead
+        </button>
+      </div>
+    );
+  }
   return (
-    <div className="space-y-2 rounded-lg border border-[#A87146]/20 bg-white p-4" data-testid="box-link">
+    <div data-testid="box-link-wrap">
+      {!folded && (
+        <div className="mx-3 flex items-center gap-3 text-xs uppercase tracking-[.08em] text-muted-foreground before:h-px before:flex-1 before:bg-[#ece6de] after:h-px after:flex-1 after:bg-[#ece6de] sm:mx-4"
+             aria-hidden>or</div>
+      )}
+    <div className="space-y-2 px-3 pb-3 pt-2.5 sm:px-4 sm:pb-3.5 sm:pt-3" data-testid="box-link">
       <label htmlFor="observation-link" className="flex items-center gap-1.5 text-sm font-medium text-[#4a3728]">
-        <Link2 className="h-4 w-4" aria-hidden /> Or identify from an iNaturalist or Mushroom Observer link
+        <Link2 className="h-4 w-4 shrink-0" aria-hidden /> Identify from an iNaturalist or Mushroom Observer link
       </label>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (parsed && !disabled) onRun(parsed); }}>
         <input id="observation-link" type="text" inputMode="url" autoComplete="off" spellCheck={false}
-               className="h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm"
+               className="h-10 min-w-0 flex-1 rounded-lg border border-input bg-background px-3 text-sm"
                placeholder="inaturalist.org/observations/…" value={value}
                onChange={(e) => setValue(e.target.value)} data-testid="input-link" />
-        <Button type="submit" disabled={!parsed || disabled} data-testid="button-identify-link">
+        <Button type="submit" className="h-10" disabled={!parsed || disabled} data-testid="button-identify-link">
           {pending ? <Loader2 className="animate-spin" aria-hidden /> : null}
           {pending ? (waiting != null ? "Waiting…" : "Reading…") : "Identify"}
         </Button>
@@ -383,6 +431,7 @@ function LinkBox({ value, setValue, pending, waiting, disabled, signIn, onRun }:
             : parsed ? `${sourceName(parsed.source)} observation ${parsed.id}: Vision reads its photos, place and date.`
               : "Vision reads the observation's photos, place and date itself."}
       </p>
+    </div>
     </div>
   );
 }
@@ -587,90 +636,111 @@ function PhotoPicker({ files, setFiles, zone, onStartOver, canStartOver }: {
     const images = Array.from(list).filter((f) => f.type.startsWith("image/"));
     setFiles([...files, ...images].slice(0, MAX_PHOTOS));
   };
+  // The drop zone before photos, the "Add more" tile after: either opens the picker, by click or key.
+  const opens = {
+    ref: zone,
+    role: "button",
+    tabIndex: 0,
+    onClick: () => input.current?.click(),
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        input.current?.click();
+      }
+    },
+  } as const;
+  const ring = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-myco-green";
   return (
-    <div>
-      <div
-        ref={zone}
-        role="button"
-        tabIndex={0}
-        aria-label="Add photos"
-        className={`rounded-lg border-2 border-dashed p-6 text-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-myco-green ${
-          over ? "border-myco-green bg-myco-green/5" : "border-[#A87146]/30 hover:border-myco-green"
-        }`}
-        onClick={() => input.current?.click()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            input.current?.click();
-          }
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        setOver(true);
+      }}
+      onDragLeave={() => setOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setOver(false);
+        add(e.dataTransfer.files);
+      }}
+    >
+      <input
+        ref={input}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          add(e.target.files);
+          e.target.value = "";
         }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setOver(true);
-        }}
-        onDragLeave={() => setOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setOver(false);
-          add(e.dataTransfer.files);
-        }}
-      >
-        <ImagePlus className="mx-auto h-8 w-8 text-myco-brown" />
-        <p className="mt-2 font-medium text-[#4a3728]">Add photos</p>
-        <p className="text-xs text-muted-foreground">
-          <span className="sm:hidden">Take or choose</span>
-          <span className="hidden sm:inline">Drop or choose</span> up to {MAX_PHOTOS}, all of the same find
-        </p>
-        <input
-          ref={input}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            add(e.target.files);
-            e.target.value = "";
-          }}
-        />
-      </div>
-      {files.length > 0 && (
-        <div className="mt-3 grid grid-cols-3 sm:grid-cols-4 gap-2">
-          {urls.map((u, i) => (
-            <div key={u} className="relative aspect-square rounded-md overflow-hidden border">
-              <img src={u} alt={`Photo ${i + 1}`} className="h-full w-full object-cover" />
-              <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[10px] text-white">
-                {i + 1}
-              </span>
-              <button
-                type="button"
-                className="absolute top-0 right-0 flex h-9 w-9 items-start justify-end p-1 text-white"
-                onClick={() => setFiles(files.filter((_, j) => j !== i))}
-                aria-label={`Remove photo ${i + 1}`}
-              >
-                <span className="rounded-full bg-black/60 p-1 hover:bg-black/80"><X className="h-3.5 w-3.5" /></span>
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      {files.length > 0 && (
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <span className="text-xs text-muted-foreground">
-            {files.length} of {MAX_PHOTOS} photos
+      />
+      {files.length === 0 ? (
+        <div {...opens} aria-label="Add photos" data-testid="zone-add-photos"
+             className={`m-3 cursor-pointer rounded-xl border-2 border-dashed bg-gradient-to-b from-white to-[#fbfaf6] px-3.5 pb-4 pt-5 text-center transition-colors sm:m-4 sm:px-5 sm:pb-5 sm:pt-[26px] ${ring} ${
+               over ? "border-myco-green bg-myco-green/5" : "border-[#A87146]/30 hover:border-myco-green"}`}>
+          <span className="mx-auto mb-2.5 flex h-[60px] w-[60px] items-center justify-center rounded-full bg-myco-green/[.14] text-[#4f7a16]" aria-hidden>
+            <Camera className="h-7 w-7" />
           </span>
-          <StartOverButton onClick={onStartOver} disabled={!canStartOver} testId="button-start-over-picker" />
+          <p className="font-display text-[19px] font-semibold text-[#4a3728] sm:text-[21px]">Add photos of one find</p>
+          <p className="mb-3.5 mt-0.5 text-sm text-muted-foreground">
+            <span className="hidden sm:inline">Drop them here, or choose up to {MAX_PHOTOS}.</span>
+            <span className="sm:hidden">Up to {MAX_PHOTOS}.</span> Every photo of the same find helps.
+          </p>
+          <span className="inline-flex items-center gap-2 rounded-[10px] bg-myco-green px-5 py-3.5 text-base font-semibold text-white" aria-hidden>
+            <ImagePlus className="h-5 w-5" />
+            <span className="sm:hidden">Take or choose photos</span>
+            <span className="hidden sm:inline">Choose photos</span>
+          </span>
+          <ViewsRow />
         </div>
+      ) : (
+        <>
+          <div className={`m-3 grid grid-cols-4 gap-2 rounded-xl sm:m-4 sm:grid-cols-5 sm:gap-2.5 ${over ? "ring-2 ring-myco-green" : ""}`}
+               data-testid="grid-photos">
+            {urls.map((u, i) => (
+              <div key={u} className="relative aspect-square overflow-hidden rounded-[10px] border border-[#A87146]/20">
+                <img src={u} alt={`Photo ${i + 1}`} className="h-full w-full object-cover" />
+                <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1.5 text-[11px] text-white">
+                  {i + 1}
+                </span>
+                <button
+                  type="button"
+                  className="absolute top-0 right-0 flex h-9 w-9 items-start justify-end p-1 text-white"
+                  onClick={() => setFiles(files.filter((_, j) => j !== i))}
+                  aria-label={`Remove photo ${i + 1}`}
+                >
+                  <span className="rounded-full bg-black/60 p-1 hover:bg-black/80"><X className="h-3.5 w-3.5" /></span>
+                </button>
+              </div>
+            ))}
+            {files.length < MAX_PHOTOS && (
+              <div {...opens} aria-label="Add more photos" data-testid="tile-add-photos"
+                   className={`flex aspect-square cursor-pointer flex-col items-center justify-center gap-1 rounded-[10px] border-2 border-dashed border-[#A87146]/30 bg-[#fbfaf6] text-xs font-semibold text-[#4f7a16] hover:border-myco-green ${ring}`}>
+                <Plus className="h-[22px] w-[22px]" aria-hidden />Add more
+              </div>
+            )}
+          </div>
+          <div className="mx-3 mb-3 flex items-center justify-between gap-2 sm:mx-4">
+            <span className="text-[13px] text-muted-foreground">
+              {files.length} of {MAX_PHOTOS} photos · all of the same find
+            </span>
+            <StartOverButton onClick={onStartOver} disabled={!canStartOver} testId="button-start-over-picker" />
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-function WhereWhen({ where, setWhere, noPlace }: {
+function WhereWhen({ where, setWhere, noPlace, open }: {
   where: Where;
   setWhere: Dispatch<SetStateAction<Where>>;
   /** Set on a phone whose photos carry no place: offer the current location. */
   noPlace: { tip: string } | null;
+  /** Photos are in: the fields show, filled from them. Before that, two chips open them. */
+  open: boolean;
 }) {
+  const [opened, setOpened] = useState(false);
   const [locating, setLocating] = useState(false);
   const [failed, setFailed] = useState<string | null>(null);
   // The map sheet; focus goes back to the button that opened it, or to the one by the
@@ -705,19 +775,43 @@ function WhereWhen({ where, setWhere, noPlace }: {
     );
   };
   const note = placeNote(where);
-  const input = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm";
+  const input = "h-10 w-full rounded-lg border border-input bg-background px-3 text-sm";
+  const filled = !!(where.lat?.trim() || where.lng?.trim() || where.observedOn);
+  const chip = "inline-flex items-center gap-1.5 rounded-full border border-[#A87146]/20 bg-white px-3 py-1.5 text-[13px] text-[#4a3728] hover:border-myco-green";
+  const map = picking && (
+        <Suspense fallback={
+          <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40" role="status" aria-label="Loading the map">
+            <Loader2 className="h-8 w-8 animate-spin text-white" />
+          </div>
+        }>
+          <LocationPicker where={where} onClose={closeMap}
+                          onUse={(pin) => { setWhere((w) => applyPick(w, pin)); closeMap(); }} />
+        </Suspense>
+  );
+  if (!open && !opened && !filled) {
+    return (
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2 border-t border-[#A87146]/10 bg-[#faf9f7] px-3 py-2.5 text-[13px] sm:px-4 sm:py-3"
+           data-testid="chips-where-when">
+        <span className="font-semibold text-[#4a3728]">Where and when</span>
+        <span className="text-xs text-muted-foreground">optional, read from your photos</span>
+        <button type="button" className={chip} onClick={() => setOpened(true)} data-testid="button-open-place">
+          <MapPin className="h-4 w-4 text-myco-brown" aria-hidden /> Place
+        </button>
+        <button type="button" className={chip} onClick={() => setOpened(true)} data-testid="button-open-date">
+          <CalendarDays className="h-4 w-4 text-myco-brown" aria-hidden /> Date
+        </button>
+        {map}
+      </div>
+    );
+  }
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">Where and when</CardTitle>
-        <p className="text-sm text-muted-foreground">
-          Optional. Filled in from your photos when they carry a place or date; change them if
-          they're wrong.
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-3">
+    <div className="space-y-3 border-t border-[#A87146]/10 bg-[#faf9f7] px-3 pb-4 pt-3.5 sm:px-4" data-testid="box-where-when">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-2.5">
+        <p className="text-sm font-semibold text-[#4a3728]">Where and when</p>
+        <p className="text-xs text-muted-foreground">optional · filled in from your photos; change them if they're wrong</p>
+      </div>
         {noPlace && (
-          <div className="rounded-md border border-myco-green/40 bg-myco-green/5 p-3 space-y-2"
+          <div className="rounded-[10px] border border-myco-green/40 bg-myco-green/5 p-3 space-y-2"
                data-testid="box-no-photo-place">
             <p className="text-sm font-medium text-[#4a3728]">Your photos don't say where they were taken.</p>
             <Button type="button" className="w-full" onClick={locate} disabled={locating}
@@ -735,42 +829,32 @@ function WhereWhen({ where, setWhere, noPlace }: {
             <p className="text-xs text-muted-foreground" data-testid="text-no-place-tip">{noPlace.tip}</p>
           </div>
         )}
-        <div className="flex items-center gap-2">
-          <MapPin className="h-4 w-4 text-myco-brown shrink-0" />
-          <input className={`${input} min-w-0`} placeholder="Latitude" inputMode="decimal" value={where.lat ?? ""}
+        <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
+          <MapPin className="h-4 w-4 text-myco-brown shrink-0" aria-hidden />
+          <input className={`${input} min-w-0 flex-1`} placeholder="Latitude" inputMode="decimal" value={where.lat ?? ""}
                  onChange={(e) => setWhere({ ...where, lat: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined, placeFromMap: undefined })} aria-label="Latitude" />
-          <input className={`${input} min-w-0`} placeholder="Longitude" inputMode="decimal" value={where.lng ?? ""}
+          <input className={`${input} min-w-0 flex-1`} placeholder="Longitude" inputMode="decimal" value={where.lng ?? ""}
                  onChange={(e) => setWhere({ ...where, lng: e.target.value, placeFromPhoto: undefined, placeFromDevice: undefined, placeFromMap: undefined })} aria-label="Longitude" />
-          <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0" onClick={locate}
+          <Button type="button" variant="outline" size="icon" className="h-10 w-10 shrink-0 bg-white" onClick={locate}
                   disabled={locating} title="Use my location" aria-label="Use my location">
             {locating ? <Loader2 className="animate-spin" /> : <LocateFixed />}
           </Button>
+          {!noPlace && (
+            <Button ref={pickButton} type="button" variant="outline" className="h-10 shrink-0 bg-white" onClick={openMap}
+                    data-testid="button-pick-on-map">
+              <MapIcon /> Pick on map
+            </Button>
+          )}
         </div>
-        {!noPlace && (
-          <Button ref={pickButton} type="button" variant="outline" size="sm" onClick={openMap}
-                  data-testid="button-pick-on-map">
-            <MapIcon /> Pick on map
-          </Button>
-        )}
         <div className="flex items-center gap-2">
-          <CalendarDays className="h-4 w-4 text-myco-brown shrink-0" />
+          <CalendarDays className="h-4 w-4 text-myco-brown shrink-0" aria-hidden />
           <input className={input} type="date" value={where.observedOn ?? ""}
                  onChange={(e) => setWhere({ ...where, observedOn: e.target.value, dateFromPhoto: undefined })} aria-label="Date found" />
         </div>
         {failed && <p className="text-xs text-destructive" data-testid="text-locate-failed">{failed}</p>}
         {note && <p className="text-xs text-muted-foreground" data-testid="text-place-source">{note}</p>}
-      </CardContent>
-      {picking && (
-        <Suspense fallback={
-          <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40" role="status" aria-label="Loading the map">
-            <Loader2 className="h-8 w-8 animate-spin text-white" />
-          </div>
-        }>
-          <LocationPicker where={where} onClose={closeMap}
-                          onUse={(pin) => { setWhere((w) => applyPick(w, pin)); closeMap(); }} />
-        </Suspense>
-      )}
-    </Card>
+      {map}
+    </div>
   );
 }
 
@@ -850,13 +934,25 @@ function ModelPicker({ models, onChange }: {
   const canCompare = cap >= 2 && ready.length * offered.length > 1;
   const info = models.data?.backbones.find((b) => b.backbone === backbone);
 
+  // Folded to one line (the model, how it scores) until "Model" opens the choices; folded,
+  // it keeps its choices, and a second model to compare.
+  const [open, setOpen] = useState(false);
+  const summary = backbone && method
+    ? `${publicModelName(backbone)} · ${publicMethodLabel(method)}${secondKey && secondKey !== first ? " · and a second model" : ""}`
+    : null;
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-base">Model</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {models.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
+    <div data-testid="box-model">
+      <div className="flex items-start justify-between gap-3 text-[13px] text-muted-foreground">
+        <span className="inline-flex min-w-0 items-start gap-1.5" data-testid="text-model-summary">
+          <Cpu className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+          {summary ?? (models.isLoading ? "Loading…" : "Model")}
+        </span>
+        <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} data-testid="button-model"
+                className="shrink-0 underline decoration-dotted underline-offset-2 hover:text-myco-green">
+          Model
+        </button>
+      </div>
+      <div className={`space-y-3 pt-3 ${open || models.isError || (models.data && (!ready.length || !bases.length)) ? "" : "hidden"}`}>
         {models.isError && (
           <p className="text-sm text-destructive">
             The identifier isn't answering. Please try again in a minute.
@@ -924,8 +1020,8 @@ function ModelPicker({ models, onChange }: {
             )}
           </details>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -947,72 +1043,88 @@ function SignInFirst() {
   );
 }
 
-function EmptyState() {
+/** The top of the page before an answer: the full hero with nothing chosen, the title alone
+ *  once photos are in. */
+function HomeTitle({ full }: { full: boolean }) {
   return (
-    <div className="rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-8 text-[#5c4a3a]">
-      <h2 className="font-display font-semibold text-2xl text-[#4a3728]">What you'll get</h2>
-      <ul className="mt-4 space-y-2 text-sm list-disc pl-5">
-        <li>
-          An answer at every rank (family, genus, species), each with its own confidence. Often
-          the genus is clear when the species isn't.
-        </li>
-        <li>
-          Species known so far only from DNA, under provisional names, that identifiers trained
-          on community names can't suggest.
-        </li>
-        <li>The closest DNA-verified specimens, with their photos, so you can compare by eye.</li>
-        <li>How each of your photos scores on its own, to see which ones agree.</li>
-        <li>Advice on what would firm up the identification.</li>
-        <li>Optionally a second model side by side, to see where they agree.</li>
-      </ul>
-      <p className="mt-4 text-xs">
-        A preview. Every answer comes from DNA-verified MycoMap records, and its confidence is
-        calibrated on the newest ones; see <a className="underline" href="/about">how it works and
-        how good it is</a>.
-      </p>
-      <p className="mt-2 text-xs font-semibold text-[#4a3728]">{SAFETY_LINE}</p>
+    <>
+      {full && (
+        <span className="inline-flex items-center gap-1.5 rounded-full bg-myco-green/[.14] px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-[.06em] text-[#4f7a16] sm:text-xs">
+          <span className="h-2 w-2 rounded-full bg-[#7FAE34] shadow-[0_0_0_3px_hsl(82_53%_51%/.25)]" aria-hidden />
+          DNA-verified references only · Updated daily
+        </span>
+      )}
+      <h1 className={`font-display font-semibold leading-[1.08] text-[#4a3728] ${full ? "mt-2 text-[31px] sm:mt-3 sm:text-[44px]" : "text-[31px] sm:text-[44px]"}`}>
+        Identify a fungus
+      </h1>
+      {full && (
+        <p className="mt-2.5 max-w-[620px] text-[15.5px] text-[#5c4a3a] sm:text-[19px]">
+          From all your photos of one find, compared with DNA-sequenced specimens, not community
+          votes. Free, from the nonprofit MycoMap.
+        </p>
+      )}
+    </>
+  );
+}
+
+/** With an answer (or while identifying): the find in one strip above it, its photos, place
+ *  and date, its link and Start over. */
+function FindBar({ urls, photos, children }: { urls: string[]; photos: number; children: ReactNode }) {
+  const tiles = urls.length ? urls : Array.from({ length: photos }, () => "");
+  return (
+    <div className="border-b border-[#A87146]/10 bg-[#f8f5f0]" data-testid="bar-find">
+      <div className="container mx-auto flex flex-wrap items-center gap-x-[18px] gap-y-3 px-4 py-3.5 sm:px-6 sm:py-[18px] lg:px-8">
+        <div className="order-first min-w-0 basis-full sm:order-none sm:basis-auto">
+          <h1 className="font-display text-[19px] font-semibold leading-tight text-[#4a3728] sm:text-[22px]">Your find</h1>
+        </div>
+        {tiles.length > 0 && (
+          <div className="flex gap-1.5" aria-label="Photos of this find">
+            {tiles.map((u, i) => (
+              <span key={i} className="relative h-11 w-11 overflow-hidden rounded-lg border border-[#A87146]/20 bg-muted sm:h-[52px] sm:w-[52px]">
+                {u && <img src={u} alt={`Photo ${i + 1}`} className="h-full w-full object-cover" />}
+                <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[10px] text-white">{i + 1}</span>
+              </span>
+            ))}
+          </div>
+        )}
+        {children}
+      </div>
     </div>
   );
 }
 
-/** Open until photos are chosen, then folded to one line (it can still be opened). */
-function PhotoChecklist({ hasPhotos }: { hasPhotos: boolean }) {
-  const [open, setOpen] = useState(!hasPhotos);
-  useEffect(() => setOpen(!hasPhotos), [hasPhotos]);
+/** Beside the answer (below it on a phone): what to do next, another find, and the photo box
+ *  folded behind "Change photos, place or model". */
+function AnswerSide({ results, editing, onEdit, onStartOver, canStartOver }: {
+  results?: IdentifyResult[]; editing: boolean; onEdit: () => void; onStartOver: () => void; canStartOver: boolean;
+}) {
   return (
-    <details className="group rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-4" data-testid="list-photo-checklist"
-             open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary className="flex cursor-pointer list-none items-center justify-between text-sm text-[#4a3728] [&::-webkit-details-marker]:hidden">
-        <span>
-          <span className="font-semibold">What to photograph</span>
-          <span className="text-muted-foreground group-open:hidden"> · {PHOTO_CHECKLIST.length} views</span>
-        </span>
-        <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-90" aria-hidden />
-      </summary>
-      <ul className="mt-2 space-y-1.5 text-sm text-[#5c4a3a]">
-        {PHOTO_CHECKLIST.map((c) => (
-          <li key={c.what} className="flex gap-2">
-            <Camera className="h-4 w-4 mt-0.5 shrink-0 text-myco-brown" aria-hidden />
-            <span>
-              <span className="font-medium">{c.what}</span>
-              <span className="text-muted-foreground">: {c.why}</span>
-            </span>
-          </li>
-        ))}
-      </ul>
-      <p className="mt-2 text-xs text-muted-foreground">
-        One find per identification. Sharp, close and in daylight works best.
-      </p>
-    </details>
+    <>
+      {results && <WhatNext results={results} className="" />}
+      <div className="rounded-xl border border-[#A87146]/20 bg-white p-4 text-[#5c4a3a]" data-testid="card-another-find">
+        <p className="font-display text-base font-semibold text-[#4a3728]">Another find?</p>
+        <p className="mb-3 mt-1 text-sm text-muted-foreground">Clears these photos, place, date and answer. The model stays.</p>
+        <Button type="button" className="w-full" onClick={onStartOver} disabled={!canStartOver}
+                data-testid="button-start-over-bottom">
+          <RotateCcw /> Start over with another find
+        </Button>
+        <button type="button" onClick={onEdit} aria-expanded={editing}
+                className="mt-3 flex w-full items-center justify-between rounded-md border border-[#A87146]/20 px-3 py-2 text-sm text-[#5c4a3a] hover:bg-[#faf9f7]"
+                data-testid="button-edit-find">
+          <span className="inline-flex items-center gap-2"><Pencil className="h-4 w-4" aria-hidden />Change photos, place or model</span>
+          <ChevronRight className={`h-4 w-4 transition-transform ${editing ? "rotate-90" : ""}`} aria-hidden />
+        </button>
+      </div>
+    </>
   );
 }
 
 /** After an answer: how to go from a suggestion to a name you can rely on (gate.whatNext
  *  words it for photos that may not show a fungus). */
-export function WhatNext({ results }: { results: IdentifyResult[] }) {
+export function WhatNext({ results, className = "mt-6" }: { results: IdentifyResult[]; className?: string }) {
   const next = whatNext(results);
   return (
-    <div className="mt-6 rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-4 text-sm text-[#5c4a3a]"
+    <div className={`${className} rounded-lg border border-[#A87146]/20 bg-[#faf9f7] p-4 text-sm text-[#5c4a3a]`}
          data-testid="card-what-next">
       <p className="font-semibold text-[#4a3728]">{next.title}</p>
       <ol className="mt-2 list-decimal pl-5 space-y-1">

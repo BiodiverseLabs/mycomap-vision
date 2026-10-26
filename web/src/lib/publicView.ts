@@ -169,12 +169,12 @@ export const RESEARCH_PATH = "/research/for-researchers";
 
 /** What to photograph, in the order that helps most. Underside and stem base separate many
  *  look-alikes that the cap alone can't. */
-export const PHOTO_CHECKLIST: { what: string; why: string }[] = [
-  { what: "Cap from above", why: "colour, texture, shape" },
-  { what: "Underside", why: "gills, pores or teeth" },
-  { what: "Whole stem, with its base", why: "ring, cup or bulb" },
-  { what: "Cut in half, top to bottom", why: "flesh and any colour change" },
-  { what: "Where it grows", why: "wood, soil or moss, and nearby trees" },
+export const PHOTO_CHECKLIST: { what: string; why: string; short: string }[] = [
+  { what: "Cap from above", why: "colour, texture, shape", short: "Cap from above" },
+  { what: "Underside", why: "gills, pores or teeth", short: "Underside" },
+  { what: "Whole stem, with its base", why: "ring, cup or bulb", short: "Stem and base" },
+  { what: "Cut in half, top to bottom", why: "flesh and any colour change", short: "Cut in half" },
+  { what: "Where it grows", why: "wood, soil or moss, and nearby trees", short: "Where it grows" },
 ];
 
 /** The newest week's new DNA-verified records as a sentence, or null when there were none
