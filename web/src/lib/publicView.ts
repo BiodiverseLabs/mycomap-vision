@@ -26,6 +26,13 @@ const BASE_NAME: Record<string, string> = {
 export { PUBLIC_TRAINED } from "./publicNames";
 /** What each MycoMap Vision v1 learned from (Steve, 2026-10-21/23), the qualifier after its name. */
 export const TRAINING_DATA = { public: "open data only", internal: "public + non-public training data" };
+/** What "open data only" means for MycoMap Vision v1-open, word for word (Vision Coordinator,
+ *  26 Oct 2026, confirmed from the release by the retrain lane: its training split holds 403,503
+ *  non-commercial + 124,339 open = 527,842 photos; the 96,943 all-rights-reserved photos were not
+ *  used, and none of them had a grant). */
+export const V1_OPEN_TRAINED_ON = "MycoMap Vision v1-open was trained only on Creative Commons–licensed photos (including non-commercial licences); no all-rights-reserved photos were used.";
+/** Its training photos, the one count to show. */
+export const V1_OPEN_PHOTOS = 527_842;
 /** Said once wherever the models are explained (Steve, 2026-10-23): Research's two models,
  *  Protocols / For researchers, and How it works' model credit. */
 export const MODEL_CREDIT_LINE = "MycoMap Vision is BioCLIP 2 (Imageomics) fine-tuned on DNA-verified records.";
@@ -56,7 +63,7 @@ export function modelName(backbone: string): string {
   const picek = /^picek-(.+?)-(\d{8}-\d{6}|smoke)$/.exec(backbone);
   if (picek && PICEK_NAME[picek[1]]) {
     const test = picek[2] === "smoke" ? " (test model)" : "";
-    return `Danish Fungi method (${PICEK_NAME[picek[1]]}, Picek et al.), trained on our ` +
+    return `Danish Fungi method (${PICEK_NAME[picek[1]]}, Picek et al.), trained on MycoMap's ` +
       `DNA-verified records${test}`;
   }
   if (backbone in EXTERNAL_NAME) return EXTERNAL_NAME[backbone];

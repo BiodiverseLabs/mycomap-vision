@@ -104,7 +104,7 @@ export function Experiments(d: ExperimentsData & { initial?: ExperimentFilter })
         {all.length > 0 && (
           <>
             <ChartCard className="mb-3.5" testId="entries-by-day">
-              <div className="flex flex-wrap justify-between gap-2"><h3 className="font-display font-semibold text-[#4a3728]">Entries by day</h3>
+              <div className="flex flex-wrap justify-between gap-2"><h2 className="font-display font-semibold text-[#4a3728]">Entries by day</h2>
                 <div className="legend" style={{ margin: 0 }}>{STRIP_ORDER.map((st) => <span key={st}><i style={{ ...STATUS_DOT[st], borderRadius: "50%" }} />{STATUS_NAMES[st]}</span>)}</div></div>
               <div className="tline mt-2.5">
                 {entriesByDay(all).map((x) => (

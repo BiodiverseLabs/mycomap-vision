@@ -11,8 +11,9 @@
  * models, which differ only by it.
  */
 
-/** The fine-tunes trained only on openly licensed (Creative Commons, incl. non-commercial)
- *  photos (`--public-trainable-only`): the paper's 336 px headline model and the 224 px one.
+/** The fine-tunes trained only on open data (`--public-trainable-only`: Creative Commons photos,
+ *  incl. non-commercial, no all-rights-reserved photo; publicView.V1_OPEN_TRAINED_ON):
+ *  the paper's 336 px headline model and the 224 px one.
  *  Every other fine-tune learned from all its training photos. */
 export const OPEN_V1 = "bioclip-2-336-ft-20261020-173106";
 export const PUBLIC_TRAINED = new Set([OPEN_V1, "bioclip-2-ft-20261014-003539"]);

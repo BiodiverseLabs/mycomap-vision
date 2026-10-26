@@ -349,9 +349,9 @@ function HowGoodSection({ h, loading, speed, today }: {
       ) : (
         <>
           <Sub>
-            Tested on the newest <Ink>{num(run.n_test)}</Ink> DNA-verified records (validated
+            Tested on the newest <Ink>{num(run.n_test)}</Ink> DNA-verified finds (validated
             after {longDate(run.cutoff)}), identified from the <Ink>{num(run.n_reference)}</Ink> records
-            verified before them.
+            verified before them{run.method.endsWith("+place") ? ", with each find's photos and its public place and date" : ", from the photos alone"}.
           </Sub>
           <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-2">
             <Score rank="Species" value={h.top1.species} />
@@ -383,7 +383,7 @@ function HowGoodSection({ h, loading, speed, today }: {
           </div>
         </>
       )}
-      <SpeedCard days={speed} today={today} />
+      <SpeedCard days={speed} today={today} loading={loading} />
       {run && (
         <div data-testid="text-model-credit">
           <Small className="mt-[18px]">
@@ -424,7 +424,7 @@ function TopKLadder({ rows }: { rows: { k: number; species: number | null; genus
         <tbody>
           {rows.map((r) => (
             <tr key={r.k} className="border-t border-[#ece6de]">
-              <td className="w-[74px] py-[7px] font-semibold text-[#4a3728] whitespace-nowrap">Top {r.k}</td>
+              <th scope="row" className="w-[74px] py-[7px] text-left font-semibold text-[#4a3728] whitespace-nowrap">Top {r.k}</th>
               <td className="py-[7px]">
                 <div className="flex flex-col gap-[3px]">
                   {([["Species", r.species, C.s1], ["Genus", r.genus, C.s2]] as const).map(([rank, v, color]) => v != null && (
@@ -508,7 +508,7 @@ function DepthCard({ h }: { h: HowGood }) {
 
 /* ------------------------------------------------------------- speed chart */
 
-function SpeedCard({ days, today }: { days?: SpeedDay[]; today: string }) {
+function SpeedCard({ days, today, loading }: { days?: SpeedDay[]; today: string; loading?: boolean }) {
   const view = speedView(days);
   const latest = view.state === "none" ? null : view.latest;
   return (
@@ -541,7 +541,8 @@ function SpeedCard({ days, today }: { days?: SpeedDay[]; today: string }) {
         )}
         {view.state === "none" && (
           <p className="mt-4 text-sm">
-            No day recorded yet. Each day's average appears here once photos have been identified that day.
+            {loading && !days ? "Loading the daily averages…"
+              : "No day recorded yet. Each day's average appears here once photos have been identified that day."}
           </p>
         )}
       </div>
@@ -876,11 +877,11 @@ function OpenAndComing({ model }: { model: ReturnType<typeof servedModel> }) {
         )}
       </div>
 
-      <div className="mt-12">
-        <Kicker>What's still to come</Kicker>
+      <div className="mt-12" data-testid="section-already-and-coming">
+        <Kicker>Already in, and still to come</Kicker>
         <div className="mt-2.5 grid gap-4 md:grid-cols-3">
-          <Card><div className="mb-2.5"><Icon><ImageIcon className="h-[18px] w-[18px]" /></Icon></div><H3>Which part each photo shows</H3><p className="text-sm">Recognising cap, underside, stem and more.</p></Card>
-          <Card><div className="mb-2.5"><Icon><MapPin className="h-[18px] w-[18px]" /></Icon></div><H3>Range and season</H3><p className="text-sm">Learned from DNA records.</p></Card>
+          <Card><div className="mb-2.5"><Icon><MapPin className="h-[18px] w-[18px]" /></Icon></div><H3>Range and season</H3><p className="text-sm">Already in: when you give a place and date, Vision weighs each name by how near and how in season its DNA-verified records are.</p></Card>
+          <Card><div className="mb-2.5"><Icon><ImageIcon className="h-[18px] w-[18px]" /></Icon></div><H3>Which part each photo shows</H3><p className="text-sm">Already in: micrographs and photos of data slips are set aside. To come: recognising cap, underside, stem and more.</p></Card>
           <Card><div className="mb-2.5"><Icon><TrendingUp className="h-[18px] w-[18px]" /></Icon></div><H3>A growing reference set</H3><p className="text-sm">Growing as more records are sequenced.</p></Card>
         </div>
       </div>

@@ -2,12 +2,13 @@ import { useState } from "react";
 import type { EarlyAnswersGroup, HowGood, Me, ModelsInfo, ProspectiveModel, RunReport, ScoreRun,
               SpeedDay } from "@/lib/api";
 import { companionBars, scoreboardSections, standardOf, STANDARD_BANDS } from "@/lib/compareView";
-import { utcDay } from "@/lib/datasetReleases";
-import { MODEL_CREDIT_LINE, modelName } from "@/lib/publicView";
-import { OPEN_REFERENCE, pointsDiff, REFERENCE_LABEL, TWO_MODELS, type TopK } from "@/lib/twoModels";
+import { utcDay, V1_VAL_COUNTS } from "@/lib/datasetReleases";
+import { MODEL_CREDIT_LINE, modelName, V1_OPEN_TRAINED_ON } from "@/lib/publicView";
+import { GENUS_LABEL, GENUS_SCORING, OPEN_REFERENCE, pointsDiff, REFERENCE_LABEL, TWO_MODELS, type TopK } from "@/lib/twoModels";
 import { APPROACHES } from "@/lib/approaches";
-import { approachGroups, comparisonRows, earlyFigures, heatRows, historyLines, modelParts, nf, pc, pt,
-         releaseGroups, scoreLines, shortDay, topkValues, type TopKRow } from "@/lib/researchView";
+import { ADVANCE_PAUSED_SINCE, BENCHMARKS } from "@/lib/research";
+import { approachGroups, comparisonRows, earlyFigures, heatRows, historyLines, modelParts, nameRuleRows, nf, pc, pt,
+         releaseGroups, scoreLines, shortDay, TOO_FEW_RESOLVED, topkValues, type TopKRow } from "@/lib/researchView";
 import { ChartCard, DepthHeatmap, DepthShareBars, InPageNav, PairedDiff, ResearchHero, ResearchShell,
          Section, SourceLine, StatusPill, Tile, Tiles, TopKChart, ValueBars, KLegend } from "@/components/ResearchKit";
 import { PermissionBox } from "@/components/Explainer";
@@ -127,6 +128,7 @@ function Headline({ d }: { d: ResultsData }) {
     rows.push({ key: "species", name: "Species", detail: `${nf(std.species.all.n)} finds`, n: std.species.all.n, values: topkValues(std.species.all), highlight: true });
     if (std.genus?.all) rows.push({ key: "genus", name: "Genus", detail: `${nf(std.genus.all.n)} finds`, n: std.genus.all.n, values: topkValues(std.genus.all) });
     if (std.family?.all) rows.push({ key: "family", name: "Family", detail: `${nf(std.family.all.n)} finds`, n: std.family.all.n, values: topkValues(std.family.all) });
+    for (const r of nameRuleRows(report) ?? []) rows.push(r);
     if (first?.species?.all) rows.push({ key: "first", name: "Species, first photo only", detail: "the first photo of each find", n: first.species.all.n, values: topkValues(first.species.all) });
   } else if (h?.top_k) {
     for (const rank of ["species", "genus", "family"] as const) {
@@ -141,7 +143,11 @@ function Headline({ d }: { d: ResultsData }) {
     <Section id="headline" kicker="1 · Headline" title="The site's model, at every rank"
              lead={run ? `${modelParts(run.backbone).name} on ${runOf(d, run.id)?.dataset_release ? `dataset release ${runOf(d, run.id)!.dataset_release}'s validation split` : "the newest validations"}, with each find's photos${run.method.endsWith("+place") ? " and its public place and date" : ""}. The same summary is reported for every test on this site.` : undefined}>
       <ChartCard>
-        <TopKChart rows={rows} labelHead="Rank" trackHead="Share right within the first k answers" testId="chart-headline" />
+        {rows.length ? <TopKChart rows={rows} labelHead="Rank" trackHead="Share right within the first k answers" testId="chart-headline" />
+          : <p className="small" data-testid="headline-empty">{d.loading ? "Reading the latest results…" : "The headline results could not be read just now."}</p>}
+        {std && !nameRuleRows(report) && (
+          <p className="small mt-2" data-testid="name-rules-missing">Species strict only: sensu lato and complex (beta) are scored in the research record, and show here once this run is scored with them.</p>
+        )}
         <SourceLine parts={[run ? `/api/scoreboard/${run.id} · all_photos.standard${first ? ", first_photo_only.standard" : ""}` : null,
                             report?.all_photos && (report.all_photos as unknown as { answer_key?: string }).answer_key ? `answer key ${(report.all_photos as unknown as { answer_key: string }).answer_key}` : null,
                             errata ? `erratum ${errata}` : null]} />
@@ -197,23 +203,24 @@ export function TwoModelsSection() {
   const openRef = OPEN_REFERENCE.species[open.backbone];
   return (
     <Section id="two" band kicker="2 · The two models" title="What the site serves, and what the paper headlines"
-             lead={<>Both are the same base model, fine-tuned the same way at 336 px on release v1's training split. They differ only in the photos they learned from. <span data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</span></>}>
+             lead={<>Both are the same base model, fine-tuned the same way at 336 px on release v1's training split. They differ only in the photos they learned from. {V1_OPEN_TRAINED_ON} <span data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</span></>}>
       <div className="two">
         <ModelTable title="MycoMap Vision v1" swatch="var(--s1)" sub="public + non-public training data · the site's model"
                     rows={[{ label: "Species", note: REFERENCE_LABEL.full, t: site.species, hl: true },
-                           { label: "Genus", note: REFERENCE_LABEL.full, t: site.genus }]} />
+                           { label: "Genus", note: `${REFERENCE_LABEL.full} · ${GENUS_LABEL}`, t: site.genus }]} />
         <ModelTable title="MycoMap Vision v1-open" swatch="#8B4A1F" sub="open data only · the paper's headline model"
                     rows={[{ label: "Species", note: REFERENCE_LABEL.open, t: openRef, hl: true },
                            { label: "Species", note: REFERENCE_LABEL.full, t: open.species },
-                           { label: "Genus", note: REFERENCE_LABEL.full, t: open.genus }]} />
+                           { label: "Genus", note: `${REFERENCE_LABEL.full} · ${GENUS_LABEL}`, t: open.genus }]} />
       </div>
       <ChartCard className="mt-3.5">
         <div className="flex flex-wrap justify-between gap-2"><h3 className="font-display font-semibold text-[#4a3728]">Paired difference, species top 1 (v1-open minus v1)</h3><span className="small">points · 95% interval clustered by observer · full reference</span></div>
         <div className="max-w-[560px]"><PairedDiff diff={p.diff} ci={p.ci95} tip={`v1-open minus v1, species top 1|${pointsDiff(p.diff, p.ci95)} points`} /></div>
         <p className="small mt-1.5" data-testid="text-paired">
-          {pointsDiff(p.diff, p.ci95)} points on the same {nf(p.n)} finds from {nf(p.observers)} observers, both against the full reference: learning only from openly licensed photos costs less than half a point.
-          {" "}Against the openly licensed reference only: {pointsDiff(OPEN_REFERENCE.paired.diff, OPEN_REFERENCE.paired.ci95)} points.
+          {pointsDiff(p.diff, p.ci95)} points on the same {nf(p.n)} finds from {nf(p.observers)} observers, both against the full reference: learning only from open data costs less than half a point.
+          {" "}Against the open-data reference only: {pointsDiff(OPEN_REFERENCE.paired.diff, OPEN_REFERENCE.paired.ci95)} points.
         </p>
+        <p className="small mt-1.5" data-testid="text-genus-scoring">{GENUS_SCORING}</p>
         <PermissionBox kind="control" className="mt-3" />
         <SourceLine parts={[`web/src/lib/twoModels.ts (research repo ${TWO_MODELS.source.replace(" (research repo, ", ", ").replace(")", "")}; ${OPEN_REFERENCE.source.replace(" (research repo, ", ", ").replace(")", "")})`,
                             "photos only, scored by specimen", "observer-clustered bootstrap, 2,000 draws"]} />
@@ -226,7 +233,7 @@ const groupTitle = (g: ScoreRun[], reports: Map<number, RunReport>) => {
   const rep = g.map((r) => reports.get(r.id)).find((x) => x);
   const errata = (rep as unknown as { errata?: { file?: string } } | undefined)?.errata?.file?.match(/-(r\d+)\.tsv$/)?.[1];
   const release = g.find((r) => r.dataset_release)?.dataset_release;
-  return `${release ? `release ${release} validation split` : "newest validations"}${errata ? `, erratum ${errata}` : ", every record"}`;
+  return `${release ? `release ${release} validation split` : "newest validations"}${errata ? `, erratum ${errata}` : ", every record, before the erratum"}`;
 };
 
 function Approaches({ d }: { d: ResultsData }) {
@@ -344,13 +351,14 @@ function Scoreboard({ d }: { d: ResultsData }) {
           </div>
         </div>
       )}
+      {g && <p className="small mt-2" data-testid="v1-val-counts">{V1_VAL_COUNTS}</p>}
       {g && <SourceLine parts={["/api/scoreboard and /api/scoreboard/{id} · standard summary", "species strict; genus and family top 1"]} />}
       {hist.length > 0 && (
         <details className="tbl" style={{ marginTop: 16 }} data-testid="scoreboard-history">
           <summary>Development history: {hist.length} earlier tests on the live data, before release v1 was frozen</summary>
           <div className="scrollx" style={{ marginTop: 8 }}>
             <table className="dt">
-              <thead><tr><th className="l">Measured</th><th>Test finds</th><th>References</th><th>Approaches</th><th className="l">Best of ours</th><th>Species top 1</th><th>iNat CV (with location)</th></tr></thead>
+              <thead><tr><th className="l">Measured</th><th>Test finds</th><th>References</th><th>Approaches</th><th className="l">Best MycoMap Vision row</th><th>Species top 1</th><th>iNat CV (with location)</th></tr></thead>
               <tbody>{hist.map((h) => {
                 const p = modelParts(h.best.backbone, h.best.method);
                 return (
@@ -372,9 +380,17 @@ function Advance({ d }: { d: ResultsData }) {
   const sealed = rows.reduce((n, r) => n + (r.sealed ?? 0), 0);
   const maxPredicted = Math.max(1, ...rows.map((r) => r.predicted));
   const resolvedMax = Math.max(...rows.map((r) => r.resolved), 0);
+  const rate = (r: ProspectiveModel, v: number | null | undefined) => (v == null || r.resolved < TOO_FEW_RESOLVED ? "–" : pc(v));
+  const served = d.howGood?.run?.backbone;
   return (
     <Section id="advance" band kicker="6 · Advance predictions" title="Predicted before the DNA name existed"
              lead="Records with a sequence but no validation yet are identified now; when they turn green, the saved answer is checked against the DNA name.">
+      {BENCHMARKS.find((b) => b.slug === "advance-predictions")?.status === "paused" && (
+        <p className="small mb-2.5" data-testid="advance-paused"><b style={{ color: "var(--ink)" }}>Paused since {utcDay(ADVANCE_PAUSED_SINCE)}.</b>{" "}
+          No records awaiting validation reach Vision from mycomap.org, so nothing new is predicted
+          {served && !rows.some((r) => r.backbone === served) ? `, and the site's model, ${modelParts(served).name}, has no predictions yet` : ""}.
+          {" "}The rows below were saved earlier, and are scored as their records turn green.</p>
+      )}
       {!rows.length ? <p className="small" data-testid="advance-empty">{d.prospective ? "None yet." : "Reading…"}</p> : (
         <div className="tcard" data-testid="advance-table"><div className="scrollx"><table className="dt">
           <thead><tr><th className="l">Model · method</th><th>Predicted</th><th>Validated since</th><th>Species top 1</th><th>Genus</th><th>Family</th><th>Stated confidence</th></tr></thead>
@@ -385,8 +401,8 @@ function Advance({ d }: { d: ResultsData }) {
                 <td className="l"><b>{p.name}</b><small>{p.detail}</small></td><td>{nf(r.predicted)}</td>
                 <td><div className="flex items-center justify-end gap-2">
                   <span className="inline-block h-1.5 w-[70px] overflow-hidden rounded-[3px] bg-[#ebe4da]"><b className="block h-full" style={{ width: `${(100 * r.resolved) / maxPredicted}%`, background: "var(--s1)" }} /></span>{nf(r.resolved)}</div></td>
-                <td className="strong">{r.species_top1 == null ? "–" : pc(r.species_top1)}</td><td>{r.genus_top1 == null ? "–" : pc(r.genus_top1)}</td>
-                <td>{r.family_top1 == null ? "–" : pc(r.family_top1)}</td><td className="mut">{r.mean_species_confidence == null ? "–" : pc(r.mean_species_confidence)}</td>
+                <td className="strong">{rate(r, r.species_top1)}</td><td>{rate(r, r.genus_top1)}</td>
+                <td>{rate(r, r.family_top1)}</td><td className="mut">{rate(r, r.mean_species_confidence)}</td>
               </tr>
             );
           })}</tbody></table></div></div>
@@ -394,7 +410,7 @@ function Advance({ d }: { d: ResultsData }) {
       {rows.length > 0 && (
         <p className="small mt-2.5" data-testid="advance-note">
           Records validated since {shortDay(d.prospective?.sealed_after)} form the paper's sealed test: their predictions are counted{sealed ? ` (${nf(sealed)})` : ""}, not scored here, until that test is opened.
-          {resolvedMax > 0 && resolvedMax < 30 && ` With ${nf(resolvedMax)} resolved, the one scored row is too small to read.`}
+          {resolvedMax > 0 && resolvedMax < TOO_FEW_RESOLVED && ` No row has ${TOO_FEW_RESOLVED} resolved yet (the most is ${nf(resolvedMax)}), so no rate is shown.`}
         </p>
       )}
       <SourceLine parts={["/api/prospective"]} />
@@ -412,7 +428,8 @@ function Early({ d }: { d: ResultsData }) {
       {!e ? <p className="small" data-testid="early-empty">{d.early ? "None yet." : "Reading…"}</p> : (
         <>
           <div className="four" data-testid="early-tiles">
-            {([[e.answers, "answers kept"], [e.awaiting, "awaiting their verdict"], [e.afterVerdict, "left out: after the verdict"], [e.scored, "scored so far"]] as const).map(([v, l]) => (
+            {([[e.answers, "answers kept"], [e.awaiting, "awaiting their verdict"], [e.afterVerdict, "left out: after the verdict"],
+               ...(e.sealed != null ? [[e.sealed, "counted, not scored: sealed test"] as const] : []), [e.scored, "scored so far"]] as const).map(([v, l]) => (
               <div key={l} className="score"><div className="v">{nf(v)}</div><div className="l">{l}</div></div>
             ))}
           </div>
@@ -422,6 +439,9 @@ function Early({ d }: { d: ResultsData }) {
                 <div className="mt-2.5"><ValueBars labelWidth={120} rows={e.askedBy.map((a) => ({ label: a.who, frac: a.n / total, text: nf(a.n), color: "var(--s1)", tip: `${a.who}|${nf(a.n)} answers` }))} /></div></div>
               <div className="small">{anyScored ? "The scored answers, in full, are below." : "When the first records are scored, this section shows the standard summary: top 1/3/5/10 for species strict, s.l. and complex (beta), and genus, with species by reference depth."} Left out by rule: answers on or after the verdict, records Vision holds as references (or a twin of one), and records validated with Vision's help.</div>
             </div>
+            {e.others.length > 0 && (
+              <p className="small mt-2" data-testid="early-others">{e.others.map((o) => `${o.context}: ${nf(o.answers)} answers kept, ${nf(o.afterVerdict)} of them given after the verdict`).join("; ")}.</p>
+            )}
             <SourceLine parts={["/api/early-answers", `${e.model} · ${e.context}`]} />
           </ChartCard>
           {anyScored && <div className="mt-4"><AnsweredBeforeVerdictCard groups={d.early!.groups} sealedAfter={d.early!.sealed_after} /></div>}
@@ -464,7 +484,7 @@ function ModelsInUse({ d }: { d: ResultsData }) {
             <h3 className="font-display font-semibold text-[#4a3728] mt-2.5 text-[22px]">{modelParts(run.backbone).name}</h3>
             <p className="small mb-3">{[modelParts(run.backbone).detail, MODEL_CREDIT_LINE].filter(Boolean).join(" · ")}</p>
             <dl className="kv">
-              {served && <><dt>Reference photos</dt><dd>{nf(served.embedded_photos)}</dd></>}
+              {served && <><dt>Reference photos</dt><dd>{nf(served.embedded_photos)}<small className="block text-[11.5px] text-[var(--muted)]">every DNA-verified record's photos, records validated since included; it grows every night</small></dd></>}
               {served?.trained_through && <><dt>Learned from records validated up to</dt><dd>{utcDay(served.trained_through)}</dd></>}
               <dt>Method</dt><dd>{modelParts(run.backbone, run.method).detail.split(" · ").slice(-1)[0]}</dd>
               {last && <><dt>Speed</dt><dd>{last.seconds_per_photo.toFixed(2)} s per photo on {shortDay(last.day)} (daily average)</dd></>}
@@ -472,7 +492,7 @@ function ModelsInUse({ d }: { d: ResultsData }) {
             {d.speed && <div className="mt-2.5"><SpeedSpark days={d.speed} /></div>}
             <SourceLine parts={["/api/models", d.speed ? "/api/speed/daily" : null, "/api/how-good"]} />
           </div>
-        ) : <p className="small">The served model could not be read just now.</p>}
+        ) : <p className="small" data-testid="served-model-empty">{d.loading ? "Reading the served model…" : "The served model could not be read just now."}</p>}
         <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5" data-testid="base-models">
           <h3 className="font-display font-semibold text-[#4a3728]">Base models on the server for comparisons</h3>
           <p className="small mb-2.5">Used in tests only, never to answer visitors. Each by its makers' name and image size.</p>

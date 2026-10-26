@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DATASET_RELEASES, ERRATUM_REASON, erratumReasons, shortHash, utcDay, utcMinute, V1 } from "./datasetReleases";
+import { DATASET_RELEASES, ERRATUM_REASON, erratumReasons, shortHash, utcDay, utcMinute, V1, V1_VAL, V1_VAL_COUNTS } from "./datasetReleases";
 
 test("each release's counts add up, as its MANIFEST's do", () => {
   for (const r of DATASET_RELEASES) {
@@ -46,4 +46,10 @@ test("release dates read in UTC, whatever the reader's time zone", () => {
   assert.equal(utcDay(V1.valCutoff), "17 August 2026");
   assert.equal(utcMinute(V1.labelSnapshot), "12 October 2026, 13:17 UTC");
   assert.equal(utcDay("2026-10-12T23:59:00Z"), "12 October 2026");
+});
+
+test("v1 validation's size is one line, the same on every page: records, finds, species, genus", () => {
+  assert.deepEqual(V1_VAL, { records: 13_354, finds: 12_874, species: 12_798, genus: 12_865 });
+  assert.ok(V1_VAL.species <= V1_VAL.genus && V1_VAL.genus <= V1_VAL.finds && V1_VAL.finds <= V1_VAL.records);
+  assert.equal(V1_VAL_COUNTS, "Release v1's validation split holds 13,354 records; scored with erratum r4 they are 12,874 finds, 12,798 of them with a species name and 12,865 with a genus. Runs scored before the erratum count every record.");
 });

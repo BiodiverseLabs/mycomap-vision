@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { API_PATH, BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, CITATIONS, DATA_LABEL, E33, isBarTabActive,
-         isResearchPath, MEASURE_LABEL, MOVED, mustSignIn, PUBLIC_NAV, researchBar, researchNav, resultCards,
-         STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, V1_PUBLISHED, type TestSetResults } from "./research";
+import { ADVANCE_PAUSED_SINCE, API_PATH, BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, CITATIONS, DATA_LABEL, diffsHeading,
+         E33, isBarTabActive, isResearchPath, MEASURE_LABEL, MOVED, mustSignIn, PUBLIC_NAV, researchBar, researchNav,
+         resultCards, SEALED_TEST, STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, V1_IMAGE_SIZE, V1_PUBLISHED, valueCaption,
+         type TestSetResults } from "./research";
 import type { Me } from "./api";
 
 const me = (signin: Me["signin"], user: Me["user"]): Me => ({ signin, user });
@@ -84,7 +85,7 @@ test("the held-out benchmark says it is not the paper's test set", () => {
 
 test("v1-test is Sealed (Steve, 2026-10-25), last but planned and history in the status order", () => {
   assert.equal(STATUS_LABEL.sealed, "Sealed");
-  assert.deepEqual(STATUS_ORDER, ["running", "partial", "sealed", "planned", "history"]);
+  assert.deepEqual(STATUS_ORDER, ["running", "partial", "paused", "sealed", "planned", "history"]);
   const t = BENCHMARKS.find((b) => b.slug === "sealed-test")!;
   assert.equal(t.status, "sealed");
   assert.deepEqual(t.data, ["sealed"]);
@@ -131,20 +132,23 @@ const diffs = (key: string) => set(key).diffs!.rows.map((r) => [r.name, ...r.cel
 
 test("results by test set: every set committed, each citing its entry on research main; grouped into cards by test set", () => {
   assert.deepEqual(TEST_SET_RESULTS.map((s) => s.key), ["fungitastic-closed-ft-train", "fungitastic-closed-mycomap-ref",
-    "fungitastic-dna-ft-train", "fungitastic-dna-mycomap-ref", "fungitastic-fewshot", "v1-val-as-released", "v1-val-open-photos"]);
+    "fungitastic-dna-ft-train", "fungitastic-dna-mycomap-ref", "fungitastic-fewshot", "v1-val-as-released", "v1-val-open-photos",
+    "v1-val-image-size"]);
   assert.deepEqual(resultCards().map((c) => [c.title, c.sets.map((s) => s.condition)]), [
     ["FungiTastic ClosedSet-Test", ["reference: FungiTastic-Train", "reference: MycoMap North American records"]],
     ["FungiTastic DNA-Test", ["reference: FungiTastic-Train", "reference: MycoMap North American records"]],
     ["FungiTastic FewShot-Test", ["reference: FungiTastic FewShot-Train (7,819 images, 2,427 species)"]],
-    ["MycoMap v1 validation (12,798 finds)", ["models as released", "training: open photos only (E4)"]],
+    ["MycoMap v1 validation (12,798 finds)", ["models as released", "training: open photos only (E4)", "image size: 224 px (v0) and 336 px (v1)"]],
   ]);
   assert.deepEqual(resultCards([{ ...set("fungitastic-fewshot"), card: "FungiTastic" }, { ...set("fungitastic-dna-ft-train"), card: "FungiTastic" }])
     .map((c) => [c.title, c.sets.length]), [["FungiTastic", 2]], "a card can aggregate different test sets");
-  assert.equal(E33.commit, "2e2576a");
+  assert.equal(E33.commit, "43328a1");
   assert.equal(V1_PUBLISHED.commit, "5792c17");
+  assert.equal(V1_IMAGE_SIZE.commit, "7ce997d");
   for (const s of TEST_SET_RESULTS) {
     const entry = s.key === "v1-val-as-released" ? /experiments\/2026-10-13-v1-published-models\.md.*\(origin\/main 5792c17\)/
-      : /experiments\/2026-10-23-fungitastic-own-test\.md \(origin\/main 2e2576a\)/;
+      : s.key === "v1-val-image-size" ? /experiments\/2026-10-18-v1-image-size\.md \(origin\/main 7ce997d\)/
+      : /experiments\/2026-10-23-fungitastic-own-test\.md \(origin\/main 43328a1\)/;
     assert.match(s.source, entry, s.key);
     assert.ok(s.about && s.size && s.maker, s.key);
     for (const r of s.rows) {
@@ -163,7 +167,7 @@ test("results by test set: no sealed-test number, no image, no competitive frami
   assert.doesNotMatch(all, /guidance|micrograph|habitat/i, "the val-only guidance look stays off the site");
   assert.doesNotMatch(all, /head to head|\bbeats?\b|\blead|\bwins?\b|\bversus\b|\bvs\.?\b|\btheir\b|\bour\b|\bwe\b/i, "not a competition (Steve, 2026-10-26)");
   for (const r of TEST_SET_RESULTS.flatMap((s) => s.rows)) {
-    assert.match(r.name, /^(MycoMap Vision v1(-open)?|BioCLIP 2 \(base model, not fine-tuned\)|BioCLIP \(base model, not fine-tuned\)|FungiTastic (BEiT-B|ViT-B|Swin-B|EfficientNetV2-B3|ConvNeXt-B)\/384|FungiTastic recipe: BEiT-B\/384|Danish Fungi 2020 ViT-L\/384)$/, r.name);
+    assert.match(r.name, /^(MycoMap Vision v[01](-open)?|BioCLIP 2 \(base model, not fine-tuned\)|BioCLIP \(base model, not fine-tuned\)|FungiTastic (BEiT-B|ViT-B|Swin-B|EfficientNetV2-B3|ConvNeXt-B)\/384|FungiTastic recipe: BEiT-B\/384|Danish Fungi 2020 ViT-L\/384)$/, r.name);
   }
 });
 
@@ -171,7 +175,7 @@ test("FungiTastic ClosedSet-Test, FungiTastic-Train as reference: every model's 
   assert.deepEqual(table("fungitastic-closed-ft-train"), [
     ["MycoMap Vision v1-open", "retrieval, FungiTastic-Train as reference", 77.46, 89.09, 91.81, 94.25, 88.31, 96.76, 98.21, 99.13],
     ["MycoMap Vision v1", "retrieval, FungiTastic-Train as reference", 77.54, 89.12, 91.81, 94.31, 88.29, 96.78, 98.22, 99.13],
-    ["BioCLIP 2 (base model, not fine-tuned)", "retrieval, FungiTastic-Train as reference", 76.36, 88.26, 91.04, 93.60, 87.61, 96.38, 97.86, 98.88],
+    ["BioCLIP 2 (base model, not fine-tuned)", "336 px · retrieval, FungiTastic-Train as reference", 76.36, 88.26, 91.04, 93.60, 87.61, 96.38, 97.86, 98.88],
     ["FungiTastic BEiT-B/384", "classifier trained on FungiTastic-Train", 75.28, 86.68, 89.56, 92.26, 87.42, 96.01, 97.52, 98.66],
     ["FungiTastic ViT-B/384", "classifier trained on FungiTastic-Train", 74.59, 86.39, 89.39, 92.10, 86.41, 95.47, 97.10, 98.34],
     ["FungiTastic Swin-B/384", "classifier · per image, all 91,832 images", 74.24, 86.33, 89.33, 92.02, null, null, null, null],
@@ -194,7 +198,7 @@ test("FungiTastic DNA-Test, FungiTastic-Train as reference: every model, and the
   assert.deepEqual(table("fungitastic-dna-ft-train"), [
     ["MycoMap Vision v1-open", "retrieval, FungiTastic-Train as reference", 41.86, 60.63, 67.44, 74.46, 56.59, 78.83, 86.58, 92.60],
     ["MycoMap Vision v1", "retrieval, FungiTastic-Train as reference", 41.78, 61.25, 67.44, 74.55, 56.83, 79.27, 86.38, 92.41],
-    ["BioCLIP 2 (base model, not fine-tuned)", "retrieval, FungiTastic-Train as reference", 37.67, 56.28, 63.70, 71.36, 51.54, 73.35, 81.58, 88.49],
+    ["BioCLIP 2 (base model, not fine-tuned)", "336 px · retrieval, FungiTastic-Train as reference", 37.67, 56.28, 63.70, 71.36, 51.54, 73.35, 81.58, 88.49],
     ["FungiTastic BEiT-B/384", "classifier trained on FungiTastic-Train", 38.73, 56.87, 63.82, 70.91, 57.28, 78.69, 85.84, 92.45],
     ["FungiTastic ViT-B/384", "classifier · per image", 36.38, 53.50, 60.24, 67.82, null, null, null, null],
     ["FungiTastic Swin-B/384", "classifier · per image", 37.96, 57.51, 63.66, 71.26, null, null, null, null],
@@ -222,24 +226,24 @@ test("FungiTastic ClosedSet-Test and DNA-Test with MycoMap's North American reco
   ]);
   assert.deepEqual(table("fungitastic-closed-mycomap-ref").map((r) => r[0]),
     ["MycoMap Vision v1-open", "MycoMap Vision v1-open", "MycoMap Vision v1", "MycoMap Vision v1"]);
-  assert.match(set("fungitastic-closed-mycomap-ref").rows[0].detail!, /979 species .*54,841 images, 29,558 observations/);
-  assert.match(set("fungitastic-closed-mycomap-ref").rows[2].detail!, /994 species .*55,631 images, 29,905 observations/);
+  assert.match(set("fungitastic-closed-mycomap-ref").rows[0].detail!, /54,841 test images \(29,558 observations\) of the 979 species/);
+  assert.match(set("fungitastic-closed-mycomap-ref").rows[2].detail!, /55,631 test images \(29,905 observations\) of the 994 species/);
   assert.deepEqual(table("fungitastic-dna-mycomap-ref").map((r) => r.slice(2)), [
     [16.10, 27.93, 34.51, 42.95, 23.73, 39.82, 46.64, 55.73],
     [8.78, 15.22, 18.81, 23.41, null, null, null, null],
   ]);
-  assert.match(set("fungitastic-dna-mycomap-ref").rows[0].detail!, /383 species .*2,782 images, 1,100 observations/);
+  assert.match(set("fungitastic-dna-mycomap-ref").rows[0].detail!, /2,782 test images \(1,100 observations\) of the 383 species/);
 });
 
 test("FungiTastic FewShot-Test: the published BioCLIP 21.8, and E33's centroid and served-method rows", () => {
   assert.deepEqual(table("fungitastic-fewshot"), [
     ["BioCLIP (base model, not fine-tuned)", "class centroid, as published in the FungiTastic paper (Table 4)", 21.8, 32.6, null, null, null, null, null, null],
     ["BioCLIP (base model, not fine-tuned)", "class centroid", 24.99, 37.40, 43.84, 52.28, 29.83, 42.54, 48.25, 56.86],
-    ["BioCLIP 2 (base model, not fine-tuned)", "class centroid, 336 px", 43.11, 58.88, 66.21, 73.86, 47.25, 63.16, 68.97, 76.68],
+    ["BioCLIP 2 (base model, not fine-tuned)", "336 px · class centroid", 43.11, 58.88, 66.21, 73.86, 47.25, 63.16, 68.97, 76.68],
     ["MycoMap Vision v1-open", "class centroid", 46.41, 61.92, 67.78, 76.27, 49.75, 64.46, 70.87, 78.48],
     ["MycoMap Vision v1", "class centroid", 45.94, 61.92, 68.31, 77.06, 49.25, 63.96, 71.67, 79.98],
     ["BioCLIP (base model, not fine-tuned)", "closest specimens + species average", 24.67, 36.14, 42.85, 52.49, 28.93, 41.24, 47.35, 56.26],
-    ["BioCLIP 2 (base model, not fine-tuned)", "closest specimens + species average, 336 px", 42.74, 57.52, 64.75, 73.02, 46.25, 62.46, 68.77, 75.18],
+    ["BioCLIP 2 (base model, not fine-tuned)", "336 px · closest specimens + species average", 42.74, 57.52, 64.75, 73.02, 46.25, 62.46, 68.77, 75.18],
     ["MycoMap Vision v1-open", "closest specimens + species average", 44.84, 59.98, 67.31, 75.22, 47.65, 63.46, 70.27, 77.98],
     ["MycoMap Vision v1", "closest specimens + species average", 45.31, 61.08, 68.05, 76.43, 48.35, 63.76, 70.77, 79.38],
   ]);
@@ -251,8 +255,9 @@ test("FungiTastic FewShot-Test: the published BioCLIP 21.8, and E33's centroid a
 
 test("MycoMap v1 validation, models as released: species top-k, genus, the 2,411 finds in FungiTastic's classes, and the intervals", () => {
   const s = set("v1-val-as-released");
-  assert.deepEqual(s.columns.map((c) => c.group), ["Species, 12,798 finds", "Species, 12,798 finds", "Species, 12,798 finds",
-    "Species, 12,798 finds", "Genus, 12,865 finds", "Species in FungiTastic's classes, 2,411 finds"]);
+  assert.deepEqual(s.columns.map((c) => c.group), ["Species: % of 12,798 finds", "Species: % of 12,798 finds",
+    "Species: % of 12,798 finds", "Species: % of 12,798 finds", "Genus: % of 12,865 finds",
+    "Species in FungiTastic's classes: % of 2,411 finds"]);
   assert.deepEqual(table("v1-val-as-released").map((r) => [r[0], ...r.slice(2)]), [
     ["MycoMap Vision v1", 56.3, 73.6, 78.9, 84.3, 85.8, 67.6],
     ["MycoMap Vision v1-open", 55.3, 72.6, 77.7, 83.3, 85.4, 66.8],
@@ -280,8 +285,8 @@ test("MycoMap v1 validation, trained on open photos only: E4 final at its best e
   assert.ok(!s.interim);
   assert.deepEqual(table("v1-val-open-photos").map((r) => [r[0], ...r.slice(2)]), [
     ["FungiTastic recipe: BEiT-B/384", 51.23, 67.18, 72.90, 79.03, 80.22],
-    ["MycoMap Vision v1-open", 55.31, 72.61, 77.65, 83.29, 84.9],
-    ["MycoMap Vision v1", 56.32, 73.55, 78.87, 84.28, 85.4],
+    ["MycoMap Vision v1-open", 55.31, 72.61, 77.65, 83.29, 85.4],
+    ["MycoMap Vision v1", 56.32, 73.55, 78.87, 84.28, 85.8],
   ]);
   assert.match(s.rows[0].detail!, /final: best epoch 13/);
   assert.deepEqual(diffs("v1-val-open-photos"), [
@@ -291,7 +296,7 @@ test("MycoMap v1 validation, trained on open photos only: E4 final at its best e
   assert.match(s.notes.join(" "), /55\.27 rather than 55\.31/);
   assert.match(s.notes.join(" "), /stopped by its declared epoch rule at epoch 20; the final model is its best epoch, 13/);
   assert.doesNotMatch(JSON.stringify(s), /still training|so far/);
-  assert.equal(cellDigits(s, s.rows[1], 4), 1, "84.9 as the entry gives it");
+  assert.equal(cellDigits(s, s.rows[1], 4), 1, "85.4 as the entry gives it");
 });
 
 test("every top-k run of values rises from top 1 to top 10", () => {
@@ -364,11 +369,116 @@ test("the sealed test says when its records start and publishes nothing before i
   assert.equal(t.status, "sealed");
   assert.equal(t.results, undefined);
   assert.match(t.records, /after dataset release v1's label snapshot \(12 October 2026, 13:17 UTC\)/);
-  assert.match(t.records, /at least 3,000 records/);
-  assert.match(t.records, /no numbers are published before it is opened/);
+  assert.match(t.records, /closes once it holds 3,000 records or on 30 November 2026, whichever comes first, with at least 2,000/);
+  assert.match(t.records, /No numbers are published before it is opened/);
   assert.match(t.pending!.text, /No numbers are published before it is opened/);
 });
 
 test("the v1 benchmark's split starts at the release's own cutoff", () => {
   assert.match(BENCHMARKS[0].records, /eight weeks after 17 August 2026/);
+});
+
+test("every results table says what its values are a percentage of (Steve, 2026-10-26)", () => {
+  for (const s of TEST_SET_RESULTS) {
+    for (const c of s.columns) assert.match(c.group ?? "", /(^|: )% of (images|observations|(\d[\d,]* )?finds)$/, `${s.key}: ${c.group}`);
+  }
+  assert.match(valueCaption(set("fungitastic-closed-ft-train")), /^Each value is the % of test images \(or, under “% of observations”, of observations/);
+  assert.match(valueCaption(set("v1-val-as-released")), /^Each value is the % of finds whose true species/);
+  assert.doesNotMatch(JSON.stringify(TEST_SET_RESULTS.map((s) => s.columns)), /"Per image"|"Per observation"/);
+});
+
+test("the MycoMap-reference rows say which test images they cover, and that a species the reference lacks is a miss", () => {
+  for (const k of ["fungitastic-closed-mycomap-ref", "fungitastic-dna-mycomap-ref"]) {
+    for (const r of set(k).rows) {
+      assert.match(r.detail!, /^(only the [\d,]+ test images .* of the [\d,]+ species its reference holds|every test image, all [\d,]+ species.*a species its reference lacks counts as a miss)/, `${k}: ${r.detail}`);
+    }
+  }
+  assert.equal(set("fungitastic-closed-mycomap-ref").rows[0].detail,
+    "only the 54,841 test images (29,558 observations) of the 979 species its reference holds · reference: open photos, 16,153 species");
+});
+
+test("every BioCLIP 2 base-model row states its image size: 336 px in E33", () => {
+  const rows = TEST_SET_RESULTS.flatMap((s) => s.rows).filter((r) => r.name === "BioCLIP 2 (base model, not fine-tuned)");
+  assert.equal(rows.length, 4);
+  for (const r of rows) assert.match(r.detail ?? "", /^336 px · /, r.detail);
+});
+
+test("paired differences say 'at top 1' only when every column is top 1", () => {
+  assert.equal(diffsHeading(set("fungitastic-closed-ft-train")), "Paired differences at top 1, in points, with 95% intervals");
+  assert.equal(diffsHeading(set("v1-val-image-size")), "Paired differences at top 1, in points, with 95% intervals");
+  assert.equal(diffsHeading(set("v1-val-open-photos")), "Paired differences in points, with 95% intervals");
+  assert.doesNotMatch(set("v1-val-open-photos").notes.join(" "), /scored the same way/, "E4 and the Vision rows answer differently");
+});
+
+test("MycoMap v1 validation, 224 px against 336 px: v1-image-size's paired step from v0 to v1", () => {
+  const s = set("v1-val-image-size");
+  assert.deepEqual(table("v1-val-image-size"), [
+    ["MycoMap Vision v0", "224 px, development · closest specimens + species average, by specimen", 54.19],
+    ["MycoMap Vision v1", "336 px · closest specimens + species average, by specimen", 56.32],
+  ]);
+  assert.deepEqual(diffs("v1-val-image-size"), [["MycoMap Vision v1 − MycoMap Vision v0", [2.13, 1.52, 2.75]]]);
+  assert.ok(Math.abs(56.32 - 54.19 - s.diffs!.rows[0].cells[0].d) < 0.005);
+  assert.match(s.notes.join(" "), /1\.73, 1\.38 and 1\.04 points/);
+  assert.match(s.notes.join(" "), /\+0\.11 \[−0\.24, \+0\.46\]/);
+  assert.doesNotMatch(JSON.stringify(s.columns), /Genus/, "its genus is scored by exact string, unlike the card's other genus figures");
+});
+
+test("the sealed test's timetable is the plan's (O6): frozen first, closed at 3,000 records or on 30 November", () => {
+  const t = BENCHMARKS.find((b) => b.slug === "sealed-test")!;
+  assert.deepEqual(SEALED_TEST, { freeze: "around the end of October 2026", target: 3000, floor: 2000, closeBy: "2026-11-30" });
+  for (const x of [t.pending!.text, t.records, ...t.protocol.map((p) => p.text)]) {
+    assert.doesNotMatch(x, /26 October|~26 Oct|frozen around 30 October/, x);
+  }
+  assert.match(t.pending!.text, /^The analysis is frozen around the end of October 2026; the set closes once it holds 3,000 records or on 30 November 2026/);
+  assert.equal(t.size, "2,000–3,000 records");
+});
+
+test("Poisonous mistakes is the plan's E21: mycomap.org's 60 deadly names, both directions, on the sealed test, no cost weight", () => {
+  const b = BENCHMARKS.find((x) => x.slug === "poisonous-mistakes")!;
+  const all = [b.summary, b.records, b.scoring, b.pending!.text, ...b.protocol.map((p) => p.text)].join(" ");
+  assert.deepEqual(b.data, ["sealed"]);
+  assert.equal(b.size, "60 deadly names");
+  assert.match(all, /60 names on mycomap\.org's list of deadly fungi/);
+  assert.doesNotMatch(all, /100 times|cost-weighted|Phalloideae|Orellani|Gyromitra/);
+  assert.match(b.scoring, /strictly and sensu lato/);
+});
+
+test("Unknown species is partly measured: the v1 validation look named by its model, AUROC on the sealed test", () => {
+  const b = BENCHMARKS.find((x) => x.slug === "unknown-species")!;
+  assert.equal(b.status, "partial");
+  assert.deepEqual(b.data, ["v1val", "sealed"]);
+  assert.match(b.pending!.text, /MycoMap Vision v0, 224 px/);
+  assert.match(b.pending!.text, /of 453 finds .* 11\.5% got a confident species answer, always wrong, and the genus was right for 58\.3%/);
+  assert.match(b.pending!.text, /\(AUROC\) is scored on the sealed test/);
+});
+
+test("Advance predictions says it is paused, and why, while no records reach Vision", () => {
+  const b = BENCHMARKS.find((x) => x.slug === "advance-predictions")!;
+  assert.equal(b.status, "paused");
+  assert.equal(STATUS_LABEL.paused, "Paused");
+  assert.equal(ADVANCE_PAUSED_SINCE, "2026-10-19");
+  assert.equal(b.pending!.lead, "Paused since 19 October 2026.");
+  assert.match(b.pending!.text, /No records awaiting validation reach Vision from mycomap\.org/);
+  assert.equal(b.lastRun, "paused since 19 October 2026");
+});
+
+test("the Results blurb names MycoMap Vision and the published models, not 'ours'", () => {
+  const all = JSON.stringify(researchBar());
+  assert.doesNotMatch(all, /\bours?\b/i);
+  assert.match(all, /Every approach, MycoMap Vision and published models, scored on the same DNA-verified records\./);
+});
+
+test("one genus figure per model on the v1 validation card: every section credits genus through the pinned taxonomy (E33 at 43328a1)", () => {
+  const genusOf = (key: string, detail: string) => {
+    const s = set(key);
+    const k = s.columns.findIndex((c) => /^Genus/.test(c.group ?? ""));
+    const r = s.rows.find((x) => x.detail === detail);
+    assert.ok(k >= 0 && r, `${key}: ${detail}`);
+    return r.cells[k];
+  };
+  assert.equal(genusOf("v1-val-open-photos", "all photos, full reference"), genusOf("v1-val-as-released", "all photos, full reference"));
+  assert.equal(genusOf("v1-val-open-photos", "open photos, open reference"), genusOf("v1-val-as-released", "open photos, open reference"));
+  assert.equal(genusOf("v1-val-as-released", "all photos, full reference"), 85.8);
+  assert.equal(genusOf("v1-val-as-released", "open photos, open reference"), 85.4);
+  assert.match(set("v1-val-open-photos").notes.join(" "), /Genus is credited through the paper's pinned taxonomy for every row/);
 });

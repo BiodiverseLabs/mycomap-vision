@@ -60,6 +60,26 @@ export const topkValues = (t: Partial<StandardScore | ApiTopK> | null | undefine
   1: t?.top1 ?? null, 3: t?.top3 ?? null, 5: t?.top5 ?? null, 10: t?.top10 ?? null,
 });
 
+/** A run's species sensu lato, species complex (beta) and genus s.l. rows, beside strict (the
+ *  standard summary's name rules; standard_report.py). Only a run scored with --name-scores
+ *  carries them (all_photos.standard_equivalence); null otherwise, and the page says so. */
+export function nameRuleRows(report: RunReport | undefined):
+    { key: string; name: string; detail: string; n: number; values: Record<K, number | null> }[] | null {
+  type Level = { top1?: number | null; top3?: number | null; top5?: number | null; top10?: number | null };
+  const eq = (report?.all_photos as unknown as { standard_equivalence?: Record<string, { n: number } & Record<string, Level | number>> } | undefined)
+    ?.standard_equivalence;
+  if (!eq?.species) return null;
+  const rows: { key: string; name: string; detail: string; n: number; values: Record<K, number | null> }[] = [];
+  const add = (rank: "species" | "genus", level: "sl" | "complex", name: string, detail: string) => {
+    const t = eq[rank]?.[level];
+    if (t && typeof t === "object") rows.push({ key: `${rank}-${level}`, name, detail, n: eq[rank].n, values: topkValues(t) });
+  };
+  add("species", "sl", "Species, sensu lato", "a recent genus split or a gender ending counts as the same name");
+  add("species", "complex", "Species complex (beta)", "right within the same species complex");
+  add("genus", "sl", "Genus, sensu lato", "Cortinarius s.l., Inocybe s.l.");
+  return rows.length ? rows : null;
+}
+
 export interface TopKAxis { lo: number; hi: number; ticks: number[] }
 
 /** The chart's axis: from the lowest value rounded down to ten points (a step lower when a
@@ -282,24 +302,35 @@ const weighted = (r: HeatRow) => r.cells.reduce((s, c) => s + (c ? c.top1 * c.n 
 /** Answered before the DNA verdict, as the landing and Results show it: the group answered
  *  with place and date (the site's usual answer) when there is one, else the first. */
 export function earlyFigures(groups: EarlyAnswersGroup[] | undefined): {
-  answers: number; awaiting: number; afterVerdict: number; scored: number;
+  answers: number; awaiting: number; afterVerdict: number; sealed: number | null; otherLeftOut: number; scored: number;
   askedBy: { who: string; n: number }[]; context: string; model: string;
+  others: { context: string; answers: number; afterVerdict: number }[];
 } | null {
   if (!groups?.length) return null;
   const g = groups.find((x) => /place/.test(x.context)) ?? groups[0];
   const asked = Object.entries(g.asked_by ?? {}).map(([who, n]) => ({
     who: who === "site" ? "This site" : who, n: n as number }));
-  return { answers: g.answers, awaiting: g.awaiting_verdict, afterVerdict: g.left_out?.answered_after_verdict ?? 0,
-           scored: g.scored, askedBy: asked, context: g.context, model: modelParts(g.backbone).name };
+  const left = (g.left_out ?? {}) as Record<string, number | undefined>;
+  const afterVerdict = left.answered_after_verdict ?? 0;
+  // Every answer is accounted for: kept = awaiting + scored + each reason left out + sealed
+  // (the sealed count is served to signed-in readers only; null otherwise).
+  const otherLeftOut = Object.entries(left).filter(([k]) => k !== "answered_after_verdict").reduce((n, [, v]) => n + (v ?? 0), 0);
+  return { answers: g.answers, awaiting: g.awaiting_verdict, afterVerdict, sealed: g.sealed ?? null, otherLeftOut,
+           scored: g.scored, askedBy: asked, context: g.context, model: modelParts(g.backbone).name,
+           others: groups.filter((x) => x !== g).map((x) => ({ context: x.context, answers: x.answers,
+             afterVerdict: x.left_out?.answered_after_verdict ?? 0 })) };
 }
 
-/** The advance-prediction row with the most records resolved (the one worth quoting), and how
- *  many predictions all rows hold. */
-export function prospectiveLead(models: ProspectiveModel[] | undefined):
+/** The served model's advance-prediction row with the most records resolved (the one worth
+ *  quoting), and how many predictions all rows hold. Only the served model is quoted (Steve,
+ *  2026-10-26: a base model's 20 of 300 was the headline): null when it has no row, or when the
+ *  served model isn't known. */
+export function prospectiveLead(models: ProspectiveModel[] | undefined, served: string | undefined):
     { row: ProspectiveModel; predicted: number; rows: number } | null {
-  if (!models?.length) return null;
-  const row = [...models].sort((a, b) => b.resolved - a.resolved || b.predicted - a.predicted)[0];
-  return { row, predicted: models.reduce((s, m) => s + m.predicted, 0), rows: models.length };
+  const mine = (models ?? []).filter((m) => m.backbone === served);
+  if (!served || !mine.length) return null;
+  const row = [...mine].sort((a, b) => b.resolved - a.resolved || b.predicted - a.predicted)[0];
+  return { row, predicted: models!.reduce((s, m) => s + m.predicted, 0), rows: models!.length };
 }
 /** Too few resolved to read a rate (the cards say so rather than show one). */
 export const TOO_FEW_RESOLVED = 30;
@@ -322,7 +353,8 @@ export type CardFigure =
 
 export function cardFigure(b: Benchmark, f: BenchmarkFeeds): CardFigure | null {
   const h = b.headline;
-  if (!h) return null;
+  // A paused benchmark shows why it is paused, not its last number.
+  if (!h || b.status === "paused") return null;
   const hg = f.howGood;
   const served = hg?.run ? modelParts(hg.run.backbone, hg.run.method) : null;
   const withPlace = hg?.run?.method.endsWith("+place") ? "photos + place and date" : "photos only";
@@ -345,10 +377,10 @@ export function cardFigure(b: Benchmark, f: BenchmarkFeeds): CardFigure | null {
       const zero = hg?.species_by_depth?.find((d) => d.band === "0");
       if (!zero) return null;
       return { kind: "count", big: nf(zero.n), caption: "finds whose species has no reference record",
-               note: "Planned: how well the top score separates known from unknown species (AUROC), and how often Vision holds back." };
+               note: b.pending ? `${b.pending.lead} ${b.pending.text}` : "" };
     }
     case "prospective": {
-      const lead = prospectiveLead(f.prospective);
+      const lead = prospectiveLead(f.prospective, hg?.run?.backbone);
       if (!lead) return null;
       const few = lead.row.resolved < TOO_FEW_RESOLVED;
       return { kind: "count", big: nf(lead.row.resolved), of: `/ ${nf(lead.row.predicted)}`,
@@ -359,9 +391,10 @@ export function cardFigure(b: Benchmark, f: BenchmarkFeeds): CardFigure | null {
     case "early-answers": {
       const e = earlyFigures(f.early);
       if (!e) return null;
+      const out = `Left out: ${nf(e.afterVerdict)} given after the verdict${e.otherLeftOut ? `, ${nf(e.otherLeftOut)} for other reasons` : ""}${e.sealed != null ? `; ${nf(e.sealed)} counted for the sealed test, not scored` : ""}.`;
       return { kind: "count", big: nf(e.answers), caption: `answers kept · ${nf(e.awaiting)} awaiting their verdict`,
-               note: e.scored ? `${nf(e.scored)} scored so far.`
-                              : "0 scored so far. Top 1/3/5/10 for species strict, s.l. and complex appear as records turn green." };
+               note: e.scored ? `${nf(e.scored)} scored so far. ${out}`
+                              : `0 scored so far. ${out} Top 1/3/5/10 for species strict, s.l. and complex appear as records turn green.` };
     }
   }
 }

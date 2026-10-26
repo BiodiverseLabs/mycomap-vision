@@ -3,7 +3,7 @@ import { Download, Search, Target } from "lucide-react";
 import type { HowGood, Me, RunReport, ScoreRun } from "@/lib/api";
 import { CITATIONS } from "@/lib/research";
 import { shortHash, utcDay, V1 } from "@/lib/datasetReleases";
-import { MODEL_CREDIT_LINE } from "@/lib/publicView";
+import { MODEL_CREDIT_LINE, V1_OPEN_PHOTOS, V1_OPEN_TRAINED_ON } from "@/lib/publicView";
 import { standardOf } from "@/lib/compareView";
 import { modelParts, nf, placeVsPhotos, topkValues } from "@/lib/researchView";
 import { CitationCard, HashChip, KV, ResearchHero, ResearchShell, Section, SourceLine, Strip,
@@ -12,7 +12,7 @@ import { useHowGood, useMe, useRunReports, useScoreboard } from "@/components/re
 
 // Research > For researchers (Steve, 2026-10-25: the approved redesign): copy-ready citations
 // (text or BibTeX), the model names as the live site uses them, and how to test a model on
-// the same records. The number to beat is read from the scoreboard (the site's model, photos
+// the same records. MycoMap Vision v1's number is read from the scoreboard (the site's model, photos
 // only), never typed in.
 
 export interface ForResearchersData { me?: Me | null; howGood?: HowGood; runs?: ScoreRun[]; reports: Map<number, RunReport> }
@@ -32,7 +32,7 @@ export const MODEL_NAMES: { name: string; note: string; what: string; role: stri
   { name: "MycoMap Vision v1", note: "public + non-public training data",
     what: "The base model fine-tuned at 336 px on release v1's training split, all 624,785 photos", role: "The site's model" },
   { name: "MycoMap Vision v1-open", note: "open data only",
-    what: "The same recipe on the 527,842 Creative Commons photos", role: "The paper's headline model" },
+    what: `The same recipe on ${V1_OPEN_PHOTOS.toLocaleString("en-US")} photos. ${V1_OPEN_TRAINED_ON}`, role: "The paper's headline model" },
   { name: "MycoMap Vision v0", note: "224 px, development", what: "The same recipe at 224 px", role: "Earlier tests" },
   { name: "BioCLIP 2 (base model, not fine-tuned)", note: "224 or 336 px",
     what: "The base model's own image vectors, unchanged", role: "Comparison only" },
@@ -63,7 +63,7 @@ export function ForResearchers(d: ForResearchersData) {
           ))}</tbody></table></div></div>
         <p className="small mt-2.5">Outside models keep their own names: iNaturalist's computer vision, the Danish Fungi 2020 and FungiTastic models.</p>
       </Section>
-      <Section kicker="Test your model on our records" title="Same records, same protocol, comparable numbers" testId="section-test-yours">
+      <Section kicker="Score your model on the same records" title="Same records, same protocol, comparable numbers" testId="section-test-yours">
         <Strip steps={[
           { icon: <Download className={icon} />, title: `1 · Get release ${V1.id}`, text: "Its public variant (Creative Commons photos only) is planned with the paper." },
           { icon: <Search className={icon} />, title: "2 · Identify the validation split", text: "From the training split only, as a new find meets it." },
@@ -79,15 +79,15 @@ export function ForResearchers(d: ForResearchersData) {
             ]} /></div>
             <SourceLine parts={["datasetReleases.ts (V1)"]} />
           </div>
-          <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5" data-testid="number-to-beat">
-            <h3 className="font-display font-semibold text-lg text-[#4a3728] mb-1">Ours on the same records</h3>
+          <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5" data-testid="same-records-number">
+            <h3 className="font-display font-semibold text-lg text-[#4a3728] mb-1">MycoMap Vision v1 on the same records</h3>
             {beatRun && sp ? (
               <>
-                <p className="small mb-2">{modelParts(beatRun.backbone).name}, {beatRun.method.endsWith("+place") ? "photos + place and date" : "photos only, scored by specimen (the number to beat with photos alone)"}.</p>
-                <TopKChart variant="mini" rows={[{ key: "beat", name: modelParts(beatRun.backbone).name, n: sp.n, values: topkValues(sp) }]} testId="chart-to-beat" />
+                <p className="small mb-2">{modelParts(beatRun.backbone).name}, {beatRun.method.endsWith("+place") ? "photos + place and date" : "photos only, scored by specimen: the comparable number for a model that uses photos alone"}.</p>
+                <TopKChart variant="mini" rows={[{ key: "beat", name: modelParts(beatRun.backbone).name, n: sp.n, values: topkValues(sp) }]} testId="chart-same-records" />
                 <SourceLine parts={[`/api/scoreboard/${beatRun.id}`, `${nf(sp.n)} finds`]} />
               </>
-            ) : <p className="small">The number to beat is read from the scoreboard; it could not be read just now.</p>}
+            ) : <p className="small">MycoMap Vision v1's number is read from the scoreboard; it could not be read just now.</p>}
           </div>
         </div>
         <p className="text-sm text-muted-foreground leading-normal mt-2.5">

@@ -3,8 +3,8 @@ import { Link } from "wouter";
 import { ArrowUpRight, Check, Lock } from "lucide-react";
 import type { EarlyAnswersGroup, HowGood, Me, ProspectiveModel, RunReport, ScoreRun } from "@/lib/api";
 import { comparisons, incompleteRun, standardOf, STANDARD_BANDS, companionBars } from "@/lib/compareView";
-import { BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, DATA_LABEL, DATA_ORDER, MEASURE_LABEL, MEASURE_ORDER,
-         resultCards, STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, type Benchmark, type BenchmarkStatus,
+import { BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, DATA_LABEL, DATA_ORDER, diffsHeading, MEASURE_LABEL, MEASURE_ORDER,
+         resultCards, STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, valueCaption, type Benchmark, type BenchmarkStatus,
          type TestSetResults } from "@/lib/research";
 import { benchmarkFacetCounts, cardFigure, cardMeta, earlyFigures, filterBenchmarks, filterFromSearch,
          filterToSearch, heatRows, historyLines, isFiltered, modelParts, NO_FILTER, nf, pc, prospectiveLead, pt,
@@ -21,7 +21,7 @@ import { useEarly, useHowGood, useMe, useProspective, useRunReports, useScoreboa
 // The summary's base-model screen and results by test set quote committed research entries.
 
 export const STATUS_SWATCH: Record<BenchmarkStatus, string> = {
-  running: "#7FAE34", partial: "#c27c2e", sealed: "#2f241b", planned: "#cfc3b6", history: "#e8e1d8",
+  running: "#7FAE34", partial: "#c27c2e", paused: "#a8968a", sealed: "#2f241b", planned: "#cfc3b6", history: "#e8e1d8",
 };
 
 export interface BenchmarksData extends BenchmarkFeeds { me?: Me | null; loading?: boolean }
@@ -76,18 +76,20 @@ function Glance({ d }: { d: BenchmarksData }) {
   const s = d.howGood?.top_k?.species;
   const depth = d.howGood?.species_by_depth ?? [];
   const lo = depth.find((b) => b.band === "1-4"), hi = depth.find((b) => b.band === "100+");
-  const lead = prospectiveLead(d.prospective);
+  const run = d.howGood?.run;
+  const lead = prospectiveLead(d.prospective, run?.backbone);
+  const advance = BENCHMARKS.find((b) => b.slug === "advance-predictions");
   const e = earlyFigures(d.early);
   const lines: [string, string][] = [];
   if (s?.top1 != null) lines.push(["Newest weeks · species top 1", pc(s.top1)], ["Newest weeks · species top 5", pc(s.top5)]);
   if (lo?.top1 != null && hi?.top1 != null) lines.push(["Rare species · 1-4 → 100+ records", `${pt(lo.top1)} → ${pc(hi.top1)}`]);
-  if (lead) lines.push(["Advance predictions · resolved", `${nf(lead.row.resolved)} of ${nf(lead.row.predicted)}`]);
+  if (advance?.status === "paused") lines.push(["Advance predictions", advance.lastRun ?? STATUS_LABEL.paused]);
+  else if (lead) lines.push(["Advance predictions · resolved", `${nf(lead.row.resolved)} of ${nf(lead.row.predicted)}`]);
   if (e) lines.push(["Answered before the verdict · kept", nf(e.answers)]);
   lines.push(["Sealed test", "opens once, after the freeze"]);
-  const run = d.howGood?.run;
   return (
     <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5 flex flex-col" data-testid="benchmarks-glance">
-      <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-1">At a glance</p>
+      <h2 className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-1">At a glance</h2>
       <div className="bigstat">{total} <small>benchmarks</small></div>
       <div className="mb-2.5 mt-3.5 flex h-3 gap-[2px]" data-testid="status-bar">
         {bar.map((x, i) => (
@@ -101,7 +103,7 @@ function Glance({ d }: { d: BenchmarksData }) {
       <div className="mt-4 border-t border-[#ece6de] pt-1.5">
         {lines.map(([k, v]) => <div key={k} className="gl"><span>{k}</span><b>{v}</b></div>)}
       </div>
-      <p className="small mt-2.5">{run && s ? `${modelParts(run.backbone).name} on ${nf(s.n)} finds. ` : ""}Every setting is chosen on the validation split; the sealed test is opened once.</p>
+      <p className="small mt-2.5">{run && s ? `Newest weeks: ${modelParts(run.backbone).name} on ${nf(s.n)} finds, ${run.method.endsWith("+place") ? "with each find's photos and its public place and date" : "photos only"}. ` : ""}Every setting is chosen on the validation split; the sealed test is opened once.</p>
       <SourceLine parts={["research.ts BENCHMARKS (statuses)", run ? "/api/how-good" : null, lead ? "/api/prospective" : null, e ? "/api/early-answers" : null]} />
     </div>
   );
@@ -135,7 +137,7 @@ export function ResultsByTestSet({ sets = TEST_SET_RESULTS }: { sets?: TestSetRe
   if (!cards.length) return null;
   return (
     <div className="mt-3.5" data-testid="results-by-test-set">
-      <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-1">Results by test set</p>
+      <h2 className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-1">Results by test set</h2>
       <p className="small mb-2">Every model scored on each test set, from the committed research entries. The sealed test (v1-test) has no results until it is opened.</p>
       <div className="grid gap-3.5">
         {cards.map((c) => <ResultCard key={c.title} title={c.title} sets={c.sets} />)}
@@ -161,6 +163,7 @@ function ResultCard({ title, sets }: { title: string; sets: TestSetResults[] }) 
       </div>
       <p className="small mt-1.5">{first.about}</p>
       <p className="small mt-0.5" style={{ color: "var(--muted)" }}>{first.size}</p>
+      <p className="small mt-1.5" data-testid="value-caption"><b style={{ color: "var(--ink)" }}>{valueCaption(first)}</b></p>
       {sets.map((s) => <ResultSection key={s.key} s={s} lead={s === first ? undefined : s} first={first} />)}
       <div className="mt-auto"><SourceLine parts={sources} /></div>
     </div>
@@ -184,7 +187,7 @@ function ResultSection({ s, first, lead }: { s: TestSetResults; first: TestSetRe
       <ResultTable s={s} />
       {s.diffs && (
         <div className="mt-3" data-testid={`diffs-${s.key}`}>
-          <p className="small mb-1"><b style={{ color: "var(--ink)" }}>Paired differences at top 1, 95% intervals</b> · points</p>
+          <p className="small mb-1"><b style={{ color: "var(--ink)" }}>{diffsHeading(s)}</b></p>
           <div className="scrollx"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
             <thead><tr><th className="l min-w-[220px]">Difference</th>{s.diffs.columns.map((h) => <th key={h}>{h}</th>)}</tr></thead>
             <tbody>{s.diffs.rows.map((r) => (
@@ -444,8 +447,8 @@ function DetailTiles({ b, d }: { b: Benchmark; d: BenchmarkDetailData }) {
     return zero ? <Tiles testId="detail-tiles"><Tile highlight value={nf(zero.n)} label="finds whose species has no reference record" note={`of ${nf(h?.top_k?.species?.n)} finds with a species`} /></Tiles> : null;
   }
   if (m === "prospective") {
-    const lead = prospectiveLead(d.prospective);
-    return lead ? (
+    const lead = prospectiveLead(d.prospective, h?.run?.backbone);
+    return lead && b.status !== "paused" ? (
       <Tiles testId="detail-tiles">
         <Tile highlight value={nf(lead.predicted)} label="predictions saved before the name existed" note={`${lead.rows} model rows`} />
         <Tile value={nf(lead.row.resolved)} label="resolved so far" note={modelParts(lead.row.backbone).name} />
@@ -459,6 +462,7 @@ function DetailTiles({ b, d }: { b: Benchmark; d: BenchmarkDetailData }) {
         <Tile highlight value={nf(e.answers)} label="answers kept" note={e.context} />
         <Tile value={nf(e.awaiting)} label="awaiting their verdict" />
         <Tile value={nf(e.afterVerdict)} label="left out: after the verdict" />
+        {e.sealed != null && <Tile value={nf(e.sealed)} label="counted, not scored: sealed test" />}
         <Tile value={nf(e.scored)} label="scored so far" />
       </Tiles>
     ) : null;
@@ -598,7 +602,7 @@ function HistorySection({ b, d }: { b: Benchmark; d: BenchmarkDetailData }) {
   const servedId = d.howGood?.run?.id;
   return (
     <Section id="history" kicker="5 · History" title="Every run of this breakdown"
-             lead="Not a trend line: the models and the test records change between rows. Read each row on its own. One row per set of test records: the best of ours on it.">
+             lead="Not a trend line: the models and the test records change between rows. Read each row on its own. One row per set of test records: the best MycoMap Vision row on it.">
       {!hist.length ? <p className="small">{d.loading ? "Reading…" : "No runs published yet."}</p> : (
         <div className="tcard" data-testid="benchmark-history"><div className="scrollx"><table className="dt">
           <thead><tr><th className="l">Measured</th><th className="l">Model · method</th><th className="l">Test records</th>
