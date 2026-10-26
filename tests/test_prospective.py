@@ -1,5 +1,6 @@
 import io
 import json
+import sqlite3
 
 from PIL import Image
 
@@ -227,3 +228,49 @@ def test_the_site_says_when_its_advance_predictions_are_sealed(conn, tmp_path, m
                               backbone_loader=lambda n: Const(n), limits=open_limits(),
                               background=False))
     assert c.get("/api/prospective").json()["sealed_after"] == "2026-10-12T13:17:51+00:00"
+
+
+def test_a_stored_prediction_carries_the_whole_served_state_at_write_time(conn, monkeypatch):
+    """E28 (the Paper Coordinator, 2026-10-26): beside the model and release, the calibration
+    in force, when a night last changed the reference set, and the Human Feedback exclusions
+    and specimen crops the index was built with, read when the prediction is written."""
+    from mycomap_vision import evaluate, feedback, nightly
+    nightly.ensure_schema(conn)
+    conn.execute("insert into nightly_runs (started_at, finished_at, ok, changed) values "
+                 "('2026-10-20T07:00:00Z', '2026-10-20T07:40:00Z', 1, 1)")
+    conn.execute("insert into nightly_runs (started_at, finished_at, ok, changed) values "
+                 "('2026-10-21T07:00:00Z', '2026-10-21T07:05:00Z', 1, 0)")   # changed nothing
+    feedback.ensure_crops_schema(conn)
+    conn.execute("insert into feedback_photo_crops values (5, 1, 'inat:5', 0, 0, 0.5, 0.5, 'v')")
+    conn.commit()
+    monkeypatch.setattr(evaluate, "latest_calibration",
+                        lambda c, b, m: {"run_id": 41, "comparison_id": 7} if (b, m) == ("m1", "hybrid")
+                        else None)
+    prospective.save_candidates(conn, [candidate("10")], "t0")
+    fetcher = FakeFetcher({"10": inat_obs(10, photos=[(0, 1, "cc0", "x")])})
+    prospective.predict_pending(conn, FakeIdentifier(), object(), ["10"], fetcher,
+                                log=lambda s: None, provenance=("2026-10-12", "20261014-090000"))
+    row = dict(zip(("model_version", "serving_release", "calibration_run", "calibration_comparison",
+                    "nightly_layer_at", "exclusions_version", "crops_version"), conn.execute(
+        "select model_version, serving_release, calibration_run, calibration_comparison, "
+        "nightly_layer_at, exclusions_version, crops_version from prediction_provenance "
+        "where observation_id = '10'").fetchone()))
+    assert row == {"model_version": "2026-10-12", "serving_release": "20261014-090000",
+                   "calibration_run": 41, "calibration_comparison": 7,
+                   "nightly_layer_at": "2026-10-20T07:40:00Z",
+                   "exclusions_version": feedback.exclusions_fingerprint(conn),
+                   "crops_version": feedback.crops_fingerprint(conn)}
+    assert row["crops_version"] != feedback.crops_fingerprint(sqlite3.connect(":memory:"))
+
+
+def test_an_older_provenance_table_gains_the_state_columns_and_keeps_its_rows(conn):
+    conn.execute("create table prediction_provenance (observation_id text not null, backbone "
+                 "text not null, method text not null, model_version text, serving_release text, "
+                 "primary key (observation_id, backbone, method))")
+    conn.execute("insert into prediction_provenance values ('9', 'm1', 'hybrid', 'v', 'r')")
+    prospective.ensure_schema(conn)
+    prospective.ensure_schema(conn)                                   # twice: no error
+    cols = [r[1] for r in conn.execute("pragma table_info(prediction_provenance)")]
+    assert cols[5:] == [c for c, _ in prospective.STATE_COLUMNS]
+    assert tuple(conn.execute("select model_version, calibration_run from prediction_provenance"
+                              ).fetchone()) == ("v", None)

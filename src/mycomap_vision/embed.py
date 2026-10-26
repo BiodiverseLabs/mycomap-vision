@@ -98,6 +98,87 @@ def photos_to_embed(conn: sqlite3.Connection, backbone: str, size: str, store_lo
     return [(r[0], r[1]) for r in conn.execute(sql, (backbone, size, store_location))]
 
 
+# --- specimen crops of excluded slip photos (feedback.sync_crops, recovered_labels.py) -----------
+# A crop is embedded as a vector of its own, under a negative id that no real photo has. Its
+# box is applied to the decoded photo in memory: no cropped file is ever written.
+CROP_SLOTS = 16                 # crop numbers per photo (slipcrop.MAX_BOXES is far fewer)
+CROP_VECTOR_SQL = f"-(c.photo_id * {CROP_SLOTS} + c.n)"
+
+
+def crop_vector_id(photo_id: int, n: int) -> int:
+    """The embeddings id of crop `n` of a photo: negative, so never a photo's own."""
+    if not 0 < n < CROP_SLOTS:
+        raise ValueError(f"crop number {n} is outside 1..{CROP_SLOTS - 1}")
+    return -(int(photo_id) * CROP_SLOTS + int(n))
+
+
+def apply_box(img: Image.Image, box) -> Image.Image:
+    """The part of `img` inside `box` (l, t, r, b as fractions of the photo)."""
+    w, h = img.size
+    l, t, r, b = (min(max(float(v), 0.0), 1.0) for v in box)
+    if r <= l or b <= t:
+        raise ValueError(f"empty crop box {box}")
+    return img.crop((int(round(l * w)), int(round(t * h)),
+                     max(int(round(r * w)), int(round(l * w)) + 1),
+                     max(int(round(b * h)), int(round(t * h)) + 1)))
+
+
+def _crops_sql(north_america_only: bool, copy_join: str = "") -> str:
+    """The kept crops not yet embedded by the backbone (the first parameter), on records
+    whose photos Vision may use; `copy_join` joins the photo's copy (alias pc)."""
+    na = "and r.north_america = 1" if north_america_only else ""
+    return f"""
+      from feedback_photo_crops c {copy_join}
+      join observation_photos op on op.photo_id = c.photo_id
+      join photos p on p.photo_id = c.photo_id
+      join records r on r.observation_id = op.observation_id {na}
+        and r.source in {sources.PHOTO_SOURCES_SQL} and p.source = r.source
+      left join embeddings e on e.backbone = ? and e.photo_id = {CROP_VECTOR_SQL}
+      where e.photo_id is null and {holdouts.not_held_out('r.observation_id')}
+    """
+
+
+def crops_to_embed(conn: sqlite3.Connection, backbone: str, size: str, store_location: str,
+                   north_america_only: bool = True, limit: int | None = None
+                   ) -> list[tuple[int, str, tuple]]:
+    """(crop vector id, relpath of the photo's copy, box) of each kept crop
+    (feedback_photo_crops) not yet embedded whose photo has a copy at `size` in the store.
+    The same rules as photos_to_embed: no held-out record, only a source Vision uses."""
+    from .feedback import ensure_crops_schema
+    conn.executescript(SCHEMA)
+    holdouts.ensure_schema(conn)
+    ensure_crops_schema(conn)
+    sql = (f"select distinct {CROP_VECTOR_SQL}, pc.path, c.l, c.t, c.r, c.b"
+           + _crops_sql(north_america_only, "join photo_copies pc on pc.photo_id = c.photo_id "
+                                            "and pc.size = ? and pc.store = ?")
+           + " order by c.photo_id, c.n")
+    if limit is not None:
+        sql += f" limit {int(limit)}"
+    rows = conn.execute(sql, (size, store_location, backbone))
+    return [(int(r[0]), r[1], (r[2], r[3], r[4], r[5])) for r in rows]
+
+
+def crop_photos_to_fetch(conn: sqlite3.Connection, backbone: str, size: str,
+                         store_location: str, north_america_only: bool = True,
+                         limit: int | None = None):
+    """Photos with a kept crop not yet embedded by `backbone` and no copy at `size` in the
+    store, as photos.run_downloads takes them (photo_id, source_url, host, attempts, source):
+    a release's photos are embedded but not held on the box."""
+    from .feedback import ensure_crops_schema
+    from .photos import MAX_ATTEMPTS
+    conn.executescript(SCHEMA)
+    holdouts.ensure_schema(conn)
+    ensure_crops_schema(conn)
+    sql = ("select distinct p.photo_id, p.source_url, p.host, p.attempts, p.source"
+           + _crops_sql(north_america_only)
+           + f" and p.status != 'missing' and p.attempts < {MAX_ATTEMPTS}"
+             " and not exists (select 1 from photo_copies x where x.photo_id = c.photo_id"
+             " and x.size = ? and x.store = ?) order by p.photo_id")
+    if limit is not None:
+        sql += f" limit {int(limit)}"
+    return conn.execute(sql, (backbone, size, store_location)).fetchall()
+
+
 def next_shard(conn: sqlite3.Connection, backbone: str) -> int:
     row = conn.execute("select max(shard) from embeddings where backbone = ?",
                        (backbone,)).fetchone()
@@ -126,7 +207,8 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
                  shard_rows: int = 8192, readers: int = 8,
                  log: Callable[[str], None] = print,
                  should_stop: Callable[[], bool] | None = None) -> EmbedStats:
-    """Embed `todo`. A photo that can't be read or decoded is skipped and listed in
+    """Embed `todo`: (photo_id, relpath), or (crop vector id, relpath, box) for a specimen
+    crop (crops_to_embed). A photo that can't be read or decoded is skipped and listed in
     stats.skipped with the reason. `should_stop()` is asked before each batch; when it
     says stop, what is embedded so far is saved and stats.stopped is set."""
     conn.executescript(SCHEMA)
@@ -156,11 +238,14 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
 
     prepare = getattr(backbone, "prepare", None) or (lambda img: img)
 
-    def load(item: tuple[int, str]):
-        pid, rel = item
+    def load(item: tuple):
+        pid, rel = item[0], item[1]
         try:
             # decode converts to RGB, which reads every pixel: a truncated file fails here.
-            return pid, prepare(decode(store.get(rel))), None
+            img = decode(store.get(rel))
+            if len(item) > 2:                # a specimen crop (crops_to_embed): its box only
+                img = apply_box(img, item[2])
+            return pid, prepare(img), None
         except Exception as e:           # unreadable, corrupt, truncated, gone
             return pid, None, f"{e.__class__.__name__}: {e}"[:300]
 

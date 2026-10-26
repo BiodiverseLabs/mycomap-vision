@@ -71,7 +71,8 @@ import requests
 
 from . import confusions, config, holdouts, inat, names, photos, refresh, taxonomy
 from .embed import SCHEMA as EMBED_SCHEMA
-from .embed import embed_photos, next_shard, photos_to_embed
+from .embed import (CROP_VECTOR_SQL, crop_photos_to_fetch, crops_to_embed, embed_photos,
+                    next_shard, photos_to_embed)
 from .manifest import snapshot
 from .records import build_records, save_records
 from .release import RELEASE_ID, current_release
@@ -151,6 +152,9 @@ class Settings:
     at: str = "03:00"                    # local time of the nightly run
     tz: str = "America/New_York"
     max_photos: int = 3000               # photos embedded in one night (~0.7 s each on the box)
+    # Specimen crops of excluded slip photos embedded in one night (Recovered labels; each
+    # needs its photo fetched first, within the download budgets). 0: none.
+    max_crops: int = 3000
     size: str = "large"                  # the size the release's vectors were made from
     max_removed: int = 500               # removals refused above max(this, share of the list)
     max_removed_share: float = 0.02
@@ -168,6 +172,7 @@ class Settings:
         return cls(at=config.setting("MV_NIGHTLY_AT", "03:00"),
                    tz=config.setting("MV_NIGHTLY_TZ", "America/New_York"),
                    max_photos=int(_number("MV_NIGHTLY_MAX_PHOTOS", 3000)),
+                   max_crops=int(_number("MV_NIGHTLY_MAX_CROPS", 3000)),
                    size=config.setting("MV_NIGHTLY_PHOTO_SIZE", "large"),
                    max_removed=int(_number("MV_NIGHTLY_MAX_REMOVED", 500)),
                    max_removed_share=_number("MV_NIGHTLY_MAX_REMOVED_SHARE", 0.02),
@@ -633,6 +638,23 @@ class Steps:
     taxonomy: Callable[..., dict] = refresh.new_genera_taxonomy
     download: Callable[..., dict] = photos.download_all
     misidentifications: Callable[..., dict] = confusions.refresh_from_settings
+    crop_photos: Callable[..., dict] = None             # fetch_crop_photos
+
+    def __post_init__(self):
+        if self.crop_photos is None:
+            self.crop_photos = fetch_crop_photos
+
+
+def fetch_crop_photos(conn: sqlite3.Connection, store, backbone: str, size: str,
+                      limit: int | None = None, log=print) -> dict:
+    """Fetch the photos whose kept specimen crops `backbone` has not embedded yet
+    (embed.crop_photos_to_fetch), within the same budgets as every download."""
+    rows = crop_photos_to_fetch(conn, backbone, size, store.location, limit=limit)
+    if not rows:
+        return {"queued": 0}
+    return photos.run_downloads(conn, rows, store, size,
+                                lambda r, now: photos.save_result(conn, r, size, now,
+                                                                  store.location), log=log)
 
 
 def pid_alive(pid: int) -> bool:
@@ -768,6 +790,25 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
                 if stats.skipped:
                     report.setdefault("unreadable", {})[name] = len(stats.skipped)
                 changed = changed or stats.embedded > 0
+            # Human Feedback's Recovered labels: the kept crops of excluded slip photos, each
+            # a vector of its own (synced before the night: feedback.sync_crops).
+            for name in served if settings.max_crops > 0 else ():
+                report.setdefault("crop_photos", {})[name] = _step(
+                    lambda: steps.crop_photos(conn, store, name, settings.size,
+                                              settings.max_crops, log=log),
+                    f"crop photos for {name}", log)
+                todo = crops_to_embed(conn, name, settings.size,
+                                      store.location)[:settings.max_crops]
+                report.setdefault("crops_embedded", {})[name] = 0
+                if not todo:
+                    continue
+                model = backbones[name]()
+                if encode_lock is not None:
+                    model = Locked(model, encode_lock)
+                stats = embed_photos(conn, store, model, todo, layer.embeddings / name,
+                                     batch_size=8, readers=2, log=log)
+                report["crops_embedded"][name] = stats.embedded
+                changed = changed or stats.embedded > 0
             report["photos_deleted"] = drop_embedded_photos(conn, store, served)
             report["layer"] = layer_sizes(conn, settings.warn_share)
             for name, size in report["layer"].items():
@@ -809,14 +850,24 @@ def layer_started(conn: sqlite3.Connection) -> str | None:
 
 
 def drop_embedded_photos(conn: sqlite3.Connection, store: LocalStore, backbones: list[str]) -> int:
-    """Delete the layer's photo files once every served backbone has their vector; their
-    copy rows go too, so a photo no backbone still needs is never fetched again."""
+    """Delete the layer's photo files once every served backbone has their vector (and the
+    vector of each of their kept specimen crops); their copy rows go too, so a photo no
+    backbone still needs is never fetched again."""
     if not backbones:
         return 0
+    from .feedback import ensure_crops_schema
+    ensure_crops_schema(conn)
     held = conn.execute("select photo_id, path from photo_copies where store = ?",
                         (store.location,)).fetchall()
+    marks = ",".join("?" * len(backbones))
+    crops_left = {r[0] for r in conn.execute(
+        f"select c.photo_id from feedback_photo_crops c where (select count(*) from embeddings e "
+        f"where e.photo_id = {CROP_VECTOR_SQL} and e.backbone in ({marks})) < ?",
+        (*backbones, len(backbones)))}
     done = []
     for pid, rel in held:
+        if pid in crops_left:
+            continue
         n = conn.execute(f"select count(*) from embeddings where photo_id = ? and backbone in "
                          f"({','.join('?' * len(backbones))})", (pid, *backbones)).fetchone()[0]
         if n == len(backbones):

@@ -112,9 +112,14 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     (permissions.MO_EXCLUDED_FROM_USE_SQL). An MO record's observer is 'mo:<login>', so
     it is never counted as the iNat account with the same name.
 
+    A photo a person left out in Human Feedback (feedback_photo_exclusions) is not loaded;
+    a specimen crop of one (feedback_photo_crops, the Recovered labels queue) is, as a photo
+    of its own, once `photo_row` has its vector (embed.crop_vector_id). Only the served
+    backbone embeds crops, so another backbone's reads are unchanged.
+
     With `release` (a dataset release, dataset_release.load_release), the records,
     labels and photos are the release's reference records (train + val), not the live
-    manifest's; the manifest only maps photos to vectors."""
+    manifest's; the manifest only maps photos to vectors. A release has no crops."""
     if release is not None:
         release.check_photos_match(conn)
         return release.as_records(("train", "val"), photo_row)
@@ -123,11 +128,16 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
     upgrade(conn)
     ensure_permissions_schema(conn)
     holdouts.ensure_schema(conn)
-    from .feedback import ensure_exclusions_schema
+    from .embed import CROP_VECTOR_SQL
+    from .feedback import ensure_crops_schema, ensure_exclusions_schema
     ensure_exclusions_schema(conn)
-    rows = conn.execute(f"""
+    ensure_crops_schema(conn)
+    excluded = "exists (select 1 from feedback_photo_exclusions fx where fx.photo_id = op.photo_id)"
+
+    def part(photo_id: str, crops: str, keep: str) -> str:
+        return f"""
       select r.observation_id, r.scientific_name, r.genus, r.family, r.validated_on,
-             coalesce(o.user_login, 'mo:' || m.owner_login), op.photo_id, op.position,
+             coalesce(o.user_login, 'mo:' || m.owner_login), {photo_id}, op.position,
              r.latitude, r.longitude, r.observed_on, o.observed_on, r.green_projects, o.uuid,
              r.source, r.source_id
       from records r
@@ -136,16 +146,20 @@ def load_records(conn: sqlite3.Connection, photo_row: dict[int, int],
       left join mo_observations m on r.source = '{sources.MO}'
         and m.observation_id = r.observation_id and m.status = 'ok'
       join observation_photos op on op.observation_id = r.observation_id
-      join photos p on p.photo_id = op.photo_id and p.source = r.source
+      join photos p on p.photo_id = op.photo_id and p.source = r.source {crops}
       where r.source in {sources.PHOTO_SOURCES_SQL}
         and (o.observation_id is not null or m.observation_id is not null)
         and r.label_conflict = 0 {na} and {EXCLUDED_FROM_USE_SQL}
         and {MO_EXCLUDED_FROM_USE_SQL}
         and {holdouts.not_held_out('r.observation_id')}
-        and not exists (select 1 from feedback_photo_exclusions fx
-                        where fx.photo_id = op.photo_id)
-      order by r.observation_id, op.position
-    """).fetchall()
+        and {keep}"""
+    # Each photo Human Feedback leaves in, then each kept crop of one it leaves out, after its
+    # record's photos (same position: the crop's number orders them).
+    rows = conn.execute(
+        part("op.photo_id", "", f"not {excluded}") + " union all "
+        + part(CROP_VECTOR_SQL, "join feedback_photo_crops c on c.photo_id = op.photo_id",
+               excluded)
+        + " order by 1, 8, 7 desc").fetchall()
     labels = names.manifest_labels(conn)
     tax = taxonomy.for_manifest(conn)
     recs: dict[str, Record] = {}

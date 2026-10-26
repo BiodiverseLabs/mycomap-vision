@@ -224,4 +224,5 @@ def test_a_public_view_holds_every_photo_item_and_record_items_of_no_project(tmp
     assert [i["subject"] for i in s.items_of("group_label", {"p1"})] == ["b"]
     assert s.items_of("photo_view", {"p2"}) == []             # a reviewer keeps their own scope
     assert len(s.items_of("group_label", None)) == 2
-    assert fb.PUBLIC_PHOTO_TYPES == {"non_specimen_photo", "photo_view"}
+    # Recovered labels too (Steve, 2026-10-26): read-only, the crop outlines on the original only
+    assert fb.PUBLIC_PHOTO_TYPES == {"non_specimen_photo", "photo_view", "recovered_label"}

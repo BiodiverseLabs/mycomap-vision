@@ -1325,13 +1325,17 @@ def cmd_feedback(conn, args) -> None:
     from pathlib import Path
 
     from . import feedback
-    if args.action == "export-photo-exclusions":         # reads a copy; opens no Store
+    if args.action == "slip-crops":                       # reads a copy; opens no Store
+        _slip_crops(conn, args)
+        return
+    if args.action in ("export-photo-exclusions", "export-photo-crops"):   # a copy; no Store
         from . import feedback_export
         key = Path(args.key_file).read_bytes().strip()
+        run = (feedback_export.export if args.action == "export-photo-exclusions"
+               else feedback_export.export_crops)
         try:
-            data, summary = feedback_export.export(Path(args.store_copy), Path(args.release),
-                                                   args.as_of, key, feedback.default_path(),
-                                                   args.expect_key_fingerprint)
+            data, summary = run(Path(args.store_copy), Path(args.release), args.as_of, key,
+                                feedback.default_path(), args.expect_key_fingerprint)
         except feedback_export.ExportError as e:
             raise SystemExit(f"export refused: {e}") from None
         Path(args.out).write_bytes(data)
@@ -1356,10 +1360,79 @@ def cmd_feedback(conn, args) -> None:
                                   twin_locations=Path(args.twin_locations)
                                   if args.twin_locations else None,
                                   answer_key_groups=Path(args.answer_key_groups)
-                                  if args.answer_key_groups else None)
+                                  if args.answer_key_groups else None,
+                                  slip_crops=Path(args.slip_crops) if args.slip_crops else None)
         print(json.dumps({"store": str(path), "seeds": out}, indent=2))
     else:
         print(json.dumps({"store": str(path), "types": store.summary()}, indent=2))
+
+
+def _slip_crops(conn, args) -> None:
+    """`mv feedback slip-crops`: the specimen detector (slipcrop.py) on every photo a person
+    leaves out as a field slip in a store COPY, in the tranches asked for, appending the seed
+    file `mv feedback seed --slip-crops` reads. Photos come from this machine's copies, else
+    their source (photo_review.ReviewPhotos: the same hosts and pacing as the review pages)."""
+    from pathlib import Path
+
+    from . import feedback, feedback_export
+    from . import photo_review as pr
+    from . import recovered_labels as rl
+    from . import slipcrop
+    from .embed import decode
+    tranches = set(_split(args.tranche))
+    unknown = tranches - set(rl.TRANCHE_CODES)
+    if unknown:
+        raise SystemExit(f"unknown tranche(s) {sorted(unknown)}: {', '.join(rl.TRANCHE_CODES)}")
+    try:
+        copy = feedback_export._open_copy(Path(args.store_copy), feedback.default_path())
+    except feedback_export.ExportError as e:
+        raise SystemExit(f"slip-crops refused: {e}") from None
+    picks = [p for p in rl.slip_photos_in_copy(copy) if p["tranche"] in tranches]
+    copy.close()
+    # Only v1 train or val photos, never a v1-test record before the unseal; the paper's seal
+    # is asserted on each photo as well (recovered_labels.v1_check).
+    import sqlite3
+    rel = sqlite3.connect(f"file:{Path(args.release).as_posix()}?mode=ro", uri=True)
+    splits = dict(rel.execute("select record_key, split from records"))
+    rel.close()
+    seal = feedback.SealGate.from_manifest(conn)
+    check = rl.v1_check(splits, seal)
+    picks, refused = rl.job_photos(picks, check)
+    if refused:
+        print(f"slip-crops: refused {refused}", file=sys.stderr)
+    photos = pr.ReviewPhotos(lambda sql, params: conn.execute(sql, params).fetchall(),
+                             permission_view=lambda: None)
+
+    def image(p):
+        """The photo as embedding reads it (embed.decode: EXIF orientation applied), so a box
+        means the same pixels there: this machine's largest copy, else the source's large."""
+        from .licenses import photo_url
+        row = photos.one(p["photo_key"])
+        if row is None:
+            return None
+        rank = {"original": 0, "large": 1, "medium": 2, "small": 3}
+        for store, size, path in sorted(conn.execute(
+                "select store, size, path from photo_copies where photo_id = ?",
+                (row.photo_id,)).fetchall(), key=lambda c: rank.get(c[1], 9)):
+            try:
+                return decode(photos.read(store, path))
+            except Exception:                    # noqa: BLE001 - a missing copy: try the next
+                continue
+        try:
+            data = photos.source.get(photo_url(row.source, row.source_url, "large"), row.source)
+            return decode(data) if data else None
+        except Exception:                        # noqa: BLE001 - no usable URL, not an image
+            return None
+    if args.device == "cuda" and args.gpu_memory_gb:
+        import torch
+        total = torch.cuda.get_device_properties(0).total_memory
+        torch.cuda.set_per_process_memory_fraction(min(1.0, args.gpu_memory_gb * 2**30 / total))
+    detector = slipcrop.Detector(device=args.device, threads=args.threads)
+    print(f"slip-crops: {len(picks):,} slip photos in {sorted(tranches)}", file=sys.stderr)
+    out = rl.run_slip_crops(picks, image, detector.detect, Path(args.out), check,
+                            limit=args.limit, log=lambda s: print(s, file=sys.stderr))
+    print(json.dumps({"out": args.out, "tranches": sorted(tranches), "refused": refused, **out},
+                     indent=2))
 
 
 def cmd_holdout(conn, args) -> None:
@@ -2654,6 +2727,8 @@ def main(argv: list[str] | None = None) -> int:
                                             "Atlas lane's list; no coordinates)")
     q.add_argument("--answer-key-groups", help="labels sharing one answer key (species rank): "
                                                "the paper lead's groups file")
+    q.add_argument("--slip-crops", help="the specimen detector's seed file (mv feedback "
+                                        "slip-crops): the Recovered labels queue")
     q.add_argument("--blind-ratio", type=float, default=0.25)
     q.add_argument("--seed", type=int, default=20261018)
     q.add_argument("--store", help="the queue file (default <release root>/state/"
@@ -2678,6 +2753,37 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--out", required=True, help="the TSV to write (and <out>.summary.json)")
     q.add_argument("--expect-key-fingerprint",
                    help="refuse unless HMAC(key, 'mycomap-e34') is this (the paper's pinned value)")
+    q = fsub.add_parser("export-photo-crops",
+                        help="the specimen crops Recovered labels kept up to a time, as a TSV a "
+                             "declared crop arm pins by sha256 (feedback_export.export_crops); "
+                             "reads a .backup COPY. Never part of the exclusion export")
+    q.add_argument("--store-copy", required=True,
+                   help="a copy made with: sqlite3 <store> '.backup <copy>'")
+    q.add_argument("--release", required=True, help="research-releases/v1/release.sqlite")
+    q.add_argument("--as-of", required=True, help="UTC cut-off, e.g. 2026-11-14T23:59:59Z")
+    q.add_argument("--key-file", required=True, help="the HMAC key for reviewer pseudonyms")
+    q.add_argument("--out", required=True, help="the TSV to write (and <out>.summary.json)")
+    q.add_argument("--expect-key-fingerprint",
+                   help="refuse unless HMAC(key, 'mycomap-e34') is this (the paper's pinned value)")
+    q = fsub.add_parser("slip-crops",
+                        help="(a GPU machine) the specimen detector on photos people left out as "
+                             "field slips, from a store COPY: writes the seed file for "
+                             "`seed --slip-crops` (slipcrop.py; needs transformers)")
+    q.add_argument("--store-copy", required=True,
+                   help="a copy made with: sqlite3 <store> '.backup <copy>'")
+    q.add_argument("--release", required=True,
+                   help="research-releases/v1/release.sqlite: only its train and val records' "
+                        "photos are read, never a v1-test record's")
+    q.add_argument("--tranche", default="high",
+                   help="comma-separated: high (p >= 0.6), medium, low, rule (default high: "
+                        "Steve, 2026-10-26)")
+    q.add_argument("--out", required=True, help="the seed TSV, appended to (a rerun resumes)")
+    q.add_argument("--limit", type=int, help="at most this many photos this run")
+    q.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
+    q.add_argument("--threads", type=int, help="CPU threads (cpu only)")
+    q.add_argument("--gpu-memory-gb", type=float, default=2.0,
+                   help="cap this process's share of the GPU (default 2.0: SAM at 1024 px "
+                        "needs a bit over 1.5)")
 
     p = sub.add_parser("holdout", help="records held out for a benchmark: never trained on, "
                                        "indexed, released or added at night (holdouts.py)")

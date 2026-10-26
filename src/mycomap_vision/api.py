@@ -850,8 +850,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # A night that only removed or renamed records leaves n alone.
             night = nightly.layer_version(conn) if layer else 0
         # A change in who has said no rebuilds the reference set without their photos.
-            # Photos Human Feedback leaves out (synced at startup and before each night).
-            excluded = feedback.exclusions_fingerprint(conn)
+            # Photos Human Feedback leaves out, and the specimen crops it keeps of them
+            # (synced at startup and before each night).
+            excluded = (feedback.exclusions_fingerprint(conn) + "+"
+                        + feedback.crops_fingerprint(conn))
             # Renames read from mycomap.org's name-change log between nights (name_changes.py).
             renamed = name_changes.version(conn) if layer else 0
         # view.fingerprint() stays third and the twins last: same_permissions reads them.
@@ -2310,6 +2312,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return base_url, key
         with db_lock:                      # Human Feedback's photo decisions, once a night
             note(f"[feedback] photo exclusions: {feedback.sync_exclusions(feedback_store, conn)}")
+            note(f"[feedback] specimen crops: {feedback.sync_crops(feedback_store, conn)}")
         read_name_changes(rebuild=False)   # .org's renames first: tonight counts only the rest
         fetch = nightly_fetch or (lambda: nightly.fetch_green(*org(), log=note))
         fetch_pending = nightly_fetch_pending or (lambda: nightly.fetch_pending(*org(), log=note))
@@ -2406,6 +2409,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     app.state.feedback = feedback_store
     with db_lock:
         feedback.sync_exclusions(feedback_store, conn)
+        feedback.sync_crops(feedback_store, conn)
 
     def feedback_rescore(record_key: str, who: dict | None = None) -> dict:
         source, number = (("mo", record_key[3:]) if record_key.startswith("mo:")

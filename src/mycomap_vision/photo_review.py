@@ -602,10 +602,13 @@ class SourceFetcher:
 
 
 def _scaled(data: bytes, px: int) -> tuple[bytes, str]:
-    from PIL import Image
+    from PIL import Image, ImageOps
     try:
         from .guards import photo_formats
         im = Image.open(io.BytesIO(data), formats=photo_formats())
+        # EXIF orientation applied, as embedding reads a photo (embed.decode): the saved JPEG
+        # keeps no EXIF, and a Recovered labels box is drawn on these pixels.
+        im = ImageOps.exif_transpose(im)
         im.thumbnail((px, px))
         buf = io.BytesIO()
         im.convert("RGB").save(buf, "JPEG", quality=85)
