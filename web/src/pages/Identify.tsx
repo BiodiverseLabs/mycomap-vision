@@ -48,6 +48,8 @@ import {
 import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
+import { InatSuggestions } from "@/components/InatSuggestions";
+import { inatForPage, newInatRef } from "@/lib/inatSuggestions";
 import { answerSpecies, bestPerPhoto, CONNECT_URL, othersHeading, yoursLine, yoursPanel } from "@/lib/yours";
 import {
   alsoPossible, answerFor, boxHints, breakdownLabel, breakdownOpen, confusedNote, coverageSummary, listedNames,
@@ -93,9 +95,9 @@ export function IdentifyPage() {
   const [waiting, setWaiting] = useState<number | null>(null);
   const [sentPart, setSentPart] = useState<number | null>(null);
   const run = useMutation({
-    mutationFn: (sent: { where: Where; files: File[]; include?: number[] }) =>
+    mutationFn: (sent: { where: Where; files: File[]; include?: number[]; inatRef?: string }) =>
       api.identify(sent.files, chosen, sent.where, (_attempt, seconds) => setWaiting(seconds), setSentPart,
-                   sent.include ?? []),
+                   sent.include ?? [], sent.inatRef),
     onMutate: () => setSentPart(null),
     onSettled: () => {
       setWaiting(null);
@@ -123,7 +125,9 @@ export function IdentifyPage() {
   const shownUrls = viaLink ? (byLink.data?.observation.photos_shown.map((u) => u ?? "") ?? []) : sentUrls;
   const shownPhotos = viaLink ? byLink.data?.observation.photos_used : run.variables?.files.length;
   const submittedAt = viaLink ? byLink.submittedAt : run.submittedAt;
-  const startPhotos = () => { setMode("photos"); byLink.reset(); run.mutate({ where, files }); };
+  const inatShown = viaLink ? null : inatForPage(
+    run.isPending ? "checking" : run.isError ? "failed" : "answered", run.data?.inat, run.variables?.inatRef);
+  const startPhotos = () => { setMode("photos"); byLink.reset(); run.mutate({ where, files, inatRef: newInatRef() }); };
   const startLink = (ref: ObservationRef) => { setMode("link"); run.reset(); byLink.mutate(ref); };
   // Run again: the kept answer is replaced by a fresh run of the same observation.
   const runLinkAgain = () => {
@@ -323,6 +327,25 @@ export function IdentifyPage() {
                             r={r} urls={shownUrls} photos={shownPhotos ?? r.photos}
                             onInclude={pending ? undefined : includePhoto} />
               ))}
+            </div>
+          )}
+          {/* iNaturalist's suggestions, below Vision's answer and never before it. */}
+          {answer && !viaLink && inatShown && (
+            <InatSuggestions key={`inat@${submittedAt}`} initial={inatShown.initial} />
+          )}
+          {/* Vision failed or timed out: iNat's lines still show, with a Retry (Steve, 2026-10-25). */}
+          {failed && !viaLink && !pending && inatShown && (
+            <div data-testid="section-vision-failed">
+              <Card>
+                <CardContent className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
+                  <p className="text-sm text-[#4a3728]">MycoMap Vision couldn't answer this time.</p>
+                  <Button type="button" variant="outline" size="sm" onClick={startPhotos}
+                          disabled={!files.length || gate !== "ready"} data-testid="button-retry-vision">
+                    <RotateCcw /> Retry
+                  </Button>
+                </CardContent>
+              </Card>
+              <InatSuggestions key={`inat-failed@${submittedAt}`} initial={inatShown.initial} visionFailed />
             </div>
           )}
           {answer && <WhatNext results={answer.results} />}

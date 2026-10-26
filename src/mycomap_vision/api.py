@@ -34,7 +34,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, linkcards, manifest, phototypes,
+from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, inat_suggest, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, research_public, serving, sessions as session_store, sources,
@@ -330,7 +330,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                run_store: "run_links.RunStore | None" = None,
                run_secret: bytes | None = None,
                identify_log: "identifylog.IdentifyLog | None" = None,
-               early_store: "early_answers.Store | None" = None) -> FastAPI:
+               early_store: "early_answers.Store | None" = None,
+               inat_suggestions: "inat_suggest.Suggestions | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -372,6 +373,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `run_store`: where the site's runs are kept, each under its own link /r/<id> (runs.py).
     None reads MV_RUN_LINKS: `s3` (the Vision bucket's site-runs/), a folder, or off (the
     default: no links). `run_secret` keys an iNat/MO run's id (default: the session secret).
+
+    `inat_suggestions`: iNaturalist's suggestions under Vision's answers, asked through
+    mycomap.org with the signed-in member's own iNat account (inat_suggest.py). True turns
+    them on when MV_INAT_SUGGESTIONS is set (off by default); None or False: off; tests pass
+    a Suggestions.
 
     `identify_log`: the append-only log of every answer given or served (identifylog.py),
     for the paper's truth-independence check. None opens state/identify-log.sqlite on the
@@ -677,6 +683,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
              else Path(manifest_path or config.MANIFEST_PATH).parent), note=note)
     app.state.run_store = run_store
     run_secret = run_secret or signin.secret or secrets.token_bytes(32)
+    # iNat's suggestions (inat_suggest.py; Steve, 2026-10-25): off until iNat agrees in
+    # writing. Never in the identify log or early answers: mycomap.org logs iNat's side.
+    if inat_suggestions is True:
+        inat_suggestions = inat_suggest.Suggestions.from_settings(note=note)
+    inat_suggestions = inat_suggestions or None
+    app.state.inat_suggestions = inat_suggestions
     # Every answer given or served, one row each, insert-only (identifylog.py; Steve,
     # 2026-10-20), beside the observation answers. Written off the request path.
     if identify_log is None:
@@ -1141,7 +1153,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def identify(request: Request, photos: list[UploadFile] = File(...),
                  models_: str = Form("", alias="models"), lat: float | None = Form(None),
                  lng: float | None = Form(None), observed_on: str | None = Form(None),
-                 include: str = Form("")):
+                 include: str = Form(""), inat_ref: str | None = Form(None)):
         client = request.client.host if request.client else "unknown"
         wait = rate.check(client)
         if wait:
@@ -1175,7 +1187,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise HTTPException(503, "busy identifying other photos; try again shortly",
                                     headers={"Retry-After": str(int(e.wait_seconds) + 1)}) from e
             out = run_identify(photos, models_, context, timer, linked_of(request),
-                               person(request), counted_anyway)
+                               person(request), counted_anyway, inat_ref)
         finally:
             in_flight.leave()
         out["timing"] = timer.block()
@@ -1340,7 +1352,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def run_identify(photos: list[UploadFile], models_: str, context: "Context",
                      timer: "apiv1.Timer", linked: "yours.Linked | None" = None,
-                     who: dict | None = None, include=()) -> dict:
+                     who: dict | None = None, include=(), inat_ref: str | None = None) -> dict:
         """The Identify page's answer to uploaded photos; with run links on, kept under
         its own link (`run`), small copies of the photos with it. `include`: photos to count
         though their photo-type tag would leave them out ("Include anyway")."""
@@ -1348,7 +1360,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         bodies = [] if run_store is not None else None
         read = decode_photos(photos, timer, hashes, bodies)
         images = [img for img, _ in read]
+        # The run's id is minted now so iNat's answer, asked for while Vision's runs, is
+        # joined to it on mycomap.org and kept beside it here.
+        rid = run_links.new_id() if run_store is not None else None
         context, used = fill_context(context, [found for _, found in read])
+        # The place entered, else the photos' EXIF one; sent rounded to 0.1 degree.
+        inat_key = start_inat(who, images, rid, inat_ref,
+                              inat_suggest.rounded_place(context.latitude, context.longitude))
         wanted = site_models(models_)
         view = permission_view()
 
@@ -1376,15 +1394,78 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         if run_store is not None:
             run = without_failing(lambda: keep_run(
                 "photos", who, [run_part(i, r, s, v, None) for i, r, s, v in parts], used,
-                bodies))
+                bodies, rid=rid))
             if run:
                 out["run"] = run
+            if rid is not None:
+                inat_kept(rid)
         asker = identifylog.site_asker(who)
         for backbone, method, version in answered:
             log_answer(identifylog.SITE_UPLOAD, fresh=True, model=f"{backbone}/{method}",
                        answers_version=version, release=release_now, asked_by=asker,
                        run_id=(out.get("run") or {}).get("id"))
+        inat = inat_view(inat_key, who, results)
+        if inat is not None:
+            out["inat"] = inat
         return out
+
+    # --- iNat's suggestions (inat_suggest.py) ------------------------------------------
+    # Vision's answer never waits for them: the photos go to mycomap.org on threads of
+    # their own, and the page asks again while they are out (GET /api/inat-suggestions).
+    inat_held: dict[str, dict | None] = {}      # answers back before their run was kept
+    inat_lock = threading.Lock()
+
+    def start_inat(who: dict | None, images: list, rid: str | None,
+                   ref: str | None = None, place: tuple[float, float] | None = None) -> str | None:
+        """Forwards a site find's photos for the signed-in member; its key, or None."""
+        if inat_suggestions is None or not who or not who.get("sub"):
+            return None
+
+        def done(merged: dict | None) -> None:
+            if rid is None or merged is None:
+                return
+            with inat_lock:
+                if run_store.get(rid) is None:      # back before the run is kept
+                    inat_held[rid] = merged
+                    return
+            run_store.keep_inat(rid, merged)
+        try:
+            return inat_suggestions.start(str(who["sub"]), images, run_id=rid, done=done,
+                                          ref=ref, place=place)
+        except Exception as e:  # noqa: BLE001 - no lines; the answer is unaffected
+            note(f"[inat-suggest] not sent: {type(e).__name__}")
+            return None
+
+    def inat_kept(rid: str) -> None:
+        """The run is kept (or couldn't be): iNat's answer, if it came back first, goes
+        beside it."""
+        if inat_suggestions is None:
+            return
+        with inat_lock:
+            merged = inat_held.pop(rid, None)
+        if merged is None:
+            return
+        try:
+            run_store.keep_inat(rid, merged)        # False when the run wasn't kept
+        except Exception as e:  # noqa: BLE001 - only the run page's copy is lost
+            note(f"[inat-suggest] not kept with run {rid}: {type(e).__name__}")
+
+    def inat_view(key: str | None, who: dict | None, results: list[dict]) -> dict | None:
+        """What to show under Vision's answer, now that it is out."""
+        if inat_suggestions is None or key is None or not who:
+            return None
+        inat_suggestions.answered(key, inat_suggest.vision_names(results))
+        return inat_suggestions.view(key, str(who.get("sub")))
+
+    @app.get("/api/inat-suggestions/{ref}")
+    def inat_suggestions_now(request: Request, ref: str, vision: str | None = None):
+        """How a find's iNat suggestions stand, for the person who sent its photos only.
+        `ref` is the key an answer gave, or site-<inat_ref> the page sent; vision=failed:
+        Vision's answer failed or timed out, so the lines show without it."""
+        who = person(request)
+        view = (inat_suggestions.view(ref, str(who.get("sub")), vision_failed=vision == "failed")
+                if inat_suggestions is not None and who else None)
+        return JSONResponse({"inat": view}, headers={"Cache-Control": "no-store"})
 
     # --- run links (runs.py) ----------------------------------------------------------
 
@@ -1529,13 +1610,26 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 linked if vecs is not None else None, photo_lookup, may_show)
             confusions.annotate(shown, table)
             results.append(shown)
+        inat = run_inat(rid, who, results) if mine else None
         body = {"id": run["id"], "kind": run["kind"], "results": results,
                 "context_used": run.get("context_used"),
                 "observation": run_links.public_observation(run.get("observation")),
                 "answered_at": run.get("answered_at"), "release": run.get("release"),
                 "photos": int(run.get("photos") or 0), "mine": mine,
                 "can_delete": mine or bool(who and is_admin(str(who.get("sub"))))}
+        if inat is not None:
+            body["inat"] = inat
         return JSONResponse(body, headers=NOT_INDEXED)
+
+    def run_inat(rid: str, who: dict, results: list[dict]) -> dict | None:
+        """iNat's suggestions on a run's page: its owner's only, asked with their iNat
+        account. Kept beside the run once back; still on their way, the page asks again."""
+        if inat_suggestions is None:
+            return None
+        kept = run_store.inat(rid)
+        if kept is not None:
+            return inat_suggest.shown(kept, inat_suggest.vision_names(results))
+        return inat_suggestions.view(inat_suggestions.key_of_run(rid), str(who.get("sub")))
 
     @app.get("/api/runs/{rid}/photos/{name}")
     def run_photo(request: Request, rid: str, name: str):
@@ -2176,11 +2270,27 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise apiv1.V1Error(413, "too_large", str(e.detail)) from e
                 raise apiv1.V1Error(415, "unsupported_image", str(e.detail)) from e
 
+        def forward_app_photo(cred: "apiv1.Credential", image, client_ref: str | None,
+                              photo_ref: str, lat, lng, open_place: bool) -> None:
+            """An app photo to mycomap.org for iNat's suggestions, without waiting: the app's
+            own members only (a token naming them, "uid"), never a developer key or
+            mycomap.org's server key. The app reads the lines from mycomap.org, so nothing
+            comes back here. The place goes only for a find whose geoprivacy is open
+            (`inat_location`)."""
+            if inat_suggestions is None or cred.kind != "app" or not cred.uid:
+                return
+            place = (lat, lng) if open_place and lat is not None and lng is not None else None
+            try:
+                inat_suggestions.forward(cred.uid, image, client_ref=client_ref,
+                                         photo_ref=photo_ref, location=place)
+            except Exception as e:  # noqa: BLE001 - no lines; the answer is unaffected
+                note(f"[inat-suggest] app photo not sent: {type(e).__name__}")
+
         def v1_identify(request: Request, photos: list[UploadFile] = File(...),
                         latitude: float | None = Form(None), longitude: float | None = Form(None),
                         observed_on: str | None = Form(None), model: str | None = Form(None),
                         top_k: int = Form(5), client_ref: str | None = Form(None),
-                        include: str | None = Form(None)):
+                        include: str | None = Form(None), inat_location: bool = Form(False)):
             timer = apiv1.Timer()
             cred: apiv1.Credential = request.state.credential
             if not 1 <= len(photos) <= MAX_PHOTOS:
@@ -2212,6 +2322,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             try:
                 hashes = [] if upload_meter.hashing() else None
                 read = v1_photos(photos, timer, hashes)
+                for n, (img, _) in enumerate(read):
+                    forward_app_photo(cred, img, client_ref, str(n + 1), latitude, longitude,
+                                      inat_location)
                 context, used = fill_context(Context(latitude, longitude, observed_on),
                                              [found for _, found in read])
                 view = permission_view()
@@ -2977,6 +3090,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             out = {k: payload[k] for k in ("latitude", "longitude", "observed_on")
                    if k in payload}
             check_context(out.get("latitude"), out.get("longitude"), out.get("observed_on"))
+            if "inat_location" in payload:
+                if not isinstance(payload["inat_location"], bool):
+                    raise apiv1.V1Error(400, "bad_request", "inat_location is true or false")
+                out["inat_location"] = payload["inat_location"]
             return out
 
         @app.post("/api/v1/sessions", status_code=201)
@@ -3042,6 +3159,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 try:
                     hashes = [] if upload_meter.hashing() else None
                     [(image, found)] = v1_photos([photo], timer, hashes)
+                    forward_app_photo(cred, image, s.client_ref, photo_ref,
+                                      s.entered.get("latitude"), s.entered.get("longitude"),
+                                      s.entered.get("inat_location") is True)
                     rescore(s, cred, timer, image=image, ref=photo_ref, found=found)
                 finally:
                     in_flight.leave()

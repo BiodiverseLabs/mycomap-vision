@@ -62,6 +62,7 @@ answered from a proxy's cache.
 | `top_k` | int 1–10, optional | candidates per rank, default 5 |
 | `client_ref` | string 1–64, optional | the caller's id for the find: the same find counted in the last 24 h (by its session or an earlier call) isn't counted again (§6.4) |
 | `include` | photo indices, optional | 0-based, comma-separated: photos to count even though their photo type would leave them out (`photo_types`, §4). Ignored while photo types are off |
+| `inat_location` | boolean, optional | the app only: true when the find's geoprivacy is open, so its place may go with the photos to mycomap.org for iNaturalist's suggestions. Default false: the place is used for scoring only |
 
 **Input guidance** (also on the developer page):
 
@@ -176,6 +177,11 @@ Why sessions rather than stateless calls:
 {"latitude": 40.12, "longitude": -82.98, "observed_on": "2026-10-11",
  "client_ref": "obs-local-8812", "model": null, "top_k": 5, "keep_photos": false}
 ```
+
+`inat_location` (boolean, also on `PATCH`) is as on `POST /identify`. With iNaturalist's
+suggestions on (`MV_INAT_SUGGESTIONS`), an app token naming the member (`uid`) has each
+photo forwarded to mycomap.org with the session's `client_ref` and its `photo_ref`, and
+the app reads the lines from mycomap.org; Vision's answers are unchanged.
 
 → `201 {"session_id": "s_7Yp2…", "expires_at": "…", "max_photos": 10,
 "model": {"name", "version", "data", "calibrated_on"}, "context_used": {…}}`
