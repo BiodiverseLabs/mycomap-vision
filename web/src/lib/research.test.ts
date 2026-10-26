@@ -112,7 +112,7 @@ test("the Research bar leads with the overview; Experiments is there for everyon
 
 test("the base-model screen quotes its committed entry: one run over every row, BioCLIP 2.5 Huge and BioCLIP 2 at 224 and 336 px", () => {
   assert.equal(BASE_MODEL_SCREEN.queries, 664);
-  assert.match(BASE_MODEL_SCREEN.source, /experiments\/2026-10-13-v1-backbone-screen\.md, addendum of 26 Oct \(origin\/main 25a9036\)/);
+  assert.match(BASE_MODEL_SCREEN.source, /experiments\/2026-10-13-v1-backbone-screen\.md, addendum of 26 Oct \(origin\/main 4ecd155\)/);
   assert.equal(BASE_MODEL_SCREEN.comparison, "20261026-163000-1a3990");
   assert.deepEqual(BASE_MODEL_SCREEN.rows.map((r) => [r.name, r.detail, r.top1, r.top3, r.top5, r.top10]), [
     ["BioCLIP 2.5 Huge (base model, not fine-tuned)", "336 px · Imageomics", 77.7, 88.9, 92.0, 94.7],
@@ -120,6 +120,7 @@ test("the base-model screen quotes its committed entry: one run over every row, 
     ["BioCLIP 2", "336 px · Imageomics", 72.7, 85.8, 89.9, 93.1],
     ["BioCLIP 2", "224 px · Imageomics", 70.9, 85.2, 88.9, 92.6],
     ["FungiTastic BEiT-B (frozen)", "384 px · fungus classifier's features, head not used", 68.8, 81.3, 84.5, 88.5],
+    ["BioCLIP", "224 px · Imageomics, first version", 58.3, 72.6, 78.0, 83.4],
     ["DINOv3 large", "512 px · Meta, general purpose", 54.7, 70.2, 76.0, 80.1]]);
   assert.ok(startsFrom336(BASE_MODEL_SCREEN.rows), "the screen says where MycoMap Vision v1 starts");
   assert.deepEqual(BASE_MODEL_SCREEN.rows.filter((r) => r.run), [], "one run only: no row from another run");

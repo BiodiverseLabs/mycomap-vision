@@ -179,7 +179,7 @@ test("Benchmarks: the summary, the screen named by its test set, results by test
   assert.match(t, /not comparable with results on the full v1 validation split, such as Newest weeks at a glance or the MycoMap v1 validation card below/);
   assert.doesNotMatch(t, /not comparable with the numbers above/, "says which numbers");
   assert.match(t, /FungiTastic BEiT-B \(frozen\)/);
-  assert.match(t, /25a9036/);
+  assert.match(t, /4ecd155/);
   assert.match(t, /comparison 20261026-163000-1a3990/);
   assert.doesNotMatch(t, /ef3a8df|20261025-163049/, "the screen cites one run, the new one");
   assert.match(t, /MycoMap Vision v1 was fine-tuned from it at 336 px\. See Results › Approaches compared/);
