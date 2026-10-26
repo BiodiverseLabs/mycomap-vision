@@ -563,6 +563,54 @@ def test_a_reference_other_than_the_two_known_or_on_another_kind_is_refused():
             {"id": "i", "kind": "inat", "file": "x", "reference": "public_trainable_only"}]})
 
 
+
+def test_a_resumed_run_reuses_only_checkpoints_of_the_same_config_code_and_comparator(
+        world, tmp_path, monkeypatch):
+    """A run that dies keeps each finished Vision comparator's predictions and stamp; with
+    resume they are loaded instead of scored again, and the report is the same. A changed
+    config, or no resume, scores again."""
+    cfg = config(tmp_path, ["5", "6"])
+    first = run(world, tmp_path, "val", cfg)
+    pred = tmp_path / "out" / "predictions"
+    meta = json.loads((pred / "vision-photos.meta.json").read_text(encoding="utf-8"))
+    assert meta["answers"] == 2 and meta["finds"] == 2 and len(meta["config_sha256"]) == 64
+    assert not list(pred.glob("*.tmp"))
+    scored = []
+    real = paper_score.vision_answers
+
+    def counting(*a, **k):
+        scored.append(a[3])
+        return real(*a, **k)
+    monkeypatch.setattr(paper_score, "vision_answers", counting)
+    again = run(world, tmp_path, "val", cfg, resume=True)
+    assert scored == []                                   # every Vision row from its checkpoint
+    assert again["standard"] == first["standard"]
+    assert again["hypotheses"] == first["hypotheses"]
+    run(world, tmp_path, "val", cfg)                      # no resume: scored again
+    assert scored == ["nearest", "nearest+mean"]
+    scored.clear()
+    cfg2 = config(tmp_path, ["5", "6"], top_k=5)          # another config: its stamp differs
+    run(world, tmp_path, "val", cfg2, resume=True)
+    assert scored == ["nearest", "nearest+mean"]
+
+
+def test_a_checkpoint_is_reused_only_when_every_part_of_its_stamp_matches(tmp_path):
+    path = tmp_path / "v.jsonl"
+    answers = {"2": {"species": [{"name": "B y"}]}, "1": {"species": [{"name": "A x"}]}}
+    stamp = paper_score.checkpoint_stamp(b"cfg", "abc1234", {"id": "v", "method": "m"}, 2)
+    paper_score.write_checkpoint(path, answers, stamp, {"place_setting": "s"})
+    info: dict = {}
+    assert paper_score.load_checkpoint(path, stamp, info) == answers
+    assert info == {"place_setting": "s"}
+    for changed in (paper_score.checkpoint_stamp(b"cfg2", "abc1234", {"id": "v", "method": "m"}, 2),
+                    paper_score.checkpoint_stamp(b"cfg", "def5678", {"id": "v", "method": "m"}, 2),
+                    paper_score.checkpoint_stamp(b"cfg", "abc1234", {"id": "v", "method": "x"}, 2),
+                    paper_score.checkpoint_stamp(b"cfg", "abc1234", {"id": "v", "method": "m"}, 3)):
+        assert paper_score.load_checkpoint(path, changed, {}) is None
+    path.write_text(path.read_text(encoding="utf-8").splitlines()[0] + "\n", encoding="utf-8")
+    assert paper_score.load_checkpoint(path, stamp, {}) is None      # a truncated file
+
+
 def test_the_attrs_file_is_pinned_by_the_config(world, tmp_path):
     attrs = tmp_path / "attrs.tsv"
     attrs.write_text("record_key\tdistance_band\n5\t<100\n6\t>1500\n", encoding="utf-8")
@@ -1314,6 +1362,121 @@ def test_a_masked_leave_out_equals_a_refit_without_the_groups_records(method, mo
     o1 = [r.observation_id for r in scored if r.observer == "o1"]
     if mode == "observer":
         assert all("G0 only" not in masked[k]["species"] for k in o1)
+
+
+
+# The leave-out as it was before the plan (methods.py until 26 Oct), kept verbatim as the
+# reference the plan-once path must reproduce.
+def _legacy_leave_out(model, per_photo, photo_sims, query, hidden):
+    from mycomap_vision.methods import NearestAndMeanRecords, rows_at
+    starts = model.index.starts
+    n_cols = len(model.index.cols)
+    hidden = np.unique(np.asarray(hidden, dtype=np.int64))
+    q = np.asarray(query, dtype=np.float32)
+    out = np.array(per_photo, dtype=np.float32, copy=True)
+    records = isinstance(model, NearestAndMeanRecords)
+    rec_starts = model.index.rec_starts if records else None
+    for u in np.unique(np.searchsorted(starts, hidden, side="right") - 1).tolist():
+        lo = int(starts[u])
+        hi = int(starts[u + 1]) if u + 1 < len(starts) else n_cols
+        keep = np.setdiff1d(np.arange(lo, hi), hidden)
+        if not len(keep):
+            out[:, u] = -np.inf
+            continue
+        if records:
+            r_hi = int(model.rec_species[u + 1]) if u + 1 < len(starts) else len(rec_starts)
+            bounds = np.append(rec_starts[int(model.rec_species[u]):r_hi], hi)
+            rec = np.searchsorted(bounds, keep, side="right") - 1
+            firsts = np.flatnonzero(np.diff(rec, prepend=-1) != 0)
+            best = np.maximum.reduceat(photo_sims[:, keep], firsts, axis=1)
+            best = -np.sort(-best, axis=1)[:, :model.k]
+            mean = model._species_mean_without(keep, bounds).astype(np.float16)
+        else:
+            best = -np.sort(-photo_sims[:, keep], axis=1)[:, :model.k]
+            mean = rows_at(model.scorer.ref, keep).sum(axis=0)
+            mean = (mean / max(float(np.linalg.norm(mean)), 1e-12)).astype(np.float16)
+        nearest = best.sum(axis=1, dtype=np.float32) / np.float32(best.shape[1])
+        out[:, u] = (model.weight * nearest
+                     + (1 - model.weight) * (q @ mean.astype(np.float32)))
+    return out
+
+
+@pytest.mark.parametrize("method", ["nearest+mean", "nearest+mean-records",
+                                    "nearest+mean-records-balanced"])
+@pytest.mark.parametrize("mode", ["observer", "trip"])
+def test_the_plan_once_leave_out_gives_the_former_leave_outs_results(method, mode,
+                                                                    monkeypatch):
+    """Speed (26 Oct): the query-free part of the leave-out is built once per group of
+    finds (leave_out_plan) and applied per find. On a seeded sample it gives the per-photo
+    scores of the former species-by-species code (to float rounding of one product), the
+    same absent species, the same ranking of every photo, and the same answers."""
+    from mycomap_vision import evaluate, twins
+    vec, ref, scored = _leave_out_world(seed=11)
+    groups = _world_twins(ref) if twins.is_grouped(method) else None
+    index, model = evaluate.fit_method(
+        vec, ref, method, "m",
+        **({"specimen_of": twins.specimen_of(groups, ref)} if groups else {}))
+    col_of_row = {int(r): i for i, r in enumerate(np.asarray(index.cols).tolist())}
+    hidden_of = {}
+    for r in ref:
+        hidden_of.setdefault(paper_score.leave_out_key(r, mode), []).extend(
+            col_of_row[int(p)] for p in r.photo_rows)
+    compared = 0
+    for rec in scored:
+        hidden = np.asarray(hidden_of.get(paper_score.leave_out_key(rec, mode), []), np.int64)
+        if not len(hidden):
+            continue
+        q = np.asarray(vec[rec.photo_rows], dtype=np.float32)
+        sims = model.photo_sims(q)
+        per = model.per_photo_scores(sims, q)
+        old = _legacy_leave_out(model, per, sims, q, hidden)
+        new = model.leave_out_apply(per, sims, q, model.leave_out_plan(hidden))
+        assert np.array_equal(np.isinf(old), np.isinf(new))
+        fin = np.isfinite(old)
+        assert np.allclose(new[fin], old[fin], rtol=0, atol=1e-6)
+        assert np.array_equal(np.argsort(-old, axis=1, kind="stable"),
+                              np.argsort(-new, axis=1, kind="stable"))
+        assert np.array_equal(model.leave_out(per, sims, q, hidden), new)
+        compared += 1
+    assert compared >= 20
+    # end to end: the answers paper-score gives are those of the former leave-out
+    truths = {r.observation_id: {"species": r.species, "genus": r.genus} for r in scored}
+    cal = {"species": {"temperature": 0.05, "floor": 0.05}, "genus": {"temperature": 0.05}}
+    kw = dict(top_k=10, calibration=cal, truths=truths, twins=groups)
+    got = paper_score.masked_leave_out_answers(vec, ref, scored, method, "m", mode, **kw)
+    with monkeypatch.context() as m:
+        orig_plan = type(model).leave_out_plan
+
+        def plan_with_hidden(self, hidden):
+            plan = orig_plan(self, hidden)
+            plan.hidden = hidden
+            return plan
+        m.setattr(type(model), "leave_out_plan", plan_with_hidden)
+        m.setattr(type(model), "leave_out_apply",
+                  lambda self, per, sims, q, plan: _legacy_leave_out(self, per, sims, q,
+                                                                     plan.hidden))
+        want = paper_score.masked_leave_out_answers(vec, ref, scored, method, "m", mode, **kw)
+    assert {k: (a["species"], a["genus"]) for k, a in got.items()} == \
+        {k: (a["species"], a["genus"]) for k, a in want.items()}
+    for k in got:
+        for rank in ("species", "genus"):
+            for f in ("conf", "p_true", "sumsq"):
+                assert got[k]["cal"][rank][f] == pytest.approx(want[k]["cal"][rank][f],
+                                                               rel=1e-5, abs=1e-6)
+
+
+def test_the_leave_out_plan_is_built_once_per_group_not_once_per_find(monkeypatch):
+    from mycomap_vision import methods
+    vec, ref, scored = _leave_out_world(seed=3)
+    built = []
+    orig = methods.NearestAndMean.leave_out_plan
+    monkeypatch.setattr(methods.NearestAndMean, "leave_out_plan",
+                        lambda self, hidden: built.append(len(hidden)) or orig(self, hidden))
+    paper_score.masked_leave_out_answers(vec, ref, scored, "nearest+mean", "m", "observer")
+    groups_with_finds = {r.observer for r in scored if r.observer
+                         and any(x.observer == r.observer for x in ref)}
+    finds_with_hidden = sum(1 for r in scored if r.observer in groups_with_finds)
+    assert len(built) == len(groups_with_finds) < finds_with_hidden
 
 
 def test_a_place_methods_leave_out_is_refitted_never_masked(monkeypatch):
