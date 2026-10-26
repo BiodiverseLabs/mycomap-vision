@@ -263,6 +263,20 @@ a record or class left with none drops out). Both are recorded in progress.json,
 and the model's json (`seed`, `train_photos`: the policy and the photos by licence class, which
 every fine-tune on a release records), and kept by `--resume`. Every model trained on v1 trains
 on v1 as cut and is scored and served with its erratum (dataset-release.md §4, Errata).
+`--exclude-photos FILE` (paper E34/E35, Steve 2026-10-26: v1.1 without the non-specimen photos)
+takes a Human Feedback photo-exclusion export (`mv feedback export-photo-exclusions`, its
+`exclude_photo` rows) and leaves those photos out of what the model learns from and is compared
+against: every read of the release that includes train (the training photos, the train reference
+for val, the train + val reference for `v1-test` and the served index). A read of val or test
+alone is the queries, and keeps every photo, so the model is judged on exactly v1's queries. A
+record left with no photo drops out of those reads. `--exclude-photo-reasons slip` keeps only
+rows with those reasons: one E35 arm, a subset of the one frozen list. The file ships with the
+run and the instance refuses it unless its sha256 is the launch's; its name, sha256, reasons and
+counts are in `dataset_release.photo_exclusions` and `train_photos.photo_exclusions`. It is not
+an erratum (no record or label changes), and a run that uses it can't be resumed yet. On the
+2026-10-26 export (sha256 `b71caa99…`), all reasons: 65,217 of v1's 624,785 train photos out
+(860 records), and 5,659 val photos out of a train + val reference (53 records); slips only:
+12,386 train photos (643 records) and 1,149 val (40). Val queries unchanged in both.
 Since the 2026-10-14 export the live manifest no longer holds 43 v1 records (.org deleted
 the MO-number rows), and a launch from it is refused before any spend; launch v1 runs with
 `--manifest data/manifest-v1-freeze.sqlite` (a private copy is made; the file is never

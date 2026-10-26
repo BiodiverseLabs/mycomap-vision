@@ -11,6 +11,7 @@ MV_AWS_PROFILE and MV_INSTANCE_ROLE.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import math
@@ -356,7 +357,9 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                              picek: list[str] | None = None, picek_exclude: str = "match",
                              picek_labels_hash: str | None = None,
                              release: dict | None = None, seed: int = 0,
-                             public_trainable_only: bool = False) -> str:
+                             public_trainable_only: bool = False,
+                             photo_exclusions_sha256: str | None = None,
+                             photo_exclusion_reasons: list[str] | None = None) -> str:
     # The job is killed at max_hours, and stops itself STOP_MARGIN_HOURS before that so
     # it can upload what it finished; the backstop leaves 30 minutes on top for setup
     # and the log upload.
@@ -396,6 +399,21 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                             f"data/{PICEK_PLACE_KEY} || exit 1\n")
             release_arg += (f" --picek-place-cells data/{PICEK_PLACE_KEY}"
                             f" --picek-place-cells-sha256 {place_sha}")
+    exclusions_arg = ""
+    if photo_exclusions_sha256 is not None:
+        if not (release and finetune) or picek:
+            raise ValueError("a photo-exclusion list ships with a release fine-tune only")
+        if not re.fullmatch(r"[0-9a-f]{64}", photo_exclusions_sha256):
+            raise ValueError(f"not a photo-exclusion list hash: {photo_exclusions_sha256!r}")
+        release_cmd += ("# The photos Human Feedback excluded: left out of the train split.\n"
+                        f'aws s3 cp "s3://$BUCKET/$RUN/{PHOTO_EXCLUSIONS_KEY}" '
+                        f"data/{PHOTO_EXCLUSIONS_KEY} || exit 1\n")
+        exclusions_arg = (f" --exclude-photos data/{PHOTO_EXCLUSIONS_KEY}"
+                          f" --exclude-photos-sha256 {photo_exclusions_sha256}")
+        if photo_exclusion_reasons:
+            if not all(re.fullmatch(r"[a-z][a-z_]*", r) for r in photo_exclusion_reasons):
+                raise ValueError(f"not exclusion reasons: {photo_exclusion_reasons!r}")
+            exclusions_arg += f" --exclude-photo-reasons {','.join(photo_exclusion_reasons)}"
     return TRAINER_USER_DATA.format(
         bucket=bucket_name, run_id=run_id, region=config.setting("MV_AWS_REGION", "us-east-2"),
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
@@ -414,7 +432,7 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         # The fine-tune trains on the shipped release too (its train split; compared on val).
         release_run_arg=(f" --release {release['dataset_release']} --release-manifest "
                          f"{release['manifest_sha256']}"
-                         + (" --allow-draft" if release.get("draft") else "")
+                         + (" --allow-draft" if release.get("draft") else "") + exclusions_arg
                          if release and finetune else ""),
         picek_ids_cmd=(f'aws s3 cp "s3://$BUCKET/$RUN/{PICEK_IDS_KEY}" '
                        "data/picek-exclude-ids.txt || exit 1\n"
@@ -430,6 +448,7 @@ PICEK_IDS_KEY = "picek-exclude-ids.txt"
 RELEASE_PREFIX = "release/"            # runs/<run>/release/<id>/<file>: what training needs
 PICEK_LABELS_KEY = "picek-labels.json"
 PICEK_PLACE_KEY = "picek-place-cells.json"   # retrain.place_cells_doc (a release run)
+PHOTO_EXCLUSIONS_KEY = "photo-exclusions.tsv"  # --exclude-photos (a release fine-tune)
 
 
 def release_for_script(rel, place_doc: dict | None) -> dict:
@@ -740,7 +759,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                    dry_run_dir: Path | None = None, ec2_check: bool = False,
                    release: str | None = None, allow_draft: bool = False,
                    seed: int = 0, public_trainable_only: bool = False,
-                   log=print) -> dict:
+                   exclude_photos: str | Path | None = None,
+                   exclude_photo_reasons: list[str] | None = None, log=print) -> dict:
     """Check the request, the time it needs and the commit it ships, all before anything
     is paid for; then upload the code and the manifest and start the instance.
 
@@ -748,6 +768,12 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     (paper E23, the public model): the fine-tune learns only from photos the released
     weights may learn from (CC including NC, or permission granted); it needs `release`
     and `finetune`. Both are recorded in the run and kept by --resume.
+
+    `exclude_photos` (paper E35): a Human Feedback photo-exclusion export; its excluded
+    photos leave training and the reference (Release.use_photo_exclusions; val queries
+    are never changed); `exclude_photo_reasons` keeps only rows with those reasons (one
+    E35 arm). It needs `release` and `finetune`, not a Picek preset; the file ships with
+    the run, pinned by its sha256, and the instance applies it again. Not resumable yet.
 
     `release`: the Picek stage trains on that dataset release (docs/dataset-release.md),
     verified (every file against MANIFEST.json) before anything else; a draft needs
@@ -779,6 +805,11 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         raise ValueError("--public-trainable-only trains the fine-tune (or the Picek recipe) "
                          "on a dataset release's public-trainable photos: give --release and "
                          "--finetune or --picek")
+    if exclude_photo_reasons and not exclude_photos:
+        raise ValueError("--exclude-photo-reasons chooses rows of --exclude-photos: give both")
+    if exclude_photos and (resume or picek or not (release and finetune)):
+        raise ValueError("--exclude-photos leaves photos out of a release fine-tune: give "
+                         "--release and --finetune, with no --picek and no --resume")
     rel = None
     if release:
         from .replications.fungitastic import dataset
@@ -794,6 +825,16 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         log(f"Dataset release {rel.id}{' (DRAFT)' if rel.manifest.get('draft') else ''}: "
             f"verified (MANIFEST {dataset.manifest_sha256(rel)[:12]}, "
             f"labels {rel.labels_hash[:12]})")
+    exclusions_sha = None
+    if exclude_photos:
+        exclusions_sha = hashlib.sha256(Path(exclude_photos).read_bytes()).hexdigest()
+        x = rel.use_photo_exclusions(exclude_photos, exclusions_sha, exclude_photo_reasons)
+        out_, gone = x["photos_left_out"], x["records_left_with_no_photo"]
+        log(f"Photo exclusions {x['file']} (sha256 {exclusions_sha[:12]}, reasons "
+            f"{x['reasons']}): {out_['train']:,} train photos left out of training and the "
+            f"reference ({gone['train']:,} records left with none), {out_['val']:,} val photos "
+            f"left out of a train + val reference only (val queries unchanged); "
+            f"{x['not_in_release']:,} not in {rel.id}")
     b = bucket()
     done: set = set()
     prev = None
@@ -817,6 +858,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             f"fine-tune {', '.join(finetune) or 'none'}, methods {', '.join(methods)}, "
             f"{size} photos and its own manifest")
         check_resume_release(resume, prev, rel)
+        if (prev.get("dataset_release") or {}).get("photo_exclusions"):
+            raise ValueError(f"run {resume} left photos out (--exclude-photos), which a resume "
+                             "does not carry yet: launch a new run")
         if rel is not None and not picek and not finetune:
             raise ValueError(f"run {resume} trains nothing from a release: resume it without "
                              "--release")
@@ -865,7 +909,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                               sample_records, spot, spot_max_price, instance_type, picek,
                               picek_exclude, labels, exclude_ids, photos, est,
                               dry_run_dir, ec2_check, log, rel, place_doc, seed=seed,
-                              public_trainable_only=public_trainable_only)
+                              public_trainable_only=public_trainable_only,
+                              exclude_photos=exclude_photos, exclusions_sha=exclusions_sha,
+                              exclusion_reasons=exclude_photo_reasons)
     if prev is not None and prev.get("code_version") not in (None, sha):
         log(f"Note: run {resume} ran commit {str(prev.get('code_version'))[:10]}; the rest "
             f"runs commit {sha[:10]} (both are recorded in progress.json)")
@@ -906,6 +952,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         if place_doc is not None:
             s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_PLACE_KEY}",
                           Body=json.dumps(place_doc, sort_keys=True).encode())
+        if exclusions_sha is not None:
+            s3.upload_file(str(exclude_photos), b, f"runs/{run_id}/{PHOTO_EXCLUSIONS_KEY}")
+            log(f"Uploaded the photo-exclusion list (sha256 {exclusions_sha[:12]})")
     if picek:
         s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_LABELS_KEY}",
                       Body=json.dumps(labels, indent=2).encode())
@@ -926,7 +975,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                          picek_labels_hash=labels_hash,
                                          release=release_for_script(rel, place_doc)
                                          if rel else None, seed=seed,
-                                         public_trainable_only=public_trainable_only)
+                                         public_trainable_only=public_trainable_only,
+                                         photo_exclusions_sha256=exclusions_sha,
+                                         photo_exclusion_reasons=exclude_photo_reasons)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price,
                                                      extra_gb=picek_cache_gb(picek, photos)
@@ -978,7 +1029,9 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                    picek: list[str] | None, picek_exclude: str, labels: dict | None,
                    exclude_ids, photos: int, est: dict, dest: Path | None,
                    ec2_check: bool, log=print, rel=None, place_doc: dict | None = None,
-                   seed: int = 0, public_trainable_only: bool = False) -> dict:
+                   seed: int = 0, public_trainable_only: bool = False,
+                   exclude_photos=None, exclusions_sha: str | None = None,
+                   exclusion_reasons: list[str] | None = None) -> dict:
     """The rest of launch_trainer with nothing sent (see its `dry_run`)."""
     from .replications.fungitastic import dataset
     run_id = "dry-run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -993,7 +1046,11 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                                          picek_labels_hash=labels["labels_hash"] if labels
                                          else None, release=release_for_script(rel, place_doc)
                                          if rel else None, seed=seed,
-                                         public_trainable_only=public_trainable_only)
+                                         public_trainable_only=public_trainable_only,
+                                         photo_exclusions_sha256=exclusions_sha,
+                                         photo_exclusion_reasons=exclusion_reasons)
+    if exclusions_sha is not None:
+        (dest / PHOTO_EXCLUSIONS_KEY).write_bytes(Path(exclude_photos).read_bytes())
     if rel is not None:
         import shutil as _sh
         shipped = dest / "release" / rel.id
