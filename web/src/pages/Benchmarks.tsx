@@ -3,9 +3,9 @@ import { Link } from "wouter";
 import { ArrowUpRight, Check, Lock } from "lucide-react";
 import type { EarlyAnswersGroup, HowGood, Me, ProspectiveModel, RunReport, ScoreRun } from "@/lib/api";
 import { comparisons, incompleteRun, standardOf, STANDARD_BANDS, companionBars } from "@/lib/compareView";
-import { BASE_MODEL_SCREEN, BENCHMARKS, crossHeadline, DATA_LABEL, DATA_ORDER, FUNGI_CARDS, isWideCard, MEASURE_LABEL,
-         MEASURE_ORDER, screenLead, STATUS_LABEL, STATUS_ORDER, type Benchmark, type BenchmarkStatus, type FungiCard,
-         type TopK4 } from "@/lib/research";
+import { BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, DATA_LABEL, DATA_ORDER, MEASURE_LABEL, MEASURE_ORDER,
+         resultCards, STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, type Benchmark, type BenchmarkStatus,
+         type TestSetResults } from "@/lib/research";
 import { benchmarkFacetCounts, cardFigure, cardMeta, earlyFigures, filterBenchmarks, filterFromSearch,
          filterToSearch, heatRows, historyLines, isFiltered, modelParts, NO_FILTER, nf, pc, prospectiveLead, pt,
          placeVsPhotos, approachGroups, shortDay, statusBar, toggle, topkValues, type BenchmarkFeeds,
@@ -18,7 +18,7 @@ import { useEarly, useHowGood, useMe, useProspective, useRunReports, useScoreboa
 // Research > Benchmarks and each benchmark's page (Steve, 2026-10-25: the approved redesign).
 // The list's text and facets are lib/research.ts BENCHMARKS; every number on a card is read
 // from the public feeds (/api/how-good, /api/scoreboard, /api/prospective, /api/early-answers).
-// The summary's base-model screen and fungi-specific cards quote committed research entries.
+// The summary's base-model screen and results by test set quote committed research entries.
 
 export const STATUS_SWATCH: Record<BenchmarkStatus, string> = {
   running: "#7FAE34", partial: "#c27c2e", sealed: "#2f241b", planned: "#cfc3b6", history: "#e8e1d8",
@@ -60,7 +60,7 @@ export function Benchmarks(d: BenchmarksData & { filter?: BenchmarkFilter; onFil
           <Glance d={d} />
           <BaseModelScreen />
         </div>
-        <FungiSpecific />
+        <ResultsByTestSet />
       </ResearchHero>
       <Section testId="section-benchmark-list">
         <FilterBar filter={filter} onFilter={setFilter} />
@@ -109,199 +109,132 @@ function Glance({ d }: { d: BenchmarksData }) {
 
 /** The base-model screen (lib/research.ts BASE_MODEL_SCREEN), labelled a development screen. */
 export function BaseModelScreen({ rows = BASE_MODEL_SCREEN.rows }: { rows?: typeof BASE_MODEL_SCREEN.rows }) {
-  const lead = screenLead(rows);
-  const chartRows: TopKRow[] = rows.map((r, i) => ({ key: r.name, name: r.name, detail: r.run ? `${r.detail} · ${r.run}` : r.detail, n: BASE_MODEL_SCREEN.queries,
-    values: { 1: r.top1 / 100, 3: r.top3 / 100, 5: r.top5 / 100, 10: r.top10 / 100 }, highlight: i === 0 }));
+  const chartRows: TopKRow[] = rows.map((r) => ({ key: r.name, name: r.name, detail: r.run ? `${r.detail} · ${r.run}` : r.detail, n: BASE_MODEL_SCREEN.queries,
+    values: { 1: r.top1 / 100, 3: r.top3 / 100, 5: r.top5 / 100, 10: r.top10 / 100 } }));
   return (
     <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5" data-testid="base-model-screen">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a]">Base-model screen</p><DevLabel />
       </div>
       <h3 className="font-display font-semibold text-lg leading-snug text-[#4a3728] mt-1.5 mb-0.5">
-        Which image model to build on?{lead && ` ${lead.best.name}, by ${lead.points.toFixed(1)} points`}
+        MycoMap v1 validation subset ({nf(BASE_MODEL_SCREEN.queries)} queries)
       </h3>
       <p className="small mb-3">Frozen base models (not fine-tuned), closest specimens + species average, photos only, on the same {nf(BASE_MODEL_SCREEN.queries)} deciding queries.</p>
       <TopKChart rows={chartRows} labelHead="Base model" trackHead="Species" labelWidth={170} numsWidth={160} testId="chart-base-screen" />
-      <p className="small mt-2.5">{rows.some((r) => r.run) && <>Every row is one run except where it names its own (that run's rows sit within 0.2 points of this one). </>}A v1 validation subset whose references cover {nf(BASE_MODEL_SCREEN.species)} species, so each query has far fewer competitors than on the full split: not comparable with the numbers above. A top 1 near 70% on {nf(BASE_MODEL_SCREEN.queries)} queries carries about ±3.5 points (95%).</p>
+      <p className="small mt-2.5">{rows.some((r) => r.run) && <>Every row is one run except where it names its own (that run's rows sit within 0.2 points of this one). </>}A v1 validation subset whose references cover {nf(BASE_MODEL_SCREEN.species)} species, so each query has far fewer candidate species than on the full split: not comparable with the numbers above. A top 1 near 70% on {nf(BASE_MODEL_SCREEN.queries)} queries carries about ±3.5 points (95%).</p>
       <SourceLine parts={[BASE_MODEL_SCREEN.source, "comparison 20261025-163049-1a3990", "dataset release v1", "seed 20261013"]} />
     </div>
   );
 }
 
-/** "Fungi-specific models": the FungiTastic cards, each citing its committed entry. The short
- *  cards share a row; a card with a wide table takes the block's full width. */
-export function FungiSpecific({ cards = FUNGI_CARDS }: { cards?: FungiCard[] }) {
+/** "Results by test set": every model we evaluate, on each test set it has been scored on
+ *  (lib/research.ts TEST_SET_RESULTS). One card per test set, or per group of them where the
+ *  data aggregates them; nothing here is new card code per test set or model. */
+export function ResultsByTestSet({ sets = TEST_SET_RESULTS }: { sets?: TestSetResults[] }) {
+  const cards = resultCards(sets);
   if (!cards.length) return null;
   return (
-    <div className="mt-3.5" data-testid="fungi-specific">
-      <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-2">Fungi-specific models</p>
-      <div className={`grid gap-3.5 ${cards.length >= 3 ? "lg:grid-cols-3" : "md:grid-cols-2"}`}>
-        {cards.map((c) => <FungiCardView key={c.key} c={c} />)}
+    <div className="mt-3.5" data-testid="results-by-test-set">
+      <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-1">Results by test set</p>
+      <p className="small mb-2">Every model scored on each test set, from the committed research entries. The sealed test (v1-test) has no results until it is opened.</p>
+      <div className="grid gap-3.5">
+        {cards.map((c) => <ResultCard key={c.title} title={c.title} sets={c.sets} />)}
       </div>
     </div>
   );
 }
 
-/** A percentage as the entry gives it ("–" where it gives none). */
-const fx = (v: number | null, digits = 2) => (v == null ? "–" : v.toFixed(digits));
+const fx = (v: number | null, digits: number) => (v == null ? "–" : v.toFixed(digits));
 /** A difference in points, signed, with a true minus sign. */
 const sgn = (v: number) => `${v < 0 ? "−" : "+"}${Math.abs(v).toFixed(2)}`;
-const neg = (v: number) => (v < 0 ? `−${Math.abs(v).toFixed(2)}` : v.toFixed(2));
-const NONE: TopK4 = [null, null, null, null];
-const SUB = "block text-[11.5px] text-[var(--muted)] font-normal";
-const TOPK_HEAD = <><th>Top 1</th><th>3</th><th>5</th><th>10</th></>;
+const neg = (v: number, digits = 2) => (v < 0 ? `−${Math.abs(v).toFixed(digits)}` : v.toFixed(digits));
+const SUB = "block whitespace-nowrap text-[11.5px] text-[var(--muted)] font-normal";
 
-function FungiCardView({ c }: { c: FungiCard }) {
+function ResultCard({ title, sets }: { title: string; sets: TestSetResults[] }) {
+  const first = sets[0];
+  const sources = [...new Set(sets.map((s) => s.source))];
   return (
-    <div className={`min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white px-[18px] py-4 flex flex-col ${isWideCard(c) ? "lg:col-span-3" : ""}`}
-         data-testid={`fungi-card-${c.key}`}>
+    <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white px-[18px] py-4 flex flex-col" data-testid={`result-card-${first.key}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <b className="text-[#4a3728]">{c.title}</b>
-        {c.interim ? <Interim>{c.kind === "versus" ? "Interim · val only" : "Interim"}</Interim> : c.tag && <span className="tag">{c.tag}</span>}
+        <b className="text-[#4a3728]">{title}</b>
+        <span className="tag">{first.maker}</span>
       </div>
-      {c.kind === "replication" && (
-        <>
-          <div className="mt-2 flex flex-wrap items-baseline gap-3.5">
-            <span className="bigstat" style={{ fontSize: 34 }}>{c.ours.toFixed(2)}%</span>
-            <span className="small">{c.model}, scored by our code on {c.testSet} · they report <b style={{ color: "var(--ink)" }}>{c.theirs.toFixed(1)}%</b> (their Table 8)</span>
-          </div>
-          <p className="small mt-2">Top 3: {c.ours3.toFixed(2)} against their {c.theirs3.toFixed(1)}. {c.also} Our scoring reproduces their published numbers before any comparison on our records is read.</p>
-        </>
-      )}
-      {c.kind === "versus" && (
-        <>
-          <div className="mt-3">
-            <ValueBars labelWidth={170} rows={c.rows.map((r) => ({ label: r.name, sub: r.detail, strong: r.ours, frac: r.top1 / 100,
-              text: `${r.top1.toFixed(1)}%`, color: r.ours ? "#8B4A1F" : "#3987e5", tip: `${r.name}|${r.top1.toFixed(2)}% species top 1 · ${nf(c.withSpecies)} finds` }))} />
-          </div>
-          <p className="small mt-2">{c.note} {nf(c.withSpecies)} finds with a species, of the {nf(c.finds)} in the split.</p>
-        </>
-      )}
-      {c.kind === "cross" && <CrossCard c={c} />}
-      {c.kind === "pairs" && <PairsCard c={c} />}
-      {c.kind === "published" && <PublishedCard c={c} />}
-      <div className="mt-auto"><SourceLine parts={[c.source, c.kind === "replication" ? "FungiTastic's own test set; no MycoMap records" : null]} /></div>
+      <p className="small mt-1.5">{first.about}</p>
+      <p className="small mt-0.5" style={{ color: "var(--muted)" }}>{first.size}</p>
+      {sets.map((s) => <ResultSection key={s.key} s={s} lead={s === first ? undefined : s} first={first} />)}
+      <div className="mt-auto"><SourceLine parts={sources} /></div>
     </div>
   );
 }
 
-/** (b1): MycoMap Vision v1-open's own North American reference on their test sets. */
-function CrossCard({ c }: { c: Extract<FungiCard, { kind: "cross" }> }) {
-  const h = crossHeadline(c.rows);
-  const splits = [...new Set(c.rows.map((r) => r.split))];
+/** One test set under one condition: its table, paired differences, checks and notes. A
+ *  section after the card's first says what it measures and its size only where they differ. */
+function ResultSection({ s, first, lead }: { s: TestSetResults; first: TestSetResults; lead?: TestSetResults }) {
   return (
-    <>
-      {h && (
-        <div className="mt-2 flex flex-wrap items-baseline gap-3.5">
-          <span className="bigstat" style={{ fontSize: 34 }}>{fx(h.topk[0])}%</span>
-          <span className="small">species top 1 per observation, on the {nf(h.n)} {h.split} observations of species we have</span>
-        </div>
-      )}
-      <div className="scrollx mt-2"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
-        <thead><tr><th className="l">Per</th>{TOPK_HEAD}</tr></thead>
-        <tbody>{splits.map((s) => [
-          <tr key={s}><td className="l" colSpan={5}><b>{s}</b><small>we have {c.classes[s]}</small></td></tr>,
-          ...c.rows.filter((r) => r.split === s).map((r) => (
-            <tr key={`${s}-${r.per}-${r.of}`} className={r === h ? "hl" : undefined}>
-              <td className="l">{r.per === "image" ? "Image" : "Observation"}<small className="whitespace-nowrap">{r.of === "ours" ? "ours" : "all"} · {nf(r.n)}</small></td>
-              {r.topk.map((v, k) => <td key={k} className={k === 0 ? "strong" : undefined}>{fx(v)}</td>)}
-            </tr>
-          )),
-        ])}</tbody>
-      </table></div>
-      <p className="small mt-2">{c.note}</p>
-    </>
-  );
-}
-
-/** (b2) and few-shot: per-image and per-observation top-k for every model on a test set, and
- *  the paired differences with their intervals. */
-function PairsCard({ c }: { c: Extract<FungiCard, { kind: "pairs" }> }) {
-  const first = c.tables[0];
-  const ours = first?.rows.find((r) => r.ours);
-  const them = first?.rows.find((r) => r.name === c.versus);
-  return (
-    <>
-      {ours && them && (
-        <div className="mt-2 flex flex-wrap items-baseline gap-3.5">
-          <span className="bigstat" style={{ fontSize: 34 }}>{fx(ours.image[0], ours.digits)}%</span>
-          <span className="small">
-            {ours.name}{ours.detail ? ` (${ours.detail})` : ""}, top 1 per image on {first.split} · {them.name}: <b style={{ color: "var(--ink)" }}>{fx(them.image[0], them.digits)}%</b>
-            {ours.observation && them.observation && <> · per observation {fx(ours.observation[0], ours.digits)}% against {fx(them.observation[0], them.digits)}%</>}
-          </span>
-        </div>
-      )}
-      <p className="small mt-2">{c.lead}</p>
-      <div className="mt-3 grid gap-4">
-        {c.tables.map((t) => (
-          <div key={t.split} className="min-w-0" data-testid={`pairs-${c.key}-${t.split}`}>
-            <p className="small mb-1"><b style={{ color: "var(--ink)" }}>{t.split}</b> · {nf(t.images)} images, {nf(t.observations)} observations</p>
-            <div className="scrollx"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
-              <thead>
-                <tr><th className="l min-w-[170px]" rowSpan={2}>Model</th><th colSpan={4} style={{ textAlign: "center" }}>Per image</th><th colSpan={4} style={{ textAlign: "center" }}>Per observation</th></tr>
-                <tr>{TOPK_HEAD}{TOPK_HEAD}</tr>
-              </thead>
-              <tbody>{t.rows.map((r, i) => (
-                <tr key={i} className={r.ours ? "hl" : undefined}>
-                  <td className="l">{r.ours ? <b>{r.name}</b> : r.name}{r.detail && <small>{r.detail}</small>}</td>
-                  {r.image.map((v, k) => <td key={`i${k}`} className={k === 0 ? "strong" : undefined}>{fx(v, r.digits)}</td>)}
-                  {(r.observation ?? NONE).map((v, k) => <td key={`o${k}`} className={v == null ? "mut" : k === 0 ? "strong" : undefined}>{fx(v, r.digits)}</td>)}
-                </tr>
-              ))}</tbody>
-            </table></div>
-          </div>
-        ))}
+    <div className="mt-4" data-testid={`result-set-${s.key}`}>
+      <div className="flex flex-wrap items-center gap-2 border-t border-[#ece6de] pt-3">
+        {s.condition && <span className="text-[13px] font-semibold text-[#4a3728]">{s.name !== first.name ? `${s.name} · ` : ""}{s.condition}</span>}
+        {s.interim && <Interim>Interim · val only</Interim>}
       </div>
-      {c.diffs && c.diffHead && (
-        <div className="mt-4" data-testid={`diffs-${c.key}`}>
-          <p className="small mb-1"><b style={{ color: "var(--ink)" }}>Paired differences at top 1</b> · points, 95% interval</p>
+      {lead && lead.about !== first.about && <p className="small mt-1">{lead.about}</p>}
+      {lead && lead.size !== first.size && <p className="small mt-0.5" style={{ color: "var(--muted)" }}>{lead.size}</p>}
+      {s.checks?.map((c) => (
+        <p key={c} className="small mt-2 flex gap-1.5" data-testid="scoring-check"><Check size={14} className="mt-[3px] shrink-0 text-[#6b8f2a]" />{c}</p>
+      ))}
+      <ResultTable s={s} />
+      {s.diffs && (
+        <div className="mt-3" data-testid={`diffs-${s.key}`}>
+          <p className="small mb-1"><b style={{ color: "var(--ink)" }}>Paired differences at top 1, 95% intervals</b> · points</p>
           <div className="scrollx"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
-            <thead><tr><th className="l min-w-[220px]">Difference</th>{c.diffHead.map((h) => <th key={h}>{h}</th>)}</tr></thead>
-            <tbody>{c.diffs.map((r) => (
+            <thead><tr><th className="l min-w-[220px]">Difference</th>{s.diffs.columns.map((h) => <th key={h}>{h}</th>)}</tr></thead>
+            <tbody>{s.diffs.rows.map((r) => (
               <tr key={r.name}>
                 <td className="l">{r.name}</td>
-                {r.cells.map((x, k) => (
-                  <td key={k} className={`whitespace-nowrap ${x.lo > 0 ? "strong" : ""}`}>{sgn(x.d)}<small className={SUB}>[{neg(x.lo)}, {neg(x.hi)}]</small></td>
-                ))}
+                {r.cells.map((x, k) => <td key={k} className="whitespace-nowrap">{sgn(x.d)}<small className={SUB}>[{neg(x.lo)}, {neg(x.hi)}]</small></td>)}
               </tr>
             ))}</tbody>
           </table></div>
         </div>
       )}
-      {c.notes.map((n, i) => <p key={i} className="small mt-2">{n}</p>)}
-    </>
+      {s.notes.map((n, i) => <p key={i} className="small mt-2">{n}</p>)}
+    </div>
   );
 }
 
-/** (a): the published models on the v1 validation finds, beside MycoMap Vision. */
-function PublishedCard({ c }: { c: Extract<FungiCard, { kind: "published" }> }) {
-  const ours = c.rows.find((r) => r.ours);
-  const them = c.rows.find((r) => !r.ours);
-  const ci = ([lo, hi]: [number, number]) => <small className={SUB}>{lo.toFixed(1)}–{hi.toFixed(1)}</small>;
+/** The models' table: columns under their group headings, a value's 95% interval beneath it. */
+function ResultTable({ s }: { s: TestSetResults }) {
+  const spans: { group?: string; label: string; n: number }[] = [];
+  for (const c of s.columns) {
+    const last = spans[spans.length - 1];
+    if (last && c.group && last.group === c.group) last.n++;
+    else spans.push({ group: c.group, label: c.label, n: 1 });
+  }
+  const grouped = spans.some((g) => g.group);
   return (
-    <>
-      {ours && them && (
-        <div className="mt-2 flex flex-wrap items-baseline gap-3.5">
-          <span className="bigstat" style={{ fontSize: 34 }}>{fx(ours.species[0], 1)}%</span>
-          <span className="small">{ours.name}, species top 1 on {nf(c.withSpecies)} v1 validation finds · {them.name}: <b style={{ color: "var(--ink)" }}>{fx(them.species[0], 1)}%</b> · on the {nf(c.shared)} finds of species it has a class for, {fx(ours.shared, 1)}% against {fx(them.shared, 1)}%</span>
-        </div>
-      )}
-      <div className="scrollx mt-3"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
-        <thead>
-          <tr><th className="l min-w-[170px]" rowSpan={2}>Model</th><th colSpan={4} style={{ textAlign: "center" }}>Species, {nf(c.withSpecies)} finds</th><th rowSpan={2}>Genus<br />top 1</th><th rowSpan={2}>Species they have<br />{nf(c.shared)} finds, top 1</th></tr>
-          <tr>{TOPK_HEAD}</tr>
-        </thead>
-        <tbody>{c.rows.map((r) => (
-          <tr key={r.name} className={r.ours ? "hl" : undefined}>
-            <td className="l">{r.ours ? <b>{r.name}</b> : r.name}{r.detail && <small>{r.detail}</small>}</td>
-            {r.species.map((v, k) => <td key={k} className={k === 0 ? "strong" : undefined}>{fx(v, 1)}{k === 0 && ci(r.ci)}</td>)}
-            <td>{fx(r.genus, 1)}</td>
-            <td className="strong">{fx(r.shared, 1)}{ci(r.sharedCi)}</td>
-          </tr>
-        ))}</tbody>
-      </table></div>
-      {c.notes.map((n, i) => <p key={i} className="small mt-2">{n}</p>)}
-    </>
+    <div className="scrollx mt-2"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
+      <thead>
+        <tr>
+          <th className="l min-w-[170px]" rowSpan={grouped ? 2 : 1}>Model</th>
+          {spans.map((g, i) => g.group
+            ? <th key={i} colSpan={g.n} style={{ textAlign: "center" }}>{g.group}</th>
+            : <th key={i} rowSpan={grouped ? 2 : 1}>{g.label}</th>)}
+        </tr>
+        {grouped && <tr>{s.columns.filter((c) => c.group).map((c, i) => <th key={i}>{c.label}</th>)}</tr>}
+      </thead>
+      <tbody>{s.rows.map((r, i) => (
+        <tr key={i}>
+          <td className="l">{r.name}{r.detail && <small>{r.detail}</small>}</td>
+          {r.cells.map((v, k) => {
+            const ci = r.cis?.[k];
+            return (
+              <td key={k} className={v == null ? "mut" : s.columns[k]?.label === "Top 1" ? "strong" : undefined}>
+                {fx(v, cellDigits(s, r, k))}{ci && <small className={SUB}>{ci[0].toFixed(cellDigits(s, r, k))}–{ci[1].toFixed(cellDigits(s, r, k))}</small>}
+              </td>
+            );
+          })}
+        </tr>
+      ))}</tbody>
+    </table></div>
   );
 }
 
