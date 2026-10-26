@@ -1091,14 +1091,14 @@ export const api = {
    *  kept from an earlier run (here, mycomap.org or the app) unless `rerun`. */
   async identifyObservation(source: "inat" | "mo", id: string, models: string[],
                             onWait?: (attempt: number, seconds: number) => void, rerun = false,
-                            include: number[] = []):
+                            include: number[] = [], inatRef?: string):
       Promise<{ results: IdentifyResult[]; context_used: ContextUsed; observation: LinkedObservation;
-                cached?: boolean; answered?: Answered; run?: RunRef }> {
+                cached?: boolean; answered?: Answered; run?: RunRef; inat?: InatView }> {
     const res = await sendWaitingInLine(() => fetch("/api/identify/observation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source, id, models: models.join(","), ...(rerun ? { rerun: true } : {}),
-                             ...(include.length ? { include } : {}) }),
+                             ...(include.length ? { include } : {}), ...(inatRef ? { inat_ref: inatRef } : {}) }),
     }), onWait);
     if (!res.ok) throw new ApiError(res.status, await errorText(res));
     return res.json();

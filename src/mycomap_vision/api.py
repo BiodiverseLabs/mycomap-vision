@@ -1430,8 +1430,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 bodies, rid=rid))
             if run:
                 out["run"] = run
-            if rid is not None:
-                inat_kept(rid)
+            inat_kept(inat_key, rid, who)
         asker = identifylog.site_asker(who)
         for backbone, method, version in answered:
             log_answer(identifylog.SITE_UPLOAD, fresh=True, model=f"{backbone}/{method}",
@@ -1445,41 +1444,84 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # --- iNat's suggestions (inat_suggest.py) ------------------------------------------
     # Vision's answer never waits for them: the photos go to mycomap.org on threads of
     # their own, and the page asks again while they are out (GET /api/inat-suggestions).
-    inat_held: dict[str, dict | None] = {}      # answers back before their run was kept
+    # Keyed by (find, member): a find's key is the page's ref, which another member could
+    # send too once this process has forgotten the find; it never reaches someone else's run.
+    inat_held: dict[tuple, dict] = {}   # answers back before their run was kept
+    inat_runs: dict[tuple, str] = {}    # -> the run, once kept (and the member's own)
     inat_lock = threading.Lock()
+
+    def inat_done_for(sub: str):
+        def done(key: str, merged: dict | None) -> None:
+            """Every photo of a find has answered: iNat's answer goes beside its run, or
+            waits for it."""
+            if merged is None or run_store is None:
+                return
+            with inat_lock:
+                rid = inat_runs.pop((key, sub), None)
+                if rid is None or run_store.get(rid) is None:  # back before the run is kept
+                    inat_held[(key, sub)] = merged
+                    return
+            run_store.keep_inat(rid, merged)
+        return done
 
     def start_inat(who: dict | None, images: list, rid: str | None,
                    ref: str | None = None, place: tuple[float, float] | None = None) -> str | None:
         """Forwards a site find's photos for the signed-in member; its key, or None."""
         if inat_suggestions is None or not who or not who.get("sub"):
             return None
-
-        def done(merged: dict | None) -> None:
-            if rid is None or merged is None:
-                return
-            with inat_lock:
-                if run_store.get(rid) is None:      # back before the run is kept
-                    inat_held[rid] = merged
-                    return
-            run_store.keep_inat(rid, merged)
         try:
-            return inat_suggestions.start(str(who["sub"]), images, run_id=rid, done=done,
-                                          ref=ref, place=place)
+            return inat_suggestions.start(str(who["sub"]), images, run_id=rid,
+                                          done=inat_done_for(str(who["sub"])), ref=ref,
+                                          place=place)
         except Exception as e:  # noqa: BLE001 - no lines; the answer is unaffected
             note(f"[inat-suggest] not sent: {type(e).__name__}")
             return None
 
-    def inat_kept(rid: str) -> None:
-        """The run is kept (or couldn't be): iNat's answer, if it came back first, goes
-        beside it."""
-        if inat_suggestions is None:
+    def start_inat_reading(who: dict | None, source: str, number: str, rid: str | None,
+                           ref: str | None, use_place: bool) -> str | None:
+        """A link whose answer was kept, so Vision read no photos: they are read again off
+        the request and forwarded (inat_suggest.start_later). iNat links only."""
+        if (inat_suggestions is None or source != "inat" or not who or not who.get("sub")
+                or source_fetcher is None):
+            return None
+
+        def read():
+            obs, pairs = source_fetcher.fetch(source, number, MAX_PHOTOS, indexed=True)
+            side = uploads.kept_side(list(backbones.values()))
+            images = []
+            for _, photo_body in pairs:
+                try:
+                    images.append(uploads.decode_upload(photo_body, side)[0])
+                except Exception:               # not an image we can read: skip
+                    continue
+            return images, (inat_suggest.public_place(obs) if use_place else None)
+        try:
+            return inat_suggestions.start_later(str(who["sub"]), read, run_id=rid,
+                                                done=inat_done_for(str(who["sub"])), ref=ref)
+        except Exception as e:  # noqa: BLE001 - no lines; the answer is unaffected
+            note(f"[inat-suggest] not sent: {type(e).__name__}")
+            return None
+
+    def inat_kept(key: str | None, rid: str | None, who: dict | None) -> None:
+        """The find's run is kept (or couldn't be): iNat's answer goes beside it, if the
+        run is this member's (an observation's run belongs to whoever ran it first)."""
+        if inat_suggestions is None or key is None:
+            return
+        sub = str((who or {}).get("sub"))
+        run = run_store.get(rid) if run_store is not None and rid else None
+        if run is None or ((run.get("owner") or {}).get("id")) != sub:
+            with inat_lock:
+                inat_held.pop((key, sub), None)
             return
         with inat_lock:
-            merged = inat_held.pop(rid, None)
+            merged = inat_held.pop((key, sub), None)
+            if merged is None:                      # not back yet: done() keeps it
+                inat_runs[(key, sub)] = rid
+        inat_suggestions.link_run(key, rid)
         if merged is None:
             return
         try:
-            run_store.keep_inat(rid, merged)        # False when the run wasn't kept
+            run_store.keep_inat(rid, merged)        # False when the run is gone
         except Exception as e:  # noqa: BLE001 - only the run page's copy is lost
             note(f"[inat-suggest] not kept with run {rid}: {type(e).__name__}")
 
@@ -2825,6 +2867,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                        for k in ("use_place", "use_date"))
                 # Run it again (the page's "Run again"): never served from what is kept.
                 rerun = payload.get("rerun", False) is True
+                # The page's name for the find (inat_suggest.py), so iNat's lines can be
+                # asked for even when Vision's answer fails.
+                inat_ref = payload.get("inat_ref") if isinstance(payload.get("inat_ref"), str) else None
                 # "Include anyway": photos counted though their photo-type tag would leave
                 # them out; an answer kept for another set of photos is never served for it.
                 try:
@@ -2882,6 +2927,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         results.append(mine)
                     run = observation_run(request_person, keys, held, wanted, view, timer,
                                           held[0].payload["observation"])
+                    inat_key = start_inat_reading(request_person, source, number,
+                                                  (run or {}).get("id"), inat_ref, use_place)
+                    inat_kept(inat_key, (run or {}).get("id"), request_person)
                     for (backbone, method), key, h in zip(wanted, keys, held):
                         log_answer(identifylog.SITE_OBSERVATION, fresh=False, source=source,
                                    observation_id=number, answer_key=key,
@@ -2889,12 +2937,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                    release=h.payload.get("release"),
                                    asked_by=identifylog.site_asker(request_person),
                                    run_id=(run or {}).get("id"))
+                    inat = inat_view(inat_key, request_person, results)
                     return {"results": results,
                             "context_used": held[0].payload["used"],
                             "observation": held[0].payload["observation"],
                             "cached": True,
                             "answered": held[0].about(versions[0]),
                             **({"run": run} if run else {}),
+                            **({"inat": inat} if inat is not None else {}),
                             "timing": timer.block()}
                 start = time.monotonic()
                 try:
@@ -2922,6 +2972,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 timer.add("decode_ms", time.monotonic() - start)
                 if not images:
                     raise HTTPException(422, "the observation has no photos Vision can read")
+                # iNat's suggestions (iNat links only), while Vision's answer runs: the
+                # photos as read, the public place rounded (none when iNat obscures it).
+                inat_key = (start_inat(request_person, images, None, inat_ref,
+                                       inat_suggest.public_place(obs) if use_place else None)
+                            if source == "inat" else None)
 
                 if not in_flight.enter():
                     raise HTTPException(503, "busy identifying other photos; try again shortly",
@@ -3000,6 +3055,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 run = observation_run(request_person, keys,
                                       [answer_cache.held(k) for k in keys], wanted, view,
                                       timer, about)
+                inat_kept(inat_key, (run or {}).get("id"), request_person)
                 release = model_card().get("version")
                 for (backbone, method), version, pooled, (deep, own_m, left_m, used_m) in zip(
                         wanted, versions, results, frozen):
@@ -3017,9 +3073,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                model=f"{backbone}/{method}", release=release,
                                asked_by=identifylog.site_asker(request_person),
                                run_id=(run or {}).get("id"))
+                inat = inat_view(inat_key, request_person, answered)
                 return {"results": answered, "context_used": used, "observation": about,
                         "cached": False, "answered": answered[0]["answered"],
                         **({"run": run} if run else {}),
+                        **({"inat": inat} if inat is not None else {}),
                         "timing": timer.block()}
 
     # The app's observation sessions (docs/api.md §3.3, sessions.py): photos sent one at a
