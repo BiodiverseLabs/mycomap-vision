@@ -12,7 +12,7 @@
  */
 
 /** The fine-tunes trained only on open data (`--public-trainable-only`: Creative Commons photos,
- *  incl. non-commercial, no all-rights-reserved photo; publicView.V1_OPEN_TRAINED_ON):
+ *  incl. non-commercial, no all-rights-reserved photo; publicView.V1_OPEN_DATA):
  *  the paper's 336 px headline model and the 224 px one.
  *  Every other fine-tune learned from all its training photos. */
 export const OPEN_V1 = "bioclip-2-336-ft-20261020-173106";
