@@ -592,7 +592,7 @@ export const FUNGI_CARDS: FungiCard[] = [
       ] },
     ],
     notes: [
-      "Where the gain over their Table 4 comes from: our pipeline with the original BioCLIP gives 24.99 against their 21.8 (protocol and resolution, about 3 points); BioCLIP 2 adds about 18; our fine-tune on North American open photos about 3 more, on species it never saw as Danish finds. No intervals yet: about ±2.2 points at 95% per model on 1,909 images.",
+      "Where the gain over their Table 4 comes from: our pipeline with the original BioCLIP gives 24.99 against their 21.8 (protocol and resolution, about 3 points); BioCLIP 2 (base model, not fine-tuned) adds about 18; our fine-tune on North American open photos about 3 more, on species it never saw as Danish finds. No intervals yet: about ±2.2 points at 95% per model on 1,909 images.",
     ],
     source: E33_SOURCE },
 ];
