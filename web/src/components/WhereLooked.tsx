@@ -10,7 +10,7 @@ import {
   workingLine,
 } from "@/lib/whereLooked";
 
-type Style = "spot" | "glow";
+export type Style = "spot" | "glow";
 type Ready = Extract<LookedView, { status: "ready" }>;
 
 /** The button, and the panel once the maps are there. Shown only where the server has the
@@ -177,8 +177,11 @@ export function LookedPanel({ view, r, urls, onHide }: {
   );
 }
 
-/** The map over the square the model sees: a canvas of grid x grid cells, scaled up smoothly. */
-function MapLayer({ entry, style, opacity }: { entry: LookedPhoto; style: Style; opacity: number }) {
+/** The map over the square the model sees: a canvas of grid x grid cells, scaled up smoothly
+ *  (the Excluded photos page draws its maps with it too). */
+export function MapLayer({ entry, style, opacity }: {
+  entry: Pick<LookedPhoto, "grid" | "map">; style: Style; opacity: number;
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const ctx = ref.current?.getContext("2d");

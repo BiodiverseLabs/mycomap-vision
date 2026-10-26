@@ -11,6 +11,7 @@ import { ResearchPage } from "@/pages/ResearchLanding";
 import { BenchmarkPage, BenchmarksPage } from "@/pages/Benchmarks";
 import { ProtocolsPage } from "@/pages/Protocols";
 import { ForResearchersPage } from "@/pages/ForResearchers";
+import { ExcludedPhotosPage } from "@/pages/ExcludedPhotos";
 import { ExperimentPage, ExperimentsPage } from "@/pages/Experiments";
 import { FeedbackPage } from "@/pages/Feedback";
 import { RunPage } from "@/pages/Run";
@@ -49,6 +50,7 @@ export function App() {
           {(params) => <ExperimentPage slug={params.slug} />}
         </Route>
         <Route path="/research/for-researchers" component={ForResearchersPage} />
+        <Route path="/research/excluded-photos" component={ExcludedPhotosPage} />
         <Route path={API_PATH} component={ApiDocsPage} />
         <Route path={FEEDBACK_PATH} component={FeedbackPage} />
         {Object.entries(MOVED).map(([from, to]) => (
