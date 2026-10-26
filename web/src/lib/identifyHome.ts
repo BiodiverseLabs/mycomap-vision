@@ -94,6 +94,16 @@ export interface ExampleView {
   count: number;
 }
 
+/** iNaturalist's own smaller copy of a photo (240 px on the long side), for a thumbnail: the
+ *  example's photos come at "large" (about 670 KB each) and its specimens at "medium", for
+ *  tiles under 140 px across (Steve, 2026-10-26: load it with the page). Any other address,
+ *  a Mushroom Observer photo say, is kept as it is. */
+export function smallPhoto(url: string): string {
+  return url.replace(
+    /^(https:\/\/(?:inaturalist-open-data\.s3\.amazonaws\.com|static\.inaturalist\.org)\/photos\/\d+\/)(?:square|thumb|small|medium|large|original)(\.(?:jpe?g|png|gif))$/i,
+    "$1small$2");
+}
+
 const licenceWords = (code: string | null | undefined) =>
   code ? code.toLowerCase() === "cc0" ? "CC0" : code.toUpperCase().replace(/-/g, " ") : null;
 
@@ -104,7 +114,7 @@ export function exampleView(run: RunView | null | undefined, specimens = 3): Exa
   const a = answerFor(r, { notFungus: banner?.verdict === "not_fungus", withheld: chanceWithheld(r) });
   const h = a?.headline;
   if (!a || !h || a.lookAlike || h.confidence == null) return null;
-  const photos = runPhotos(run).filter(Boolean);
+  const photos = runPhotos(run).filter(Boolean).map(smallPhoto);
   if (!photos.length) return null;
   const o = run.observation;
   const by = new Map<string, string | null>();
@@ -122,11 +132,13 @@ export function exampleView(run: RunView | null | undefined, specimens = 3): Exa
     source: o ? { label: `${sourceName(o.source)} ${o.id}`, url: o.url } : null,
     photos, credit,
     headline: named(h), above: a.above.map(named), ranks,
-    specimens: r.specimens.filter((s) => s.photo_url).slice(0, specimens),
+    specimens: r.specimens.filter((s) => s.photo_url).slice(0, specimens)
+      .map((s) => ({ ...s, photo_url: smallPhoto(s.photo_url!) })),
     perPhoto: r.per_photo.flatMap((p) => {
       const url = shown[p.photo];
       const sp = p.overall_top.species;
-      return url ? [{ url, chance: sp?.confidence == null ? null : pct(sp.confidence), agrees: sp?.position === 1 }] : [];
+      return url ? [{ url: smallPhoto(url), chance: sp?.confidence == null ? null : pct(sp.confidence),
+                      agrees: sp?.position === 1 }] : [];
     }),
     count: o?.photos_used ?? run.photos ?? r.photos,
   };

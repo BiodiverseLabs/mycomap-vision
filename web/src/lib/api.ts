@@ -1061,8 +1061,9 @@ export const api = {
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
   run: (id: number) => getJson<RunReport>(`/api/scoreboard/${id}`),
   howGood: () => getJson<HowGood>("/api/how-good"),
-  /** The run the Identify page shows as its example result (MV_EXAMPLE_RUN), or none. */
-  example: () => getJson<{ run: string | null }>("/api/example"),
+  /** The run the Identify page shows as its example result (MV_EXAMPLE_RUN), or none, with
+   *  the run as its link shows anyone (`view`, null when it couldn't be read just then). */
+  example: () => getJson<{ run: string | null; view?: RunView | null }>("/api/example"),
   speedDaily: () => getJson<{ days: SpeedDay[] }>("/api/speed/daily"),
   /** `onWait(attempt, seconds)`: the server was busy and the photos wait in line.
    *  `onSent(fraction)`: how much of the photos has been sent, 0 to 1, for each try. */

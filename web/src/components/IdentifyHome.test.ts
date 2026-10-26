@@ -70,6 +70,17 @@ test("the example shows real photos only where the run's link may show them", ()
   assert.match(text(h), /© owner1/, "each specimen photo credited to its photographer");
 });
 
+test("while the example comes, its place is kept; once it's known there is none, the place goes", () => {
+  assert.match(html(ExampleResult, { view: null, loading: true }), /data-testid="example-loading"/);
+  assert.doesNotMatch(html(ExampleResult, { view: null, loading: false }), /example-loading/);
+  assert.doesNotMatch(html(ExampleResult, { view: exampleView(EXAMPLE_RUN), loading: true }), /example-loading/,
+                      "never both the placeholder and the card");
+});
+
+test("the example's photos load with the page, not lazily", () => {
+  assert.doesNotMatch(html(ExampleResult, { view: exampleView(EXAMPLE_RUN) }), /loading="lazy"/);
+});
+
 test("without an example run the card is left out and the list of what you get stays", () => {
   const h = html(ExampleResult, { view: null });
   assert.doesNotMatch(h, /<img/);

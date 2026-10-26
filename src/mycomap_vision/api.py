@@ -289,6 +289,13 @@ def first_confused_with(served: "confusions.Served", layer: "nightly.Layer | Non
     served.reload()
 
 
+# Sent with the Identify page's shell when it has an example result: the browser fetches
+# /api/example while the page's scripts load (the page's own fetch then takes that answer),
+# and opens its connection to iNat's open photo bucket, where the example's photos are.
+EXAMPLE_PRELOAD = ("</api/example>; rel=preload; as=fetch; crossorigin=anonymous, "
+                   "<https://inaturalist-open-data.s3.amazonaws.com>; rel=preconnect")
+
+
 def create_app(manifest_path: Path | None = None, embeddings_root: Path | None = None,
                backbone_loader: Callable[[str], object] = models.load_backbone,
                web_dist: Path | None = WEB_DIST, limits: Limits | None = None,
@@ -1083,15 +1090,31 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             return howgood.how_good(conn, served, method)
 
+    def example_set() -> bool:
+        return run_store is not None and run_links.valid_id(config.setting("MV_EXAMPLE_RUN"))
+
     @app.get("/api/example")
     def example_run():
         """The run the Identify page shows as its "Example result" (Steve, 2026-10-26: "a
         real result with real images"): the id in MV_EXAMPLE_RUN, read on each request, so
         changing it needs only a restart. Null when it is unset or not a run id, or the site
-        keeps no run links. The page opens the run through its own open route, which shows
-        only what its link shows anyone and checks its photos against today's permissions."""
+        keeps no run links.
+        `view` is the run as its link shows anyone signed out (run_body for nobody), its
+        photos checked against today's permissions, so the page needs no second request
+        (Steve, 2026-10-26: load it with the page). Null when the run can't be read now; the
+        page then opens /api/runs/<id> itself."""
         rid = config.setting("MV_EXAMPLE_RUN")
-        return {"run": rid if run_store is not None and run_links.valid_id(rid) else None}
+        if not example_set():
+            return JSONResponse({"run": None, "view": None}, headers=NOT_INDEXED)
+        try:
+            stored = run_store.get(rid)
+            if stored is None:                  # deleted since: no example
+                return JSONResponse({"run": None, "view": None}, headers=NOT_INDEXED)
+            view = run_body(stored, None, None)
+        except Exception as e:  # noqa: BLE001 - reported; the page falls back to the run route
+            note(f"[example] {rid} not read now: {type(e).__name__}: {e}")
+            view = None
+        return JSONResponse({"run": rid, "view": view}, headers=NOT_INDEXED)
 
     @app.get("/api/benchmarks")
     def benchmarks(request: Request):
@@ -1588,15 +1611,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         """A run as its link shows it, to anyone with the link. The person who ran it, signed
         in, also gets their own part ("Your collections"), made now. Never who ran it."""
         read_limit(request)
-        run = stored_run(rid)
-        who = person(request)
+        return JSONResponse(run_body(stored_run(rid), person(request), request), headers=NOT_INDEXED)
+
+    def run_body(run: dict, who: dict | None, request: Request | None) -> dict:
+        """What a run's link shows `who` (None: anyone signed out): its specimen photos
+        checked against today's permissions, and, for the person who ran it, their own part
+        and iNat's suggestions."""
+        rid = run["id"]
         owner = (run.get("owner") or {}).get("id")
         mine = bool(who and owner and str(who.get("sub")) == owner)
         view = permission_view()
 
         def may_show(info) -> bool:
             return view.may_show(info.license_class, info.owner_user_id)
-        linked = linked_of(request) if mine else None
+        linked = linked_of(request) if mine and request is not None else None
         table = confused_table()
         results = []
         for part in run.get("models") or []:
@@ -1629,7 +1657,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "can_delete": mine or bool(who and is_admin(str(who.get("sub"))))}
         if inat is not None:
             body["inat"] = inat
-        return JSONResponse(body, headers=NOT_INDEXED)
+        return body
 
     def run_inat(rid: str, who: dict, results: list[dict]) -> dict | None:
         """iNat's suggestions on a run's page: its owner's only, asked with their iNat
@@ -3307,8 +3335,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             card, status = page_card(request, "/" + path)
             shell = linkcards.with_tags((root / "index.html").read_text(encoding="utf-8"), card)
             # A run's link is found only by whoever was given it: never by a search engine.
-            return HTMLResponse(shell, status_code=status,
-                                headers=NOT_INDEXED if run_path("/" + path) else None)
+            headers = dict(NOT_INDEXED) if run_path("/" + path) else {}
+            # The Identify page asks for its example result while its scripts still load, and
+            # opens the way to iNat's photos early (Steve, 2026-10-26: load it with the page).
+            if path == "" and person(request) is not None and example_set():
+                headers["Link"] = EXAMPLE_PRELOAD
+            return HTMLResponse(shell, status_code=status, headers=headers or None)
 
     return app
 

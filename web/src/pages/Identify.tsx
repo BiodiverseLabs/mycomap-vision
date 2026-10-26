@@ -250,11 +250,16 @@ export function IdentifyPage() {
   const wide = useMemo(() => window.matchMedia?.(`(min-width: ${SINGLE_COLUMN_BELOW}px)`).matches ?? true, []);
   const stats = useQuery({ queryKey: ["stats"], queryFn: api.stats, enabled: stage === "empty" });
   const howGood = useQuery({ queryKey: ["how-good"], queryFn: api.howGood, enabled: stage === "empty" });
-  // The example result: a real run the server names, opened as anyone with its link opens it.
-  const example = useQuery({ queryKey: ["example"], queryFn: api.example, enabled: stage === "empty", retry: false });
+  // The example result: a real run the server names, as anyone with its link sees it. It
+  // comes with /api/example; only when the server couldn't read it then is the run opened.
+  const example = useQuery({ queryKey: ["example"], queryFn: api.example, enabled: stage === "empty", retry: false,
+                             staleTime: 3_600_000 });
   const exampleId = example.data?.run ?? null;
   const exampleRun = useQuery({ queryKey: ["run", exampleId], queryFn: () => runApi.open(exampleId!),
-                                enabled: stage === "empty" && !!exampleId, retry: false, staleTime: 3_600_000 });
+                                enabled: stage === "empty" && !!exampleId && !example.data?.view, retry: false,
+                                staleTime: 3_600_000 });
+  const exampleShown = example.data?.view ?? exampleRun.data;
+  const exampleLoading = example.isLoading || exampleRun.isLoading;
   const onAnswer = stage === "answer";
 
   return (
@@ -342,7 +347,7 @@ export function IdentifyPage() {
           </div>
 
           <div className="min-w-0 scroll-mt-20" ref={results}>
-          {stage === "empty" && <ExampleResult view={exampleView(exampleRun.data)} />}
+          {stage === "empty" && <ExampleResult view={exampleView(exampleShown)} loading={exampleLoading} />}
           {stage === "photos" && <ViewsChecklist wide={wide} />}
           {pending && viaLink && byLink.variables && (
             <LinkWaitingCard observation={byLink.variables} waitSeconds={waiting} />

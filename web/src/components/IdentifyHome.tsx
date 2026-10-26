@@ -32,7 +32,7 @@ export function ViewsRow() {
 /** "Example result": one real run (lib/identifyHome.ts exampleView), its photos, answer and
  *  closest specimens as its own page shows them, with what each part is for. Without an
  *  example run, the list of what an answer holds stands alone. */
-export function ExampleResult({ view }: { view: ExampleView | null }) {
+export function ExampleResult({ view, loading = false }: { view: ExampleView | null; loading?: boolean }) {
   const italic = (rank: string) => (rank !== "family" ? "sci" : "");
   const label = (rank: string) => rank.charAt(0).toUpperCase() + rank.slice(1);
   const mark = "flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#4a3728] text-[11px] font-semibold text-white";
@@ -47,13 +47,18 @@ export function ExampleResult({ view }: { view: ExampleView | null }) {
           </a>
         )}
       </div>
+      {/* While it comes, its place is kept, so nothing below it moves when it arrives. */}
+      {!view && loading && (
+        <div className="h-[540px] rounded-[14px] sm:h-[600px] border border-[#A87146]/20 bg-white/60 motion-safe:animate-pulse"
+             aria-hidden data-testid="example-loading" />
+      )}
       {view && (
         <div className="overflow-hidden rounded-[14px] border border-[#A87146]/20 bg-white shadow-[0_10px_30px_-18px_rgba(74,55,40,.35)]">
           <div className="px-4 pb-3 pt-3.5">
             <div className="grid grid-cols-5 gap-1.5" data-testid="example-photos">
               {view.photos.slice(0, 5).map((u, i) => (
                 <span key={u} className="relative aspect-square overflow-hidden rounded-md border border-[#A87146]/20 bg-muted">
-                  <img src={u} alt={`Photo ${i + 1} of the example find`} loading="lazy" className="h-full w-full object-cover" />
+                  <img src={u} alt={`Photo ${i + 1} of the example find`} decoding="async" className="h-full w-full object-cover" />
                   <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[10px] text-white">{i + 1}</span>
                 </span>
               ))}
@@ -104,7 +109,7 @@ export function ExampleResult({ view }: { view: ExampleView | null }) {
                 {view.specimens.map((s) => (
                   <a key={s.observation_id} href={s.record_url ?? s.inat_url ?? undefined} target="_blank" rel="noreferrer"
                      className="overflow-hidden rounded-lg border border-[#A87146]/20 text-[11px] leading-tight text-[#5c4a3a] no-underline">
-                    <img src={s.photo_url ?? ""} alt={s.name ?? s.species} loading="lazy" className="block aspect-[4/3] w-full object-cover" />
+                    <img src={s.photo_url ?? ""} alt={s.name ?? s.species} decoding="async" className="block aspect-[4/3] w-full object-cover" />
                     <span className="block px-1.5 pb-1.5 pt-1">
                       <span className="sci line-clamp-2 block font-semibold text-[#4a3728]">{s.name ?? s.species}</span>
                       <span className="text-muted-foreground">{pct(s.similarity)} alike</span>
@@ -124,7 +129,7 @@ export function ExampleResult({ view }: { view: ExampleView | null }) {
               <div className="flex flex-wrap gap-2" data-testid="example-per-photo">
                 {view.perPhoto.map((p, i) => (
                   <span key={i} className="flex flex-col items-center gap-0.5">
-                    <img src={p.url} alt="" loading="lazy" className="h-10 w-10 rounded-md border border-[#A87146]/20 object-cover" />
+                    <img src={p.url} alt="" decoding="async" className="h-10 w-10 rounded-md border border-[#A87146]/20 object-cover" />
                     <span className={`text-[11px] tabular-nums ${p.agrees ? "font-semibold text-[#5f8f1c]" : "text-muted-foreground"}`}>
                       {p.chance ?? "–"}
                     </span>

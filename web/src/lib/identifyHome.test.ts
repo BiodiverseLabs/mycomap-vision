@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { exampleView, homeStage, topKTable, whyNumbers } from "./identifyHome";
+import { exampleView, homeStage, smallPhoto, topKTable, whyNumbers } from "./identifyHome";
 import type { HowGood, RunView, Stats } from "./api";
 import { EXAMPLE_RUN } from "./exampleRun.fixture";
 
@@ -105,4 +105,23 @@ test("no example when there is no run, no firm answer, or no photo to show", () 
   assert.equal(exampleView(withheld), null, "a look-alike answer (chance withheld) is never the example");
   const hidden = { ...EXAMPLE_RUN, observation: { ...EXAMPLE_RUN.observation!, photos_shown: [null, null, null] } } as RunView;
   assert.equal(exampleView(hidden), null, "a find none of whose photos may be shown");
+});
+
+test("the example's photos come at iNaturalist's small size, not the large originals", () => {
+  const base = "https://inaturalist-open-data.s3.amazonaws.com/photos/151257149/";
+  assert.equal(smallPhoto(`${base}large.jpeg`), `${base}small.jpeg`);
+  assert.equal(smallPhoto(`${base}medium.jpg`), `${base}small.jpg`);
+  assert.equal(smallPhoto("https://static.inaturalist.org/photos/42/original.png"),
+               "https://static.inaturalist.org/photos/42/small.png", "a photo shown with its owner's permission");
+  for (const other of ["https://mushroomobserver.org/images/640/123.jpg", "/api/runs/AAAAAAAAAAAAAAAA/photos/0.jpg",
+                       "https://evil.example/photos/1/large.jpeg"]) {
+    assert.equal(smallPhoto(other), other, "anything else is kept as it is");
+  }
+  const run = { ...EXAMPLE_RUN, observation: { ...EXAMPLE_RUN.observation!, photos_shown: [`${base}large.jpeg`, null, null] },
+                results: [{ ...EXAMPLE_RUN.results[0], specimens: [{ ...EXAMPLE_RUN.results[0].specimens[0],
+                  photo_url: "https://inaturalist-open-data.s3.amazonaws.com/photos/560548350/medium.jpg" }] }] } as RunView;
+  const v = exampleView(run)!;
+  assert.deepEqual(v.photos, [`${base}small.jpeg`]);
+  assert.equal(v.perPhoto[0].url, `${base}small.jpeg`);
+  assert.equal(v.specimens[0].photo_url, "https://inaturalist-open-data.s3.amazonaws.com/photos/560548350/small.jpg");
 });
