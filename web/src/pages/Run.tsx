@@ -52,8 +52,10 @@ export function RunPage({ id }: { id: string }) {
         Vision compares photos with DNA-sequenced specimens. This is one find's answer, as it was given;
         it doesn't change.
       </PageHeader>
-      <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 grid gap-8 lg:grid-cols-[360px_1fr]">
-        <div className="space-y-6">
+      {/* The answer first, its details beside it (below it on a phone), as on Identify
+          (Steve's approved redesign, 2026-10-26). */}
+      <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 grid items-start gap-6 lg:gap-7 lg:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="order-2 space-y-6 lg:sticky lg:top-20">
           <RunFacts r={r} />
           {signedIn ? <AgainCard r={r} /> : <SignInToIdentify signedIn={false} />}
           {r.can_delete && (

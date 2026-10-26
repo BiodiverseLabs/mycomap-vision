@@ -16,6 +16,7 @@ import {
 } from "@/lib/getInvolved";
 import { namesByRecords } from "@/lib/howItWorks";
 import { JOIN_URL, longDate, PHOTO_CHECKLIST, SEQUENCING_URL } from "@/lib/publicView";
+import { VIEW_ART } from "@/components/ViewArt";
 import { API_PATH } from "@/lib/research";
 
 // Get involved (Steve, 2026-10-22: the approved redesign, open to signed-out visitors): six
@@ -160,15 +161,6 @@ function SixWays() {
 
 /* ------------------------------------------------------------------ 1. photograph */
 
-/** One drawing per view, in PHOTO_CHECKLIST's order. */
-const SHOT_ART: React.ReactNode[] = [
-  <svg key="cap" width="76" height="60" viewBox="0 0 76 60"><circle cx="38" cy="30" r="25" fill="#b9875a" /><circle cx="38" cy="30" r="25" fill="none" stroke="#a0714a" strokeWidth="2" /><circle cx="30" cy="22" r="3" fill="#e9dcc8" /><circle cx="45" cy="27" r="2.4" fill="#e9dcc8" /><circle cx="35" cy="38" r="2.6" fill="#e9dcc8" /><circle cx="47" cy="40" r="1.8" fill="#e9dcc8" /><circle cx="25" cy="33" r="1.8" fill="#e9dcc8" /></svg>,
-  <svg key="under" width="76" height="60" viewBox="0 0 76 60"><circle cx="38" cy="30" r="25" fill="#d8c7ad" /><g stroke="#8a6040" strokeWidth="1.3"><path d="M38 5v18M38 37v18M13 30h18M45 30h18M20 12l13 13M43 35l13 13M56 12 43 25M33 35 20 48M28 7l7 16M41 37l7 16M48 7l-7 16M35 37l-7 16M15 20l17 7M44 33l17 7M61 20l-17 7M32 33l-17 7" /></g><circle cx="38" cy="30" r="7" fill="#e9dcc8" stroke="#a0714a" strokeWidth="1.5" /></svg>,
-  <svg key="stem" width="76" height="60" viewBox="0 0 76 60"><path d="M16 22C16 10 26 4 38 4s22 6 22 18z" fill="#b9875a" /><rect x="33" y="22" width="10" height="26" rx="3" fill="#e9dcc8" /><path d="M31 29h14" stroke="#cdb795" strokeWidth="3" /><ellipse cx="38" cy="50" rx="10" ry="6" fill="#d8c7ad" /><path d="M18 56h40" stroke="#a88a66" strokeWidth="2" strokeLinecap="round" /></svg>,
-  <svg key="cut" width="76" height="60" viewBox="0 0 76 60"><path d="M14 24C14 11 25 4 38 4v20z" fill="#b9875a" /><path d="M38 4c13 0 24 7 24 20H38z" fill="#b9875a" /><path d="M20 22c2-8 9-13 18-13s16 5 18 13z" fill="#f1e6d2" /><rect x="33" y="22" width="10" height="30" rx="3" fill="#f1e6d2" stroke="#d2bd9c" strokeWidth="1.2" /><path d="M38 24v28" stroke="#d58f6a" strokeWidth="2" strokeDasharray="3 3" /><path d="M41 30c4 2 4 8 0 10" stroke="#5f86b8" strokeWidth="2" fill="none" opacity=".7" /></svg>,
-  <svg key="where" width="96" height="60" viewBox="0 0 96 60"><path d="M66 50V24" stroke="#8a6040" strokeWidth="4" /><path d="M66 6 52 30h28z" fill="#7fa04a" /><path d="M66 16 54 38h24z" fill="#6b8f2a" /><rect x="8" y="42" width="52" height="12" rx="6" fill="#a0714a" /><circle cx="14" cy="48" r="4" fill="#c79b72" /><path d="M26 42c0-7 4-11 9-11s9 4 9 11z" fill="#b9875a" /><rect x="33" y="40" width="4" height="4" fill="#e9dcc8" /><path d="M4 56h88" stroke="#a88a66" strokeWidth="2" strokeLinecap="round" /><path d="M76 54c2-4 6-4 8 0M84 55c1-3 4-3 5 0" stroke="#6b8f2a" strokeWidth="2" fill="none" /></svg>,
-];
-
 function StripStep({ icon, title, children }: { icon: React.ReactNode; title: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="flex h-full min-w-0 items-center gap-3 rounded-[10px] border border-[#A87146]/20 bg-white px-3.5 py-3 text-sm leading-snug">
@@ -191,7 +183,7 @@ function Photograph() {
             <div key={c.what} className={`min-w-0 overflow-hidden rounded-[10px] border border-[#A87146]/20 bg-white ${last ? "col-span-2 min-[560px]:col-span-1" : ""}`}>
               <div className={`relative flex items-center justify-center bg-[#efe9e1] ${last ? "aspect-[8/3] min-[560px]:aspect-[4/3]" : "aspect-[4/3]"}`} aria-hidden>
                 <span className="absolute left-2 top-2 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-white text-xs font-bold text-[#4a3728] shadow-sm">{i + 1}</span>
-                {SHOT_ART[i]}
+                {VIEW_ART[i]}
               </div>
               <div className="px-3 pb-3 pt-2.5 text-[13px] leading-snug">
                 <b className="mb-0.5 block text-sm text-[#4a3728]">{c.what}</b>{c.why}
