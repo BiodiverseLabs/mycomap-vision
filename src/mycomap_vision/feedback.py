@@ -145,6 +145,16 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
              (Option("exclude_photo", "Leave this photo out of Vision", "vision"),
               Option("keep_photo", "Keep it (it shows the specimen)", "note")),
              granularity="photo"),
+    # Steve, 2026-10-26 (recovered_labels.py): a field-slip photo a person left out, where the
+    # specimen detector found the specimen. Its crop goes back into Vision unless rejected.
+    ItemType("recovered_label", "Recovered labels",
+             "Field-slip photos people left out, where the specimen detector found the "
+             "specimen on the slip. Each crop goes back into Vision unless you reject it; the "
+             "photo itself stays left out, and no new image is made.",
+             ("the photo with the crop boxes", "each crop"),
+             (Option("include_crops", "Use these crops in Vision", "vision", needs_value=True),
+              Option("reject_crops", "No usable crop: use none", "vision")),
+             model_flagged=True, granularity="photo"),
     ItemType("twin_location_conflict", "One find, two places",
              "Two records, one on Mushroom Observer and one on iNaturalist, with the same label "
              "and photo but placed more than 5 km apart, so maps and the Atlas count one find "
@@ -209,7 +219,8 @@ SECTIONS: dict[str, tuple[str, str, str]] = {
                    "blind: Vision's answer stays hidden unless you choose to see it."),
 }
 SECTION_OF: dict[str, str] = {
-    "non_specimen_photo": "cleanup", "name_writing_split": "cleanup",
+    "non_specimen_photo": "cleanup", "recovered_label": "cleanup",
+    "name_writing_split": "cleanup",
     "name_retired": "cleanup", "name_inactive_on_inat": "cleanup",
     "crosspost_twin": "cleanup", "twin_location_conflict": "cleanup",
     "species_rank_split": "cleanup", "photo_view": "views",
@@ -815,14 +826,27 @@ def seed_files(store: Store, conn: sqlite3.Connection, queue: Path | None = None
                crosswalk: Path | None = None, hits: Path | None = None,
                blind_ratio: float = 0.25, seed: int = 20261018,
                twin_locations: Path | None = None,
-               answer_key_groups: Path | None = None) -> list[dict]:
+               answer_key_groups: Path | None = None,
+               slip_crops: Path | None = None) -> list[dict]:
     """Seed the queue from the miss review's files. With `hits`, every model-flagged type
     also gets a blind sample of finds Vision answered right: blind_ratio of its items. Every
-    row passes the paper's seal (SealGate, from this manifest when the store has none)."""
+    row passes the paper's seal (SealGate, from this manifest when the store has none).
+    `slip_crops` is the specimen detector's file (`mv feedback slip-crops`): only photos a
+    person still leaves out as a field slip are queued ("not_slip_excluded" counts the rest)."""
     import hashlib
     if store.gate is None:
         store.gate = SealGate.from_manifest(conn)
     out = []
+    if slip_crops is not None:
+        from . import recovered_labels as rl
+        rows, counts = rl.rows_from_slip_crops(Path(slip_crops))
+        slips = rl.slip_exclusions(store)
+        for r in rows:              # the slip item's projects: the same reviewers see both
+            r["projects"] = (slips.get(r["subject"]) or {}).get("projects") or []
+        keep = [r for r in rows if r["subject"] in slips]
+        sha = hashlib.sha256(Path(slip_crops).read_bytes()).hexdigest()
+        done = store.seed(with_projects(keep, conn), Path(slip_crops).name, sha)
+        out.append(done | counts | {"not_slip_excluded": len(rows) - len(keep)})
     for path, reader in ((queue, rows_from_queue_seed), (crosswalk, rows_from_crosswalk),
                          (twin_locations, rows_from_twin_locations),
                          (answer_key_groups, lambda p: rows_from_answer_key_groups(p, store))):
@@ -892,6 +916,52 @@ def exclusions_fingerprint(conn: sqlite3.Connection) -> str:
     except sqlite3.OperationalError:          # never synced on this manifest: none
         ids = []
     return hashlib.sha1(",".join(map(str, ids)).encode()).hexdigest()[:12]
+
+
+# --- specimen crops of excluded slip photos (recovered_labels.py) -----------------------------
+# The boxes Vision uses, as fractions of the photo (l, t, r, b), synced like the exclusions:
+# at startup and before each nightly update. Each crop is embedded as a vector of its own
+# (embed.crop_vector_id: a negative id, never a real photo's) and evaluate.load_records counts
+# it as one of the record's photos. A frozen dataset release is not affected.
+CROPS_SCHEMA = """
+create table if not exists feedback_photo_crops (
+  photo_id integer not null, n integer not null, photo_key text not null,
+  l real not null, t real not null, r real not null, b real not null,
+  version text not null default '',
+  primary key (photo_id, n)
+);
+"""
+
+
+def ensure_crops_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(CROPS_SCHEMA)
+
+
+def sync_crops(store: Store, conn: sqlite3.Connection) -> dict:
+    """Make the manifest's crop table the queue's current crops (recovered_labels.accepted_crops):
+    every crop kept on a photo a person still leaves out as a field slip."""
+    from .recovered_labels import accepted_crops
+    rows = [(photo_id_of(key), n, key, *box, c["version"])
+            for key, c in sorted(accepted_crops(store).items()) for n, box in c["boxes"]
+            if photo_id_of(key) is not None]
+    ensure_crops_schema(conn)
+    with conn:
+        conn.execute("delete from feedback_photo_crops")
+        conn.executemany("insert or ignore into feedback_photo_crops values (?,?,?,?,?,?,?,?)",
+                         rows)
+    return {"crops": len(rows), "photos": len({r[0] for r in rows}),
+            "fingerprint": crops_fingerprint(conn)}
+
+
+def crops_fingerprint(conn: sqlite3.Connection) -> str:
+    """Changes whenever the crops Vision uses change (the index is then rebuilt)."""
+    import hashlib
+    try:                      # read on every index lookup: no schema work here
+        rows = conn.execute("select photo_id, n, l, t, r, b from feedback_photo_crops "
+                            "order by photo_id, n").fetchall()
+    except sqlite3.OperationalError:          # never synced on this manifest: none
+        rows = []
+    return hashlib.sha1(repr([tuple(r) for r in rows]).encode()).hexdigest()[:12]
 
 
 # --- the paper's seal on the queues -----------------------------------------------------------

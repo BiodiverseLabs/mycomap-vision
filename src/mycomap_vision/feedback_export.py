@@ -167,3 +167,89 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
                    r["reason"] for r in rows if r["decision"] == "exclude_photo").items())),
                "by_split": dict(sorted(Counter(r["v1_split"] for r in rows).items()))}
     return data, summary
+
+
+# --- the specimen crops kept on excluded slip photos (Recovered labels) -----------------------
+# A file of its own (Steve and the coordinator, 2026-10-26): the exclusion export above never
+# changes because of a crop, and a training run reads this one only with --photo-crops, pinned
+# by its sha256, in a crop arm declared before any result.
+
+CROP_COLUMNS = ("photo_key", "manifest_photo_id", "record_key", "v1_split", "n", "l", "t", "r",
+                "b", "width", "height", "detector", "decision", "decision_id", "decided_at",
+                "reviewer_pseudonym")
+
+
+def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
+                 live: Path | None = None, expect_fingerprint: str | None = None
+                 ) -> tuple[bytes, dict]:
+    """One row per crop the Recovered labels queue kept as of `as_of`: on a photo whose latest
+    "Photos that show no specimen" decision by then leaves it out as a field slip, of an item
+    seeded by then; an item nobody had decided keeps every crop ("default"), a decided one the
+    crops of its latest decision by then. Boxes are fractions of the photo (l, t, r, b), to 6
+    places. Same rules as `export`: a .backup copy opened read-only, reviewers as HMAC
+    pseudonyms, a v1-test photo refused; rows sorted by photo_key, then n."""
+    from . import recovered_labels as rl
+    if not key:
+        raise ExportError("no HMAC key: reviewers are exported only as pseudonyms")
+    if expect_fingerprint is not None and key_fingerprint(key) != expect_fingerprint.strip():
+        raise ExportError("the HMAC key's fingerprint is not the one expected: a different key "
+                          "would give different pseudonyms")
+    cut = parse_as_of(as_of)
+    conn = _open_copy(store_copy, live)
+    split_of = _splits(release)
+    latest: dict[int, sqlite3.Row] = {}
+    for d in conn.execute("select * from decisions where at <= ? order by at, id", (cut,)):
+        latest[d["item_id"]] = d
+    slips = {r["subject"] for r in conn.execute("select id, subject from items where "
+                                                "item_type = ?", (pr.ITEM_TYPE,))
+             if (d := latest.get(r["id"])) is not None and d["decision"] == "exclude_photo"
+             and d["value"] == rl.SLIP_REASON}
+    rows, test = [], []
+    for it in conn.execute("select * from items where item_type = ? and created_at <= ?",
+                           (rl.ITEM_TYPE, cut)):
+        photo = it["subject"]
+        if photo not in slips:
+            continue
+        if split_of.get(photo, "") == "test":
+            test.append(photo)
+            continue
+        d = latest.get(it["id"])
+        item = {"status": "decided" if d is not None else "open",
+                "evidence": json.loads(it["evidence"] or "{}"),
+                "last_decision": dict(d) if d is not None else None}
+        ev = item["evidence"]
+        w, h = int(ev.get("width") or 0), int(ev.get("height") or 0)
+        keep = set(rl.kept(item))
+        rk = pr.record_of_item({"record_keys": json.loads(it["record_keys"] or "[]"),
+                                "links": json.loads(it["links"] or "[]")}) or ""
+        pid = fb.photo_id_of(photo)
+        for c in rl.crops_of(item):
+            if c["n"] not in keep or not (w and h):
+                continue
+            l, t, r, b = c["box"]
+            rows.append({
+                "photo_key": photo, "manifest_photo_id": "" if pid is None else str(pid),
+                "record_key": rk, "v1_split": split_of.get(photo, "") or "none",
+                "n": str(c["n"]), "l": f"{l / w:.6f}", "t": f"{t / h:.6f}",
+                "r": f"{r / w:.6f}", "b": f"{b / h:.6f}", "width": str(w), "height": str(h),
+                "detector": ev.get("version") or "",
+                "decision": d["decision"] if d is not None else "default",
+                "decision_id": "" if d is None else str(d["id"]),
+                "decided_at": "" if d is None else datetime.fromtimestamp(
+                    d["at"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "reviewer_pseudonym": "" if d is None else pseudonym(key, d["by_user"])})
+    conn.close()
+    if test:
+        raise ExportError(f"{len(test)} crop photo(s) belong to v1-test records, which no "
+                          f"queue may hold (the paper's seal): {sorted(test)[:20]}")
+    rows.sort(key=lambda r: (r["photo_key"], int(r["n"])))
+    buf = io.StringIO()
+    w_ = csv.DictWriter(buf, fieldnames=CROP_COLUMNS, delimiter="\t", lineterminator="\n")
+    w_.writeheader()
+    w_.writerows(rows)
+    data = buf.getvalue().encode("utf-8")
+    summary = {"as_of": as_of, "rows": len(rows), "photos": len({r["photo_key"] for r in rows}),
+               "sha256": hashlib.sha256(data).hexdigest(), "key_fingerprint": key_fingerprint(key),
+               "by_decision": dict(sorted(Counter(r["decision"] for r in rows).items())),
+               "by_split": dict(sorted(Counter(r["v1_split"] for r in rows).items()))}
+    return data, summary

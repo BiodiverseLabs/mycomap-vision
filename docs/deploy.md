@@ -281,6 +281,16 @@ the green list get their iNat details and photos, are embedded on this box's CPU
 with the served model (about 0.7 s a photo, at most `MV_NIGHTLY_MAX_PHOTOS` a
 night), and join it. Their photos are deleted once embedded; only the vectors stay.
 
+The same night embeds the specimen crops Human Feedback's **Recovered labels** queue keeps
+(`recovered_labels.py`): each crop of a photo a person left out as a field slip, unless a
+reviewer rejected it, synced into the manifest's `feedback_photo_crops` before the night. The
+photo is fetched within the usual download budgets, its box is applied in memory (no cropped
+file is ever written), the crop becomes a vector of its own (a negative id), and the photo is
+deleted once its crops are embedded. At most `MV_NIGHTLY_MAX_CROPS` (3000) a night; 0 turns it
+off. The proposals come from a GPU batch job on the laptop (`mv feedback slip-crops`, OWLv2 +
+SAM: about 1.3 s a photo there, 30–55 s on this box's CPU), seeded here with
+`mv feedback seed --slip-crops <tsv>`.
+
 The release is never written. The server works on a layer beside it,
 `/srv/mycomap-vision/state/nightly/<release id>/` (a copy of the release's
 manifest, the nightly shards and iNat's answers). A new release starts a fresh

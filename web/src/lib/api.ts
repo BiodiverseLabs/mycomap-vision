@@ -860,6 +860,50 @@ export interface FlaggedPage {
   tiles: FlaggedTile[];
 }
 
+// --- Recovered labels: specimen crops proposed on photos excluded as field slips ------------
+
+/** One proposed crop: a box on the ORIGINAL photo's pixels [left, top, right, bottom], the
+ *  specimen cluster's share of the photo, and its saved decision (none while open). */
+export interface RecoveredCrop {
+  n: number;
+  box: [number, number, number, number];
+  area: number;
+  decision?: "include" | "reject" | null;
+}
+
+/** A photo a person excluded as a field slip, with the crops the detector proposes. */
+export interface RecoveredTile {
+  item_id: number;
+  photo_key: string;
+  record_key: string;
+  label: string;
+  link: string;
+  /** The tagger's slip p when the photo was seeded, and its tranche (lib/recoveredLabels). */
+  slip_p: number | null;
+  tranche: string;
+  width: number;
+  height: number;
+  specimen_area: number;
+  crops: RecoveredCrop[];
+  status: FeedbackStatus;
+  /** False once a person kept the photo, or left it out for another reason: its crops are
+   *  then not used. */
+  still_excluded: boolean | null;
+  shown: "public" | "private" | "hidden";
+  thumb?: string;
+  full?: string;
+  hidden_reason?: string;
+  license_code: string | null;
+  owner_login: string | null;
+}
+
+export interface RecoveredPage {
+  total: number;
+  offset: number;
+  tranches: { code: string; open: number; decided: number }[];
+  tiles: RecoveredTile[];
+}
+
 /** Photo views (Steve, 2026-10-21): one photo of the queue, with the tagger's suggested views
  *  (strongest first) and, once decided, the confirmed set. */
 export interface PhotoViewTile {
@@ -1018,6 +1062,16 @@ export const feedbackApi = {
    *  `keepalive`: sent as the page is hidden or left. */
   photoReviewBatch: (body: PhotoBatchBody, opts: { keepalive?: boolean } = {}) =>
     postJson<{ excluded: number; kept: number }>("/api/feedback/photo-review/batch", body, opts),
+  recoveredLabels: (p: { tranche: string; status: FeedbackStatus; sort: string; q?: string; offset?: number;
+                          limit?: number }) => {
+    const qs = new URLSearchParams({ tranche: p.tranche, status: p.status, sort: p.sort, q: p.q ?? "",
+                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 24) });
+    return getJson<RecoveredPage>(`/api/feedback/recovered-labels?${qs}`);
+  },
+  /** Each photo's crops kept (an empty list rejects them all), written whole or not at all. */
+  recoveredLabelsBatch: (decisions: { item_id: number; include: number[] }[]) =>
+    postJson<{ saved: number; included: number; rejected: number }>("/api/feedback/recovered-labels/batch",
+                                                                   { decisions }),
   photoViews: (p: { tab: string; status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {
     const qs = new URLSearchParams({ tab: p.tab, status: p.status, q: p.q ?? "",
                                      offset: String(p.offset ?? 0), limit: String(p.limit ?? 60) });

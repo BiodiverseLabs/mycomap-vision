@@ -34,6 +34,7 @@ from . import feedback_public as fp
 from . import name_context as nc
 from . import photo_review as pr
 from . import photo_views as pv
+from . import recovered_labels as rl
 from .pair_places import PairPlaces
 
 ROLE_TTL = 300.0
@@ -541,11 +542,12 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         return {"total": len(tiles), "offset": start, "tiles": out,
                 "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
 
-    def photo_tiles(page: list[dict], ro: bool) -> list[dict]:
-        """A page of tiles with each photo as this viewer may see it (Summary, Photo views)."""
+    def photo_tiles(page: list[dict], ro: bool, thumb: str = "grid") -> list[dict]:
+        """A page of tiles with each photo as this viewer may see it (Summary, Photo views,
+        Recovered labels)."""
         info = need_photos().many([(t["photo_key"], t["record_key"]) for t in page])
         shown = {d["photo_key"]: d for d in need_photos().for_viewer(
-            [i["row"] for i in info.values()], reviewer=not ro, thumb="grid")}
+            [i["row"] for i in info.values()], reviewer=not ro, thumb=thumb)}
         out = []
         for t in page:
             i = info.get(t["photo_key"])
@@ -585,6 +587,40 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         who, projects = access(request)
         try:
             return pv.batch_decide(store, list(payload.get("decisions") or []), who,
+                                   projects=projects)
+        except fb.FeedbackError as e:
+            bad(e)
+
+    # --- Recovered labels: specimen crops of excluded slip photos (recovered_labels.py) -----
+    @app.get("/api/feedback/recovered-labels")
+    def fb_recovered_labels(request: Request, tranche: str = "all", status: str = "open",
+                            sort: str = "riskiest", q: str = "", offset: int = 0,
+                            limit: int = 30):
+        """Recovered labels (Steve, 2026-10-26): one tile per excluded slip photo with the crop
+        boxes the detector proposes, paged (at most 100), smallest specimen first. The photo
+        as this viewer may see it (the photo rule); a read-only viewer gets the boxes on the
+        original only, and the page shows them no enlarged crop. "still_excluded" False: a
+        person has since kept the photo, or left it out for another reason, so its crops
+        count for nothing."""
+        _, projects, _, ro = viewer(request)
+        items = items_cached(rl.ITEM_TYPE, projects)
+        slips = set(rl.slip_excluded(items_cached(pr.ITEM_TYPE, None)))
+        try:
+            tiles = rl.tiles(items, tranche, status, sort, q, slips)
+        except fb.FeedbackError as e:
+            bad(e)
+        start = max(0, offset)
+        page = tiles[start:start + min(max(1, limit), 100)]
+        return {"total": len(tiles), "offset": start, "tranches": rl.tranche_counts(items),
+                "tiles": photo_tiles(page, ro, thumb="full")}
+
+    @app.post("/api/feedback/recovered-labels/batch")
+    def fb_recovered_labels_batch(request: Request, payload: dict = Body(...)):
+        """Save a page of Recovered labels: [{item_id, include: [crop numbers kept]}], written
+        whole or not at all (recovered_labels.batch_decide)."""
+        who, projects = access(request)
+        try:
+            return rl.batch_decide(store, list(payload.get("decisions") or []), who,
                                    projects=projects)
         except fb.FeedbackError as e:
             bad(e)

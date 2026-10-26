@@ -22,6 +22,8 @@ import { confirmLeave, reviewUnsaved } from "@/lib/reviewSave";
 import { LabelReview } from "./LabelReview";
 import { PhotoReview } from "./PhotoReview";
 import { PhotoViews } from "./PhotoViews";
+import { RecoveredLabels } from "./RecoveredLabels";
+import { RECOVERED_TYPE } from "@/lib/recoveredLabels";
 import { PHOTO_VIEW_TYPE } from "@/lib/photoViews";
 
 // Human Feedback (Steve, 2026-10-18): a review queue of places where Vision and the reference
@@ -138,6 +140,8 @@ function FeedbackBody() {
                   ? <PhotoReview key={sel.type} summary={sel} />
                   : sel.type === PHOTO_VIEW_TYPE
                   ? <PhotoViews key={sel.type} summary={sel} />
+                  : sel.type === RECOVERED_TYPE
+                  ? <RecoveredLabels key={sel.type} summary={sel} />
                   : sel.type === LABEL_REVIEW_TYPE
                     ? <LabelReview key={sel.type} summary={sel} />
                     : <TypeQueue key={sel.type} summary={sel} type={catalogueType} me={me.data}
