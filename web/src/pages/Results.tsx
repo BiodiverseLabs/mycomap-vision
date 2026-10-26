@@ -4,7 +4,7 @@ import type { EarlyAnswersGroup, HowGood, Me, ModelsInfo, ProspectiveModel, RunR
 import { companionBars, scoreboardSections, standardOf, STANDARD_BANDS } from "@/lib/compareView";
 import { utcDay, V1_VAL_COUNTS } from "@/lib/datasetReleases";
 import { MODEL_CREDIT_LINE, modelName, OPEN_DATA_MEANS } from "@/lib/publicView";
-import { GENUS_SCORING, OPEN_REFERENCE, pointsDiff, REFERENCE_LABEL, TWO_MODELS, type TopK } from "@/lib/twoModels";
+import { GENUS_LABEL, GENUS_SCORING, OPEN_REFERENCE, pointsDiff, REFERENCE_LABEL, TWO_MODELS, type TopK } from "@/lib/twoModels";
 import { APPROACHES } from "@/lib/approaches";
 import { ADVANCE_PAUSED_SINCE, BENCHMARKS } from "@/lib/research";
 import { approachGroups, comparisonRows, earlyFigures, heatRows, historyLines, modelParts, nameRuleRows, nf, pc, pt,
@@ -207,11 +207,11 @@ export function TwoModelsSection() {
       <div className="two">
         <ModelTable title="MycoMap Vision v1" swatch="var(--s1)" sub="public + non-public training data · the site's model"
                     rows={[{ label: "Species", note: REFERENCE_LABEL.full, t: site.species, hl: true },
-                           { label: "Genus", note: REFERENCE_LABEL.full, t: site.genus }]} />
+                           { label: "Genus", note: `${REFERENCE_LABEL.full} · ${GENUS_LABEL}`, t: site.genus }]} />
         <ModelTable title="MycoMap Vision v1-open" swatch="#8B4A1F" sub="open data only · the paper's headline model"
                     rows={[{ label: "Species", note: REFERENCE_LABEL.open, t: openRef, hl: true },
                            { label: "Species", note: REFERENCE_LABEL.full, t: open.species },
-                           { label: "Genus", note: REFERENCE_LABEL.full, t: open.genus }]} />
+                           { label: "Genus", note: `${REFERENCE_LABEL.full} · ${GENUS_LABEL}`, t: open.genus }]} />
       </div>
       <ChartCard className="mt-3.5">
         <div className="flex flex-wrap justify-between gap-2"><h3 className="font-display font-semibold text-[#4a3728]">Paired difference, species top 1 (v1-open minus v1)</h3><span className="small">points · 95% interval clustered by observer · full reference</span></div>

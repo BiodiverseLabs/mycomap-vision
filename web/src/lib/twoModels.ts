@@ -96,7 +96,9 @@ export function openModelHeadline(): { open: TopK; full: TopK } {
   return { open, full: TWO_MODELS.models[1].species };
 }
 
-/** Genus here is O1's: an exact genus name. The paper credits genus through its pinned taxonomy,
- *  as every genus figure on Benchmarks does (research repo experiments/2026-10-13-v1-published-
- *  models.md at 5792c17: 85.8 and 85.6 on the full reference; E33 corrected to match at 43328a1). */
-export const GENUS_SCORING = "Genus here counts an exact genus name. Credited through the paper's pinned taxonomy, as on Benchmarks, genus top 1 is 85.8% for MycoMap Vision v1 and 85.6% for v1-open against the full reference.";
+/** Genus here is O1's: an exact genus name, the only scoring with genus at top 3, 5 and 10. The
+ *  paper credits genus through its pinned taxonomy at top 1 only, as every genus figure on
+ *  Benchmarks (research repo experiments/2026-10-13-v1-published-models.md at 5792c17: v1 85.8 on
+ *  the full reference; v1-open 85.6 on the full reference, 85.4 on the open-data reference). */
+export const GENUS_LABEL = "exact genus name";
+export const GENUS_SCORING = "The genus rows here count an exact genus name, the only scoring with genus at top 3, 5 and 10. The paper credits genus through its pinned taxonomy, at top 1 only, as on Benchmarks: 85.8% for MycoMap Vision v1 against the full reference, and for v1-open 85.6% against the full reference and 85.4% against the open-data reference.";

@@ -143,7 +143,8 @@ test("Results: eight sections in the nav's order, the two models with both v1-op
   const t = text(html);
   assert.match(t, /Species against the open-data reference only \(the paper's headline setup\) 55\.3/);
   assert.match(t, /v1-open's open data is Creative Commons photos \(including non-commercial licences\) and all-rights-reserved photos whose owners gave permission\./);
-  assert.match(t, /Genus here counts an exact genus name\. Credited through the paper's pinned taxonomy, as on Benchmarks, genus top 1 is 85\.8% for MycoMap Vision v1 and 85\.6% for v1-open/);
+  assert.match(t, /Genus against the full reference · exact genus name 85\.4 93\.9/);
+  assert.match(t, /The genus rows here count an exact genus name, the only scoring with genus at top 3, 5 and 10\. The paper credits genus through its pinned taxonomy, at top 1 only, as on Benchmarks: 85\.8% for MycoMap Vision v1 against the full reference, and for v1-open 85\.6% against the full reference and 85\.4% against the open-data reference\./);
   assert.doesNotMatch(t, /openly licensed (reference|photos)/);
   assert.match(t, /Species against the full reference 55\.9/);
   assert.match(t, /Using every photo of a find helps\. The first photo alone gets the species first 53\.1%/);
