@@ -1235,6 +1235,8 @@ class Release:
     db: sqlite3.Connection = field(repr=False)
     _private: sqlite3.Connection | None = field(default=None, repr=False)
     errata: object | None = field(default=None, repr=False)     # errata.Errata
+    photo_exclusions: dict | None = field(default=None, repr=False)
+    _photos_out: frozenset = field(default=frozenset(), repr=False)
 
     def use_errata(self, errata) -> None:
         """Leave out an erratum's records (errata.py) from every split this release
@@ -1242,6 +1244,65 @@ class Release:
         from .errata import check
         check(errata, self)
         self.errata = errata
+
+    def use_photo_exclusions(self, path, expect_sha256: str, reasons=None) -> dict:
+        """Take the photos a person excluded in Human Feedback (`mv feedback
+        export-photo-exclusions`: its exclude_photo rows; a keep_photo row takes nothing out;
+        with `reasons`, only rows with one of those reasons: one arm of paper E35) out of what
+        a model learns from and is compared against, from now on. They leave every read that
+        includes the train split: the fine-tune's training photos, the train reference a val
+        query is compared against, and the train + val reference of a test comparison or the
+        served index. A read of val (or test) alone is the queries a model is judged on: it
+        keeps every photo, so two models are compared on the same queries. A record left
+        with no photo drops out of those reads. Not an erratum: no record or label changes.
+        The file is pinned: refused unless its sha256 is `expect_sha256`; cite() then names
+        it with its counts."""
+        path = Path(path)
+        body = path.read_bytes()
+        sha = hashlib.sha256(body).hexdigest()
+        if sha != str(expect_sha256 or "").lower():
+            raise ReleaseError(f"{path.name}: sha256 {sha[:12]}, not the {str(expect_sha256)[:12]} "
+                               "it was pinned to: not the photo-exclusion list the run named")
+        rows = list(csv.DictReader(io.StringIO(body.decode("utf-8")), delimiter="\t"))
+        if not rows or "photo_key" not in rows[0]:
+            raise ReleaseError(f"{path.name}: needs a photo_key column and at least one row")
+        wanted = sorted(set(reasons)) if reasons else None
+        if wanted and "reason" not in rows[0]:
+            raise ReleaseError(f"{path.name}: has no reason column to choose {wanted} from")
+        keys = {r["photo_key"].strip() for r in rows
+                if (r.get("decision") or "exclude_photo") == "exclude_photo"
+                and (wanted is None or r["reason"] in wanted)}
+        if wanted and not keys:
+            raise ReleaseError(f"{path.name}: no excluded photo has reason {wanted}")
+        found = {}
+        for key, pid, split in self.db.execute(
+                "select p.photo_key, p.manifest_photo_id, r.split from photos p join records r "
+                "using (record_key) where p.included = 1 and r.included = 1"):
+            if key in keys:
+                found[key] = (pid, split)
+        out = frozenset(pid for pid, split in found.values() if split in TRAINABLE)
+        left: dict[str, dict[str, int]] = {s: defaultdict(int) for s in TRAINABLE}
+        q = ",".join("?" * len(TRAINABLE))
+        for key, pid, split in self.db.execute(
+                "select p.record_key, p.manifest_photo_id, r.split from photos p join records r "
+                f"using (record_key) where p.included = 1 and r.included = 1 and r.split in ({q})",
+                TRAINABLE):
+            left[split][key] += pid not in out
+        self._photos_out = out
+        self.photo_exclusions = {
+            "file": path.name, "sha256": sha, "reasons": wanted or "all",
+            "photos_listed": len(keys),
+            "photos_left_out": {s: sum(sp == s for _, sp in found.values()) for s in TRAINABLE},
+            "records_left_with_no_photo": {s: sum(not n for n in left[s].values())
+                                           for s in TRAINABLE},
+            "other_split_kept": sum(sp not in TRAINABLE for _, sp in found.values()),
+            "not_in_release": len(keys) - len(found)}
+        return self.photo_exclusions
+
+    def _photos_out_of(self, splits) -> frozenset:
+        """use_photo_exclusions' photos when `splits` is a learning or reference read (it
+        holds train); none for a read of val or test alone (queries)."""
+        return self._photos_out if "train" in splits else frozenset()
 
     def _not_errata(self, rows):
         if self.errata is None:
@@ -1319,6 +1380,8 @@ class Release:
                "release_code_commit": self.code_commit, "draft": self.manifest["draft"]}
         if self.errata is not None:
             out["errata"] = self.errata.cite()
+        if self.photo_exclusions is not None:
+            out["photo_exclusions"] = dict(self.photo_exclusions)
         return out
 
     def record_keys(self) -> list[str]:
@@ -1360,10 +1423,11 @@ class Release:
         q = ",".join("?" * len(splits))
         pt = " and p.public_trainable = 1" if public_trainable_only else ""
         skip = self.errata.keys if self.errata is not None else frozenset()
+        drop = self._photos_out_of(splits)
         return [r[0] for r in self.db.execute(
             f"select p.manifest_photo_id, r.record_key from photos p join records r "
             f"using (record_key) where p.included = 1 and r.included = 1 and r.split in ({q}){pt}",
-            tuple(splits)) if r[1] not in skip]
+            tuple(splits)) if r[1] not in skip and r[0] not in drop]
 
     def as_records(self, splits=TRAINABLE, photo_row: dict[int, int] | None = None,
                    public_trainable_only: bool = False) -> list:
@@ -1371,7 +1435,8 @@ class Release:
         release, coordinates from private.sqlite (None when it was not shipped). photo_rows
         hold photo_row[photo id] for photos with a vector (all included photos when
         photo_row is None). public_trainable_only: the photos the final public model may
-        learn from (CC or permission granted); a record left with none is left out."""
+        learn from (CC or permission granted); a record left with none is left out. A read
+        that holds train (learning, a reference) leaves out use_photo_exclusions' photos."""
         from .evaluate import Record, real_date
         splits = (splits,) if isinstance(splits, str) else tuple(splits)
         places = {r[0]: (r[1], r[2]) for r in self.private.execute(
@@ -1379,10 +1444,12 @@ class Release:
             if self.has_private else {}
         photos: dict[str, list[int]] = defaultdict(list)
         pt = " and public_trainable = 1" if public_trainable_only else ""
+        drop = self._photos_out_of(splits)
         for key, pid in self.db.execute(
                 f"select record_key, manifest_photo_id from photos where included = 1{pt} "
                 "order by record_key, position, photo_key"):
-            photos[key].append(pid)
+            if pid not in drop:
+                photos[key].append(pid)
         out = []
         for r in self.records(splits):
             pids = photos.get(r["record_key"], [])

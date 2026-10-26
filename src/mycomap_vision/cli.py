@@ -213,7 +213,10 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         dry_run=args.dry_run, ec2_check=args.ec2_check,
                                         release=_dataset_release(args),
                                         allow_draft=args.allow_draft, seed=args.seed,
-                                        public_trainable_only=args.public_trainable_only),
+                                        public_trainable_only=args.public_trainable_only,
+                                        exclude_photos=args.exclude_photos,
+                                        exclude_photo_reasons=_split(
+                                            args.exclude_photo_reasons or "")),
                      indent=2))
 
 
@@ -228,8 +231,14 @@ def trainer_release(args):
     if not getattr(args, "release", None):
         return None
     from .replications.fungitastic import dataset
-    return dataset.load(args.release, args.allow_draft, without_private=True,
-                        expect_manifest_sha256=args.release_manifest)
+    rel = dataset.load(args.release, args.allow_draft, without_private=True,
+                       expect_manifest_sha256=args.release_manifest)
+    if getattr(args, "exclude_photos", None):
+        # The launch's photo-exclusion list, shipped with the run and pinned by its sha256.
+        print(json.dumps({"photo_exclusions": rel.use_photo_exclusions(
+            args.exclude_photos, args.exclude_photos_sha256,
+            _split(getattr(args, "exclude_photo_reasons", None) or ""))}))
+    return rel
 
 
 def cmd_aws_train_job(conn, args) -> None:
@@ -2001,6 +2010,14 @@ def main(argv: list[str] | None = None) -> int:
                    help="with --release and --finetune: train only on photos the released "
                         "weights may learn from (CC including NC, or permission granted); "
                         "the run records the policy and the photos by licence class")
+    p.add_argument("--exclude-photos", metavar="TSV",
+                   help="with --release and --finetune: a Human Feedback photo-exclusion export "
+                        "(mv feedback export-photo-exclusions); its excluded photos are left out "
+                        "of training and the reference (never of the val queries). It ships "
+                        "with the run, pinned by its sha256")
+    p.add_argument("--exclude-photo-reasons", metavar="R1,R2",
+                   help="with --exclude-photos: only its rows with these reasons (an E35 arm, "
+                        "e.g. slip)")
     p.add_argument("--manifest", metavar="FILE",
                    help="launch from a copy of this manifest instead of the live one: the one a "
                         "dataset release was cut from (e.g. data/manifest-v1-freeze.sqlite), "
@@ -2035,6 +2052,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sample-records", type=int)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--public-trainable-only", action="store_true")
+    p.add_argument("--exclude-photos", help="the photo-exclusion list the launch shipped")
+    p.add_argument("--exclude-photos-sha256", help="its sha256 at launch")
+    p.add_argument("--exclude-photo-reasons", help="only its rows with these reasons")
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
                         "finished; set by the launcher to leave time before the hard limit")

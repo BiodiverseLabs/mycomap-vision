@@ -97,9 +97,12 @@ def train_photo_policy(release, photo_ids, public_trainable_only: bool, left_out
             key = lclass if lclass in CC_CLASSES else (
                 f"{lclass}_permission_granted" if pt else lclass)
             by[key] = by.get(key, 0) + 1
-    return {"policy": PHOTO_POLICIES[int(public_trainable_only)], "photos": len(want),
-            "photos_by_licence_class": dict(sorted(by.items())),
-            "photos_left_out_by_policy": left_out}
+    out = {"policy": PHOTO_POLICIES[int(public_trainable_only)], "photos": len(want),
+           "photos_by_licence_class": dict(sorted(by.items())),
+           "photos_left_out_by_policy": left_out}
+    if getattr(release, "photo_exclusions", None) is not None:
+        out["photo_exclusions"] = dict(release.photo_exclusions)    # use_photo_exclusions
+    return out
 
 
 def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, size: str,
