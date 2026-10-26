@@ -1,6 +1,6 @@
 import { Link } from "wouter";
 import { ArrowUpRight, CheckSquare, Clock, Code2, Database, Dna, FlaskConical, Hash, LineChart, Lock,
-         Quote, Star, Target } from "lucide-react";
+         Quote, ScanEye, Star, Target } from "lucide-react";
 import type { EarlyAnswersGroup, HowGood, Me, RunReport, ScoreRun, Stats } from "@/lib/api";
 import type { Outline } from "@/lib/apiOutline";
 import type { ExperimentSummary } from "@/lib/experiments";
@@ -263,6 +263,9 @@ function SectionMap({ d }: { d: LandingData }) {
                  text="The registry: every question, everything tried, the numbers and the decision."
                  fact={!has("/research/experiments") ? "For mycomap.org members: sign in to read"
                    : xs ? <><b>{nf(xs.length)}</b>entries · {nf(xs.filter((x) => datasetOf(x) !== "pre-v1").length)} rebuilt on v1</> : "Reading the registry…"} />
+        <MapCard href="/research/excluded-photos" icon={<ScanEye className={icon} />} title="Excluded photos"
+                 text="Photos people left out of Vision, by why, and where Vision looked on any of them."
+                 fact="Micrographs, field slips, habitat and more" />
         <MapCard href="/research/for-researchers" icon={<Quote className={icon} />} title="For researchers"
                  text="How to cite, the model names, and how to score your own model on the same records."
                  fact={<><b>{CITATIONS.length}</b>citations, copy-ready</>} />

@@ -84,7 +84,10 @@ RESEARCH_API = ("/api/stats", "/api/models", "/api/scoreboard", "/api/prospectiv
                 "/api/benchmarks", "/api/early-answers",
                 # How it works (a share page, open to anyone): its accuracy summary, never the
                 # sealed test (howgood.py), and the daily seconds per photo, averages only.
-                "/api/how-good", "/api/speed/daily")
+                "/api/how-good", "/api/speed/daily",
+                # Research > Excluded photos (excluded_looked.py): the list and kept maps; asking
+                # for a map (POST) needs sign-in.
+                "/api/research/excluded-photos", "/api/research/excluded-photos/looked")
 _RESEARCH_RUN = re.compile(r"^/api/scoreboard/\d{1,9}$")
 
 

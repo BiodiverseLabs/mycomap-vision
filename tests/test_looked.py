@@ -134,6 +134,17 @@ def test_the_block_by_block_tower_gives_the_towers_own_vector():
     assert len(atts) == 6 and tuple(atts[0].shape) == (1, 4, 17, 17)
 
 
+def test_a_photos_vector_is_the_towers_own():
+    torch = pytest.importorskip("torch")
+    vit, tf, _ = tiny_tower()
+    tower = looked.Tower(vit, tf)
+    x, _ = tower.prepare(jpeg(seed=3))
+    with torch.no_grad():
+        own = torch.nn.functional.normalize(vit(x[None]), dim=-1)[0].numpy()
+    got = looked.photo_vector(tower, jpeg(seed=3))
+    assert got.shape == (32,) and float(own @ got) > 0.9999
+
+
 def test_the_trained_tower_is_found_inside_a_loaded_model_and_a_stand_in_is_refused():
     vit, tf, Loaded = tiny_tower()
     assert looked.vit_of(Loaded) == (vit, tf)

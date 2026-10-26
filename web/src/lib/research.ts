@@ -29,6 +29,9 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
     blurb: "The DNA-verified records and photos the identifier learns from." },
   { href: "/research/experiments", label: "Experiments", members: true,
     blurb: "Every experiment: the question, everything tried, the numbers, the decision (members)." },
+  // Steve, 2026-10-26: the photos people left out, and where Vision looked on them.
+  { href: "/research/excluded-photos", label: "Excluded photos",
+    blurb: "Photos people left out of Vision, by why, and where Vision looked on any of them." },
   { href: "/research/for-researchers", label: "For researchers",
     blurb: "How to cite, and how to score your own model on the same records." },
   // Last (Steve, 2026-10-12): the developer API was linked only from the footer.

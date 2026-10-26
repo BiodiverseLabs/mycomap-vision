@@ -174,8 +174,10 @@ class Target:
         return self.weight * near + (1 - self.weight) * (q @ m)
 
 
-def target_for(ident, name: str) -> Target:
-    """The served index's T_X for `name` (identify.Identifier), or NoMap."""
+def target_for(ident, name: str, hidden: np.ndarray | None = None) -> Target:
+    """The served index's T_X for `name` (identify.Identifier), or NoMap. `hidden`: reference
+    columns left out, as if never there (Identifier.left_out: a reference record's own photo
+    must not match its own record); X's average is then made again from the records left."""
     from .methods import rows_at
     index = ident.index
     try:
@@ -185,15 +187,28 @@ def target_for(ident, name: str) -> Target:
     lo = int(index.starts[u])
     hi = int(index.starts[u + 1]) if u + 1 < len(index.starts) else len(index.cols)
     cols = np.arange(lo, hi, dtype=np.int64)
-    vectors = np.asarray(ident.reference_vectors(cols), dtype=np.float32)
     if index.rec_starts is None:
         record = np.arange(len(cols))
     else:
         bounds = index.rec_starts[(index.rec_starts >= lo) & (index.rec_starts < hi)]
         record = np.searchsorted(bounds, cols, side="right") - 1
+    left_out = hidden is not None and bool(np.isin(cols, hidden).any())
+    if left_out:
+        keep = ~np.isin(cols, hidden)
+        if not keep.any():
+            raise NoMap(f"no other DNA-verified record of {name} to compare with")
+        cols = cols[keep]
+        record = np.unique(record[keep], return_inverse=True)[1]
+    vectors = np.asarray(ident.reference_vectors(cols), dtype=np.float32)
     scoring = getattr(ident.model, "base", ident.model)
     means = getattr(scoring, "means", None)
-    if means is not None:
+    if left_out:
+        # Record-balanced, as the method's own average: each record's unit sum, then their mean.
+        per = np.zeros((int(record.max()) + 1, vectors.shape[1]), dtype=np.float64)
+        np.add.at(per, record, vectors)
+        per /= np.maximum(np.linalg.norm(per, axis=1, keepdims=True), 1e-12)
+        mean = per.mean(axis=0)
+    elif means is not None:
         mean = rows_at(means.ref, [u])[0]
     else:
         mean = vectors.mean(axis=0)
@@ -290,6 +305,14 @@ def quantise(m: np.ndarray) -> list[int]:
     v = np.clip(np.asarray(m, dtype=np.float64), 0, None)
     top = float(np.percentile(v, 99)) or float(v.max()) or 1.0
     return np.clip(np.round(v / top * MAP_LEVELS), 0, MAP_LEVELS).astype(int).ravel().tolist()
+
+
+def photo_vector(tower: Tower, body: bytes) -> np.ndarray:
+    """(dim,) the photo's unit vector from the same forward pass the map reads."""
+    x, _ = tower.prepare(body)
+    with tower.torch.inference_mode():
+        q, _, _ = tower.run(x[None], attention=False)
+    return q[0].cpu().numpy().astype(np.float32)
 
 
 def photo_map(tower: Tower, body: bytes, target: Target, specimen: bytes | None) -> dict:

@@ -36,7 +36,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, inat_suggest, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               looked, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
+               excluded_looked as xl, looked, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, research_public, serving, sessions as session_store, sources,
                speedlog, uploads,
                workqueue, yours)
@@ -340,7 +340,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                identify_log: "identifylog.IdentifyLog | None" = None,
                early_store: "early_answers.Store | None" = None,
                inat_suggestions: "inat_suggest.Suggestions | None | bool" = True,
-               where_looked: "Callable | None | bool" = True) -> FastAPI:
+               where_looked: "Callable | None | bool" = True,
+               excluded_looked: "Callable | None | bool" = True,
+               excluded_base: str | None = None,
+               excluded_unsealed: bool | None = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -397,6 +400,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     MV_WHERE_LOOKED=0; None or False: off; tests pass the photo maker (called as
     maker(loaded backbone, backbone name, identifier, name, photo bytes, specimen bytes or
     None) -> the photo's entry).
+
+    `excluded_looked`: Research > Excluded photos (excluded_looked.py), the photos people left
+    out in Human Feedback with "where Vision looked" on any of them, on the run maps' worker.
+    True: on unless MV_EXCLUDED_LOOKED=0; None or False: off; tests pass the photo maker
+    (called as maker(loaded backbone, backbone name, identifier, name, photo bytes, the
+    record's own columns to leave out) -> {crop, grid, map, rank}). `excluded_base`: the base
+    model its "base" maps come from (default MV_EXCLUDED_LOOKED_BASE, else bioclip-2-336),
+    offered only where it has reference vectors. `excluded_unsealed`: the paper's seal lifted
+    (default MV_EXCLUDED_LOOKED_UNSEALED=1; off until the v1-test scoring is committed).
 
     `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
     `confused_with` field on species candidates. True reads the cache beside the manifest
@@ -701,6 +713,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # Where Vision looked (looked.py): needs run links; MV_WHERE_LOOKED=0 turns it off.
     looked_on = bool(where_looked) and run_store is not None and (
         callable(where_looked) or config.setting("MV_WHERE_LOOKED") != "0")
+    # Research > Excluded photos (excluded_looked.py): MV_EXCLUDED_LOOKED=0 turns it off.
+    excluded_on = bool(excluded_looked) and (
+        callable(excluded_looked) or config.setting("MV_EXCLUDED_LOOKED") != "0")
     run_secret = run_secret or signin.secret or secrets.token_bytes(32)
     # iNat's suggestions (inat_suggest.py; Steve, 2026-10-25): off until iNat agrees in
     # writing. Never in the identify log or early answers: mycomap.org logs iNat's side.
@@ -1921,15 +1936,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # (site-runs/<id>/looked.json). Only the photos the run's link shows are read, the
     # specimen matched to each is the one the link shows for it today, and the maps are made
     # one photo at a time behind every identification.
+    # The Excluded photos page's maps (excluded_looked.py) take turns on the same worker.
     looked_worker = (looked.Worker(model_queue.idle, gpu_lock, background=background, note=note)
-                     if looked_on else None)
+                     if looked_on or excluded_on else None)
     looked_asks = RateLimiter(20, 600.0)
     looked_targets: "OrderedDict[tuple, looked.Target]" = OrderedDict()
     looked_towers: dict[str, looked.Tower] = {}
 
-    def real_looked_maker(loaded, backbone: str, ident: Identifier, name: str, body: bytes,
-                          specimen: bytes | None) -> dict:
-        """The served model's map and match for one photo (call holding gpu_lock)."""
+    def looked_tower(loaded, backbone: str) -> looked.Tower:
+        """The backbone's tower, run block by block (call holding gpu_lock)."""
         tower = looked_towers.get(backbone)
         if tower is None:
             # The served torch tower, or (an ONNX tower is served) a torch copy of it.
@@ -1937,6 +1952,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if found is None:
                 raise looked.NoMap("this model's maps can't be made")
             tower = looked_towers[backbone] = looked.Tower(*found)
+        return tower
+
+    def real_looked_maker(loaded, backbone: str, ident: Identifier, name: str, body: bytes,
+                          specimen: bytes | None) -> dict:
+        """The served model's map and match for one photo (call holding gpu_lock)."""
+        tower = looked_tower(loaded, backbone)
         # An index rebuilt is a new identifier; its size guards against a reused id().
         key = (id(ident), getattr(ident, "embedded", 0), len(ident.index.cols), name)
         target = looked_targets.get(key)
@@ -1949,7 +1970,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     looked_maker = where_looked if callable(where_looked) else real_looked_maker
 
     def looked_off() -> None:
-        if looked_worker is None:
+        if not looked_on:
             raise HTTPException(404, "not available here", headers=NOT_INDEXED)
 
     def first_view(run: dict) -> dict:
@@ -2443,13 +2464,224 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             return feedback_org_rules.manifest_name_info(conn, genus_known)(wanted)
 
+    review_photos = photo_review.ReviewPhotos(q, permission_view)
     feedback_requests = feedback_api.add_routes(
         app, person=person, store=feedback_store, org=feedback_org, rescore=feedback_rescore,
-        photos=photo_review.ReviewPhotos(q, permission_view), name_info=name_info,
+        photos=review_photos, name_info=name_info,
         on_name_update_done=read_name_changes, places=feedback_places or pair_places.PairPlaces(
             cached_mo_place), inat_names=feedback_inat_names or name_context.InatNames(),
         note=note)
     app.state.feedback_requests = feedback_requests
+
+    # Research > Excluded photos (excluded_looked.py; Steve, 2026-10-26): the photos people left
+    # out in Human Feedback, as a read-only viewer sees them there, and "where Vision looked" on
+    # any of them, from the served model or its base, on the run maps' worker. The paper's seal
+    # holds maps back for records past it until MV_EXCLUDED_LOOKED_UNSEALED=1.
+    excluded_list = xl.Listing(feedback_store)
+    excluded_maps = (xl.Maps((config.RELEASE_ROOT / "state" if config.RELEASE_ROOT
+                              else Path(manifest_path or config.MANIFEST_PATH).parent) / xl.FILE)
+                     if excluded_on else None)
+    excluded_daily = RateLimiter(200, 86400.0)
+    app.state.excluded_limits = (looked_asks, excluded_daily)
+    excluded_maker = excluded_looked if callable(excluded_looked) else None
+    base_backbone = excluded_base or config.setting("MV_EXCLUDED_LOOKED_BASE") or "bioclip-2-336"
+    unsealed = (excluded_unsealed if excluded_unsealed is not None
+                else config.setting(xl.UNSEAL_SETTING) == "1")
+
+    def real_excluded_maker(loaded, backbone: str, ident: Identifier, name: str, body: bytes,
+                            hidden) -> dict:
+        """One excluded photo's map and rank, its own record left out (call holding gpu_lock)."""
+        tower = looked_tower(loaded, backbone)
+        entry = looked.photo_map(tower, body, looked.target_for(ident, name, hidden), None)
+        entry.pop("pairs", None)
+        entry["rank"] = xl.rank_of(ident, looked.photo_vector(tower, body), name, hidden)
+        return entry
+
+    def excluded_models() -> dict[str, str]:
+        """{"v1": the served backbone, "base": its base model where it has reference vectors}.
+        The base needn't be offered for identification (MV_BACKBONES): it is never served."""
+        ready = ready_backbones()
+        out = {"v1": ready[0]} if ready else {}
+        if ready and base_backbone != ready[0] and embedded_counts().get(base_backbone):
+            out["base"] = base_backbone
+        return out
+
+    def excluded_off() -> None:
+        if not excluded_on:
+            raise HTTPException(404, "not available here", headers=NOT_INDEXED)
+
+    def is_reviewer(request: Request) -> bool:
+        return not app.state.feedback_viewer(request)[3]
+
+    def excluded_row(request: Request, photo_key: str) -> "xl.Excluded":
+        """The excluded photo as this viewer may see it, or 404: listed to them, and a photo
+        anyone may see now (rechecked on every read)."""
+        rows = xl.visible(excluded_list.rows(), is_reviewer(request))
+        hit = next((r for r in rows if r.photo_key == photo_key), None)
+        row = review_photos.one(photo_key) if hit else None
+        view = permission_view()
+        if (hit is None or row is None or review_photos.declined(row, view)
+                or not view.may_show(row.license_class, row.owner_user_id)):
+            raise HTTPException(404, "no such photo shown here", headers=NOT_INDEXED)
+        return hit
+
+    def excluded_model(model: str) -> str:
+        backbone = excluded_models().get(model)
+        if backbone is None:
+            raise HTTPException(404, f"no {model} maps here", headers=NOT_INDEXED)
+        return backbone
+
+    def excluded_held(hit: "xl.Excluded") -> None:
+        if xl.held_back(feedback_store.gate, hit.record_key, unsealed):
+            raise HTTPException(403, "this photo's map is held back until the paper's sealed "
+                                     "test is scored", headers=NOT_INDEXED)
+
+    def excluded_rid(photo_key: str, model: str) -> str:
+        return f"excluded:{model}:{photo_key}"
+
+    def excluded_state(hit: "xl.Excluded", model: str):
+        doc = excluded_maps.get(hit.photo_key, model)
+        if doc is not None:
+            return JSONResponse({"status": "ready", **doc}, headers=NOT_INDEXED)
+        state = looked_worker.status(excluded_rid(hit.photo_key, model))
+        if state is None:
+            return JSONResponse({"status": "none"}, status_code=404, headers=NOT_INDEXED)
+        return JSONResponse(state, status_code=202 if state["status"] == "working" else 503,
+                            headers=NOT_INDEXED)
+
+    def manifest_names(keys: list[str]) -> dict[str, str]:
+        if not keys:
+            return {}
+        marks = ",".join("?" * len(keys))
+        return {str(k): n for k, n in q(f"select observation_id, coalesce(species, "
+                                        f"scientific_name) from records where observation_id "
+                                        f"in ({marks})", tuple(keys)) if n}
+
+    def excluded_job(hit: "xl.Excluded", model: str, backbone: str) -> looked.Job:
+        """One photo's map as a job: the index, the name and the photo are read outside the
+        model lock (fetch); the map is made holding it (make)."""
+        row = review_photos.one(hit.photo_key)
+        source, number = (("mo", hit.record_key[3:]) if hit.record_key.startswith("mo:")
+                          else ("inat", hit.record_key))
+
+        def fetch():
+            method = default_method()
+            try:
+                ident = identifier(backbone, method, permission_view())
+            except Exception as e:  # noqa: BLE001 - a model this server can't answer with now
+                raise looked.NoMap("the model is not ready here") from e
+            hidden, own = ident.left_out(source, number)
+            name = (ident.col_record[int(own[0])].species if len(own)
+                    else manifest_names([hit.record_key]).get(hit.record_key))
+            if not name or name not in ident.index.species:
+                raise looked.NoMap("the record's name is not in the reference set")
+            got = review_photos.image(row, "full")
+            if got is None:
+                raise looked.NoMap("the photo could not be read just now")
+            return ident, method, name, hidden, got[0]
+
+        def make(got):
+            ident, method, name, hidden, body = got
+            maker = excluded_maker or real_excluded_maker
+            entry = dict(maker(backbone_model(backbone), backbone, ident, name, body, hidden))
+            return {"name": name, "method": method, "entry": entry}
+
+        def finish(entries: list[dict]) -> None:
+            e = entries[0]
+            m = e["entry"]
+            excluded_maps.keep(hit.photo_key, model, {
+                "version": xl.VERSION, "name": e["name"], "model": model,
+                "backbone": backbone, "method": e["method"],
+                "made_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "map": {"crop": m["crop"], "grid": m["grid"], "map": m["map"]},
+                "rank": m.get("rank"), "top": xl.RANK_DEPTH})
+        return looked.Job(excluded_rid(hit.photo_key, model),
+                          [looked.Task(0, fetch, make)], finish)
+
+    @app.get("/api/research/excluded-photos")
+    def excluded_photos(request: Request, category: str = "all", offset: int = 0,
+                        limit: int = 48, maps: int = 0):
+        """The excluded photos of a category, a page at a time, as a read-only Human Feedback
+        viewer sees them; People only to reviewers. Open to anyone."""
+        read_limit(request)
+        excluded_off()
+        rows = xl.visible(excluded_list.rows(), is_reviewer(request))
+        mapped = excluded_maps.mapped()
+        try:
+            chosen = xl.select(rows, category, set(mapped) if maps else None)
+        except ValueError as e:
+            raise HTTPException(400, str(e), headers=NOT_INDEXED) from None
+        start = max(0, offset)
+        page = chosen[start:start + min(max(1, limit), xl.PAGE_MAX)]
+        info = review_photos.many([(r.photo_key, r.record_key) for r in page])
+        shown = {d["photo_key"]: d for d in review_photos.for_viewer(
+            [i["row"] for i in info.values()], reviewer=False, thumb="grid")}
+        names = manifest_names(sorted({r.record_key for r in page}))
+        tiles = []
+        for r in page:
+            ph, i = shown.get(r.photo_key) or {}, info.get(r.photo_key) or {}
+            public = ph.get("shown") == "public"
+            held = xl.held_back(feedback_store.gate, r.record_key, unsealed)
+            tiles.append({"photo_key": r.photo_key, "record_key": r.record_key,
+                          "name": names.get(r.record_key), "category": r.category,
+                          "shown": "public" if public else "hidden",
+                          "thumb": ph.get("thumb") if public else None,
+                          "photo_url": ph.get("full") if public else None,
+                          "owner_login": i.get("owner_login") if public else None,
+                          "license_code": i.get("license_code") if public else None,
+                          "record_url": xl.record_url(r.record_key),
+                          "held": held,
+                          "maps": sorted(mapped.get(r.photo_key, ())) if public and not held
+                          else []})
+        return JSONResponse({"categories": xl.categories(rows), "total": len(chosen),
+                             "offset": start, "tiles": tiles, "models": list(excluded_models()),
+                             "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
+                            headers=NOT_INDEXED)
+
+    @app.get("/api/research/excluded-photos/looked")
+    def read_excluded_looked(request: Request, photo: str, model: str = "v1"):
+        """An excluded photo's map, to anyone: 200 once made, 202 while being made, 404 when
+        nobody has asked yet, 403 while the paper's seal holds it back, 503 when it failed."""
+        read_limit(request)
+        excluded_off()
+        hit = excluded_row(request, photo)
+        excluded_model(model)
+        excluded_held(hit)
+        return excluded_state(hit, model)
+
+    @app.post("/api/research/excluded-photos/looked")
+    def ask_excluded_looked(request: Request, photo: str, model: str = "v1"):
+        """Asks for an excluded photo's map: anyone signed in. 200 when kept already, 202 while
+        it is made; 409 when it can't be made, 429 past 20 asks in 10 minutes or 200 in a day
+        (with the run maps' asks), or while too many maps are waiting. Who asked is not kept."""
+        excluded_off()
+        who = person(request)
+        if not who:
+            raise HTTPException(401, "sign in with your mycomap.org account to ask for this",
+                                headers=NOT_INDEXED)
+        hit = excluded_row(request, photo)
+        backbone = excluded_model(model)
+        excluded_held(hit)
+        rid = excluded_rid(hit.photo_key, model)
+        state = looked_worker.status(rid)
+        if excluded_maps.get(hit.photo_key, model) is not None or (
+                state and state["status"] == "working"):
+            return excluded_state(hit, model)
+        sub = str(who.get("sub"))
+        wait = looked_asks.check(sub) or excluded_daily.check(sub)
+        if wait:
+            raise HTTPException(429, "you have asked for a lot of these; try again later",
+                                headers={"Retry-After": str(int(wait) + 1), **NOT_INDEXED})
+        try:
+            looked_worker.submit(excluded_job(hit, model, backbone))
+        except looked.Busy as e:
+            raise HTTPException(429, "Vision is busy making other maps; try again in a minute",
+                                headers={"Retry-After": str(int(e.wait_seconds) + 1),
+                                         **NOT_INDEXED}) from None
+        state = looked_worker.status(rid)
+        if state and state["status"] == "failed":
+            raise HTTPException(409, state["detail"], headers=NOT_INDEXED)
+        return excluded_state(hit, model)
     if background and org_named:           # unfinished Name Updates, and the log beside them
         def follow_name_updates():
             feedback_requests.poll_once()

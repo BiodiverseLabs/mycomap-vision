@@ -239,6 +239,9 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             return person(request), fb.PUBLIC_ITEMS, {}, True
         return who, projects, roles, False
 
+    # Research > Excluded photos lists People photos only to reviewers (excluded_looked.py).
+    app.state.feedback_viewer = viewer
+
     def admin_only(request: Request) -> dict:
         who, projects = access(request)
         if projects is not None:

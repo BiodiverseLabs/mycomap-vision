@@ -102,7 +102,7 @@ test("the sticky in-page nav numbers each section and links to it, the first mar
 
 test("the Research bar shows Experiments, locked, to a visitor, and marks the page being read", () => {
   const html = render(createElement(ResearchBar, { me: visitor }), "/research/benchmarks/rare-species");
-  assert.match(text(html), /Overview Results Benchmarks Evaluation protocols Reference data Experiments For researchers API/);
+  assert.match(text(html), /Overview Results Benchmarks Evaluation protocols Reference data Experiments Excluded photos For researchers API/);
   assert.match(html, /href="\/research\/experiments" class="">Experiments<span class="lk" aria-label="members only">/);
   assert.match(html, /aria-current="page" href="\/research\/benchmarks" class="on"/);
 });
@@ -119,6 +119,7 @@ test("the landing: live headline tiles, every finding card, the section map and 
   assert.match(t, /v1-open names 55\.3%/, "the open-reference number, labelled");
   assert.match(t, /66% of reference species have 1-4/);
   assert.match(html, /data-testid="map-experiments"/, "Experiments is on the map for a visitor too");
+  assert.match(html, /href="\/research\/excluded-photos"/, "Excluded photos is on the map");
   assert.match(t, /For mycomap\.org members: sign in to read/);
   assert.match(t, /MycoMap Vision is BioCLIP 2 \(Imageomics\) fine-tuned on DNA-verified records\./);
   assert.doesNotMatch(t, /v1-test result|Zenodo|Hugging ?Face/i);
