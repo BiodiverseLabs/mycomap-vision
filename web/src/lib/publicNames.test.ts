@@ -148,8 +148,9 @@ test("no fine-tuned model is named BioCLIP 2 anywhere: it is the base model, the
   }
   for (const m of TWO_MODELS.models) assert.doesNotMatch(twoModelLabel(m), /bioclip/i);
   // Written out in the code, "BioCLIP 2" is only the base model as itself, the credit line, its
-  // citation (its text or BibTeX title), its zero-shot gate, or the base model's own name in a table of bases.
-  const allowed = /BioCLIP 2(?= \(base model, not fine-tuned| \(Imageomics\) fine-tuned on DNA-verified records\.|: [eE]mergent [pP]roperties|'s zero-shot| \(Gu et al\. 2025\)|")/g;
+  // citation (its text or BibTeX title), its zero-shot gate, or the base model's own name in a table of bases;
+  // "BioCLIP 2.5 Huge (base model, not fine-tuned)" is another base model, named as one.
+  const allowed = /BioCLIP 2(?= \(base model, not fine-tuned|\.5 Huge \(base model, not fine-tuned| \(Imageomics\) fine-tuned on DNA-verified records\.|: [eE]mergent [pP]roperties|'s zero-shot| \(Gu et al\. 2025\)|")/g;
   for (const { file, text } of all) {
     const left = code(text).replace(allowed, "");
     assert.doesNotMatch(left, /BioCLIP 2/, `${file}: BioCLIP 2 named outside the base model and its credit`);

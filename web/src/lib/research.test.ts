@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ADVANCE_PAUSED_SINCE, API_PATH, BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, CITATIONS, DATA_LABEL, diffsHeading,
          E33, isBarTabActive, isResearchPath, MEASURE_LABEL, MOVED, mustSignIn, PUBLIC_NAV, researchBar, researchNav,
-         resultCards, SEALED_TEST, STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, V1_IMAGE_SIZE, V1_PUBLISHED, valueCaption,
+         resultCards, SEALED_TEST, startsFrom336, STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, V1_IMAGE_SIZE, V1_PUBLISHED, valueCaption,
          type TestSetResults } from "./research";
 import type { Me } from "./api";
 
@@ -110,14 +110,22 @@ test("the Research bar leads with the overview; Experiments is there for everyon
   assert.equal(isBarTabActive("/research/benchmarks", "/research/benchmarksx"), false);
 });
 
-test("the base-model screen quotes its committed entry: one run, FungiTastic BEiT-B (frozen) beside the bases", () => {
+test("the base-model screen quotes its committed entry: one run over every row, BioCLIP 2.5 Huge and BioCLIP 2 at 224 and 336 px", () => {
   assert.equal(BASE_MODEL_SCREEN.queries, 664);
-  assert.match(BASE_MODEL_SCREEN.source, /experiments\/2026-10-13-v1-backbone-screen\.md, addendum of 25 Oct \(origin\/main ef3a8df\)/);
-  assert.deepEqual(BASE_MODEL_SCREEN.rows.map((r) => [r.name, r.top1, r.top3, r.top5, r.top10]), [
-    ["BioCLIP 2", 70.9, 85.2, 88.9, 92.6], ["FungiTastic BEiT-B (frozen)", 68.8, 81.3, 84.5, 88.5],
-    ["BioCLIP", 58.3, 72.6, 78.0, 83.4], ["DINOv3 large", 54.7, 70.2, 76.0, 80.1]]);
+  assert.match(BASE_MODEL_SCREEN.source, /experiments\/2026-10-13-v1-backbone-screen\.md, addendum of 26 Oct \(origin\/main 25a9036\)/);
+  assert.equal(BASE_MODEL_SCREEN.comparison, "20261026-163000-1a3990");
+  assert.deepEqual(BASE_MODEL_SCREEN.rows.map((r) => [r.name, r.detail, r.top1, r.top3, r.top5, r.top10]), [
+    ["BioCLIP 2.5 Huge (base model, not fine-tuned)", "336 px · Imageomics", 77.7, 88.9, 92.0, 94.7],
+    ["BioCLIP 2.5 Huge (base model, not fine-tuned)", "224 px · Imageomics", 75.0, 88.5, 91.3, 94.7],
+    ["BioCLIP 2", "336 px · Imageomics", 72.7, 85.8, 89.9, 93.1],
+    ["BioCLIP 2", "224 px · Imageomics", 70.9, 85.2, 88.9, 92.6],
+    ["FungiTastic BEiT-B (frozen)", "384 px · fungus classifier's features, head not used", 68.8, 81.3, 84.5, 88.5],
+    ["DINOv3 large", "512 px · Meta, general purpose", 54.7, 70.2, 76.0, 80.1]]);
+  assert.ok(startsFrom336(BASE_MODEL_SCREEN.rows), "the screen says where MycoMap Vision v1 starts");
   assert.deepEqual(BASE_MODEL_SCREEN.rows.filter((r) => r.run), [], "one run only: no row from another run");
-  assert.ok(!BASE_MODEL_SCREEN.rows.some((r) => /MycoMap Vision|fine-tun/i.test(r.name)), "base models only");
+  assert.ok(!BASE_MODEL_SCREEN.rows.some((r) => /MycoMap Vision|(?<!not )fine-tun/i.test(r.name)), "base models only");
+  assert.equal(new Set(BASE_MODEL_SCREEN.rows.map((r) => `${r.name} · ${r.detail}`)).size, BASE_MODEL_SCREEN.rows.length,
+    "each row is one model at one size");
   for (const r of BASE_MODEL_SCREEN.rows) assert.ok(r.top1 <= r.top3 && r.top3 <= r.top5 && r.top5 <= r.top10, r.name);
 });
 
@@ -129,6 +137,13 @@ const set = (key: string): TestSetResults => {
 /** A set's rows as [name, detail, ...values], so a wrong, moved or missing number fails. */
 const table = (key: string) => set(key).rows.map((r) => [r.name, r.detail ?? "", ...r.cells]);
 const diffs = (key: string) => set(key).diffs!.rows.map((r) => [r.name, ...r.cells.map((x) => [x.d, x.lo, x.hi])]);
+
+test("the screen says MycoMap Vision v1 starts from BioCLIP 2 at 336 px only when that row is there", () => {
+  const row = (name: string, detail: string) => ({ name, detail, top1: 1, top3: 2, top5: 3, top10: 4 });
+  assert.equal(startsFrom336([row("BioCLIP 2", "224 px · Imageomics")]), false);
+  assert.equal(startsFrom336([row("BioCLIP 2.5 Huge (base model, not fine-tuned)", "336 px · Imageomics")]), false);
+  assert.equal(startsFrom336([row("BioCLIP 2", "224 px · Imageomics"), row("BioCLIP 2", "336 px · Imageomics")]), true);
+});
 
 test("results by test set: every set committed, each citing its entry on research main; grouped into cards by test set", () => {
   assert.deepEqual(TEST_SET_RESULTS.map((s) => s.key), ["fungitastic-closed-ft-train", "fungitastic-closed-mycomap-ref",

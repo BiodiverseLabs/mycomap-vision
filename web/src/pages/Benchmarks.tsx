@@ -3,7 +3,7 @@ import { Link } from "wouter";
 import { ArrowUpRight, Check, Lock } from "lucide-react";
 import type { EarlyAnswersGroup, HowGood, Me, ProspectiveModel, RunReport, ScoreRun } from "@/lib/api";
 import { comparisons, incompleteRun, standardOf, STANDARD_BANDS, companionBars } from "@/lib/compareView";
-import { BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, DATA_LABEL, DATA_ORDER, diffsHeading, MEASURE_LABEL, MEASURE_ORDER,
+import { BASE_MODEL_SCREEN, BENCHMARKS, cellDigits, startsFrom336, DATA_LABEL, DATA_ORDER, diffsHeading, MEASURE_LABEL, MEASURE_ORDER,
          resultCards, STATUS_LABEL, STATUS_ORDER, TEST_SET_RESULTS, valueCaption, type Benchmark, type BenchmarkStatus,
          type TestSetResults } from "@/lib/research";
 import { benchmarkFacetCounts, cardFigure, cardMeta, earlyFigures, filterBenchmarks, filterFromSearch,
@@ -13,6 +13,7 @@ import { benchmarkFacetCounts, cardFigure, cardMeta, earlyFigures, filterBenchma
 import { BandBars, ChartCard, ChipRow, DepthHeatmap, DepthShareBars, DevLabel, InPageNav, Interim, KV,
          Pipeline, ResearchHero, ResearchShell, SearchBox, Section, SourceLine, StatusPill, Tile, Tiles,
          TopKChart, ValueBars } from "@/components/ResearchKit";
+import { MODEL_CREDIT_LINE } from "@/lib/publicView";
 import { useEarly, useHowGood, useMe, useProspective, useRunReports, useScoreboard } from "@/components/researchQueries";
 
 // Research > Benchmarks and each benchmark's page (Steve, 2026-10-25: the approved redesign).
@@ -111,7 +112,7 @@ function Glance({ d }: { d: BenchmarksData }) {
 
 /** The base-model screen (lib/research.ts BASE_MODEL_SCREEN), labelled a development screen. */
 export function BaseModelScreen({ rows = BASE_MODEL_SCREEN.rows }: { rows?: typeof BASE_MODEL_SCREEN.rows }) {
-  const chartRows: TopKRow[] = rows.map((r) => ({ key: r.name, name: r.name, detail: r.run ? `${r.detail} · ${r.run}` : r.detail, n: BASE_MODEL_SCREEN.queries,
+  const chartRows: TopKRow[] = rows.map((r) => ({ key: `${r.name} · ${r.detail}`, name: r.name, detail: r.run ? `${r.detail} · ${r.run}` : r.detail, n: BASE_MODEL_SCREEN.queries,
     values: { 1: r.top1 / 100, 3: r.top3 / 100, 5: r.top5 / 100, 10: r.top10 / 100 } }));
   return (
     <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5" data-testid="base-model-screen">
@@ -123,8 +124,9 @@ export function BaseModelScreen({ rows = BASE_MODEL_SCREEN.rows }: { rows?: type
       </h3>
       <p className="small mb-3">Frozen base models (not fine-tuned), closest specimens + species average, photos only, on the same {nf(BASE_MODEL_SCREEN.queries)} deciding queries.</p>
       <TopKChart rows={chartRows} labelHead="Base model" trackHead="Species" labelWidth={170} numsWidth={160} testId="chart-base-screen" />
-      <p className="small mt-2.5">{rows.some((r) => r.run) && <>Every row is one run except where it names its own (that run's rows sit within 0.2 points of this one). </>}A v1 validation subset whose references cover {nf(BASE_MODEL_SCREEN.species)} species, so each query has far fewer candidate species than on the full split: not comparable with the numbers above. A top 1 near 70% on {nf(BASE_MODEL_SCREEN.queries)} queries carries about ±3.5 points (95%).</p>
-      <SourceLine parts={[BASE_MODEL_SCREEN.source, "comparison 20261025-163049-1a3990", "dataset release v1", "seed 20261013"]} />
+      {startsFrom336(rows) && <p className="small mt-2.5" data-testid="screen-v1-start">{MODEL_CREDIT_LINE} MycoMap Vision v1 was fine-tuned from it at 336 px. <Link href="/research/results#approaches" className="text-[#4f7a16] underline" data-testid="link-approaches">See Results › Approaches compared</Link></p>}
+      <p className="small mt-2.5">{rows.some((r) => r.run) && <>Every row is one run except where it names its own (that run's rows sit within 0.2 points of this one). </>}A v1 validation subset whose references cover {nf(BASE_MODEL_SCREEN.species)} species, so each query has far fewer candidate species than on the full split: not comparable with results on the full v1 validation split, such as Newest weeks at a glance or the MycoMap v1 validation card below. A top 1 near 70% on {nf(BASE_MODEL_SCREEN.queries)} queries carries about ±3.5 points (95%).</p>
+      <SourceLine parts={[BASE_MODEL_SCREEN.source, `comparison ${BASE_MODEL_SCREEN.comparison}`, "dataset release v1", "seed 20261013"]} />
     </div>
   );
 }

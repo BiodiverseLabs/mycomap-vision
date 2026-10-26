@@ -17,7 +17,7 @@ import { CitationCard, InPageNav, ResearchBar, StatusPill } from "../components/
 import { ResearchLanding } from "./ResearchLanding";
 import { V1_OPEN_DATA, V1_OPEN_PHOTOS } from "../lib/publicView";
 import { Results, RESULTS_SECTIONS } from "./Results";
-import { BenchmarkDetail, Benchmarks, DETAIL_SECTIONS } from "./Benchmarks";
+import { BaseModelScreen, BenchmarkDetail, Benchmarks, DETAIL_SECTIONS } from "./Benchmarks";
 import { Protocols } from "./Protocols";
 import { Data } from "./Data";
 import { Experiments } from "./Experiments";
@@ -175,8 +175,13 @@ test("Benchmarks: the summary, the screen named by its test set, results by test
   assert.match(html, /data-testid="label-dev">Development screen/);
   assert.match(t, /Base-model screen Development screen MycoMap v1 validation subset \(664 queries\)/);
   assert.doesNotMatch(t, /Which image model to build on|by 2\.1 points/, "the screen is named by its test set, with no winner");
+  assert.match(t, /not comparable with results on the full v1 validation split, such as Newest weeks at a glance or the MycoMap v1 validation card below/);
+  assert.doesNotMatch(t, /not comparable with the numbers above/, "says which numbers");
   assert.match(t, /FungiTastic BEiT-B \(frozen\)/);
-  assert.match(t, /ef3a8df/);
+  assert.match(t, /25a9036/);
+  assert.match(t, /comparison 20261026-163000-1a3990/);
+  assert.doesNotMatch(t, /ef3a8df|20261025-163049/, "the screen cites one run, the new one");
+  assert.match(t, /MycoMap Vision v1 was fine-tuned from it at 336 px\. See Results › Approaches compared/);
   for (const k of ["fungitastic-closed-ft-train", "fungitastic-dna-ft-train", "fungitastic-fewshot", "v1-val-as-released"]) {
     assert.match(html, new RegExp(`data-testid="result-card-${k}"`), k);
   }
@@ -242,6 +247,16 @@ test("Benchmarks, results by test set: each card titled by its test set, its con
   assert.match(v1, /Paired differences in points, with 95% intervals Difference Species top 1 3 5 10 FungiTastic recipe: BEiT-B\/384 − MycoMap Vision v1-open −4\.04 \[−4\.91, −3\.24\] −5\.41 \[−6\.37, −4\.53\] −4\.71 \[−5\.60, −3\.92\] −4\.22 \[−4\.97, −3\.59\]/);
   assert.match(v1, /MycoMap Vision v1-open open photos, open reference 55\.31 72\.61 77\.65 83\.29 85\.4 /);
   assert.match(v1, /MycoMap Vision v1 all photos, full reference 56\.32 73\.55 78\.87 84\.28 85\.8 /);
+});
+
+test("Benchmarks, base-model screen: once BioCLIP 2 at 336 px is a row, it says MycoMap Vision v1 starts there and links to Approaches compared", () => {
+  const row = (name: string, detail: string, top1: number) => ({ name, detail, top1, top3: top1 + 1, top5: top1 + 2, top10: top1 + 3 });
+  const without = render(createElement(BaseModelScreen, { rows: [row("BioCLIP 2", "224 px · Imageomics", 70)] }), "/research/benchmarks");
+  assert.doesNotMatch(without, /data-testid="screen-v1-start"/);
+  const html = render(createElement(BaseModelScreen, { rows: [row("BioCLIP 2", "224 px · Imageomics", 70),
+    row("BioCLIP 2", "336 px · Imageomics", 71)] }), "/research/benchmarks");
+  assert.match(text(html), /MycoMap Vision is BioCLIP 2 \(Imageomics\) fine-tuned on DNA-verified records\. MycoMap Vision v1 was fine-tuned from it at 336 px\. See Results › Approaches compared/);
+  assert.match(html.match(/<a[^>]*data-testid="link-approaches"[^>]*>/)?.[0] ?? "", /href="\/research\/results#approaches"/);
 });
 
 test("Benchmarks filtered: the count says so, a clear button shows, and an empty result offers to clear", () => {
