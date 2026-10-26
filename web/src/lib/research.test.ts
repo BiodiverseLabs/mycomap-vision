@@ -140,11 +140,11 @@ test("results by test set: every set committed, each citing its entry on researc
   ]);
   assert.deepEqual(resultCards([{ ...set("fungitastic-fewshot"), card: "FungiTastic" }, { ...set("fungitastic-dna-ft-train"), card: "FungiTastic" }])
     .map((c) => [c.title, c.sets.length]), [["FungiTastic", 2]], "a card can aggregate different test sets");
-  assert.equal(E33.commit, "6090354");
+  assert.equal(E33.commit, "2e2576a");
   assert.equal(V1_PUBLISHED.commit, "5792c17");
   for (const s of TEST_SET_RESULTS) {
     const entry = s.key === "v1-val-as-released" ? /experiments\/2026-10-13-v1-published-models\.md.*\(origin\/main 5792c17\)/
-      : /experiments\/2026-10-23-fungitastic-own-test\.md \(origin\/main 6090354\)/;
+      : /experiments\/2026-10-23-fungitastic-own-test\.md \(origin\/main 2e2576a\)/;
     assert.match(s.source, entry, s.key);
     assert.ok(s.about && s.size && s.maker, s.key);
     for (const r of s.rows) {
@@ -152,8 +152,8 @@ test("results by test set: every set committed, each citing its entry on researc
       if (r.cis) assert.equal(r.cis.length, s.columns.length, `${s.key}: ${r.name}`);
     }
   }
-  // Only E4, still training, is interim in E33.
-  assert.deepEqual(TEST_SET_RESULTS.filter((s) => s.interim).map((s) => s.key), ["v1-val-open-photos"]);
+  // E33 marks E4 final (stopped at epoch 20, best epoch 13): nothing is interim.
+  assert.deepEqual(TEST_SET_RESULTS.filter((s) => s.interim).map((s) => s.key), []);
 });
 
 test("results by test set: no sealed-test number, no image, no competitive framing, and the agreed model names", () => {
@@ -275,15 +275,22 @@ test("MycoMap v1 validation, models as released: species top-k, genus, the 2,411
   });
 });
 
-test("MycoMap v1 validation, trained on open photos only: E4 stays interim at epoch 13", () => {
+test("MycoMap v1 validation, trained on open photos only: E4 final at its best epoch 13, with the paired interval", () => {
   const s = set("v1-val-open-photos");
-  assert.ok(s.interim);
+  assert.ok(!s.interim);
   assert.deepEqual(table("v1-val-open-photos").map((r) => [r[0], ...r.slice(2)]), [
     ["FungiTastic recipe: BEiT-B/384", 51.23, 67.18, 72.90, 79.03, 80.22],
     ["MycoMap Vision v1-open", 55.31, 72.61, 77.65, 83.29, 84.9],
     ["MycoMap Vision v1", 56.32, 73.55, 78.87, 84.28, 85.4],
   ]);
-  assert.match(s.rows[0].detail!, /best epoch so far \(13\)/);
+  assert.match(s.rows[0].detail!, /final: best epoch 13/);
+  assert.deepEqual(diffs("v1-val-open-photos"), [
+    ["FungiTastic recipe: BEiT-B/384 − MycoMap Vision v1-open", [-4.04, -4.91, -3.24], [-5.41, -6.37, -4.53], [-4.71, -5.60, -3.92], [-4.22, -4.97, -3.59]],
+  ]);
+  for (const x of s.diffs!.rows[0].cells) assert.ok(x.lo <= x.d && x.d <= x.hi);
+  assert.match(s.notes.join(" "), /55\.27 rather than 55\.31/);
+  assert.match(s.notes.join(" "), /stopped by its declared epoch rule at epoch 20; the final model is its best epoch, 13/);
+  assert.doesNotMatch(JSON.stringify(s), /still training|so far/);
   assert.equal(cellDigits(s, s.rows[1], 4), 1, "84.9 as the entry gives it");
 });
 

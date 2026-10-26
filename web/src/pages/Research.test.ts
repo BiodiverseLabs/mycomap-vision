@@ -176,8 +176,8 @@ test("Benchmarks: the summary, the screen named by its test set, results by test
   }
   assert.equal(count(html, /data-testid="result-card-/g), 4, "aggregated: one card per test set here");
   assert.equal(count(html, /data-testid="result-set-/g), 7);
-  assert.equal(count(html, /data-testid="label-interim"/g), 1, "only E4 is interim");
-  assert.match(t, /6090354/);
+  assert.equal(count(html, /data-testid="label-interim"/g), 0, "E4 is final in E33");
+  assert.match(t, /2e2576a/);
   assert.match(t, /5792c17/);
   assert.doesNotMatch(t, /8147947/, "the results cite the entries as they stand now");
   assert.equal(count(html, /data-testid="benchmark-card-/g), BENCHMARKS.length);
@@ -227,8 +227,10 @@ test("Benchmarks, results by test set: each card titled by its test set, its con
   assert.match(v1, /MycoMap Vision v1 all photos, full reference 56\.3 53\.4–59\.2 73\.6 78\.9 84\.3 85\.8 84\.0–87\.5 67\.6 64\.6–70\.4/);
   assert.match(v1, /FungiTastic BEiT-B\/384 10\.7 9\.4–12\.4 14\.1 15\.2 16\.5 58\.6 56\.0–61\.4 56\.9 53\.1–61\.2/);
   assert.match(v1, /FungiTastic ConvNeXt-B\/384 9\.6 8\.2–11\.4 13\.0 14\.4 15\.8 53\.9 51\.0 46\.7–56\.2/);
-  assert.match(v1, /training: open photos only \(E4\) Interim · val only/);
-  assert.match(v1, /FungiTastic recipe: BEiT-B\/384 trained on v1's open photos \(E4\) · best epoch so far \(13\) 51\.23 67\.18 72\.90 79\.03 80\.22/);
+  assert.match(v1, /training: open photos only \(E4\) The same finds/, "no interim label after the condition");
+  assert.doesNotMatch(v1, /Interim/);
+  assert.match(v1, /FungiTastic recipe: BEiT-B\/384 trained on v1's open photos \(E4\) · final: best epoch 13 51\.23 67\.18 72\.90 79\.03 80\.22/);
+  assert.match(v1, /Difference Species top 1 3 5 10 FungiTastic recipe: BEiT-B\/384 − MycoMap Vision v1-open −4\.04 \[−4\.91, −3\.24\] −5\.41 \[−6\.37, −4\.53\] −4\.71 \[−5\.60, −3\.92\] −4\.22 \[−4\.97, −3\.59\]/);
   assert.match(v1, /MycoMap Vision v1-open open photos, open reference 55\.31 72\.61 77\.65 83\.29 84\.9 /);
 });
 

@@ -380,11 +380,11 @@ export const BASE_MODEL_SCREEN = {
 };
 
 /** The research entry most test-set results cite (Steve, 2026-10-25): E33, as it stands on
- *  the research repo's origin/main at 6090354 (the entry's last change; read at 5792c17). */
+ *  the research repo's origin/main at 2e2576a (E4 marked FINAL, the entry done). */
 export const E33 = {
   path: "experiments/2026-10-23-fungitastic-own-test.md",
   slug: "fungitastic-own-test",
-  commit: "6090354",
+  commit: "2e2576a",
 };
 
 /** The entry the published models on v1 val come from: its 25 Oct addendum (502719f) and the
@@ -463,9 +463,9 @@ const PAIRED = "Paired on the same images; 95% intervals from an observation-clu
 const ON_NA_REFERENCE = "The reference is MycoMap's North American v1 training split, so only the species it holds can be named: a test of transfer across continents. An answer counts when it equals the image's scientific name or its GBIF accepted species (exact names, no crosswalk). Photos only.";
 
 /** Every test set with committed results, each number copied from its entry on the research
- *  repo's origin/main (E33 at 6090354; v1-published-models at 5792c17). None is the sealed
+ *  repo's origin/main (E33 at 2e2576a; v1-published-models at 5792c17). None is the sealed
  *  test (v1-test): it has no results until it is opened. FungiTastic's images are CC BY-NC-SA,
- *  so only scores appear. The E4 row is still INTERIM in E33, and here. */
+ *  so only scores appear. */
 export const TEST_SET_RESULTS: TestSetResults[] = [
   { key: "fungitastic-closed-ft-train", name: "FungiTastic ClosedSet-Test", condition: "reference: FungiTastic-Train",
     about: `${FUNGITASTIC}'s closed-set test: observations from the Atlas of Danish Fungi whose species all appear in its training set.`,
@@ -590,14 +590,21 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
     source: V1_PUBLISHED_SOURCE },
   { key: "v1-val-open-photos", name: "MycoMap v1 validation (12,798 finds)", condition: "training: open photos only (E4)",
     about: "The same finds, with the FungiTastic training recipe trained on v1's openly licensed photos: the photos MycoMap Vision v1-open learned from.",
-    size: "12,874 finds · 12,798 with a species", maker: "MycoMap v1", interim: true,
+    size: "12,874 finds · 12,798 with a species", maker: "MycoMap v1",
     columns: [...topK("Species"), { group: "Genus", label: "Top 1" }], digits: 2,
     rows: [
-      { name: E4, detail: "trained on v1's open photos (E4) · best epoch so far (13)", cells: [51.23, 67.18, 72.90, 79.03, 80.22] },
+      { name: E4, detail: "trained on v1's open photos (E4) · final: best epoch 13", cells: [51.23, 67.18, 72.90, 79.03, 80.22] },
       { name: VISION_V1_OPEN, detail: "open photos, open reference", cells: [55.31, 72.61, 77.65, 83.29, 84.9], digits: [2, 2, 2, 2, 1] },
       { name: VISION_V1, detail: "all photos, full reference", cells: [56.32, 73.55, 78.87, 84.28, 85.4], digits: [2, 2, 2, 2, 1] },
     ],
-    notes: ["E4 (BEiT-B/384, Seesaw loss, the FungiTastic schedule) is still training, so its number can move; the paired interval comes with its final model. Every row is scored the same way: each find's photos averaged, the species-rank answer key."],
+    diffs: { columns: ["Species top 1", "3", "5", "10"], rows: [
+      { name: `${E4} − ${VISION_V1_OPEN}`, cells: [{ d: -4.04, lo: -4.91, hi: -3.24 }, { d: -5.41, lo: -6.37, hi: -4.53 },
+        { d: -4.71, lo: -5.60, hi: -3.92 }, { d: -4.22, lo: -4.97, hi: -3.59 }] },
+    ] },
+    notes: [
+      "E4 (BEiT-B/384, Seesaw loss, the FungiTastic schedule) stopped by its declared epoch rule at epoch 20; the final model is its best epoch, 13. Every row is scored the same way: each find's photos averaged, the species-rank answer key.",
+      "Paired on the same finds; 95% intervals from an observer-clustered bootstrap (752 observers, 2,000 resamples). The interval's own scoring gives MycoMap Vision v1-open 55.27 rather than 55.31; the 0.04-point difference is in its row, not E4's.",
+    ],
     source: E33_SOURCE },
 ];
 
