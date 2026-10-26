@@ -47,6 +47,7 @@ import { capitalize, publicMethodLabel, publicModelName } from "@/lib/publicName
 import { SafetyNote } from "@/components/SafetyNote";
 import { canStartOver, startOver } from "@/lib/startOver";
 import { InatSuggestions } from "@/components/InatSuggestions";
+import { WhereLooked } from "@/components/WhereLooked";
 import { inatForPage, newInatRef } from "@/lib/inatSuggestions";
 import { answerSpecies, bestPerPhoto, CONNECT_URL, othersHeading, yoursLine, yoursPanel } from "@/lib/yours";
 import {
@@ -367,10 +368,11 @@ export function IdentifyPage() {
             <div
               className={`grid gap-6 ${answer.results.length > 1 ? "xl:grid-cols-2" : ""}`}
             >
-              {answer.results.map((r) => (
+              {answer.results.map((r, i) => (
                 <ResultCard key={`${modelKey(r.model.backbone, r.model.method)}@${submittedAt}`}
                             r={r} urls={shownUrls} photos={shownPhotos ?? r.photos}
-                            onInclude={pending ? undefined : includePhoto} />
+                            onInclude={pending ? undefined : includePhoto}
+                            runId={i === 0 && !pending ? answer.run?.id : undefined} />
               ))}
             </div>
           )}
@@ -1182,10 +1184,12 @@ export function WhatNext({ results, className = "mt-6" }: { results: IdentifyRes
   );
 }
 
-export function ResultCard({ r, urls, photos, onInclude }: {
+export function ResultCard({ r, urls, photos, onInclude, runId }: {
   r: IdentifyResult; urls: string[]; photos: number;
   /** Runs it again with a photo counted (true) or left out again (false); none on a run's page. */
   onInclude?: (photo: number, on: boolean) => void;
+  /** The run's link id, on the answer "Where Vision looked" explains (the first model's). */
+  runId?: string;
 }) {
   // null: all photos together (the main answer). A number: that photo on its own.
   const [view, setView] = useState<number | null>(null);
@@ -1217,6 +1221,7 @@ export function ResultCard({ r, urls, photos, onInclude }: {
           {r.per_photo.length > 1 && (
             <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} />
           )}
+          {runId && answer && !gate.notFungus && <WhereLooked runId={runId} r={r} urls={urls} />}
           {!photo && <LeftOutByType r={r} onInclude={onInclude} />}
           {r.per_photo.length === 1 && <OnePhotoType p={r.per_photo[0]} />}
           {photo && <PhotoVerdict p={photo} onInclude={onInclude} />}

@@ -19,6 +19,9 @@ What a run keeps (RunStore), and never anything else:
   shown one's licence code and who took it (photos_credit), so its card can credit them;
 - its link-preview card (linkcards.py) once made, as `card.jpg` beside it: an iNat or MO
   run's is drawn from its CC0 / CC BY photos, read from the source once;
+- its "Where Vision looked" maps once someone signed in asks for them (looked.py), as
+  `looked.json` beside it: per photo, a 24 x 24 map and the patches matched with the specimen
+  photo the link showed; a match is shown only while the link still shows that photo;
 - the place at 0.1 degree and the date, as the page shows them; never the exact point;
 - the reference photos each specimen could show, so a photo whose photographer withdrew
   since is never shown (answercache.reshow_photos);
@@ -66,6 +69,7 @@ COPY_QUALITY = 80
 KINDS = ("photos", "observation")
 CARD = "card.jpg"                          # the run's link-preview image, beside it
 INAT = "inat.json"                         # iNat's suggestions for its owner (inat_suggest.py)
+LOOKED = "looked.json"                     # "Where Vision looked" maps, once asked for (looked.py)
 
 
 def new_id() -> str:
@@ -461,9 +465,32 @@ class RunStore:
             return None
         return kept if isinstance(kept, dict) else None
 
+    def keep_looked(self, rid: str, doc: dict) -> bool:
+        """Keeps the run's "Where Vision looked" maps beside it (looked.py); False (and
+        nothing kept) when the run is gone."""
+        if self.get(rid) is None:
+            return False
+        self.objects.put(self._key(rid, LOOKED), json.dumps(doc, separators=(",", ":")).encode(),
+                         "application/json")
+        if self.get(rid) is None:           # deleted while they were being kept
+            self.objects.delete(self._key(rid, LOOKED))
+            return False
+        return True
+
+    def looked(self, rid: str) -> dict | None:
+        """The maps kept beside the run, or None."""
+        if self.get(rid) is None:
+            return None
+        body = self.objects.get(self._key(rid, LOOKED))
+        try:
+            kept = json.loads(body) if body else None
+        except ValueError:
+            return None
+        return kept if isinstance(kept, dict) else None
+
     def delete(self, rid: str) -> bool:
-        """Removes the run, its photo copies, its card and its place on every owner's list;
-        False when there was none."""
+        """Removes the run, its photo copies, its card, its maps and its place on every
+        owner's list; False when there was none."""
         run = self.get(rid)
         if run is None:
             return False
@@ -471,6 +498,7 @@ class RunStore:
             self.objects.delete(self._key(rid, f"{n}.jpg"))
         self.objects.delete(self._key(rid, CARD))
         self.objects.delete(self._key(rid, INAT))
+        self.objects.delete(self._key(rid, LOOKED))
         self.objects.delete(self._key(rid, "run.json"))
         with self._lock:
             self._remember(rid, None)

@@ -122,12 +122,13 @@ def public_page(method: str, path: str) -> bool:
         or any(path.startswith(d) for d in PUBLIC_FILE_DIRS) or run_path(path))
 
 
-# A run's own link (runs.py; Steve, 2026-10-20): its page, its answer, its photo copies and
-# its link-preview image (linkcards.py) open for anyone who has the link, signed in or not.
-# The id is the only key. Nothing else about runs is open: deleting one needs sign-in, and
-# no route lists them.
+# A run's own link (runs.py; Steve, 2026-10-20): its page, its answer, its photo copies, its
+# link-preview image (linkcards.py) and its "Where Vision looked" maps once made (looked.py)
+# open for anyone who has the link, signed in or not, to read. The id is the only key.
+# Nothing else about runs is open: deleting one or asking for its maps needs sign-in, and no
+# route lists them.
 _RUN_PATH = re.compile(r"^/(?:r/[A-Za-z0-9_-]{16}|api/runs/[A-Za-z0-9_-]{16}"
-                       r"(?:/photos/\d{1,2}\.jpg|/card\.jpg)?)$")
+                       r"(?:/photos/\d{1,2}\.jpg|/card\.jpg|/looked)?)$")
 
 
 def run_path(path: str) -> bool:
