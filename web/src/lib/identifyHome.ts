@@ -3,8 +3,12 @@
  * 2026-10-26: the approved redesign, .mockups/vision-identify-home). Every number comes from
  * /api/stats or /api/how-good; one the server doesn't send is left out, never made up.
  */
-import { num, pct, RANKS, type HowGood, type Rank, type Stats, type TopK } from "@/lib/api";
+import { num, pct, RANKS, type HowGood, type Rank, type RunView, type Specimen, type Stats, type TopK } from "@/lib/api";
+import { answerFor } from "@/lib/answer";
+import { chanceWithheld, gateBanner } from "@/lib/gate";
+import { sourceName } from "@/lib/observationLink";
 import { longDate, recentWeekLine } from "@/lib/publicView";
+import { runPath, runPhotos } from "@/lib/runLink";
 
 /**
  * "empty": nothing chosen yet; the hero sells what Vision does. "photos": photos are in,
@@ -63,4 +67,67 @@ export function whyNumbers(stats: Stats | undefined | null, howGood: HowGood | u
     records: num(run.n_test), after: run.cutoff ? longDate(run.cutoff) : null, rows,
   } : null;
   return { references, provisional, tested };
+}
+
+/**
+ * The empty page's "Example result" (Steve, 2026-10-26: "a real result with real images"):
+ * one real run, named by the server (MV_EXAMPLE_RUN), as anyone with its link sees it. Its
+ * photos are the observation's own Creative Commons ones and the specimens' photos the run
+ * route re-checks against today's permissions, so nothing here is shown that the run's own
+ * page wouldn't show. Null (no example) when the run has no firm answer to show, or its
+ * photos may not be shown.
+ */
+export interface ExampleView {
+  href: string;
+  /** "iNaturalist 91443365", linking to the observation; null for an upload. */
+  source: { label: string; url: string | null } | null;
+  photos: string[];
+  /** "Tom Norton (CC BY)": who took the find's photos, and their licences. */
+  credit: string | null;
+  headline: { rank: Rank; name: string; chance: string | null };
+  above: { rank: Rank; name: string; chance: string | null }[];
+  ranks: { rank: Rank; name: string; value: number; chance: string }[];
+  specimens: Specimen[];
+  /** Each photo on its own: how it rates the answer, and whether it puts it first. */
+  perPhoto: { url: string; chance: string | null; agrees: boolean }[];
+  /** How many photos the answer is from. */
+  count: number;
+}
+
+const licenceWords = (code: string | null | undefined) =>
+  code ? code.toLowerCase() === "cc0" ? "CC0" : code.toUpperCase().replace(/-/g, " ") : null;
+
+export function exampleView(run: RunView | null | undefined, specimens = 3): ExampleView | null {
+  const r = run?.results[0];
+  if (!run || !r) return null;
+  const banner = gateBanner(r);
+  const a = answerFor(r, { notFungus: banner?.verdict === "not_fungus", withheld: chanceWithheld(r) });
+  const h = a?.headline;
+  if (!a || !h || a.lookAlike || h.confidence == null) return null;
+  const photos = runPhotos(run).filter(Boolean);
+  if (!photos.length) return null;
+  const o = run.observation;
+  const by = new Map<string, string | null>();
+  for (const c of o?.photos_credit ?? []) if (c?.by && !by.has(c.by)) by.set(c.by, licenceWords(c.licence));
+  const credit = by.size ? [...by].map(([who, lic]) => (lic ? `${who} (${lic})` : who)).join(", ") : null;
+  const named = (n: { rank: Rank; name: string; confidence: number | null }) =>
+    ({ rank: n.rank, name: n.name, chance: n.confidence == null ? null : pct(n.confidence) });
+  const ranks = RANKS.flatMap((rank) => {
+    const top = r.ranks[rank]?.[0];
+    return top?.confidence == null ? [] : [{ rank, name: top.name, value: top.confidence, chance: pct(top.confidence) }];
+  });
+  const shown = runPhotos(run);
+  return {
+    href: runPath(run.id),
+    source: o ? { label: `${sourceName(o.source)} ${o.id}`, url: o.url } : null,
+    photos, credit,
+    headline: named(h), above: a.above.map(named), ranks,
+    specimens: r.specimens.filter((s) => s.photo_url).slice(0, specimens),
+    perPhoto: r.per_photo.flatMap((p) => {
+      const url = shown[p.photo];
+      const sp = p.overall_top.species;
+      return url ? [{ url, chance: sp?.confidence == null ? null : pct(sp.confidence), agrees: sp?.position === 1 }] : [];
+    }),
+    count: o?.photos_used ?? run.photos ?? r.photos,
+  };
 }

@@ -478,3 +478,38 @@ def test_with_run_links_off_the_health_check_says_so(conn, tmp_path):
     app, _, _ = site(conn, tmp_path, links=False, by_observation=True)
     full = visitor(app).get("/api/health", headers={"Authorization": f"Bearer {SERVER_KEY}"})
     assert full.json()["run_links"] is None
+
+
+# --- the Identify page's example result (Steve, 2026-10-26) ------------------------------
+
+def test_the_example_result_is_the_run_mv_example_run_names(conn, tmp_path, monkeypatch):
+    app, _, _ = site(conn, tmp_path)
+    rid = identify(person(app, "user-1")).json()["run"]["id"]
+    monkeypatch.setenv("MV_EXAMPLE_RUN", rid)
+    member = person(app, "user-2")
+    assert member.get("/api/example").json() == {"run": rid}
+    # The page opens it as anyone with the link would: someone else's run, no owner's parts.
+    shown = member.get(f"/api/runs/{rid}").json()
+    assert shown["mine"] is False and shown["can_delete"] is False
+
+
+def test_with_no_example_set_or_a_malformed_one_there_is_none(conn, tmp_path, monkeypatch):
+    app, _, _ = site(conn, tmp_path)
+    member = person(app, "user-1")
+    monkeypatch.delenv("MV_EXAMPLE_RUN", raising=False)
+    assert member.get("/api/example").json() == {"run": None}
+    for bad in ("short", "../../etc/passwd", "x" * 17, "a b c d e f g h "):
+        monkeypatch.setenv("MV_EXAMPLE_RUN", bad)
+        assert member.get("/api/example").json() == {"run": None}, bad
+
+
+def test_without_run_links_there_is_no_example(conn, tmp_path, monkeypatch):
+    app, _, _ = site(conn, tmp_path, links=False)
+    monkeypatch.setenv("MV_EXAMPLE_RUN", "A" * 16)
+    assert person(app, "user-1").get("/api/example").json() == {"run": None}
+
+
+def test_the_example_route_needs_sign_in_like_the_identify_page(conn, tmp_path, monkeypatch):
+    app, _, _ = site(conn, tmp_path)
+    monkeypatch.setenv("MV_EXAMPLE_RUN", "A" * 16)
+    assert visitor(app).get("/api/example").status_code == 401

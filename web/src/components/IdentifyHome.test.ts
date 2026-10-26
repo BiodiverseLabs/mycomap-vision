@@ -3,8 +3,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createElement, type FC } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ExampleAnswer, GUIDE_ID, PhotoGuide, ViewsChecklist, ViewsRow, WhyVision } from "./IdentifyHome";
+import { ExampleResult, GUIDE_ID, PhotoGuide, ViewsChecklist, ViewsRow, WhyVision } from "./IdentifyHome";
 import { PHOTO_CHECKLIST } from "../lib/publicView";
+import { exampleView } from "../lib/identifyHome";
+import { EXAMPLE_RUN } from "../lib/exampleRun.fixture";
 import type { HowGood, Stats } from "../lib/api";
 
 const STATS = {
@@ -48,10 +50,30 @@ test("a card whose numbers the server doesn't send is left out, and with none th
   assert.doesNotMatch(older, /why-provisional/, "an older server without provisional names");
 });
 
-test("the example answer says it is one, and shows no photos (so it needs no permissions)", () => {
-  const h = html(ExampleAnswer);
-  assert.match(text(h), /What you'll get · an example/);
-  assert.doesNotMatch(h, /<img/, "drawn, not photographed");
+test("the example result is labelled at the top and links to the real run", () => {
+  const t = text(html(ExampleResult, { view: exampleView(EXAMPLE_RUN) }));
+  assert.ok(t.trim().startsWith("Example result"), "the label comes first");
+  const h = html(ExampleResult, { view: exampleView(EXAMPLE_RUN) });
+  assert.match(h, /href="\/r\/AAAAAAAAAAAAAAAA"[^>]*data-testid="link-example-run"/);
+  assert.match(t, /Open the full result/);
+  assert.match(t, /iNaturalist 91443365 · photos Tom Norton \(CC BY\)/);
+  assert.match(t, /Best answer from these 3 photos Laetiporus sulphureus 80%/);
+  assert.match(t, /Species · Genus Laetiporus 100% · Family Laetiporaceae 100%/);
+});
+
+test("the example shows real photos only where the run's link may show them", () => {
+  const h = html(ExampleResult, { view: exampleView(EXAMPLE_RUN) });
+  const srcs = [...h.matchAll(/<img[^>]* src="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(srcs, ["https://img/1.jpg", "https://img/3.jpg", "https://img/s1.jpg", "https://img/s3.jpg",
+                          "https://img/s4.jpg", "https://img/1.jpg", "https://img/3.jpg"],
+                   "the find's shown photos, three specimens with photos, then each photo on its own");
+  assert.match(text(h), /© owner1/, "each specimen photo credited to its photographer");
+});
+
+test("without an example run the card is left out and the list of what you get stays", () => {
+  const h = html(ExampleResult, { view: null });
+  assert.doesNotMatch(h, /<img/);
+  assert.doesNotMatch(h, /link-example-run/);
   const t = text(h);
   for (const part of ["An answer at every rank", "The closest DNA-verified specimens", "How each photo scores on its own",
                       "provisional names"]) {

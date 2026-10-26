@@ -1061,6 +1061,8 @@ export const api = {
   scoreboard: () => getJson<{ runs: ScoreRun[] }>("/api/scoreboard"),
   run: (id: number) => getJson<RunReport>(`/api/scoreboard/${id}`),
   howGood: () => getJson<HowGood>("/api/how-good"),
+  /** The run the Identify page shows as its example result (MV_EXAMPLE_RUN), or none. */
+  example: () => getJson<{ run: string | null }>("/api/example"),
   speedDaily: () => getJson<{ days: SpeedDay[] }>("/api/speed/daily"),
   /** `onWait(attempt, seconds)`: the server was busy and the photos wait in line.
    *  `onSent(fraction)`: how much of the photos has been sent, 0 to 1, for each try. */
@@ -1154,6 +1156,8 @@ export interface LinkedObservation {
   /** It is one of Vision's DNA reference records, left out of its own answer. */
   excluded_reference: boolean;
   left_out_photos: number;
+  /** Each scored photo's licence code and who took it, in photos_shown's order (kept runs). */
+  photos_credit?: ({ licence: string | null; by: string | null } | null)[];
 }
 
 export const pct = (v: number | null | undefined, digits = 0) =>

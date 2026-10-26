@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { homeStage, topKTable, whyNumbers } from "./identifyHome";
-import type { HowGood, Stats } from "./api";
+import { exampleView, homeStage, topKTable, whyNumbers } from "./identifyHome";
+import type { HowGood, RunView, Stats } from "./api";
+import { EXAMPLE_RUN } from "./exampleRun.fixture";
 
 const STATS = {
   records: 182926, records_north_america: 177390, label_conflicts: 0, inat_ok: 1, inat_missing: 0,
@@ -71,4 +72,37 @@ test("a number the server doesn't send is left out, never made up", () => {
   assert.equal(bare.references?.photos, null, "no model's photos embedded");
   assert.equal(bare.tested, null, "no test run to report");
   assert.equal(whyNumbers({ ...STATS, records_north_america: 0 }, null).references, null, "never a zero as a headline");
+});
+
+// --- the example result: a real run, as its link shows it (Steve, 2026-10-26) ---------------
+
+test("the example shows the run's own answer, at the finest rank it settles", () => {
+  const v = exampleView(EXAMPLE_RUN)!;
+  assert.deepEqual(v.headline, { rank: "species", name: "Laetiporus sulphureus", chance: "80%" });
+  assert.deepEqual(v.above.map((n) => [n.rank, n.name, n.chance]), [["genus", "Laetiporus", "100%"], ["family", "Laetiporaceae", "100%"]]);
+  assert.deepEqual(v.ranks.map((n) => [n.rank, n.chance]), [["family", "100%"], ["genus", "100%"], ["species", "80%"]]);
+  assert.equal(v.href, "/r/AAAAAAAAAAAAAAAA", "a link to the full result");
+  assert.deepEqual(v.source, { label: "iNaturalist 91443365", url: "https://www.inaturalist.org/observations/91443365" });
+  assert.equal(v.count, 3);
+});
+
+test("the example shows only the photos the run's link may show, credited to who took them", () => {
+  const v = exampleView(EXAMPLE_RUN)!;
+  assert.deepEqual(v.photos, ["https://img/1.jpg", "https://img/3.jpg"], "a photo its link may not show is left out");
+  assert.equal(v.credit, "Tom Norton (CC BY)", "each photographer once, with the licence");
+  assert.deepEqual(v.specimens.map((s) => s.observation_id), ["inat:1", "inat:3", "inat:4"],
+                   "the first three specimens with a photo the run route still shows");
+  assert.deepEqual(v.perPhoto, [{ url: "https://img/1.jpg", chance: "77%", agrees: true },
+                                { url: "https://img/3.jpg", chance: "31%", agrees: false }]);
+});
+
+test("no example when there is no run, no firm answer, or no photo to show", () => {
+  assert.equal(exampleView(undefined), null, "MV_EXAMPLE_RUN unset, or the run deleted");
+  const r = EXAMPLE_RUN.results[0];
+  const withheld = { ...EXAMPLE_RUN, results: [{ ...r, confidence_withheld: true,
+    ranks: { family: [{ ...r.ranks.family[0], confidence: null }], genus: [{ ...r.ranks.genus[0], confidence: null }],
+             species: [{ ...r.ranks.species[0], confidence: null }] } }] } as RunView;
+  assert.equal(exampleView(withheld), null, "a look-alike answer (chance withheld) is never the example");
+  const hidden = { ...EXAMPLE_RUN, observation: { ...EXAMPLE_RUN.observation!, photos_shown: [null, null, null] } } as RunView;
+  assert.equal(exampleView(hidden), null, "a find none of whose photos may be shown");
 });

@@ -54,8 +54,8 @@ import {
   photoOnlyNote, placeLines, placeWarns, publicNote, usesPlace, type Answer, type Named,
 } from "@/lib/answer";
 import { shouldScrollTo, showPinnedBar, SINGLE_COLUMN_BELOW, waitingSteps, type Step } from "@/lib/phoneFlow";
-import { homeStage } from "@/lib/identifyHome";
-import { ExampleAnswer, PhotoGuide, ViewsChecklist, ViewsRow, WhyVision } from "@/components/IdentifyHome";
+import { exampleView, homeStage } from "@/lib/identifyHome";
+import { ExampleResult, PhotoGuide, ViewsChecklist, ViewsRow, WhyVision } from "@/components/IdentifyHome";
 import {
   BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
@@ -250,6 +250,11 @@ export function IdentifyPage() {
   const wide = useMemo(() => window.matchMedia?.(`(min-width: ${SINGLE_COLUMN_BELOW}px)`).matches ?? true, []);
   const stats = useQuery({ queryKey: ["stats"], queryFn: api.stats, enabled: stage === "empty" });
   const howGood = useQuery({ queryKey: ["how-good"], queryFn: api.howGood, enabled: stage === "empty" });
+  // The example result: a real run the server names, opened as anyone with its link opens it.
+  const example = useQuery({ queryKey: ["example"], queryFn: api.example, enabled: stage === "empty", retry: false });
+  const exampleId = example.data?.run ?? null;
+  const exampleRun = useQuery({ queryKey: ["run", exampleId], queryFn: () => runApi.open(exampleId!),
+                                enabled: stage === "empty" && !!exampleId, retry: false, staleTime: 3_600_000 });
   const onAnswer = stage === "answer";
 
   return (
@@ -337,7 +342,7 @@ export function IdentifyPage() {
           </div>
 
           <div className="min-w-0 scroll-mt-20" ref={results}>
-          {stage === "empty" && <ExampleAnswer />}
+          {stage === "empty" && <ExampleResult view={exampleView(exampleRun.data)} />}
           {stage === "photos" && <ViewsChecklist wide={wide} />}
           {pending && viaLink && byLink.variables && (
             <LinkWaitingCard observation={byLink.variables} waitSeconds={waiting} />

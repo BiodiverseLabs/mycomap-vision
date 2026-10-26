@@ -1083,6 +1083,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         with db_lock:
             return howgood.how_good(conn, served, method)
 
+    @app.get("/api/example")
+    def example_run():
+        """The run the Identify page shows as its "Example result" (Steve, 2026-10-26: "a
+        real result with real images"): the id in MV_EXAMPLE_RUN, read on each request, so
+        changing it needs only a restart. Null when it is unset or not a run id, or the site
+        keeps no run links. The page opens the run through its own open route, which shows
+        only what its link shows anyone and checks its photos against today's permissions."""
+        rid = config.setting("MV_EXAMPLE_RUN")
+        return {"run": rid if run_store is not None and run_links.valid_id(rid) else None}
+
     @app.get("/api/benchmarks")
     def benchmarks(request: Request):
         """Held-out benchmark results imported with mv benchmark-import (aggregates only)."""

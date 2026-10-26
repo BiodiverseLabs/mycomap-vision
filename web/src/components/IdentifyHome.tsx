@@ -2,8 +2,8 @@ import { useState } from "react";
 import { ArrowRight, ArrowUpRight, BarChart3, Check, ChevronRight, CircleHelp, Dna } from "lucide-react";
 import { H2, H3, Kicker, Sub, Wrap } from "@/components/Explainer";
 import { VIEW_ART } from "@/components/ViewArt";
-import { RANKS, type HowGood, type Stats } from "@/lib/api";
-import { whyNumbers } from "@/lib/identifyHome";
+import { pct, RANKS, type HowGood, type Stats } from "@/lib/api";
+import { whyNumbers, type ExampleView } from "@/lib/identifyHome";
 import { PHOTO_CHECKLIST, SEQUENCING_URL } from "@/lib/publicView";
 
 // The Identify page's empty state and photo guide (Steve, 2026-10-26: the approved redesign,
@@ -29,66 +29,112 @@ export function ViewsRow() {
   );
 }
 
-/** What an answer looks like, drawn (no photos, so it needs no photo permissions), with
- *  what each part is for. It is an example and says so. */
-export function ExampleAnswer() {
-  const ranks: [string, number][] = [["Family", 99], ["Genus", 97], ["Species", 78]];
-  const specimens: [string, string, string][] = [
-    ["C. cinnabarinus", "91% alike", "#e9e2d4"], ["C. cinnabarinus", "89% alike", "#dfe5d2"],
-    ["C. texensis", "84% alike", "#ece3d9"],
-  ];
-  const pin = "absolute -left-[11px] z-10 flex h-[22px] w-[22px] items-center justify-center rounded-full bg-[#4a3728] text-xs font-semibold text-white shadow-[0_0_0_3px_#fff]";
+/** "Example result": one real run (lib/identifyHome.ts exampleView), its photos, answer and
+ *  closest specimens as its own page shows them, with what each part is for. Without an
+ *  example run, the list of what an answer holds stands alone. */
+export function ExampleResult({ view }: { view: ExampleView | null }) {
+  const italic = (rank: string) => (rank !== "family" ? "sci" : "");
+  const label = (rank: string) => rank.charAt(0).toUpperCase() + rank.slice(1);
+  const mark = "flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#4a3728] text-[11px] font-semibold text-white";
   return (
-    <div className="relative mt-10 lg:mt-[62px]" data-testid="example-answer">
-      <span className="absolute -top-[11px] left-[18px] z-10 rounded-full border border-[#A87146]/20 bg-white px-2.5 py-px text-[11px] font-bold uppercase tracking-[.08em] text-muted-foreground">
-        What you'll get · an example
-      </span>
-      <span className={`${pin} top-[52px]`} aria-hidden>1</span>
-      <span className={`${pin} top-[218px]`} aria-hidden>2</span>
-      <span className={`${pin} top-[350px]`} aria-hidden>3</span>
-      <div className="overflow-hidden rounded-[14px] border border-[#A87146]/20 bg-white shadow-[0_10px_30px_-18px_rgba(74,55,40,.35)]"
-           aria-hidden>
-        <div className="border-b border-[#4f7a43]/15 bg-[#f1f6ec] px-[18px] pb-3.5 pt-[18px] text-[#4a3728]">
-          <p className="text-[11px] font-semibold uppercase tracking-[.08em] text-[#4f7a43]">Best answer from your 3 photos</p>
-          <div className="mt-0.5 flex items-center justify-between gap-2.5">
-            <span className="sci text-[21px] font-semibold leading-tight text-[#2f2419] sm:text-[25px]">Cantharellus cinnabarinus</span>
-            <span className="rounded-full bg-[#4f7a43] px-[11px] py-[3px] text-base font-semibold text-white tabular-nums">78%</span>
+    <div className="mt-10 lg:mt-0" data-testid="example-result">
+      <div className="mb-2.5 flex items-baseline justify-between gap-3">
+        <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a]">Example result</p>
+        {view && (
+          <a href={view.href} className="inline-flex items-center gap-1 text-[13px] font-medium text-[#4f7a16] no-underline hover:underline"
+             data-testid="link-example-run">
+            Open the full result <ArrowRight className="h-3.5 w-3.5" aria-hidden />
+          </a>
+        )}
+      </div>
+      {view && (
+        <div className="overflow-hidden rounded-[14px] border border-[#A87146]/20 bg-white shadow-[0_10px_30px_-18px_rgba(74,55,40,.35)]">
+          <div className="px-4 pb-3 pt-3.5">
+            <div className="grid grid-cols-5 gap-1.5" data-testid="example-photos">
+              {view.photos.slice(0, 5).map((u, i) => (
+                <span key={u} className="relative aspect-square overflow-hidden rounded-md border border-[#A87146]/20 bg-muted">
+                  <img src={u} alt={`Photo ${i + 1} of the example find`} loading="lazy" className="h-full w-full object-cover" />
+                  <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[10px] text-white">{i + 1}</span>
+                </span>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[11.5px] leading-snug text-muted-foreground" data-testid="example-credit">
+              {view.source?.url
+                ? <a href={view.source.url} target="_blank" rel="noreferrer" className="underline">{view.source.label}</a>
+                : view.source?.label}
+              {view.credit && <>{view.source ? " · " : ""}photos {view.credit}</>}
+            </p>
           </div>
-          <p className="mt-1 text-[13px]">Species · Genus <span className="sci">Cantharellus</span> 97% · Family Hydnaceae 99%</p>
-        </div>
-        <div className="grid gap-3.5 px-[18px] pb-4 pt-3.5 text-[#5c4a3a]">
-          <div className="grid gap-1.5">
-            {ranks.map(([rank, v]) => (
-              <div key={rank} className="grid grid-cols-[62px_1fr_40px] items-center gap-2 text-[12.5px]">
-                <span>{rank}</span>
-                <span className="h-2 overflow-hidden rounded bg-[#efe9e1]"><b className="block h-full rounded bg-[#7FAE34]" style={{ width: `${v}%` }} /></span>
-                <span className="text-right font-semibold text-[#4a3728] tabular-nums">{v}%</span>
-              </div>
-            ))}
-          </div>
-          <div>
-            <p className="mb-1.5 text-xs text-muted-foreground">Closest DNA-verified specimens</p>
-            <div className="grid grid-cols-3 gap-2">
-              {specimens.map(([name, alike, bg], i) => (
-                <div key={i} className="overflow-hidden rounded-lg border border-[#A87146]/20 text-[11px] leading-tight">
-                  <svg viewBox="0 0 100 60" className="block h-[58px] w-full" style={{ background: bg }}>
-                    <path d="M30 34 Q50 10 70 34 Q50 38 30 34 Z" fill="#e8873f" />
-                    <rect x="46" y="34" width="8" height="16" fill="#f0c49a" />
-                    <path d="M0 52 Q25 46 50 52 T100 52 V60 H0 Z" fill="#6f8f3a" opacity=".55" />
-                  </svg>
-                  <p className="px-1.5 pb-1.5 pt-1"><span className="sci">{name}</span><br /><span className="text-muted-foreground">{alike}</span></p>
+          <div className="border-y border-[#4f7a43]/15 bg-[#f1f6ec] px-4 py-3.5 text-[#4a3728]">
+            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[.08em] text-[#4f7a43]">
+              <span className={mark} aria-hidden>1</span>Best answer from these {view.count} photos
+            </p>
+            <div className="mt-1 flex items-center justify-between gap-2.5">
+              <span className={`${italic(view.headline.rank)} text-[21px] font-semibold leading-tight text-[#2f2419] sm:text-[24px]`}>
+                {view.headline.name}
+              </span>
+              {view.headline.chance && (
+                <span className="rounded-full bg-[#4f7a43] px-[11px] py-[3px] text-base font-semibold text-white tabular-nums">{view.headline.chance}</span>
+              )}
+            </div>
+            <p className="mt-1 text-[13px]">
+              {label(view.headline.rank)}
+              {view.above.map((n) => (
+                <span key={n.rank}> · {label(n.rank)} <span className={italic(n.rank)}>{n.name}</span>{n.chance && ` ${n.chance}`}</span>
+              ))}
+            </p>
+            <div className="mt-2.5 grid gap-1.5" data-testid="example-ranks">
+              {view.ranks.map((n) => (
+                <div key={n.rank} className="grid grid-cols-[58px_1fr_40px] items-center gap-2 text-[12.5px]">
+                  <span>{label(n.rank)}</span>
+                  <span className="h-2 overflow-hidden rounded bg-white">
+                    <b className="block h-full rounded bg-[#7FAE34]" style={{ width: `${Math.max(2, Math.round(n.value * 100))}%` }} />
+                  </span>
+                  <span className="text-right font-semibold tabular-nums">{n.chance}</span>
                 </div>
               ))}
             </div>
           </div>
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-muted-foreground">Each photo on its own:</span>
-            {[["81%", true], ["31%", false], ["74%", true]].map(([v, ok], i) => (
-              <span key={i} className={`rounded-md border px-1.5 tabular-nums ${ok ? "border-myco-green/45 text-[#5f8f1c]" : "border-[hsl(20_5.9%_85%)] text-[#4a3728]"}`}>{v}</span>
-            ))}
-          </div>
+          {view.specimens.length > 0 && (
+            <div className="px-4 pt-3">
+              <p className="mb-1.5 flex items-center gap-2 text-xs text-muted-foreground">
+                <span className={mark} aria-hidden>2</span>Closest DNA-verified specimens
+              </p>
+              <div className="grid grid-cols-3 gap-2" data-testid="example-specimens">
+                {view.specimens.map((s) => (
+                  <a key={s.observation_id} href={s.record_url ?? s.inat_url ?? undefined} target="_blank" rel="noreferrer"
+                     className="overflow-hidden rounded-lg border border-[#A87146]/20 text-[11px] leading-tight text-[#5c4a3a] no-underline">
+                    <img src={s.photo_url ?? ""} alt={s.name ?? s.species} loading="lazy" className="block aspect-[4/3] w-full object-cover" />
+                    <span className="block px-1.5 pb-1.5 pt-1">
+                      <span className="sci line-clamp-2 block font-semibold text-[#4a3728]">{s.name ?? s.species}</span>
+                      <span className="text-muted-foreground">{pct(s.similarity)} alike</span>
+                      {s.photo_owner && <span className="block truncate text-[10px] text-muted-foreground">© {s.photo_owner}</span>}
+                    </span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {view.perPhoto.length > 1 && (
+            <div className="px-4 pb-4 pt-3">
+              <p className="mb-1.5 flex items-center gap-2 text-xs text-muted-foreground">
+                <span className={mark} aria-hidden>3</span>
+                <span>Each photo on its own: how it rates <span className={italic(view.headline.rank)}>{view.headline.name}</span></span>
+              </p>
+              <div className="flex flex-wrap gap-2" data-testid="example-per-photo">
+                {view.perPhoto.map((p, i) => (
+                  <span key={i} className="flex flex-col items-center gap-0.5">
+                    <img src={p.url} alt="" loading="lazy" className="h-10 w-10 rounded-md border border-[#A87146]/20 object-cover" />
+                    <span className={`text-[11px] tabular-nums ${p.agrees ? "font-semibold text-[#5f8f1c]" : "text-muted-foreground"}`}>
+                      {p.chance ?? "–"}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
-      </div>
+      )}
       <ol className="mt-4 grid list-none gap-2.5 p-0 text-sm leading-snug text-[#5c4a3a]" data-testid="list-what-you-get">
         <Callout n="1"><b className="font-semibold text-[#4a3728]">An answer at every rank</b>, each with its own calibrated chance. Often the genus is clear when the species isn't.</Callout>
         <Callout n="2"><b className="font-semibold text-[#4a3728]">The closest DNA-verified specimens</b>, with their photos, to compare by eye.</Callout>
