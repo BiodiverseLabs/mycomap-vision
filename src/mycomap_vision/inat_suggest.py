@@ -12,6 +12,13 @@ What is shown, under Vision's answer and never before it:
   "iNaturalist suggests · 82%";
 - "iNaturalist suggests this may not be a fungus · 92%" when every photo says so;
 - on the website, iNat's full answer in a folded dropdown.
+An iNaturalist link on the website ("from a link") gets the same (Steve, 2026-10-26): the
+observation's photos as Vision read them, at most as many as an upload may have, with its
+public place rounded to 0.1 degree and none when iNat obscures it. A kept answer reads the
+photos again, off the request; a repeat costs no iNat call (mycomap.org's 90-day score
+cache is keyed on the photo's bytes, which are the same each time: jpeg_of is
+deterministic).
+
 When Vision fails or times out on the website, the lines still show, with a Retry (Steve,
 2026-10-25): the page names the find (`inat_ref`) when it sends the photos, and asks for
 them once it knows Vision failed. Never while Vision is still checking.
@@ -38,7 +45,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
 from . import config
@@ -52,6 +59,8 @@ JPEG_SIDE = 1024                # longest side sent; mycomap.org takes up to 4 M
 # The page's name for a find (inat_ref): with "site-" it is the client_ref, which
 # mycomap.org keeps to 64 characters.
 _REF = re.compile(r"^[A-Za-z0-9_-]{16,59}$")
+MAX_PHOTOS = 10                 # per find, as an upload may have (guards.MAX_PHOTOS): each
+                                # photo is one iNat call from mycomap.org's daily budget
 MAX_IN_FLIGHT = 32              # forwards waiting or running; more are skipped
 KEEP_SECONDS = 600              # how long a find's answers are kept in memory
 
@@ -149,6 +158,16 @@ def thresholds(merged: dict | None) -> tuple[float, float]:
     return number("show", SHOW_AT), number(not_fungus, NOT_FUNGUS_AT)
 
 
+def public_place(obs) -> tuple[float, float] | None:
+    """An iNat observation's place as a link find sends it: its public coordinates rounded
+    to 0.1 degree; none when iNat obscures them or there are none (byobservation's
+    `place`: "coordinates" / "obscured" / None). Never true coordinates: Vision only ever
+    reads the public ones for a link."""
+    if getattr(obs, "place", None) != "coordinates":
+        return None
+    return rounded_place(obs.latitude, obs.longitude)
+
+
 def rounded_place(lat: float | None, lng: float | None) -> tuple[float, float] | None:
     """A place as a website find sends it: to 0.1 degree (~10 km); None without one."""
     if lat is None or lng is None:
@@ -240,7 +259,7 @@ class Find:
     futures: list[Future]
     names: set[str] | None = None           # Vision's names, once its answer is out
     full: bool = True
-    done: Callable[[dict | None], None] | None = None
+    done: Callable[[str, dict | None], None] | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -255,6 +274,9 @@ class Suggestions:
         self.wait = wait
         self.note = note
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="inat-suggest")
+        # Link finds whose photos must be read first (a kept answer): their own threads,
+        # so a slow read never holds up the forwards.
+        self.readers = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inat-suggest-read")
         self.room = threading.BoundedSemaphore(MAX_IN_FLIGHT)
         self.finds: dict[str, Find] = {}
         self.by_run: dict[str, str] = {}
@@ -303,32 +325,29 @@ class Suggestions:
             self.room.release()
             return None
 
-    def start(self, owner: str, images: list, *, run_id: str | None,
-              done: Callable[[dict | None], None] | None = None, full: bool = True,
-              ref: str | None = None, place: tuple[float, float] | None = None) -> str | None:
-        """Forwards a website find's photos, with `place` rounded to 0.1 degree whatever
-        precision it came in (rounded_place). Its key, for asking how it stands; None when
-        nothing was sent.
-        `ref`: the page's own name for the find, so it can ask even when Vision's answer
-        never reaches it; refused (a fresh key instead) when malformed or another
-        member's."""
-        self._forget_old()
+    def _key_for(self, owner: str, ref: str | None) -> str:
+        """The find's key: site-<the page's ref> when well formed and not another member's,
+        else a fresh one."""
         key = "site-" + (ref if ref and _REF.match(ref) else secrets.token_urlsafe(12))
         held = self.finds.get(key)
         if held is not None and held.owner != owner:
             key = "site-" + secrets.token_urlsafe(12)
+        return key
+
+    def _forward_all(self, owner: str, images: list, key: str, run_id: str | None,
+                     place, full: bool) -> list[Future]:
         place = rounded_place(*place) if place is not None else None
-        futures = [f for i, img in enumerate(images)
-                   if (f := self.forward(owner, img, run_id=run_id, client_ref=key,
-                                         photo_ref=str(i + 1), location=place,
-                                         full=full)) is not None]
-        if not futures:
-            return None
+        return [f for i, img in enumerate(images)
+                if (f := self.forward(owner, img, run_id=run_id, client_ref=key,
+                                      photo_ref=str(i + 1), location=place,
+                                      full=full)) is not None]
+
+    def _track(self, key: str, owner: str, futures: list[Future], done, full: bool) -> str:
+        # The run's lines are found by link_run, which the caller makes only for the run's
+        # own member: an observation's run is shared, so its id alone says nothing of whose.
         find = Find(key, owner, self.clock(), futures, full=full, done=done)
         with self.lock:
             self.finds[key] = find
-            if run_id:
-                self.by_run[run_id] = key
         left = [len(futures)]
 
         def one_done(_):
@@ -337,12 +356,60 @@ class Suggestions:
                 last = left[0] == 0
             if last and find.done is not None:
                 try:
-                    find.done(self._merged(find))
+                    find.done(key, self._merged(find))
                 except Exception as e:  # noqa: BLE001 - only the run's copy is lost
                     self.note(f"[inat-suggest] keeping it with the run failed: {type(e).__name__}")
         for f in futures:
             f.add_done_callback(one_done)
         return key
+
+    def start(self, owner: str, images: list, *, run_id: str | None,
+              done: Callable[[str, dict | None], None] | None = None, full: bool = True,
+              ref: str | None = None, place: tuple[float, float] | None = None) -> str | None:
+        """Forwards a website find's photos, with `place` rounded to 0.1 degree whatever
+        precision it came in (rounded_place). Its key, for asking how it stands; None when
+        nothing was sent. `done(key, merged)` once every photo has answered.
+        `ref`: the page's own name for the find, so it can ask even when Vision's answer
+        never reaches it; refused (a fresh key instead) when malformed or another
+        member's."""
+        self._forget_old()
+        key = self._key_for(owner, ref)
+        futures = self._forward_all(owner, images[:MAX_PHOTOS], key, run_id, place, full)
+        if not futures:
+            return None
+        return self._track(key, owner, futures, done, full)
+
+    def start_later(self, owner: str, read: Callable[[], "tuple[list, tuple | None] | None"], *,
+                    run_id: str | None, done: Callable[[str, dict | None], None] | None = None,
+                    full: bool = True, ref: str | None = None) -> str | None:
+        """As start, for photos still to be read (a link whose answer was kept, so Vision
+        read nothing): `read()` -> (images, place) or None, run off the request. Its key."""
+        self._forget_old()
+        key = self._key_for(owner, ref)
+
+        def job() -> list:
+            try:
+                got = read()
+            except Exception as e:  # noqa: BLE001 - no lines; the answer is unaffected
+                self.note(f"[inat-suggest] reading the photos failed: {type(e).__name__}")
+                return []
+            if not got:
+                return []
+            images, place = got
+            futures = self._forward_all(owner, images[:MAX_PHOTOS], key, run_id, place, full)
+            finished, _ = wait(futures, timeout=self.wait + 5)
+            return [f.result() if f in finished else None for f in futures]
+        try:
+            future = self.readers.submit(job)
+        except Exception:  # noqa: BLE001 - shutting down
+            return None
+        return self._track(key, owner, [future], done, full)
+
+    def link_run(self, key: str, run_id: str) -> None:
+        """The run is this member's: asking for the run's lines now finds this find."""
+        with self.lock:
+            if key in self.finds:
+                self.by_run[run_id] = key
 
     def answered(self, key: str, names: set[str]) -> None:
         """Vision's answer is out: from now on the lines may be shown, against its names."""
@@ -355,8 +422,11 @@ class Suggestions:
 
     @staticmethod
     def _merged(find: Find) -> dict | None:
-        return merge([f.result() if f.done() and not f.cancelled() else None
-                      for f in find.futures])
+        bodies: list = []
+        for f in find.futures:
+            got = f.result() if f.done() and not f.cancelled() and f.exception() is None else None
+            bodies.extend(got if isinstance(got, list) else [got])   # a read job: its photos'
+        return merge(bodies)
 
     def view(self, key: str | None, owner: str | None, vision_failed: bool = False) -> dict | None:
         """How a find stands for the person who sent it, once Vision has answered (or, with

@@ -114,9 +114,9 @@ export function IdentifyPage() {
   const [link, setLink] = useState(fromQuery?.text ?? "");
   const [mode, setMode] = useState<"photos" | "link">("photos");
   const byLink = useMutation({
-    mutationFn: (ref: ObservationRef & { rerun?: boolean; include?: number[] }) =>
+    mutationFn: (ref: ObservationRef & { rerun?: boolean; include?: number[]; inatRef?: string }) =>
       api.identifyObservation(ref.source, ref.id, chosen, (_attempt, seconds) => setWaiting(seconds), ref.rerun,
-                              ref.include ?? []),
+                              ref.include ?? [], ref.inatRef),
     onSettled: () => setWaiting(null),
   });
   const viaLink = mode === "link";
@@ -126,14 +126,20 @@ export function IdentifyPage() {
   const shownUrls = viaLink ? (byLink.data?.observation.photos_shown.map((u) => u ?? "") ?? []) : sentUrls;
   const shownPhotos = viaLink ? byLink.data?.observation.photos_used : run.variables?.files.length;
   const submittedAt = viaLink ? byLink.submittedAt : run.submittedAt;
-  const inatShown = viaLink ? null : inatForPage(
-    run.isPending ? "checking" : run.isError ? "failed" : "answered", run.data?.inat, run.variables?.inatRef);
+  // iNaturalist's suggestions, for an upload and for an iNaturalist link (Steve, 2026-10-26).
+  const inatShown = viaLink
+    ? inatForPage(byLink.isPending ? "checking" : byLink.isError ? "failed" : "answered", byLink.data?.inat,
+                  byLink.variables?.inatRef)
+    : inatForPage(run.isPending ? "checking" : run.isError ? "failed" : "answered", run.data?.inat,
+                  run.variables?.inatRef);
   const startPhotos = () => { setMode("photos"); byLink.reset(); run.mutate({ where, files, inatRef: newInatRef() }); };
-  const startLink = (ref: ObservationRef) => { setMode("link"); run.reset(); byLink.mutate(ref); };
+  const startLink = (ref: ObservationRef) => { setMode("link"); run.reset(); byLink.mutate({ ...ref, inatRef: newInatRef() }); };
+  const retryLink = () => { if (byLink.variables) byLink.mutate({ ...byLink.variables, inatRef: newInatRef() }); };
   // Run again: the kept answer is replaced by a fresh run of the same observation.
   const runLinkAgain = () => {
     const o = byLink.data?.observation;
-    if (o) byLink.mutate({ source: o.source, id: o.id, rerun: true, include: byLink.variables?.include });
+    if (o) byLink.mutate({ source: o.source, id: o.id, rerun: true, include: byLink.variables?.include,
+                           inatRef: newInatRef() });
   };
   // "Include anyway" (lib/photoTypes.ts): the same photos or observation again, with a photo
   // its type left out counted (or, from "Leave it out", left out again).
@@ -143,7 +149,7 @@ export function IdentifyPage() {
     const include = on ? withIncluded(now, photo) : withoutIncluded(now, photo);
     if (viaLink) {
       const o = byLink.data?.observation;
-      if (o) byLink.mutate({ source: o.source, id: o.id, include });
+      if (o) byLink.mutate({ source: o.source, id: o.id, include, inatRef: newInatRef() });
     } else if (run.variables) {
       run.mutate({ ...run.variables, include });
     }
@@ -377,17 +383,18 @@ export function IdentifyPage() {
             </div>
           )}
           {/* iNaturalist's suggestions, below Vision's answer and never before it. */}
-          {answer && !viaLink && inatShown && (
+          {answer && inatShown && (
             <InatSuggestions key={`inat@${submittedAt}`} initial={inatShown.initial} />
           )}
           {/* Vision failed or timed out: iNat's lines still show, with a Retry (Steve, 2026-10-25). */}
-          {failed && !viaLink && !pending && inatShown && (
+          {failed && !pending && inatShown && (
             <div data-testid="section-vision-failed">
               <Card>
                 <CardContent className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
                   <p className="text-sm text-[#4a3728]">MycoMap Vision couldn't answer this time.</p>
-                  <Button type="button" variant="outline" size="sm" onClick={startPhotos}
-                          disabled={!files.length || gate !== "ready"} data-testid="button-retry-vision">
+                  <Button type="button" variant="outline" size="sm" onClick={viaLink ? retryLink : startPhotos}
+                          disabled={(viaLink ? !byLink.variables : !files.length) || gate !== "ready"}
+                          data-testid="button-retry-vision">
                     <RotateCcw /> Retry
                   </Button>
                 </CardContent>
