@@ -148,7 +148,8 @@ def sign_in(client, return_to="/"):
 def test_with_the_whole_site_gated_nothing_outside_the_open_pages_answers_before_sign_in(conn, tmp_path):
     c = site(conn, tmp_path, "all")
     assert c.get("/api/health").status_code == 200
-    assert c.get("/api/me").json() == {"signin": "all", "user": None}
+    assert c.get("/api/me").json() == {"signin": "all", "user": None,
+                                      "features": {"where_looked": False}}
     r = c.get("/api/paper")
     assert r.status_code == 401 and r.json()["signin"] == "/auth/signin"
     assert c.get("/api/geocode/search").status_code == 401
@@ -241,7 +242,8 @@ def test_with_sign_in_off_everything_is_open_and_there_is_no_sign_in_route(conn,
     assert c.get("/api/stats").status_code == 200
     assert post_photos(c, [247], "m1/nearest").status_code == 200
     assert c.get("/auth/signin").status_code == 404
-    assert c.get("/api/me").json() == {"signin": "off", "user": None}
+    assert c.get("/api/me").json() == {"signin": "off", "user": None,
+                                      "features": {"where_looked": False}}
 
 
 def test_on_an_https_site_the_cookies_are_secure_and_http_only(conn, tmp_path):

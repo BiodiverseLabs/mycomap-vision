@@ -67,6 +67,7 @@ class ModelQueue:
         self.clock, self.note = clock, note
         self._jobs: list[Job] = []
         self._running_photos = 0
+        self._busy = False                          # a batch is being answered
         self._cond = threading.Condition()
         self._seq = itertools.count()
         self.batches = 0                            # searches run (for tests and health)
@@ -101,6 +102,12 @@ class ModelQueue:
             self._cond.notify()
         return job.future.result(timeout=timeout)
 
+    def idle(self) -> bool:
+        """Nothing waiting and no batch running: what lower-priority work waits for
+        (looked.Worker makes its maps only then)."""
+        with self._cond:
+            return not self._jobs and not self._busy
+
     def state(self) -> dict:
         with self._cond:
             return {"queued_jobs": len(self._jobs),
@@ -132,11 +139,13 @@ class ModelQueue:
                 while not self._jobs:
                     self._cond.wait()
                 batch = self._take_batch()
+                self._busy = True
             try:
                 self.run_batch(batch)
             finally:
                 with self._cond:
                     self._running_photos = 0
+                    self._busy = False
 
     def run_batch(self, batch: list[Job]) -> None:
         """Embed each job, score them all in one search, finish each. A job that fails

@@ -36,7 +36,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, inat_suggest, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
+               looked, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, research_public, serving, sessions as session_store, sources,
                speedlog, uploads,
                workqueue, yours)
@@ -46,6 +46,7 @@ from .embed import normalise, photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge)
 from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
+from .identify import left_out_photos as left_out_of
 from .licenses import photo_url
 from .methods import method_ready
 from .prior import Context
@@ -338,7 +339,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                run_secret: bytes | None = None,
                identify_log: "identifylog.IdentifyLog | None" = None,
                early_store: "early_answers.Store | None" = None,
-               inat_suggestions: "inat_suggest.Suggestions | None | bool" = True) -> FastAPI:
+               inat_suggestions: "inat_suggest.Suggestions | None | bool" = True,
+               where_looked: "Callable | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -389,6 +391,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `identify_log`: the append-only log of every answer given or served (identifylog.py),
     for the paper's truth-independence check. None opens state/identify-log.sqlite on the
     box, the file beside the manifest elsewhere.
+
+    `where_looked`: "Where Vision looked" maps on a run's answer (looked.py), made when
+    someone asks and kept beside the run; needs run links. True: on unless
+    MV_WHERE_LOOKED=0; None or False: off; tests pass the photo maker (called as
+    maker(loaded backbone, backbone name, identifier, name, photo bytes, specimen bytes or
+    None) -> the photo's entry).
 
     `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
     `confused_with` field on species candidates. True reads the cache beside the manifest
@@ -552,7 +560,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def me(request: Request):
         p = person(request)
         return {"signin": signin.mode,
-                "user": {"id": p["sub"], "name": p.get("name")} if p else None}
+                "user": {"id": p["sub"], "name": p.get("name")} if p else None,
+                "features": {"where_looked": looked_on}}
 
     @app.get("/auth/signin", include_in_schema=False)
     def signin_start(returnTo: str | None = None):  # noqa: N803 (the .org name)
@@ -689,6 +698,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             (config.RELEASE_ROOT / "state" if config.RELEASE_ROOT
              else Path(manifest_path or config.MANIFEST_PATH).parent), note=note)
     app.state.run_store = run_store
+    # Where Vision looked (looked.py): needs run links; MV_WHERE_LOOKED=0 turns it off.
+    looked_on = bool(where_looked) and run_store is not None and (
+        callable(where_looked) or config.setting("MV_WHERE_LOOKED") != "0")
     run_secret = run_secret or signin.secret or secrets.token_bytes(32)
     # iNat's suggestions (inat_suggest.py; Steve, 2026-10-25): off until iNat agrees in
     # writing. Never in the identify log or early answers: mycomap.org logs iNat's side.
@@ -1861,6 +1873,193 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not ready:
                 card_later(rid)
         return linkcards.run_card(origin, rid, run, card_version, card_ready=ready), 200
+
+    # "Where Vision looked" (looked.py; Steve, 2026-10-26): each photo's map of where its
+    # evidence for the answer's species was, made when someone asks and kept beside the run
+    # (site-runs/<id>/looked.json). Only the photos the run's link shows are read, the
+    # specimen matched to each is the one the link shows for it today, and the maps are made
+    # one photo at a time behind every identification.
+    looked_worker = (looked.Worker(model_queue.idle, gpu_lock, background=background, note=note)
+                     if looked_on else None)
+    looked_asks = RateLimiter(20, 600.0)
+    looked_targets: "OrderedDict[tuple, looked.Target]" = OrderedDict()
+    looked_towers: dict[str, looked.Tower] = {}
+
+    def real_looked_maker(loaded, backbone: str, ident: Identifier, name: str, body: bytes,
+                          specimen: bytes | None) -> dict:
+        """The served model's map and match for one photo (call holding gpu_lock)."""
+        tower = looked_towers.get(backbone)
+        if tower is None:
+            # The served torch tower, or (an ONNX tower is served) a torch copy of it.
+            found = looked.vit_of(loaded) or looked.vit_of(models.load_backbone(backbone))
+            if found is None:
+                raise looked.NoMap("this model's maps can't be made")
+            tower = looked_towers[backbone] = looked.Tower(*found)
+        # An index rebuilt is a new identifier; its size guards against a reused id().
+        key = (id(ident), getattr(ident, "embedded", 0), len(ident.index.cols), name)
+        target = looked_targets.get(key)
+        if target is None:
+            target = looked_targets[key] = looked.target_for(ident, name)
+            while len(looked_targets) > 32:
+                looked_targets.popitem(last=False)
+        return looked.photo_map(tower, body, target, specimen)
+
+    looked_maker = where_looked if callable(where_looked) else real_looked_maker
+
+    def looked_off() -> None:
+        if looked_worker is None:
+            raise HTTPException(404, "not available here", headers=NOT_INDEXED)
+
+    def first_view(run: dict) -> dict:
+        """The run's first answer as its link shows it to anyone today: {photo: per-photo}."""
+        view = run_body(run, None, None)
+        if not view["results"]:
+            return {}
+        return {p.get("photo"): p for p in (view["results"][0].get("per_photo") or [])}
+
+    def looked_shown(doc: dict, run: dict) -> dict:
+        """The kept maps as the link shows them today: a photo's match only while the link
+        still shows that specimen photo (permissions are checked again on every read)."""
+        per_photo = first_view(run)
+        photos = []
+        for entry in doc.get("photos") or []:
+            entry = dict(entry)
+            match = entry.pop("match", None)
+            shown = ((per_photo.get(entry["photo"]) or {}).get("specimens") or [None])[0]
+            if (match and shown and shown.get("photo_url") == match.get("photo_url")
+                    and str(shown.get("observation_id")) == str(match.get("observation_id"))):
+                entry["match"] = {"pairs": match["pairs"], "crop": match.get("crop"), "specimen": {
+                    k: shown.get(k) for k in ("observation_id", "name", "similarity", "photo_url",
+                                              "photo_owner", "record_url", "source")}}
+            else:
+                entry["match"] = None
+            photos.append(entry)
+        return {"status": "ready", "name": doc.get("name"), "model": doc.get("model"),
+                "made_at": doc.get("made_at"), "photos": photos}
+
+    def looked_job(rid: str, run: dict) -> looked.Job:
+        """The run's maps as a job: one task per photo the answer used and the link shows."""
+        parts = run.get("models") or []
+        result = (parts[0] or {}).get("result") if parts else None
+        species = ((result or {}).get("ranks") or {}).get("species") or []
+        if not result or not species:
+            raise looked.NoMap("this answer has no species to show the evidence for")
+        name = species[0]["name"]
+        model = result.get("model") or {}
+        backbone, method = model.get("backbone"), model.get("method")
+        try:
+            ident = identifier(backbone, method, permission_view())
+        except Exception as e:  # noqa: BLE001 - a model this server no longer answers with
+            raise looked.NoMap("the model that gave this answer is no longer served") from e
+        if name not in ident.index.species:
+            raise looked.NoMap(f"{name} is not in the reference set any more")
+        specimen_of = {i: ((p.get("specimens") or [None])[0]) for i, p in first_view(run).items()}
+        left = left_out_of(result)
+        if run.get("kind") == "photos":
+            urls: list = [None] * int(run.get("photos") or 0)
+            source = None
+        else:
+            obs = run_links.public_observation(run.get("observation")) or {}
+            urls = list(obs.get("photos_shown") or [])
+            source = obs.get("source")
+        tasks = []
+        for p in result.get("per_photo") or []:
+            i = int(p.get("photo", -1))
+            if i in left or not 0 <= i < len(urls) or (source and not urls[i]):
+                continue
+            spec = specimen_of.get(i)
+            if not (spec and spec.get("photo_url") and not spec.get("photo_withheld")):
+                spec = None
+
+            def fetch(i=i, spec=spec):
+                if source is None:
+                    body = run_store.photo(rid, i)
+                else:
+                    got = source_fetcher.photos_at(source, [urls[i]])
+                    body = got[0][1] if got else None
+                if body is None:
+                    raise looked.NoMap(f"photo {i + 1} could not be read")
+                specimen = None
+                if spec is not None:
+                    try:
+                        got = source_fetcher.photos_at(spec.get("source") or "inat",
+                                                       [spec["photo_url"]])
+                        specimen = got[0][1] if got else None
+                    except Exception:  # noqa: BLE001 - the map goes on without its match
+                        specimen = None
+                return body, specimen
+
+            def make(got, spec=spec):
+                body, specimen = got
+                loaded = backbone_model(backbone)
+                entry = dict(looked_maker(loaded, backbone, ident, name, body, specimen))
+                pairs = entry.pop("pairs", None)
+                spec_crop = entry.pop("specimen_crop", None)
+                entry["match"] = ({"observation_id": spec.get("observation_id"),
+                                   "photo_url": spec.get("photo_url"), "pairs": pairs,
+                                   "crop": spec_crop}
+                                  if spec is not None and specimen is not None and pairs else None)
+                return entry
+
+            tasks.append(looked.Task(i, fetch, make))
+        if not tasks:
+            raise looked.NoMap("none of this answer's photos can be shown here")
+
+        def finish(entries: list[dict]) -> None:
+            run_store.keep_looked(rid, {
+                "version": looked.VERSION, "name": name,
+                "model": {"backbone": backbone, "method": method},
+                "made_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "photos": entries})
+        return looked.Job(rid, tasks, finish)
+
+    def looked_state(rid: str, run: dict, state: dict | None):
+        doc = run_store.looked(rid)
+        if doc is not None:
+            return JSONResponse(looked_shown(doc, run), headers=NOT_INDEXED)
+        if state is None:
+            return JSONResponse({"status": "none"}, status_code=404, headers=NOT_INDEXED)
+        return JSONResponse(state, status_code=202 if state["status"] == "working" else 503,
+                            headers=NOT_INDEXED)
+
+    @app.get("/api/runs/{rid}/looked")
+    def read_looked(request: Request, rid: str):
+        """A run's maps, to anyone with its link: 200 once made, 202 while being made,
+        404 when nobody has asked yet (or not here), 503 when making them failed."""
+        read_limit(request)
+        looked_off()
+        run = stored_run(rid)
+        return looked_state(rid, run, looked_worker.status(rid))
+
+    @app.post("/api/runs/{rid}/looked")
+    def ask_looked(request: Request, rid: str):
+        """Asks for a run's maps: anyone signed in who has the link. 200 when they are kept
+        already (or made now), 202 while they are made; 409 when the answer has nothing to
+        map, 429 when too many are waiting."""
+        looked_off()
+        who = person(request)
+        if not who:
+            raise HTTPException(401, "sign in with your mycomap.org account to ask for this",
+                                headers=NOT_INDEXED)
+        run = stored_run(rid)
+        state = looked_worker.status(rid)
+        if run_store.looked(rid) is not None or (state and state["status"] == "working"):
+            return looked_state(rid, run, state)
+        wait = looked_asks.check(str(who.get("sub")))
+        if wait:
+            raise HTTPException(429, "you have asked for a lot of these; try again shortly",
+                                headers={"Retry-After": str(int(wait) + 1), **NOT_INDEXED})
+        try:
+            job = looked_job(rid, run)
+        except looked.NoMap as e:
+            raise HTTPException(409, str(e), headers=NOT_INDEXED) from None
+        try:
+            looked_worker.submit(job)
+        except looked.Busy as e:
+            raise HTTPException(429, "Vision is busy making other maps; try again in a minute",
+                                headers={"Retry-After": str(int(e.wait_seconds) + 1),
+                                         **NOT_INDEXED}) from None
+        return looked_state(rid, run, looked_worker.status(rid))
 
     @app.delete("/api/runs/{rid}", status_code=204)
     def delete_run(request: Request, rid: str):

@@ -451,6 +451,8 @@ export interface EarlyAnswersGroup {
 export interface Me {
   signin: "off" | "identify" | "all";
   user: { id: string; name: string | null } | null;
+  /** Parts of the site this server has switched on. */
+  features?: { where_looked?: boolean };
 }
 
 // --- Human Feedback (/feedback): places where Vision and the reference data disagree ---------
@@ -1131,6 +1133,46 @@ export interface RunView {
 export const inatApi = {
   now: (ref: string, visionFailed = false) => getJson<{ inat: InatView | null }>(
     `/api/inat-suggestions/${encodeURIComponent(ref)}${visionFailed ? "?vision=failed" : ""}`),
+};
+
+/** "Where Vision looked" (looked.py): one photo's map of where its evidence for the answer's
+ *  name was, on the centre square the model sees, and its match with a specimen photo. */
+export interface LookedPhoto {
+  /** Which of the run's photos (its index, as in per_photo). */
+  photo: number;
+  /** The square the model sees, as fractions of the photo. */
+  crop: { x: number; y: number; w: number; h: number };
+  /** Cells per side, and the map row by row, 0..255 (255: the strongest evidence). */
+  grid: number;
+  map: number[];
+  /** Patches that look alike: [photo x, y, specimen x, y], fractions of each square. Shown
+   *  only while the link still shows that specimen photo. */
+  match: { pairs: number[][]; crop: LookedPhoto["crop"] | null;
+           specimen: Pick<Specimen, "observation_id" | "name" | "similarity" | "photo_url"
+                          | "photo_owner" | "record_url" | "source"> } | null;
+}
+
+export type LookedView =
+  | { status: "ready"; name: string; made_at: string; photos: LookedPhoto[] }
+  | { status: "working"; photos: number; done: number; ahead: number }
+  | { status: "none" }
+  | { status: "failed"; detail?: string };
+
+/** The maps' state from a reply: 200 ready, 202 working, 404 none, 503 failed; any other
+ *  status (401, 409, 429) is an ApiError the page words. */
+async function lookedReply(res: Response): Promise<LookedView> {
+  if (res.status === 200 || res.status === 202 || res.status === 503) return res.json();
+  if (res.status === 404) {
+    const body = await res.json().catch(() => null);
+    if (body && body.status === "none") return { status: "none" };
+  }
+  throw new ApiError(res.status, await errorText(res));
+}
+
+export const lookedApi = {
+  read: async (id: string) => lookedReply(await fetch(`/api/runs/${encodeURIComponent(id)}/looked`)),
+  ask: async (id: string) => lookedReply(await fetch(`/api/runs/${encodeURIComponent(id)}/looked`, {
+    method: "POST", credentials: "same-origin" })),
 };
 
 export const runApi = {

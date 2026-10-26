@@ -75,9 +75,10 @@ export function RunPage({ id }: { id: string }) {
           <div className="mb-4"><RunContext used={r.context_used} /></div>
           <OthersRun.Provider value={!r.mine}>
             <div className={`grid gap-6 ${r.results.length > 1 ? "xl:grid-cols-2" : ""}`}>
-              {r.results.map((res) => (
+              {r.results.map((res, i) => (
                 <ResultCard key={`${res.model.backbone}/${res.model.method}`} r={res} urls={runPhotos(r)}
-                            photos={r.kind === "photos" ? r.photos : r.observation?.photos_used ?? res.photos} />
+                            photos={r.kind === "photos" ? r.photos : r.observation?.photos_used ?? res.photos}
+                            runId={i === 0 ? r.id : undefined} />
               ))}
             </div>
             {r.mine && r.inat && <InatSuggestions initial={r.inat} />}
