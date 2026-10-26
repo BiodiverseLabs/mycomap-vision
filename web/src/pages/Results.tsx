@@ -3,8 +3,8 @@ import type { EarlyAnswersGroup, HowGood, Me, ModelsInfo, ProspectiveModel, RunR
               SpeedDay } from "@/lib/api";
 import { companionBars, scoreboardSections, standardOf, STANDARD_BANDS } from "@/lib/compareView";
 import { utcDay, V1_VAL_COUNTS } from "@/lib/datasetReleases";
-import { MODEL_CREDIT_LINE, modelName } from "@/lib/publicView";
-import { OPEN_REFERENCE, pointsDiff, REFERENCE_LABEL, TWO_MODELS, type TopK } from "@/lib/twoModels";
+import { MODEL_CREDIT_LINE, modelName, OPEN_DATA_MEANS } from "@/lib/publicView";
+import { GENUS_SCORING, OPEN_REFERENCE, pointsDiff, REFERENCE_LABEL, TWO_MODELS, type TopK } from "@/lib/twoModels";
 import { APPROACHES } from "@/lib/approaches";
 import { ADVANCE_PAUSED_SINCE, BENCHMARKS } from "@/lib/research";
 import { approachGroups, comparisonRows, earlyFigures, heatRows, historyLines, modelParts, nameRuleRows, nf, pc, pt,
@@ -203,7 +203,7 @@ export function TwoModelsSection() {
   const openRef = OPEN_REFERENCE.species[open.backbone];
   return (
     <Section id="two" band kicker="2 · The two models" title="What the site serves, and what the paper headlines"
-             lead={<>Both are the same base model, fine-tuned the same way at 336 px on release v1's training split. They differ only in the photos they learned from. <span data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</span></>}>
+             lead={<>Both are the same base model, fine-tuned the same way at 336 px on release v1's training split. They differ only in the photos they learned from: v1-open's open data is {OPEN_DATA_MEANS}. <span data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</span></>}>
       <div className="two">
         <ModelTable title="MycoMap Vision v1" swatch="var(--s1)" sub="public + non-public training data · the site's model"
                     rows={[{ label: "Species", note: REFERENCE_LABEL.full, t: site.species, hl: true },
@@ -217,9 +217,10 @@ export function TwoModelsSection() {
         <div className="flex flex-wrap justify-between gap-2"><h3 className="font-display font-semibold text-[#4a3728]">Paired difference, species top 1 (v1-open minus v1)</h3><span className="small">points · 95% interval clustered by observer · full reference</span></div>
         <div className="max-w-[560px]"><PairedDiff diff={p.diff} ci={p.ci95} tip={`v1-open minus v1, species top 1|${pointsDiff(p.diff, p.ci95)} points`} /></div>
         <p className="small mt-1.5" data-testid="text-paired">
-          {pointsDiff(p.diff, p.ci95)} points on the same {nf(p.n)} finds from {nf(p.observers)} observers, both against the full reference: learning only from openly licensed photos costs less than half a point.
-          {" "}Against the openly licensed reference only: {pointsDiff(OPEN_REFERENCE.paired.diff, OPEN_REFERENCE.paired.ci95)} points.
+          {pointsDiff(p.diff, p.ci95)} points on the same {nf(p.n)} finds from {nf(p.observers)} observers, both against the full reference: learning only from open data costs less than half a point.
+          {" "}Against the open-data reference only: {pointsDiff(OPEN_REFERENCE.paired.diff, OPEN_REFERENCE.paired.ci95)} points.
         </p>
+        <p className="small mt-1.5" data-testid="text-genus-scoring">{GENUS_SCORING}</p>
         <PermissionBox kind="control" className="mt-3" />
         <SourceLine parts={[`web/src/lib/twoModels.ts (research repo ${TWO_MODELS.source.replace(" (research repo, ", ", ").replace(")", "")}; ${OPEN_REFERENCE.source.replace(" (research repo, ", ", ").replace(")", "")})`,
                             "photos only, scored by specimen", "observer-clustered bootstrap, 2,000 draws"]} />

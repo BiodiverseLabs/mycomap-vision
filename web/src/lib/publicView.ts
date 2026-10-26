@@ -26,6 +26,9 @@ const BASE_NAME: Record<string, string> = {
 export { PUBLIC_TRAINED } from "./publicNames";
 /** What each MycoMap Vision v1 learned from (Steve, 2026-10-21/23), the qualifier after its name. */
 export const TRAINING_DATA = { public: "open data only", internal: "public + non-public training data" };
+/** What "open data only" is: the photos a model may be shared from (research repo
+ *  paper/costs.csv, E23 and E23b; the retrain lane, 26 Oct 2026). Not Creative Commons alone. */
+export const OPEN_DATA_MEANS = "Creative Commons photos (including non-commercial licences) and all-rights-reserved photos whose owners gave permission";
 /** Said once wherever the models are explained (Steve, 2026-10-23): Research's two models,
  *  Protocols / For researchers, and How it works' model credit. */
 export const MODEL_CREDIT_LINE = "MycoMap Vision is BioCLIP 2 (Imageomics) fine-tuned on DNA-verified records.";

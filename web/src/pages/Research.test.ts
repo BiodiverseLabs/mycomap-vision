@@ -141,7 +141,10 @@ test("Results: eight sections in the nav's order, the two models with both v1-op
   assert.ok(order.every((i) => i > 0), JSON.stringify(order));
   assert.deepEqual([...order].sort((a, b) => a - b), order);
   const t = text(html);
-  assert.match(t, /Species against the openly licensed reference only \(the paper's headline setup\) 55\.3/);
+  assert.match(t, /Species against the open-data reference only \(the paper's headline setup\) 55\.3/);
+  assert.match(t, /v1-open's open data is Creative Commons photos \(including non-commercial licences\) and all-rights-reserved photos whose owners gave permission\./);
+  assert.match(t, /Genus here counts an exact genus name\. Credited through the paper's pinned taxonomy, as on Benchmarks, genus top 1 is 85\.8% for MycoMap Vision v1 and 85\.6% for v1-open/);
+  assert.doesNotMatch(t, /openly licensed (reference|photos)/);
   assert.match(t, /Species against the full reference 55\.9/);
   assert.match(t, /Using every photo of a find helps\. The first photo alone gets the species first 53\.1%/);
   assert.match(t, /honest to within 4\.3 points/);
@@ -179,7 +182,7 @@ test("Benchmarks: the summary, the screen named by its test set, results by test
   assert.equal(count(html, /data-testid="result-set-/g), 8);
   assert.equal(count(html, /data-testid="value-caption"/g), 4, "every card says what its values are a percentage of");
   assert.equal(count(html, /data-testid="label-interim"/g), 0, "E4 is final in E33");
-  assert.match(t, /2e2576a/);
+  assert.match(t, /43328a1/);
   assert.match(t, /5792c17/);
   assert.doesNotMatch(t, /8147947/, "the results cite the entries as they stand now");
   assert.equal(count(html, /data-testid="benchmark-card-/g), BENCHMARKS.length);
@@ -235,7 +238,8 @@ test("Benchmarks, results by test set: each card titled by its test set, its con
   assert.doesNotMatch(v1, /Interim/);
   assert.match(v1, /FungiTastic recipe: BEiT-B\/384 trained on v1's open photos \(E4\) · final: best epoch 13 51\.23 67\.18 72\.90 79\.03 80\.22/);
   assert.match(v1, /Paired differences in points, with 95% intervals Difference Species top 1 3 5 10 FungiTastic recipe: BEiT-B\/384 − MycoMap Vision v1-open −4\.04 \[−4\.91, −3\.24\] −5\.41 \[−6\.37, −4\.53\] −4\.71 \[−5\.60, −3\.92\] −4\.22 \[−4\.97, −3\.59\]/);
-  assert.match(v1, /MycoMap Vision v1-open open photos, open reference 55\.31 72\.61 77\.65 83\.29 84\.9 /);
+  assert.match(v1, /MycoMap Vision v1-open open photos, open reference 55\.31 72\.61 77\.65 83\.29 85\.4 /);
+  assert.match(v1, /MycoMap Vision v1 all photos, full reference 56\.32 73\.55 78\.87 84\.28 85\.8 /);
 });
 
 test("Benchmarks filtered: the count says so, a clear button shows, and an empty result offers to clear", () => {
@@ -473,4 +477,14 @@ test("Protocols: the sealed test closes by 30 November with 2,000-3,000 records;
   assert.doesNotMatch(t, /~26 Oct|≥ 3,000/);
   assert.match(t, /155,781 DNA-verified records and 624,785 photos as cut \(16,959 species once erratum r4 is applied\), with classifiers at species \(17,077 classes\)/);
   assert.match(t, /scored on exactly the records MycoMap Vision is/);
+});
+
+test("v1-open is described by what it learned from, not as Creative Commons only (retrain lane, 26 Oct)", () => {
+  const fr = text(render(createElement(ForResearchers, { me: visitor, howGood: HOW_GOOD, runs: RUNS, reports: REPORTS }), "/research/for-researchers"));
+  assert.match(fr, /The same recipe on 527,842 photos a model may be shared from: Creative Commons photos \(including non-commercial licences\) and all-rights-reserved photos whose owners gave permission/);
+  const pr = text(render(createElement(Protocols, { me: visitor, howGood: HOW_GOOD, runs: RUNS, reports: REPORTS }), "/research/protocols"));
+  assert.match(pr, /MycoMap Vision v1-open from the 527,842 among them a model may be shared from: Creative Commons photos \(including non-commercial licences\) and all-rights-reserved photos whose owners gave permission\./);
+  for (const t of [fr, pr]) assert.doesNotMatch(t, /527,842 Creative Commons photos/);
+  const data = text(render(createElement(Data, { me: visitor, stats: STATS, howGood: HOW_GOOD }), "/research/data"));
+  assert.match(data, /Open, any use \(CC0, CC-BY, CC-BY-SA\)/);
 });

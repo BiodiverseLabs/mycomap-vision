@@ -4,7 +4,7 @@ import { BookOpen, Calendar, Check, Copy, FileText, Hash, Layers, ListChecks, Se
 import type { HowGood, Me, RunReport, ScoreRun } from "@/lib/api";
 import { ERRATUM_REASON, utcMinute, V1, type ErratumReason } from "@/lib/datasetReleases";
 import { CITATIONS, SEALED_TEST } from "@/lib/research";
-import { MODEL_CREDIT_LINE } from "@/lib/publicView";
+import { MODEL_CREDIT_LINE, OPEN_DATA_MEANS } from "@/lib/publicView";
 import { publicMethodLabel } from "@/lib/publicNames";
 import { modelParts, nf, pc, shortDay } from "@/lib/researchView";
 import { ChartCard, Pipeline, ResearchHero, ResearchShell, Section, SourceLine, Tile, Tiles,
@@ -102,7 +102,7 @@ export function Protocols(d: ProtocolsData) {
           <div>
             <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-1.5">What MycoMap Vision is built on</p>
             <h2 className="font-display font-semibold text-[25px] sm:text-[30px] leading-tight text-[#4a3728] mb-2" data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</h2>
-            <p>The last 4 of the base model's 24 transformer blocks were trained for 2 epochs at 336 px on release {V1.id}'s training split: 155,781 DNA-verified records and 624,785 photos as cut (16,959 species once erratum r4 is applied), with classifiers at species (17,077 classes), genus and family. MycoMap Vision v1 learned from all of those photos; MycoMap Vision v1-open from the 527,842 Creative Commons photos among them. Earlier tests used the same recipe at 224 px: MycoMap Vision v0.</p>
+            <p>The last 4 of the base model's 24 transformer blocks were trained for 2 epochs at 336 px on release {V1.id}'s training split: 155,781 DNA-verified records and 624,785 photos as cut (16,959 species once erratum r4 is applied), with classifiers at species (17,077 classes), genus and family. MycoMap Vision v1 learned from all of those photos; MycoMap Vision v1-open from the 527,842 among them a model may be shared from: {OPEN_DATA_MEANS}. Earlier tests used the same recipe at 224 px: MycoMap Vision v0.</p>
             <p className="small mt-2">"BioCLIP 2 (base model, not fine-tuned)" in the results means the base model's own image vectors, unchanged, used to find the nearest DNA-verified records; not zero-shot naming from text prompts.</p>
             {/* The recipe: the served model's finetunes row on the box (bioclip-2-336-ft-20261018-171420:
                 blocks_trained 4 of 24, 2 epochs, 155,781 records, 624,785 photos, 17,077 species); the

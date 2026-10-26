@@ -3,7 +3,7 @@ import { Download, Search, Target } from "lucide-react";
 import type { HowGood, Me, RunReport, ScoreRun } from "@/lib/api";
 import { CITATIONS } from "@/lib/research";
 import { shortHash, utcDay, V1 } from "@/lib/datasetReleases";
-import { MODEL_CREDIT_LINE } from "@/lib/publicView";
+import { MODEL_CREDIT_LINE, OPEN_DATA_MEANS } from "@/lib/publicView";
 import { standardOf } from "@/lib/compareView";
 import { modelParts, nf, placeVsPhotos, topkValues } from "@/lib/researchView";
 import { CitationCard, HashChip, KV, ResearchHero, ResearchShell, Section, SourceLine, Strip,
@@ -32,7 +32,7 @@ export const MODEL_NAMES: { name: string; note: string; what: string; role: stri
   { name: "MycoMap Vision v1", note: "public + non-public training data",
     what: "The base model fine-tuned at 336 px on release v1's training split, all 624,785 photos", role: "The site's model" },
   { name: "MycoMap Vision v1-open", note: "open data only",
-    what: "The same recipe on the 527,842 Creative Commons photos", role: "The paper's headline model" },
+    what: `The same recipe on 527,842 photos a model may be shared from: ${OPEN_DATA_MEANS}`, role: "The paper's headline model" },
   { name: "MycoMap Vision v0", note: "224 px, development", what: "The same recipe at 224 px", role: "Earlier tests" },
   { name: "BioCLIP 2 (base model, not fine-tuned)", note: "224 or 336 px",
     what: "The base model's own image vectors, unchanged", role: "Comparison only" },

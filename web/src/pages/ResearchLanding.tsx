@@ -172,7 +172,7 @@ function LatestResults({ d }: { d: LandingData }) {
         )}
         <ResultCard testId="card-two-models" when="v1 val" tag="paired, by observer"
                     title={`Open data only costs ${Math.abs(100 * TWO_MODELS.paired.diff).toFixed(2)} points`}
-                    foot={<>Species top 1, photos only, {" "}against the full reference. v1-open minus v1: {pointsDiff(TWO_MODELS.paired.diff, TWO_MODELS.paired.ci95)} points, {nf(TWO_MODELS.paired.n)} finds from {nf(TWO_MODELS.paired.observers)} observers. Against the openly licensed reference only (the paper's headline setup), v1-open names {pc(heads.open.top1)}.</>}
+                    foot={<>Species top 1, photos only, {" "}against the full reference. v1-open minus v1: {pointsDiff(TWO_MODELS.paired.diff, TWO_MODELS.paired.ci95)} points, {nf(TWO_MODELS.paired.n)} finds from {nf(TWO_MODELS.paired.observers)} observers. Against the open-data reference only (the paper's headline setup), v1-open names {pc(heads.open.top1)}.</>}
                     more={{ href: "/research/results#two", label: "The two models" }}>
           <div className="flex justify-between text-[13px] text-[#4a3728]">
             <span>v1 <b>{pc(site.species.top1)}</b></span><span>v1-open <b>{pc(open.species.top1)}</b></span>

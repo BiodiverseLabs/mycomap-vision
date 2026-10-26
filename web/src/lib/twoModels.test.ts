@@ -39,7 +39,7 @@ test("v1-open has two numbers, each labelled with its reference: 55.3% open-only
   assert.equal((100 * h.open.top1).toFixed(1), "55.3");
   assert.equal((100 * h.full.top1).toFixed(1), "55.9");
   assert.equal(h.open.n, h.full.n, "the same finds");
-  assert.match(REFERENCE_LABEL.open, /openly licensed reference only/);
+  assert.match(REFERENCE_LABEL.open, /open-data reference only/);
   assert.match(REFERENCE_LABEL.open, /headline/);
   assert.match(REFERENCE_LABEL.full, /full reference/);
   assert.ok(OPEN_REFERENCE.referenceRecords < TWO_MODELS.referenceRecords);

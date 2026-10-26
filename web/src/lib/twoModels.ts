@@ -63,7 +63,7 @@ export const twoModelLabel = (m: ModelFigures) => modelName(m.backbone);
 /** Its tooltip: the image size and the internal id. */
 export const twoModelTip = (m: ModelFigures) => modelTooltip(m.backbone);
 
-/** The same two models answered from the openly licensed reference only (Steve, 2026-10-25):
+/** The same two models answered from the open-data reference only (Steve, 2026-10-25):
  *  the paper's headline setup, where MycoMap Vision v1-open names 55.3% of species first. Copied
  *  from the research repo's paper/o1/o1-336-c-cc.json (commit e9df6e4): reference
  *  "public-trainable" (134,942 records), record set 8951e6f53b28, the same 12,874 val finds
@@ -86,7 +86,7 @@ export const OPEN_REFERENCE = {
 /** The two references a v1-open number can come from, each labelled (Steve, 2026-10-25): the
  *  open reference is the paper's headline setup; the full one is what the site answers from. */
 export const REFERENCE_LABEL = {
-  open: "against the openly licensed reference only (the paper's headline setup)",
+  open: "against the open-data reference only (the paper's headline setup)",
   full: "against the full reference",
 } as const;
 
@@ -95,3 +95,8 @@ export function openModelHeadline(): { open: TopK; full: TopK } {
   const open = OPEN_REFERENCE.species[TWO_MODELS.models[1].backbone];
   return { open, full: TWO_MODELS.models[1].species };
 }
+
+/** Genus here is O1's: an exact genus name. The paper credits genus through its pinned taxonomy,
+ *  as every genus figure on Benchmarks does (research repo experiments/2026-10-13-v1-published-
+ *  models.md at 5792c17: 85.8 and 85.6 on the full reference; E33 corrected to match at 43328a1). */
+export const GENUS_SCORING = "Genus here counts an exact genus name. Credited through the paper's pinned taxonomy, as on Benchmarks, genus top 1 is 85.8% for MycoMap Vision v1 and 85.6% for v1-open against the full reference.";

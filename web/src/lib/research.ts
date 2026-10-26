@@ -401,11 +401,12 @@ export const BASE_MODEL_SCREEN = {
 };
 
 /** The research entry most test-set results cite (Steve, 2026-10-25): E33, as it stands on
- *  the research repo's origin/main at 2e2576a (E4 marked FINAL, the entry done). */
+ *  the research repo's origin/main at 43328a1 (E4 final at 2e2576a; 43328a1 credits the Vision
+ *  rows' genus through the pinned taxonomy, 85.8 / 85.4, as E4's and the published models'). */
 export const E33 = {
   path: "experiments/2026-10-23-fungitastic-own-test.md",
   slug: "fungitastic-own-test",
-  commit: "2e2576a",
+  commit: "43328a1",
 };
 
 /** The entry the published models on v1 val come from: its 25 Oct addendum (502719f) and the
@@ -638,8 +639,8 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
     columns: [...topK("Species: % of finds"), { group: "Genus: % of finds", label: "Top 1" }], digits: 2,
     rows: [
       { name: E4, detail: "trained on v1's open photos (E4) · final: best epoch 13", cells: [51.23, 67.18, 72.90, 79.03, 80.22] },
-      { name: VISION_V1_OPEN, detail: "open photos, open reference", cells: [55.31, 72.61, 77.65, 83.29, 84.9], digits: [2, 2, 2, 2, 1] },
-      { name: VISION_V1, detail: "all photos, full reference", cells: [56.32, 73.55, 78.87, 84.28, 85.4], digits: [2, 2, 2, 2, 1] },
+      { name: VISION_V1_OPEN, detail: "open photos, open reference", cells: [55.31, 72.61, 77.65, 83.29, 85.4], digits: [2, 2, 2, 2, 1] },
+      { name: VISION_V1, detail: "all photos, full reference", cells: [56.32, 73.55, 78.87, 84.28, 85.8], digits: [2, 2, 2, 2, 1] },
     ],
     diffs: { columns: ["Species top 1", "3", "5", "10"], rows: [
       { name: `${E4} − ${VISION_V1_OPEN}`, cells: [{ d: -4.04, lo: -4.91, hi: -3.24 }, { d: -5.41, lo: -6.37, hi: -4.53 },
@@ -648,6 +649,7 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
     notes: [
       "E4 (BEiT-B/384, Seesaw loss, the FungiTastic schedule) stopped by its declared epoch rule at epoch 20; the final model is its best epoch, 13. Every row is scored on the same finds with the same species-rank answer key: E4 averages the logits of each find's photos, and the MycoMap Vision rows answer by closest specimens + species average, by specimen.",
       "Paired on the same finds; 95% intervals from an observer-clustered bootstrap (752 observers, 2,000 resamples). The interval's own scoring gives MycoMap Vision v1-open 55.27 rather than 55.31; the 0.04-point difference is in its row, not E4's.",
+      "Genus is credited through the paper's pinned taxonomy for every row, as in the models-as-released section above.",
     ],
     source: E33_SOURCE },
   // research repo, experiments/2026-10-18-v1-image-size.md (origin/main 7ce997d), "Paired, 336 px
