@@ -254,6 +254,31 @@ def test_load_checked_names_every_bad_file_and_keeps_the_rest(tmp_path):
         experiments.load_all(d)
 
 
+TEMPLATE = """# Experiment registry
+
+```markdown
+---
+title: Plain title
+slug: the-slug                # must match the file name
+status: done                  # planned | running | done | adopted | dropped
+---
+```
+"""
+
+
+def test_the_readme_and_other_notes_are_never_entries_and_never_counted(tmp_path, capsys):
+    from mycomap_vision import cli
+    write(tmp_path, "README.md", TEMPLATE)
+    write(tmp_path, "NOTES.md", "---\n" + TEMPLATE)               # front matter of its own
+    d = write(tmp_path, "2026-10-09-good-one.md", GOOD)
+    found, problems = experiments.load_checked(d)
+    assert [e.slug for e in found] == ["good-one"] and problems == []
+    assert cli.main(["experiments-check", str(d)]) == 0
+    assert "1 entries ok, 0 bad" in capsys.readouterr().out
+    write(tmp_path, "2026-10-26_Misnamed.md", GOOD)                  # dated: still an entry
+    assert [n for n, _ in experiments.load_checked(d)[1]] == ["2026-10-26_Misnamed.md"]
+
+
 def test_experiments_check_exits_non_zero_on_a_bad_entry(tmp_path, capsys):
     from mycomap_vision import cli
     d = write(tmp_path, "2026-10-09-good-one.md", GOOD)

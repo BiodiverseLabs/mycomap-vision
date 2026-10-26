@@ -37,6 +37,9 @@ FREEZE_DATE: str | None = "2026-10-12"
 LISTED = REQUIRED + ("branch", "commits", "benchmark", "split", "model", "methods", "related") \
     + REPRO_FIELDS + ("reproduced_by", "reproduced_on")
 FILE_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$")
+# Only a file named for a date is an entry (well or badly formed). README.md (the template and
+# rules) and any other note in the folder is not one: never listed, never counted as skipped.
+DATED = re.compile(r"^\d{4}-\d{2}-\d{2}")
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # The template's sections (experiments/README.md), each an exact "## <name>" heading.
 SECTIONS = ("Question", "Why it matters", "Setup", "What we tried", "Results", "Verdict",
@@ -159,7 +162,7 @@ def load_checked(directory: Path = EXPERIMENTS_DIR, freeze_date: str | None = No
     out: list[Experiment] = []
     problems: list[tuple[str, str]] = []
     for p in sorted(directory.glob("*.md")):
-        if p.name.lower() == "readme.md":
+        if not DATED.match(p.name):
             continue
         try:
             out.append(parse(p, freeze_date))
