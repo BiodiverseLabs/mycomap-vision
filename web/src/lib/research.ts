@@ -387,41 +387,89 @@ export function screenLead(rows: ScreenRow[]): { best: ScreenRow; points: number
   return { best: sorted[0], points: Math.round((sorted[0].top1 - sorted[1].top1) * 10) / 10 };
 }
 
-/** The research entry the fungi-specific cards cite (Steve, 2026-10-25): E33, committed on
- *  the research repo's origin/main as 8147947. */
+/** The research entry most fungi-specific cards cite (Steve, 2026-10-25): E33, as it stands on
+ *  the research repo's origin/main at 6090354 (the entry's last change; read at 5792c17). */
 export const E33 = {
   path: "experiments/2026-10-23-fungitastic-own-test.md",
   slug: "fungitastic-own-test",
-  commit: "8147947",
+  commit: "6090354",
 };
 
-/** Cards in the Benchmarks summary's "Fungi-specific models" block that wait on numbers not
- *  yet committed to the research repo: (a) the published FungiTastic / Danish Fungi models on
- *  our North American v1 val records, as published. Off until E33 holds them; switch it on
- *  (and put the numbers in FUNGI_PENDING) once the entry is committed. */
-export const SHOW_PENDING_FUNGI_CARDS = false;
+/** The entry card (a) cites: the published models on v1 val, its 25 Oct addendum (502719f)
+ *  and the three models added on 26 Oct, as on origin/main at 5792c17. */
+export const V1_PUBLISHED = {
+  path: "experiments/2026-10-13-v1-published-models.md",
+  slug: "v1-published-models",
+  commit: "5792c17",
+};
+
+/** Top 1, 3, 5 and 10 in percent, exactly as the entry gives them; null where it gives none. */
+export type TopK4 = readonly [number | null, number | null, number | null, number | null];
 
 export interface VersusRow { name: string; detail?: string; top1: number; ours?: boolean }
-export interface FewShotRow { per: string; n: number; top1: number; top3: number; top5: number; top10: number }
+
+/** A model's row in a per-image / per-observation table; `observation` is null when the entry
+ *  scores it per image only. `digits`: the entry's precision when it isn't the card's. */
+export interface PairRow { name: string; detail?: string; ours?: boolean; image: TopK4; observation: TopK4 | null;
+                           digits?: number }
+/** One test set's table. */
+export interface PairTable { split: string; images: number; observations: number; rows: PairRow[] }
+/** A paired difference in points with its 95% interval (absent when the entry gives none). */
+export interface Diff { d: number; lo: number; hi: number }
+export interface DiffRow { name: string; cells: Diff[] }
+
+/** A row of card (a): species top-k and genus top 1 on every find with a species, and species
+ *  top 1 on the finds whose species the published models have a class for. */
+export interface PublishedRow { name: string; detail?: string; ours?: boolean; species: TopK4; ci: [number, number];
+                                genus: number; shared: number; sharedCi: [number, number] }
+
+/** A row of card (b1): one split, per image or per observation, all finds or the species we have. */
+export interface CrossRow { split: string; per: "image" | "observation"; of: "all" | "ours"; n: number; topk: TopK4 }
+
+interface CardBase { title: string; interim: boolean; tag?: string; source: string }
 
 export type FungiCard =
-  | { kind: "replication"; key: "d"; title: string; interim: boolean; ours: number; theirs: number;
-      ours3: number; theirs3: number; model: string; testSet: string; also: string; source: string }
-  | { kind: "versus"; key: "c"; title: string; interim: boolean; rows: VersusRow[];
-      finds: number; withSpecies: number; note: string; source: string }
-  | { kind: "fewshot"; key: "fewshot"; title: string; interim: boolean; rows: FewShotRow[];
-      note: string; source: string }
-  | { kind: "pending"; key: "a"; title: string; interim: boolean; text: string; source: string };
+  | CardBase & { kind: "replication"; key: "d"; ours: number; theirs: number;
+      ours3: number; theirs3: number; model: string; testSet: string; also: string }
+  | CardBase & { kind: "versus"; key: "c"; rows: VersusRow[]; finds: number; withSpecies: number; note: string }
+  | CardBase & { kind: "pairs"; key: "b2" | "fewshot"; lead: string; tables: PairTable[];
+      /** The bigstat: the first `ours` row's top 1 per image, beside this row's. */
+      versus: string; diffHead?: string[]; diffs?: DiffRow[]; notes: string[] }
+  | CardBase & { kind: "published"; key: "a"; finds: number; withSpecies: number; shared: number;
+      rows: PublishedRow[]; notes: string[] }
+  | CardBase & { kind: "cross"; key: "b1"; rows: CrossRow[]; classes: Record<string, string>;
+      note: string };
+
+/** Card (b1)'s headline: the first per-observation row on the species we have. */
+export const crossHeadline = (rows: CrossRow[]): CrossRow | undefined =>
+  rows.find((r) => r.per === "observation" && r.of === "ours");
+
+/** Whether a card takes the block's full width (its table needs it). */
+export const isWideCard = (c: FungiCard): boolean => c.kind === "pairs" || c.kind === "published";
 
 const E33_SOURCE = `research repo, ${E33.path} (origin/main ${E33.commit})`;
+const V1_PUBLISHED_SOURCE = `research repo, ${V1_PUBLISHED.path}, addendum of 25 Oct and rows added 26 Oct (origin/main ${V1_PUBLISHED.commit})`;
 
-/** The committed cards, numbers copied from E33 (research 8147947): (d) the replication, final
- *  there; (c) their recipe on our open photos and the few-shot rows, both INTERIM there and here. */
+const FT_BEIT = "FungiTastic BEiT-B/384";
+const FT_VIT = "FungiTastic ViT-B/384";
+const FT_SWIN = "FungiTastic Swin-B/384";
+const FT_EFF = "FungiTastic EfficientNetV2-B3/384";
+const FT_CONVNEXT = "FungiTastic ConvNeXt-B/384";
+const BIOCLIP2_BASE = "BioCLIP 2 (base model, not fine-tuned)";
+
+const CLOSED_CLASSES = "979 of their 2,336 ClosedSet-Test classes";
+const DNA_CLASSES = "383 of 725 DNA-Test classes";
+
+/** The committed cards, every number copied from its entry on the research repo's origin/main
+ *  (E33 at 6090354; v1-published-models at 5792c17). Nothing here is from the sealed test
+ *  (v1-test): FungiTastic's own test sets, or v1 validation finds. FungiTastic's images are
+ *  CC BY-NC-SA, so the cards carry scores only. (c), their recipe on our open photos, is still
+ *  INTERIM in E33 and here. */
 export const FUNGI_CARDS: FungiCard[] = [
-  { kind: "replication", key: "d", title: "Replicating FungiTastic", interim: false,
+  { kind: "replication", key: "d", title: "Replicating FungiTastic", interim: false, tag: "Replication",
     ours: 75.28, theirs: 75.3, ours3: 86.68, theirs3: 86.7, model: "their released BEiT-B/384",
     testSet: "their ClosedSet-Test, 91,832 images",
-    also: "ViT-B/384: 74.59 / 86.39 against their 74.9 / 86.3.",
+    also: "ViT-B/384: 74.59 / 86.39 against their 74.9 / 86.3. Their other released checkpoints, not in Table 8, score lower on the same images at top 1: Swin-B/384 74.24, EfficientNetV2-B3/384 72.03, ConvNeXt-B/384 70.71.",
     source: E33_SOURCE },
   { kind: "versus", key: "c", title: "Their recipe, our open photos", interim: true,
     rows: [
@@ -431,25 +479,123 @@ export const FUNGI_CARDS: FungiCard[] = [
     finds: 12874, withSpecies: 12798,
     note: "Species top 1 on the same v1 validation finds; both learned only from the same openly licensed photos. Their run is still training, so its number can move.",
     source: E33_SOURCE },
-  { kind: "fewshot", key: "fewshot", title: "Few-shot, on their own test set", interim: true,
+  { kind: "cross", key: "b1", title: "Our North American references, their Danish finds", interim: false,
+    tag: "Their test sets",
     rows: [
-      { per: "Per image", n: 1909, top1: 44.84, top3: 59.98, top5: 67.31, top10: 75.22 },
-      { per: "Per observation", n: 999, top1: 47.65, top3: 63.46, top5: 70.27, top10: 77.98 },
+      { split: "ClosedSet-Test", per: "image", of: "ours", n: 54841, topk: [37.23, 55.61, 62.85, 72.09] },
+      { split: "ClosedSet-Test", per: "observation", of: "ours", n: 29558, topk: [43.77, 63.07, 70.45, 79.49] },
+      { split: "ClosedSet-Test", per: "image", of: "all", n: 91756, topk: [22.25, 33.24, 37.56, 43.09] },
+      { split: "ClosedSet-Test", per: "observation", of: "all", n: 48361, topk: [26.75, 38.55, 43.06, 48.59] },
+      { split: "DNA-Test", per: "image", of: "ours", n: 2782, topk: [16.10, 27.93, 34.51, 42.95] },
+      { split: "DNA-Test", per: "observation", of: "ours", n: 1100, topk: [23.73, 39.82, 46.64, 55.73] },
+      { split: "DNA-Test", per: "image", of: "all", n: 5105, topk: [8.78, 15.22, 18.81, 23.41] },
     ],
-    note: "MycoMap Vision v1-open with FungiTastic's FewShot-Train (7,819 images, 2,427 species) as the reference, on FewShot-Test (567 species).",
+    classes: { "ClosedSet-Test": CLOSED_CLASSES, "DNA-Test": DNA_CLASSES },
+    note: "MycoMap Vision v1-open, photos only, answering from its own North American reference (v1 training split, open photos: 16,153 species). “Ours” means the species it has, the only ones it can name, so this tests transfer across continents, not a match to their 75.3%. MycoMap Vision v1 is level on the species it has: 37.18 per image, 43.86 per observation.",
+    source: E33_SOURCE },
+  { kind: "pairs", key: "b2", title: "Head to head on their test sets", interim: false, tag: "Their test sets",
+    lead: "Their training photos (433,499 images, all 2,829 classes) are MycoMap Vision's reference, and it is not trained on FungiTastic at all: the models are as released, fine-tuned on North American open photos only. Both sides are photo only: no place, date or other metadata.",
+    versus: FT_BEIT,
+    tables: [
+      { split: "ClosedSet-Test", images: 91756, observations: 48361, rows: [
+        { name: "MycoMap Vision v1-open", detail: "their training photos as reference", ours: true,
+          image: [77.46, 89.09, 91.81, 94.25], observation: [88.31, 96.76, 98.21, 99.13] },
+        { name: "MycoMap Vision v1", detail: "the same reference", ours: true,
+          image: [77.54, 89.12, 91.81, 94.31], observation: [88.29, 96.78, 98.22, 99.13] },
+        { name: BIOCLIP2_BASE, detail: "the same reference",
+          image: [76.36, 88.26, 91.04, 93.60], observation: [87.61, 96.38, 97.86, 98.88] },
+        { name: FT_BEIT, detail: "their classifier, trained on those photos",
+          image: [75.28, 86.68, 89.56, 92.26], observation: [87.42, 96.01, 97.52, 98.66] },
+        { name: FT_VIT, detail: "their classifier",
+          image: [74.59, 86.39, 89.39, 92.10], observation: [86.41, 95.47, 97.10, 98.34] },
+        { name: FT_SWIN, detail: "their classifier · all 91,832 images",
+          image: [74.24, 86.33, 89.33, 92.02], observation: null },
+        { name: FT_EFF, detail: "their classifier · all 91,832 images",
+          image: [72.03, 84.67, 88.02, 91.22], observation: null },
+        { name: FT_CONVNEXT, detail: "their classifier · all 91,832 images",
+          image: [70.71, 83.83, 87.29, 90.74], observation: null },
+      ] },
+      { split: "DNA-Test", images: 5105, observations: 2041, rows: [
+        { name: "MycoMap Vision v1-open", detail: "their training photos as reference", ours: true,
+          image: [41.86, 60.63, 67.44, 74.46], observation: [56.59, 78.83, 86.58, 92.60] },
+        { name: "MycoMap Vision v1", detail: "the same reference", ours: true,
+          image: [41.78, 61.25, 67.44, 74.55], observation: [56.83, 79.27, 86.38, 92.41] },
+        { name: BIOCLIP2_BASE, detail: "the same reference",
+          image: [37.67, 56.28, 63.70, 71.36], observation: [51.54, 73.35, 81.58, 88.49] },
+        { name: FT_BEIT, detail: "their classifier",
+          image: [38.73, 56.87, 63.82, 70.91], observation: [57.28, 78.69, 85.84, 92.45] },
+        { name: FT_VIT, detail: "their classifier", image: [36.38, 53.50, 60.24, 67.82], observation: null },
+        { name: FT_SWIN, detail: "their classifier", image: [37.96, 57.51, 63.66, 71.26], observation: null },
+        { name: FT_EFF, detail: "their classifier", image: [35.55, 54.44, 61.27, 69.21], observation: null },
+        { name: FT_CONVNEXT, detail: "their classifier", image: [34.01, 53.12, 60.00, 68.15], observation: null },
+      ] },
+    ],
+    diffHead: ["ClosedSet-Test, per image", "per observation", "DNA-Test, per image", "per observation"],
+    diffs: [
+      { name: `MycoMap Vision v1-open − ${FT_BEIT}`, cells: [
+        { d: 2.18, lo: 1.92, hi: 2.47 }, { d: 0.90, lo: 0.63, hi: 1.17 },
+        { d: 3.13, lo: 1.63, hi: 4.55 }, { d: -0.69, lo: -2.79, hi: 1.32 }] },
+      { name: `MycoMap Vision v1-open − ${FT_VIT}`, cells: [
+        { d: 2.87, lo: 2.59, hi: 3.16 }, { d: 1.91, lo: 1.62, hi: 2.18 },
+        { d: 5.48, lo: 4.01, hi: 6.87 }, { d: 3.77, lo: 1.57, hi: 5.88 }] },
+      { name: `MycoMap Vision v1 − ${FT_BEIT}`, cells: [
+        { d: 2.27, lo: 2.00, hi: 2.54 }, { d: 0.87, lo: 0.60, hi: 1.15 },
+        { d: 3.06, lo: 1.59, hi: 4.48 }, { d: -0.44, lo: -2.55, hi: 1.57 }] },
+      { name: `What the fine-tune adds: MycoMap Vision v1-open − ${BIOCLIP2_BASE}`, cells: [
+        { d: 1.11, lo: 0.93, hi: 1.28 }, { d: 0.71, lo: 0.51, hi: 0.90 },
+        { d: 4.19, lo: 3.22, hi: 5.20 }, { d: 5.05, lo: 3.58, hi: 6.61 }] },
+    ],
+    notes: [
+      "Their classifiers are scored on exactly the same images; per observation, by averaging their logits over the observation's photos (their own rule). 76 ClosedSet-Test images that are cut short are left out for every model; it does not move BEiT-B or ViT-B at two decimals. Their other three checkpoints are scored per image only, on all 91,832 ClosedSet-Test images.",
+      "Paired differences at top 1, in points, with 95% intervals from an observation-clustered bootstrap (2,000 resamples). Every ClosedSet-Test difference excludes zero; on DNA-Test, the smaller sequence-verified set, MycoMap Vision leads per image, and per observation it is level with BEiT-B.",
+    ],
+    source: E33_SOURCE },
+  { kind: "published", key: "a", title: "Their published models on our finds", interim: false, tag: "v1 validation",
+    finds: 12874, withSpecies: 12798, shared: 2411,
+    rows: [
+      { name: "MycoMap Vision v1", detail: "all photos, full reference", ours: true,
+        species: [56.3, 73.6, 78.9, 84.3], ci: [53.4, 59.2], genus: 85.8, shared: 67.6, sharedCi: [64.6, 70.4] },
+      { name: "MycoMap Vision v1-open", detail: "open photos, open reference", ours: true,
+        species: [55.3, 72.6, 77.7, 83.3], ci: [52.4, 58.2], genus: 85.4, shared: 66.8, sharedCi: [63.9, 69.5] },
+      { name: FT_BEIT, species: [10.7, 14.1, 15.2, 16.5], ci: [9.4, 12.4], genus: 58.6, shared: 56.9, sharedCi: [53.1, 61.2] },
+      { name: FT_SWIN, species: [10.3, 13.7, 14.9, 16.2], ci: [8.9, 12.1], genus: 56.6, shared: 54.7, sharedCi: [50.3, 59.7] },
+      { name: FT_EFF, species: [10.2, 13.5, 14.7, 15.9], ci: [8.8, 11.9], genus: 56.2, shared: 54.1, sharedCi: [50.1, 58.6] },
+      { name: FT_VIT, species: [10.1, 13.4, 14.6, 15.8], ci: [8.7, 11.7], genus: 55.6, shared: 53.5, sharedCi: [49.4, 57.9] },
+      { name: FT_CONVNEXT, species: [9.6, 13.0, 14.4, 15.8], ci: [8.2, 11.4], genus: 53.9, shared: 51.0, sharedCi: [46.7, 56.2] },
+      { name: "Danish Fungi 2020 ViT-L/384", detail: "1,604 classes of its own",
+        species: [10.2, 12.9, 13.8, 14.6], ci: [8.9, 11.6], genus: 55.6, shared: 52.6, sharedCi: [49.2, 55.9] },
+    ],
+    notes: [
+      "Their models as released, from the photos alone (each find's photos' logits averaged), their class names matched to ours through the reviewed GBIF / Catalogue of Life crosswalk; every model credited by the same species-rank answer key, with 95% intervals clustered by observer (below each top 1). Four in five finds are species they have no class for; on the finds of species they do have, the gap is not only vocabulary.",
+      "The last column is the 2,411 finds whose species is one of FungiTastic's 2,829 classes (all five FungiTastic models share them; Danish Fungi 2020 is scored on the same finds). Genus top 1 is on the 12,865 finds with a genus.",
+    ],
+    source: V1_PUBLISHED_SOURCE },
+  { kind: "pairs", key: "fewshot", title: "Few-shot, on their own test set", interim: false, tag: "Their test sets",
+    lead: "FungiTastic's FewShot-Train (7,819 images, 2,427 species) is the reference; FewShot-Test is scored (567 species). The class centroid (each species' average image) is the protocol of their Table 4; the served method is MycoMap Vision's closest specimens + species average.",
+    versus: "FungiTastic paper: BioCLIP",
+    tables: [
+      { split: "FewShot-Test", images: 1909, observations: 999, rows: [
+        { name: "MycoMap Vision v1-open", detail: "class centroid", ours: true,
+          image: [46.41, 61.92, 67.78, 76.27], observation: [49.75, 64.46, 70.87, 78.48] },
+        { name: "MycoMap Vision v1", detail: "class centroid", ours: true,
+          image: [45.94, 61.92, 68.31, 77.06], observation: [49.25, 63.96, 71.67, 79.98] },
+        { name: "MycoMap Vision v1-open", detail: "served method", ours: true,
+          image: [44.84, 59.98, 67.31, 75.22], observation: [47.65, 63.46, 70.27, 77.98] },
+        { name: "MycoMap Vision v1", detail: "served method", ours: true,
+          image: [45.31, 61.08, 68.05, 76.43], observation: [48.35, 63.76, 70.77, 79.38] },
+        { name: BIOCLIP2_BASE, detail: "class centroid, 336 px",
+          image: [43.11, 58.88, 66.21, 73.86], observation: [47.25, 63.16, 68.97, 76.68] },
+        { name: "BioCLIP (base model, not fine-tuned)", detail: "class centroid, our pipeline",
+          image: [24.99, 37.40, 43.84, 52.28], observation: [29.83, 42.54, 48.25, 56.86] },
+        { name: "FungiTastic paper: BioCLIP", detail: "their Table 4, best centroid",
+          image: [21.8, 32.6, null, null], observation: null, digits: 1 },
+      ] },
+    ],
+    notes: [
+      "Where the gain over their Table 4 comes from: our pipeline with the original BioCLIP gives 24.99 against their 21.8 (protocol and resolution, about 3 points); BioCLIP 2 adds about 18; our fine-tune on North American open photos about 3 more, on species it never saw as Danish finds. No intervals yet: about ±2.2 points at 95% per model on 1,909 images.",
+    ],
     source: E33_SOURCE },
 ];
-
-/** Cards waiting on committed numbers; shown only with SHOW_PENDING_FUNGI_CARDS. */
-export const FUNGI_PENDING: FungiCard[] = [
-  { kind: "pending", key: "a", title: "Their published models on our records", interim: true,
-    text: "The FungiTastic and Danish Fungi models as published, on the v1 validation finds. Numbers come with the E33 entry.",
-    source: E33_SOURCE },
-];
-
-/** The cards the summary shows: the committed ones, and the pending ones only when switched on. */
-export const fungiCards = (showPending: boolean = SHOW_PENDING_FUNGI_CARDS): FungiCard[] =>
-  showPending ? [...FUNGI_CARDS, ...FUNGI_PENDING] : FUNGI_CARDS;
 
 // --- Citations (For researchers, and the references under Evaluation protocols) ------------
 

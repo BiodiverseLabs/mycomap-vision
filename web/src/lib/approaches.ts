@@ -25,5 +25,7 @@ export const APPROACHES: Approach[] = [
   { name: "Danish Fungi method on our records", outside: true,
     how: "Whole network retrained as a classifier (BEiT-B, 384 px).", status: "Running (from 21 Oct)" },
   { name: "Published Danish Fungi / FungiTastic models", outside: true,
-    how: "The authors' models, unchanged.", status: "Can name 13-19% of formally named North American records" },
+    how: "The authors' models, unchanged.",
+    // research repo, experiments/2026-10-13-v1-published-models.md, addendum of 25 Oct (origin/main 5792c17)
+    status: "BEiT-B: 10.7% species top 1 on v1 validation finds; 56.9% on the species it has a class for" },
 ];

@@ -170,16 +170,49 @@ test("Benchmarks: the summary, the screen with FungiTastic BEiT-B (frozen), the 
   assert.match(t, /Which image model to build on\? BioCLIP 2, by 2\.1 points/);
   assert.match(t, /FungiTastic BEiT-B \(frozen\)/);
   assert.match(t, /ef3a8df/);
-  for (const k of ["d", "c", "fewshot"]) assert.match(html, new RegExp(`data-testid="fungi-card-${k}"`), k);
-  assert.doesNotMatch(html, /data-testid="fungi-card-a"/, "the pending card stays off");
-  assert.equal(count(html, /data-testid="label-interim"/g), 2, "their recipe on our photos, and few-shot");
+  for (const k of ["d", "c", "b1", "b2", "a", "fewshot"]) assert.match(html, new RegExp(`data-testid="fungi-card-${k}"`), k);
+  assert.equal(count(html, /data-testid="label-interim"/g), 1, "only their recipe on our photos (E4) is interim");
   assert.match(t, /75\.28%/);
-  assert.match(t, /8147947/);
+  assert.match(t, /6090354/);
+  assert.match(t, /5792c17/);
+  assert.doesNotMatch(t, /8147947/, "the cards cite the entry as it stands now");
   assert.equal(count(html, /data-testid="benchmark-card-/g), BENCHMARKS.length);
   assert.match(t, /Showing all 9 benchmarks/);
   assert.match(html, /data-testid="pill-sealed"/);
   for (const chip of ["chip-status-sealed", "chip-measures-danger", "chip-data-prev1"]) assert.match(html, new RegExp(chip), chip);
   assert.match(t, /Dangerous mistakes 1/);
+});
+
+test("Benchmarks, fungi cards: the head to head, the published models on our finds, cross-continent and few-shot, as the page shows them", () => {
+  const html = render(createElement(Benchmarks, { me: visitor }), "/research/benchmarks");
+  const part = (key: string) => {
+    const at = html.indexOf(`data-testid="fungi-card-${key}"`);
+    assert.ok(at >= 0, key);
+    const next = html.indexOf('data-testid="fungi-card-', at + 10);
+    return text(html.slice(at + 10, next < 0 ? undefined : next));
+  };
+  // (b2): the headline, both tables, the paired intervals with true minus signs, photo only said plainly.
+  const b2 = part("b2");
+  assert.match(b2, /77\.46% MycoMap Vision v1-open \(their training photos as reference\), top 1 per image on ClosedSet-Test · FungiTastic BEiT-B\/384: 75\.28% · per observation 88\.31% against 87\.42%/);
+  assert.match(b2, /Both sides are photo only/);
+  assert.match(b2, /ClosedSet-Test · 91,756 images, 48,361 observations/);
+  assert.match(b2, /DNA-Test · 5,105 images, 2,041 observations/);
+  assert.match(b2, /MycoMap Vision v1-open their training photos as reference 77\.46 89\.09 91\.81 94\.25 88\.31 96\.76 98\.21 99\.13/);
+  assert.match(b2, /BioCLIP 2 \(base model, not fine-tuned\) the same reference 76\.36 88\.26 91\.04 93\.60 87\.61/);
+  assert.match(b2, /FungiTastic Swin-B\/384 their classifier · all 91,832 images 74\.24 86\.33 89\.33 92\.02 – – – –/);
+  assert.match(b2, /\+2\.18 \[1\.92, 2\.47\] \+0\.90 \[0\.63, 1\.17\] \+3\.13 \[1\.63, 4\.55\] −0\.69 \[−2\.79, 1\.32\]/);
+  assert.match(b2, /What the fine-tune adds: MycoMap Vision v1-open − BioCLIP 2 \(base model, not fine-tuned\) \+1\.11 \[0\.93, 1\.28\] \+0\.71 \[0\.51, 0\.90\] \+4\.19 \[3\.22, 5\.20\] \+5\.05 \[3\.58, 6\.61\]/);
+  // (a): the published models on 12,798 v1 val finds, with intervals under each top 1.
+  const a = part("a");
+  assert.match(a, /56\.3% MycoMap Vision v1, species top 1 on 12,798 v1 validation finds · FungiTastic BEiT-B\/384: 10\.7% · on the 2,411 finds of species it has a class for, 67\.6% against 56\.9%/);
+  assert.match(a, /FungiTastic BEiT-B\/384 10\.7 9\.4–12\.4 14\.1 15\.2 16\.5 58\.6 56\.9 53\.1–61\.2/);
+  assert.match(a, /FungiTastic ConvNeXt-B\/384 9\.6 8\.2–11\.4 13\.0 14\.4 15\.8 53\.9 51\.0 46\.7–56\.2/);
+  assert.match(a, /^\S* ?Their published models on our finds v1 validation/);
+  // (b1) and few-shot.
+  assert.match(part("b1"), /43\.77% species top 1 per observation, on the 29,558 ClosedSet-Test observations of species we have/);
+  const f = part("fewshot");
+  assert.match(f, /46\.41% MycoMap Vision v1-open \(class centroid\), top 1 per image on FewShot-Test · FungiTastic paper: BioCLIP: 21\.8%/);
+  assert.match(f, /FungiTastic paper: BioCLIP their Table 4, best centroid 21\.8 32\.6 – – – – – –/);
 });
 
 test("Benchmarks filtered: the count says so, a clear button shows, and an empty result offers to clear", () => {

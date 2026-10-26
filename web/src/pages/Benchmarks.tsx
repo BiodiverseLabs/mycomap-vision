@@ -3,8 +3,9 @@ import { Link } from "wouter";
 import { ArrowUpRight, Check, Lock } from "lucide-react";
 import type { EarlyAnswersGroup, HowGood, Me, ProspectiveModel, RunReport, ScoreRun } from "@/lib/api";
 import { comparisons, incompleteRun, standardOf, STANDARD_BANDS, companionBars } from "@/lib/compareView";
-import { BASE_MODEL_SCREEN, BENCHMARKS, DATA_LABEL, DATA_ORDER, fungiCards, MEASURE_LABEL, MEASURE_ORDER,
-         screenLead, STATUS_LABEL, STATUS_ORDER, type Benchmark, type BenchmarkStatus, type FungiCard } from "@/lib/research";
+import { BASE_MODEL_SCREEN, BENCHMARKS, crossHeadline, DATA_LABEL, DATA_ORDER, FUNGI_CARDS, isWideCard, MEASURE_LABEL,
+         MEASURE_ORDER, screenLead, STATUS_LABEL, STATUS_ORDER, type Benchmark, type BenchmarkStatus, type FungiCard,
+         type TopK4 } from "@/lib/research";
 import { benchmarkFacetCounts, cardFigure, cardMeta, earlyFigures, filterBenchmarks, filterFromSearch,
          filterToSearch, heatRows, historyLines, isFiltered, modelParts, NO_FILTER, nf, pc, prospectiveLead, pt,
          placeVsPhotos, approachGroups, shortDay, statusBar, toggle, topkValues, type BenchmarkFeeds,
@@ -127,8 +128,9 @@ export function BaseModelScreen({ rows = BASE_MODEL_SCREEN.rows }: { rows?: type
   );
 }
 
-/** "Fungi-specific models": the FungiTastic cards, each citing its committed entry. */
-export function FungiSpecific({ cards = fungiCards() }: { cards?: FungiCard[] }) {
+/** "Fungi-specific models": the FungiTastic cards, each citing its committed entry. The short
+ *  cards share a row; a card with a wide table takes the block's full width. */
+export function FungiSpecific({ cards = FUNGI_CARDS }: { cards?: FungiCard[] }) {
   if (!cards.length) return null;
   return (
     <div className="mt-3.5" data-testid="fungi-specific">
@@ -140,12 +142,22 @@ export function FungiSpecific({ cards = fungiCards() }: { cards?: FungiCard[] })
   );
 }
 
+/** A percentage as the entry gives it ("–" where it gives none). */
+const fx = (v: number | null, digits = 2) => (v == null ? "–" : v.toFixed(digits));
+/** A difference in points, signed, with a true minus sign. */
+const sgn = (v: number) => `${v < 0 ? "−" : "+"}${Math.abs(v).toFixed(2)}`;
+const neg = (v: number) => (v < 0 ? `−${Math.abs(v).toFixed(2)}` : v.toFixed(2));
+const NONE: TopK4 = [null, null, null, null];
+const SUB = "block text-[11.5px] text-[var(--muted)] font-normal";
+const TOPK_HEAD = <><th>Top 1</th><th>3</th><th>5</th><th>10</th></>;
+
 function FungiCardView({ c }: { c: FungiCard }) {
   return (
-    <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white px-[18px] py-4 flex flex-col" data-testid={`fungi-card-${c.key}`}>
+    <div className={`min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white px-[18px] py-4 flex flex-col ${isWideCard(c) ? "lg:col-span-3" : ""}`}
+         data-testid={`fungi-card-${c.key}`}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <b className="text-[#4a3728]">{c.title}</b>
-        {c.interim ? <Interim>{c.kind === "versus" ? "Interim · val only" : "Interim"}</Interim> : <span className="tag">Replication</span>}
+        {c.interim ? <Interim>{c.kind === "versus" ? "Interim · val only" : "Interim"}</Interim> : c.tag && <span className="tag">{c.tag}</span>}
       </div>
       {c.kind === "replication" && (
         <>
@@ -165,21 +177,131 @@ function FungiCardView({ c }: { c: FungiCard }) {
           <p className="small mt-2">{c.note} {nf(c.withSpecies)} finds with a species, of the {nf(c.finds)} in the split.</p>
         </>
       )}
-      {c.kind === "fewshot" && (
-        <>
-          <p className="small mt-1">MycoMap Vision v1-open, top 1 / 3 / 5 / 10</p>
-          <div className="scrollx mt-1"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
-            <thead><tr><th className="l">Per</th><th>Top 1</th><th>3</th><th>5</th><th>10</th><th>n</th></tr></thead>
-            <tbody>{c.rows.map((r) => (
-              <tr key={r.per}><td className="l">{r.per.replace(/^Per /, "")}</td><td className="strong">{r.top1.toFixed(1)}</td><td>{r.top3.toFixed(1)}</td><td>{r.top5.toFixed(1)}</td><td>{r.top10.toFixed(1)}</td><td className="mut">{nf(r.n)}</td></tr>
-            ))}</tbody>
-          </table></div>
-          <p className="small mt-2">{c.note}</p>
-        </>
-      )}
-      {c.kind === "pending" && <p className="small mt-2">{c.text}</p>}
+      {c.kind === "cross" && <CrossCard c={c} />}
+      {c.kind === "pairs" && <PairsCard c={c} />}
+      {c.kind === "published" && <PublishedCard c={c} />}
       <div className="mt-auto"><SourceLine parts={[c.source, c.kind === "replication" ? "FungiTastic's own test set; no MycoMap records" : null]} /></div>
     </div>
+  );
+}
+
+/** (b1): MycoMap Vision v1-open's own North American reference on their test sets. */
+function CrossCard({ c }: { c: Extract<FungiCard, { kind: "cross" }> }) {
+  const h = crossHeadline(c.rows);
+  const splits = [...new Set(c.rows.map((r) => r.split))];
+  return (
+    <>
+      {h && (
+        <div className="mt-2 flex flex-wrap items-baseline gap-3.5">
+          <span className="bigstat" style={{ fontSize: 34 }}>{fx(h.topk[0])}%</span>
+          <span className="small">species top 1 per observation, on the {nf(h.n)} {h.split} observations of species we have</span>
+        </div>
+      )}
+      <div className="scrollx mt-2"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
+        <thead><tr><th className="l">Per</th>{TOPK_HEAD}</tr></thead>
+        <tbody>{splits.map((s) => [
+          <tr key={s}><td className="l" colSpan={5}><b>{s}</b><small>we have {c.classes[s]}</small></td></tr>,
+          ...c.rows.filter((r) => r.split === s).map((r) => (
+            <tr key={`${s}-${r.per}-${r.of}`} className={r === h ? "hl" : undefined}>
+              <td className="l">{r.per === "image" ? "Image" : "Observation"}<small className="whitespace-nowrap">{r.of === "ours" ? "ours" : "all"} · {nf(r.n)}</small></td>
+              {r.topk.map((v, k) => <td key={k} className={k === 0 ? "strong" : undefined}>{fx(v)}</td>)}
+            </tr>
+          )),
+        ])}</tbody>
+      </table></div>
+      <p className="small mt-2">{c.note}</p>
+    </>
+  );
+}
+
+/** (b2) and few-shot: per-image and per-observation top-k for every model on a test set, and
+ *  the paired differences with their intervals. */
+function PairsCard({ c }: { c: Extract<FungiCard, { kind: "pairs" }> }) {
+  const first = c.tables[0];
+  const ours = first?.rows.find((r) => r.ours);
+  const them = first?.rows.find((r) => r.name === c.versus);
+  return (
+    <>
+      {ours && them && (
+        <div className="mt-2 flex flex-wrap items-baseline gap-3.5">
+          <span className="bigstat" style={{ fontSize: 34 }}>{fx(ours.image[0], ours.digits)}%</span>
+          <span className="small">
+            {ours.name}{ours.detail ? ` (${ours.detail})` : ""}, top 1 per image on {first.split} · {them.name}: <b style={{ color: "var(--ink)" }}>{fx(them.image[0], them.digits)}%</b>
+            {ours.observation && them.observation && <> · per observation {fx(ours.observation[0], ours.digits)}% against {fx(them.observation[0], them.digits)}%</>}
+          </span>
+        </div>
+      )}
+      <p className="small mt-2">{c.lead}</p>
+      <div className="mt-3 grid gap-4">
+        {c.tables.map((t) => (
+          <div key={t.split} className="min-w-0" data-testid={`pairs-${c.key}-${t.split}`}>
+            <p className="small mb-1"><b style={{ color: "var(--ink)" }}>{t.split}</b> · {nf(t.images)} images, {nf(t.observations)} observations</p>
+            <div className="scrollx"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
+              <thead>
+                <tr><th className="l min-w-[170px]" rowSpan={2}>Model</th><th colSpan={4} style={{ textAlign: "center" }}>Per image</th><th colSpan={4} style={{ textAlign: "center" }}>Per observation</th></tr>
+                <tr>{TOPK_HEAD}{TOPK_HEAD}</tr>
+              </thead>
+              <tbody>{t.rows.map((r, i) => (
+                <tr key={i} className={r.ours ? "hl" : undefined}>
+                  <td className="l">{r.ours ? <b>{r.name}</b> : r.name}{r.detail && <small>{r.detail}</small>}</td>
+                  {r.image.map((v, k) => <td key={`i${k}`} className={k === 0 ? "strong" : undefined}>{fx(v, r.digits)}</td>)}
+                  {(r.observation ?? NONE).map((v, k) => <td key={`o${k}`} className={v == null ? "mut" : k === 0 ? "strong" : undefined}>{fx(v, r.digits)}</td>)}
+                </tr>
+              ))}</tbody>
+            </table></div>
+          </div>
+        ))}
+      </div>
+      {c.diffs && c.diffHead && (
+        <div className="mt-4" data-testid={`diffs-${c.key}`}>
+          <p className="small mb-1"><b style={{ color: "var(--ink)" }}>Paired differences at top 1</b> · points, 95% interval</p>
+          <div className="scrollx"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
+            <thead><tr><th className="l min-w-[220px]">Difference</th>{c.diffHead.map((h) => <th key={h}>{h}</th>)}</tr></thead>
+            <tbody>{c.diffs.map((r) => (
+              <tr key={r.name}>
+                <td className="l">{r.name}</td>
+                {r.cells.map((x, k) => (
+                  <td key={k} className={`whitespace-nowrap ${x.lo > 0 ? "strong" : ""}`}>{sgn(x.d)}<small className={SUB}>[{neg(x.lo)}, {neg(x.hi)}]</small></td>
+                ))}
+              </tr>
+            ))}</tbody>
+          </table></div>
+        </div>
+      )}
+      {c.notes.map((n, i) => <p key={i} className="small mt-2">{n}</p>)}
+    </>
+  );
+}
+
+/** (a): the published models on the v1 validation finds, beside MycoMap Vision. */
+function PublishedCard({ c }: { c: Extract<FungiCard, { kind: "published" }> }) {
+  const ours = c.rows.find((r) => r.ours);
+  const them = c.rows.find((r) => !r.ours);
+  const ci = ([lo, hi]: [number, number]) => <small className={SUB}>{lo.toFixed(1)}–{hi.toFixed(1)}</small>;
+  return (
+    <>
+      {ours && them && (
+        <div className="mt-2 flex flex-wrap items-baseline gap-3.5">
+          <span className="bigstat" style={{ fontSize: 34 }}>{fx(ours.species[0], 1)}%</span>
+          <span className="small">{ours.name}, species top 1 on {nf(c.withSpecies)} v1 validation finds · {them.name}: <b style={{ color: "var(--ink)" }}>{fx(them.species[0], 1)}%</b> · on the {nf(c.shared)} finds of species it has a class for, {fx(ours.shared, 1)}% against {fx(them.shared, 1)}%</span>
+        </div>
+      )}
+      <div className="scrollx mt-3"><table className="dt [&_td]:!px-1.5 [&_th]:!px-1.5">
+        <thead>
+          <tr><th className="l min-w-[170px]" rowSpan={2}>Model</th><th colSpan={4} style={{ textAlign: "center" }}>Species, {nf(c.withSpecies)} finds</th><th rowSpan={2}>Genus<br />top 1</th><th rowSpan={2}>Species they have<br />{nf(c.shared)} finds, top 1</th></tr>
+          <tr>{TOPK_HEAD}</tr>
+        </thead>
+        <tbody>{c.rows.map((r) => (
+          <tr key={r.name} className={r.ours ? "hl" : undefined}>
+            <td className="l">{r.ours ? <b>{r.name}</b> : r.name}{r.detail && <small>{r.detail}</small>}</td>
+            {r.species.map((v, k) => <td key={k} className={k === 0 ? "strong" : undefined}>{fx(v, 1)}{k === 0 && ci(r.ci)}</td>)}
+            <td>{fx(r.genus, 1)}</td>
+            <td className="strong">{fx(r.shared, 1)}{ci(r.sharedCi)}</td>
+          </tr>
+        ))}</tbody>
+      </table></div>
+      {c.notes.map((n, i) => <p key={i} className="small mt-2">{n}</p>)}
+    </>
   );
 }
 
