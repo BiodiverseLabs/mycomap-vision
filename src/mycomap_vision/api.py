@@ -788,8 +788,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
-        # thread, after taking the one packed slot from the index serving now.
-        if config.setting("MV_SEARCH_INT8") == "1":
+        # thread, after taking the one packed slot from the index serving now. Only for a
+        # backbone offered for identification: the Excluded photos page's base index
+        # (excluded_looked.py) must never take the slot from the served one.
+        if config.setting("MV_SEARCH_INT8") == "1" and backbone in ready_backbones():
             ref = getattr(getattr(getattr(ident, "nearest", None), "scorer", None), "ref", None)
             if not hasattr(ref, "use_int8"):
                 fastsearch.SLOT.last_error = ("the reference vectors aren't memory-mapped here "
@@ -2497,12 +2499,26 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         entry["rank"] = xl.rank_of(ident, looked.photo_vector(tower, body), name, hidden)
         return entry
 
+    base_shipped: dict = {"at": -1e9, "ok": False}
+
+    def base_ready() -> bool:
+        """The base model's vector files are here, every shard the manifest names (a release's
+        manifest lists backbones it ships no files for); looked at once a minute."""
+        now = time.monotonic()
+        if now - base_shipped["at"] > 60:
+            folder = (embeddings_root / base_backbone if embeddings_root
+                      else config.DATA_DIR / "embeddings" / base_backbone)
+            shards = [s for (s,) in q("select distinct shard from embeddings where backbone = ?",
+                                      (base_backbone,))]
+            base_shipped.update(at=now, ok=xl.vectors_shipped(shards, folder))
+        return base_shipped["ok"]
+
     def excluded_models() -> dict[str, str]:
-        """{"v1": the served backbone, "base": its base model where it has reference vectors}.
+        """{"v1": the served backbone, "base": its base model where its vectors are here}.
         The base needn't be offered for identification (MV_BACKBONES): it is never served."""
         ready = ready_backbones()
         out = {"v1": ready[0]} if ready else {}
-        if ready and base_backbone != ready[0] and embedded_counts().get(base_backbone):
+        if ready and base_backbone != ready[0] and base_ready():
             out["base"] = base_backbone
         return out
 

@@ -341,3 +341,70 @@ def test_the_list_follows_new_decisions_within_its_check_interval(tmp_path):
     fstore.decide(item["id"], "keep_photo", ANN)                  # a later decision wins
     now[0] = 62.0
     assert listing.rows() == []
+
+
+# --- the base model's vectors: rows alone don't make it usable --------------------------------------
+
+def test_manifest_rows_without_the_base_models_files_offer_v1_only(conn, tmp_path):
+    # A release's manifest keeps every backbone the laptop embedded; the files are what count.
+    app, maker, _ = site(conn, tmp_path)
+    (tmp_path / "emb" / "m2" / "shard-00000.npy").unlink()
+    assert visitor(app).get(LIST).json()["models"] == ["v1"]
+    assert person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": "base"}).status_code == 404
+    assert not maker.calls
+
+
+def test_a_folder_shipped_as_the_manifest_names_it_passes_the_check(conn, tmp_path):
+    site(conn, tmp_path)
+    got = xl.check_vectors(conn, "m2", tmp_path / "emb" / "m2")
+    assert got["ok"], got["problems"]
+    assert got["vectors"] == conn.execute("select count(*) from embeddings where backbone = 'm2'"
+                                          ).fetchone()[0]
+    assert xl.check_vectors(conn, "m2", tmp_path / "emb" / "m2", dim=got["dim"])["ok"]
+
+
+def test_the_same_folder_as_int8_codes_with_their_scales_passes_too(conn, tmp_path):
+    from mycomap_vision.quantize import write_int8_shards
+    site(conn, tmp_path)
+    write_int8_shards(tmp_path / "emb" / "m2", tmp_path / "int8" / "m2")
+    got = xl.check_vectors(conn, "m2", tmp_path / "int8" / "m2")
+    assert got["ok"] and got["dtype"] == "int8", got["problems"]
+    (tmp_path / "int8" / "m2" / "shard-00000.scale.npy").unlink()
+    assert not xl.check_vectors(conn, "m2", tmp_path / "int8" / "m2")["ok"]
+
+
+def test_the_check_refuses_a_folder_the_server_would_misread(conn, tmp_path):
+    site(conn, tmp_path)
+    folder = tmp_path / "emb" / "m2"
+    ids = np.load(folder / "shard-00000.ids.npy")
+    vecs = np.load(folder / "shard-00000.npy")
+    bad = lambda: xl.check_vectors(conn, "m2", folder)["problems"]
+    np.save(folder / "shard-00000.ids.npy", ids[::-1].copy())            # rows in another order
+    assert any("name another photo" in p for p in bad())
+    np.save(folder / "shard-00000.ids.npy", ids)
+    np.save(folder / "shard-00000.npy", vecs * 3)                         # not unit length
+    assert any("unit length" in p for p in bad())
+    np.save(folder / "shard-00000.npy", vecs[:-1])                        # a row short
+    assert any("vectors of shape" in p for p in bad())
+    np.save(folder / "shard-00000.npy", vecs)
+    assert xl.check_vectors(conn, "m2", folder, dim=vecs.shape[1] + 1)["problems"]
+    (folder / "shard-00000.ids.npy").unlink()
+    assert any("missing" in p for p in bad())
+    assert not xl.vectors_shipped(xl.manifest_shards(conn, "m2"), folder)
+    assert xl.check_vectors(conn, "nothing", folder)["problems"] == [
+        "the manifest has no embeddings rows for nothing"]
+
+
+def test_a_base_map_leaves_the_served_models_fast_search_packed(conn, tmp_path, monkeypatch):
+    from mycomap_vision import fastsearch
+    pytest.importorskip("torch")
+    monkeypatch.setenv("MV_SEARCH_INT8", "1")
+    monkeypatch.setattr(fastsearch, "SLOT", fastsearch.Slot())
+    app, _, _ = site(conn, tmp_path)
+    assert person(app, "m").post(LOOKED, params={"photo": "inat:1003"}).status_code == 200
+    served = fastsearch.SLOT.owner
+    if served is None:
+        pytest.skip(f"no int8 engine here: {fastsearch.SLOT.last_error}")
+    assert person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": "base"}
+                                 ).status_code == 200
+    assert fastsearch.SLOT.owner is served and served.packed is not None

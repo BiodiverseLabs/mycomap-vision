@@ -127,6 +127,98 @@ def record_url(record_key: str) -> str:
     return f"https://www.inaturalist.org/observations/{record_key}"
 
 
+# --- the base model's vectors ------------------------------------------------------------------
+# A release's manifest keeps the embeddings rows of every backbone the laptop ever embedded, but
+# ships vector files only for the served ones (release.py), so rows alone don't make a backbone
+# usable. The base is offered only when its folder holds every shard the manifest names; shipping
+# it is a folder copy into <release>/embeddings/<base>/, read by serving.map_embeddings as
+# shard-NNNNN.ids.npy (int64 photo ids) and shard-NNNNN.npy (float, or int8 codes with
+# shard-NNNNN.scale.npy beside them), row r of a shard being the manifest's (photo_id, shard, r).
+
+def manifest_shards(conn: sqlite3.Connection, backbone: str) -> list[int]:
+    return [r[0] for r in conn.execute("select distinct shard from embeddings where backbone = ? "
+                                       "order by shard", (backbone,))]
+
+
+def vectors_shipped(shards: list[int], folder: Path) -> bool:
+    """Every shard's two files are in `folder` (the cheap check the server makes)."""
+    folder = Path(folder)
+    return bool(shards) and folder.is_dir() and all(
+        (folder / f"shard-{s:05d}.ids.npy").is_file() and (folder / f"shard-{s:05d}.npy").is_file()
+        for s in shards)
+
+
+def check_vectors(conn: sqlite3.Connection, backbone: str, folder: Path,
+                  dim: int | None = None, sample: int = 2000) -> dict:
+    """Whether `folder` holds `backbone`'s vectors exactly as `conn`'s manifest names them, and
+    loads as the server loads it (serving.map_embeddings): every shard's files, each row's photo
+    id, the vectors' shape, dtype and scales, `dim` when given, and unit length on a sample of
+    float rows. {"ok", "problems", "shards", "vectors", "dim", "dtype"}."""
+    import numpy as np
+
+    from .serving import SCALE_SUFFIX, map_embeddings
+    folder = Path(folder)
+    problems: list[str] = []
+    want: dict[int, dict[int, int]] = {}
+    for photo_id, shard, row in conn.execute(
+            "select photo_id, shard, row from embeddings where backbone = ?", (backbone,)):
+        want.setdefault(int(shard), {})[int(row)] = int(photo_id)
+    if not want:
+        return {"ok": False, "problems": [f"the manifest has no embeddings rows for {backbone}"],
+                "shards": 0, "vectors": 0, "dim": None, "dtype": None}
+    dims, dtypes, total = set(), set(), 0
+    rng = np.random.default_rng(0)
+    for s in sorted(want):
+        ids_f, vec_f = folder / f"shard-{s:05d}.ids.npy", folder / f"shard-{s:05d}.npy"
+        if not (ids_f.is_file() and vec_f.is_file()):
+            problems.append(f"shard {s}: {ids_f.name} or {vec_f.name} is missing")
+            continue
+        ids = np.load(ids_f)
+        v = np.load(vec_f, mmap_mode="r")
+        if ids.ndim != 1 or ids.dtype.kind not in "iu":
+            problems.append(f"shard {s}: photo ids are {ids.dtype} {ids.shape}, not 1-D integers")
+            continue
+        if v.ndim != 2 or len(v) != len(ids):
+            problems.append(f"shard {s}: {len(ids)} ids but vectors of shape {v.shape}")
+            continue
+        dims.add(int(v.shape[1]))
+        dtypes.add(str(v.dtype))
+        rows = want[s]
+        wrong = [r for r, pid in rows.items() if r >= len(ids) or int(ids[r]) != pid]
+        if wrong:
+            problems.append(f"shard {s}: {len(wrong)} manifest rows name another photo "
+                            f"(first: row {wrong[0]})")
+        if len(ids) != len(rows):
+            problems.append(f"shard {s}: {len(ids)} vectors, the manifest names {len(rows)}")
+        total += len(ids)
+        if v.dtype == np.int8:
+            sc_f = folder / f"shard-{s:05d}{SCALE_SUFFIX}"
+            if not sc_f.is_file() or np.load(sc_f).shape != (len(ids),):
+                problems.append(f"shard {s}: int8 codes without one scale per row in {sc_f.name}")
+        elif v.dtype.kind == "f":
+            pick = rng.choice(len(v), size=min(len(v), max(1, sample // len(want))), replace=False)
+            norms = np.linalg.norm(np.asarray(v[np.sort(pick)], dtype=np.float64), axis=1)
+            if not np.all(np.isfinite(norms)) or np.abs(norms - 1).max() > 1e-2:
+                problems.append(f"shard {s}: vectors are not unit length (norms "
+                                f"{norms.min():.3f}..{norms.max():.3f})")
+        else:
+            problems.append(f"shard {s}: vectors of dtype {v.dtype}")
+    if len(dims) > 1:
+        problems.append(f"shards differ in width: {sorted(dims)}")
+    if dim is not None and dims and dims != {dim}:
+        problems.append(f"vectors are {sorted(dims)} wide, the model's are {dim}")
+    if not problems:
+        try:
+            ids, vecs = map_embeddings(conn, backbone, folder)
+            if len(ids) != total:
+                problems.append(f"the server's loader read {len(ids)} vectors, not {total}")
+        except Exception as e:  # noqa: BLE001 - report what the server would hit
+            problems.append(f"the server's loader refused it: {type(e).__name__}: {e}")
+    return {"ok": not problems, "problems": problems, "shards": len(want), "vectors": total,
+            "dim": next(iter(dims)) if len(dims) == 1 else None,
+            "dtype": next(iter(dtypes)) if len(dtypes) == 1 else sorted(dtypes)}
+
+
 class Maps:
     """The kept maps: one row per photo and model, insert or replace (a newer VERSION), never
     who asked."""
