@@ -3,7 +3,7 @@ import type { EarlyAnswersGroup, HowGood, Me, ModelsInfo, ProspectiveModel, RunR
               SpeedDay } from "@/lib/api";
 import { companionBars, scoreboardSections, standardOf, STANDARD_BANDS } from "@/lib/compareView";
 import { utcDay, V1_VAL_COUNTS } from "@/lib/datasetReleases";
-import { MODEL_CREDIT_LINE, modelName, V1_OPEN_TRAINED_ON } from "@/lib/publicView";
+import { MODEL_CREDIT_LINE, modelName, V1_OPEN_DATA } from "@/lib/publicView";
 import { GENUS_LABEL, GENUS_SCORING, OPEN_REFERENCE, pointsDiff, REFERENCE_LABEL, TWO_MODELS, type TopK } from "@/lib/twoModels";
 import { APPROACHES } from "@/lib/approaches";
 import { ADVANCE_PAUSED_SINCE, BENCHMARKS } from "@/lib/research";
@@ -203,7 +203,7 @@ export function TwoModelsSection() {
   const openRef = OPEN_REFERENCE.species[open.backbone];
   return (
     <Section id="two" band kicker="2 · The two models" title="What the site serves, and what the paper headlines"
-             lead={<>Both are the same base model, fine-tuned the same way at 336 px on release v1's training split. They differ only in the photos they learned from. {V1_OPEN_TRAINED_ON} <span data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</span></>}>
+             lead={<>Both are the same base model, fine-tuned the same way at 336 px on release v1's training split. They differ only in the photos they learned from: MycoMap Vision v1-open learned only from {V1_OPEN_DATA}. <span data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</span></>}>
       <div className="two">
         <ModelTable title="MycoMap Vision v1" swatch="var(--s1)" sub="public + non-public training data · the site's model"
                     rows={[{ label: "Species", note: REFERENCE_LABEL.full, t: site.species, hl: true },

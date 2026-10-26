@@ -15,7 +15,7 @@ import { BENCHMARKS, CITATIONS } from "../lib/research";
 import { NO_FILTER } from "../lib/researchView";
 import { CitationCard, InPageNav, ResearchBar, StatusPill } from "../components/ResearchKit";
 import { ResearchLanding } from "./ResearchLanding";
-import { V1_OPEN_PHOTOS, V1_OPEN_TRAINED_ON } from "../lib/publicView";
+import { V1_OPEN_DATA, V1_OPEN_PHOTOS } from "../lib/publicView";
 import { Results, RESULTS_SECTIONS } from "./Results";
 import { BenchmarkDetail, Benchmarks, DETAIL_SECTIONS } from "./Benchmarks";
 import { Protocols } from "./Protocols";
@@ -143,7 +143,7 @@ test("Results: eight sections in the nav's order, the two models with both v1-op
   assert.deepEqual([...order].sort((a, b) => a - b), order);
   const t = text(html);
   assert.match(t, /Species against the open-data reference only \(the paper's headline setup\) 55\.3/);
-  assert.ok(t.includes("They differ only in the photos they learned from. MycoMap Vision v1-open was trained only on Creative Commons–licensed photos (including non-commercial licences); no all-rights-reserved photos were used."));
+  assert.ok(t.includes("They differ only in the photos they learned from: MycoMap Vision v1-open learned only from Creative Commons photos (including non-commercial licences)."));
   assert.match(t, /Genus against the full reference · exact genus name 85\.4 93\.9/);
   assert.match(t, /The genus rows here count an exact genus name, the only scoring with genus at top 3, 5 and 10\. The paper credits genus through its pinned taxonomy, at top 1 only, as on Benchmarks: 85\.8% for MycoMap Vision v1 against the full reference, and for v1-open 85\.6% against the full reference and 85\.4% against the open-data reference\./);
   assert.doesNotMatch(t, /openly licensed (reference|photos)/);
@@ -481,14 +481,14 @@ test("Protocols: the sealed test closes by 30 November with 2,000-3,000 records;
   assert.match(t, /scored on exactly the records MycoMap Vision is/);
 });
 
-test("v1-open was trained only on Creative Commons photos, none all rights reserved: the confirmed sentence, word for word (26 Oct)", () => {
-  const SENTENCE = "MycoMap Vision v1-open was trained only on Creative Commons–licensed photos (including non-commercial licences); no all-rights-reserved photos were used.";
-  assert.equal(V1_OPEN_TRAINED_ON, SENTENCE);
+test("v1-open's data is \"Creative Commons photos (including non-commercial licences)\", word for word (Steve, 26 Oct; research c636f2f)", () => {
+  const PHRASE = "Creative Commons photos (including non-commercial licences)";
+  assert.equal(V1_OPEN_DATA, PHRASE);
   assert.equal(V1_OPEN_PHOTOS, 527_842);
   const fr = text(render(createElement(ForResearchers, { me: visitor, howGood: HOW_GOOD, runs: RUNS, reports: REPORTS }), "/research/for-researchers"));
-  assert.ok(fr.includes(`The same recipe on 527,842 photos. ${SENTENCE}`), "For researchers");
+  assert.ok(fr.includes(`The same recipe on the 527,842 ${PHRASE}`), "For researchers");
   const pr = text(render(createElement(Protocols, { me: visitor, howGood: HOW_GOOD, runs: RUNS, reports: REPORTS }), "/research/protocols"));
-  assert.ok(pr.includes(`MycoMap Vision v1-open from 527,842 of them. ${SENTENCE}`), "Protocols");
+  assert.ok(pr.includes(`MycoMap Vision v1-open from the 527,842 ${PHRASE} among them.`), "Protocols");
   const rs = text(render(createElement(Results, { me: visitor, howGood: HOW_GOOD, runs: RUNS, reports: REPORTS }), "/research/results"));
   for (const t of [fr, pr, rs]) assert.doesNotMatch(t, /owners gave permission|whose owners gave|permission-granted/, "no permission clause for v1-open");
   const data = text(render(createElement(Data, { me: visitor, stats: STATS, howGood: HOW_GOOD }), "/research/data"));

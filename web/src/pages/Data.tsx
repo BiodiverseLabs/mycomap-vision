@@ -13,7 +13,7 @@ import { useHowGood, useMe, useStats } from "@/components/researchQueries";
 
 const LICENCE: { key: "open" | "nc" | "arr"; label: string; color: string; ink: string }[] = [
   // "Open, any use": not the "open data" v1-open learned from, which adds non-commercial
-  // licences (publicView.V1_OPEN_TRAINED_ON).
+  // licences (publicView.V1_OPEN_DATA).
   { key: "open", label: "Open, any use (CC0, CC-BY, CC-BY-SA)", color: "#507a1d", ink: "#fff" },
   { key: "nc", label: "Non-commercial (NC or ND)", color: "#98c052", ink: "#2f241b" },
   { key: "arr", label: "All rights reserved", color: "#d9d0c5", ink: "#2f241b" },
