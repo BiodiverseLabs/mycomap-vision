@@ -152,15 +152,25 @@ const PROSPECTIVE: ProspectiveModel[] = [
   { backbone: V0, method: "nearest", predicted: 378, resolved: 0, family_top1: null, genus_top1: null,
     species_top1: null, mean_species_confidence: null }];
 
-test("live feeds: the answered-with-place group leads; the advance row with most resolved is quoted", () => {
-  const e = earlyFigures([{ ...EARLY, context: "photos only", answers: 1501 }, EARLY])!;
+test("live feeds: the answered-with-place group leads, every answer accounted for; only the served model's advance row is quoted", () => {
+  const e = earlyFigures([{ ...EARLY, context: "photos only", answers: 1501, left_out: { answered_after_verdict: 1496 } }, EARLY])!;
   assert.deepEqual([e.answers, e.awaiting, e.afterVerdict, e.scored], [574, 531, 36, 0]);
   assert.deepEqual(e.askedBy, [{ who: "mycomap.org", n: 251 }, { who: "This site", n: 323 }]);
+  assert.equal(e.sealed, null, "the sealed count is served to signed-in readers only");
+  assert.deepEqual(e.others, [{ context: "photos only", answers: 1501, afterVerdict: 1496 }]);
+  const signedIn = earlyFigures([{ ...EARLY, answers: 667, awaiting_verdict: 624, sealed: 7,
+    left_out: { answered_after_verdict: 36, in_reference: 0, vision_assisted: 0 } }])!;
+  assert.equal(signedIn.sealed, 7);
+  assert.equal(signedIn.awaiting + signedIn.afterVerdict + signedIn.otherLeftOut + signedIn.sealed! + signedIn.scored, signedIn.answers,
+    "667 kept = 624 awaiting + 36 after the verdict + 7 sealed");
   assert.equal(earlyFigures([]), null);
-  const lead = prospectiveLead(PROSPECTIVE)!;
-  assert.equal(lead.row.resolved, 20);
-  assert.equal(lead.predicted, 678);
-  assert.equal(prospectiveLead(undefined), null);
+  assert.equal(prospectiveLead(PROSPECTIVE, V1), null, "a base model's 20 of 300 is never quoted for the served model");
+  assert.equal(prospectiveLead(PROSPECTIVE, undefined), null, "nor when the served model isn't known");
+  const lead = prospectiveLead([...PROSPECTIVE, { ...PROSPECTIVE[1], backbone: V1, predicted: 40, resolved: 3 }], V1)!;
+  assert.equal(lead.row.backbone, V1);
+  assert.equal(lead.row.resolved, 3);
+  assert.equal(lead.predicted, 718, "the total still counts every row");
+  assert.equal(prospectiveLead(undefined, V1), null);
 });
 
 const HOW_GOOD: HowGood = {
@@ -178,13 +188,18 @@ test("benchmark cards read their headline from the feeds", () => {
   assert.ok(rare?.kind === "depth" && rare.from === "19.9" && rare.to === "77.3%");
   const unknown = cardFigure(bench("unknown-species"), FEEDS);
   assert.ok(unknown?.kind === "count" && unknown.big === "649");
-  const adv = cardFigure(bench("advance-predictions"), FEEDS);
-  assert.ok(adv?.kind === "count" && adv.big === "20" && adv.of === "/ 300" && /Too few resolved/.test(adv.note));
+  assert.match(unknown?.kind === "count" ? unknown.note : "", /^Partly measured\. A first look on v1 validation \(MycoMap Vision v0, 224 px/);
+  assert.equal(cardFigure(bench("advance-predictions"), FEEDS), null, "paused: the card says why, not a number");
+  const running = { ...bench("advance-predictions"), status: "running" as const };
+  assert.equal(cardFigure(running, FEEDS), null, "no row from the served model: nothing to quote");
+  const served = cardFigure(running, { ...FEEDS, prospective: [...PROSPECTIVE, { ...PROSPECTIVE[1], backbone: V1, predicted: 40, resolved: 3 }] });
+  assert.ok(served?.kind === "count" && served.big === "3" && served.of === "/ 40" && /MycoMap Vision v1/.test(served.caption));
   const early = cardFigure(bench("answered-before-verdict"), FEEDS);
   assert.ok(early?.kind === "count" && early.big === "574");
+  assert.match(early?.kind === "count" ? early.note : "", /Left out: 36 given after the verdict\./);
   assert.deepEqual(cardMeta(bench("newest-weeks"), FEEDS), { dataset: "v1 val", size: "12,874 finds", lastRun: "19 Oct 2026" });
   assert.deepEqual(cardMeta(bench("unknown-species"), FEEDS).size, "649 finds");
-  assert.deepEqual(cardMeta(bench("advance-predictions"), FEEDS), { dataset: "live", size: "≤ 300 a night", lastRun: "nightly" });
+  assert.deepEqual(cardMeta(bench("advance-predictions"), FEEDS), { dataset: "live", size: "≤ 300 a night", lastRun: "paused since 19 October 2026" });
 });
 
 test("with a feed missing, a card has no number rather than a made-up one; the sealed test never has one", () => {
@@ -197,7 +212,7 @@ test("with a feed missing, a card has no number rather than a made-up one; the s
 test("benchmark filters: words anywhere, OR within a chip group, AND across groups; status or name order", () => {
   const all = filterBenchmarks(BENCHMARKS, NO_FILTER);
   assert.equal(all.length, BENCHMARKS.length);
-  assert.deepEqual([...new Set(all.map((b) => b.status))], ["running", "partial", "sealed", "planned", "history"]);
+  assert.deepEqual([...new Set(all.map((b) => b.status))], ["running", "partial", "paused", "sealed", "planned", "history"]);
   assert.ok(filterBenchmarks(BENCHMARKS, { ...NO_FILTER, q: "SEALED test" }).some((b) => b.slug === "sealed-test"));
   assert.deepEqual(filterBenchmarks(BENCHMARKS, { ...NO_FILTER, q: "v1-test" }).map((b) => b.slug), ["sealed-test"]);
   assert.deepEqual(filterBenchmarks(BENCHMARKS, { ...NO_FILTER, q: "inaturalist" }).map((b) => b.slug).sort(),
@@ -206,19 +221,21 @@ test("benchmark filters: words anywhere, OR within a chip group, AND across grou
                    ["sealed-test", "held-out"]);
   assert.deepEqual(filterBenchmarks(BENCHMARKS, { ...NO_FILTER, measures: ["danger"] }).map((b) => b.slug), ["poisonous-mistakes"]);
   assert.deepEqual(filterBenchmarks(BENCHMARKS, { ...NO_FILTER, status: ["running"], data: ["live"] }).map((b) => b.slug),
-                   ["rare-species", "advance-predictions", "answered-before-verdict"]);
+                   ["rare-species", "answered-before-verdict"]);
+  assert.deepEqual(filterBenchmarks(BENCHMARKS, { ...NO_FILTER, status: ["paused"] }).map((b) => b.slug), ["advance-predictions"]);
   assert.deepEqual(filterBenchmarks(BENCHMARKS, { ...NO_FILTER, q: "no such benchmark" }), []);
   const byName = filterBenchmarks(BENCHMARKS, { ...NO_FILTER, sort: "name" }).map((b) => b.name);
   assert.deepEqual(byName, [...byName].sort((a, b) => a.localeCompare(b)));
 });
 
-test("chip counts come from the whole list, as the mockup's: running 4, accuracy 6, v1 validation 5", () => {
+test("chip counts come from the whole list: running 3, paused 1, accuracy 6, v1 validation 4, sealed test 3", () => {
   const c = benchmarkFacetCounts();
-  assert.deepEqual(c.status, { running: 4, partial: 1, sealed: 1, planned: 2, history: 1 });
+  assert.deepEqual(c.status, { running: 3, partial: 2, paused: 1, sealed: 1, planned: 1, history: 1 });
   assert.equal(c.measures.accuracy, 6);
   assert.equal(c.measures.danger, 1);
-  assert.deepEqual(c.data, { v1val: 5, sealed: 1, live: 4, prev1: 1 });
-  assert.deepEqual(statusBar().map((s) => [s.status, s.n]), [["running", 4], ["partial", 1], ["sealed", 1], ["planned", 2], ["history", 1]]);
+  assert.deepEqual(c.data, { v1val: 4, sealed: 3, live: 4, prev1: 1 });
+  assert.deepEqual(statusBar().map((s) => [s.status, s.n]),
+                   [["running", 3], ["partial", 2], ["paused", 1], ["sealed", 1], ["planned", 1], ["history", 1]]);
 });
 
 test("a filter round-trips through the address, unknown values dropped", () => {

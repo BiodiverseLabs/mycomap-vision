@@ -48,9 +48,9 @@ test("Research names each model by its MycoMap Vision version and training data,
   assert.equal(modelName("eva02-l14-448"), "EVA-02 large (base model, not fine-tuned), 448 px");
   assert.equal(modelName("some-new-model"), "some-new-model");
   assert.equal(modelName("picek-fungitastic-beit-b384-20261012-080000"),
-    "Danish Fungi method (BEiT-B, 384 px, Picek et al.), trained on our DNA-verified records");
+    "Danish Fungi method (BEiT-B, 384 px, Picek et al.), trained on MycoMap's DNA-verified records");
   assert.equal(modelName("picek-fungitastic-beit-b384-smoke"),
-    "Danish Fungi method (BEiT-B, 384 px, Picek et al.), trained on our DNA-verified records (test model)");
+    "Danish Fungi method (BEiT-B, 384 px, Picek et al.), trained on MycoMap's DNA-verified records (test model)");
   assert.equal(modelName("picek-unknown-preset-20261012-080000"),
     "picek-unknown-preset-20261012-080000");
 });

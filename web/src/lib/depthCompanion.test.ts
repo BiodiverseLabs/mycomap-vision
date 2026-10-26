@@ -26,7 +26,7 @@ test("the chart renders both bars, with each band's share", () => {
                                                                      speciesTotal: SPECIES.species }));
   assert.match(html, /data-testid="depth-bar-species"/);
   assert.match(html, /data-testid="depth-bar-finds"/);
-  assert.match(html, /Species in the reference set \(16,809\)/);
+  assert.match(html, /Species in the reference set, by the answer key(&#x27;|')s names \(16,809\)/);
   assert.match(html, /Test finds \(12,798\)/);
   assert.match(html, /1-4 records 66%/);
   assert.match(html, /1-4 records 11%/);

@@ -121,7 +121,9 @@ export function Release({ r }: { r: DatasetRelease }) {
             ["Release hash", <HashChip key="r" value={r.releaseHash} short={`${shortHash(r.releaseHash)}…`} />],
             ["Reference hash", <HashChip key="f" value={r.referenceHash} short={`${shortHash(r.referenceHash)}…`} />],
             ["Cut by code", <span key="c" className="mono">{r.codeCommit.slice(0, 7)}</span>],
-            ["Names", `${nf(r.labels)}, North America`],
+            // 16,959: species-level names in the training split after erratum r4 (research repo
+            // paper/supplement/ED1-dataset.md), the count the paper uses.
+            ["Names", `${nf(r.labels)} distinct labels, North America; 16,959 species in training (erratum r4)`],
             ["Public files", r.doi ? r.doi : "Creative Commons photos only, coming with the paper"],
           ]} /></div>
         </ChartCard>
@@ -153,7 +155,7 @@ function Live({ s, h }: { s: Stats; h?: HowGood }) {
           <Licences counts={s.photos_by_license as Partial<Record<"open" | "nc" | "arr", number>>} title={`Photo licences, live (${nf(s.photos)} photos)`} />
           <PermissionBox kind="control" className="mt-4" />
           <div className="mt-4 border-t border-[#ece6de] pt-3">
-            {compared != null && served && <div className="gl"><span>Photos the identifier compares with ({modelParts(served).name})</span><b>{nf(compared)}</b></div>}
+            {compared != null && served && <div className="gl"><span>Photos the identifier compares with ({modelParts(served).name})<small className="block text-[11.5px] text-[var(--muted)]">every DNA-verified record's photos, records validated since the release included; it learned from the training split only</small></span><b>{nf(compared)}</b></div>}
             <div className="gl"><span>Green records no longer on iNaturalist</span><b>{nf(s.inat_missing)}</b></div>
             <div className="gl"><span>Records held out with two different names</span><b>{nf(s.label_conflicts)}</b></div>
           </div>

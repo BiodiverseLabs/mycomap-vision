@@ -12,7 +12,7 @@ import { useHowGood, useMe, useRunReports, useScoreboard } from "@/components/re
 
 // Research > For researchers (Steve, 2026-10-25: the approved redesign): copy-ready citations
 // (text or BibTeX), the model names as the live site uses them, and how to test a model on
-// the same records. The number to beat is read from the scoreboard (the site's model, photos
+// the same records. MycoMap Vision v1's number is read from the scoreboard (the site's model, photos
 // only), never typed in.
 
 export interface ForResearchersData { me?: Me | null; howGood?: HowGood; runs?: ScoreRun[]; reports: Map<number, RunReport> }
@@ -63,7 +63,7 @@ export function ForResearchers(d: ForResearchersData) {
           ))}</tbody></table></div></div>
         <p className="small mt-2.5">Outside models keep their own names: iNaturalist's computer vision, the Danish Fungi 2020 and FungiTastic models.</p>
       </Section>
-      <Section kicker="Test your model on our records" title="Same records, same protocol, comparable numbers" testId="section-test-yours">
+      <Section kicker="Score your model on the same records" title="Same records, same protocol, comparable numbers" testId="section-test-yours">
         <Strip steps={[
           { icon: <Download className={icon} />, title: `1 · Get release ${V1.id}`, text: "Its public variant (Creative Commons photos only) is planned with the paper." },
           { icon: <Search className={icon} />, title: "2 · Identify the validation split", text: "From the training split only, as a new find meets it." },
@@ -79,15 +79,15 @@ export function ForResearchers(d: ForResearchersData) {
             ]} /></div>
             <SourceLine parts={["datasetReleases.ts (V1)"]} />
           </div>
-          <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5" data-testid="number-to-beat">
-            <h3 className="font-display font-semibold text-lg text-[#4a3728] mb-1">Ours on the same records</h3>
+          <div className="min-w-0 rounded-[10px] border border-[#A87146]/20 bg-white p-5" data-testid="same-records-number">
+            <h3 className="font-display font-semibold text-lg text-[#4a3728] mb-1">MycoMap Vision v1 on the same records</h3>
             {beatRun && sp ? (
               <>
-                <p className="small mb-2">{modelParts(beatRun.backbone).name}, {beatRun.method.endsWith("+place") ? "photos + place and date" : "photos only, scored by specimen (the number to beat with photos alone)"}.</p>
-                <TopKChart variant="mini" rows={[{ key: "beat", name: modelParts(beatRun.backbone).name, n: sp.n, values: topkValues(sp) }]} testId="chart-to-beat" />
+                <p className="small mb-2">{modelParts(beatRun.backbone).name}, {beatRun.method.endsWith("+place") ? "photos + place and date" : "photos only, scored by specimen: the comparable number for a model that uses photos alone"}.</p>
+                <TopKChart variant="mini" rows={[{ key: "beat", name: modelParts(beatRun.backbone).name, n: sp.n, values: topkValues(sp) }]} testId="chart-same-records" />
                 <SourceLine parts={[`/api/scoreboard/${beatRun.id}`, `${nf(sp.n)} finds`]} />
               </>
-            ) : <p className="small">The number to beat is read from the scoreboard; it could not be read just now.</p>}
+            ) : <p className="small">MycoMap Vision v1's number is read from the scoreboard; it could not be read just now.</p>}
           </div>
         </div>
         <p className="text-sm text-muted-foreground leading-normal mt-2.5">

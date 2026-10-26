@@ -56,7 +56,7 @@ export function modelName(backbone: string): string {
   const picek = /^picek-(.+?)-(\d{8}-\d{6}|smoke)$/.exec(backbone);
   if (picek && PICEK_NAME[picek[1]]) {
     const test = picek[2] === "smoke" ? " (test model)" : "";
-    return `Danish Fungi method (${PICEK_NAME[picek[1]]}, Picek et al.), trained on our ` +
+    return `Danish Fungi method (${PICEK_NAME[picek[1]]}, Picek et al.), trained on MycoMap's ` +
       `DNA-verified records${test}`;
   }
   if (backbone in EXTERNAL_NAME) return EXTERNAL_NAME[backbone];

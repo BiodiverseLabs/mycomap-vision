@@ -156,3 +156,18 @@ test("a run scored before the standard summary shows its top-1 tiles and no ladd
   assert.match(text(html), /59\.2%/);
   assert.match(text(html), /Top 3, 5 and 10 are not measured for this run yet/);
 });
+
+test("How it works: the headline names its test, place and date included; the speed chart says when it is loading", () => {
+  assert.match(text(page()), /Tested on the newest 12,874 DNA-verified finds \(validated after 17 August 2026\), identified from the 155,648 records verified before them, with each find's photos and its public place and date\./);
+  const loading = text(page({ speed: undefined, loading: true }));
+  assert.match(loading, /Loading the daily averages…/);
+  assert.doesNotMatch(loading, /No day recorded yet/);
+});
+
+test("How it works: range and season and the photo-type tagger are already in, not 'still to come'", () => {
+  const t = text(page());
+  assert.doesNotMatch(t, /What's still to come/);
+  assert.match(t, /Already in, and still to come/);
+  assert.match(t, /Range and season Already in: when you give a place and date, Vision weighs each name/);
+  assert.match(t, /Already in: micrographs and photos of data slips are set aside\. To come: recognising cap, underside, stem and more\./);
+});

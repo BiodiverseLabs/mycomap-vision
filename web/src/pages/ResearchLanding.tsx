@@ -248,7 +248,7 @@ function SectionMap({ d }: { d: LandingData }) {
              lead="Start with Results for the numbers, Benchmarks for what each test measures, and Evaluation protocols for how every number is scored.">
       <div className="smap">
         <MapCard href="/research/results" icon={<LineChart className={icon} />} title="Results"
-                 text="Every approach, ours and outside models, scored on the same DNA-verified records."
+                 text="Every approach, MycoMap Vision and published models, scored on the same DNA-verified records."
                  fact={counts ? <><b>{nf(counts.runs)}</b>scored runs in {nf(counts.comparisons)} comparisons</> : "Every scored run"} />
         <MapCard href="/research/benchmarks" icon={<Star className={icon} />} title="Benchmarks"
                  text="The named test sets: what each measures, its records, and its latest number."
@@ -261,9 +261,10 @@ function SectionMap({ d }: { d: LandingData }) {
                  fact={<><b>{nf(V1.records.included)}</b>records in release {V1.id}</>} />
         <MapCard href="/research/experiments" icon={<FlaskConical className={icon} />} brown members title="Experiments"
                  text="The registry: every question, everything tried, the numbers and the decision."
-                 fact={xs && has("/research/experiments") ? <><b>{nf(xs.length)}</b>entries · {nf(xs.filter((x) => datasetOf(x) !== "pre-v1").length)} rebuilt on v1</> : "For mycomap.org members: sign in to read"} />
+                 fact={!has("/research/experiments") ? "For mycomap.org members: sign in to read"
+                   : xs ? <><b>{nf(xs.length)}</b>entries · {nf(xs.filter((x) => datasetOf(x) !== "pre-v1").length)} rebuilt on v1</> : "Reading the registry…"} />
         <MapCard href="/research/for-researchers" icon={<Quote className={icon} />} title="For researchers"
-                 text="How to cite, the model names, and how to test your own model on our records."
+                 text="How to cite, the model names, and how to score your own model on the same records."
                  fact={<><b>{CITATIONS.length}</b>citations, copy-ready</>} />
         <MapCard href="/research/api" icon={<Code2 className={icon} />} title="API"
                  text="Identify fungi from your own app or site: access, requests and the answer, field by field."

@@ -67,6 +67,15 @@ export const V1: DatasetRelease = {
 
 export const DATASET_RELEASES: DatasetRelease[] = [V1];
 
+/** v1's validation split as each page counts it (research repo experiments/2026-10-13-v1-finetune.md:
+ *  12,874 finds after erratum r4, 12,798 with a species, 12,865 with a genus). Records and finds
+ *  differ because the erratum leaves records out and joins cross-posted twins. */
+export const V1_VAL = { records: V1.records.val, finds: 12_874, species: 12_798, genus: 12_865 };
+const n = (x: number) => x.toLocaleString("en-US");
+/** The one line every page uses where it gives v1 validation's size (Steve, 2026-10-26: one fact,
+ *  stated the same way everywhere). */
+export const V1_VAL_COUNTS = `Release v1's validation split holds ${n(V1_VAL.records)} records; scored with erratum r4 they are ${n(V1_VAL.finds)} finds, ${n(V1_VAL.species)} of them with a species name and ${n(V1_VAL.genus)} with a genus. Runs scored before the erratum count every record.`;
+
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August",
                 "September", "October", "November", "December"];
 

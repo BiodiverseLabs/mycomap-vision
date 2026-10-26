@@ -133,3 +133,10 @@ test("never mycomap.com, and every outside link is a real mycomap.org or iNatura
   assert.doesNotMatch(text(html), /Zenodo|Hugging ?Face|v1-test|sealed/i);
   assert.match(text(html), /MycoMap Vision/);
 });
+
+test("the depth chart names its test, finds and place and date; researchers score their model on the same records", () => {
+  const t = text(page());
+  assert.match(t, /Tested on the newest 12,874 finds \(validated after 17 August 2026\), each identified from the records verified before it, with its photos and its public place and date\./);
+  assert.match(t, /how to cite, and how to score your own model on the same records\./);
+  assert.doesNotMatch(t, /\bours\b/);
+});

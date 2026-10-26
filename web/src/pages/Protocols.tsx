@@ -3,7 +3,7 @@ import { BookOpen, Calendar, Check, Copy, FileText, Hash, Layers, ListChecks, Se
          Target, Users } from "lucide-react";
 import type { HowGood, Me, RunReport, ScoreRun } from "@/lib/api";
 import { ERRATUM_REASON, utcMinute, V1, type ErratumReason } from "@/lib/datasetReleases";
-import { CITATIONS } from "@/lib/research";
+import { CITATIONS, SEALED_TEST } from "@/lib/research";
 import { MODEL_CREDIT_LINE } from "@/lib/publicView";
 import { publicMethodLabel } from "@/lib/publicNames";
 import { modelParts, nf, pc, shortDay } from "@/lib/researchView";
@@ -33,7 +33,7 @@ export const STANDARD_PARTS: [string, string][] = [
   ["Species sensu lato", "Also right when the genus was split recently (Cortinarius s.l., Inocybe s.l.) or only the gender ending differs. Beside strict, never instead."],
   ["Species complex (beta)", "Also right within the same species complex. Shown for context while the rule is tested."],
   ["By reference depth", "Species results by the true species' DNA-verified records: 0, 1-4, 5-19, 20-99, 100+."],
-  ["Outside models, same records", "iNaturalist's computer vision and published models are scored on exactly the records ours are, or not shown."],
+  ["Outside models, same records", "iNaturalist's computer vision and published models are scored on exactly the records MycoMap Vision is, or not shown."],
   ["Intervals and paired tests", "95% intervals (Wilson; observer-clustered bootstrap where shown) and McNemar tests when two approaches answer the same records."],
   ["Calibration", "Whether a stated 80% is right about 80% of the time, measured on records not used to set it."],
 ];
@@ -69,9 +69,9 @@ export function Protocols(d: ProtocolsData) {
           <div className="tl mt-3">
             <div style={{ flex: V1.records.train, background: "#507a1d" }} data-tip={`Training split|${nf(V1.records.train)} records`}><b>{nf(V1.records.train)}</b>training split</div>
             <div style={{ flex: 30000, background: "#8B4A1F" }} data-tip={`Validation split|${nf(V1.records.val)} records`}><b>{nf(V1.records.val)}</b>validation</div>
-            <div style={{ flex: 14000, background: "#2f241b" }} data-tip="Sealed test|at least 3,000 records"><b>≥ 3,000</b>sealed test</div>
+            <div style={{ flex: 14000, background: "#2f241b" }} data-tip={`Sealed test|${nf(SEALED_TEST.floor)}–${nf(SEALED_TEST.target)} records`}><b>{nf(SEALED_TEST.floor)}–{nf(SEALED_TEST.target)}</b>sealed test</div>
           </div>
-          <div className="tlx"><span>earlier validations</span><span>{shortDay(V1.valCutoff)}</span><span>{shortDay(V1.labelSnapshot)}, {utcMinute(V1.labelSnapshot).split(", ")[1]}</span><span>closes ~26 Oct</span></div>
+          <div className="tlx"><span>earlier validations</span><span>{shortDay(V1.valCutoff)}</span><span>{shortDay(V1.labelSnapshot)}, {utcMinute(V1.labelSnapshot).split(", ")[1]}</span><span>closes by {shortDay(SEALED_TEST.closeBy)}</span></div>
           <p className="small mt-2.5">Widths of the validation and sealed segments are not to scale (illustrative), so the labels fit; the counts are exact.</p>
           <SourceLine parts={["datasetReleases.ts (V1)", "research.ts BENCHMARKS[sealed-test]"]} />
         </ChartCard>
@@ -102,7 +102,7 @@ export function Protocols(d: ProtocolsData) {
           <div>
             <p className="text-xs font-semibold uppercase tracking-[.08em] text-[#6b8f2a] mb-1.5">What MycoMap Vision is built on</p>
             <h2 className="font-display font-semibold text-[25px] sm:text-[30px] leading-tight text-[#4a3728] mb-2" data-testid="text-model-credit-line">{MODEL_CREDIT_LINE}</h2>
-            <p>The last 4 of the base model's 24 transformer blocks were trained for 2 epochs at 336 px on release {V1.id}'s training split: 155,781 DNA-verified records, 624,785 photos and 17,077 species, with classifiers at species, genus and family. MycoMap Vision v1 learned from all of those photos; MycoMap Vision v1-open from the 527,842 Creative Commons photos among them. Earlier tests used the same recipe at 224 px: MycoMap Vision v0.</p>
+            <p>The last 4 of the base model's 24 transformer blocks were trained for 2 epochs at 336 px on release {V1.id}'s training split: 155,781 DNA-verified records and 624,785 photos as cut (16,959 species once erratum r4 is applied), with classifiers at species (17,077 classes), genus and family. MycoMap Vision v1 learned from all of those photos; MycoMap Vision v1-open from the 527,842 Creative Commons photos among them. Earlier tests used the same recipe at 224 px: MycoMap Vision v0.</p>
             <p className="small mt-2">"BioCLIP 2 (base model, not fine-tuned)" in the results means the base model's own image vectors, unchanged, used to find the nearest DNA-verified records; not zero-shot naming from text prompts.</p>
             {/* The recipe: the served model's finetunes row on the box (bioclip-2-336-ft-20261018-171420:
                 blocks_trained 4 of 24, 2 epochs, 155,781 records, 624,785 photos, 17,077 species); the

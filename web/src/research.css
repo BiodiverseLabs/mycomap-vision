@@ -216,6 +216,8 @@
 .rs .pill.sealed i{display:none}
 .rs .pill.planned{background:#fff;color:#57493c;box-shadow:inset 0 0 0 1px #d9cdbf}
 .rs .pill.planned i{background:#fff;box-shadow:inset 0 0 0 1.5px #a8968a}
+.rs .pill.paused{background:#efe9e2;color:#57493c}
+.rs .pill.paused i{background:#a8968a}
 .rs .pill.history{background:#fff;color:#7d7064;box-shadow:inset 0 0 0 1px #cfc3b6;border:0;background-image:none}
 .rs .pill.history i{background:#cfc3b6}
 .rs .pill.adopted{background:hsl(82 53% 51% / .14);color:#3f6612}

@@ -374,8 +374,8 @@ function DepthCard({ h, loading }: { h?: HowGood; loading?: boolean }) {
             <span>0%</span><span>50%</span><span>100%</span>
           </div>
           <Cap>
-            Tested on the newest {num(run.n_test)} records (validated after {longDate(run.cutoff)}), each
-            identified from the records verified before it.{" "}
+            Tested on the newest {num(run.n_test)} finds (validated after {longDate(run.cutoff)}), each
+            identified from the records verified before it{run.method.endsWith("+place") ? ", with its photos and its public place and date" : ", from its photos alone"}.{" "}
             <a className="underline" href="/about#how-good">More in How it works</a>.
           </Cap>
         </>
@@ -537,7 +537,7 @@ function Build({ outline }: { outline?: Outline }) {
           </div>
           <Cap>
             <a className="underline" href="/research/for-researchers">For researchers</a>: how to cite, and how
-            to test your own model against ours. Questions or collaborations:{" "}
+            to score your own model on the same records. Questions or collaborations:{" "}
             <a className="underline" href="mailto:info@mycomap.org">info@mycomap.org</a>
           </Cap>
         </Card>

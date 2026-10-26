@@ -20,7 +20,7 @@ export const PUBLIC_NAV: NavItem[] = [
 
 const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
   { href: "/research/results", label: "Results",
-    blurb: "Every approach, ours and outside models, scored on the same DNA-verified records." },
+    blurb: "Every approach, MycoMap Vision and published models, scored on the same DNA-verified records." },
   { href: "/research/benchmarks", label: "Benchmarks",
     blurb: "The named test sets: what each one measures and how." },
   { href: "/research/protocols", label: "Evaluation protocols",
@@ -30,7 +30,7 @@ const RESEARCH_ITEMS: (NavItem & { members?: boolean })[] = [
   { href: "/research/experiments", label: "Experiments", members: true,
     blurb: "Every experiment: the question, everything tried, the numbers, the decision (members)." },
   { href: "/research/for-researchers", label: "For researchers",
-    blurb: "How to cite, and how to test your own model against ours." },
+    blurb: "How to cite, and how to score your own model on the same records." },
   // Last (Steve, 2026-10-12): the developer API was linked only from the footer.
   { href: API_PATH, label: "API",
     blurb: "Identify fungi from your own app or site: access, requests and the answer, field by field." },
@@ -93,15 +93,28 @@ export function mustSignIn(me: Me | null | undefined, path: string): boolean {
 // --- Benchmarks ---------------------------------------------------------------------------
 
 /** "history": measured before dataset release v1 and kept as development history. "sealed"
- *  (Steve, 2026-10-25): the paper's test, scored once after the analysis freeze. */
-export type BenchmarkStatus = "running" | "partial" | "sealed" | "planned" | "history";
+ *  (Steve, 2026-10-25): the paper's test, scored once after the analysis freeze. "paused": it
+ *  ran, and has stopped for a reason its card states (Steve, 2026-10-26: never "Running" while
+ *  nothing runs). */
+export type BenchmarkStatus = "running" | "partial" | "paused" | "sealed" | "planned" | "history";
 
 export const STATUS_LABEL: Record<BenchmarkStatus, string> = {
-  running: "Running", partial: "Partly measured", sealed: "Sealed", planned: "Planned",
+  running: "Running", partial: "Partly measured", paused: "Paused", sealed: "Sealed", planned: "Planned",
   history: "Development history",
 };
 /** The order the summary bar, the filters and the default sort follow. */
-export const STATUS_ORDER: BenchmarkStatus[] = ["running", "partial", "sealed", "planned", "history"];
+export const STATUS_ORDER: BenchmarkStatus[] = ["running", "partial", "paused", "sealed", "planned", "history"];
+
+/** The sealed test's timetable, as the paper plan has it (research repo paper/PLAN.md O6,
+ *  decided 18 Oct): the analysis is frozen first, then the set closes at the first of 3,000
+ *  included records or 30 November, with at least 2,000. */
+export const SEALED_TEST = { freeze: "around the end of October 2026", target: 3000, floor: 2000, closeBy: "2026-11-30" };
+const SEALED_CLOSE = `The analysis is frozen ${SEALED_TEST.freeze}; the set closes once it holds ${SEALED_TEST.target.toLocaleString("en-US")} records or on ${utcDay(SEALED_TEST.closeBy)}, whichever comes first, with at least ${SEALED_TEST.floor.toLocaleString("en-US")}.`;
+
+/** Advance predictions stopped on 19 Oct 2026: mycomap.org's list of records awaiting validation
+ *  (GET /api/vision/pending-records) has come back empty every night since, so nothing new is
+ *  predicted (Vision Coordinator, from the box's nightly log, 26 Oct). */
+export const ADVANCE_PAUSED_SINCE = "2026-10-19";
 
 /** What a benchmark measures (the Measures filter; Steve, 2026-10-25, the mockup's values). */
 export type Measure = "accuracy" | "rare" | "unknown" | "generalisation" | "leakage" | "outside"
@@ -212,8 +225,10 @@ export const BENCHMARKS: Benchmark[] = [
         text: "What one more record is worth (members)", members: true },
       { href: FUNGITASTIC_URL, title: "FungiTastic (Picek et al. 2025)", text: "Few-shot task elsewhere" },
     ] },
-  { slug: "advance-predictions", name: "Advance predictions", status: "running", measures: ["live", "accuracy"],
-    data: ["live"], headline: { metric: "prospective" }, size: "≤ 300 a night", lastRun: "nightly",
+  { slug: "advance-predictions", name: "Advance predictions", status: "paused", measures: ["live", "accuracy"],
+    data: ["live"], headline: { metric: "prospective" }, size: "≤ 300 a night", lastRun: `paused since ${utcDay(ADVANCE_PAUSED_SINCE)}`,
+    pending: { lead: `Paused since ${utcDay(ADVANCE_PAUSED_SINCE)}.`,
+               text: "No records awaiting validation reach Vision from mycomap.org, so nothing new is predicted. Predictions saved earlier are kept and scored as their records turn green." },
     question: "Is Vision right about a find before anyone knows its DNA name?",
     summary: "Records with a sequence but no validation yet are identified now and scored when their DNA name arrives.",
     whyItMatters: "Nothing could have seen the answer: the prediction is saved before the name exists. A static benchmark can't offer this.",
@@ -251,7 +266,7 @@ export const BENCHMARKS: Benchmark[] = [
   { slug: "look-alikes", name: "Look-alikes and species complexes", status: "partial", measures: ["accuracy"],
     data: ["v1val", "live"], size: "every benchmark",
     pending: { lead: "Strict scores are published everywhere.",
-               text: "Sensu lato and complex (beta) columns are scored, and appear beside strict once the standard summary carries them." },
+               text: "Sensu lato and complex (beta) are scored in the research record, and appear beside strict on Results once the site's run is scored with them." },
     question: "Is a near miss a wrong identification, or a matter of taxonomy?",
     summary: "Credit for a near miss where the name is a matter of taxonomy rather than a wrong identification.",
     whyItMatters: "Genus splits (Cortinarius, Inocybe) and species complexes mean a strict name match can count a sound answer as wrong. Shown beside strict scores, never instead of them.",
@@ -269,17 +284,16 @@ export const BENCHMARKS: Benchmark[] = [
       { href: "/research/results", title: "Results", text: "Strict scores for every approach" },
     ] },
   { slug: "sealed-test", name: "Sealed test (v1-test)", status: "sealed", measures: ["accuracy", "leakage", "outside"],
-    data: ["sealed"], size: "≥ 3,000 records", lastRun: "not opened",
-    pending: { lead: "Sealed.",
-               text: "The set closes once it holds at least 3,000 records (expected around 26 October 2026) and is frozen around 30 October. No numbers are published before it is opened." },
+    data: ["sealed"], size: `${SEALED_TEST.floor.toLocaleString("en-US")}–${SEALED_TEST.target.toLocaleString("en-US")} records`, lastRun: "not opened",
+    pending: { lead: "Sealed.", text: `${SEALED_CLOSE} No numbers are published before it is opened.` },
     question: "How good is Vision on finds nothing was ever tuned on?",
     summary: "Fresh DNA-verified records, validated after release v1 was cut, scored once after every choice is frozen.",
     whyItMatters: "The paper's numbers. Nothing is tuned on these records and no model output exists for them until the analysis plan is frozen, so they measure the identifier as a new find would meet it.",
-    records: `North American records first validated after dataset release v1's label snapshot (${utcMinute(V1.labelSnapshot)}), kept apart from v1 by record and by photo, and never trained on. The set closes once it holds at least 3,000 records (expected around 26 October 2026) and is frozen around 30 October; no numbers are published before it is opened.`,
+    records: `North American records first validated after dataset release v1's label snapshot (${utcMinute(V1.labelSnapshot)}), kept apart from v1 by record and by photo, and never trained on. ${SEALED_CLOSE} No numbers are published before it is opened.`,
     scoring: "The standard summary with 95% intervals clustered by observer; iNaturalist's computer vision on the same photos and the same public place; tests declared before the records are opened.",
     protocol: [
       { title: "Collect", text: `Records first validated after ${utcDay(V1.labelSnapshot)}, kept apart by record and photo.` },
-      { title: "Close and freeze", text: "At 3,000 records or more; the analysis plan is frozen first." },
+      { title: "Freeze, then close", text: `The analysis plan is frozen first; the set closes at ${SEALED_TEST.target.toLocaleString("en-US")} records or on ${utcDay(SEALED_TEST.closeBy)}.` },
       { title: "Open once", text: "Every model, iNaturalist's included, on the same photos and public place." },
       { title: "Report", text: "The standard summary with observer-clustered 95% intervals." },
     ],
@@ -288,43 +302,50 @@ export const BENCHMARKS: Benchmark[] = [
       { href: "/research/protocols", title: "Evaluation protocols", text: "How the sealed test is kept clean" },
       { href: "/research/benchmarks/newest-weeks", title: "Newest weeks", text: "Where every setting is chosen" },
     ] },
-  { slug: "unknown-species", name: "Unknown species", status: "planned", measures: ["unknown"], data: ["v1val"],
+  { slug: "unknown-species", name: "Unknown species", status: "partial", measures: ["unknown"], data: ["v1val", "sealed"],
     headline: { run: "served", metric: "unknown-count" },
-    pending: { lead: "Planned.",
-               text: "How well the top score separates known from unknown species (AUROC), and how often Vision holds back." },
+    // research repo, experiments/2026-10-18-v1-unknown-species.md (v1 val excluding the former
+    // held-out, erratum r3, the 224 px model, the 0.70 rule of the time).
+    pending: { lead: "Partly measured.",
+               text: "A first look on v1 validation (MycoMap Vision v0, 224 px, the 5,933 finds outside the former held-out set): of 453 finds whose species has no reference record, 11.5% got a confident species answer, always wrong, and the genus was right for 58.3%. How well the top score separates known from unknown species (AUROC) is scored on the sealed test." },
     question: "Does Vision say so when a find's species is not in its references at all?",
     summary: "How the identifier behaves when the species is not in its references at all.",
     whyItMatters: "Some finds in dataset release v1's validation split belong to a species with no record in the training split (the count is on this page, from the latest run). The identifier should say so rather than name a look-alike with confidence.",
-    records: "Finds whose true species has no reference record, against those whose species does.",
-    scoring: "How well the top score separates known from unknown species (AUROC, and true negatives at 95% true positives), and how often the identifier holds back.",
+    records: "Finds whose true species has no reference record, against those whose species does: on v1 validation, and on the sealed test once it is opened.",
+    scoring: "On v1 validation: how often such a find gets a confident species answer (always wrong) and how often its genus is still right. On the sealed test: how well the top score separates known from unknown species (AUROC, and true negatives at 95% true positives), and how often the identifier holds back.",
     protocol: [
       { title: "Find the unknowns", text: "Test finds whose species has no reference record." },
       { title: "Read the top score", text: "For every find, known and unknown alike." },
-      { title: "Separate them", text: "AUROC, and true negatives at 95% true positives." },
+      { title: "Separate them", text: "AUROC, and true negatives at 95% true positives, on the sealed test." },
       { title: "Count hold-backs", text: "How often the identifier declines to name a species." },
     ],
+    results: { href: "/research/results#depth", label: "Results: the 0-record band, by reference depth" },
     elsewhere: "Open-set classification in FungiTastic and FungiCLEF.",
     links: [
       { href: "/research/benchmarks/rare-species", title: "Rare species", text: "The 0-record band, scored" },
       { href: FUNGITASTIC_URL, title: "FungiTastic (Picek et al. 2025)", text: "Open-set task elsewhere" },
     ] },
-  { slug: "poisonous-mistakes", name: "Poisonous mistakes", status: "planned", measures: ["danger"], data: ["v1val"],
-    size: "5 groups",
+  // The paper plan's E21 (research repo paper/PLAN.md): mycomap.org's deadly list, 60 names
+  // (snapshot paper/e21-deadly-list.csv), matched strict and s.l., rates both ways, descriptive
+  // only, on the sealed test. No cost weighting.
+  { slug: "poisonous-mistakes", name: "Poisonous mistakes", status: "planned", measures: ["danger"], data: ["sealed"],
+    size: "60 deadly names",
     pending: { lead: "Not for deciding what to eat.",
-               text: "Error rates both ways for Amanita sect. Phalloideae, Galerina, Lepiota, Cortinarius sect. Orellani and Gyromitra, with a dangerous miss counted 100 times a harmless one." },
+               text: "Scored once on the sealed test: how often a find of a deadly species is named as something else, and how often something else is named as a deadly species, for the 60 names on mycomap.org's list of deadly fungi." },
     question: "How often is a deadly species named as something else, and the reverse?",
     summary: "How often a deadly species is named as something else, and the reverse.",
     whyItMatters: "Not for deciding what to eat. Measuring dangerous mistakes separately keeps them from hiding in an average.",
-    records: "Finds of Amanita sect. Phalloideae, Galerina, Lepiota, Cortinarius sect. Orellani and Gyromitra, and finds named as them.",
-    scoring: "Error rates in each direction, and a cost-weighted score with a dangerous miss counted 100 times a harmless one.",
+    records: "Sealed-test finds of the 60 names on mycomap.org's list of deadly fungi (its snapshot is kept with the paper), and finds named as one of them.",
+    scoring: "Two rates, each with its count: deadly named as something else, and something else named as deadly; names matched strictly and sensu lato. Descriptive only.",
     protocol: [
-      { title: "Mark the groups", text: "Five deadly groups, by their DNA names." },
-      { title: "Both directions", text: "Deadly named as harmless, and harmless named as deadly." },
-      { title: "Weigh the cost", text: "A dangerous miss counts 100 times a harmless one." },
-      { title: "Report apart", text: "Never folded into an average." },
+      { title: "Fix the list", text: "mycomap.org's list of deadly fungi, 60 names, frozen with the paper." },
+      { title: "Both directions", text: "Deadly named as something else, and something else named as deadly." },
+      { title: "Strict and s.l.", text: "Each name matched exactly, and sensu lato." },
+      { title: "Report apart", text: "Rates with their counts, never folded into an average." },
     ],
     elsewhere: "Cost-sensitive classification in FungiCLEF 2023 and 2024.",
     links: [
+      { href: "/research/benchmarks/sealed-test", title: "Sealed test", text: "Where it is scored, once" },
       { href: "/research/protocols", title: "Evaluation protocols", text: "How every number is scored" },
     ] },
   { slug: "held-out", name: "Held-out records", longName: "Held-out records (development history)",
@@ -395,7 +416,14 @@ export const V1_PUBLISHED = {
   commit: "5792c17",
 };
 
-/** A metric column; columns sharing a `group` sit under one heading ("Per image"). */
+/** The entry the 224 px → 336 px step comes from, as on origin/main at 7ce997d. */
+export const V1_IMAGE_SIZE = {
+  path: "experiments/2026-10-18-v1-image-size.md",
+  slug: "v1-image-size",
+  commit: "7ce997d",
+};
+
+/** A metric column; columns sharing a `group` sit under one heading ("% of images"). */
 export interface ResultColumn { group?: string; label: string }
 /** A model's row: one value per column, exactly as the entry gives it (null where it gives
  *  none), the 95% interval under a value where the entry gives one, and the entry's precision
@@ -440,13 +468,29 @@ const V1_PUBLISHED_SOURCE = `research repo, ${V1_PUBLISHED.path}, addendum of 25
 
 const TOP_K = ["Top 1", "3", "5", "10"];
 const topK = (group: string): ResultColumn[] => TOP_K.map((label) => ({ group, label }));
-const PER_IMAGE_AND_OBSERVATION = [...topK("Per image"), ...topK("Per observation")];
+/** Every value is a share of the test set's images, observations or finds (Steve, 2026-10-26:
+ *  "are these numbers the percentage of species it got correct? Needs to be made clear"). */
+const PER_IMAGE_AND_OBSERVATION = [...topK("% of images"), ...topK("% of observations")];
+
+/** The line above a test set's table saying what each value is a percentage of. */
+export function valueCaption(s: TestSetResults): string {
+  return s.columns.some((c) => c.group?.startsWith("% of images"))
+    ? "Each value is the % of test images (or, under “% of observations”, of observations, all of an observation's photos together) whose true species was the first answer (top 1) or among the first 3, 5 or 10."
+    : "Each value is the % of finds whose true species (or genus, where the column says so) was the first answer (top 1) or among the first 3, 5 or 10.";
+}
+
+/** The heading over a test set's paired differences: "at top 1" only when every column is. */
+export function diffsHeading(s: TestSetResults): string {
+  const allTop1 = !!s.diffs && s.diffs.columns.every((c) => !/^(3|5|10)$|top (3|5|10)\b/i.test(c));
+  return allTop1 ? "Paired differences at top 1, in points, with 95% intervals" : "Paired differences in points, with 95% intervals";
+}
 const NO_K = [null, null, null, null];
 /** A row's per-image and per-observation top 1/3/5/10 (per image only when `obs` is null). */
 const io = (image: (number | null)[], obs: (number | null)[] | null): (number | null)[] => [...image, ...(obs ?? NO_K)];
 
 const VISION_V1_OPEN = "MycoMap Vision v1-open";
 const VISION_V1 = "MycoMap Vision v1";
+const VISION_V0 = "MycoMap Vision v0";
 const BIOCLIP2_BASE = "BioCLIP 2 (base model, not fine-tuned)";
 const BIOCLIP_BASE = "BioCLIP (base model, not fine-tuned)";
 const FT_BEIT = "FungiTastic BEiT-B/384";
@@ -463,7 +507,7 @@ const PAIRED = "Paired on the same images; 95% intervals from an observation-clu
 const ON_NA_REFERENCE = "The reference is MycoMap's North American v1 training split, so only the species it holds can be named: a test of transfer across continents. An answer counts when it equals the image's scientific name or its GBIF accepted species (exact names, no crosswalk). Photos only.";
 
 /** Every test set with committed results, each number copied from its entry on the research
- *  repo's origin/main (E33 at 2e2576a; v1-published-models at 5792c17). None is the sealed
+ *  repo's origin/main (E33 at 2e2576a; v1-published-models at 5792c17; v1-image-size at 7ce997d). None is the sealed
  *  test (v1-test): it has no results until it is opened. FungiTastic's images are CC BY-NC-SA,
  *  so only scores appear. */
 export const TEST_SET_RESULTS: TestSetResults[] = [
@@ -474,7 +518,7 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
     rows: [
       { name: VISION_V1_OPEN, detail: "retrieval, FungiTastic-Train as reference", cells: io([77.46, 89.09, 91.81, 94.25], [88.31, 96.76, 98.21, 99.13]) },
       { name: VISION_V1, detail: "retrieval, FungiTastic-Train as reference", cells: io([77.54, 89.12, 91.81, 94.31], [88.29, 96.78, 98.22, 99.13]) },
-      { name: BIOCLIP2_BASE, detail: "retrieval, FungiTastic-Train as reference", cells: io([76.36, 88.26, 91.04, 93.60], [87.61, 96.38, 97.86, 98.88]) },
+      { name: BIOCLIP2_BASE, detail: "336 px · retrieval, FungiTastic-Train as reference", cells: io([76.36, 88.26, 91.04, 93.60], [87.61, 96.38, 97.86, 98.88]) },
       { name: FT_BEIT, detail: "classifier trained on FungiTastic-Train", cells: io([75.28, 86.68, 89.56, 92.26], [87.42, 96.01, 97.52, 98.66]) },
       { name: FT_VIT, detail: "classifier trained on FungiTastic-Train", cells: io([74.59, 86.39, 89.39, 92.10], [86.41, 95.47, 97.10, 98.34]) },
       { name: FT_SWIN, detail: "classifier · per image, all 91,832 images", cells: io([74.24, 86.33, 89.33, 92.02], null) },
@@ -498,12 +542,12 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
     size: "91,756 images · 48,361 observations · 2,336 species", maker: "FungiTastic",
     columns: PER_IMAGE_AND_OBSERVATION, digits: 2,
     rows: [
-      { name: VISION_V1_OPEN, detail: "the 979 species in its reference (open photos, 16,153 species): 54,841 images, 29,558 observations",
+      { name: VISION_V1_OPEN, detail: "only the 54,841 test images (29,558 observations) of the 979 species its reference holds · reference: open photos, 16,153 species",
         cells: io([37.23, 55.61, 62.85, 72.09], [43.77, 63.07, 70.45, 79.49]) },
-      { name: VISION_V1_OPEN, detail: "all 2,336 species", cells: io([22.25, 33.24, 37.56, 43.09], [26.75, 38.55, 43.06, 48.59]) },
-      { name: VISION_V1, detail: "the 994 species in its reference (all photos, 16,959 species): 55,631 images, 29,905 observations",
+      { name: VISION_V1_OPEN, detail: "every test image, all 2,336 species; a species its reference lacks counts as a miss", cells: io([22.25, 33.24, 37.56, 43.09], [26.75, 38.55, 43.06, 48.59]) },
+      { name: VISION_V1, detail: "only the 55,631 test images (29,905 observations) of the 994 species its reference holds · reference: all photos, 16,959 species",
         cells: io([37.18, 55.49, 62.98, 72.59], [43.86, 62.90, 70.46, 80.25]) },
-      { name: VISION_V1, detail: "all 2,336 species", cells: io([22.54, 33.64, 38.18, 44.01], [27.12, 38.89, 43.57, 49.63]) },
+      { name: VISION_V1, detail: "every test image, all 2,336 species; a species its reference lacks counts as a miss", cells: io([22.54, 33.64, 38.18, 44.01], [27.12, 38.89, 43.57, 49.63]) },
     ],
     notes: [ON_NA_REFERENCE],
     source: E33_SOURCE },
@@ -514,7 +558,7 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
     rows: [
       { name: VISION_V1_OPEN, detail: "retrieval, FungiTastic-Train as reference", cells: io([41.86, 60.63, 67.44, 74.46], [56.59, 78.83, 86.58, 92.60]) },
       { name: VISION_V1, detail: "retrieval, FungiTastic-Train as reference", cells: io([41.78, 61.25, 67.44, 74.55], [56.83, 79.27, 86.38, 92.41]) },
-      { name: BIOCLIP2_BASE, detail: "retrieval, FungiTastic-Train as reference", cells: io([37.67, 56.28, 63.70, 71.36], [51.54, 73.35, 81.58, 88.49]) },
+      { name: BIOCLIP2_BASE, detail: "336 px · retrieval, FungiTastic-Train as reference", cells: io([37.67, 56.28, 63.70, 71.36], [51.54, 73.35, 81.58, 88.49]) },
       { name: FT_BEIT, detail: "classifier trained on FungiTastic-Train", cells: io([38.73, 56.87, 63.82, 70.91], [57.28, 78.69, 85.84, 92.45]) },
       { name: FT_VIT, detail: "classifier · per image", cells: io([36.38, 53.50, 60.24, 67.82], null) },
       { name: FT_SWIN, detail: "classifier · per image", cells: io([37.96, 57.51, 63.66, 71.26], null) },
@@ -535,9 +579,9 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
     size: "5,105 images · 725 species", maker: "FungiTastic",
     columns: PER_IMAGE_AND_OBSERVATION, digits: 2,
     rows: [
-      { name: VISION_V1_OPEN, detail: "the 383 species in its reference (open photos): 2,782 images, 1,100 observations",
+      { name: VISION_V1_OPEN, detail: "only the 2,782 test images (1,100 observations) of the 383 species its reference holds · reference: open photos",
         cells: io([16.10, 27.93, 34.51, 42.95], [23.73, 39.82, 46.64, 55.73]) },
-      { name: VISION_V1_OPEN, detail: "all 725 species · per image", cells: io([8.78, 15.22, 18.81, 23.41], null) },
+      { name: VISION_V1_OPEN, detail: "every test image, all 725 species, per image only; a species its reference lacks counts as a miss", cells: io([8.78, 15.22, 18.81, 23.41], null) },
     ],
     notes: [ON_NA_REFERENCE],
     source: E33_SOURCE },
@@ -549,11 +593,11 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
       { name: BIOCLIP_BASE, detail: "class centroid, as published in the FungiTastic paper (Table 4)",
         cells: io([21.8, 32.6, null, null], null), digits: 1 },
       { name: BIOCLIP_BASE, detail: "class centroid", cells: io([24.99, 37.40, 43.84, 52.28], [29.83, 42.54, 48.25, 56.86]) },
-      { name: BIOCLIP2_BASE, detail: "class centroid, 336 px", cells: io([43.11, 58.88, 66.21, 73.86], [47.25, 63.16, 68.97, 76.68]) },
+      { name: BIOCLIP2_BASE, detail: "336 px · class centroid", cells: io([43.11, 58.88, 66.21, 73.86], [47.25, 63.16, 68.97, 76.68]) },
       { name: VISION_V1_OPEN, detail: "class centroid", cells: io([46.41, 61.92, 67.78, 76.27], [49.75, 64.46, 70.87, 78.48]) },
       { name: VISION_V1, detail: "class centroid", cells: io([45.94, 61.92, 68.31, 77.06], [49.25, 63.96, 71.67, 79.98]) },
       { name: BIOCLIP_BASE, detail: "closest specimens + species average", cells: io([24.67, 36.14, 42.85, 52.49], [28.93, 41.24, 47.35, 56.26]) },
-      { name: BIOCLIP2_BASE, detail: "closest specimens + species average, 336 px", cells: io([42.74, 57.52, 64.75, 73.02], [46.25, 62.46, 68.77, 75.18]) },
+      { name: BIOCLIP2_BASE, detail: "336 px · closest specimens + species average", cells: io([42.74, 57.52, 64.75, 73.02], [46.25, 62.46, 68.77, 75.18]) },
       { name: VISION_V1_OPEN, detail: "closest specimens + species average", cells: io([44.84, 59.98, 67.31, 75.22], [47.65, 63.46, 70.27, 77.98]) },
       { name: VISION_V1, detail: "closest specimens + species average", cells: io([45.31, 61.08, 68.05, 76.43], [48.35, 63.76, 70.77, 79.38]) },
     ],
@@ -565,8 +609,8 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
   { key: "v1-val-as-released", name: "MycoMap v1 validation (12,798 finds)", condition: "models as released",
     about: "MycoMap's DNA-verified North American records first validated in the eight weeks after dataset release v1's cutoff: the development set every setting is chosen on.",
     size: "12,874 finds · 12,798 with a species · 2,411 of a species in FungiTastic's 2,829 classes", maker: "MycoMap v1",
-    columns: [...topK("Species, 12,798 finds"), { group: "Genus, 12,865 finds", label: "Top 1" },
-              { group: "Species in FungiTastic's classes, 2,411 finds", label: "Top 1" }],
+    columns: [...topK("Species: % of 12,798 finds"), { group: "Genus: % of 12,865 finds", label: "Top 1" },
+              { group: "Species in FungiTastic's classes: % of 2,411 finds", label: "Top 1" }],
     digits: 1,
     rows: [
       { name: VISION_V1, detail: "all photos, full reference", cells: [56.3, 73.6, 78.9, 84.3, 85.8, 67.6],
@@ -591,7 +635,7 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
   { key: "v1-val-open-photos", name: "MycoMap v1 validation (12,798 finds)", condition: "training: open photos only (E4)",
     about: "The same finds, with the FungiTastic training recipe trained on v1's openly licensed photos: the photos MycoMap Vision v1-open learned from.",
     size: "12,874 finds · 12,798 with a species", maker: "MycoMap v1",
-    columns: [...topK("Species"), { group: "Genus", label: "Top 1" }], digits: 2,
+    columns: [...topK("Species: % of finds"), { group: "Genus: % of finds", label: "Top 1" }], digits: 2,
     rows: [
       { name: E4, detail: "trained on v1's open photos (E4) · final: best epoch 13", cells: [51.23, 67.18, 72.90, 79.03, 80.22] },
       { name: VISION_V1_OPEN, detail: "open photos, open reference", cells: [55.31, 72.61, 77.65, 83.29, 84.9], digits: [2, 2, 2, 2, 1] },
@@ -602,10 +646,29 @@ export const TEST_SET_RESULTS: TestSetResults[] = [
         { d: -4.71, lo: -5.60, hi: -3.92 }, { d: -4.22, lo: -4.97, hi: -3.59 }] },
     ] },
     notes: [
-      "E4 (BEiT-B/384, Seesaw loss, the FungiTastic schedule) stopped by its declared epoch rule at epoch 20; the final model is its best epoch, 13. Every row is scored the same way: each find's photos averaged, the species-rank answer key.",
+      "E4 (BEiT-B/384, Seesaw loss, the FungiTastic schedule) stopped by its declared epoch rule at epoch 20; the final model is its best epoch, 13. Every row is scored on the same finds with the same species-rank answer key: E4 averages the logits of each find's photos, and the MycoMap Vision rows answer by closest specimens + species average, by specimen.",
       "Paired on the same finds; 95% intervals from an observer-clustered bootstrap (752 observers, 2,000 resamples). The interval's own scoring gives MycoMap Vision v1-open 55.27 rather than 55.31; the 0.04-point difference is in its row, not E4's.",
     ],
     source: E33_SOURCE },
+  // research repo, experiments/2026-10-18-v1-image-size.md (origin/main 7ce997d), "Paired, 336 px
+  // minus 224 px, v1 val r4, full reference", scoring (c). Species only: its genus row is scored
+  // by exact genus string, not as the other genus figures on this card.
+  { key: "v1-val-image-size", name: "MycoMap v1 validation (12,798 finds)", condition: "image size: 224 px (v0) and 336 px (v1)",
+    about: "The same finds, with the same fine-tuning recipe at two image sizes: MycoMap Vision v0 at 224 px, and MycoMap Vision v1 at 336 px, the site's model.",
+    size: "12,798 finds with a species · 752 observers", maker: "MycoMap v1",
+    columns: [{ group: "Species: % of finds", label: "Top 1" }], digits: 2,
+    rows: [
+      { name: VISION_V0, detail: "224 px, development · closest specimens + species average, by specimen", cells: [54.19] },
+      { name: VISION_V1, detail: "336 px · closest specimens + species average, by specimen", cells: [56.32] },
+    ],
+    diffs: { columns: ["Species top 1"], rows: [
+      { name: `${VISION_V1} − ${VISION_V0}`, cells: [{ d: 2.13, lo: 1.52, hi: 2.75 }] },
+    ] },
+    notes: [
+      "At species top 3, 5 and 10 the 336 px model is ahead by 1.73, 1.38 and 1.04 points, each interval above zero. A second training seed at 224 px moves species top 1 by +0.11 [−0.24, +0.46]: the gain is about five times the width of that interval.",
+      "Paired on the same finds, photos only, full reference; 95% intervals from an observer-clustered bootstrap (752 observers, 2,000 resamples).",
+    ],
+    source: `research repo, ${V1_IMAGE_SIZE.path} (origin/main ${V1_IMAGE_SIZE.commit})` },
 ];
 
 /** The cards, in order: entries grouped by `card` (else `name`), each card's entries in order. */

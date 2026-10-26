@@ -301,7 +301,7 @@ export function DepthShareBars({ species, finds, speciesTotal }: {
   };
   return (
     <div data-testid="chart-depth-shares">
-      {species && bar(`Species in the reference set${speciesTotal ? ` (${nf(speciesTotal)})` : ""}`, species, "species")}
+      {species && bar(`Species in the reference set, by the answer key's names${speciesTotal ? ` (${nf(speciesTotal)})` : ""}`, species, "species")}
       {bar(`Test finds (${nf(finds.reduce((s, x) => s + x.n, 0))})`, finds, "finds")}
       <div className="legend" style={{ marginTop: 10 }}>
         {Object.entries(BAND_COLOR).map(([band, c]) => <span key={band}><i style={{ background: c.bg }} />{band} records</span>)}
