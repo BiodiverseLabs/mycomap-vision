@@ -207,6 +207,15 @@ def boxes_now(item: dict) -> dict[int, list[int]]:
     return {c["n"]: effective_box(edited.get(c["n"], c["box"])) for c in crops_of(item)}
 
 
+def box_source(item: dict, n: int) -> str:
+    """Whose box crop `n` has now: "reviewer" when a reviewer moved or resized it, else
+    "detector". Compared as squares (effective_box), so a reviewer box equal to the detector's
+    square is no edit, and a rectangle saved before boxes were squared compares fairly. The one
+    rule for export-photo-crops' box_source and Research > Excluded photos' Modified photos."""
+    crop = next(c for c in crops_of(item) if c["n"] == n)
+    return "reviewer" if boxes_now(item)[n] != effective_box(crop["box"]) else "detector"
+
+
 def accepted_crops(store: fb.Store) -> dict[str, dict]:
     """photo key -> {"width", "height", "boxes": [(n, [l, t, r, b] as fractions of the photo)],
     "version"} for every photo a person still leaves out as a field slip and whose item keeps a

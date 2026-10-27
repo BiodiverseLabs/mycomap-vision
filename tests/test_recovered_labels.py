@@ -712,3 +712,17 @@ def test_the_square_shown_is_exactly_what_the_served_transform_reads():
     assert float(torch.mean(torch.abs(a - b))) < 0.05
     off = t(embed.apply_box(img, frac([40, 60, 280, 300])))   # the left square: other pixels
     assert float(torch.mean(torch.abs(a - off))) > 0.5
+
+
+def test_box_source_says_reviewer_only_for_a_box_whose_square_differs_from_the_detectors():
+    item = {"status": "decided", "evidence": {"crops": [{"n": 1, "box": [0, 0, 300, 200]},
+                                                        {"n": 2, "box": [10, 10, 60, 60]}]},
+            "last_decision": {"decision": "include_crops",
+                              "value": json.dumps({"include": [1, 2],
+                                                   "boxes": {"1": [50, 0, 250, 200],     # = its square
+                                                             "2": [20, 10, 80, 60]}})}}  # an old rectangle
+    assert rl.box_source(item, 1) == "detector"
+    assert rl.box_source(item, 2) == "reviewer"
+    assert rl.boxes_now(item)[2] == [25, 10, 75, 60]
+    open_item = {"status": "open", "evidence": item["evidence"], "last_decision": None}
+    assert [rl.box_source(open_item, n) for n in (1, 2)] == ["detector", "detector"]

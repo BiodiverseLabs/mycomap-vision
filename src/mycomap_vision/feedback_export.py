@@ -236,8 +236,7 @@ def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
                 "n": str(c["n"]), "l": f"{l / w:.6f}", "t": f"{t / h:.6f}",
                 "r": f"{r / w:.6f}", "b": f"{b / h:.6f}", "width": str(w), "height": str(h),
                 "detector": ev.get("version") or "",
-                "box_source": ("reviewer" if now[c["n"]] != rl.effective_box(c["box"])
-                               else "detector"),
+                "box_source": rl.box_source(item, c["n"]),
                 "decision": d["decision"] if d is not None else "default",
                 "decision_id": "" if d is None else str(d["id"]),
                 "decided_at": "" if d is None else datetime.fromtimestamp(
