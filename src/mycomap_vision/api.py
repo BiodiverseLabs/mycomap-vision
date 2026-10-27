@@ -850,8 +850,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # A night that only removed or renamed records leaves n alone.
             night = nightly.layer_version(conn) if layer else 0
         # A change in who has said no rebuilds the reference set without their photos.
-            # Photos Human Feedback leaves out, and the specimen crops it keeps of them
-            # (synced at startup and before each night).
+            # Photos Human Feedback leaves out (synced at startup and before each night), and
+            # the specimen crops it keeps of them (before each night).
             excluded = (feedback.exclusions_fingerprint(conn) + "+"
                         + feedback.crops_fingerprint(conn))
             # Renames read from mycomap.org's name-change log between nights (name_changes.py).
@@ -956,9 +956,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             served_cache.update(at=now, ready=ready, served=ready[0] if ready else None)
         return served_cache["served"], served_cache["ready"]
 
+    # When this process's app was made (epoch seconds), in /api/health: deploy.sh counts an
+    # answer only from the process it started (2026-10-27: a deploy passed while the site
+    # gave 502s).
+    started = int(time.time())
+
     @app.get("/api/health")
     def health(request: Request):
-        full = {"ok": True, "code_version": config.code_version(),
+        full = {"ok": True, "started": started, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
@@ -2411,7 +2416,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     app.state.feedback = feedback_store
     with db_lock:
         feedback.sync_exclusions(feedback_store, conn)
-        feedback.sync_crops(feedback_store, conn)
+        # Specimen crops sync before each nightly update only (run_nightly), never here: a
+        # restart must not wait on them (2026-10-27: 5 min 20 s of 502s at startup). Crops a
+        # reviewer changes reach Vision at the next night, as they always did.
 
     def feedback_rescore(record_key: str, who: dict | None = None) -> dict:
         source, number = (("mo", record_key[3:]) if record_key.startswith("mo:")

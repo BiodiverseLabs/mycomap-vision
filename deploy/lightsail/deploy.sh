@@ -15,6 +15,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/var/www/mycomap-vision}"
 BRANCH="${BRANCH:-main}"
 PORT="${PORT:-8010}"
+HOST="${HOST:-vision.mycomap.org}"
 ENV_FILE="${ENV_FILE:-/etc/mycomap-vision/vision.env}"
 SELF="$APP_DIR/deploy/lightsail/deploy.sh"
 
@@ -73,15 +74,23 @@ rm -rf web/dist-prev
 mv web/dist-next web/dist
 
 echo "==> restarting the server"
+restarted_at="$(date +%s)"
 sudo systemctl restart mycomap-vision
 
 # Health answers within seconds; the model loads behind it (MV_PRELOAD). Checking
 # before health is up would report 502s that are false alarms.
+# Only the process just started counts: /api/health says when its app was made ("started",
+# epoch seconds), and an answer from anything else on the port never passes (2026-10-27: a
+# deploy ended "All checks passed" while the site gave 502s for 5 min).
+health_started() { grep -o '"started":[0-9]*' | cut -d: -f2; }
 echo "==> waiting for the server"
 up=0
+started=""
 for i in $(seq 1 60); do
-  if curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"ok":true'; then
-    echo "    up after ${i} s"; up=1; break
+  body="$(curl -fsS -m 2 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || true)"
+  s="$(printf '%s' "$body" | health_started || true)"
+  if printf '%s' "$body" | grep -q '"ok":true' && [ -n "$s" ] && [ "$s" -ge "$restarted_at" ]; then
+    echo "    up after ${i} s"; up=1; started="$s"; break
   fi
   sleep 1
 done
@@ -90,6 +99,12 @@ if [ "$up" -ne 1 ]; then
   sudo journalctl -u mycomap-vision -n 40 --no-pager
   exit 1
 fi
+# systemd's own count of restarts and the main process's start: the deploy fails at the end
+# if either changes, so a crash and restart during the checks can't hide behind a pass.
+service_state() {
+  systemctl show -p NRestarts -p ExecMainStartTimestamp mycomap-vision 2>/dev/null | tr '\n' ' '
+}
+service_before="$(service_state)"
 
 # The preload block's own state ("loading", "ready", "off", "failed"): health has other
 # "state" fields (the nightly update's). Empty when health is slow or doesn't say yet.
@@ -118,3 +133,21 @@ while :; do
   sleep 1
 done
 bash deploy/lightsail/verify.sh
+
+# The last word: the server is still the process this deploy started, and the site answers
+# health through nginx (on this box, past Cloudflare's cache) from it.
+echo "==> final check"
+now_state="$(service_state)"
+if [ "$now_state" != "$service_before" ]; then
+  echo "!!  the server restarted during the deploy ($service_before -> $now_state)"
+  exit 1
+fi
+final="$(curl -sS -m 10 --resolve "$HOST:443:127.0.0.1" -w '\n%{http_code}' "https://$HOST/api/health" 2>&1 || true)"
+code="${final##*$'\n'}"
+body="${final%$'\n'*}"
+seen="$(printf '%s' "$body" | health_started || true)"
+if [ "$code" != "200" ] || ! printf '%s' "$body" | grep -q '"ok":true' || [ "$seen" != "$started" ]; then
+  echo "!!  https://$HOST/api/health through nginx: HTTP $code, started '${seen:-?}' (expected 200, ok, started $started)"
+  exit 1
+fi
+echo "    ok: nginx answers from the process this deploy started ($started), no restarts"
