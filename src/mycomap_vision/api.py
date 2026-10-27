@@ -2766,7 +2766,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     # The preload (xl.Preloader; Steve, 2026-10-27): every slip photo's and kept crop's map
     # made ahead of anyone asking, one batch photo at a time behind every identification and
-    # every person's ask. MV_EXCLUDED_PRELOAD=0 turns it off; MV_EXCLUDED_PRELOAD_WINDOW sets
+    # every person's ask. On by default on the box (a served release); MV_EXCLUDED_PRELOAD=0
+    # turns it off, =1 on elsewhere; MV_EXCLUDED_PRELOAD_WINDOW sets
     # its hours (UTC, or "any"); MV_EXCLUDED_PRELOAD_CROP_WAIT=0 lets slips go before crops.
     preload_names: dict[str, str] = {}
 
@@ -2816,7 +2817,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     if excluded_on and looked_worker is not None:
         preloader = xl.Preloader(
-            enabled=config.setting("MV_EXCLUDED_PRELOAD") != "0", window=preload_window(),
+            enabled=xl.preload_on(config.setting("MV_EXCLUDED_PRELOAD"),
+                                  on_box=config.RELEASE_ROOT is not None),
+            window=preload_window(),
             crop_wait=config.setting("MV_EXCLUDED_PRELOAD_CROP_WAIT") != "0",
             worker=looked_worker, targets=preload_targets, stamp_now=preload_stamp,
             stamps=lambda: excluded_maps.stamps(xl.MODEL),

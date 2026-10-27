@@ -38,7 +38,8 @@ Preloader makes every slip photo's and crop's map ahead of anyone asking, one ba
 time on the same worker, behind every identification and every person's ask, so Identify waits
 at most one map. It runs in a time window (MV_EXCLUDED_PRELOAD_WINDOW, UTC, default
 PRELOAD_WINDOW; "any": whenever the box is idle), never while the nightly update runs, and off
-with MV_EXCLUDED_PRELOAD=0. Slip photos wait until no kept crop is still waiting for its vector
+with MV_EXCLUDED_PRELOAD=0; it is on by default only on the box (a served release), and
+MV_EXCLUDED_PRELOAD=1 turns it on elsewhere. Slip photos wait until no kept crop is still waiting for its vector
 (MV_EXCLUDED_PRELOAD_CROP_WAIT=0 skips that wait), so their maps are made against the reference
 set with the crops in it. The seal and the public-photo rule apply as for an ask.
 
@@ -164,6 +165,11 @@ def is_current(doc: dict | None, now: dict) -> bool:
     kept before stamps were written is never current."""
     stamp = (doc or {}).get("stamp")
     return isinstance(stamp, dict) and all(stamp.get(k) == now.get(k) for k in STAMP_KEYS)
+
+
+def preload_on(setting: str | None, on_box: bool) -> bool:
+    """MV_EXCLUDED_PRELOAD: "1" on, "0" off; unset, on only on the box (a served release)."""
+    return setting == "1" or (setting != "0" and on_box)
 
 
 def parse_window(value: str | None) -> tuple[int, int] | None:
@@ -417,7 +423,8 @@ class Preloader:
                "window": "any" if self.window is None else "%02d:%02d-%02d:%02d UTC" % (
                    self.window[0] // 60, self.window[0] % 60, self.window[1] // 60,
                    self.window[1] % 60),
-               "state": self.state, "made": self.made, "failed": self.failed,
+               # "doing", not "state": deploy.sh reads the health's two "state" keys.
+               "doing": self.state, "made": self.made, "failed": self.failed,
                "last_map_at": self.last_map_at,
                "last_map_seconds": (round(self.worker.last_seconds, 2)
                                     if getattr(self.worker, "last_seconds", None) else None)}

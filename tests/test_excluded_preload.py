@@ -175,7 +175,7 @@ def test_current_maps_are_counted_done_and_stale_ones_remade():
     assert made == ["inat:2", "inat:3", "inat:4"]
     h = p.health()
     assert h["slips"] == {"total": 4, "done": 4, "remaining": 0} and h["made"] == 3
-    assert h["state"] == "done" and h["last_map_seconds"] == 4.2 and h["last_map_at"]
+    assert h["doing"] == "done" and h["last_map_seconds"] == 4.2 and h["last_map_at"]
 
 
 def test_held_and_hidden_photos_are_skipped_and_counted():
@@ -270,6 +270,7 @@ def test_a_map_without_a_stamp_is_never_current():
 
 @pytest.fixture
 def any_time(monkeypatch):
+    monkeypatch.setenv("MV_EXCLUDED_PRELOAD", "1")          # off the box it is off by default
     monkeypatch.setenv("MV_EXCLUDED_PRELOAD_WINDOW", "any")
 
 
@@ -287,7 +288,7 @@ def test_the_server_preloads_public_unsealed_slip_photos_only(conn, tmp_path, an
     assert res.status_code == 200 and res.json()["stamp"]["backbone"] == "m1"
     assert visitor(app).get(LOOKED, params={"photo": "inat:1005"}).status_code == 403
     h = visitor(app).get("/api/health").json()["excluded_preload"]
-    assert h["enabled"] is True and h["window"] == "any" and h["state"] == "done"
+    assert h["enabled"] is True and h["window"] == "any" and h["doing"] == "done"
     assert h["slips"] == {"total": 2, "done": 1, "remaining": 0}
     assert h["skipped"] == {"held by the seal": 1} and h["made"] == 1
     # Asked for again afterwards: kept, never made again.
@@ -312,12 +313,32 @@ def test_switched_off_it_makes_nothing(conn, tmp_path, monkeypatch):
     app, maker, _ = site(conn, tmp_path)
     tick(app)
     assert not maker.calls
-    assert visitor(app).get("/api/health").json()["excluded_preload"]["state"] == "off"
+    assert visitor(app).get("/api/health").json()["excluded_preload"]["doing"] == "off"
+
+
+def test_it_is_on_by_default_on_the_box_only(conn, tmp_path, monkeypatch):
+    monkeypatch.delenv("MV_EXCLUDED_PRELOAD", raising=False)
+    app, maker, _ = site(conn, tmp_path)
+    assert app.state.excluded_preload.enabled is False           # a laptop: no preload
+    tick(app)
+    assert not maker.calls
+    assert xl.preload_on(None, on_box=True) and xl.preload_on("1", on_box=False)
+    assert not xl.preload_on("0", on_box=True) and not xl.preload_on(None, on_box=False)
+
+
+def test_the_health_keeps_the_two_state_keys_deploy_reads(conn, tmp_path, any_time):
+    app, _, _ = site(conn, tmp_path)
+    tick(app)
+    import json
+    block = visitor(app).get("/api/health").json()["excluded_preload"]
+    assert '"state":' not in json.dumps(block, separators=(",", ":"))
+    assert block["doing"] == "done"
 
 
 def test_outside_its_window_it_waits(conn, tmp_path, monkeypatch):
     now = datetime.now(timezone.utc)
     start = (now.hour + 2) % 24
+    monkeypatch.setenv("MV_EXCLUDED_PRELOAD", "1")
     monkeypatch.setenv("MV_EXCLUDED_PRELOAD_WINDOW", f"{start:02d}:00-{(start + 1) % 24:02d}:00")
     app, maker, _ = site(conn, tmp_path)
     tick(app)
