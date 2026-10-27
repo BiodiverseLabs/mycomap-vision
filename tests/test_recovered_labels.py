@@ -141,7 +141,7 @@ def test_a_page_save_is_whole_or_nothing_and_idempotent(store):
                           "where i.item_type = ?", (rl.ITEM_TYPE,)).fetchone()[0] == 0
     out = rl.batch_decide(s, [{"item_id": one, "include": [2, 1, 1]},
                               {"item_id": two, "include": []}], ME)
-    assert out == {"saved": 2, "unchanged": 0, "included": 1, "rejected": 1}
+    assert out == {"saved": 2, "unchanged": 0, "reasons_changed": 0, "included": 1, "rejected": 1}
     last = s.get(one)["decisions"][-1]
     assert (last["decision"], last["value"], last["applies"]) == ("include_crops", "[1, 2]", "vision")
     assert s.get(two)["decisions"][-1]["decision"] == "reject_crops"
@@ -157,7 +157,8 @@ def test_tiles_sort_riskiest_first_filter_by_tranche_and_say_when_a_photo_is_bac
     assert [t["photo_key"] for t in rl.tiles(items, sort="largest")] == ["inat:2", "inat:1"]
     assert [t["photo_key"] for t in rl.tiles(items, "medium")] == ["inat:2"]
     t = rl.tiles(items, slips=slips)[0]
-    assert t["crops"][0] == {"n": 1, "box": [100, 100, 300, 300], "area": 0.05, "decision": None}
+    assert t["crops"][0] == {"n": 1, "box": [100, 100, 300, 300], "proposed": [100, 100, 300, 300],
+                             "area": 0.05, "decision": None}
     assert t["still_excluded"] is True
     assert {c["code"]: c["open"] for c in rl.tranche_counts(items)} == {
         "high": 1, "medium": 1, "low": 0, "rule": 0}
@@ -362,7 +363,8 @@ def test_the_exclusion_export_is_byte_identical_with_crops_and_the_crop_export_i
     fb.seed_files(s, conn, slip_crops=seed)
     s.conn.execute("update items set created_at = ? where item_type = ?", (T0 + 2, rl.ITEM_TYPE))
     s.conn.commit()
-    rl.batch_decide(s, [{"item_id": item_of(s, "inat:1")["id"], "include": [2]}], ME)
+    rl.batch_decide(s, [{"item_id": item_of(s, "inat:1")["id"], "include": [2],
+                         "boxes": {"2": [520, 420, 880, 780]}}], ME)
     at(s, T0 + 3)
     rl.batch_decide(s, [{"item_id": item_of(s, "inat:2")["id"], "include": []}], ME)
     at(s, T0 + 5000)                                   # after the cut: not in the file
@@ -374,7 +376,8 @@ def test_the_exclusion_export_is_byte_identical_with_crops_and_the_crop_export_i
     rows = [dict(zip(fx.CROP_COLUMNS, x.split("\t"))) for x in lines[1:]]
     assert [(r["photo_key"], r["n"], r["decision"]) for r in rows] == [
         ("inat:1", "2", "include_crops"), ("inat:2", "1", "default"), ("inat:3", "1", "default")]
-    assert (rows[0]["l"], rows[0]["b"], rows[0]["v1_split"]) == ("0.500000", "1.000000", "train")
+    assert (rows[0]["l"], rows[0]["b"], rows[0]["v1_split"]) == ("0.520000", "0.975000", "train")
+    assert [r["box_source"] for r in rows] == ["reviewer", "detector", "detector"]
     assert rows[1]["reviewer_pseudonym"] == "" and len(rows[0]["reviewer_pseudonym"]) == 16
     assert summary["rows"] == 3 and summary["photos"] == 3
     again, _ = fx.export_crops(backup(live, tmp_path / "d.sqlite"), rel, CUT, KEY, live)
@@ -544,3 +547,102 @@ def test_the_job_reads_only_v1_train_and_val_photos_and_never_a_v1_test_record(t
     with pytest.raises(fb.FeedbackError, match="v1 test"):
         rl.run_slip_crops([picks[0], picks[2]], image, detect, tmp_path / "seed.tsv", check)
     assert read == ["inat:10"]                 # stopped before the v1-test photo was read
+
+
+# --- a reviewer's own box, and the exclusion reason from the tile (Steve, 2026-10-27) ------------
+
+def test_a_reviewers_box_replaces_the_detectors_wherever_crops_are_used_and_carries_over(store, conn):
+    s, _ = store
+    one = item_of(s, "inat:1")["id"]
+    rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "boxes": {"2": [400, 300, 900, 800]}}], ME)
+    last = s.get(one)["decisions"][-1]
+    assert json.loads(last["value"]) == {"include": [1, 2], "boxes": {"2": [400, 300, 900, 800]}}
+    got = rl.accepted_crops(s)["inat:1"]["boxes"]
+    assert got == [(1, [0.1, 0.125, 0.3, 0.375]), (2, [0.4, 0.375, 0.9, 1.0])]
+    t = next(x for x in rl.tiles(s.items_of(rl.ITEM_TYPE), status="decided") if x["item_id"] == one)
+    assert t["crops"][1]["box"] == [400, 300, 900, 800] and t["crops"][1]["proposed"] == [500, 400, 900, 800]
+    fb.sync_crops(s, conn)
+    assert tuple(conn.execute("select l, t from feedback_photo_crops where n = 2").fetchone()) == (0.4, 0.375)
+    # a later save without boxes keeps the reviewer's box; back on the detector's, it is no edit
+    rl.batch_decide(s, [{"item_id": one, "include": [2]}], ME)
+    assert rl.boxes_now(s.get(one))[2] == [400, 300, 900, 800]
+    rl.batch_decide(s, [{"item_id": one, "include": [2], "boxes": {"2": [500, 400, 900, 800]}}], ME)
+    assert s.get(one)["decisions"][-1]["value"] == "[2]"
+    again = rl.batch_decide(s, [{"item_id": one, "include": [2]}], ME)
+    assert (again["saved"], again["unchanged"]) == (0, 1)
+
+
+def test_a_box_outside_its_photo_too_small_or_on_a_rejected_crop_writes_nothing(store):
+    s, _ = store
+    one, two = item_of(s, "inat:1")["id"], item_of(s, "inat:2")["id"]
+    ok = {"item_id": two, "include": [1], "boxes": {"1": [0, 0, 300, 300]}}
+    for bad in ({"item_id": one, "include": [1], "boxes": {"1": [0, 0, 1200, 300]}},   # past the edge
+                {"item_id": one, "include": [1], "boxes": {"1": [10, 10, 30, 30]}},    # under 32 px
+                {"item_id": one, "include": [1], "boxes": {"2": [0, 0, 300, 300]}},    # crop 2 rejected
+                {"item_id": one, "include": [1], "boxes": {"1": [0, 0, 300]}},         # not a box
+                {"item_id": one, "include": [1], "boxes": [[0, 0, 300, 300]]}):        # not by number
+        with pytest.raises(fb.FeedbackError):
+            rl.batch_decide(s, [ok, bad], ME)
+    assert s.conn.execute("select count(*) from decisions d join items i on i.id = d.item_id "
+                          "where i.item_type = ?", (rl.ITEM_TYPE,)).fetchone()[0] == 0
+    assert rl.min_side(1000, 800) == 32
+
+
+def test_changing_the_reason_on_the_tile_changes_the_photos_exclusion_and_only_a_slip_gives_crops(store):
+    s, _ = store
+    one = item_of(s, "inat:1")["id"]
+    photo = next(i for i in s.items_of(pr.ITEM_TYPE) if i["subject"] == "inat:1")["id"]
+    out = rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "reason": "dried"}], ME)
+    assert out["reasons_changed"] == 1
+    last = s.get(photo)["decisions"][-1]
+    assert (last["decision"], last["value"], last["note"]) == ("exclude_photo", "dried", "recovered labels")
+    assert "inat:1" not in rl.accepted_crops(s) and "inat:1" in s.excluded_photos()
+    reasons = rl.photo_reasons(s.items_of(pr.ITEM_TYPE))
+    t = next(x for x in rl.tiles(s.items_of(rl.ITEM_TYPE), status="decided", slips=reasons)
+             if x["item_id"] == one)
+    assert (t["reason"], t["still_excluded"]) == ("dried", False)
+    same = rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "reason": "dried"}], ME)
+    assert same["reasons_changed"] == 0                                 # nothing written twice
+    rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "reason": "slip"}], ME)
+    assert "inat:1" in rl.accepted_crops(s)
+    rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "reason": "keep"}], ME)
+    assert s.get(photo)["decisions"][-1]["decision"] == "keep_photo"
+    assert "inat:1" not in s.excluded_photos() and "inat:1" not in rl.accepted_crops(s)
+    with pytest.raises(fb.FeedbackError, match="reason"):
+        rl.batch_decide(s, [{"item_id": one, "include": [1], "reason": "fungus"}], ME)
+
+
+def test_the_api_saves_a_moved_box_and_a_new_reason(conn, tmp_path):
+    c, fstore = site_with_photos(conn, tmp_path)
+    decide_photo(fstore, "inat:1000", "exclude_photo", "slip")
+    fstore.seed([{**r, "projects": ["p1"]} for r in rl.rows_from_slip_crops(write_seed(
+        tmp_path / "crops.tsv", [seed_line("inat:1000", "100", 0.9, [[10, 10, 90, 90]], w=200, h=200)]))[0]],
+                "crops")
+    as_user(c, "admin-1")
+    body = c.get("/api/feedback/recovered-labels").json()
+    assert {"code": "slip", "label": "Field slip or label"} in body["reasons"]
+    t = body["tiles"][0]
+    assert t["reason"] == "slip" and t["crops"][0]["proposed"] == [10, 10, 90, 90]
+    r = c.post("/api/feedback/recovered-labels/batch", json={"decisions": [
+        {"item_id": t["item_id"], "include": [1], "boxes": {"1": [20, 20, 120, 120]}, "reason": "dried"}]})
+    assert r.status_code == 200 and r.json()["reasons_changed"] == 1
+    done = c.get("/api/feedback/recovered-labels", params={"status": "decided"}).json()["tiles"][0]
+    assert done["crops"][0]["box"] == [20, 20, 120, 120] and done["reason"] == "dried"
+    assert done["still_excluded"] is False
+    bad = c.post("/api/feedback/recovered-labels/batch", json={"decisions": [
+        {"item_id": t["item_id"], "include": [1], "boxes": {"1": [0, 0, 500, 500]}}]})
+    assert bad.status_code == 400
+
+
+def test_the_touching_box_rule_takes_a_weak_box_beside_a_sure_one_but_never_chains_or_spreads():
+    stem = ([354, 260, 454, 375], 0.18, "specimen")
+    cap = ([297, 163, 402, 267], 0.04, "specimen")                 # overlaps the stem's box
+    logo = ([177, 522, 202, 548], 0.04, "specimen")                # touches nothing kept
+    beyond = ([200, 100, 300, 170], 0.04, "specimen")              # touches only the cap
+    huge = ([300, 200, 560, 420], 0.05, "specimen")                # overlaps, 5x the stem's area
+    area = 768 * 1024
+    off = slipcrop.keep_detections([stem, cap, logo, beyond, huge], area)
+    assert [b for b, _ in off["specimen"]] == [stem[0]]
+    on = slipcrop.keep_detections([stem, cap, logo, beyond, huge], area, grow=0.03)
+    assert sorted(b for b, _ in on["specimen"]) == sorted([stem[0], cap[0]])
+    assert slipcrop.version() == "slipcrop-1" and slipcrop.version(0.03) == "slipcrop-1+grow0.03"

@@ -867,6 +867,8 @@ export interface FlaggedPage {
 export interface RecoveredCrop {
   n: number;
   box: [number, number, number, number];
+  /** The detector's box, when a reviewer has since moved or resized it (box is then theirs). */
+  proposed?: [number, number, number, number];
   area: number;
   decision?: "include" | "reject" | null;
 }
@@ -889,6 +891,8 @@ export interface RecoveredTile {
   /** False once a person kept the photo, or left it out for another reason: its crops are
    *  then not used. */
   still_excluded: boolean | null;
+  /** The photo's exclusion reason now (photo review REASONS), "keep" when it is kept. */
+  reason?: string | null;
   shown: "public" | "private" | "hidden";
   thumb?: string;
   full?: string;
@@ -900,6 +904,8 @@ export interface RecoveredTile {
 export interface RecoveredPage {
   total: number;
   offset: number;
+  /** The exclusion reasons a tile's picker offers (the photo review's). */
+  reasons?: { code: string; label: string }[];
   tranches: { code: string; open: number; decided: number }[];
   tiles: RecoveredTile[];
 }
@@ -1069,7 +1075,8 @@ export const feedbackApi = {
     return getJson<RecoveredPage>(`/api/feedback/recovered-labels?${qs}`);
   },
   /** Each photo's crops kept (an empty list rejects them all), written whole or not at all. */
-  recoveredLabelsBatch: (decisions: { item_id: number; include: number[] }[]) =>
+  recoveredLabelsBatch: (decisions: { item_id: number; include: number[];
+                                      boxes?: Record<string, [number, number, number, number]>; reason?: string }[]) =>
     postJson<{ saved: number; included: number; rejected: number }>("/api/feedback/recovered-labels/batch",
                                                                    { decisions }),
   photoViews: (p: { tab: string; status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {

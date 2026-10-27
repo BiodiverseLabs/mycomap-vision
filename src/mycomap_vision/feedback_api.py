@@ -604,7 +604,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         count for nothing."""
         _, projects, _, ro = viewer(request)
         items = items_cached(rl.ITEM_TYPE, projects)
-        slips = set(rl.slip_excluded(items_cached(pr.ITEM_TYPE, None)))
+        slips = rl.photo_reasons(items_cached(pr.ITEM_TYPE, None))
         try:
             tiles = rl.tiles(items, tranche, status, sort, q, slips)
         except fb.FeedbackError as e:
@@ -612,12 +612,13 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         start = max(0, offset)
         page = tiles[start:start + min(max(1, limit), 100)]
         return {"total": len(tiles), "offset": start, "tranches": rl.tranche_counts(items),
+                "reasons": [{"code": c, "label": t} for c, t in pr.REASONS],
                 "tiles": photo_tiles(page, ro, thumb="full")}
 
     @app.post("/api/feedback/recovered-labels/batch")
     def fb_recovered_labels_batch(request: Request, payload: dict = Body(...)):
-        """Save a page of Recovered labels: [{item_id, include: [crop numbers kept]}], written
-        whole or not at all (recovered_labels.batch_decide)."""
+        """Save a page of Recovered labels: [{item_id, include: [crop numbers kept], boxes?:
+        {n: [l, t, r, b]}, reason?}], written whole or not at all (recovered_labels.batch_decide)."""
         who, projects = access(request)
         try:
             return rl.batch_decide(store, list(payload.get("decisions") or []), who,
