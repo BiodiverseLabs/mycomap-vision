@@ -25,12 +25,10 @@ export const CATEGORIES: { code: string; label: string }[] = [
 
 export const categoryLabel = (code: string) => CATEGORIES.find((c) => c.code === code)?.label ?? code;
 
-/** The models a map can come from: the site's model, and the base model it was tuned from. */
-export type MapModel = "v1" | "base";
-export const MAP_MODELS: { code: MapModel; label: string; short: string }[] = [
-  { code: "v1", label: "MycoMap Vision v1", short: "Vision v1" },
-  { code: "base", label: "BioCLIP 2 (base model, not fine-tuned)", short: "BioCLIP 2" },
-];
+/** The one model a map comes from: the site's (Steve, 2026-10-26: no base model, no side by
+ *  side). */
+export const MAP_MODEL = "v1";
+export const MAP_MODEL_LABEL = "MycoMap Vision v1";
 
 export interface ExcludedTile {
   photo_key: string;
@@ -45,8 +43,8 @@ export interface ExcludedTile {
   owner_login?: string | null;
   license_code?: string | null;
   record_url?: string | null;
-  /** Which models' maps are kept for it already. */
-  maps: MapModel[];
+  /** ["v1"] when its map is kept already, else []. */
+  maps: (typeof MAP_MODEL)[];
   /** Its map is held back until the paper's sealed test is scored (the photo still shows). */
   held?: boolean;
 }
@@ -58,15 +56,13 @@ export interface ExcludedPage {
   total: number;
   offset: number;
   tiles: ExcludedTile[];
-  /** The models this server can make maps with (the base model only where it is loaded). */
-  models: MapModel[];
   /** When the list was read from Human Feedback. */
   as_of: string;
 }
 
 /** One photo's map: its state as the run maps' (200 ready, 202 working, 404 none, 503 failed). */
 export type ExcludedLooked =
-  | { status: "ready"; name: string; model: MapModel; backbone: string; method: string; made_at: string;
+  | { status: "ready"; name: string; model: typeof MAP_MODEL; backbone: string; method: string; made_at: string;
       map: Omit<LookedPhoto, "photo" | "match">;
       /** Where the photo alone puts the record's name among every species, its own record left
        *  out: 1..top, or null below the top. */
@@ -86,8 +82,8 @@ export function listUrl(category: string, offset: number, withMaps: boolean, lim
   return `/api/research/excluded-photos?${q}`;
 }
 
-export const lookedUrl = (photoKey: string, model: MapModel) =>
-  `/api/research/excluded-photos/looked?${new URLSearchParams({ photo: photoKey, model })}`;
+export const lookedUrl = (photoKey: string) =>
+  `/api/research/excluded-photos/looked?${new URLSearchParams({ photo: photoKey, model: MAP_MODEL })}`;
 
 async function lookedReply(res: Response): Promise<ExcludedLooked> {
   if (res.status === 200 || res.status === 202 || res.status === 503) return res.json();
@@ -105,8 +101,8 @@ export const excludedApi = {
     if (!res.ok) throw new ApiError(res.status, res.statusText);
     return res.json();
   },
-  read: async (photoKey: string, model: MapModel) => lookedReply(await fetch(lookedUrl(photoKey, model))),
-  ask: async (photoKey: string, model: MapModel) => lookedReply(await fetch(lookedUrl(photoKey, model), {
+  read: async (photoKey: string) => lookedReply(await fetch(lookedUrl(photoKey))),
+  ask: async (photoKey: string) => lookedReply(await fetch(lookedUrl(photoKey), {
     method: "POST", credentials: "same-origin" })),
 };
 

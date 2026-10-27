@@ -2,7 +2,8 @@
 left out of Vision in Human Feedback, by why, and "where Vision looked" on any of them. Who may
 list, read and ask, what is refused and with which status, which photos are listed (a person's
 latest decision only; People only to reviewers), what is shown of them (a read-only Human
-Feedback viewer's rules), the paper's seal, and that a map leaves the photo's own record out."""
+Feedback viewer's rules), the paper's seal, that a map leaves the photo's own record out, and
+that only v1's maps are made or served (Steve, 2026-10-26: no base model)."""
 
 import numpy as np
 import pytest
@@ -60,11 +61,12 @@ def add_photo(conn, photo_id, record, like, license_class="open", code="cc0", ow
                  (photo_id, store, path))
 
 
-def site(conn, tmp_path, admins=("admin-1",), unsealed=None, base="m2", sealed=("105",),
+def site(conn, tmp_path, admins=("admin-1",), unsealed=None, sealed=("105",),
          maker=None, excluded=True):
     """seed_two_species (records 100-107, A x and B y, one CC photo each, 1000-1007) plus a
-    second CC photo on 103 (1103) and an all-rights-reserved one on 100 (1100); m1 serves, m2 is
-    the base. Excluded by a person: 1000 micrograph, 1003 slip, 1004 people, 1100 habitat,
+    second CC photo on 103 (1103) and an all-rights-reserved one on 100 (1100); m1 serves, m2
+    stands for the old base model, its vectors still here. Every backbone the app loads is
+    noted in app.state.test_loaded. Excluded by a person: 1000 micrograph, 1003 slip, 1004 people, 1100 habitat,
     1005 slip (record 105, past the seal). Not excluded: 1001 kept, 1002 only flagged, 1006
     excluded and then kept."""
     store = seed_two_species(conn, tmp_path)
@@ -93,11 +95,14 @@ def site(conn, tmp_path, admins=("admin-1",), unsealed=None, base="m2", sealed=(
     signin = SigninConfig(mode="all", origin=HERE, issuer=ISSUER, public_key=PUBLIC_KEY,
                           secret=SECRET)
     maker = maker or Maker()
-    app = create_app(tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
+    loaded = []
+    app = create_app(tmp_path / "manifest.sqlite", root,
+                     backbone_loader=lambda n: loaded.append(n) or Const(n),
                      limits=open_limits(), signin=signin, background=False, fungus_gate=None,
                      feedback_store=fstore, feedback_org=Roles(admins), note=lambda s: None,
                      where_looked=None, excluded_looked=maker if excluded else None,
-                     excluded_base=base, excluded_unsealed=unsealed)
+                     excluded_unsealed=unsealed)
+    app.state.test_loaded = loaded
     return app, maker, tmp_path
 
 
@@ -231,20 +236,38 @@ def test_who_asked_is_never_kept(made):
     assert b"member-77" not in kept and b"Asker Name" not in kept
 
 
-def test_the_base_model_has_its_own_map(made):
+def test_only_v1_maps_are_offered_and_any_other_model_is_refused(made):
     app, maker, _ = made
-    assert visitor(app).get(LIST).json()["models"] == ["v1", "base"]
-    res = person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": "base"})
-    assert res.status_code == 200 and res.json()["model"] == "base"
-    assert res.json()["backbone"] == "m2" and maker.calls[-1]["backbone"] == "m2"
+    res = visitor(app).get(LIST)
+    assert "models" not in res.json() and "base" not in res.text
+    for model in ("base", "bioclip-2-336", "m2", ""):
+        assert visitor(app).get(LOOKED, params={"photo": "inat:1003", "model": model}
+                                ).status_code == 404, model
+        assert person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": model}
+                                     ).status_code == 404, model
+    assert not maker.calls
+    # v1 as before; the base model (m2, its vectors here) is never loaded.
+    res = person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": "v1"})
+    assert res.status_code == 200 and res.json()["model"] == "v1"
+    assert [c["backbone"] for c in maker.calls] == ["m1"]
+    assert "m2" not in app.state.test_loaded
+
+
+def test_a_base_map_kept_before_is_never_served_or_marked(made):
+    app, maker, tmp = made
+    old = {"version": xl.VERSION, "name": "B y", "model": "base", "backbone": "m2",
+           "method": "x", "made_at": "2026-10-26T10:00:00Z",
+           "map": {"crop": {"x": 0, "y": 0, "w": 1, "h": 1}, "grid": 2, "map": [1, 2, 3, 4]},
+           "rank": 1, "top": xl.RANK_DEPTH}
+    xl.Maps(tmp / xl.FILE).keep("inat:1003", "base", old)        # kept, not deleted
+    assert visitor(app).get(LOOKED, params={"photo": "inat:1003", "model": "base"}
+                            ).status_code == 404
     assert visitor(app).get(LOOKED, params={"photo": "inat:1003"}).json() == {"status": "none"}
-
-
-def test_without_the_base_models_vectors_only_v1_is_offered(conn, tmp_path):
-    app, _, _ = site(conn, tmp_path, base="not-here")
-    assert visitor(app).get(LIST).json()["models"] == ["v1"]
-    res = person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": "base"})
-    assert res.status_code == 404
+    tiles = {t["photo_key"]: t for t in visitor(app).get(LIST).json()["tiles"]}
+    assert tiles["inat:1003"]["maps"] == []
+    assert visitor(app).get(LIST, params={"maps": 1}).json()["tiles"] == []
+    assert xl.Maps(tmp / xl.FILE).get("inat:1003", "base") == old
+    assert not maker.calls
 
 
 def test_a_photo_that_is_not_excluded_has_no_map_here(made):
@@ -341,70 +364,3 @@ def test_the_list_follows_new_decisions_within_its_check_interval(tmp_path):
     fstore.decide(item["id"], "keep_photo", ANN)                  # a later decision wins
     now[0] = 62.0
     assert listing.rows() == []
-
-
-# --- the base model's vectors: rows alone don't make it usable --------------------------------------
-
-def test_manifest_rows_without_the_base_models_files_offer_v1_only(conn, tmp_path):
-    # A release's manifest keeps every backbone the laptop embedded; the files are what count.
-    app, maker, _ = site(conn, tmp_path)
-    (tmp_path / "emb" / "m2" / "shard-00000.npy").unlink()
-    assert visitor(app).get(LIST).json()["models"] == ["v1"]
-    assert person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": "base"}).status_code == 404
-    assert not maker.calls
-
-
-def test_a_folder_shipped_as_the_manifest_names_it_passes_the_check(conn, tmp_path):
-    site(conn, tmp_path)
-    got = xl.check_vectors(conn, "m2", tmp_path / "emb" / "m2")
-    assert got["ok"], got["problems"]
-    assert got["vectors"] == conn.execute("select count(*) from embeddings where backbone = 'm2'"
-                                          ).fetchone()[0]
-    assert xl.check_vectors(conn, "m2", tmp_path / "emb" / "m2", dim=got["dim"])["ok"]
-
-
-def test_the_same_folder_as_int8_codes_with_their_scales_passes_too(conn, tmp_path):
-    from mycomap_vision.quantize import write_int8_shards
-    site(conn, tmp_path)
-    write_int8_shards(tmp_path / "emb" / "m2", tmp_path / "int8" / "m2")
-    got = xl.check_vectors(conn, "m2", tmp_path / "int8" / "m2")
-    assert got["ok"] and got["dtype"] == "int8", got["problems"]
-    (tmp_path / "int8" / "m2" / "shard-00000.scale.npy").unlink()
-    assert not xl.check_vectors(conn, "m2", tmp_path / "int8" / "m2")["ok"]
-
-
-def test_the_check_refuses_a_folder_the_server_would_misread(conn, tmp_path):
-    site(conn, tmp_path)
-    folder = tmp_path / "emb" / "m2"
-    ids = np.load(folder / "shard-00000.ids.npy")
-    vecs = np.load(folder / "shard-00000.npy")
-    bad = lambda: xl.check_vectors(conn, "m2", folder)["problems"]
-    np.save(folder / "shard-00000.ids.npy", ids[::-1].copy())            # rows in another order
-    assert any("name another photo" in p for p in bad())
-    np.save(folder / "shard-00000.ids.npy", ids)
-    np.save(folder / "shard-00000.npy", vecs * 3)                         # not unit length
-    assert any("unit length" in p for p in bad())
-    np.save(folder / "shard-00000.npy", vecs[:-1])                        # a row short
-    assert any("vectors of shape" in p for p in bad())
-    np.save(folder / "shard-00000.npy", vecs)
-    assert xl.check_vectors(conn, "m2", folder, dim=vecs.shape[1] + 1)["problems"]
-    (folder / "shard-00000.ids.npy").unlink()
-    assert any("missing" in p for p in bad())
-    assert not xl.vectors_shipped(xl.manifest_shards(conn, "m2"), folder)
-    assert xl.check_vectors(conn, "nothing", folder)["problems"] == [
-        "the manifest has no embeddings rows for nothing"]
-
-
-def test_a_base_map_leaves_the_served_models_fast_search_packed(conn, tmp_path, monkeypatch):
-    from mycomap_vision import fastsearch
-    pytest.importorskip("torch")
-    monkeypatch.setenv("MV_SEARCH_INT8", "1")
-    monkeypatch.setattr(fastsearch, "SLOT", fastsearch.Slot())
-    app, _, _ = site(conn, tmp_path)
-    assert person(app, "m").post(LOOKED, params={"photo": "inat:1003"}).status_code == 200
-    served = fastsearch.SLOT.owner
-    if served is None:
-        pytest.skip(f"no int8 engine here: {fastsearch.SLOT.last_error}")
-    assert person(app, "m").post(LOOKED, params={"photo": "inat:1003", "model": "base"}
-                                 ).status_code == 200
-    assert fastsearch.SLOT.owner is served and served.packed is not None
