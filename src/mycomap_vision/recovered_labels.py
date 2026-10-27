@@ -9,6 +9,12 @@ photo. A crop goes back into Vision unless a person rejects it (Steve's rule: th
 default is Include), and only while the photo stays excluded as a slip: kept, or excluded for
 another reason, and its crops count for nothing.
 
+A crop is SQUARE (Steve, 2026-10-27: the editor keeps "the aspect ratio that will be used for
+the final box"). The served model resizes a photo's short side and centre-crops a square
+(BioCLIP 2: resize_mode "shortest", then CenterCrop), so of any box it reads only the central
+square, side = the box's shorter side (effective_box). Every box is stored, shown, embedded and
+exported as that square, so what a reviewer sees is what the model reads.
+
 The crop is COORDINATES on the original photo, never a new image file (no-derivatives licences;
 the public read-only viewer must never be shown a derivative). The page draws the box on the
 original and, for reviewers, shows the box's part of the same image by CSS. Embedding applies
@@ -185,10 +191,20 @@ def kept(item: dict) -> list[int]:
     return [n for n in every if n in set(chosen)]
 
 
+def effective_box(box) -> list[int]:
+    """The square the model reads from `box`: its central square, side = the shorter side (the
+    served transform resizes the short side and centre-crops). A square box is itself."""
+    l, t, r, b = (int(round(v)) for v in box)
+    side = min(r - l, b - t)
+    x, y = l + (r - l - side) // 2, t + (b - t - side) // 2
+    return [x, y, x + side, y + side]
+
+
 def boxes_now(item: dict) -> dict[int, list[int]]:
-    """Each crop's box now: the reviewer's (the latest decision's), else the detector's."""
+    """Each crop's box now, as the square the model reads (effective_box): the reviewer's (the
+    latest decision's), else the detector's."""
     _, edited = read_value(last_of(item))
-    return {c["n"]: list(edited.get(c["n"], c["box"])) for c in crops_of(item)}
+    return {c["n"]: effective_box(edited.get(c["n"], c["box"])) for c in crops_of(item)}
 
 
 def accepted_crops(store: fb.Store) -> dict[str, dict]:
@@ -260,7 +276,7 @@ def tiles(items: list[dict], tranche: str = "all", status: str = "open", sort: s
         keep = set(kept(it))
         now = boxes_now(it)
         decided = it["status"] == "decided"
-        crops = [{"n": c["n"], "box": now[c["n"]], "proposed": c["box"],
+        crops = [{"n": c["n"], "box": now[c["n"]], "proposed": effective_box(c["box"]),
                   "area": round((now[c["n"]][2] - now[c["n"]][0])
                                 * (now[c["n"]][3] - now[c["n"]][1])
                                 / max(1, ev.get("width", 1) * ev.get("height", 1)), 4),
@@ -306,12 +322,14 @@ KEEP = "keep"            # a tile's reason picker: keep the whole photo in Visio
 
 
 def min_side(w: int, h: int) -> int:
-    """The smallest side a reviewer's box may have (the page's minSide)."""
-    return max(16, round(0.04 * min(w, h)))
+    """The smallest side a reviewer's box may have (the page's minSide): 4% of the short side,
+    at least 16 px, never more than the short side itself."""
+    return min(max(16, round(0.04 * min(w, h))), min(w, h))
 
 
 def check_box(box, w: int, h: int) -> list[int]:
-    """A reviewer's box as whole pixels inside its w x h photo, at least min_side a side."""
+    """A reviewer's box as the square the model reads (effective_box: the editor sends squares),
+    in whole pixels inside its w x h photo, at least min_side a side."""
     if not (isinstance(box, list) and len(box) == 4
             and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box)):
         raise fb.FeedbackError(f"a box is [left, top, right, bottom] in pixels, not {box!r}")
@@ -321,7 +339,7 @@ def check_box(box, w: int, h: int) -> list[int]:
             and b[2] - b[0] >= m and b[3] - b[1] >= m):
         raise fb.FeedbackError(f"box {b} is not inside the {w} x {h} photo with sides of at "
                                f"least {m} px")
-    return b
+    return effective_box(b)
 
 
 def crop_value(chosen: list[int], boxes: dict[int, list[int]]) -> str:
@@ -390,7 +408,7 @@ def batch_decide(store: fb.Store, decisions: list[dict], person: dict,
                 raise fb.FeedbackError(f"crop {n} of item {item_id} is not kept: a box is only "
                                        "for a kept crop")
             edited[n] = check_box(b, w, h)
-        edited = {n: b for n, b in edited.items() if b != list(have[n])}
+        edited = {n: b for n, b in edited.items() if b != effective_box(have[n])}
         reason = d.get("reason")
         photo = None
         if reason is not None:

@@ -939,17 +939,28 @@ def ensure_crops_schema(conn: sqlite3.Connection) -> None:
 
 def sync_crops(store: Store, conn: sqlite3.Connection) -> dict:
     """Make the manifest's crop table the queue's current crops (recovered_labels.accepted_crops):
-    every crop kept on a photo a person still leaves out as a field slip."""
+    every crop kept on a photo a person still leaves out as a field slip. A crop whose box
+    changed (a reviewer moved it) loses its vectors, so the next night embeds it afresh: a
+    crop's vector id (embed.crop_vector_id) names the photo and crop, not the box."""
+    from .embed import SCHEMA as EMBED_SCHEMA
+    from .embed import crop_vector_id
     from .recovered_labels import accepted_crops
     rows = [(photo_id_of(key), n, key, *box, c["version"])
             for key, c in sorted(accepted_crops(store).items()) for n, box in c["boxes"]
             if photo_id_of(key) is not None]
     ensure_crops_schema(conn)
+    conn.executescript(EMBED_SCHEMA)
+    before = {(r[0], r[1]): tuple(r[2:]) for r in conn.execute(
+        "select photo_id, n, l, t, r, b from feedback_photo_crops")}
+    moved = [(pid, n) for pid, n, _k, *box, _v in rows
+             if (pid, n) in before and before[(pid, n)] != tuple(box)]
     with conn:
         conn.execute("delete from feedback_photo_crops")
         conn.executemany("insert or ignore into feedback_photo_crops values (?,?,?,?,?,?,?,?)",
                          rows)
-    return {"crops": len(rows), "photos": len({r[0] for r in rows}),
+        conn.executemany("delete from embeddings where photo_id = ?",
+                         [(crop_vector_id(pid, n),) for pid, n in moved])
+    return {"crops": len(rows), "photos": len({r[0] for r in rows}), "moved": len(moved),
             "fingerprint": crops_fingerprint(conn)}
 
 

@@ -7,7 +7,7 @@ import { ReadOnlyContext } from "@/components/ReadOnlyReview";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type RecoveredTile } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { tileImage } from "@/lib/photoReview";
-import { type Box, boxOf, type BoxEdits, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, flipCrop,
+import { type Box, boxOf, type BoxEdits, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, effectiveBox, flipCrop,
          type Handle, KEEP_PHOTO, pendingDecisions, RECOVERED_SORTS, type ReasonEdits, startChoice, tileFacts, TRANCHES,
          type CropMarks } from "@/lib/recoveredLabels";
 
@@ -171,7 +171,7 @@ function Tile({ tile, marks, edits, readOnly, reasons, reason, onSeen, onFlip, o
     return marks[cropKey(tile.item_id, n)] ?? startChoice(tile, c);
   };
   const box = (c: RecoveredTile["crops"][number]) => boxOf(tile, c, edits);
-  const moved = tile.crops.some((c) => box(c).some((v, i) => v !== c.box[i]));
+  const moved = tile.crops.some((c) => box(c).some((v, i) => v !== effectiveBox(c.box)[i]));
   const used = cropsUsed(reason);
   const changed = tile.crops.some((c) => choice(c.n) !== startChoice(tile, c)) || moved || reason !== (tile.reason ?? "slip");
   return (
@@ -215,7 +215,7 @@ function Tile({ tile, marks, edits, readOnly, reasons, reason, onSeen, onFlip, o
         <div className={`grid min-w-0 flex-1 content-start gap-2 ${tile.crops.length > 2 ? "grid-cols-2" : "grid-cols-1"}`}>
           {tile.crops.map((c) => {
             const on = choice(c.n) === "include" && used;
-            const edited = box(c).some((v, i) => v !== c.box[i]);
+            const edited = box(c).some((v, i) => v !== effectiveBox(c.box)[i]);
             return (
               <div key={c.n} className="min-w-0">
                 {/* Reviewers see the box's part of the original; the public view keeps to the outline. */}
@@ -282,8 +282,9 @@ const HANDLE_POS: Record<Exclude<Handle, "move">, string> = {
 };
 
 /** One photo's crops on the original, large: drag a box to move it, a corner to resize it;
- *  arrow keys move the chosen box (Shift: 10x), Shift+Alt+arrows resize it. Done keeps the
- *  boxes (an edited crop is included), Esc or Cancel leaves them as they were. */
+ *  arrow keys move the chosen box (Shift: 10x), Shift+Alt+arrows resize it. Every box stays
+ *  square, the region the model reads (dragBox, effectiveBox). Done keeps the boxes (an edited
+ *  crop is included), Esc or Cancel leaves them as they were. */
 function CropEditor({ tile, marks, edits, onDone, onClose }: {
   tile: RecoveredTile; marks: CropMarks; edits: BoxEdits;
   onDone: (boxes: BoxEdits, keep: CropMarks) => void; onClose: () => void;
@@ -317,7 +318,7 @@ function CropEditor({ tile, marks, edits, onDone, onClose }: {
     for (const c of tile.crops) {
       const b = boxes[c.n];
       out[cropKey(tile.item_id, c.n)] = b;
-      if (b.some((v, i) => v !== c.box[i])) keep[cropKey(tile.item_id, c.n)] = "include";
+      if (b.some((v, i) => v !== effectiveBox(c.box)[i])) keep[cropKey(tile.item_id, c.n)] = "include";
     }
     onDone(out, keep);
   };
@@ -330,11 +331,14 @@ function CropEditor({ tile, marks, edits, onDone, onClose }: {
     e.preventDefault();
     const step = Math.max(1, Math.round(0.01 * Math.min(W, H))) * (e.shiftKey && !e.altKey ? 10 : 1);
     const [dx, dy] = dir[e.key].map((v) => v * step);
-    setBoxes((b) => ({ ...b, [active]: dragBox(b[active], e.shiftKey && e.altKey ? "se" : "move", dx, dy, W, H) }));
+    // Shift+Alt: → or ↓ grows the square, ← or ↑ shrinks it, its top-left corner fixed.
+    setBoxes((b) => ({ ...b, [active]: e.shiftKey && e.altKey
+      ? dragBox(b[active], "se", dx + dy, dx + dy, W, H)
+      : dragBox(b[active], "move", dx, dy, W, H) }));
   };
   const reset = () => setBoxes((b) => {
     const c = tile.crops.find((x) => x.n === active)!;
-    return { ...b, [active]: c.proposed ?? c.box };
+    return { ...b, [active]: effectiveBox(c.proposed ?? c.box) };
   });
   return (
     <div ref={root} tabIndex={-1} role="dialog" aria-modal="true" aria-label={`Adjust the crops of ${recordLabel(tile.record_key)}`}
@@ -342,7 +346,8 @@ function CropEditor({ tile, marks, edits, onDone, onClose }: {
          data-testid="crop-editor">
       <div className="flex min-w-0 items-center justify-between gap-3 text-sm text-white" onClick={(e) => e.stopPropagation()}>
         <span className="min-w-0 break-words">
-          <span className="italic">{tile.label}</span> · {recordLabel(tile.record_key)} · drag a box to move it, a corner to resize it
+          <span className="italic">{tile.label}</span> · {recordLabel(tile.record_key)} · drag a box to move it, a corner to resize it ·
+          boxes stay square: the model reads a square, and a box stops at the photo's edge
         </span>
         <button type="button" onClick={onClose} aria-label="Cancel"
                 className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-md hover:bg-white/10">
@@ -388,7 +393,7 @@ function CropEditor({ tile, marks, edits, onDone, onClose }: {
           <Check className="h-4 w-4" aria-hidden /> Done
         </button>
         <p className="w-full text-center text-xs text-white/70">
-          drag to move · corners to resize · arrows move (Shift ×10) · Shift+Alt+arrows resize
+          drag to move · corners to resize (stays square) · arrows move (Shift ×10) · Shift+Alt+→/↓ grow, ←/↑ shrink
           {tile.crops.length > 1 ? ` · 1–${tile.crops.length} choose a box` : ""} · Enter done · Esc cancel
         </p>
       </div>
