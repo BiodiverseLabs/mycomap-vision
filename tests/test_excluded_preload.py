@@ -389,3 +389,54 @@ def test_a_crop_not_yet_embedded_has_no_map_and_holds_the_slips_back(conn, tmp_p
     assert visitor(app).get(LOOKED, params={"photo": "inat:1003", "crop": 1}).status_code == 404
     assert person(app, "m").post(LOOKED, params={"photo": "inat:1003", "crop": 1}
                                  ).status_code == 404
+
+
+# --- 2026-10-27: the first pass never ended ------------------------------------------------------
+
+def test_a_pass_reads_what_is_served_once_not_per_target(conn, tmp_path, any_time, monkeypatch):
+    """The served backbone comes from a count over every embeddings row (about a second on the
+    box, holding the manifest lock); read per target, the box's first pass of ~31k targets took
+    hours and never finished. A pass now reads it once, however many targets."""
+    from mycomap_vision import api
+    counts = []
+    real_open = api.open_manifest
+
+    def counting(path):
+        c = real_open(path)
+        c.set_trace_callback(lambda sql: counts.append(sql)
+                             if "from embeddings group by" in sql.lower() else None)
+        return c
+    monkeypatch.setattr(api, "open_manifest", counting)
+    app, _, _ = site(conn, tmp_path)
+    p = app.state.excluded_preload
+    before = len(counts)
+    p.pass_ = p.scan()
+    assert p.pass_.total["slips"] == 2
+    assert len(counts) - before <= 1, f"{len(counts) - before} counts over embeddings in one pass"
+
+
+def test_a_pass_is_logged_and_an_error_shows_in_the_health_and_is_retried(conn, tmp_path,
+                                                                          any_time):
+    app, maker, _ = site(conn, tmp_path)
+    p = app.state.excluded_preload
+    said = []
+    p.note = said.append
+    p.step()
+    assert said[0] == "[preload] pass starting"
+    assert said[1].startswith("[preload] pass ready in ") and "2 slips" in said[1]
+    clock = [1000.0]
+    q, w, _ = preloader(slips=[hit(1)])
+    q.clock = lambda: clock[0]
+    q.note = said.append
+
+    def broken():
+        raise RuntimeError("the manifest is locked")
+    q.targets = broken
+    assert q.step() == "error: RuntimeError: the manifest is locked"
+    assert said[-1] == "[preload] RuntimeError: the manifest is locked"
+    assert q.health()["doing"].startswith("error:")
+    q.targets = lambda: ([xl.Target(hit(1))], [], 0)
+    clock[0] += 30
+    assert q.step().startswith("error:")               # waits a minute before trying again
+    clock[0] += 31
+    assert q.step() == "making a map"

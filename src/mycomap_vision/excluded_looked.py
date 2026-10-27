@@ -335,12 +335,17 @@ class Preloader:
         self.rescan_seconds, self.clock, self.now, self.note = rescan_seconds, clock, now, note
         self.state = "off" if not enabled else "starting"
         self.pass_: Pass | None = None
+        self.last_pass_seconds: float | None = None
+        self._retry_at = -1e9                     # after an error, the next try (clock)
         self.made = self.failed = 0
         self.last_map_at: str | None = None
         self.lock = threading.Lock()
 
     def scan(self) -> Pass:
-        """A new pass: every target whose kept map is not current, slip photos first."""
+        """A new pass: every target whose kept map is not current, slip photos first. Logged
+        at its start and end."""
+        started = self.clock()
+        self.note("[preload] pass starting")
         slips, crops, waiting = self.targets()
         kept = self.stamps()
         total = {"slips": len(slips), "crops": len(crops)}
@@ -353,15 +358,27 @@ class Preloader:
                     done[kind] += 1
                 else:
                     todo.append(t)
+        self.last_pass_seconds = round(self.clock() - started, 1)
+        self.note(f"[preload] pass ready in {self.last_pass_seconds} s: {total['slips']} slips "
+                  f"({done['slips']} current), {total['crops']} crops ({done['crops']} current), "
+                  f"{len(todo)} to make, {waiting} crops waiting for their vector")
         return Pass(todo, total, done, {}, waiting, self.clock())
 
     def _due(self, t: Target) -> bool:
         return not (t.crop == 0 and self.crop_wait and self.pass_ and self.pass_.crops_waiting)
 
     def step(self) -> str:
-        """One tick: the state it is in afterwards."""
+        """One tick: the state it is in afterwards. An error is logged, shown in the health
+        ("error: ..."), and tried again a minute later."""
         with self.lock:
-            self.state = self._step()
+            if self.clock() < self._retry_at:
+                return self.state
+            try:
+                self.state = self._step()
+            except Exception as e:  # noqa: BLE001 - say so, never stop the server
+                self.note(f"[preload] {type(e).__name__}: {e}")
+                self.state = f"error: {type(e).__name__}: {e}"[:200]
+                self._retry_at = self.clock() + 60.0
             return self.state
 
     def _step(self) -> str:
@@ -425,7 +442,7 @@ class Preloader:
                    self.window[1] % 60),
                # "doing", not "state": deploy.sh reads the health's two "state" keys.
                "doing": self.state, "made": self.made, "failed": self.failed,
-               "last_map_at": self.last_map_at,
+               "last_map_at": self.last_map_at, "last_pass_seconds": self.last_pass_seconds,
                "last_map_seconds": (round(self.worker.last_seconds, 2)
                                     if getattr(self.worker, "last_seconds", None) else None)}
         if p is not None:

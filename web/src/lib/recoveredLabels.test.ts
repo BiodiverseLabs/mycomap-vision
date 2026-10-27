@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { RecoveredCrop, RecoveredTile } from "./api";
-import { boxOf, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, effectiveBox, flipCrop, minSide, pendingDecisions,
-         startChoice, tileFacts } from "./recoveredLabels";
+import { boxOf, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, decisionKey, dragBox, effectiveBox, flipCrop, minSide,
+         pendingDecisions, startChoice, tileDecision, tileFacts, tileSave, tileSaveDecision } from "./recoveredLabels";
 
 const crop = (n: number, box: RecoveredCrop["box"], decision: RecoveredCrop["decision"] = null): RecoveredCrop =>
   ({ n, box, area: 0.05, decision });
@@ -52,11 +52,15 @@ test("an open tile is saved once seen, a decided one only when a crop changed", 
                    [{ item_id: 1, include: [1] }, { item_id: 2, include: [] }]);   // [] rejects all
 });
 
-test("the tile says its slip p, how big the find is and how many crops", () => {
+test("the tile says its slip p, how big the found specimen is (not the crop) and how many crops", () => {
   assert.equal(tileFacts(tile(1, [crop(1, [0, 0, 1, 1]), crop(2, [2, 2, 3, 3])])),
-               "slip p 0.83 · specimen 4.0% of the photo · 2 crops");
+               "slip p 0.83 · specimen found: 4.0% of the photo · 2 crops");
   assert.equal(tileFacts({ slip_p: null, specimen_area: 0.25, crops: [crop(1, [0, 0, 1, 1])] }),
-               "specimen 25% of the photo");
+               "specimen found: 25% of the photo");
+  // the riskiest page sits just above the smallest find (2/576 = 0.35%): two places keep them apart
+  const small = (a: number) => tileFacts({ slip_p: null, specimen_area: a, crops: [crop(1, [0, 0, 1, 1])] });
+  assert.deepEqual([0.0035, 0.0037, 0.0044].map(small), ["specimen found: 0.35% of the photo",
+    "specimen found: 0.37% of the photo", "specimen found: 0.44% of the photo"]);
 });
 
 test("a box moves whole or by one corner and stays square: the region the model reads", () => {
@@ -105,4 +109,32 @@ test("a moved box and a changed reason are saved with the page; a box only for a
   assert.equal(cropsUsed("slip"), true);
   assert.equal(cropsUsed("dried"), false);
   assert.equal(cropsUsed("keep"), false);
+});
+
+test("a tile saves on its own: what it saved is not sent again, and a change after it is unsaved", () => {
+  const a = tile(1, [crop(1, [0, 0, 100, 100]), crop(2, [200, 200, 300, 300])]);
+  const b = tile(2, [crop(1, [0, 0, 100, 100])]);
+  const seen = new Set([1, 2]);
+  const pending = pendingDecisions([a, b], {}, seen);
+  assert.deepEqual(pending.map((d) => d.item_id), [1, 2]);
+  // tile 1 saved by itself: only tile 2 is left for "Save page"
+  const sent = { 1: decisionKey(tileDecision(a, {}).decision) };
+  assert.deepEqual(pendingDecisions([a, b], {}, seen, {}, {}, sent).map((d) => d.item_id), [2]);
+  const ids = (marks = {}) => new Set(pendingDecisions([a, b], marks, seen, {}, {}, sent).map((d) => d.item_id));
+  const state = (marks = {}, flight = {}) =>
+    tileSave(a, ids(marks), sent, decisionKey(tileDecision(a, marks).decision), flight);
+  assert.equal(state(), "saved");
+  const flipped = flipCrop({}, a, 2);
+  assert.equal(state(flipped), "unsaved");                           // changed since it was saved
+  assert.equal(state(flipCrop(flipped, a, 2)), "saved");            // and back: nothing to save
+  assert.equal(state({}, { 1: "saving" }), "saving");
+  assert.equal(state({}, { 1: "failed" }), "failed");
+  // an open tile nobody has seen has nothing to say, but its own Save still sends it
+  assert.equal(tileSave(b, new Set(), {}, decisionKey(tileDecision(b, {}).decision), {}), null);
+  assert.deepEqual(pendingDecisions([b], {}, new Set()), []);
+  assert.deepEqual(tileSaveDecision(b, {}), [{ item_id: 2, include: [1] }]);
+  // what a tile sends carries its box and reason edits, as the page's save does
+  const edited = { [cropKey(1, 2)]: [180, 180, 300, 300] as RecoveredCrop["box"] };
+  assert.deepEqual(tileSaveDecision(a, {}, edited, { 1: "dried" }),
+                   [{ item_id: 1, include: [1, 2], boxes: { "2": [180, 180, 300, 300] }, reason: "dried" }]);
 });

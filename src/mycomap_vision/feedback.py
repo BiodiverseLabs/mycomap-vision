@@ -919,8 +919,8 @@ def exclusions_fingerprint(conn: sqlite3.Connection) -> str:
 
 
 # --- specimen crops of excluded slip photos (recovered_labels.py) -----------------------------
-# The boxes Vision uses, as fractions of the photo (l, t, r, b), synced like the exclusions:
-# at startup and before each nightly update. Each crop is embedded as a vector of its own
+# The boxes Vision uses, as fractions of the photo (l, t, r, b), synced before each nightly update
+# (not at startup: sync_crops). Each crop is embedded as a vector of its own
 # (embed.crop_vector_id: a negative id, never a real photo's) and evaluate.load_records counts
 # it as one of the record's photos. A frozen dataset release is not affected.
 CROPS_SCHEMA = """
@@ -941,7 +941,12 @@ def sync_crops(store: Store, conn: sqlite3.Connection) -> dict:
     """Make the manifest's crop table the queue's current crops (recovered_labels.accepted_crops):
     every crop kept on a photo a person still leaves out as a field slip. A crop whose box
     changed (a reviewer moved it) loses its vectors, so the next night embeds it afresh: a
-    crop's vector id (embed.crop_vector_id) names the photo and crop, not the box."""
+    crop's vector id (embed.crop_vector_id) names the photo and crop, not the box.
+
+    Each vector is deleted by the embeddings table's whole key (backbone, photo_id), one
+    backbone at a time: a delete by photo_id alone scans the whole table (millions of rows),
+    and 1,100 of them held the server's startup for 5 min 20 s (2026-10-27, 235 GB read). Run
+    before each nightly update, never at startup (api.py)."""
     from .embed import SCHEMA as EMBED_SCHEMA
     from .embed import crop_vector_id
     from .recovered_labels import accepted_crops
@@ -958,8 +963,10 @@ def sync_crops(store: Store, conn: sqlite3.Connection) -> dict:
         conn.execute("delete from feedback_photo_crops")
         conn.executemany("insert or ignore into feedback_photo_crops values (?,?,?,?,?,?,?,?)",
                          rows)
-        conn.executemany("delete from embeddings where photo_id = ?",
-                         [(crop_vector_id(pid, n),) for pid, n in moved])
+        if moved:
+            backbones = [r[0] for r in conn.execute("select distinct backbone from embeddings")]
+            conn.executemany("delete from embeddings where backbone = ? and photo_id = ?",
+                             [(b, crop_vector_id(pid, n)) for b in backbones for pid, n in moved])
     return {"crops": len(rows), "photos": len({r[0] for r in rows}), "moved": len(moved),
             "fingerprint": crops_fingerprint(conn)}
 

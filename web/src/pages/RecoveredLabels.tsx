@@ -1,15 +1,18 @@
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Lock, Move, RotateCcw, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2, Lock, Move, RotateCcw, Save, X } from "lucide-react";
 import { BODY, BTN, Ext, FIELD, INK } from "@/components/ReviewPhotos";
-import { SaveBar } from "@/components/ReviewSave";
+import { AutosaveToggle, SaveBar, useLeaveGuard } from "@/components/ReviewSave";
 import { ReadOnlyContext } from "@/components/ReadOnlyReview";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type RecoveredTile } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { tileImage } from "@/lib/photoReview";
+import { AUTOSAVE_MS } from "@/lib/photoSummary";
+import { autosaveOnText, readAutosave, writeAutosave } from "@/lib/reviewSave";
 import { type Box, boxOf, type BoxEdits, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, effectiveBox, flipCrop,
          type Handle, KEEP_PHOTO, pendingDecisions, RECOVERED_SORTS, type ReasonEdits, startChoice, tileFacts, TRANCHES,
-         type CropMarks } from "@/lib/recoveredLabels";
+         type CropMarks, decisionKey, type RecoveredDecision, type Sent, tileDecision, type TileSave, tileSave,
+         tileSaveDecision } from "@/lib/recoveredLabels";
 
 // Recovered labels (Steve, 2026-10-26): photos a person excluded as field slips, where the
 // specimen detector found a specimen. Each tile is the ORIGINAL photo with the proposed crop
@@ -18,6 +21,9 @@ import { type Box, boxOf, type BoxEdits, boxStyle, cropBackground, cropKey, crop
 // first, where false finds (a printed logo, a finger) sit. The rules: lib/recoveredLabels.ts.
 // Steve, 2026-10-27: a reviewer may change the photo's exclusion reason on the tile (only a
 // field slip gives crops), and click the photo to move or resize its crop boxes.
+// Steve, 2026-10-27: "save panels individually": each tile has its own Save and says whether it
+// is saved; "Save page" saves every unsaved tile; Auto-save (off by default, the photo review's
+// setting) saves each tile on its own. A saved tile stays where it is until the page changes.
 
 const PAGE = 24;
 
@@ -33,7 +39,9 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
   const [reasons, setReasons] = useState<ReasonEdits>({});
   const [editing, setEditing] = useState<number | null>(null);
   const [seen, setSeen] = useState<Set<number>>(new Set());
-  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState<Sent>({});
+  const [flight, setFlight] = useState<Record<number, "saving" | "failed">>({});
+  const [autosave, setAutosave] = useState(() => readAutosave(browserStorage));
   const [error, setError] = useState<string | null>(null);
   const list = useQuery({
     queryKey: ["feedback", "recovered", status, tranche, sort, offset],
@@ -44,18 +52,48 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
   const data = list.data;
   const tiles = data?.tiles ?? [];
   const discard = () => { setMarks({}); setEdits({}); setReasons({}); };
-  useEffect(() => { discard(); setSeen(new Set()); }, [status, tranche, sort, offset]);
-  const pending = useMemo(() => (readOnly ? [] : pendingDecisions(tiles, marks, seen, edits, reasons)),
-                          [tiles, marks, seen, edits, reasons, readOnly]);
+  useEffect(() => { discard(); setSeen(new Set()); setSent({}); setFlight({}); }, [status, tranche, sort, offset]);
+  const pending = useMemo(() => (readOnly ? [] : pendingDecisions(tiles, marks, seen, edits, reasons, sent)),
+                          [tiles, marks, seen, edits, reasons, sent, readOnly]);
+  const pendingIds = useMemo(() => new Set(pending.map((d) => d.item_id)), [pending]);
+  // Paging, a filter or another queue with unsaved tiles asks first (Auto-save off).
+  const canLeave = useLeaveGuard(autosave ? 0 : pending.length, "recovered-labels");
+  const leaving = (go: () => void) => () => { if (canLeave()) go(); };
   const reasonList = data?.reasons ?? [];
   const editTile = tiles.find((t) => t.item_id === editing);
-  const save = () => {
-    if (!pending.length) return;
-    setBusy(true);
+  // One save of some tiles' decisions: each tile shows Saving…, then Saved (what it saved is
+  // remembered, so it is not sent again) or Not saved. Only the queue counts are refreshed: a
+  // saved tile stays on the page where it is.
+  const send = useCallback((decisions: RecoveredDecision[]) => {
+    if (!decisions.length) return;
+    const ids = decisions.map((d) => d.item_id);
+    setFlight((f) => ({ ...f, ...Object.fromEntries(ids.map((id) => [id, "saving" as const])) }));
     setError(null);
-    feedbackApi.recoveredLabelsBatch(pending).then(
-      () => { setBusy(false); discard(); qc.invalidateQueries({ queryKey: ["feedback"] }); },
-      (e) => { setBusy(false); setError(e instanceof ApiError || e instanceof Error ? e.message : "Not saved."); });
+    feedbackApi.recoveredLabelsBatch(decisions).then(
+      () => {
+        setSent((x) => ({ ...x, ...Object.fromEntries(decisions.map((d) => [d.item_id, decisionKey(d)])) }));
+        setFlight((f) => Object.fromEntries(Object.entries(f).filter(([id]) => !ids.includes(+id))));
+        void qc.invalidateQueries({ queryKey: ["feedback", "summary"] });
+      },
+      (e) => {
+        setFlight((f) => ({ ...f, ...Object.fromEntries(ids.map((id) => [id, "failed" as const])) }));
+        setError(e instanceof ApiError || e instanceof Error ? e.message : "Not saved.");
+      });
+  }, [qc]);
+  const save = () => send(pending.filter((d) => flight[d.item_id] !== "saving"));
+  const busy = Object.values(flight).includes("saving");
+  // Auto-save on: every unsaved tile is saved shortly after it changes (or is first seen).
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  useEffect(() => {
+    if (!autosave || readOnly || !pending.length) return;
+    const t = window.setTimeout(() => send(pendingRef.current.filter((d) => !flight[d.item_id])), AUTOSAVE_MS);
+    return () => window.clearTimeout(t);
+  }, [autosave, readOnly, pending, flight, send]);
+  const turnAutosave = (on: boolean) => {
+    if (on && pending.length && !window.confirm(autosaveOnText(pending.length))) return;
+    setAutosave(on);
+    writeAutosave(browserStorage, on);
   };
   const count = (code: string) => {
     const t = data?.tranches.find((x) => x.code === code);
@@ -75,7 +113,7 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
         <div className="inline-flex overflow-hidden rounded-md border border-[#A87146]/30 dark:border-border" role="group"
              aria-label="Open or decided">
           {(["open", "decided"] as FeedbackStatus[]).map((s, i) => (
-            <button key={s} type="button" aria-pressed={status === s} onClick={() => { setStatus(s); setOffset(0); }}
+            <button key={s} type="button" aria-pressed={status === s} onClick={leaving(() => { setStatus(s); setOffset(0); })}
                     className={`min-h-10 px-3 py-1.5 text-sm font-medium ${i ? "border-l border-[#A87146]/30 dark:border-border" : ""} ${
                       status === s ? "bg-myco-green/10 text-myco-green" : "text-gray-700 hover:bg-myco-green/5 dark:text-foreground/80"}`}>
               {s === "open" ? "Open" : "Decided"}
@@ -85,22 +123,28 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
         <label className="flex min-w-0 items-center gap-2 text-sm"
                title="The photo-type tagger's slip p when the photo was put up for review">
           <span className="text-muted-foreground">Tranche</span>
-          <select className={FIELD} value={tranche} onChange={(e) => { setTranche(e.target.value); setOffset(0); }}
+          <select className={FIELD} value={tranche} onChange={(e) => { const v = e.target.value; leaving(() => { setTranche(v); setOffset(0); })(); }}
                   data-testid="recovered-tranche">
             {TRANCHES.map((t) => <option key={t.code} value={t.code}>{t.label}{count(t.code)}</option>)}
           </select>
         </label>
         <label className="flex min-w-0 items-center gap-2 text-sm">
           <span className="text-muted-foreground">Sort</span>
-          <select className={FIELD} value={sort} onChange={(e) => { setSort(e.target.value); setOffset(0); }}>
+          <select className={FIELD} value={sort} onChange={(e) => { const v = e.target.value; leaving(() => { setSort(v); setOffset(0); })(); }}>
             {RECOVERED_SORTS.map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
           </select>
         </label>
         {list.isFetching && <span className="text-xs text-muted-foreground">Loading…</span>}
+        {!readOnly && (
+          <span className="ml-auto">
+            <AutosaveToggle on={autosave} onChange={turnAutosave}
+                            title="On: each tile is saved by itself shortly after you change it or see it. Off: save a tile with its own Save, or the page." />
+          </span>
+        )}
       </div>
-      {!readOnly && status === "open" && (
+      {!readOnly && !autosave && (
         <SaveBar count={pending.length} busy={busy} onSave={save} onDiscard={discard} sticky
-                 note="A photo you have seen counts as reviewed; its crops are saved as shown." />
+                 note="Each tile has its own Save. A photo you have seen counts as reviewed; Save page saves every unsaved tile as shown." />
       )}
       {status === "open" && (
         <p className="text-xs text-muted-foreground">
@@ -118,7 +162,9 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
           aria-label="Proposed crops" data-testid="recovered-grid">
         {tiles.map((t) => (
           <Tile key={t.item_id} tile={t} marks={marks} edits={edits} readOnly={readOnly} reasons={reasonList}
-                reason={reasons[t.item_id] ?? t.reason ?? "slip"}
+                reason={reasons[t.item_id] ?? t.reason ?? "slip"} manual={!autosave}
+                save={readOnly ? null : tileSave(t, pendingIds, sent, decisionKey(tileDecision(t, marks, edits, reasons).decision), flight)}
+                onSave={() => send(tileSaveDecision(t, marks, edits, reasons))}
                 onSeen={() => setSeen((s) => (s.has(t.item_id) ? s : new Set(s).add(t.item_id)))}
                 onFlip={(n) => setMarks((m) => flipCrop(m, t, n))}
                 onReason={(r) => setReasons((x) => ({ ...x, [t.item_id]: r }))}
@@ -138,9 +184,9 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
         <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
           <span className="text-muted-foreground">{pageText(offset, tiles.length, data.total)}</span>
           <span className="flex gap-2">
-            <button type="button" className={BTN} disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Previous</button>
+            <button type="button" className={BTN} disabled={offset === 0} onClick={leaving(() => setOffset(Math.max(0, offset - PAGE)))}>Previous</button>
             <button type="button" className={BTN} disabled={offset + tiles.length >= data.total}
-                    onClick={() => setOffset(offset + PAGE)}>Next</button>
+                    onClick={leaving(() => setOffset(offset + PAGE))}>Next</button>
           </span>
         </div>
       )}
@@ -148,9 +194,10 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
   );
 }
 
-function Tile({ tile, marks, edits, readOnly, reasons, reason, onSeen, onFlip, onReason, onEdit }: {
+function Tile({ tile, marks, edits, readOnly, reasons, reason, manual, save, onSave, onSeen, onFlip, onReason, onEdit }: {
   tile: RecoveredTile; marks: CropMarks; edits: BoxEdits; readOnly: boolean; reasons: { code: string; label: string }[];
-  reason: string; onSeen: () => void; onFlip: (n: number) => void; onReason: (r: string) => void; onEdit: () => void;
+  reason: string; manual: boolean; save: TileSave | null; onSave: () => void;
+  onSeen: () => void; onFlip: (n: number) => void; onReason: (r: string) => void; onEdit: () => void;
 }) {
   const ref = useRef<HTMLLIElement>(null);
   const src = tileImage(tile, "full");
@@ -176,7 +223,8 @@ function Tile({ tile, marks, edits, readOnly, reasons, reason, onSeen, onFlip, o
   const changed = tile.crops.some((c) => choice(c.n) !== startChoice(tile, c)) || moved || reason !== (tile.reason ?? "slip");
   return (
     <li ref={ref} className={`min-w-0 rounded-lg border bg-white p-2 dark:bg-card ${
-          changed ? "border-amber-400 border-dashed" : "border-[#A87146]/20 dark:border-border"}`}
+          save === "failed" ? "border-red-500" : save === "unsaved" && changed ? "border-amber-400 border-dashed"
+            : save === "saved" ? "border-myco-green/60" : "border-[#A87146]/20 dark:border-border"}`}
         data-testid={`recovered-tile-${tile.item_id}`}>
       <div className="flex min-w-0 gap-2">
         <div className={`group relative w-[58%] shrink-0 self-start overflow-hidden rounded-md bg-black/5 ${
@@ -269,9 +317,35 @@ function Tile({ tile, marks, edits, readOnly, reasons, reason, onSeen, onFlip, o
           Its crops are not used: only a photo excluded as a field slip gives crops.
         </p>
       )}
+      {!readOnly && <TileSaveRow save={save} manual={manual} onSave={onSave} />}
     </li>
   );
 }
+
+/** The tile's own save: whether it is saved, and its Save (Auto-save off; and after a failure). */
+function TileSaveRow({ save, manual, onSave }: { save: TileSave | null; manual: boolean; onSave: () => void }) {
+  const chip = save === "saved" ? <span className="inline-flex items-center gap-1 text-myco-green"><Check className="h-3.5 w-3.5" aria-hidden /> Saved</span>
+    : save === "saving" ? <span className="inline-flex items-center gap-1 text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> Saving…</span>
+    : save === "failed" ? <span className="inline-flex items-center gap-1 text-red-700 dark:text-red-300"><AlertTriangle className="h-3.5 w-3.5" aria-hidden /> Not saved</span>
+    : save === "unsaved" ? <span className="text-amber-800 dark:text-amber-300">{manual ? "Unsaved" : "Saving soon…"}</span>
+    : <span className="text-muted-foreground">Not reviewed yet</span>;
+  const button = (manual && (save === "unsaved" || save === null)) || save === "failed";
+  return (
+    <div className="mt-1.5 flex min-h-8 items-center justify-between gap-2 border-t border-[#A87146]/10 pt-1.5 text-xs dark:border-border"
+         data-testid="recovered-tile-save" aria-live="polite">
+      {chip}
+      {button && (
+        <button type="button" onClick={onSave}
+                className="inline-flex min-h-8 items-center gap-1 rounded-md border border-myco-green/50 px-2.5 text-xs font-semibold text-myco-green hover:bg-myco-green/10">
+          <Save className="h-3.5 w-3.5" aria-hidden /> {save === "failed" ? "Try again" : "Save"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The viewer's localStorage; reading `window.localStorage` itself can throw (blocked site data). */
+const browserStorage = () => (typeof window === "undefined" ? null : window.localStorage);
 
 // --- the crop editor: the original photo large, each box moved or resized by dragging ------------
 

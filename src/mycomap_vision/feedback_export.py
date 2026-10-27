@@ -175,8 +175,8 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
 # by its sha256, in a crop arm declared before any result.
 
 CROP_COLUMNS = ("photo_key", "manifest_photo_id", "record_key", "v1_split", "n", "l", "t", "r",
-                "b", "width", "height", "detector", "box_source", "decision", "decision_id",
-                "decided_at", "reviewer_pseudonym")
+                "b", "width", "height", "detector", "box_source", "det_l", "det_t", "det_r",
+                "det_b", "decision", "decision_id", "decided_at", "reviewer_pseudonym")
 
 
 def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
@@ -188,7 +188,8 @@ def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
     crops of its latest decision by then. Boxes are fractions of the photo (l, t, r, b), to 6
     places, always the square the model reads (recovered_labels.effective_box): the
     reviewer's when they moved or resized it ("box_source" reviewer), else the detector's
-    ("detector": its box's central square). Same rules as `export`: a .backup copy opened read-only, reviewers as HMAC
+    ("detector": its box's central square). det_l..det_b are the detector's own box as it
+    proposed it (raw, before squaring), so what reviewers changed can be studied. Same rules as `export`: a .backup copy opened read-only, reviewers as HMAC
     pseudonyms, a v1-test photo refused; rows sorted by photo_key, then n."""
     from . import recovered_labels as rl
     if not key:
@@ -237,6 +238,8 @@ def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
                 "r": f"{r / w:.6f}", "b": f"{b / h:.6f}", "width": str(w), "height": str(h),
                 "detector": ev.get("version") or "",
                 "box_source": rl.box_source(item, c["n"]),
+                "det_l": f"{c['box'][0] / w:.6f}", "det_t": f"{c['box'][1] / h:.6f}",
+                "det_r": f"{c['box'][2] / w:.6f}", "det_b": f"{c['box'][3] / h:.6f}",
                 "decision": d["decision"] if d is not None else "default",
                 "decision_id": "" if d is None else str(d["id"]),
                 "decided_at": "" if d is None else datetime.fromtimestamp(

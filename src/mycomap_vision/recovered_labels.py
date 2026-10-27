@@ -19,7 +19,7 @@ The crop is COORDINATES on the original photo, never a new image file (no-deriva
 the public read-only viewer must never be shown a derivative). The page draws the box on the
 original and, for reviewers, shows the box's part of the same image by CSS. Embedding applies
 the box in memory (embed.py); the manifest holds the boxes Vision uses (feedback_photo_crops,
-synced like the exclusions).
+synced before each nightly update, never at startup).
 
 Decisions: "include_crops" with the crop numbers kept as a JSON list in the value, or
 "reject_crops" (none kept). The latest decision is the photo's crops; an open item is every
@@ -62,7 +62,13 @@ SORTS = ("riskiest", "largest", "newest")
 TAGGER = "R10"
 
 SEED_COLUMNS = ("photo_key", "record_key", "label", "slip_p", "tranche", "width", "height",
-                "slip_area", "specimen_area", "on_slip_area", "crops", "version")
+                "slip_area", "specimen_area", "on_slip_area", "crops", "version",
+                "crop_detail", "detections")
+# Kept for later study of what reviewers changed and why (Steve, 2026-10-27: the "why" is to be
+# worked out from the detector's boxes against the reviewed ones): per crop its cluster's share
+# of the photo and tight box before the margin ("crop_detail"), and OWLv2's kept boxes with
+# their scores ("detections"), on the photo's pixels. Item evidence keeps them as seeded; no
+# decision ever changes evidence, and every save is a new decision row.
 
 
 def tranche_of(p: float | None) -> str:
@@ -111,7 +117,10 @@ def seed_row(photo: dict, found: dict) -> dict:
             "slip_area": found["slip_area"], "specimen_area": found["specimen_area"],
             "on_slip_area": found["on_slip_area"],
             "crops": json.dumps([c["box"] for c in found["crops"]], separators=(",", ":")),
-            "version": found["version"]}
+            "version": found["version"],
+            "crop_detail": json.dumps([{"area": c.get("area"), "cluster": c.get("cluster")}
+                                       for c in found["crops"]], separators=(",", ":")),
+            "detections": json.dumps(found.get("detections") or {}, separators=(",", ":"))}
 
 
 def valid_box(box, w: int, h: int) -> bool:
@@ -136,6 +145,8 @@ def rows_from_slip_crops(path) -> tuple[list[dict], dict]:
                     raise fb.FeedbackError(f"{r['photo_key']}: crop {b} is not inside its "
                                            f"{w} x {h} photo")
             p = float(r["slip_p"]) if r.get("slip_p") else None
+            detail = json.loads(r.get("crop_detail") or "[]")          # files before 27 Oct: none
+            detail = detail + [{}] * (len(boxes) - len(detail))
             rows.append({
                 "item_type": ITEM_TYPE, "subject": r["photo_key"], "granularity": "photo",
                 "rule": RULE + (f" (slip p={p:.2f})" if p is not None else ""),
@@ -147,7 +158,11 @@ def rows_from_slip_crops(path) -> tuple[list[dict], dict]:
                              "slip_area": float(r["slip_area"] or 0),
                              "specimen_area": float(r["specimen_area"] or 0),
                              "on_slip_area": float(r.get("on_slip_area") or 0),
-                             "crops": [{"n": i + 1, "box": b} for i, b in enumerate(boxes)]}})
+                             "crops": [{"n": i + 1, "box": b,
+                                        **{k: v for k, v in detail[i].items() if v is not None}}
+                                       for i, b in enumerate(boxes)],
+                             **({"detections": json.loads(r["detections"])}
+                                if r.get("detections") else {})}})
     return rows, {"no_specimen": none}
 
 

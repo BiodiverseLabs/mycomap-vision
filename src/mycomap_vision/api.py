@@ -850,8 +850,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # A night that only removed or renamed records leaves n alone.
             night = nightly.layer_version(conn) if layer else 0
         # A change in who has said no rebuilds the reference set without their photos.
-            # Photos Human Feedback leaves out, and the specimen crops it keeps of them
-            # (synced at startup and before each night).
+            # Photos Human Feedback leaves out (synced at startup and before each night), and
+            # the specimen crops it keeps of them (before each night).
             excluded = (feedback.exclusions_fingerprint(conn) + "+"
                         + feedback.crops_fingerprint(conn))
             # Renames read from mycomap.org's name-change log between nights (name_changes.py).
@@ -956,9 +956,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             served_cache.update(at=now, ready=ready, served=ready[0] if ready else None)
         return served_cache["served"], served_cache["ready"]
 
+    # When this process's app was made (epoch seconds), in /api/health: deploy.sh counts an
+    # answer only from the process it started (2026-10-27: a deploy passed while the site
+    # gave 502s).
+    started = int(time.time())
+
     @app.get("/api/health")
     def health(request: Request):
-        full = {"ok": True, "code_version": config.code_version(),
+        full = {"ok": True, "started": started, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
@@ -2411,7 +2416,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     app.state.feedback = feedback_store
     with db_lock:
         feedback.sync_exclusions(feedback_store, conn)
-        feedback.sync_crops(feedback_store, conn)
+        # Specimen crops sync before each nightly update only (run_nightly), never here: a
+        # restart must not wait on them (2026-10-27: 5 min 20 s of 502s at startup). Crops a
+        # reviewer changes reach Vision at the next night, as they always did.
 
     def feedback_rescore(record_key: str, who: dict | None = None) -> dict:
         source, number = (("mo", record_key[3:]) if record_key.startswith("mo:")
@@ -2769,10 +2776,18 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # every person's ask. On by default on the box (a served release); MV_EXCLUDED_PRELOAD=0
     # turns it off, =1 on elsewhere; MV_EXCLUDED_PRELOAD_WINDOW sets
     # its hours (UTC, or "any"); MV_EXCLUDED_PRELOAD_CROP_WAIT=0 lets slips go before crops.
+    # What is served is read ONCE per pass (preload_targets), never per target: the served
+    # backbone comes from a count over every embeddings row (~1 s on the box under db_lock),
+    # and a pass has tens of thousands of targets (2026-10-27: the first pass never ended).
     preload_names: dict[str, str] = {}
+    preload_served: dict = {}
 
     def preload_targets():
         backbone = excluded_backbone()
+        rel = served_release_dir()
+        preload_served.clear()
+        preload_served.update(backbone=backbone, release=rel.name if rel is not None else None,
+                              method=default_method() if backbone else None)
         slips = [r for r in excluded_list.rows() if r.category in xl.PRELOAD_CATEGORIES]
         keys = sorted({r.record_key for r in slips})
         preload_names.clear()
@@ -2786,12 +2801,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return [xl.Target(r) for r in slips], crops, crops_waiting(backbone)
 
     def preload_stamp(t: "xl.Target") -> dict | None:
-        backbone = excluded_backbone()
-        if backbone is None:
+        """The stamp a map made now would carry, from this pass's reads alone."""
+        if not preload_served.get("backbone"):
             return None
-        return excluded_stamp(t.hit, backbone, list(t.box) if t.box else None,
-                              name=preload_names.get(t.hit.record_key)
-                              or manifest_names([t.hit.record_key]).get(t.hit.record_key))
+        return {"map_version": looked.VERSION, "backbone": preload_served["backbone"],
+                "method": preload_served["method"], "release": preload_served["release"],
+                "name": preload_names.get(t.hit.record_key),
+                "box": list(t.box) if t.box else None}
 
     def preload_skip(t: "xl.Target") -> str | None:
         if xl.held_back(feedback_store.gate, t.hit.record_key, unsealed):
@@ -2825,7 +2841,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             stamps=lambda: excluded_maps.stamps(xl.MODEL),
             stamp_of=lambda key: (excluded_maps.get(key, xl.MODEL) or {}).get("stamp"),
             skip=preload_skip,
-            job=lambda t, done: excluded_job(t.hit, xl.MODEL, excluded_backbone(), t.crop,
+            job=lambda t, done: excluded_job(t.hit, xl.MODEL, preload_served["backbone"], t.crop,
                                              list(t.box) if t.box else None, batch=True,
                                              on_done=done),
             nightly_running=nightly_running, note=note)

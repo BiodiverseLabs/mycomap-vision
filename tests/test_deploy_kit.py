@@ -237,7 +237,8 @@ def test_a_model_still_loading_after_five_minutes_is_reported_and_verify_still_r
 
 def test_verify_runs_last_so_a_failed_check_still_fails_the_deploy(tmp_path):
     script = read("deploy.sh").replace("\r\n", "\n")
-    assert script.rstrip().endswith("bash deploy/lightsail/verify.sh")
+    # verify.sh, then only the final check (2026-10-27) after it
+    assert "bash deploy/lightsail/verify.sh" in script.split('echo "==> final check"')[0]
     out = _preload_wait(tmp_path, [LOADING, None, READY], verify='echo "VERIFY RAN"; exit 1')
     assert "VERIFY RAN" in out.stdout
     assert out.returncode != 0
@@ -349,3 +350,109 @@ def test_a_pull_that_changes_deploy_sh_runs_the_new_script(tmp_path):
     assert out.returncode == 0, out.stdout + out.stderr
     assert "running the new one" in out.stdout
     assert out.stdout.count("NEW SCRIPT RAN") == 1
+
+
+# --- the deploy counts only the process it started (2026-10-27: "All checks passed" over 502s) -----
+
+def _restart_to_end(tmp_path, local: list[str | None], nginx: str, states: list[str],
+                    verify: str = 'echo "VERIFY RAN"'):
+    """Run deploy.sh from the restart to its end, in bash, under `set -euo pipefail`: `date` is
+    1000 at the restart, each local /api/health call answers from `local` in turn (None: no
+    server), the call through nginx (curl --resolve) answers `nginx` ("<body>\\n<code>"), and
+    `systemctl show` answers from `states` in turn. verify.sh is replaced by `verify`."""
+    import subprocess
+
+    import pytest
+    bash = _git_bash()
+    if not bash:
+        pytest.skip("needs bash")
+    script = read("deploy.sh").replace("\r\n", "\n")
+    tail = script[script.index('echo "==> restarting the server"'):]
+    tail = tail.replace("bash deploy/lightsail/verify.sh", verify)
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    d = str(tmp_path).replace("\\", "/")
+    for i, a in enumerate(local):
+        (tmp_path / f"local{i}").write_text("" if a is None else a, encoding="utf-8")
+        if a is None:
+            (tmp_path / f"local{i}.down").write_text("", encoding="utf-8")
+    for i, s in enumerate(states):
+        (tmp_path / f"state{i}").write_text(s, encoding="utf-8")
+    (tmp_path / "nginx").write_text(nginx, encoding="utf-8")
+    fake = f"""set -euo pipefail
+PORT=8010
+HOST=vision.mycomap.org
+date() {{ echo 1000; }}
+sudo() {{ "$@"; }}
+journalctl() {{ echo "(journal)"; }}
+systemctl() {{
+  [ "$1" = show ] || return 0
+  n=$(cat "{d}/scalls" 2>/dev/null || echo 0); echo $((n + 1)) > "{d}/scalls"
+  [ -f "{d}/state$n" ] || n={len(states) - 1}
+  cat "{d}/state$n"
+}}
+curl() {{
+  case " $* " in *" --resolve "*) cat "{d}/nginx"; return 0 ;; esac
+  n=$(cat "{d}/calls" 2>/dev/null || echo 0); echo $((n + 1)) > "{d}/calls"
+  [ -f "{d}/local$n" ] || n={len(local) - 1}
+  if [ -f "{d}/local$n.down" ]; then echo "curl: (7) Failed to connect" >&2; return 7; fi
+  cat "{d}/local$n"
+}}
+sleep() {{ SECONDS=$((SECONDS + 100)); }}
+"""
+    return subprocess.run([bash, "-c", fake + tail], capture_output=True, text=True, timeout=120)
+
+
+NEW = '{"ok":true,"started":1003,"preload":{"state":"ready"},"nightly":{"state":"ok"}}'
+OLD = '{"ok":true,"started":900,"preload":{"state":"ready"},"nightly":{"state":"ok"}}'
+UP = "NRestarts=0\nExecMainStartTimestamp=Tue 2026-10-27 09:19:59 UTC\n"
+
+
+def test_a_deploy_passes_only_on_the_process_it_started_answering_through_nginx(tmp_path):
+    out = _restart_to_end(tmp_path, [None, OLD, NEW], NEW + "\n200", [UP])
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "up after 3 s" in out.stdout                     # not at the old process's answer
+    assert "VERIFY RAN" in out.stdout
+    assert out.stdout.rstrip().endswith("no restarts")     # the final check is the last word
+
+
+def test_an_answer_from_any_other_process_on_the_port_never_passes(tmp_path):
+    out = _restart_to_end(tmp_path / "old", [OLD], OLD + "\n200", [UP])
+    assert out.returncode != 0 and "did not answer in 60 s" in out.stdout
+    assert "VERIFY RAN" not in out.stdout
+    nodate = '{"ok":true,"preload":{"state":"ready"}}'      # a server too old to say when it started
+    out = _restart_to_end(tmp_path / "nodate", [nodate], nodate + "\n200", [UP])
+    assert out.returncode != 0 and "did not answer in 60 s" in out.stdout
+    out = _restart_to_end(tmp_path / "down", [None], "\n000", [UP])     # nothing listening (the incident)
+    assert out.returncode != 0 and "did not answer in 60 s" in out.stdout
+
+
+def test_a_restart_during_the_deploy_fails_it_after_verify(tmp_path):
+    again = "NRestarts=1\nExecMainStartTimestamp=Tue 2026-10-27 09:25:21 UTC\n"
+    out = _restart_to_end(tmp_path, [NEW], NEW + "\n200", [UP, again])
+    assert out.returncode != 0 and "restarted during the deploy" in out.stdout
+    assert "VERIFY RAN" in out.stdout
+
+
+def test_the_site_through_nginx_must_answer_from_this_process(tmp_path):
+    for name, nginx in (("502", "<html>502 Bad Gateway</html>\n502"),
+                        ("cached", OLD + "\n200"),                    # an old answer kept by a cache
+                        ("not-ok", '{"ok":false,"started":1003}\n200')):
+        out = _restart_to_end(tmp_path / name, [NEW], nginx, [UP])
+        assert out.returncode != 0, name
+        assert "through nginx" in out.stdout, name
+
+
+def test_a_failed_verify_still_fails_the_deploy_before_the_final_check(tmp_path):
+    out = _restart_to_end(tmp_path, [NEW], NEW + "\n200", [UP], verify='echo "VERIFY RAN"; exit 1')
+    assert out.returncode != 0 and "VERIFY RAN" in out.stdout
+    assert "final check" not in out.stdout
+
+
+def test_health_says_when_this_process_started(conn, tmp_path):
+    import time
+
+    from test_feedback_api import make_site
+    before = int(time.time())
+    c, _, _ = make_site(conn, tmp_path)
+    started = c.get("/api/health").json()["started"]
+    assert before <= started <= int(time.time())
