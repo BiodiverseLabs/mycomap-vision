@@ -777,3 +777,66 @@ def test_a_reviewers_saves_never_change_the_detectors_box_and_each_is_a_new_deci
                        ("include_crops", [450, 300, 950, 800], "admin-1")]   # each row is whole
     assert all(d["at"] for d in s.get(one)["decisions"])
     assert rl.effective_box(item_of(s, "inat:1")["evidence"]["crops"][1]["box"]) == [500, 400, 900, 800]
+
+
+# --- the crop sync never scans the vectors, and never holds up a restart (2026-10-27 incident) ----
+
+def embeddings_with(conn, backbones, crop_ids, others):
+    conn.executescript(embed.SCHEMA)
+    conn.executemany("insert into embeddings values (?, ?, 0, 0, 'now')",
+                     [(b, pid) for b in backbones for pid in list(crop_ids) + list(others)])
+    conn.commit()
+
+
+def test_the_sync_deletes_moved_crop_vectors_by_their_whole_key_never_by_a_table_scan(store, conn):
+    s, _ = store
+    fb.sync_crops(s, conn)
+    ids = [embed.crop_vector_id(pid, n) for pid, n in conn.execute("select photo_id, n from feedback_photo_crops")]
+    embeddings_with(conn, ["m1", "m2", "m3"], ids, range(1000, 1050))
+    conn.execute("update feedback_photo_crops set l = l + 0.01 where photo_id = 1")      # 2 crops "moved"
+    conn.commit()
+    deletes = []
+    conn.set_trace_callback(lambda sql: deletes.append(sql) if sql.lstrip().lower().startswith(
+        "delete from embeddings") else None)
+    out = fb.sync_crops(s, conn)
+    conn.set_trace_callback(None)
+    assert out["moved"] == 2 and deletes
+    for sql in set(deletes):
+        plan = " ".join(r[3] for r in conn.execute("explain query plan " + sql))
+        assert "SCAN embeddings" not in plan and "USING INDEX" in plan, (sql, plan)
+    left = {(b, p) for b, p in conn.execute("select backbone, photo_id from embeddings")}
+    gone = {(b, embed.crop_vector_id(1, n)) for b in ("m1", "m2", "m3") for n in (1, 2)}
+    assert not (left & gone)                                                       # every backbone
+    assert len(left) == 3 * (len(ids) + 50) - len(gone)                            # nothing else
+
+
+def test_a_thousand_moved_crops_sync_in_seconds_on_a_large_vector_table(conn, monkeypatch):
+    import time
+    n, rows = 1100, 400_000
+    crops = {f"inat:{i}": {"width": 100, "height": 100, "boxes": [(1, [0.1, 0.1, 0.5, 0.5])],
+                           "version": "v"} for i in range(1, n + 1)}
+    monkeypatch.setattr(rl, "accepted_crops", lambda store: crops)
+    fb.ensure_crops_schema(conn)
+    conn.executemany("insert into feedback_photo_crops values (?, 1, ?, 0.2, 0.2, 0.6, 0.6, 'v')",
+                     [(i, f"inat:{i}") for i in range(1, n + 1)])                  # the old boxes
+    ids = [embed.crop_vector_id(i, 1) for i in range(1, n + 1)]
+    others = range(10_000, 10_000 + rows // 4 - n)
+    embeddings_with(conn, ["m1", "m2", "m3", "m4"], ids, others)
+    started = time.monotonic()
+    out = fb.sync_crops(None, conn)
+    took = time.monotonic() - started
+    assert out["moved"] == n
+    assert conn.execute("select count(*) from embeddings where photo_id < 0").fetchone()[0] == 0
+    assert conn.execute("select count(*) from embeddings").fetchone()[0] == 4 * len(others)
+    assert took < 10, f"{took:.1f} s"            # one scan per moved crop took minutes here
+
+
+def test_starting_the_server_never_syncs_the_crops(conn, tmp_path, monkeypatch):
+    from test_feedback_api import make_site
+
+    def refuse(*a, **k):
+        raise AssertionError("sync_crops ran at startup")
+    monkeypatch.setattr(fb, "sync_crops", refuse)
+    c, _, _ = make_site(conn, tmp_path)
+    r = c.get("/api/health")
+    assert r.status_code == 200 and r.json()["ok"] is True

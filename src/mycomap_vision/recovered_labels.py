@@ -19,7 +19,7 @@ The crop is COORDINATES on the original photo, never a new image file (no-deriva
 the public read-only viewer must never be shown a derivative). The page draws the box on the
 original and, for reviewers, shows the box's part of the same image by CSS. Embedding applies
 the box in memory (embed.py); the manifest holds the boxes Vision uses (feedback_photo_crops,
-synced like the exclusions).
+synced before each nightly update, never at startup).
 
 Decisions: "include_crops" with the crop numbers kept as a JSON list in the value, or
 "reject_crops" (none kept). The latest decision is the photo's crops; an open item is every

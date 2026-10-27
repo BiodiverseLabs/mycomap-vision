@@ -850,8 +850,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # A night that only removed or renamed records leaves n alone.
             night = nightly.layer_version(conn) if layer else 0
         # A change in who has said no rebuilds the reference set without their photos.
-            # Photos Human Feedback leaves out, and the specimen crops it keeps of them
-            # (synced at startup and before each night).
+            # Photos Human Feedback leaves out (synced at startup and before each night), and
+            # the specimen crops it keeps of them (before each night).
             excluded = (feedback.exclusions_fingerprint(conn) + "+"
                         + feedback.crops_fingerprint(conn))
             # Renames read from mycomap.org's name-change log between nights (name_changes.py).
@@ -2411,7 +2411,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     app.state.feedback = feedback_store
     with db_lock:
         feedback.sync_exclusions(feedback_store, conn)
-        feedback.sync_crops(feedback_store, conn)
+        # Specimen crops sync before each nightly update only (run_nightly), never here: a
+        # restart must not wait on them (2026-10-27: 5 min 20 s of 502s at startup). Crops a
+        # reviewer changes reach Vision at the next night, as they always did.
 
     def feedback_rescore(record_key: str, who: dict | None = None) -> dict:
         source, number = (("mo", record_key[3:]) if record_key.startswith("mo:")
