@@ -203,12 +203,15 @@ def inat_outcome(line: dict, find: Find, score: str, key: AnswerKey | None = Non
     """iNat CV's outcome on a find from an E14 finds.jsonl line (`score`: "vision", photos
     only, or "combined", with the public point and date), judged by the answer key from
     iNat's own ranked names and taxon ids. The lane's taxon-id hits are a diagnostic only
-    (inat_hits_disagree). Species cells are None unless the truth is a formal species."""
+    (inat_hits_disagree). Species cells are None unless the truth is a formal species, or a
+    provisional one that resolves one-to-one to an iNat species at the snapshot (rule 4)."""
     ranked = line[score]
     names = {rank: [r[1] for r in ranked.get(rank) or []] for rank in ("species", "genus")}
     taxa = {rank: [r[0] for r in ranked.get(rank) or []] for rank in ("species", "genus")}
-    formal = bool(line["truth"].get("formal_species"))
-    out = from_ranked(names["species"], names["genus"], find, species_scorable=formal,
+    tx = key.taxonomy if key is not None else None
+    scorable = bool(line["truth"].get("formal_species")) or bool(
+        tx is not None and find.species and tx.resolves(find.species))
+    out = from_ranked(names["species"], names["genus"], find, species_scorable=scorable,
                       key=key, species_taxa=taxa["species"], genus_taxa=taxa["genus"])
     answered = line.get("answered") or {}
     # combined_raw is the same answer as combined, on iNat's raw place-aware scale.

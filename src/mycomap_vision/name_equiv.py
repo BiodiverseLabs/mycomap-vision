@@ -320,10 +320,20 @@ class Taxonomy:
 
     def _resolve_name(self, name: str) -> int | None:
         """The current iNat species of a formal name (rank words dropped; a variety or
-        subspecies to its species), or None (a code, unknown, or a homonym)."""
+        subspecies to its species), or None (unknown, or a homonym). A coded (provisional)
+        name resolves only when its exact name, case aside, is one current iNat species of
+        the snapshot (rule 4, 27 Oct): iNat holds provisional taxa written as MycoMap writes
+        them, but keeps padding twins ('IN5' / 'IN05') as separate taxa, so the name key's
+        folding is never used against iNat."""
         n = (name or "").strip()
-        if not n or names.parse_name(n).code:
+        if not n:
             return None
+        if names.parse_name(n).code:
+            ids = self.by_name.get(n.lower(), [])
+            current = {c for c in (self.current(i, base_only=True) for i in ids) if c is not None}
+            species = {s for s in (self._level(c, SPECIES_LEVEL, base_only=True)
+                                   for c in current) if s}
+            return species.pop() if len(species) == 1 else None
         words = _RANK_WORD.sub(" ", n).split()
         if any(w.lower() in _NOT_INFRA for w in words[2:]):
             return None            # a group or complex is no species: it stays a name
@@ -407,7 +417,10 @@ def canonical(x, taxonomy: Taxonomy | None = None, rule: str = ANSWER_KEY) -> st
     ('inat:<id>'); otherwise answer_key of the name (a taxon id without a taxonomy, or one
     that does not resolve, gets 'taxon:<id>', which matches nothing else)."""
     is_id = isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit())
-    if taxonomy is not None and rule != "exact":
+    # A coded name keeps its name key, so writings of one MycoMap name stay one name even
+    # where iNat holds them as two taxa; species_credit matches it to an iNat taxon id.
+    coded = not is_id and isinstance(x, str) and bool(names.parse_name(x).code)
+    if taxonomy is not None and rule != "exact" and not coded:
         sid = taxonomy.species_id(x)
         if sid is not None:
             return f"inat:{sid}"
@@ -426,6 +439,12 @@ def species_credit(answer, truth, rule: str = ANSWER_KEY,
     a = canonical(answer, taxonomy, rule)
     if a == canonical(truth, taxonomy, rule):
         return True
+    if taxonomy is not None and rule != "exact":
+        # both sides one current iNat species (an iNat taxon id answer and a provisional
+        # truth that resolves by its exact name, rule 4)
+        sa = taxonomy.species_id(answer)
+        if sa is not None and sa == taxonomy.species_id(truth):
+            return True
     return rule != "exact" and isinstance(truth, str) and any(
         a == canonical(p, taxonomy, rule) for p in hybrid_parents(truth))
 

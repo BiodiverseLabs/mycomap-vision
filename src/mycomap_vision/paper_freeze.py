@@ -149,7 +149,10 @@ def compute(config: dict, base, conn, resolve, models_root: Path | None = None,
         spec["gate"] = {"fingerprint": gate.fingerprint() if gate is not None else None,
                         "files": {p.name: sha256_file(p) for p in sorted(Path(gdir).iterdir())
                                   if p.is_file()} if Path(gdir).is_dir() else {}}
-    cal = {c["id"]: c["calibration"] for c in vision if c.get("calibration")}
+    # (a calibration still a "TBD..." placeholder is left out: filled after the tag, it is
+    # a part the freeze block gains, never one it changes)
+    cal = {c["id"]: c["calibration"] for c in vision
+           if c.get("calibration") and not str(c["calibration"]).startswith("TBD")}
     if cal:
         spec["calibration"] = cal
     cw = {c["id"]: {"cache": sha256_file(resolve(c["crosswalk"]["cache"])),

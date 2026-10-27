@@ -306,7 +306,9 @@ def test_one(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
         sub = select(finds, spec, outcomes)
         r = paired(sub, outcomes[spec["a"]], outcomes[spec["b"]], spec["cell"],
                    spec.get("alternative", "greater"), reps, seed)
-        return {**r, "p_test": r["p"]}
+        return {**r, "p_test": r["p"],
+                "n_by_name_kind": paired_name_kinds(sub, outcomes[spec["a"]],
+                                                    outcomes[spec["b"]], spec["cell"])}
     if kind == "gee_depth":
         sub = [f for f in select(finds, spec, outcomes) if f.species]
         o = outcomes[spec["comparator"]]
@@ -338,6 +340,17 @@ def test_one(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
         return {"superiority": sup, "noninferiority": {**ni, "band": spec["band"]},
                 "p_test": ps.intersection_union(sup["p"], ni["p"])}
     raise ValueError(f"unknown hypothesis kind {kind!r}")
+
+
+def paired_name_kinds(finds, a, b, cell) -> dict:
+    """The paired finds' n by the truth's name kind (formal / provisional / one-word): the
+    finds _pairs keeps (rule 4: a provisional truth that resolves enters the iNat-paired
+    tests, so their n is reported split)."""
+    out: dict = defaultdict(int)
+    for f in finds:
+        if len(_pairs([f], a, b, cell)[0]):
+            out[f.name_kind] += 1
+    return dict(sorted(out.items()))
 
 
 def _pairs(finds, a, b, cell):
@@ -404,6 +417,69 @@ def families(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
             r.update(p_holm=adj[hid]["p_holm"], reject=adj[hid]["reject"]
                      and "not_tested" not in r)
         out[fam] = results
+    return out
+
+
+# --- secondary rows (E14, Steve 27 Oct): descriptive, outside Holm -----------------------------
+
+WHERE_KEYS = ("name_kind", "created_after", "rg_at_inat_export", "inat_observation", "any_of")
+UNKNOWN = ("", None, "unknown")
+
+
+def where_holds(f: Find, where: dict) -> bool | None:
+    """Does find `f` meet a row's `where` (every condition; `any_of`: at least one of its
+    conditions)? None when an attribute it needs is unknown and nothing else decides it.
+    `created_after` is a resolved ISO date: the find's observation was created on a later
+    day (created_at's date part)."""
+    verdicts = []
+    for k, v in where.items():
+        if k == "any_of":
+            parts = [where_holds(f, w) for w in v]
+            verdicts.append(True if True in parts else None if None in parts else False)
+        elif k == "name_kind":
+            verdicts.append(f.name_kind == v)
+        elif k == "created_after":
+            c = f.attrs.get("created_at")
+            verdicts.append(None if c in UNKNOWN else str(c)[:10] > str(v)[:10])
+        elif k in ("rg_at_inat_export", "inat_observation"):
+            a = f.attrs.get(k)
+            verdicts.append(None if a in UNKNOWN else a == v)
+        else:
+            raise ValueError(f"secondary row: unknown condition {k!r}")
+    if False in verdicts:
+        return False
+    return None if None in verdicts else True
+
+
+def secondary_rows(block: dict, hypotheses: dict, finds: list[Find], outcomes: dict[str, dict],
+                   reps: int, seed: int, finds_of: dict | None = None) -> dict:
+    """Each row's finds (`where`, resolved), and each hypothesis of block["for"] tested on
+    them: n, estimate, interval and p, unadjusted, with no reject decision. A find whose
+    attribute is unknown leaves the row and is counted; a row whose where still names a TBD
+    config value is reported "not run: TBD"."""
+    by_id = {h["id"]: h for hs in hypotheses.values() for h in hs}
+    scored = in_scope(finds, "primary", "all")
+    out = {}
+    for row in block.get("rows") or []:
+        if row.get("not_run"):
+            out[row["id"]] = {"not_run": row["not_run"]}
+            continue
+        held = {f.key: where_holds(f, row.get("where") or {}) for f in finds}
+        kept = [f for f in scored if held[f.key]]
+        res = {"where": row.get("where") or {}, "finds": len(kept),
+               "share_of_scored": len(kept) / len(scored) if scored else None,
+               "unknown": sum(1 for f in scored if held[f.key] is None), "hypotheses": {}}
+        for hid in block.get("for") or []:
+            h = by_id[hid]
+            needed = [h[k] for k in ("a", "b", "comparator") if k in h] + h.get("has", [])
+            missing = [c for c in needed if not outcomes.get(c)]
+            if missing:
+                res["hypotheses"][hid] = {"not_tested": f"no outcomes for {missing}"}
+                continue
+            fs = [f for f in finds_for(h, finds, finds_of) if held.get(f.key)]
+            res["hypotheses"][hid] = {**test_one(h, fs, outcomes, reps, seed),
+                                      "outside_holm": True, "p_holm": None, "reject": None}
+        out[row["id"]] = res
     return out
 
 

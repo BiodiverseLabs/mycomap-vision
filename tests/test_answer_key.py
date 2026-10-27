@@ -479,3 +479,55 @@ def test_a_species_held_only_as_its_variety_is_not_a_novel_find():
         return set(out["standard"]["species"]) - {"all"}, set(out["species"]) - {"all"}
     assert bands(None) == ({"1-4"}, {"1 ref"})
     assert bands("exact") == ({"0"}, {"novel (0 refs)"})
+
+
+
+# --- provisional labels that iNat holds as taxa (rule 4, 27 Oct) -------------------------------
+
+PROV_TAXA = {
+    1: t("Fungi", 70), 50: t("Russula", 20, anc=[1]), 60: t("Mycena", 20, anc=[1]),
+    700: t("Russula sp. 'NC09'", 10, anc=[1, 50]),
+    710: t("Mycena sp. 'IN05'", 10, anc=[1, 60]),       # iNat keeps padding twins apart
+    711: t("Mycena sp. 'IN5'", 10, anc=[1, 60]),
+    720: t("Mycena sp. 'IN06'", 10, anc=[1, 60]),
+}
+PROV_LABELS = ["Russula sp. 'NC09'", "Mycena sp. 'IN5'", "Mycena sp. 'IN05'",
+               "Mycena sp. 'IN6'", "Russula sp. 'NC10'"]
+
+
+@pytest.fixture
+def prov():
+    return ne.Taxonomy(PROV_TAXA, PROV_LABELS)
+
+
+def test_a_provisional_label_resolves_when_its_exact_name_is_one_inat_species(prov):
+    assert prov.species_id("Russula sp. 'NC09'") == 700
+    assert prov.species_id("russula SP. 'nc09'") == 700                  # case aside
+    assert prov.resolves("Russula sp. 'NC09'")
+    # an iNat taxon id answer names the provisional truth; a formal-name rule is unchanged
+    assert ne.species_credit(700, "Russula sp. 'NC09'", taxonomy=prov)
+    assert not ne.species_credit(711, "Russula sp. 'NC09'", taxonomy=prov)
+
+
+def test_a_padding_twin_is_never_folded_against_inat(prov):
+    """MycoMap's key folds 'IN6' and 'IN06'; iNat keeps 'IN5' and 'IN05' as two taxa, so a
+    provisional label resolves by its own exact writing only."""
+    assert prov.species_id("Mycena sp. 'IN5'") == 711
+    assert prov.species_id("Mycena sp. 'IN05'") == 710
+    assert prov.species_id("Mycena sp. 'IN6'") is None                  # iNat writes 'IN06'
+    assert not prov.resolves("Mycena sp. 'IN6'")
+
+
+def test_a_provisional_label_with_no_inat_taxon_does_not_resolve(prov):
+    assert prov.species_id("Russula sp. 'NC10'") is None
+    assert not prov.resolves("Russula sp. 'NC10'")
+    assert not ne.species_credit(700, "Russula sp. 'NC10'", taxonomy=prov)
+
+
+def test_writings_of_one_mycomap_name_stay_one_name_where_inat_has_two_taxa(prov):
+    """A name answer is still judged by the name key against a name truth: 'IN5' names
+    'IN05' as before, though iNat holds them as two taxa; their taxon ids do not."""
+    assert ne.species_credit("Mycena sp. 'IN5'", "Mycena sp. 'IN05'", taxonomy=prov)
+    assert ne.collapse(["Mycena sp. 'IN5'", "Mycena sp. 'IN05'"], taxonomy=prov) == \
+        ["Mycena sp. 'IN5'"]
+    assert not ne.species_credit(711, "Mycena sp. 'IN05'", taxonomy=prov)

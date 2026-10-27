@@ -12,6 +12,11 @@ that predicts, embeds or scores, and it refuses to run unless:
 - this code is the commit the config names (`code_commit`), unless `--allow-code <sha>`
   names the commit running, which marks every output "post hoc" in capitals.
 
+The one exception to "byte-identical" is the tagged config's `post_freeze` list: the fields
+it names (each a "TBD..." placeholder at the tag, with the rule that fills it) may be filled
+after the tag, and the freeze block may gain parts (never change one). Every other difference
+is refused, and each filled field is recorded with its sha256 (PLAN §8).
+
 `--test val` scores the base release's val split against its train split, and a draft
 test release (`dry-...-test`) runs freely: both are how this command is tested before the
 freeze. Nothing is ever written to the manifest: outputs go to `--out`.
@@ -39,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -109,7 +115,14 @@ def check_config(doc: dict) -> None:
     ids = [c["id"] for c in doc.get("comparators", [])]
     if len(ids) != len(set(ids)):
         raise ValueError("comparator ids must be unique")
+    check_post_freeze(doc)
+    # A post_freeze field still a "TBD..." placeholder is checked once it is filled (the
+    # sealed run's config), not before; the rest of its comparator is checked now.
+    pending = {e["path"] for e in doc.get("post_freeze") or []
+               if is_placeholder(config_path_get(doc, e["path"]))}
     for c in doc.get("comparators", []):
+        def later(key, c=c):
+            return f"comparators/{c.get('id')}/{key}" in pending
         if c.get("kind") not in KINDS:
             raise ValueError(f"comparator {c.get('id')}: kind is one of {KINDS}")
         if c["kind"] == "vision" and not (c.get("backbone") and c.get("method")):
@@ -117,7 +130,7 @@ def check_config(doc: dict) -> None:
         if c.get("answer_key") not in (None, doc["answer_key"], "exact"):
             raise ValueError(f"comparator {c['id']}: a comparator's own answer_key is only "
                              "\"exact\" (v1's published rule, a sensitivity row)")
-        if c["kind"] == "vision":
+        if c["kind"] == "vision" and not later("method"):
             # Any method the scoring code knows (an adopted E32 arm, e.g.
             # nearest+mean-records-balanced, once it is in methods.METHODS); a typo is
             # refused here, never first met when the sealed test is opened.
@@ -129,18 +142,19 @@ def check_config(doc: dict) -> None:
                 raise ValueError(f"comparator {c['id']}: {c['method']} scores by reference "
                                  "record, so the config pins its cross-post twin groups "
                                  "(a top-level \"twins\" block)")
-        if c.get("reference") not in REFERENCES:
+        if not later("reference") and c.get("reference") not in REFERENCES:
             raise ValueError(f"comparator {c['id']}: reference is one of "
                              f"{[r for r in REFERENCES if r]} (or none: every included photo), "
                              f"not {c.get('reference')!r}")
         if c.get("reference") and c["kind"] != "vision":
             raise ValueError(f"comparator {c['id']}: a reference is for a Vision comparator")
-        if c["kind"] == "vision" and "place" in c["method"] and not c.get("place"):
+        if (c["kind"] == "vision" and not later("method") and "place" in c["method"]
+                and not c.get("place")):
             # Without "place": true the scored records keep the release's true point.
             raise ValueError(f"comparator {c['id']}: {c['method']} reads each find's place, "
                              "so it takes \"place\": true (the public point, never the "
                              "release's true one)")
-        if c.get("place_setting"):
+        if c.get("place_setting") and not later("place_setting") and not later("method"):
             if "place" not in str(c.get("method", "")):
                 raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "
                                  f"not {c.get('method')!r}")
@@ -191,6 +205,69 @@ def check_config(doc: dict) -> None:
             for k in ("a", "b", "comparator"):
                 if k in h and h[k] not in ids:
                     raise ValueError(f"{fam}/{h.get('id')}: unknown comparator {h[k]!r}")
+    check_secondary_rows(doc)
+
+
+def check_secondary_rows(doc: dict) -> None:
+    """The secondary_rows block (E14, Steve 27 Oct): rows of known conditions, hypotheses
+    that exist, created_after an ISO date or {"config": path} naming a field that exists."""
+    block = doc.get("secondary_rows")
+    if block is None:
+        return
+    from . import paper_tables as ptab
+    hyp_ids = {h["id"] for hs in (doc.get("hypotheses") or {}).values() for h in hs}
+    for hid in block.get("for") or []:
+        if hid not in hyp_ids:
+            raise ValueError(f"secondary_rows: unknown hypothesis {hid!r}")
+    ids = [r.get("id") for r in block.get("rows") or []]
+    if not ids or None in ids or len(ids) != len(set(ids)):
+        raise ValueError("secondary_rows: every row has a unique id")
+
+    def check(where, rid):
+        for k, v in where.items():
+            if k not in ptab.WHERE_KEYS:
+                raise ValueError(f"secondary_rows {rid}: unknown condition {k!r} (one of "
+                                 f"{ptab.WHERE_KEYS})")
+            if k == "any_of":
+                if not isinstance(v, list) or not v:
+                    raise ValueError(f"secondary_rows {rid}: any_of is a list of conditions")
+                for w in v:
+                    check(w, rid)
+            elif k == "created_after":
+                if isinstance(v, dict):
+                    try:
+                        config_path_get(doc, v["config"])
+                    except KeyError:
+                        raise ValueError(f"secondary_rows {rid}: created_after names "
+                                         f"{v.get('config')!r}, no such field") from None
+                elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v)):
+                    raise ValueError(f"secondary_rows {rid}: created_after is a date "
+                                     "(YYYY-MM-DD) or {\"config\": path}")
+    for r in block.get("rows") or []:
+        check(r.get("where") or {}, r["id"])
+
+
+def resolved_secondary_rows(config: dict) -> dict:
+    """The block with each {"config": path} date read from the config; a row whose date is
+    still a TBD placeholder is marked not run."""
+    block = json.loads(json.dumps(config.get("secondary_rows") or {}))
+
+    def fill(where):
+        for k, v in list(where.items()):
+            if k == "any_of":
+                for w in v:
+                    fill(w)
+            elif k == "created_after" and isinstance(v, dict):
+                val = config_path_get(config, v["config"])
+                if is_placeholder(val):
+                    raise LookupError(v["config"])
+                where[k] = str(val)
+    for r in block.get("rows") or []:
+        try:
+            fill(r.get("where") or {})
+        except LookupError as e:
+            r["not_run"] = f"not run: TBD ({e.args[0]} is still a placeholder)"
+    return block
 
 
 def resolve(path: str | Path) -> Path:
@@ -275,6 +352,162 @@ def apply_errata(base, block: dict | None) -> dict | None:
     return block
 
 
+# --- fields filled after the tag (post_freeze) ---------------------------------------------------
+
+# PLAN §8: test-time outputs made at scoring by the pinned code (E14, E31a, the external
+# models' v1-test files, the attrs file), and models and lists declared before the tag but
+# finished after it by a pre-declared rule (E34 / E35).
+POST_FREEZE_KINDS = ("test_output", "declared_after_freeze")
+POST_FREEZE_PROTECTED = ("code_commit", "post_freeze", "freeze")
+
+
+def is_placeholder(value) -> bool:
+    return isinstance(value, str) and value.startswith("TBD")
+
+
+def config_path_get(doc, path: str):
+    """The value at `path` in the config: segments split by "/"; inside a list of objects a
+    segment picks the one entry whose "id" it is. KeyError when nothing is there, or when the
+    path does not end at an object's key."""
+    parts = str(path).split("/")
+    if not path or any(not seg for seg in parts):
+        raise KeyError(path)
+    node = doc
+    for i, seg in enumerate(parts):
+        if isinstance(node, dict) and seg in node:
+            node = node[seg]
+        elif isinstance(node, list) and i < len(parts) - 1:
+            hits = [x for x in node if isinstance(x, dict) and x.get("id") == seg]
+            if len(hits) != 1:
+                raise KeyError(path)
+            node = hits[0]
+        else:
+            raise KeyError(path)
+    return node
+
+
+def check_post_freeze(doc: dict) -> None:
+    """The config's post_freeze list is well formed: each entry names a path that exists, the
+    rule that fills it and its kind; no path is protected, repeated, or inside another."""
+    entries = doc.get("post_freeze")
+    if entries is None:
+        return
+    if not isinstance(entries, list):
+        raise ValueError("post_freeze: a list of {path, rule, kind}")
+    paths = []
+    for e in entries:
+        path = e.get("path") if isinstance(e, dict) else None
+        if not isinstance(path, str) or not path:
+            raise ValueError(f"post_freeze: every entry names a path ({e!r})")
+        if not str(e.get("rule") or "").strip():
+            raise ValueError(f"post_freeze {path}: names the rule that fills it")
+        if e.get("kind") not in POST_FREEZE_KINDS:
+            raise ValueError(f"post_freeze {path}: kind is one of {POST_FREEZE_KINDS}")
+        if path.split("/")[0] in POST_FREEZE_PROTECTED:
+            raise ValueError(f"post_freeze {path}: {path.split('/')[0]} is never filled after "
+                             "the tag")
+        try:
+            config_path_get(doc, path)
+        except KeyError:
+            raise ValueError(f"post_freeze {path}: no such field in the config (the path ends "
+                             "at an object's key; a list entry is picked by its id)") from None
+        paths.append(path)
+    for a in paths:
+        for b in paths:
+            if a == b and paths.count(a) > 1:
+                raise ValueError(f"post_freeze {a}: named twice")
+            if a != b and b.startswith(a + "/"):
+                raise ValueError(f"post_freeze {b}: inside {a}, also named")
+
+
+def post_freeze_differences(tagged: dict, given: dict) -> list[str]:
+    """Where `given` differs from the tagged config other than in the tagged post_freeze
+    fields and by parts added to the freeze block (empty: the same plan). Key sets count: a
+    key added or dropped anywhere else is a difference."""
+    allowed = {e["path"] for e in tagged.get("post_freeze") or []}
+    out: list[str] = []
+
+    def grow(a, b, path):
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in a:
+                if k not in b:
+                    out.append(f"{path}/{k}: frozen at the tag, missing now")
+                else:
+                    grow(a[k], b[k], f"{path}/{k}")
+        elif a != b:
+            out.append(f"{path}: changed since the tag (the freeze block may only gain parts)")
+
+    def walk(a, b, path):
+        if path in allowed:
+            return
+        if path == "freeze":
+            if a is None:
+                out.append("freeze: no freeze block in the tagged config")
+            else:
+                grow(a, b, "freeze")
+            return
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in sorted(set(a) | set(b)):
+                p = f"{path}/{k}" if path else k
+                if k not in b:
+                    out.append(f"{p}: in the tagged config, missing now")
+                elif k not in a:
+                    out.append(f"{p}: not in the tagged config")
+                else:
+                    walk(a[k], b[k], p)
+        elif isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                out.append(f"{path}: {len(a)} entries tagged, {len(b)} now")
+                return
+            for i, (x, y) in enumerate(zip(a, b)):
+                xid = x.get("id") if isinstance(x, dict) else None
+                yid = y.get("id") if isinstance(y, dict) else None
+                if xid != yid:
+                    out.append(f"{path}/{i}: entry {xid!r} tagged, {yid!r} now")
+                    continue
+                walk(x, y, f"{path}/{xid if xid is not None else i}")
+        elif a != b:
+            out.append(f"{path}: changed since the tag")
+
+    walk(tagged, given, "")
+    return out
+
+
+def post_freeze_records(tagged: dict, given: dict) -> list[dict]:
+    """Per tagged post_freeze entry, what the scoring record keeps: its path, kind and rule,
+    whether it is filled, and the sha256 of its value (canonical JSON)."""
+    from .paper_freeze import canonical_sha
+    out = []
+    for e in tagged.get("post_freeze") or []:
+        value = config_path_get(given, e["path"])
+        filled = not is_placeholder(value)
+        out.append({"path": e["path"], "kind": e["kind"], "rule": e["rule"], "filled": filled,
+                    **({"value_sha256": canonical_sha(value)} if filled else {})})
+    return out
+
+
+def post_freeze_files(config: dict, records: list[dict], resolve_path) -> None:
+    """A filled post_freeze ".../file" field: the file's own sha256 goes into its record. When
+    the object beside it pins a sha256 (filled, or fixed at the tag), the file must match."""
+    from .paper_freeze import sha256_file
+    for rec in records:
+        if not (rec["filled"] and rec["path"].endswith("/file")):
+            continue
+        p = Path(resolve_path(config_path_get(config, rec["path"])))
+        if not p.is_file():
+            raise FrozenError(f"post_freeze {rec['path']}: {p.name} not found, so its sha256 "
+                              "cannot be recorded")
+        rec["file_sha256"] = sha256_file(p)
+        try:
+            pinned = config_path_get(config, rec["path"][:-len("file")] + "sha256")
+        except KeyError:
+            continue
+        if not is_placeholder(pinned) and pinned != rec["file_sha256"]:
+            raise FrozenError(f"post_freeze {rec['path']}: the file's sha256 "
+                              f"{rec['file_sha256'][:12]} is not the {str(pinned)[:12]} "
+                              "pinned beside it")
+
+
 # --- the freeze guard -------------------------------------------------------------------------
 
 def _git(repo: Path, *args) -> subprocess.CompletedProcess:
@@ -301,13 +534,29 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
     tagged = _git(research_dir, "show", f"{TAG}:{CONFIG_IN_REPO}")
     if tagged.returncode:
         raise FrozenError(f"tag {TAG} has no {CONFIG_IN_REPO}")
+    tagged_doc = json.loads(tagged.stdout)
+    # The tagged post_freeze fields are placeholders: filling one never changes a value the
+    # tag decided.
+    try:
+        check_post_freeze(tagged_doc)
+    except ValueError as e:
+        raise FrozenError(f"the tagged config's post_freeze list: {e}") from None
+    for e in tagged_doc.get("post_freeze") or []:
+        if not is_placeholder(config_path_get(tagged_doc, e["path"])):
+            raise FrozenError(f"post_freeze {e['path']}: not a \"TBD...\" placeholder in the "
+                              f"config tagged {TAG}")
     if tagged.stdout != config_bytes:
         crlf = tagged.stdout.replace(b"\r", b"") == config_bytes.replace(b"\r", b"")
-        raise FrozenError(f"the config given is not the one tagged {TAG} "
-                          + ("(line endings differ: give the tagged bytes, as "
-                             f"git show {TAG}:{CONFIG_IN_REPO} prints them)" if crlf else
-                             f"(sha256 {sha256_bytes(config_bytes)[:12]} vs "
-                             f"{sha256_bytes(tagged.stdout)[:12]})"))
+        if crlf:
+            raise FrozenError(f"the config given is not the one tagged {TAG} (line endings "
+                              f"differ: give the tagged bytes, as git show "
+                              f"{TAG}:{CONFIG_IN_REPO} prints them)")
+        diff = post_freeze_differences(tagged_doc, config)
+        if diff:
+            raise FrozenError(f"the config given is not the one tagged {TAG} outside its "
+                              f"post_freeze fields (sha256 {sha256_bytes(config_bytes)[:12]} vs "
+                              f"{sha256_bytes(tagged.stdout)[:12]}): " + "; ".join(diff[:8])
+                              + (f" (+{len(diff) - 8} more)" if len(diff) > 8 else ""))
     if code_commit.endswith("-dirty") or code_commit == "unknown":
         raise FrozenError(f"the sealed test is scored only by committed code (this is "
                           f"{code_commit})")
@@ -322,7 +571,10 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
                               f"{code_commit[:12]} runs it as POST HOC")
     return {"sealed": True, "tag": TAG, "post_hoc": post_hoc,
             "config_sha256": sha256_bytes(config_bytes), "code_commit": code_commit,
-            "frozen_code_commit": frozen}
+            "frozen_code_commit": frozen,
+            **({"tagged_config_sha256": sha256_bytes(tagged.stdout),
+                "post_freeze": post_freeze_records(tagged_doc, config)}
+               if "post_freeze" in tagged_doc else {})}
 
 
 # --- finds ----------------------------------------------------------------------------------------
@@ -861,6 +1113,58 @@ def ensure_embedded(conn, spec: str, photo_ids: list[int], px: int | None = None
     return n
 
 
+def embed_fresh(conn, spec: str, photo_ids: list[int], px: int | None = None, loader=None,
+                log=print) -> tuple[np.ndarray, np.ndarray, int]:
+    """The sealed test's photos embedded now by the frozen model `spec` (at `px`), from the
+    copies on this machine, in memory: (photo ids, vectors, how many of them already had a
+    stored vector, which is never read). PLAN §8: the site's nightly layer embeds newly
+    validated records under the served backbone names, so a stored vector of a test photo
+    may come from other weights. Nothing is written to the manifest; a photo with no local
+    copy, or one that cannot be read, is refused."""
+    import sqlite3
+    import tempfile
+    from . import models
+    from .embed import embed_photos, load_embeddings
+    from .storage import open_store
+    loader = loader or models.load_backbone
+    want = list(dict.fromkeys(int(p) for p in photo_ids))
+    bb = loader(spec)
+    if px:
+        bb = Resized(bb, px)
+    stored = 0                     # under the name embed_photos stores this model's rows
+    if conn.execute("select 1 from sqlite_master where name = 'embeddings'").fetchone():
+        have = {r[0] for r in conn.execute("select photo_id from embeddings where backbone = ?",
+                                           (bb.name,))}
+        stored = sum(1 for p in want if p in have)
+    todo: dict[str, list] = defaultdict(list)
+    missing = []
+    for pid in want:
+        row = conn.execute("select store, path from photo_copies where photo_id = ? and "
+                           "size = 'large' and store not like 's3:%' order by store limit 1",
+                           (pid,)).fetchone()
+        if row is None:
+            missing.append(pid)
+        else:
+            todo[row[0]].append((pid, row[1]))
+    if missing:
+        raise FrozenError(f"{len(missing):,} sealed-test photos have no large copy on this "
+                          f"machine (e.g. {missing[:5]}): copy them first; the sealed test is "
+                          "embedded fresh, never from stored vectors")
+    with tempfile.TemporaryDirectory() as d:
+        mem = sqlite3.connect(":memory:")
+        skipped = []
+        for where, items in todo.items():
+            st = embed_photos(mem, open_store(where, cfgmod.DATA_DIR), bb, items,
+                              Path(d) / "vectors", log=log)
+            skipped += st.skipped
+        if skipped:
+            raise FrozenError(f"{len(skipped):,} sealed-test photos could not be embedded "
+                              f"(e.g. {skipped[:3]})")
+        ids, vecs = load_embeddings(mem, bb.name, root=Path(d) / "vectors")
+        mem.close()
+    return ids, vecs, stored
+
+
 def with_public_points(records: list, public: dict[str, tuple]) -> list:
     """The scored records with their public point only (paper rule: obscured where iNat
     obscures, MO's box centre), never the release's true point; none when there is none."""
@@ -1000,6 +1304,13 @@ def extras_files(block: dict | None) -> list[dict]:
         return []
     items = raw if isinstance(raw, list) else list(raw.values())
     return [x for x in items if isinstance(x, dict) and x.get("file") and x.get("sha256")]
+
+
+def truth_resolution(taxonomy, species: str) -> str:
+    """A find's truth_resolves attribute: "yes" when its species label resolves one-to-one
+    to an iNat species at the snapshot (a formal name, or a provisional one by its exact
+    name, rule 4), "no", or "(no species)"."""
+    return "(no species)" if not species else "yes" if taxonomy.resolves(species) else "no"
 
 
 def genus_known(taxonomy, genus: str, species: str | None) -> bool:
@@ -1147,6 +1458,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     code_commit = cfgmod.code_version()
     g = guard(sealed, config_bytes, config, research_dir or cfgmod.RESEARCH_DIR,
               code_commit, allow_code)
+    if g.get("post_freeze"):
+        post_freeze_files(config, g["post_freeze"], resolve)
     apply_errata(base, config.get("errata"))
     attrs_path = attrs_file(config.get("attrs"), attrs_path)
     # The whole predictor by hash (PLAN §8): the sealed test refuses any part that is not
@@ -1242,8 +1555,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     # expert-paired tests (hypotheses with "truth_resolves": true), never their miss.
     if taxonomy is not None:
         for f in finds:
-            f.attrs["truth_resolves"] = ("(no species)" if not f.species else
-                                         "yes" if taxonomy.resolves(f.species) else "no")
+            f.attrs["truth_resolves"] = truth_resolution(taxonomy, f.species)
             f.attrs["truth_genus_known"] = ("(no genus)" if not f.genus else
                                             "yes" if genus_known(taxonomy, f.genus, f.species)
                                             else "no")
@@ -1255,13 +1567,15 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     finds_by_ref = {r: finds_in_reference(finds, scored_rows, ref_rows_of[r]) for r in refs_used}
     finds_of = {c["id"]: finds_by_ref[c["reference"]] for c in config["comparators"]
                 if c.get("reference")}
+    fresh: dict = {}               # the sealed test: (backbone, px) -> its fresh vectors
+    test_vectors: dict = {}
     for comp in config["comparators"]:
         answers = None
         if comp["kind"] == "vision":
             b = comp["backbone"]
             px = comp.get("photo_px")
             wanted = [int(p["manifest_photo_id"]) for ph in photos.values() for p in ph]
-            if embed_missing is not None:
+            if embed_missing is not None and not g["sealed"]:
                 embed_missing(b, wanted, None)
             ids, vecs = load_embeddings(conn, b)
             row = {int(p): i for i, p in enumerate(ids.tolist())}
@@ -1269,7 +1583,27 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 comp.get("reference") == "public_trainable_only"))
             if comp.get("reference_as_of"):           # E7b: the reference as it stood then
                 ref = [r for r in ref if r.validated_on and r.validated_on <= comp["reference_as_of"]]
-            if px:
+            if g["sealed"]:
+                # PLAN §8: the sealed test's photos are embedded now by the frozen model (its
+                # files pinned by the freeze block), never read from stored vectors; their
+                # vectors_sha is recorded (a test output). References stay as stored, pinned
+                # by the freeze block's vectors part.
+                if (b, px) not in fresh:
+                    fresh[(b, px)] = embed_fresh(conn, b, wanted, px, log=log)
+                    fids, fvecs, stored = fresh[(b, px)]
+                    from .paper_freeze import vectors_sha
+                    test_vectors[sized_name(b, px) if px else b] = {
+                        **vectors_sha(fids, fvecs, wanted), "stored_vectors_not_read": stored}
+                    if stored:
+                        log(f"[fresh] {sized_name(b, px) if px else b}: {stored:,} stored "
+                            "vectors of sealed-test photos not read (embedded fresh)")
+                fids, fvecs, _ = fresh[(b, px)]
+                offset = len(vecs)
+                vecs = np.concatenate([vecs, np.asarray(fvecs, dtype=vecs.dtype)]) \
+                    if len(fvecs) else vecs
+                scored = scored_rel.as_records(split, {int(p): offset + i
+                                                       for i, p in enumerate(fids.tolist())})
+            elif px:
                 # E30: the scored photos as sent at `px` (references stay as stored).
                 qname = sized_name(b, px)
                 if embed_missing is not None:
@@ -1394,7 +1728,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "truth_genus_known": ({k: sum(1 for f in finds if f.attrs.get("truth_genus_known") == k)
                                for k in ("yes", "no", "(no genus)")}
                               if taxonomy is not None else None),
-        "freeze": {"predictor": freeze_now, "differences": freeze_diff},
+        "freeze": {"predictor": freeze_now, "differences": freeze_diff,
+                   **({"test_vectors": test_vectors} if test_vectors else {})},
         "dataset_release": dataset.cite(base),
         "scored": {"release": scored_rel.id, "split": split, "reference_splits": list(ref_splits),
                    **({"test_release": dataset.cite(scored_rel)} if scored_rel is not base else {})},
@@ -1434,6 +1769,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   finds_of=finds_of, alpha=
                                   float(config.get("alpha", 0.05))),
+        # E14 (Steve 27 Oct): the same hypotheses on secondary rows, descriptive, no Holm
+        **({"secondary_rows": pt.secondary_rows(resolved_secondary_rows(config),
+                                                config.get("hypotheses") or {}, finds,
+                                                outcomes, reps, seed, finds_of=finds_of)}
+           if config.get("secondary_rows") else {}),
         "per_photo": per_photo,
         # PLAN C4 (19 Oct): species recoverability, descriptive and model-based.
         "recoverability": ({cid: pt.recoverability(
@@ -1660,6 +2000,38 @@ def format_report(report: dict, config: dict) -> str:
         lines += ["## Freeze", "", "The predictor matches the config's freeze block."
                   if not diff else f"{len(diff)} part(s) differ from the config's freeze "
                   "block:", ""] + [f"- {d}" for d in diff[:40]] + [""]
+    tv = (report.get("freeze") or {}).get("test_vectors")
+    if tv:
+        lines += ["The scored photos were embedded fresh by the frozen model (stored vectors "
+                  "of them are never read):", "", "| backbone | photos | sha256 | stored, not "
+                  "read |", "|---|---|---|---|"]
+        lines += [f"| {b} | {v['photos']:,} | {v['sha256'][:12]} | "
+                  f"{v['stored_vectors_not_read']:,} |" for b, v in tv.items()] + [""]
+    pf = (report.get("guard") or {}).get("post_freeze")
+    if pf:
+        lines += [f"Filled after the tag (post_freeze): {sum(r['filled'] for r in pf)} of "
+                  f"{len(pf)}; the config tagged had sha256 "
+                  f"{report['guard']['tagged_config_sha256'][:12]}.", "",
+                  "| field | kind | filled | sha256 |", "|---|---|---|---|"]
+        lines += [f"| {r['path']} | {r['kind']} | {'yes' if r['filled'] else 'no'} | "
+                  f"{(r.get('file_sha256') or r.get('value_sha256') or '-')[:12]} |"
+                  for r in pf] + [""]
+    if report.get("secondary_rows"):
+        lines += ["## Secondary rows (descriptive, outside Holm)", "",
+                  "| row | finds | share | unknown | hypothesis | n | difference | p |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for rid, r in report["secondary_rows"].items():
+            if "not_run" in r:
+                lines.append(f"| {rid} | - | - | - | {r['not_run']} | | | |")
+                continue
+            for hid, h in r["hypotheses"].items():
+                d = h.get("difference")
+                lines.append(f"| {rid} | {r['finds']:,} | "
+                             f"{100 * (r['share_of_scored'] or 0):.1f}% | {r['unknown']:,} | "
+                             f"{hid} | {h.get('n', '-')} | "
+                             + ("-" if d is None else f"{100 * d:+.1f} pts")
+                             + f" | {h.get('p', h.get('not_tested', '-'))} |")
+        lines.append("")
     lines += ["## Hypotheses", ""]
     for fam, hyps in report["hypotheses"].items():
         lines += [f"### Family {fam} (" + ("outside Holm: disclosed, no decision"
