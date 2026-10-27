@@ -26,6 +26,11 @@ queue has nothing waiting or running; it holds the model lock for that one photo
 identification that arrives meanwhile waits for at most one photo's map. Reading the photos
 (from the run's copies, or the observation's source through the polite fetcher) happens
 outside the lock. A request is refused (Busy) while too many photos are already waiting.
+
+**People first** (Excluded photos preload, 2026-10-27): a batch job (Job.batch, the preload's
+one photo at a time) never counts toward that limit and always waits behind every person's
+ask; it is never stopped mid-map, so a person's ask waits at most for the one batch photo
+being made. Each map's time is logged ("[looked] <id>: map 4.1 s, read 0.3 s").
 """
 
 from __future__ import annotations
@@ -352,6 +357,8 @@ class Job:
     started: float = 0.0
     error: str | None = None
     finished: threading.Event = field(default_factory=threading.Event)
+    batch: bool = False                           # the preload's: behind every person's ask
+    on_error: Callable[[str], None] | None = None  # told when the job fails
 
 
 class Worker:
@@ -372,6 +379,7 @@ class Worker:
         self._failed: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
         self._thread: threading.Thread | None = None
         self.photos_made = 0                        # for health and tests
+        self.last_seconds: float | None = None      # the last map's time holding the lock
 
     def status(self, rid: str) -> dict | None:
         """{"status": "working", ...} while queued or making, {"status": "failed", ...} for a
@@ -387,11 +395,17 @@ class Worker:
         return None
 
     def waiting_photos(self) -> int:
+        """Photos people asked for that are not made yet (batch photos don't count)."""
         with self._cond:
-            left = sum(len(j.tasks) for j in self._queue)
-            if self._current:
+            left = sum(len(j.tasks) for j in self._queue if not j.batch)
+            if self._current and not self._current.batch:
                 left += len(self._current.tasks) - self._current.done
             return left
+
+    def batch_pending(self) -> bool:
+        """A batch job is queued or being made."""
+        with self._cond:
+            return any(j.batch for j in ([self._current] if self._current else []) + self._queue)
 
     def submit(self, job: Job) -> dict:
         """Queue the job (or join the one already queued for its run); Busy when too many
@@ -400,12 +414,18 @@ class Worker:
             if any(j.rid == job.rid for j in ([self._current] if self._current else []) + self._queue):
                 pass
             else:
-                waiting = sum(len(j.tasks) for j in self._queue) + (
-                    len(self._current.tasks) - self._current.done if self._current else 0)
-                if waiting and waiting + len(job.tasks) > self.max_waiting_photos:
+                people = [j for j in self._queue if not j.batch]
+                waiting = sum(len(j.tasks) for j in people) + (
+                    len(self._current.tasks) - self._current.done
+                    if self._current and not self._current.batch else 0)
+                if (not job.batch and waiting
+                        and waiting + len(job.tasks) > self.max_waiting_photos):
                     raise Busy(waiting * self.seconds_per_photo)
                 self._failed.pop(job.rid, None)
-                self._queue.append(job)
+                # A person's ask goes ahead of every queued batch job; a batch job goes last.
+                at = len(self._queue) if job.batch else next(
+                    (i for i, j in enumerate(self._queue) if j.batch), len(self._queue))
+                self._queue.insert(at, job)
                 self._cond.notify()
                 if self.background and self._thread is None:
                     self._thread = threading.Thread(target=self._work, name="where-looked",
@@ -432,7 +452,9 @@ class Worker:
         entries: list[dict] = []
         try:
             for task in job.tasks:
+                read_at = self.clock()
                 got = task.fetch()                      # the network, outside the lock
+                read = self.clock() - read_at
                 while not self.idle():                  # identifications first
                     self.sleep(self.poll)
                 with self.lock:
@@ -441,7 +463,10 @@ class Worker:
                     took = self.clock() - start
                 entries.append({"photo": task.photo, **entry})
                 self.photos_made += 1
+                self.last_seconds = took
                 self.seconds_per_photo += 0.3 * (took - self.seconds_per_photo)
+                self.note(f"[looked] {job.rid}: map {took:.1f} s, read {read:.1f} s"
+                          + (" (preload)" if job.batch else ""))
                 with self._cond:
                     job.done += 1
             job.finish(entries)
@@ -452,6 +477,8 @@ class Worker:
                 self._failed[job.rid] = (self.clock(), job.error)
                 while len(self._failed) > 500:
                     self._failed.popitem(last=False)
+            if job.on_error is not None:
+                job.on_error(f"{type(e).__name__}: {e}")
         finally:
             with self._cond:
                 self._current = None

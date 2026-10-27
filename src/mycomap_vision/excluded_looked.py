@@ -26,6 +26,29 @@ no map is made or shown for a photo whose record is not judged "ok" by feedback.
 record, or first green on a day before the seal); the photo still shows. One switch lifts it,
 MV_EXCLUDED_LOOKED_UNSEALED=1, set only once the paper's v1-test scoring is committed. Requests
 keep no requester and write nothing to the identify log.
+
+**Crops** (Recovered Labels, recovered_labels.py): each kept specimen crop of a slip photo has a
+map of its own, made on the photo with the crop's box applied in memory (as embed.py embeds it;
+no cropped file is ever kept), keyed `<photo key>#crop<n>`. A crop's map is made only once the
+served model has the crop's vector (the nightly embeds it), and explains the record's name with
+the record, crops included, left out, like the photo's.
+
+**Preload** (Steve, 2026-10-27, the approved plan .drafts/excluded-maps-preload-plan.md): the
+Preloader makes every slip photo's and crop's map ahead of anyone asking, one batch photo at a
+time on the same worker, behind every identification and every person's ask, so Identify waits
+at most one map. It runs in a time window (MV_EXCLUDED_PRELOAD_WINDOW, UTC, default
+PRELOAD_WINDOW; "any": whenever the box is idle), never while the nightly update runs, and off
+with MV_EXCLUDED_PRELOAD=0; it is on by default only on the box (a served release), and
+MV_EXCLUDED_PRELOAD=1 turns it on elsewhere. Slip photos wait until no kept crop is still waiting for its vector
+(MV_EXCLUDED_PRELOAD_CROP_WAIT=0 skips that wait), so their maps are made against the reference
+set with the crops in it. The seal and the public-photo rule apply as for an ask.
+
+**Stale maps.** Every map carries a stamp of what it was made from (STAMP_KEYS). A map is
+served, and counts as preloaded, only while its stamp matches what is served now (is_current):
+a new served model, release or method, a record's new name, or a crop's new box makes it
+stale, and a stale map is made again on the next ask or preload pass. The calibration run and
+the nightly layer's last run are stamped for the record but don't make a map stale: the rank is
+read from raw scores, and a night adds well under 1% of the reference photos.
 """
 
 from __future__ import annotations
@@ -34,8 +57,10 @@ import json
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from . import feedback as fb
 from . import photo_review as pr
@@ -56,6 +81,11 @@ assert set(CATEGORY_LABELS) == set(pr.REASON_CODES)
 RANK_DEPTH = 10
 PAGE_MAX = 96
 UNSEAL_SETTING = "MV_EXCLUDED_LOOKED_UNSEALED"
+PRELOAD_WINDOW = "07:45-12:45"          # UTC: after the 07:00 nightly, before US mornings
+PRELOAD_CATEGORIES = ("slip",)
+# What a map is made from; a map is current while these match what is served now.
+STAMP_KEYS = ("map_version", "backbone", "method", "release", "name", "box")
+CROP_MARK = "#crop"
 
 # Each item's latest decision, grouped once (0.6 s on the live store's 79k decisions; the
 # per-item max of feedback.LATEST_DECISION took 2.5 s).
@@ -125,6 +155,47 @@ def rank_of(ident, vector, name: str, hidden) -> int | None:
     return names.index(name) + 1 if name in names else None
 
 
+def crop_key(photo_key: str, n: int) -> str:
+    """The key a crop's map is kept under: `inat:123#crop2`."""
+    return f"{photo_key}{CROP_MARK}{int(n)}"
+
+
+def is_current(doc: dict | None, now: dict) -> bool:
+    """Whether a kept map was made from what is served now (`now`: STAMP_KEYS' values). A map
+    kept before stamps were written is never current."""
+    stamp = (doc or {}).get("stamp")
+    return isinstance(stamp, dict) and all(stamp.get(k) == now.get(k) for k in STAMP_KEYS)
+
+
+def preload_on(setting: str | None, on_box: bool) -> bool:
+    """MV_EXCLUDED_PRELOAD: "1" on, "0" off; unset, on only on the box (a served release)."""
+    return setting == "1" or (setting != "0" and on_box)
+
+
+def parse_window(value: str | None) -> tuple[int, int] | None:
+    """MV_EXCLUDED_PRELOAD_WINDOW: "HH:MM-HH:MM" in UTC (it may run past midnight) as minutes
+    of the day, or None for "any" (whenever the box is idle). Unset: PRELOAD_WINDOW."""
+    value = (value or PRELOAD_WINDOW).strip().lower()
+    if value in ("any", "always", "idle"):
+        return None
+    try:
+        a, b = value.split("-")
+        start, end = (int(x.split(":")[0]) * 60 + int(x.split(":")[1]) for x in (a, b))
+    except (ValueError, IndexError):
+        raise ValueError(f"the preload window is HH:MM-HH:MM in UTC, or any: {value!r}") from None
+    if not (0 <= start < 1440 and 0 <= end < 1440) or start == end:
+        raise ValueError(f"the preload window is HH:MM-HH:MM in UTC, or any: {value!r}")
+    return start, end
+
+
+def in_window(window: tuple[int, int] | None, when: datetime) -> bool:
+    if window is None:
+        return True
+    minute = when.astimezone(timezone.utc).hour * 60 + when.astimezone(timezone.utc).minute
+    start, end = window
+    return start <= minute < end if start < end else (minute >= start or minute < end)
+
+
 def record_url(record_key: str) -> str:
     if record_key.startswith("mo:"):
         return f"https://mushroomobserver.org/observations/{record_key[3:]}"
@@ -147,7 +218,7 @@ class Maps:
         self.lock = threading.Lock()
         with self.lock, self.conn:
             self.conn.execute(self.SCHEMA)
-        self._mapped: dict[str, tuple[int, set[str]]] = {}
+        self._mapped: dict[str, set[str]] = {}         # model -> keys, until a map is kept
 
     def get(self, photo_key: str, model: str) -> dict | None:
         with self.lock:
@@ -163,10 +234,20 @@ class Maps:
             self._mapped.clear()
 
     def mapped(self, model: str = MODEL) -> set[str]:
-        """The photo keys with a kept map from `model`."""
+        """The photo keys with a kept map from `model` (read once, again after a keep)."""
         with self.lock:
-            return {k for (k,) in self.conn.execute(
-                "select photo_key from maps where model = ? and version = ?", (model, VERSION))}
+            if model not in self._mapped:
+                self._mapped[model] = {k for (k,) in self.conn.execute(
+                    "select photo_key from maps where model = ? and version = ?",
+                    (model, VERSION))}
+            return self._mapped[model]
+
+    def stamps(self, model: str = MODEL) -> dict[str, dict | None]:
+        """Every kept map's stamp, by key (a preload pass reads them once)."""
+        with self.lock:
+            rows = self.conn.execute("select photo_key, doc from maps where model = ? and "
+                                     "version = ?", (model, VERSION)).fetchall()
+        return {k: json.loads(d).get("stamp") for k, d in rows}
 
 
 class Listing:
@@ -177,6 +258,7 @@ class Listing:
     def __init__(self, store: fb.Store, every: float = 30.0, clock=time.monotonic):
         self.store, self.every, self.clock = store, every, clock
         self._at, self._version, self._rows = -1e9, None, []
+        self._by_key: dict[str, Excluded] = {}
         self._conn: sqlite3.Connection | None = None
         self.lock = threading.Lock()
 
@@ -191,5 +273,165 @@ class Listing:
                 version = self._conn.execute("select max(id), count(*) from decisions").fetchone()
                 if version != self._version:
                     self._rows = read_excluded(self._conn)
+                    self._by_key = {r.photo_key: r for r in self._rows}
                     self._version = version
             return self._rows
+
+    def get(self, photo_key: str) -> Excluded | None:
+        """One photo's row (read as rows() reads them), or None."""
+        self.rows()
+        return self._by_key.get(photo_key)
+
+
+# --- the preload -------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Target:
+    """One map the preload makes: a slip photo's (crop 0) or one of its crops'."""
+    hit: Excluded
+    crop: int = 0
+    box: tuple | None = None
+
+    @property
+    def key(self) -> str:
+        return crop_key(self.hit.photo_key, self.crop) if self.crop else self.hit.photo_key
+
+
+@dataclass
+class Pass:
+    """One pass over every target: what was already current, what is left, what was skipped."""
+    todo: list[Target]
+    total: dict[str, int]
+    done: dict[str, int]
+    skipped: dict[str, int] = field(default_factory=dict)
+    crops_waiting: int = 0
+    at: float = 0.0
+
+
+class Preloader:
+    """Makes the targets' maps one batch photo at a time (module docstring). The server gives
+    it its reads and its worker:
+
+    - `targets()` -> (slip photos, embedded crops as Targets, kept crops still waiting for
+      their vector);
+    - `stamp_now(target)` -> the stamp a map made now would carry (None: the model is not
+      ready, nothing is made); `stamps()` every kept map's stamp by key, `stamp_of(key)` one;
+    - `skip(target)` -> why it can't be mapped now ("held", "not shown"), or None;
+    - `job(target, on_done)` -> the looked.Job that makes and keeps it, calling on_done(ok);
+    - `nightly_running()`, and the worker (`submit`, `batch_pending`).
+
+    step() is one tick of its thread: it submits at most one photo, and only while the worker
+    has no batch photo queued or in hand."""
+
+    def __init__(self, *, enabled: bool, window: tuple[int, int] | None, crop_wait: bool,
+                 worker, targets: Callable, stamp_now: Callable, stamps: Callable,
+                 stamp_of: Callable, skip: Callable, job: Callable, nightly_running: Callable[[], bool],
+                 rescan_seconds: float = 3600.0, clock=time.monotonic,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc), note=print):
+        self.enabled, self.window, self.crop_wait = enabled, window, crop_wait
+        self.worker, self.targets, self.stamp_now, self.stamps = worker, targets, stamp_now, stamps
+        self.stamp_of = stamp_of
+        self.skip_reason, self.job, self.nightly_running = skip, job, nightly_running
+        self.rescan_seconds, self.clock, self.now, self.note = rescan_seconds, clock, now, note
+        self.state = "off" if not enabled else "starting"
+        self.pass_: Pass | None = None
+        self.made = self.failed = 0
+        self.last_map_at: str | None = None
+        self.lock = threading.Lock()
+
+    def scan(self) -> Pass:
+        """A new pass: every target whose kept map is not current, slip photos first."""
+        slips, crops, waiting = self.targets()
+        kept = self.stamps()
+        total = {"slips": len(slips), "crops": len(crops)}
+        done = {"slips": 0, "crops": 0}
+        todo: list[Target] = []
+        for kind, group in (("slips", slips), ("crops", crops)):
+            for t in group:
+                now = self.stamp_now(t)
+                if now is not None and is_current({"stamp": kept.get(t.key)}, now):
+                    done[kind] += 1
+                else:
+                    todo.append(t)
+        return Pass(todo, total, done, {}, waiting, self.clock())
+
+    def _due(self, t: Target) -> bool:
+        return not (t.crop == 0 and self.crop_wait and self.pass_ and self.pass_.crops_waiting)
+
+    def step(self) -> str:
+        """One tick: the state it is in afterwards."""
+        with self.lock:
+            self.state = self._step()
+            return self.state
+
+    def _step(self) -> str:
+        if not self.enabled:
+            return "off"
+        if not in_window(self.window, self.now()):
+            return "outside its window"
+        if self.nightly_running():
+            return "waiting for the nightly update"
+        if self.worker.batch_pending():
+            return "making a map"
+        # A fresh pass every rescan_seconds, done or not: new exclusions, crops the night
+        # embedded (which lets slips go), maps a new release or rename made stale.
+        if self.pass_ is None or self.clock() - self.pass_.at >= self.rescan_seconds:
+            self.pass_ = self.scan()
+        p = self.pass_
+        while True:
+            t = next((t for t in p.todo if self._due(t)), None)
+            if t is None:
+                if p.todo:                       # only slip photos left, crops still embedding
+                    return "waiting for crops to be embedded"
+                return "done"
+            p.todo.remove(t)
+            kind = "crops" if t.crop else "slips"
+            why = self.skip_reason(t)
+            if why is not None:
+                p.skipped[why] = p.skipped.get(why, 0) + 1
+                continue
+            stamp = self.stamp_now(t)
+            if stamp is None:
+                p.todo.insert(0, t)
+                return "waiting for the model"
+            if is_current({"stamp": self.stamp_of(t.key)}, stamp):    # asked for meanwhile
+                p.done[kind] += 1
+                continue
+            try:
+                self.worker.submit(self.job(t, lambda ok, kind=kind: self._made(kind, ok)))
+            except Exception as e:  # noqa: BLE001 - this photo alone; the pass goes on
+                self.note(f"[preload] {t.key}: {type(e).__name__}: {e}")
+                self._made(kind, False)
+            return "making a map"
+
+    def _made(self, kind: str, ok: bool) -> None:
+        if ok:
+            self.made += 1
+            if self.pass_:
+                self.pass_.done[kind] += 1
+            self.last_map_at = self.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            self.failed += 1
+            if self.pass_:
+                self.pass_.skipped["failed"] = self.pass_.skipped.get("failed", 0) + 1
+
+    def health(self) -> dict:
+        """For /api/health: on or off, its window, what it is doing, and per kind how many
+        maps are current, left and skipped, with the last map's time."""
+        p = self.pass_
+        out = {"enabled": self.enabled,
+               "window": "any" if self.window is None else "%02d:%02d-%02d:%02d UTC" % (
+                   self.window[0] // 60, self.window[0] % 60, self.window[1] // 60,
+                   self.window[1] % 60),
+               # "doing", not "state": deploy.sh reads the health's two "state" keys.
+               "doing": self.state, "made": self.made, "failed": self.failed,
+               "last_map_at": self.last_map_at,
+               "last_map_seconds": (round(self.worker.last_seconds, 2)
+                                    if getattr(self.worker, "last_seconds", None) else None)}
+        if p is not None:
+            left = {"slips": sum(1 for t in p.todo if not t.crop),
+                    "crops": sum(1 for t in p.todo if t.crop)}
+            out.update({k: {"total": p.total[k], "done": p.done[k], "remaining": left[k]}
+                        for k in ("slips", "crops")})
+            out.update(skipped=dict(sorted(p.skipped.items())), crops_waiting=p.crops_waiting)
+        return out
