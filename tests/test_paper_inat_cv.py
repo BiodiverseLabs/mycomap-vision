@@ -168,3 +168,66 @@ def test_every_line_carries_the_model_it_was_scored_under_and_a_new_version_resc
     assert client.calls == 6 and m2["finds_by_inat_model"] == {"2.35": 2}
     lines = [json.loads(l) for l in (tmp_path / "paper-comparisons/e14/t/finds.jsonl").open()]
     assert {l["inat_model"] for l in lines} == {"2.35"}
+
+
+
+def test_an_original_held_on_this_machine_is_read_from_disk_not_the_store(tmp_path):
+    """E14 pipeline check (27 Oct): the run read every photo from S3. A photo at the store's
+    relative path under the data folder is read from disk; one that isn't goes to the store."""
+    from mycomap_vision import paper_inat_cv as P
+    (tmp_path / "photos/large/1").mkdir(parents=True)
+    (tmp_path / "photos/large/1/10.jpg").write_bytes(b"local bytes")
+    asked = []
+
+    def store(location, relpath):
+        asked.append((location, relpath))
+        return b"store bytes"
+    other = tmp_path / "benchmarks" / "heldout"            # a second local store, same layout
+    (other / "photos/large/2").mkdir(parents=True)
+    (other / "photos/large/2/20.jpg").write_bytes(b"other local bytes")
+    r = P.LocalFirst([tmp_path, other], fallback=store)
+    assert r("s3://bucket/", "photos/large/1/10.jpg") == b"local bytes"
+    assert r("s3://bucket/", "photos/large/2/20.jpg") == b"other local bytes"
+    assert asked == []
+    assert r("s3://bucket/", "photos/large/1/11.jpg") == b"store bytes"
+    assert asked == [("s3://bucket/", "photos/large/1/11.jpg")]
+    assert r.reads == {"local": 2, "store": 1}
+
+
+def test_the_local_stores_are_the_data_folder_and_the_manifests_local_copies(tmp_path,
+                                                                           monkeypatch):
+    import sqlite3
+    from mycomap_vision import config
+    from mycomap_vision import paper_inat_cv as P
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("create table photo_copies (photo_id int, store text, path text, size text)")
+    conn.executemany("insert into photo_copies values (?, ?, ?, 'large')",
+                     [(1, str(tmp_path), "p/1.jpg"), (2, str(tmp_path / "heldout"), "p/2.jpg"),
+                      (3, "s3://bucket/", "p/3.jpg")])
+    assert P.local_store_roots(conn) == [tmp_path, tmp_path / "heldout"]
+    assert P.local_store_roots() == [tmp_path]
+
+
+def test_a_local_file_that_is_not_the_original_is_refused_by_derive(tmp_path):
+    """The local read changes where the bytes come from, never what is checked: derive
+    refuses bytes whose sha256 is not the release's original."""
+    import hashlib
+    import sqlite3
+    from mycomap_vision import dataset_release as dr
+    from mycomap_vision import paper_inat_cv as P
+    (tmp_path / "photos").mkdir()
+    (tmp_path / "photos/a.jpg").write_bytes(b"not the original")
+
+    class Rel:
+        has_private = False
+        db = sqlite3.connect(":memory:")
+    Rel.db.row_factory = sqlite3.Row
+    Rel.db.execute("create table photos (photo_key text, original_path text, original_sha256 text)")
+    Rel.db.execute("insert into photos values ('inat:1', 'photos/a.jpg', ?)",
+                   (hashlib.sha256(b"the original").hexdigest(),))
+    Rel.db.execute("create table recipes (name text, recipe_json text)")
+    Rel.db.execute("insert into recipes values ('original', '{}')")
+    with pytest.raises(dr.ReleaseError, match="no longer matches its sha256"):
+        dr.Release.derive(Rel(), "inat:1", "original", store_reader=P.LocalFirst([tmp_path]),
+                          store_location="s3://bucket/")

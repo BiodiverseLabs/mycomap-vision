@@ -35,6 +35,46 @@ RANKS = ("species", "genus", "family")
 FORMAT = 1
 
 
+def local_store_roots(conn=None) -> list[Path]:
+    """This machine's photo stores: the data folder, then every local store the manifest's
+    photo_copies names (e.g. the former held-out set's folder), in that order."""
+    roots = [Path(config.DATA_DIR)]
+    if conn is not None and conn.execute(
+            "select 1 from sqlite_master where name = 'photo_copies'").fetchone():
+        for (store,) in conn.execute("select distinct store from photo_copies "
+                                     "where store not like 's3:%' order by store"):
+            if Path(store) not in roots:
+                roots.append(Path(store))
+    return roots
+
+
+class LocalFirst:
+    """A store reader for Release.derive: an original this machine holds at the photo store's
+    relative path under one of its local stores (local_store_roots: every store keeps the
+    same layout) is read from disk, any other from the release's store (S3). derive checks
+    the bytes' sha256 either way, so a local file that is not the original is refused, never
+    sent. Found by the E14 pipeline check (27 Oct): the run read every photo from S3, so it
+    failed where there are no S3 credentials and paid egress where there are, for photos
+    already on disk."""
+
+    def __init__(self, roots: list[Path] | None = None, fallback=None):
+        self.roots = [Path(r) for r in (roots or [config.DATA_DIR])]
+        self._fallback = fallback
+        self.reads = Counter()
+
+    def __call__(self, location: str, relpath: str) -> bytes:
+        for root in self.roots:
+            p = root / relpath
+            if p.is_file():
+                self.reads["local"] += 1
+                return p.read_bytes()
+        if self._fallback is None:
+            from .dataset_release import default_store_reader
+            self._fallback = default_store_reader()
+        self.reads["store"] += 1
+        return self._fallback(location, relpath)
+
+
 def work_dir(name: str) -> Path:
     if not E.re.fullmatch(r"[a-z0-9][a-z0-9._-]*", name):
         raise ValueError(f"set name {name!r}: lower case letters, digits, . _ -")
