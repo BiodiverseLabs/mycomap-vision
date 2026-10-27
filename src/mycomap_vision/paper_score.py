@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections import Counter, defaultdict
 from contextlib import contextmanager
@@ -204,6 +205,69 @@ def check_config(doc: dict) -> None:
             for k in ("a", "b", "comparator"):
                 if k in h and h[k] not in ids:
                     raise ValueError(f"{fam}/{h.get('id')}: unknown comparator {h[k]!r}")
+    check_secondary_rows(doc)
+
+
+def check_secondary_rows(doc: dict) -> None:
+    """The secondary_rows block (E14, Steve 27 Oct): rows of known conditions, hypotheses
+    that exist, created_after an ISO date or {"config": path} naming a field that exists."""
+    block = doc.get("secondary_rows")
+    if block is None:
+        return
+    from . import paper_tables as ptab
+    hyp_ids = {h["id"] for hs in (doc.get("hypotheses") or {}).values() for h in hs}
+    for hid in block.get("for") or []:
+        if hid not in hyp_ids:
+            raise ValueError(f"secondary_rows: unknown hypothesis {hid!r}")
+    ids = [r.get("id") for r in block.get("rows") or []]
+    if not ids or None in ids or len(ids) != len(set(ids)):
+        raise ValueError("secondary_rows: every row has a unique id")
+
+    def check(where, rid):
+        for k, v in where.items():
+            if k not in ptab.WHERE_KEYS:
+                raise ValueError(f"secondary_rows {rid}: unknown condition {k!r} (one of "
+                                 f"{ptab.WHERE_KEYS})")
+            if k == "any_of":
+                if not isinstance(v, list) or not v:
+                    raise ValueError(f"secondary_rows {rid}: any_of is a list of conditions")
+                for w in v:
+                    check(w, rid)
+            elif k == "created_after":
+                if isinstance(v, dict):
+                    try:
+                        config_path_get(doc, v["config"])
+                    except KeyError:
+                        raise ValueError(f"secondary_rows {rid}: created_after names "
+                                         f"{v.get('config')!r}, no such field") from None
+                elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v)):
+                    raise ValueError(f"secondary_rows {rid}: created_after is a date "
+                                     "(YYYY-MM-DD) or {\"config\": path}")
+    for r in block.get("rows") or []:
+        check(r.get("where") or {}, r["id"])
+
+
+def resolved_secondary_rows(config: dict) -> dict:
+    """The block with each {"config": path} date read from the config; a row whose date is
+    still a TBD placeholder is marked not run."""
+    block = json.loads(json.dumps(config.get("secondary_rows") or {}))
+
+    def fill(where):
+        for k, v in list(where.items()):
+            if k == "any_of":
+                for w in v:
+                    fill(w)
+            elif k == "created_after" and isinstance(v, dict):
+                val = config_path_get(config, v["config"])
+                if is_placeholder(val):
+                    raise LookupError(v["config"])
+                where[k] = str(val)
+    for r in block.get("rows") or []:
+        try:
+            fill(r.get("where") or {})
+        except LookupError as e:
+            r["not_run"] = f"not run: TBD ({e.args[0]} is still a placeholder)"
+    return block
 
 
 def resolve(path: str | Path) -> Path:
@@ -1705,6 +1769,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "hypotheses": pt.families(config.get("hypotheses") or {}, finds, outcomes, reps, seed,
                                   finds_of=finds_of, alpha=
                                   float(config.get("alpha", 0.05))),
+        # E14 (Steve 27 Oct): the same hypotheses on secondary rows, descriptive, no Holm
+        **({"secondary_rows": pt.secondary_rows(resolved_secondary_rows(config),
+                                                config.get("hypotheses") or {}, finds,
+                                                outcomes, reps, seed, finds_of=finds_of)}
+           if config.get("secondary_rows") else {}),
         "per_photo": per_photo,
         # PLAN C4 (19 Oct): species recoverability, descriptive and model-based.
         "recoverability": ({cid: pt.recoverability(
@@ -1947,6 +2016,22 @@ def format_report(report: dict, config: dict) -> str:
         lines += [f"| {r['path']} | {r['kind']} | {'yes' if r['filled'] else 'no'} | "
                   f"{(r.get('file_sha256') or r.get('value_sha256') or '-')[:12]} |"
                   for r in pf] + [""]
+    if report.get("secondary_rows"):
+        lines += ["## Secondary rows (descriptive, outside Holm)", "",
+                  "| row | finds | share | unknown | hypothesis | n | difference | p |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for rid, r in report["secondary_rows"].items():
+            if "not_run" in r:
+                lines.append(f"| {rid} | - | - | - | {r['not_run']} | | | |")
+                continue
+            for hid, h in r["hypotheses"].items():
+                d = h.get("difference")
+                lines.append(f"| {rid} | {r['finds']:,} | "
+                             f"{100 * (r['share_of_scored'] or 0):.1f}% | {r['unknown']:,} | "
+                             f"{hid} | {h.get('n', '-')} | "
+                             + ("-" if d is None else f"{100 * d:+.1f} pts")
+                             + f" | {h.get('p', h.get('not_tested', '-'))} |")
+        lines.append("")
     lines += ["## Hypotheses", ""]
     for fam, hyps in report["hypotheses"].items():
         lines += [f"### Family {fam} (" + ("outside Holm: disclosed, no decision"

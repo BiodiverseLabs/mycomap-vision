@@ -1888,3 +1888,81 @@ def test_a_provisional_truth_that_resolves_enters_h1a_and_inat_is_matched_by_tax
     assert [f.key for f in pt.select(finds, spec, outcomes)] == ["p1", "f1"]
     r = pt.test_one(spec, finds, outcomes, 50, 1)
     assert r["n"] == 2 and r["n_by_name_kind"] == {"formal": 1, "provisional": 1}
+
+
+
+# --- E14 secondary rows (Steve 27 Oct): descriptive, outside Holm ------------------------------
+
+def _f(key, kind="formal", **attrs):
+    f = po.Find(key, "o" + key, "A x", "A", "", kind, 5, 1)
+    f.attrs.update(attrs)
+    return f
+
+
+@pytest.mark.parametrize("where, want", [
+    ({}, [True, True, True, True]),
+    ({"name_kind": "formal"}, [True, False, True, True]),
+    ({"created_after": "2024-05-01"}, [True, False, None, False]),     # same day is not after
+    ({"rg_at_inat_export": "no"}, [False, True, None, True]),
+    ({"inat_observation": "none"}, [False, False, False, True]),
+    ({"any_of": [{"inat_observation": "none"}, {"created_after": "2024-05-01"}]},
+     [True, False, None, True]),
+    ({"name_kind": "formal", "created_after": "2024-05-01"}, [True, False, None, False]),
+])
+def test_each_secondary_row_condition_keeps_the_finds_it_names_and_marks_unknowns(where, want):
+    from mycomap_vision import paper_tables as pt
+    finds = [_f("1", created_at="2024-06-02T10:00:00Z", rg_at_inat_export="yes",
+                inat_observation="yes"),
+             _f("2", "provisional", created_at="2023-01-01T00:00:00Z", rg_at_inat_export="no",
+                inat_observation="yes"),
+             _f("3", created_at="", rg_at_inat_export="unknown", inat_observation="yes"),
+             _f("4", created_at="2024-05-01T23:59:00Z", rg_at_inat_export="no",
+                inat_observation="none")]
+    assert [pt.where_holds(f, where) for f in finds] == want
+
+
+def test_secondary_rows_run_the_named_hypotheses_on_each_row_outside_holm(world, tmp_path):
+    attrs = tmp_path / "attrs.tsv"
+    attrs.write_text("record_key\tcreated_at\trg_at_inat_export\tinat_observation\n"
+                     "5\t2025-01-02T00:00:00Z\tno\tyes\n6\t\tunknown\tyes\n", encoding="utf-8")
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["inat_cv"] = {"model_version": "TBD", "training_export_date": "TBD: at the cut"}
+    cfg["secondary_rows"] = {"for": ["H1a"], "rows": [
+        {"id": "all-finds", "where": {}},
+        {"id": "unseen-by-bioclip2", "where": {"created_after": "2024-05-01"}},
+        {"id": "unseen-by-inat", "where": {"any_of": [
+            {"inat_observation": "none"},
+            {"created_after": {"config": "inat_cv/training_export_date"}}]}},
+        {"id": "not-rg", "where": {"rg_at_inat_export": "no"}}]}
+    paper_score.check_config(cfg)
+    rep = run(world, tmp_path, "val", cfg, attrs_path=attrs)
+    rows = rep["secondary_rows"]
+    assert rows["all-finds"]["finds"] == 2 and rows["all-finds"]["share_of_scored"] == 1.0
+    assert rows["all-finds"]["hypotheses"]["H1a"]["n"] == rep["hypotheses"]["A"]["H1a"]["n"]
+    assert rows["unseen-by-bioclip2"]["finds"] == 1 and rows["unseen-by-bioclip2"]["unknown"] == 1
+    assert rows["unseen-by-bioclip2"]["hypotheses"]["H1a"]["n"] == 1
+    h = rows["not-rg"]["hypotheses"]["H1a"]
+    assert h["outside_holm"] and h["p_holm"] is None and h["reject"] is None
+    assert rows["unseen-by-inat"] == {
+        "not_run": "not run: TBD (inat_cv/training_export_date is still a placeholder)"}
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "## Secondary rows (descriptive, outside Holm)" in md
+
+
+@pytest.mark.parametrize("change, refused", [
+    (lambda b: b["rows"].append({"id": "x", "where": {"colour": "red"}}), "unknown condition"),
+    (lambda b: b["for"].append("H9"), "unknown hypothesis"),
+    (lambda b: b["rows"].append({"id": "x", "where": {"created_after": "May 2024"}}),
+     "is a date"),
+    (lambda b: b["rows"].append({"id": "x", "where": {"created_after": {"config": "inat_cv/nope"}}}),
+     "no such field"),
+    (lambda b: b["rows"].append({"id": "all-finds", "where": {}}), "unique id"),
+    (lambda b: b["rows"].append({"id": "x", "where": {"any_of": []}}), "any_of is a list"),
+])
+def test_a_malformed_secondary_rows_block_is_refused(tmp_path, change, refused):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["inat_cv"] = {"training_export_date": "TBD"}
+    cfg["secondary_rows"] = {"for": ["H1a"], "rows": [{"id": "all-finds", "where": {}}]}
+    change(cfg["secondary_rows"])
+    with pytest.raises(ValueError, match=refused):
+        paper_score.check_config(cfg)
