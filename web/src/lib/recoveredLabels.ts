@@ -135,27 +135,63 @@ export interface RecoveredDecision {
 /** The exclusion reasons a reviewer changed, by item id. */
 export type ReasonEdits = Record<number, string>;
 
+/** One tile's decision as it stands: the crops kept, any box moved (kept crops only: the server
+ *  refuses a box for a rejected crop), the reason when it changed; and whether anything differs
+ *  from what the tile came with. */
+export function tileDecision(t: RecoveredTile, marks: CropMarks, edits: BoxEdits = {},
+                             reasons: ReasonEdits = {}): { decision: RecoveredDecision; changed: boolean } {
+  const choice = (c: RecoveredCrop) => marks[cropKey(t.item_id, c.n)] ?? startChoice(t, c);
+  const moved = t.crops.filter((c) => !sameBox(boxOf(t, c, edits), effectiveBox(c.box)));
+  const keptMoved = moved.filter((c) => choice(c) === "include");
+  const reason = reasons[t.item_id] && reasons[t.item_id] !== t.reason ? reasons[t.item_id] : undefined;
+  const changed = t.crops.some((c) => choice(c) !== startChoice(t, c)) || moved.length > 0 || !!reason;
+  const decision: RecoveredDecision = { item_id: t.item_id, include: t.crops.filter((c) => choice(c) === "include").map((c) => c.n) };
+  if (keptMoved.length) decision.boxes = Object.fromEntries(keptMoved.map((c) => [String(c.n), boxOf(t, c, edits)]));
+  if (reason) decision.reason = reason;
+  return { decision, changed };
+}
+
+/** What a decision is, as text: equal texts are the same decision (the order of its keys and
+ *  crop numbers is fixed by tileDecision). */
+export const decisionKey = (d: RecoveredDecision): string => JSON.stringify(d);
+
+/** The decision each tile last saved on this page, by item id (decisionKey). */
+export type Sent = Record<number, string>;
+
 /** The decisions to save for these tiles: every open tile (Include is a decision too, once the
- *  reviewer has seen it), and a decided tile only where a crop, a box or the reason changed. */
+ *  reviewer has seen it), and a decided tile only where a crop, a box or the reason changed;
+ *  none that is what the tile last saved on this page (`sent`). */
 export function pendingDecisions(tiles: RecoveredTile[], marks: CropMarks, seen: Set<number>,
-                                 edits: BoxEdits = {}, reasons: ReasonEdits = {}): RecoveredDecision[] {
+                                 edits: BoxEdits = {}, reasons: ReasonEdits = {}, sent: Sent = {}): RecoveredDecision[] {
   const out: RecoveredDecision[] = [];
   for (const t of tiles) {
-    const choice = (c: RecoveredCrop) => marks[cropKey(t.item_id, c.n)] ?? startChoice(t, c);
-    const moved = t.crops.filter((c) => !sameBox(boxOf(t, c, edits), effectiveBox(c.box)));
-    // A box is sent only for a kept crop (the server refuses one for a rejected crop).
-    const keptMoved = moved.filter((c) => choice(c) === "include");
-    const reason = reasons[t.item_id] && reasons[t.item_id] !== t.reason ? reasons[t.item_id] : undefined;
-    const changed = t.crops.some((c) => choice(c) !== startChoice(t, c)) || moved.length > 0 || !!reason;
-    if ((t.status === "open" && seen.has(t.item_id)) || changed) {
-      const d: RecoveredDecision = { item_id: t.item_id, include: t.crops.filter((c) => choice(c) === "include").map((c) => c.n) };
-      if (keptMoved.length) d.boxes = Object.fromEntries(keptMoved.map((c) => [String(c.n), boxOf(t, c, edits)]));
-      if (reason) d.reason = reason;
-      out.push(d);
-    }
+    const { decision, changed } = tileDecision(t, marks, edits, reasons);
+    const due = (t.status === "open" && seen.has(t.item_id)) || changed;
+    if (due && sent[t.item_id] !== decisionKey(decision)) out.push(decision);
   }
   return out;
 }
+
+// --- saving one tile at a time (Steve, 2026-10-27: "save panels individually") ---------------------
+
+export type TileSave = "unsaved" | "saving" | "saved" | "failed";
+
+/** A tile's save state: "saving" or "failed" while its last save is in flight or failed (until
+ *  it changes), else "unsaved" when its decision is pending, "saved" when what it shows is what
+ *  it saved on this page, and null when there is nothing to say (an unseen open tile, an
+ *  untouched decided one). */
+export function tileSave(t: RecoveredTile, pending: Set<number>, sent: Sent, current: string,
+                         flight: Record<number, "saving" | "failed">): TileSave | null {
+  if (flight[t.item_id]) return flight[t.item_id];
+  if (pending.has(t.item_id)) return "unsaved";
+  if (sent[t.item_id] === current) return "saved";
+  return null;
+}
+
+/** The decisions a per-tile Save sends: the tile's decision as it stands, seen or not. */
+export const tileSaveDecision = (t: RecoveredTile, marks: CropMarks, edits: BoxEdits = {},
+                                 reasons: ReasonEdits = {}): RecoveredDecision[] =>
+  [tileDecision(t, marks, edits, reasons).decision];
 
 /** Only a photo left out as a field slip gives crops (the server's rule): another reason, or
  *  keeping the photo, leaves its crops unused. */
@@ -167,7 +203,11 @@ export const cropsUsed = (reason: string | null | undefined) => (reason ?? CROP_
 export function tileFacts(t: Pick<RecoveredTile, "slip_p" | "specimen_area" | "crops">): string {
   const parts = [];
   if (t.slip_p != null) parts.push(`slip p ${t.slip_p.toFixed(2)}`);
-  parts.push(`specimen ${(t.specimen_area * 100).toFixed(t.specimen_area < 0.1 ? 1 : 0)}% of the photo`);
+  // The specimen the detector found (its mask), not the crop: the crop adds a margin and is
+  // square. The smallest find is 2/576 of the photo (0.35%), so the riskiest pages sit just
+  // above it: two places below 1% keep them apart.
+  const pct = t.specimen_area * 100;
+  parts.push(`specimen found: ${pct.toFixed(pct < 1 ? 2 : pct < 10 ? 1 : 0)}% of the photo`);
   if (t.crops.length > 1) parts.push(`${t.crops.length} crops`);
   return parts.join(" · ");
 }
