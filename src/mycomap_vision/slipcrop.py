@@ -153,8 +153,9 @@ def crop_boxes(spec: np.ndarray, w: int, h: int, gap: float = GAP,
     """The crop boxes for a specimen grid that covers a w x h photo: one per well-separated
     cluster (parts closer than `gap` of the short side join), each the cluster's bounding box
     with `margin`, square where possible; clusters whose boxes overlap become one. Each is
-    {"box": [l, t, r, b] in original pixels, "area": the cluster's share of the frame}, the
-    smallest cluster first (the riskiest, where false finds sit)."""
+    {"box": [l, t, r, b] in original pixels, "area": the cluster's share of the frame,
+    "cluster": the cluster's own tight box before the margin and squaring}, the smallest cluster
+    first (the riskiest, where false finds sit)."""
     gh, gw = spec.shape
     sx, sy = w / gw, h / gh
     r = max(1, int(round(gap * min(gh, gw))))
@@ -183,7 +184,8 @@ def crop_boxes(spec: np.ndarray, w: int, h: int, gap: float = GAP,
                     break
             if merged:
                 break
-    out = [{"box": list(square_box(*c["raw"], w, h, margin)), "area": round(c["area"], 5)}
+    out = [{"box": list(square_box(*c["raw"], w, h, margin)), "area": round(c["area"], 5),
+            "cluster": [int(round(v)) for v in c["raw"]]}
            for c in found]
     return sorted(out, key=lambda c: c["area"])
 
@@ -337,6 +339,10 @@ class Detector:
             if k < 1 else img
         slip_m, spec_m, found = self.masks(small)
         slip, spec, on_slip = specimen_region(to_grid(slip_m), to_grid(spec_m))
+        # OWLv2's kept boxes with their scores, on the original photo's pixels like the crops
+        back = w / small.size[0]
+        found = {kind: [{"box": [round(v * back, 1) for v in d["box"]], "score": d["score"]}
+                        for d in dets] for kind, dets in found.items()}
         return {"version": version(self.grow), "width": w, "height": h,
                 "slip_area": round(float(slip.mean()), 4),
                 "specimen_area": round(float(spec.mean()), 4),

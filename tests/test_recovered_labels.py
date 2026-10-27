@@ -378,6 +378,9 @@ def test_the_exclusion_export_is_byte_identical_with_crops_and_the_crop_export_i
         ("inat:1", "2", "include_crops"), ("inat:2", "1", "default"), ("inat:3", "1", "default")]
     assert (rows[0]["l"], rows[0]["b"], rows[0]["v1_split"]) == ("0.520000", "0.975000", "train")
     assert [r["box_source"] for r in rows] == ["reviewer", "detector", "detector"]
+    # the detector's own box beside it: inat:1 crop 2 was [500, 400, 900, 800] on 1000 x 800
+    assert (rows[0]["det_l"], rows[0]["det_t"], rows[0]["det_r"], rows[0]["det_b"]) == (
+        "0.500000", "0.500000", "0.900000", "1.000000")
     assert rows[1]["reviewer_pseudonym"] == "" and len(rows[0]["reviewer_pseudonym"]) == 16
     assert summary["rows"] == 3 and summary["photos"] == 3
     again, _ = fx.export_crops(backup(live, tmp_path / "d.sqlite"), rel, CUT, KEY, live)
@@ -429,7 +432,7 @@ def test_the_job_reads_slips_from_a_copy_writes_seed_lines_and_resumes(tmp_path,
     assert (second["photos"], second["no_specimen"], second["already_done"]) == (1, 1, 1)
     rows, counts = rl.rows_from_slip_crops(out)
     assert [r["subject"] for r in rows] == ["inat:2"] and counts == {"no_specimen": 1}
-    assert rows[0]["evidence"]["crops"] == [{"n": 1, "box": [0, 0, 5, 5]}]
+    assert rows[0]["evidence"]["crops"] == [{"n": 1, "box": [0, 0, 5, 5], "area": 0.1}]   # kept
     assert rows[0]["evidence"]["width"] == 20
 
 
@@ -726,3 +729,51 @@ def test_box_source_says_reviewer_only_for_a_box_whose_square_differs_from_the_d
     assert rl.boxes_now(item)[2] == [25, 10, 75, 60]
     open_item = {"status": "open", "evidence": item["evidence"], "last_decision": None}
     assert [rl.box_source(open_item, n) for n in (1, 2)] == ["detector", "detector"]
+
+
+# --- what is kept for studying reviewers' changes later (Steve, 2026-10-27) ----------------------
+
+def test_the_seed_keeps_each_crops_cluster_and_the_detectors_scores_in_the_items_evidence(tmp_path, conn):
+    spec = np.zeros((60, 80), bool)
+    spec[5:10, 5:10] = True
+    crop = slipcrop.crop_boxes(spec, 800, 600, min_cluster=0.001)[0]
+    assert crop["cluster"] == [50, 50, 100, 100] and crop["box"] != crop["cluster"]
+    found = {"version": slipcrop.VERSION, "width": 800, "height": 600, "slip_area": 0.3,
+             "specimen_area": 0.01, "on_slip_area": 0.0, "crops": [crop],
+             "detections": {"slip": [{"box": [0, 300, 800, 600], "score": 0.71}],
+                            "specimen": [{"box": [48, 49, 101, 102], "score": 0.18}]}}
+    row = rl.seed_row({"photo_key": "inat:1", "record_key": "10", "slip_p": 0.8}, found)
+    path = tmp_path / "seed.tsv"
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        import csv
+        w = csv.DictWriter(f, fieldnames=rl.SEED_COLUMNS, delimiter="\t", lineterminator="\n")
+        w.writeheader()
+        w.writerow(row)
+    s = open_store(tmp_path / "f.sqlite")
+    s.seed([slip_item("inat:1", "10")], "slips")
+    decide_photo(s, "inat:1", "exclude_photo", "slip")
+    fb.seed_files(s, conn, slip_crops=path)
+    ev = item_of(s, "inat:1")["evidence"]
+    assert ev["crops"] == [{"n": 1, "box": crop["box"], "area": crop["area"], "cluster": [50, 50, 100, 100]}]
+    assert ev["detections"]["specimen"] == [{"box": [48, 49, 101, 102], "score": 0.18}]
+    # a file from before the scores were kept still reads (no crop_detail, no detections)
+    old = write_seed(tmp_path / "old.tsv", [seed_line("inat:2", "11", 0.7, [[0, 0, 100, 100]])])
+    rows, _ = rl.rows_from_slip_crops(old)
+    assert rows[0]["evidence"]["crops"] == [{"n": 1, "box": [0, 0, 100, 100]}]
+    assert "detections" not in rows[0]["evidence"]
+
+
+def test_a_reviewers_saves_never_change_the_detectors_box_and_each_is_a_new_decision(store):
+    s, _ = store
+    one = item_of(s, "inat:1")["id"]
+    before = json.dumps(item_of(s, "inat:1")["evidence"], sort_keys=True)
+    rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "boxes": {"2": [400, 300, 900, 800]}}], ME)
+    rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "boxes": {"2": [450, 300, 950, 800]}}], ME)
+    rl.batch_decide(s, [{"item_id": one, "include": [2]}], ME)
+    assert json.dumps(item_of(s, "inat:1")["evidence"], sort_keys=True) == before
+    history = [(d["decision"], rl.read_value(d)[1].get(2), d["by_user"]) for d in s.get(one)["decisions"]]
+    assert history == [("include_crops", [400, 300, 900, 800], "admin-1"),
+                       ("include_crops", [450, 300, 950, 800], "admin-1"),
+                       ("include_crops", [450, 300, 950, 800], "admin-1")]   # each row is whole
+    assert all(d["at"] for d in s.get(one)["decisions"])
+    assert rl.effective_box(item_of(s, "inat:1")["evidence"]["crops"][1]["box"]) == [500, 400, 900, 800]
