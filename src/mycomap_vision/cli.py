@@ -1904,10 +1904,19 @@ def cmd_paper_inat_cv(args) -> None:
     if rel.manifest.get("test_for") and not args.inat_model:
         raise SystemExit("record the iNat CV model version first: --inat-model '<version, date>'")
     model = {"version": args.inat_model, "noted_at": E.utc(datetime.now(timezone.utc).isoformat())}         if args.inat_model else None
-    meta = P.run(rel, args.name, ids, client, lambda pk: rel.derive(pk, "original").body, truths,
+    if Path(config.MANIFEST_PATH).is_file():
+        with sqlite3.connect(f"file:{Path(config.MANIFEST_PATH).as_posix()}?mode=ro",
+                             uri=True) as mconn:
+            roots = P.local_store_roots(mconn)
+    else:
+        roots = P.local_store_roots()
+    reader = P.LocalFirst(roots)     # this machine's copy first, the release's store else
+    meta = P.run(rel, args.name, ids, client,
+                 lambda pk: rel.derive(pk, "original", store_reader=reader).body, truths,
                  model=model)
     lines = [json.loads(l) for l in (d / "finds.jsonl").open(encoding="utf-8")]
-    print(json.dumps({**meta, "summary": P.summarise(lines)}, indent=2))
+    print(json.dumps({**meta, "photo_reads": dict(reader.reads),
+                      "summary": P.summarise(lines)}, indent=2))
 
 
 def cmd_expert_ids(args) -> None:
