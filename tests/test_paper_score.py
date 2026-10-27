@@ -711,7 +711,8 @@ def test_a_place_setting_is_built_into_the_place_method_recorded_and_an_unknown_
     name = "penalty-500-2026-10-13"
     cfg = config(tmp_path, ["5", "6"])
     cfg["comparators"] = [{"id": "vision-place", "kind": "vision", "backbone": "m1",
-                           "method": "nearest+mean+place", "place_setting": name}]
+                           "method": "nearest+mean+place", "place": True,
+                           "place_setting": name}]
     cfg["hypotheses"] = {}
     cfg["place_settings"] = place_pins(name)
     rep = run(world, tmp_path, "val", cfg)
@@ -794,7 +795,7 @@ def test_a_place_setting_that_reads_inat_distances_is_refused():
             if "inat" in str({**placeprior.NO_EXTRAS, **s}["pen_known"])]
     cfg = {"format": 1, "answer_key": KEY, "comparators": [{"id": "p", "kind": "vision",
                                                             "backbone": "m",
-                                         "method": "nearest+mean+place",
+                                         "method": "nearest+mean+place", "place": True,
                                          "place_setting": "penalty-500-2026-10-13"}],
            "place_settings": place_pins("penalty-500-2026-10-13")}
     paper_score.check_config(cfg)                                    # dna only: fine
@@ -815,7 +816,8 @@ def test_a_place_setting_that_reads_inat_distances_is_refused():
 def _place_config(**extra):
     return {"format": 1, "answer_key": KEY, "comparators": [
         {"id": "vision-place", "kind": "vision", "backbone": "m1",
-         "method": "nearest+mean+place", "place_setting": "penalty-500-s30-2026-10-19"}], **extra}
+         "method": "nearest+mean+place", "place": True,
+         "place_setting": "penalty-500-s30-2026-10-19"}], **extra}
 
 
 def test_a_place_setting_is_scored_only_under_the_configs_pinned_sha():

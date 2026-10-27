@@ -135,10 +135,22 @@ def check_config(doc: dict) -> None:
                              f"not {c.get('reference')!r}")
         if c.get("reference") and c["kind"] != "vision":
             raise ValueError(f"comparator {c['id']}: a reference is for a Vision comparator")
+        if c["kind"] == "vision" and "place" in c["method"] and not c.get("place"):
+            # Without "place": true the scored records keep the release's true point.
+            raise ValueError(f"comparator {c['id']}: {c['method']} reads each find's place, "
+                             "so it takes \"place\": true (the public point, never the "
+                             "release's true one)")
         if c.get("place_setting"):
             if "place" not in str(c.get("method", "")):
                 raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "
                                  f"not {c.get('method')!r}")
+            from .replications.fungitastic.retrain import CLASSIFIER_METHODS
+            if c["method"] in {m.name for m in CLASSIFIER_METHODS}:
+                # Its place prior is the model's own training counts (retrain.MetadataPrior),
+                # so a placeprior setting would only be refused after the test was read.
+                raise ValueError(f"comparator {c['id']}: {c['method']}'s place prior is the "
+                                 "trained model's own counts, not a place setting: leave "
+                                 "place_setting out")
             from . import placeprior
             _, setting = placeprior.place_setting(c["place_setting"])   # refuses an unknown name
             if "inat" in str(setting.get("pen_known", "")):
