@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { RecoveredCrop, RecoveredTile } from "./api";
-import { boxOf, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, flipCrop, minSide, pendingDecisions,
+import { boxOf, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, effectiveBox, flipCrop, minSide, pendingDecisions,
          startChoice, tileFacts } from "./recoveredLabels";
 
 const crop = (n: number, box: RecoveredCrop["box"], decision: RecoveredCrop["decision"] = null): RecoveredCrop =>
@@ -59,14 +59,37 @@ test("the tile says its slip p, how big the find is and how many crops", () => {
                "specimen 25% of the photo");
 });
 
-test("a box moves whole or by one corner, never past the photo or below the smallest side", () => {
+test("a box moves whole or by one corner and stays square: the region the model reads", () => {
   const b: RecoveredCrop["box"] = [100, 100, 300, 300];
   assert.deepEqual(dragBox(b, "move", 50, -20, 1000, 800), [150, 80, 350, 280]);
-  assert.deepEqual(dragBox(b, "move", -500, 900, 1000, 800), [0, 600, 200, 800]);      // stays inside
+  assert.deepEqual(dragBox(b, "move", -500, 900, 1000, 800), [0, 600, 200, 800]);      // stops at the edge
   assert.deepEqual(dragBox(b, "nw", -60, -60, 1000, 800), [40, 40, 300, 300]);
-  assert.deepEqual(dragBox(b, "se", 900, 900, 1000, 800), [100, 100, 1000, 800]);
+  assert.deepEqual(dragBox(b, "se", 50, 10, 1000, 800), [100, 100, 350, 350]);         // the larger move wins
+  assert.deepEqual(dragBox(b, "sw", 0, 80, 1000, 800), [20, 100, 300, 380]);           // grows from the fixed ne corner
+  assert.deepEqual(dragBox(b, "se", 900, 900, 1000, 800), [100, 100, 800, 800]);       // stops at the bottom edge, square
+  assert.deepEqual(dragBox(b, "nw", -500, -10, 1000, 800), [0, 0, 300, 300]);          // stops at the top-left edge
   assert.equal(minSide(1000, 800), 32);
-  assert.deepEqual(dragBox(b, "ne", -500, 500, 1000, 800), [100, 268, 132, 300]);    // 32 px at least
+  assert.deepEqual(dragBox(b, "ne", -500, 500, 1000, 800), [100, 268, 132, 300]);      // 32 px at least
+  // keyboard: Shift+Alt+→ grows (dragBox "se" by the step on both axes), ← shrinks
+  assert.deepEqual(dragBox(b, "se", 8 + 0, 8 + 0, 1000, 800), [100, 100, 308, 308]);
+  assert.deepEqual(dragBox(b, "se", -8, -8, 1000, 800), [100, 100, 292, 292]);
+  for (const h of ["move", "nw", "ne", "sw", "se"] as const) {
+    for (const [dx, dy] of [[37, -213], [-999, 5], [400, 400], [-3, 650]]) {
+      const [l, t, r, bb] = dragBox(b, h, dx, dy, 1000, 800);
+      assert.equal(r - l, bb - t, `${h} ${dx},${dy} square`);
+      assert.ok(l >= 0 && t >= 0 && r <= 1000 && bb <= 800, `${h} ${dx},${dy} inside`);
+    }
+  }
+});
+
+test("a detector's non-square box is shown as the central square the model reads", () => {
+  assert.deepEqual(effectiveBox([0, 0, 300, 200]), [50, 0, 250, 200]);
+  assert.deepEqual(effectiveBox([10, 20, 110, 320]), [10, 120, 110, 220]);
+  assert.deepEqual(effectiveBox([5, 5, 55, 55]), [5, 5, 55, 55]);                      // a square is itself
+  assert.deepEqual(dragBox([0, 0, 300, 200], "move", 0, 0, 1000, 800), [50, 0, 250, 200]);
+  const t = tile(1, [crop(1, [0, 0, 300, 200])]);
+  assert.deepEqual(boxOf(t, t.crops[0], {}), [50, 0, 250, 200]);
+  assert.deepEqual(pendingDecisions([t], {}, new Set(), { [cropKey(1, 1)]: [50, 0, 250, 200] }), []);  // no edit
 });
 
 test("a moved box and a changed reason are saved with the page; a box only for a kept crop", () => {

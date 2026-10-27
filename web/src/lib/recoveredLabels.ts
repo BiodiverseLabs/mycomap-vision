@@ -79,30 +79,47 @@ export type Box = RecoveredCrop["box"];
 export type BoxEdits = Record<string, Box>;
 export type Handle = "move" | "nw" | "ne" | "sw" | "se";
 
-/** The smallest crop side, in photo pixels: 4% of the short side, at least 16. */
-export const minSide = (w: number, h: number) => Math.max(16, Math.round(0.04 * Math.min(w, h)));
+/** The smallest crop side, in photo pixels: 4% of the short side, at least 16, never more than
+ *  the short side itself. */
+export const minSide = (w: number, h: number) =>
+  Math.min(Math.max(16, Math.round(0.04 * Math.min(w, h))), Math.min(w, h));
 
-/** `box` dragged by (dx, dy) photo pixels at `handle`: moved whole, or one corner moved, never
- *  past the photo's edges and never smaller than minSide. Whole pixels. */
+/** The square the model reads from `box` (Steve, 2026-10-27): the served model resizes the
+ *  short side and centre-crops a square, so of any box it uses the central square, side = the
+ *  shorter side. The server stores and sends boxes this way (recovered_labels.effective_box). */
+export function effectiveBox(box: Box): Box {
+  const [l, t, r, b] = box.map(Math.round);
+  const side = Math.min(r - l, b - t);
+  const x = l + Math.floor((r - l - side) / 2), y = t + Math.floor((b - t - side) / 2);
+  return [x, y, x + side, y + side];
+}
+
+/** `box` (a square) dragged by (dx, dy) photo pixels at `handle`, staying square: moved whole,
+ *  or one corner moved with the opposite corner fixed, the side following the larger of the
+ *  two moves. At a photo edge the box stops (it never leaves the photo or squashes), and it is
+ *  never smaller than minSide nor larger than the photo's short side. Whole pixels. */
 export function dragBox(box: Box, handle: Handle, dx: number, dy: number, w: number, h: number): Box {
-  let [l, t, r, b] = box;
-  const m = minSide(w, h);
+  const [l, t, r, b] = effectiveBox(box);
+  const side = r - l;
   if (handle === "move") {
-    const bw = r - l, bh = b - t;
-    l = Math.min(Math.max(0, l + dx), w - bw);
-    t = Math.min(Math.max(0, t + dy), h - bh);
-    return [Math.round(l), Math.round(t), Math.round(l + bw), Math.round(t + bh)];
+    const x = Math.min(Math.max(0, l + dx), w - side);
+    const y = Math.min(Math.max(0, t + dy), h - side);
+    return [Math.round(x), Math.round(y), Math.round(x) + side, Math.round(y) + side];
   }
-  if (handle.includes("w")) l = Math.min(Math.max(0, l + dx), r - m);
-  if (handle.includes("e")) r = Math.max(Math.min(w, r + dx), l + m);
-  if (handle.includes("n")) t = Math.min(Math.max(0, t + dy), b - m);
-  if (handle.includes("s")) b = Math.max(Math.min(h, b + dy), t + m);
-  return [Math.round(l), Math.round(t), Math.round(r), Math.round(b)];
+  // The fixed corner, and which way the box grows from it.
+  const west = handle.includes("w"), north = handle.includes("n");
+  const ax = west ? r : l, ay = north ? b : t;
+  const gx = west ? -dx : dx, gy = north ? -dy : dy;          // growth along each axis
+  const want = side + (Math.abs(gx) >= Math.abs(gy) ? gx : gy);
+  const room = Math.min(west ? ax : w - ax, north ? ay : h - ay);
+  const s = Math.round(Math.max(Math.min(minSide(w, h), room), Math.min(want, room)));
+  const x = west ? ax - s : ax, y = north ? ay - s : ay;
+  return [x, y, x + s, y + s];
 }
 
 /** The box a crop has now: the reviewer's edit, else the saved or proposed one. */
 export const boxOf = (tile: Pick<RecoveredTile, "item_id">, crop: Pick<RecoveredCrop, "n" | "box">,
-                      edits: BoxEdits): Box => edits[cropKey(tile.item_id, crop.n)] ?? crop.box;
+                      edits: BoxEdits): Box => edits[cropKey(tile.item_id, crop.n)] ?? effectiveBox(crop.box);
 
 const sameBox = (a: Box, b: Box) => a.every((v, i) => v === b[i]);
 
@@ -125,7 +142,7 @@ export function pendingDecisions(tiles: RecoveredTile[], marks: CropMarks, seen:
   const out: RecoveredDecision[] = [];
   for (const t of tiles) {
     const choice = (c: RecoveredCrop) => marks[cropKey(t.item_id, c.n)] ?? startChoice(t, c);
-    const moved = t.crops.filter((c) => !sameBox(boxOf(t, c, edits), c.box));
+    const moved = t.crops.filter((c) => !sameBox(boxOf(t, c, edits), effectiveBox(c.box)));
     // A box is sent only for a kept crop (the server refuses one for a rejected crop).
     const keptMoved = moved.filter((c) => choice(c) === "include");
     const reason = reasons[t.item_id] && reasons[t.item_id] !== t.reason ? reasons[t.item_id] : undefined;

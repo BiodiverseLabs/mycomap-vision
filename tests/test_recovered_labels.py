@@ -646,3 +646,83 @@ def test_the_touching_box_rule_takes_a_weak_box_beside_a_sure_one_but_never_chai
     on = slipcrop.keep_detections([stem, cap, logo, beyond, huge], area, grow=0.03)
     assert sorted(b for b, _ in on["specimen"]) == sorted([stem[0], cap[0]])
     assert slipcrop.version() == "slipcrop-1" and slipcrop.version(0.03) == "slipcrop-1+grow0.03"
+
+
+# --- every crop is the square the model reads (Steve, 2026-10-27) --------------------------------
+
+def test_a_crop_is_the_central_square_of_its_box_wherever_it_is_shown_stored_or_saved(tmp_path, conn):
+    assert rl.effective_box([0, 0, 300, 200]) == [50, 0, 250, 200]
+    assert rl.effective_box([10, 20, 110, 320]) == [10, 120, 110, 220]
+    assert rl.effective_box([5, 5, 55, 55]) == [5, 5, 55, 55]
+    s = open_store(tmp_path / "f.sqlite")
+    s.seed([slip_item("inat:1", "10")], "slips")
+    decide_photo(s, "inat:1", "exclude_photo", "slip")
+    fb.seed_files(s, conn, slip_crops=write_seed(tmp_path / "crops.tsv", [
+        seed_line("inat:1", "10", 0.8, [[0, 0, 1000, 600], [100, 100, 300, 300]])]))
+    t = rl.tiles(s.items_of(rl.ITEM_TYPE))[0]
+    assert [c["box"] for c in t["crops"]] == [[200, 0, 800, 600], [100, 100, 300, 300]]
+    assert t["crops"][0]["proposed"] == [200, 0, 800, 600]
+    assert rl.accepted_crops(s)["inat:1"]["boxes"][0] == (1, [0.2, 0.0, 0.8, 0.75])
+    one = item_of(s, "inat:1")["id"]
+    rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "boxes": {"2": [100, 100, 400, 300]}}], ME)
+    assert rl.boxes_now(s.get(one))[2] == [150, 100, 350, 300]          # saved as its square
+    rl.batch_decide(s, [{"item_id": one, "include": [1, 2], "boxes": {"1": [200, 0, 800, 600]}}], ME)
+    assert 1 not in rl.read_value(s.get(one)["decisions"][-1])[1]      # the detector's square: no edit
+
+
+def test_a_moved_box_is_embedded_again_at_the_next_night(conn, tmp_path):
+    store, s = slip_with_crop(conn, tmp_path)
+    m1 = Const("m1")
+    root = tmp_path / "emb"
+    embed.embed_photos(conn, store, m1, embed.crops_to_embed(conn, "m1", "large", store.location),
+                       root / "m1", log=lambda x: None)
+    assert embed.crops_to_embed(conn, "m1", "large", store.location) == []
+    rl.batch_decide(s, [{"item_id": item_of(s, "inat:1000")["id"], "include": [1],
+                         "boxes": {"1": [8, 0, 16, 8]}}], ME)
+    out = fb.sync_crops(s, conn)
+    assert out["moved"] == 1
+    todo = embed.crops_to_embed(conn, "m1", "large", store.location)
+    assert todo == [(-16001, todo[0][1], (0.5, 0.0, 1.0, 1.0))]          # the black half now
+    embed.embed_photos(conn, store, m1, todo, root / "m1", log=lambda x: None)
+    ids, vecs = embed.load_embeddings(conn, "m1", root / "m1")
+    row = {int(p): i for i, p in enumerate(ids.tolist())}                 # the newest vector wins
+    want = embed.normalise(m1.encode([Image.new("RGB", (8, 8), (0, 0, 0))]))[0]
+    assert np.allclose(vecs[row[-16001]], want)
+    assert fb.sync_crops(s, conn)["moved"] == 0                           # nothing moved since
+
+
+def test_the_square_shown_is_exactly_what_the_served_transform_reads():
+    """The served models' eval transform (open_clip, resize_mode shortest: Resize then
+    CenterCrop) reads only the central square of a crop box: the box and its effective square
+    give the same model input."""
+    open_clip = pytest.importorskip("open_clip")
+    torch = pytest.importorskip("torch")
+    t = open_clip.image_transform(336, is_train=False)
+    rng = np.random.default_rng(7)
+    img = Image.fromarray(rng.integers(0, 255, (480, 640, 3), dtype=np.uint8))
+    raw = [40, 60, 440, 300]                                  # 400 x 240: wider than tall
+    sq = rl.effective_box(raw)
+    assert sq == [120, 60, 360, 300]
+    w, h = img.size
+    frac = lambda b: [b[0] / w, b[1] / h, b[2] / w, b[3] / h]  # noqa: E731
+    a = t(embed.apply_box(img, frac(raw)))
+    b = t(embed.apply_box(img, frac(sq)))
+    assert a.shape == b.shape == (3, 336, 336)
+    # the same pixels; only the resampling at the square's edges can differ a little
+    assert float(torch.mean(torch.abs(a - b))) < 0.05
+    off = t(embed.apply_box(img, frac([40, 60, 280, 300])))   # the left square: other pixels
+    assert float(torch.mean(torch.abs(a - off))) > 0.5
+
+
+def test_box_source_says_reviewer_only_for_a_box_whose_square_differs_from_the_detectors():
+    item = {"status": "decided", "evidence": {"crops": [{"n": 1, "box": [0, 0, 300, 200]},
+                                                        {"n": 2, "box": [10, 10, 60, 60]}]},
+            "last_decision": {"decision": "include_crops",
+                              "value": json.dumps({"include": [1, 2],
+                                                   "boxes": {"1": [50, 0, 250, 200],     # = its square
+                                                             "2": [20, 10, 80, 60]}})}}  # an old rectangle
+    assert rl.box_source(item, 1) == "detector"
+    assert rl.box_source(item, 2) == "reviewer"
+    assert rl.boxes_now(item)[2] == [25, 10, 75, 60]
+    open_item = {"status": "open", "evidence": item["evidence"], "last_decision": None}
+    assert [rl.box_source(open_item, n) for n in (1, 2)] == ["detector", "detector"]

@@ -186,8 +186,9 @@ def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
     "Photos that show no specimen" decision by then leaves it out as a field slip, of an item
     seeded by then; an item nobody had decided keeps every crop ("default"), a decided one the
     crops of its latest decision by then. Boxes are fractions of the photo (l, t, r, b), to 6
-    places: the reviewer's when they moved or resized it ("box_source" reviewer), else the
-    detector's. Same rules as `export`: a .backup copy opened read-only, reviewers as HMAC
+    places, always the square the model reads (recovered_labels.effective_box): the
+    reviewer's when they moved or resized it ("box_source" reviewer), else the detector's
+    ("detector": its box's central square). Same rules as `export`: a .backup copy opened read-only, reviewers as HMAC
     pseudonyms, a v1-test photo refused; rows sorted by photo_key, then n."""
     from . import recovered_labels as rl
     if not key:
@@ -235,7 +236,7 @@ def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
                 "n": str(c["n"]), "l": f"{l / w:.6f}", "t": f"{t / h:.6f}",
                 "r": f"{r / w:.6f}", "b": f"{b / h:.6f}", "width": str(w), "height": str(h),
                 "detector": ev.get("version") or "",
-                "box_source": "reviewer" if list(now[c["n"]]) != list(c["box"]) else "detector",
+                "box_source": rl.box_source(item, c["n"]),
                 "decision": d["decision"] if d is not None else "default",
                 "decision_id": "" if d is None else str(d["id"]),
                 "decided_at": "" if d is None else datetime.fromtimestamp(
