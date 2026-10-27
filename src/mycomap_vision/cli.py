@@ -1427,7 +1427,7 @@ def _slip_crops(conn, args) -> None:
         import torch
         total = torch.cuda.get_device_properties(0).total_memory
         torch.cuda.set_per_process_memory_fraction(min(1.0, args.gpu_memory_gb * 2**30 / total))
-    detector = slipcrop.Detector(device=args.device, threads=args.threads)
+    detector = slipcrop.Detector(device=args.device, threads=args.threads, grow=args.grow)
     print(f"slip-crops: {len(picks):,} slip photos in {sorted(tranches)}", file=sys.stderr)
     out = rl.run_slip_crops(picks, image, detector.detect, Path(args.out), check,
                             limit=args.limit, log=lambda s: print(s, file=sys.stderr))
@@ -2781,6 +2781,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--limit", type=int, help="at most this many photos this run")
     q.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     q.add_argument("--threads", type=int, help="CPU threads (cpu only)")
+    q.add_argument("--grow", type=float,
+                   help="also keep a weaker specimen box (score >= this, e.g. 0.03) that overlaps a "
+                        "kept one and is at most 3x its area: a cap scored low beside its stem "
+                        "(off by default; 27 Oct trial: 13 of 121 crops changed, ~4 better, 1-2 "
+                        "worse)")
     q.add_argument("--gpu-memory-gb", type=float, default=2.0,
                    help="cap this process's share of the GPU (default 2.0: SAM at 1024 px "
                         "needs a bit over 1.5)")

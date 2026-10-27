@@ -175,8 +175,8 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
 # by its sha256, in a crop arm declared before any result.
 
 CROP_COLUMNS = ("photo_key", "manifest_photo_id", "record_key", "v1_split", "n", "l", "t", "r",
-                "b", "width", "height", "detector", "decision", "decision_id", "decided_at",
-                "reviewer_pseudonym")
+                "b", "width", "height", "detector", "box_source", "decision", "decision_id",
+                "decided_at", "reviewer_pseudonym")
 
 
 def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
@@ -186,7 +186,8 @@ def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
     "Photos that show no specimen" decision by then leaves it out as a field slip, of an item
     seeded by then; an item nobody had decided keeps every crop ("default"), a decided one the
     crops of its latest decision by then. Boxes are fractions of the photo (l, t, r, b), to 6
-    places. Same rules as `export`: a .backup copy opened read-only, reviewers as HMAC
+    places: the reviewer's when they moved or resized it ("box_source" reviewer), else the
+    detector's. Same rules as `export`: a .backup copy opened read-only, reviewers as HMAC
     pseudonyms, a v1-test photo refused; rows sorted by photo_key, then n."""
     from . import recovered_labels as rl
     if not key:
@@ -220,19 +221,21 @@ def export_crops(store_copy: Path, release: Path, as_of: str, key: bytes,
         ev = item["evidence"]
         w, h = int(ev.get("width") or 0), int(ev.get("height") or 0)
         keep = set(rl.kept(item))
+        now = rl.boxes_now(item)
         rk = pr.record_of_item({"record_keys": json.loads(it["record_keys"] or "[]"),
                                 "links": json.loads(it["links"] or "[]")}) or ""
         pid = fb.photo_id_of(photo)
         for c in rl.crops_of(item):
             if c["n"] not in keep or not (w and h):
                 continue
-            l, t, r, b = c["box"]
+            l, t, r, b = now[c["n"]]
             rows.append({
                 "photo_key": photo, "manifest_photo_id": "" if pid is None else str(pid),
                 "record_key": rk, "v1_split": split_of.get(photo, "") or "none",
                 "n": str(c["n"]), "l": f"{l / w:.6f}", "t": f"{t / h:.6f}",
                 "r": f"{r / w:.6f}", "b": f"{b / h:.6f}", "width": str(w), "height": str(h),
                 "detector": ev.get("version") or "",
+                "box_source": "reviewer" if list(now[c["n"]]) != list(c["box"]) else "detector",
                 "decision": d["decision"] if d is not None else "default",
                 "decision_id": "" if d is None else str(d["id"]),
                 "decided_at": "" if d is None else datetime.fromtimestamp(

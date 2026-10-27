@@ -54,6 +54,7 @@ MIN_CLUSTER = 2 / 576
 GAP = 0.05              # specimen parts closer than this share of the short side are one cluster
 SIDE = 1024             # the long side the detector runs at
 CELL = 8                # px of the detection image per cell of the grid the geometry runs on
+GROW_MAX_RATIO = 3.0    # keep_detections(grow=...): a weak box at most this x its sure box
 VERSION = "slipcrop-1"  # names the rules and models above; kept with every proposal
 
 
@@ -206,19 +207,45 @@ def nms(boxes: list, scores: list, iou: float = 0.5) -> list[int]:
     return keep
 
 
-def keep_detections(dets: list[tuple[list, float, str]], frame_area: float) -> dict:
+def _touch(a, b, pad: float) -> bool:
+    return (a[0] - pad < b[2] and b[0] - pad < a[2] and a[1] - pad < b[3] and b[1] - pad < a[3])
+
+
+def keep_detections(dets: list[tuple[list, float, str]], frame_area: float,
+                    grow: float | None = None) -> dict:
     """OWLv2's (box, score, kind) detections by kind, at each kind's threshold, the
-    whole-scene specimen boxes dropped, NMS'd and capped at MAX_BOXES, best first."""
+    whole-scene specimen boxes dropped, NMS'd and capped at MAX_BOXES, best first.
+
+    With `grow` (a lower specimen score): a weaker specimen box is kept too when it touches or
+    overlaps a kept one, repeatedly, so a cap OWLv2 scores low beside the stem it is sure of
+    joins it (Steve, 2026-10-27: a Hygrocybe crop got the stem, not the cap at 0.04). A weak
+    box touching nothing kept (a logo printed on the slip) stays out."""
     found: dict[str, list] = {"slip": [], "specimen": []}
+    weak = []
     for b, s, k in dets:
         big = (b[2] - b[0]) * (b[3] - b[1]) > MAX_BOX * frame_area
         if s >= THRESH[k] and not (k == "specimen" and big):
             found[k].append((b, s))
+        elif k == "specimen" and grow is not None and s >= grow and not big:
+            weak.append((b, s))
+    # One step only (no chaining: weak boxes linked to weak boxes spread over the scene), and a
+    # weak box at most GROW_MAX_RATIO times the area of the sure box it overlaps.
+    area = lambda bx: max(1e-9, (bx[2] - bx[0]) * (bx[3] - bx[1]))  # noqa: E731
+    seeds = list(found["specimen"])
+    for w in weak:
+        if any(_touch(w[0], f[0], 0.0) and area(w[0]) <= GROW_MAX_RATIO * area(f[0])
+               for f in seeds):
+            found["specimen"].append(w)
     out = {}
     for k, items in found.items():
         keep = nms([i[0] for i in items], [i[1] for i in items])[:MAX_BOXES]
         out[k] = [items[i] for i in keep]
     return out
+
+
+def version(grow: float | None = None) -> str:
+    """The proposal's version: VERSION, and the touching-box rule when it is on."""
+    return VERSION if grow is None else f"{VERSION}+grow{grow:g}"
 
 
 # --- the detector (transformers + torch, loaded on first use) -----------------------------------
@@ -227,6 +254,7 @@ def keep_detections(dets: list[tuple[list, float, str]], frame_area: float) -> d
 class Detector:
     device: str = "cpu"
     threads: int | None = None
+    grow: float | None = None          # keep_detections' lower score for touching boxes
     _m: dict = field(default_factory=dict, repr=False)
 
     def _load(self):
@@ -264,11 +292,11 @@ class Detector:
             # OWLv2 pads the photo to a square at the bottom/right: boxes are on that square
             s = max(W, H)
             res = m["owl_p"].post_process_object_detection(
-                o, threshold=0.05, target_sizes=torch.tensor([[s, s]]))[0]
+                o, threshold=min(0.05, self.grow or 0.05), target_sizes=torch.tensor([[s, s]]))[0]
         dets = [([min(max(v, 0.0), (W, H, W, H)[i]) for i, v in enumerate(b)], sc, kinds[lb])
                 for b, sc, lb in zip(res["boxes"].tolist(), res["scores"].tolist(),
                                      res["labels"].tolist())]
-        kept = keep_detections(dets, W * H)
+        kept = keep_detections(dets, W * H, self.grow)
         out, emb = {}, None
         for k in ("slip", "specimen"):
             mk = np.zeros((H, W), bool)
@@ -309,7 +337,7 @@ class Detector:
             if k < 1 else img
         slip_m, spec_m, found = self.masks(small)
         slip, spec, on_slip = specimen_region(to_grid(slip_m), to_grid(spec_m))
-        return {"version": VERSION, "width": w, "height": h,
+        return {"version": version(self.grow), "width": w, "height": h,
                 "slip_area": round(float(slip.mean()), 4),
                 "specimen_area": round(float(spec.mean()), 4),
                 "on_slip_area": round(float(on_slip.mean()), 4),

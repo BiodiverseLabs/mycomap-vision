@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { RecoveredCrop, RecoveredTile } from "./api";
-import { boxStyle, cropBackground, cropKey, cropShare, flipCrop, pendingDecisions, startChoice, tileFacts } from "./recoveredLabels";
+import { boxOf, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, flipCrop, minSide, pendingDecisions,
+         startChoice, tileFacts } from "./recoveredLabels";
 
 const crop = (n: number, box: RecoveredCrop["box"], decision: RecoveredCrop["decision"] = null): RecoveredCrop =>
   ({ n, box, area: 0.05, decision });
@@ -56,4 +57,29 @@ test("the tile says its slip p, how big the find is and how many crops", () => {
                "slip p 0.83 · specimen 4.0% of the photo · 2 crops");
   assert.equal(tileFacts({ slip_p: null, specimen_area: 0.25, crops: [crop(1, [0, 0, 1, 1])] }),
                "specimen 25% of the photo");
+});
+
+test("a box moves whole or by one corner, never past the photo or below the smallest side", () => {
+  const b: RecoveredCrop["box"] = [100, 100, 300, 300];
+  assert.deepEqual(dragBox(b, "move", 50, -20, 1000, 800), [150, 80, 350, 280]);
+  assert.deepEqual(dragBox(b, "move", -500, 900, 1000, 800), [0, 600, 200, 800]);      // stays inside
+  assert.deepEqual(dragBox(b, "nw", -60, -60, 1000, 800), [40, 40, 300, 300]);
+  assert.deepEqual(dragBox(b, "se", 900, 900, 1000, 800), [100, 100, 1000, 800]);
+  assert.equal(minSide(1000, 800), 32);
+  assert.deepEqual(dragBox(b, "ne", -500, 500, 1000, 800), [100, 268, 132, 300]);    // 32 px at least
+});
+
+test("a moved box and a changed reason are saved with the page; a box only for a kept crop", () => {
+  const t = { ...tile(1, [crop(1, [0, 0, 10, 10]), crop(2, [20, 20, 40, 40])]), reason: "slip" };
+  const edits = { [cropKey(1, 2)]: [10, 10, 60, 60] as RecoveredCrop["box"] };
+  assert.deepEqual(boxOf(t, t.crops[1], edits), [10, 10, 60, 60]);
+  assert.deepEqual(pendingDecisions([t], {}, new Set(), edits),
+                   [{ item_id: 1, include: [1, 2], boxes: { "2": [10, 10, 60, 60] } }]);
+  assert.deepEqual(pendingDecisions([t], flipCrop({}, t, 2), new Set(), edits), [{ item_id: 1, include: [1] }]);
+  assert.deepEqual(pendingDecisions([t], {}, new Set(), {}, { 1: "dried" }),
+                   [{ item_id: 1, include: [1, 2], reason: "dried" }]);
+  assert.deepEqual(pendingDecisions([t], {}, new Set(), {}, { 1: "slip" }), []);       // unchanged
+  assert.equal(cropsUsed("slip"), true);
+  assert.equal(cropsUsed("dried"), false);
+  assert.equal(cropsUsed("keep"), false);
 });

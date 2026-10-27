@@ -17,7 +17,11 @@ synced like the exclusions).
 
 Decisions: "include_crops" with the crop numbers kept as a JSON list in the value, or
 "reject_crops" (none kept). The latest decision is the photo's crops; an open item is every
-crop. Both apply in Vision.
+crop. Both apply in Vision. A reviewer may move or resize a crop (Steve, 2026-10-27): the value
+is then {"include": [...], "boxes": {"<n>": [l, t, r, b]}}, the reviewer's boxes in the photo's
+pixels, carried into later decisions until changed again. From the same tile a reviewer may
+change the photo's exclusion reason, written on its "Photos that show no specimen" item as the
+photo review writes it; only a field slip gives crops.
 
 Paper (the coordinator's rule, 2026-10-26): crops never change the E34/E35 exclusion lists
 (`mv feedback export-photo-exclusions` is byte-identical with or without them). They have an
@@ -147,20 +151,44 @@ def crops_of(item: dict) -> list[dict]:
     return list((item.get("evidence") or {}).get("crops") or [])
 
 
+def read_value(decision: dict | None) -> tuple[list[int] | None, dict[int, list[int]]]:
+    """A Recovered labels decision's (crop numbers kept, reviewer's boxes by crop number).
+    None kept for no decision; [] for reject_crops or an unreadable value."""
+    if not decision:
+        return None, {}
+    if decision["decision"] == "reject_crops":
+        return [], {}
+    try:
+        v = json.loads(decision.get("value") or "[]")
+    except ValueError:
+        return [], {}
+    if isinstance(v, dict):
+        return (list(v.get("include") or []),
+                {int(n): list(b) for n, b in (v.get("boxes") or {}).items()})
+    return list(v), {}
+
+
+def last_of(item: dict) -> dict | None:
+    """The item's latest decision, from items_of ("last_decision") or get ("decisions")."""
+    if "last_decision" in item:
+        return item.get("last_decision") or None
+    return (item.get("decisions") or [None])[-1]
+
+
 def kept(item: dict) -> list[int]:
     """The crop numbers the item keeps now: every crop while open (the default Include), else
     its latest decision's."""
-    last = item.get("last_decision") or None
     every = [c["n"] for c in crops_of(item)]
-    if item["status"] == "open" or not last:
+    chosen, _ = read_value(last_of(item))
+    if item["status"] == "open" or chosen is None:
         return every
-    if last["decision"] == "reject_crops":
-        return []
-    try:
-        chosen = set(json.loads(last.get("value") or "[]"))
-    except ValueError:
-        return []
-    return [n for n in every if n in chosen]
+    return [n for n in every if n in set(chosen)]
+
+
+def boxes_now(item: dict) -> dict[int, list[int]]:
+    """Each crop's box now: the reviewer's (the latest decision's), else the detector's."""
+    _, edited = read_value(last_of(item))
+    return {c["n"]: list(edited.get(c["n"], c["box"])) for c in crops_of(item)}
 
 
 def accepted_crops(store: fb.Store) -> dict[str, dict]:
@@ -175,9 +203,10 @@ def accepted_crops(store: fb.Store) -> dict[str, dict]:
         ev = it.get("evidence") or {}
         w, h = int(ev.get("width") or 0), int(ev.get("height") or 0)
         keep = set(kept(it))
-        boxes = [(c["n"], [round(c["box"][0] / w, 6), round(c["box"][1] / h, 6),
-                           round(c["box"][2] / w, 6), round(c["box"][3] / h, 6)])
-                 for c in crops_of(it) if c["n"] in keep and w and h]
+        now = boxes_now(it)
+        boxes = [(n, [round(b[0] / w, 6), round(b[1] / h, 6), round(b[2] / w, 6),
+                      round(b[3] / h, 6)])
+                 for n, b in now.items() if n in keep and w and h]
         if boxes:
             out[it["subject"]] = {"width": w, "height": h, "boxes": boxes,
                                   "version": ev.get("version") or ""}
@@ -186,12 +215,27 @@ def accepted_crops(store: fb.Store) -> dict[str, dict]:
 
 # --- the queue's page -------------------------------------------------------------------------
 
+def photo_reasons(photo_items: list[dict]) -> dict[str, str]:
+    """photo key -> its exclusion reason now ("keep" when kept), from the "Photos that show no
+    specimen" items (Store.items_of); a photo nobody decided is not in it."""
+    out = {}
+    for it in photo_items:
+        last = it.get("last_decision") or {}
+        if last.get("decision") == "exclude_photo":
+            out[it["subject"]] = last.get("value") or "other"
+        elif last.get("decision") == "keep_photo":
+            out[it["subject"]] = KEEP
+    return out
+
+
 def tiles(items: list[dict], tranche: str = "all", status: str = "open", sort: str = "riskiest",
-          query: str = "", slips: set[str] | None = None) -> list[dict]:
-    """The queue's photos, one tile each with its crops (each with the decision it carries).
-    Sorted riskiest first (the smallest specimen: where false finds sit), or largest, or
-    newest. With `slips` (the photos still left out as slips), a photo no longer left out is
-    shown as such ("still_excluded": False): its crops count for nothing."""
+          query: str = "", slips: set[str] | dict | None = None) -> list[dict]:
+    """The queue's photos, one tile each with its crops (each with its box now, the detector's
+    "proposed" box, and the decision it carries). Sorted riskiest first (the smallest
+    specimen: where false finds sit), or largest, or newest. With `slips` (photo key -> its
+    exclusion reason, photo_reasons; or the set of photos left out as slips), each tile says
+    its "reason", and a photo no longer left out as a slip is shown as such
+    ("still_excluded": False): its crops count for nothing."""
     if tranche != "all" and tranche not in TRANCHE_CODES:
         raise fb.FeedbackError(f"tranche is all or one of {', '.join(TRANCHE_CODES)}")
     if status not in ("open", "decided"):
@@ -214,18 +258,26 @@ def tiles(items: list[dict], tranche: str = "all", status: str = "open", sort: s
                 and query not in it["subject"].lower():
             continue
         keep = set(kept(it))
+        now = boxes_now(it)
         decided = it["status"] == "decided"
-        crops = [{"n": c["n"], "box": c["box"],
-                  "area": round((c["box"][2] - c["box"][0]) * (c["box"][3] - c["box"][1])
+        crops = [{"n": c["n"], "box": now[c["n"]], "proposed": c["box"],
+                  "area": round((now[c["n"]][2] - now[c["n"]][0])
+                                * (now[c["n"]][3] - now[c["n"]][1])
                                 / max(1, ev.get("width", 1) * ev.get("height", 1)), 4),
                   "decision": ("include" if c["n"] in keep else "reject") if decided else None}
                  for c in crops_of(it)]
+        if isinstance(slips, dict):
+            reason = slips.get(it["subject"])
+            still = reason == SLIP_REASON
+        else:
+            reason = None if slips is None else (SLIP_REASON if it["subject"] in slips else None)
+            still = None if slips is None else it["subject"] in slips
         out.append({"item_id": it["id"], "photo_key": it["subject"], "record_key": key,
                     "label": label, "link": fb.link(key), "slip_p": ev.get("slip_p"),
                     "tranche": ev.get("tranche") or "rule", "width": ev.get("width"),
                     "height": ev.get("height"), "specimen_area": ev.get("specimen_area") or 0.0,
                     "crops": crops, "status": it["status"],
-                    "still_excluded": None if slips is None else it["subject"] in slips,
+                    "still_excluded": still, "reason": reason,
                     "created_at": it.get("created_at") or 0})
     if sort == "riskiest":
         out.sort(key=lambda t: (t["specimen_area"], t["photo_key"]))
@@ -250,13 +302,52 @@ def tranche_counts(items: list[dict]) -> list[dict]:
     return out
 
 
+KEEP = "keep"            # a tile's reason picker: keep the whole photo in Vision
+
+
+def min_side(w: int, h: int) -> int:
+    """The smallest side a reviewer's box may have (the page's minSide)."""
+    return max(16, round(0.04 * min(w, h)))
+
+
+def check_box(box, w: int, h: int) -> list[int]:
+    """A reviewer's box as whole pixels inside its w x h photo, at least min_side a side."""
+    if not (isinstance(box, list) and len(box) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box)):
+        raise fb.FeedbackError(f"a box is [left, top, right, bottom] in pixels, not {box!r}")
+    b = [int(round(v)) for v in box]
+    m = min_side(w, h)
+    if not (0 <= b[0] and 0 <= b[1] and b[2] <= w and b[3] <= h
+            and b[2] - b[0] >= m and b[3] - b[1] >= m):
+        raise fb.FeedbackError(f"box {b} is not inside the {w} x {h} photo with sides of at "
+                               f"least {m} px")
+    return b
+
+
+def crop_value(chosen: list[int], boxes: dict[int, list[int]]) -> str:
+    """include_crops' value: the kept numbers, with the reviewer's boxes when there are any."""
+    if not boxes:
+        return json.dumps(chosen)
+    return json.dumps({"include": chosen, "boxes": {str(n): boxes[n] for n in sorted(boxes)}},
+                      separators=(",", ":"))
+
+
 def batch_decide(store: fb.Store, decisions: list[dict], person: dict,
                  projects: set[str] | None = None) -> dict:
-    """Save a page: each {item_id, include: [crop numbers kept]} (an empty list rejects every
-    crop). Include is a decision too, once the reviewer has seen the tile. Every entry is
-    checked before anything is written (an item of this queue the reviewer may see, crop
-    numbers it has, the paper's seal), so a batch is written whole or not at all. Idempotent:
-    an entry equal to the item's latest decision writes nothing."""
+    """Save a page: each {item_id, include: [crop numbers kept], boxes?: {n: [l, t, r, b]},
+    reason?} (an empty include rejects every crop). Include is a decision too, once the
+    reviewer has seen the tile.
+
+    `boxes` are the reviewer's moved or resized crops (photo pixels), for kept crops only; a
+    box back on the detector's is no longer an edit, and boxes saved before carry over.
+    `reason` changes the photo's exclusion: one of photo_review.REASONS, written as
+    "exclude_photo" on its "Photos that show no specimen" item, or "keep" ("keep_photo"); only
+    a field slip gives crops.
+
+    Every entry is checked before anything is written (an item of this queue the reviewer may
+    see, crop numbers it has, boxes inside the photo, a known reason, the paper's seal), so a
+    batch is written whole or not at all. Idempotent: an entry equal to the latest decisions
+    writes nothing."""
     if not decisions:
         raise fb.FeedbackError("nothing to save")
     plan, seen = [], set()
@@ -277,16 +368,57 @@ def batch_decide(store: fb.Store, decisions: list[dict], person: dict,
         if store.gate is not None and store.gate.judge_row(item)[0] != "ok":
             raise fb.FeedbackError(f"item {item_id} is under the paper's seal")
         include = d.get("include")
-        have = {c["n"] for c in crops_of(item)}
+        have = {c["n"]: c["box"] for c in crops_of(item)}
         if not isinstance(include, list) or any(not isinstance(n, int) or isinstance(n, bool)
                                                 or n not in have for n in include):
             raise fb.FeedbackError(f"include is a list of the crop numbers of item {item_id} "
                                    f"({', '.join(map(str, sorted(have)))})")
         chosen = sorted(set(include))
-        plan.append((item, ("include_crops", json.dumps(chosen)) if chosen
-                     else ("reject_crops", None)))
-    saved = unchanged = 0
-    for item, (decision, value) in plan:
+        ev = item.get("evidence") or {}
+        w, h = int(ev.get("width") or 0), int(ev.get("height") or 0)
+        given = d.get("boxes") or {}
+        if not isinstance(given, dict):
+            raise fb.FeedbackError("boxes are {crop number: [left, top, right, bottom]}")
+        _, edited = read_value(last_of(item))
+        edited = {n: b for n, b in edited.items() if n in chosen}      # carried over
+        for n, b in given.items():
+            try:
+                n = int(n)
+            except (TypeError, ValueError):
+                raise fb.FeedbackError(f"not a crop number: {n!r}") from None
+            if n not in chosen:
+                raise fb.FeedbackError(f"crop {n} of item {item_id} is not kept: a box is only "
+                                       "for a kept crop")
+            edited[n] = check_box(b, w, h)
+        edited = {n: b for n, b in edited.items() if b != list(have[n])}
+        reason = d.get("reason")
+        photo = None
+        if reason is not None:
+            if reason != KEEP and reason not in pr.REASON_CODES:
+                raise fb.FeedbackError(f"reason is one of {', '.join(pr.REASON_CODES)} or keep")
+            row = store.conn.execute("select id from items where item_type = ? and subject = ?",
+                                     (pr.ITEM_TYPE, item["subject"])).fetchone()
+            if row is None:
+                raise fb.FeedbackError(f"{item['subject']} has no exclusion to change")
+            try:
+                photo = store.get(row["id"], projects)
+            except KeyError:
+                raise fb.FeedbackError(f"{item['subject']}'s exclusion is not one you can "
+                                       "review") from None
+            if store.gate is not None and store.gate.judge_row(photo)[0] != "ok":
+                raise fb.FeedbackError(f"{item['subject']} is under the paper's seal")
+        plan.append((item, ("include_crops", crop_value(chosen, edited)) if chosen
+                     else ("reject_crops", None), photo, reason))
+    saved = unchanged = reasons = 0
+    for item, (decision, value), photo, reason in plan:
+        if photo is not None:
+            code, why = ("keep_photo", None) if reason == KEEP else ("exclude_photo", reason)
+            last = (photo.get("decisions") or [None])[-1]
+            if not (photo["status"] == "decided" and last and last["decision"] == code
+                    and (last.get("value") or None) == why):
+                store.decide(photo["id"], code, person, value=why, note="recovered labels",
+                             projects=projects)
+                reasons += 1
         last = item["decisions"][-1] if item["decisions"] else None
         if (item["status"] == "decided" and last and last["decision"] == decision
                 and (last["value"] or None) == value):
@@ -294,9 +426,9 @@ def batch_decide(store: fb.Store, decisions: list[dict], person: dict,
             continue
         store.decide(item["id"], decision, person, value=value, projects=projects)
         saved += 1
-    return {"saved": saved, "unchanged": unchanged,
-            "included": sum(1 for _, (dec, _v) in plan if dec == "include_crops"),
-            "rejected": sum(1 for _, (dec, _v) in plan if dec == "reject_crops")}
+    return {"saved": saved, "unchanged": unchanged, "reasons_changed": reasons,
+            "included": sum(1 for p in plan if p[1][0] == "include_crops"),
+            "rejected": sum(1 for p in plan if p[1][0] == "reject_crops")}
 
 
 # --- the batch job: `mv feedback slip-crops` (laptop GPU; slipcrop.Detector) ------------------
