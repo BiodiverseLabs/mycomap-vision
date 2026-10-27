@@ -3098,6 +3098,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "external" and args.action in ("coverage", "crosswalk", "predict", "run",
                                                        "report"):
         read_only["external"] = cmd_external  # these only read the manifest
+    if args.command == "paper-score" and not args.embed_missing:
+        # It only reads the manifest (the sealed test's photos are embedded in memory), and
+        # the paper's manifest (data/manifest-v1-paper.sqlite, pinned by sha256) is a read-
+        # only file: opening it for writing would set WAL and change its bytes, or fail.
+        # Only --embed-missing writes vectors to the manifest.
+        read_only["paper-score"] = cmd_paper_score
     if args.command in read_only:             # the manifest is opened as it is, read-only
         conn = sqlite3.connect(config.MANIFEST_PATH.resolve().as_uri() + "?mode=ro", uri=True)
         read_only[args.command](conn, args)
