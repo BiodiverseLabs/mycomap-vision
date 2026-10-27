@@ -12,6 +12,11 @@ that predicts, embeds or scores, and it refuses to run unless:
 - this code is the commit the config names (`code_commit`), unless `--allow-code <sha>`
   names the commit running, which marks every output "post hoc" in capitals.
 
+Amendments (pre-results, declared): tags `paper-analysis-freeze-v1-a1`, `-a2`, ... each hold a
+config whose `amends` block names its parent tag, the reason, the config paths it changes and
+the code files its code_commit changes. The guard takes the newest tag and checks every link
+(amendment_differences, code_changes); the report records the chain.
+
 The one exception to "byte-identical" is the tagged config's `post_freeze` list: the fields
 it names (each a "TBD..." placeholder at the tag, with the rule that fills it) may be filled
 after the tag, and the freeze block may gain parts (never change one). Every other difference
@@ -206,6 +211,7 @@ def check_config(doc: dict) -> None:
                 if k in h and h[k] not in ids:
                     raise ValueError(f"{fam}/{h.get('id')}: unknown comparator {h[k]!r}")
     check_secondary_rows(doc)
+    check_amends(doc)
 
 
 def check_secondary_rows(doc: dict) -> None:
@@ -358,7 +364,7 @@ def apply_errata(base, block: dict | None) -> dict | None:
 # models' v1-test files, the attrs file), and models and lists declared before the tag but
 # finished after it by a pre-declared rule (E34 / E35).
 POST_FREEZE_KINDS = ("test_output", "declared_after_freeze")
-POST_FREEZE_PROTECTED = ("code_commit", "post_freeze", "freeze")
+POST_FREEZE_PROTECTED = ("code_commit", "post_freeze", "freeze", "amends")
 
 
 def is_placeholder(value) -> bool:
@@ -508,6 +514,175 @@ def post_freeze_files(config: dict, records: list[dict], resolve_path) -> None:
                               "pinned beside it")
 
 
+# --- amendments: a chain of freeze tags ------------------------------------------------------------
+
+AMEND_ALWAYS = ("code_commit", "_code_commit_note", "amends")
+
+
+def check_amends(doc: dict) -> None:
+    """An amendment's block: {"tag": its parent freeze tag, "reason", "paths": [config paths
+    it changes], "code_files": [files its code_commit changes]}."""
+    a = doc.get("amends")
+    if a is None:
+        return
+    if not isinstance(a, dict) or not str(a.get("tag") or "").startswith(TAG):
+        raise ValueError(f"amends: names its parent tag ({TAG} or {TAG}-a<n>)")
+    if not str(a.get("reason") or "").strip():
+        raise ValueError("amends: gives the reason")
+    for k in ("paths", "code_files"):
+        if not isinstance(a.get(k), list) or not all(isinstance(x, str) and x for x in a[k]):
+            raise ValueError(f"amends: {k} is a list of strings")
+
+
+def freeze_chain(research_dir: Path) -> list[str]:
+    """The freeze tags present, in order: TAG, then TAG-a1, TAG-a2, ... An amendment tag past
+    a gap (an -a2 with no -a1) is refused, not skipped."""
+    def has(tag):
+        return not _git(research_dir, "rev-parse", "--verify", "--quiet",
+                        f"refs/tags/{tag}").returncode
+    if not has(TAG):
+        return []
+    chain, n = [TAG], 1
+    while has(f"{TAG}-a{n}"):
+        chain.append(f"{TAG}-a{n}")
+        n += 1
+    listed = _git(research_dir, "tag", "--list", f"{TAG}-a*").stdout.decode().split()
+    stray = sorted(set(listed) - set(chain))
+    if stray:
+        raise FrozenError(f"amendment tags out of sequence: {stray} (the chain is {chain})")
+    return chain
+
+
+def tagged_config(research_dir: Path, tag: str) -> tuple[bytes, dict]:
+    got = _git(research_dir, "show", f"{tag}:{CONFIG_IN_REPO}")
+    if got.returncode:
+        raise FrozenError(f"tag {tag} has no {CONFIG_IN_REPO}")
+    return got.stdout, json.loads(got.stdout)
+
+
+def _covered(path: str, declared) -> bool:
+    return any(path == d or path.startswith(d + "/") for d in declared)
+
+
+def amendment_differences(parent: dict, child: dict) -> list[str]:
+    """Where an amendment's config differs from its parent's other than in its declared
+    paths (amends.paths: a field and everything under it, added, changed or removed; a list
+    entry picked by its id), code_commit / _code_commit_note / amends, post_freeze entries
+    under a declared path, and freeze-block growth (every part but code_commit kept). Empty:
+    the amendment changes only what it declares."""
+    declared = list((child.get("amends") or {}).get("paths") or [])
+    out: list[str] = []
+
+    def grow(a, b, path):
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in a:
+                if path == "freeze" and k == "code_commit":
+                    continue
+                if k not in b:
+                    out.append(f"{path}/{k}: frozen in the parent, missing now")
+                else:
+                    grow(a[k], b[k], f"{path}/{k}")
+        elif a != b:
+            out.append(f"{path}: changed (the freeze block may only gain parts)")
+
+    def walk(a, b, path):
+        if path and (_covered(path, declared) or path in AMEND_ALWAYS):
+            return
+        if path == "freeze":
+            if a is None or b is None:
+                if a != b:
+                    out.append("freeze: present in one config only")
+            else:
+                grow(a, b, "freeze")
+            return
+        if path == "post_freeze":
+            pa = {e["path"]: e for e in a or []}
+            pb = {e["path"]: e for e in b or []}
+            for k in sorted(set(pa) | set(pb)):
+                if pa.get(k) != pb.get(k) and not _covered(k, declared):
+                    out.append(f"post_freeze {k}: changed, and {k} is not declared")
+            return
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in sorted(set(a) | set(b)):
+                p = f"{path}/{k}" if path else k
+                if _covered(p, declared) or (not path and k in AMEND_ALWAYS):
+                    continue
+                if k not in b:
+                    out.append(f"{p}: in the parent, missing now")
+                elif k not in a:
+                    out.append(f"{p}: not in the parent")
+                else:
+                    walk(a[k], b[k], p)
+        elif (isinstance(a, list) and isinstance(b, list)
+              and all(isinstance(x, dict) and "id" in x for x in a + b)):
+            ia, ib = {x["id"]: x for x in a}, {x["id"]: x for x in b}
+            for k in [x["id"] for x in a] + [x["id"] for x in b if x["id"] not in ia]:
+                p = f"{path}/{k}"
+                if _covered(p, declared):
+                    continue
+                if k not in ib:
+                    out.append(f"{p}: in the parent, missing now")
+                elif k not in ia:
+                    out.append(f"{p}: not in the parent")
+                else:
+                    walk(ia[k], ib[k], p)
+            kept_a = [x["id"] for x in a if x["id"] in ib]
+            kept_b = [x["id"] for x in b if x["id"] in ia]
+            if kept_a != kept_b and not _covered(path, declared):
+                out.append(f"{path}: entries reordered")
+        elif a != b:
+            out.append(f"{path}: changed")
+
+    walk(parent, child, "")
+    return out
+
+
+def code_changes(parent_commit: str, child_commit: str) -> list[str]:
+    """The files that differ between two code commits of this repository (git diff
+    --name-only); refused when either commit is not here."""
+    got = subprocess.run(["git", "-C", str(cfgmod.REPO_ROOT), "diff", "--name-only",
+                          parent_commit, child_commit], capture_output=True, text=True)
+    if got.returncode:
+        raise FrozenError(f"cannot compare code commits {parent_commit[:12]} and "
+                          f"{child_commit[:12]} here: {got.stderr.strip()[:200]}")
+    return sorted(x for x in got.stdout.splitlines() if x.strip())
+
+
+def check_chain(research_dir: Path, chain: list[str]) -> list[dict]:
+    """Every link of the chain checked; returns what the report records per tag."""
+    recs = []
+    prev_doc = None
+    for i, tag in enumerate(chain):
+        body, doc = tagged_config(research_dir, tag)
+        rec = {"tag": tag, "config_sha256": sha256_bytes(body),
+               "code_commit": doc.get("code_commit")}
+        if i:
+            a = doc.get("amends") or {}
+            try:
+                check_amends(doc)
+            except ValueError as e:
+                raise FrozenError(f"tag {tag}: {e}") from None
+            if a.get("tag") != chain[i - 1]:
+                raise FrozenError(f"tag {tag}: amends {a.get('tag')!r}, but its parent in the "
+                                  f"chain is {chain[i - 1]}")
+            diff = amendment_differences(prev_doc, doc)
+            if diff:
+                raise FrozenError(f"tag {tag} changes its parent {chain[i - 1]} outside the "
+                                  "paths it declares: " + "; ".join(diff[:8])
+                                  + (f" (+{len(diff) - 8} more)" if len(diff) > 8 else ""))
+            changed = code_changes(str(prev_doc.get("code_commit") or ""),
+                                   str(doc.get("code_commit") or ""))
+            undeclared = sorted(set(changed) - set(a["code_files"]))
+            if undeclared:
+                raise FrozenError(f"tag {tag}: its code_commit changes files it does not "
+                                  f"declare: {undeclared[:8]}")
+            rec.update(reason=a["reason"], paths=a["paths"], code_files=a["code_files"],
+                       code_changed=changed)
+        recs.append(rec)
+        prev_doc = doc
+    return recs
+
+
 # --- the freeze guard -------------------------------------------------------------------------
 
 def _git(repo: Path, *args) -> subprocess.CompletedProcess:
@@ -524,17 +699,19 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
           code_commit: str, allow_code: str | None = None) -> dict:
     """Whether this run may touch the scored records, and how it is labelled. A sealed test
     needs the freeze tag, the tagged config byte for byte, and the frozen code commit (or
-    `allow_code` = the commit running: post hoc)."""
+    `allow_code` = the commit running: post hoc). With amendment tags the newest one is the
+    frozen config, once every link of the chain is checked (check_chain)."""
     if not sealed:
         if allow_code:
             raise ValueError("--allow-code is only for the sealed test")
         return {"sealed": False, "post_hoc": False}
-    if _git(research_dir, "rev-parse", "--verify", "--quiet", f"refs/tags/{TAG}").returncode:
+    chain = freeze_chain(research_dir)
+    if not chain:
         raise FrozenError(f"the sealed test stays closed: no tag {TAG} in {research_dir}")
-    tagged = _git(research_dir, "show", f"{TAG}:{CONFIG_IN_REPO}")
-    if tagged.returncode:
-        raise FrozenError(f"tag {TAG} has no {CONFIG_IN_REPO}")
-    tagged_doc = json.loads(tagged.stdout)
+    chain_recs = check_chain(research_dir, chain)
+    tag = chain[-1]
+    tagged_bytes, tagged_doc = tagged_config(research_dir, tag)
+
     # The tagged post_freeze fields are placeholders: filling one never changes a value the
     # tag decided.
     try:
@@ -544,18 +721,18 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
     for e in tagged_doc.get("post_freeze") or []:
         if not is_placeholder(config_path_get(tagged_doc, e["path"])):
             raise FrozenError(f"post_freeze {e['path']}: not a \"TBD...\" placeholder in the "
-                              f"config tagged {TAG}")
-    if tagged.stdout != config_bytes:
-        crlf = tagged.stdout.replace(b"\r", b"") == config_bytes.replace(b"\r", b"")
+                              f"config tagged {tag}")
+    if tagged_bytes != config_bytes:
+        crlf = tagged_bytes.replace(b"\r", b"") == config_bytes.replace(b"\r", b"")
         if crlf:
-            raise FrozenError(f"the config given is not the one tagged {TAG} (line endings "
+            raise FrozenError(f"the config given is not the one tagged {tag} (line endings "
                               f"differ: give the tagged bytes, as git show "
-                              f"{TAG}:{CONFIG_IN_REPO} prints them)")
+                              f"{tag}:{CONFIG_IN_REPO} prints them)")
         diff = post_freeze_differences(tagged_doc, config)
         if diff:
-            raise FrozenError(f"the config given is not the one tagged {TAG} outside its "
+            raise FrozenError(f"the config given is not the one tagged {tag} outside its "
                               f"post_freeze fields (sha256 {sha256_bytes(config_bytes)[:12]} vs "
-                              f"{sha256_bytes(tagged.stdout)[:12]}): " + "; ".join(diff[:8])
+                              f"{sha256_bytes(tagged_bytes)[:12]}): " + "; ".join(diff[:8])
                               + (f" (+{len(diff) - 8} more)" if len(diff) > 8 else ""))
     if code_commit.endswith("-dirty") or code_commit == "unknown":
         raise FrozenError(f"the sealed test is scored only by committed code (this is "
@@ -569,10 +746,11 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
             raise FrozenError(f"this code ({code_commit[:12]}) is not the frozen paper-score "
                               f"commit ({frozen[:12] or 'none named'}); --allow-code "
                               f"{code_commit[:12]} runs it as POST HOC")
-    return {"sealed": True, "tag": TAG, "post_hoc": post_hoc,
+    return {"sealed": True, "tag": tag, "post_hoc": post_hoc,
             "config_sha256": sha256_bytes(config_bytes), "code_commit": code_commit,
             "frozen_code_commit": frozen,
-            **({"tagged_config_sha256": sha256_bytes(tagged.stdout),
+            **({"chain": chain_recs} if len(chain) > 1 else {}),
+            **({"tagged_config_sha256": sha256_bytes(tagged_bytes),
                 "post_freeze": post_freeze_records(tagged_doc, config)}
                if "post_freeze" in tagged_doc else {})}
 

@@ -2002,3 +2002,174 @@ def test_paper_score_opens_the_manifest_read_only_and_leaves_its_bytes_unchanged
         assert not (tmp_path / (m.name + "-wal")).exists()
     finally:
         os.chmod(m, 0o644)
+
+
+
+# --- amendments: a chain of freeze tags (paper coordinator, 27 Oct) -------------------------------
+
+NEW_CODE = "bbbbbbb1234567"
+
+
+def amend_base():
+    """A frozen plan with an expert comparator, its post_freeze file, a hypothesis and a slice
+    naming it: what an amendment removing E31 takes out."""
+    d = post_freeze_plan()
+    d["comparators"].append({"id": "experts-t1", "kind": "expert", "file": "TBD: e31"})
+    d["post_freeze"].append({"path": "comparators/experts-t1/file", "rule": "E31a at scoring",
+                             "kind": "test_output"})
+    d["hypotheses"] = {"A": [
+        {"id": "H1a", "kind": "mcnemar", "a": "public-v1.1", "b": "inat-vision",
+         "cell": "species_strict@1"},
+        {"id": "H4s", "kind": "mcnemar", "a": "public-v1.1", "b": "experts-t1",
+         "cell": "species_strict@1"}]}
+    d["slices"] = {"comparators": ["inat-vision", "experts-t1"]}
+    return d
+
+
+def amended(parent_tag=None):
+    import copy
+    d = copy.deepcopy(amend_base())
+    d["comparators"] = [c for c in d["comparators"] if c["id"] != "experts-t1"]
+    d["post_freeze"] = [e for e in d["post_freeze"] if not e["path"].startswith("comparators/experts-t1")]
+    d["hypotheses"]["A"] = [h for h in d["hypotheses"]["A"] if h["id"] != "H4s"]
+    d["slices"]["comparators"] = ["inat-vision"]
+    d["code_commit"] = NEW_CODE
+    d["freeze"]["code_commit"] = NEW_CODE
+    d["amends"] = {"tag": parent_tag or paper_score.TAG, "reason": "E31 removed (Steve, pre-results)",
+                   "paths": ["comparators/experts-t1", "hypotheses/A/H4s", "slices/comparators"],
+                   "code_files": ["src/mycomap_vision/paper_score.py"]}
+    return d
+
+
+def tag_as(repo, doc, tag):
+    body = json.dumps(doc, indent=1).encode()
+    (repo / "paper" / "analysis-v1.json").write_bytes(body)
+    git(repo, "commit", "-q", "-am", f"plan for {tag}")
+    git(repo, "tag", tag)
+    return body
+
+
+def test_an_amendment_tag_becomes_the_frozen_config_and_its_link_is_recorded(research,
+                                                                            monkeypatch):
+    repo, _ = research
+    tag_as(repo, amend_base(), paper_score.TAG)
+    a1 = amended()
+    body = tag_as(repo, a1, paper_score.TAG + "-a1")
+    monkeypatch.setattr(paper_score, "code_changes",
+                        lambda a, b: ["src/mycomap_vision/paper_score.py"])
+    g = paper_score.guard(True, body, a1, repo, NEW_CODE)
+    assert g["sealed"] and g["tag"] == paper_score.TAG + "-a1" and not g["post_hoc"]
+    first, link = g["chain"]
+    assert first["tag"] == paper_score.TAG and first["code_commit"] == "abcdef1234567"
+    assert link["reason"] == "E31 removed (Steve, pre-results)"
+    assert link["paths"] == a1["amends"]["paths"]
+    assert link["code_changed"] == ["src/mycomap_vision/paper_score.py"]
+    base = json.dumps(amend_base(), indent=1).encode()               # the first tag's config
+    with pytest.raises(paper_score.FrozenError, match="not the one tagged .*-a1"):
+        paper_score.guard(True, base, amend_base(), repo, "abcdef1")
+    with pytest.raises(paper_score.FrozenError, match="not the frozen paper-score commit"):
+        paper_score.guard(True, body, a1, repo, "abcdef1")             # the first tag's code
+
+
+@pytest.mark.parametrize("change, refused", [
+    (lambda d: d.update(top_k=5), "top_k: changed"),
+    (lambda d: next(c for c in d["comparators"] if c["id"] == "inat-vision").update(score="combined"),
+     "comparators/inat-vision/score: not in the parent"),
+    (lambda d: next(e for e in d["post_freeze"] if e["path"] == "comparators/inat-vision/file")
+     .update(rule="anything"), "post_freeze comparators/inat-vision/file: changed"),
+    (lambda d: d["freeze"]["models"]["m1"].update(weights="zz"), "freeze/models/m1/weights: changed"),
+    (lambda d: d["amends"].update(tag=paper_score.TAG + "-a7"), "its parent in the chain is"),
+    (lambda d: d["amends"].update(reason=""), "gives the reason"),
+])
+def test_an_amendment_that_changes_more_than_it_declares_is_refused(research, monkeypatch,
+                                                                   change, refused):
+    repo, _ = research
+    tag_as(repo, amend_base(), paper_score.TAG)
+    a1 = amended()
+    change(a1)
+    body = tag_as(repo, a1, paper_score.TAG + "-a1")
+    monkeypatch.setattr(paper_score, "code_changes",
+                        lambda a, b: ["src/mycomap_vision/paper_score.py"])
+    with pytest.raises(paper_score.FrozenError, match=refused):
+        paper_score.guard(True, body, a1, repo, NEW_CODE)
+
+
+def test_an_amendment_whose_code_changes_undeclared_files_is_refused(research, monkeypatch):
+    repo, _ = research
+    tag_as(repo, amend_base(), paper_score.TAG)
+    a1 = amended()
+    body = tag_as(repo, a1, paper_score.TAG + "-a1")
+    monkeypatch.setattr(paper_score, "code_changes", lambda a, b: [
+        "src/mycomap_vision/paper_score.py", "src/mycomap_vision/methods.py"])
+    with pytest.raises(paper_score.FrozenError, match="does not declare.*methods.py"):
+        paper_score.guard(True, body, a1, repo, NEW_CODE)
+
+
+def test_amendment_tags_out_of_sequence_are_refused(research, monkeypatch):
+    repo, _ = research
+    tag_as(repo, amend_base(), paper_score.TAG)
+    a2 = amended()
+    body = tag_as(repo, a2, paper_score.TAG + "-a2")                   # no -a1
+    with pytest.raises(paper_score.FrozenError, match="out of sequence"):
+        paper_score.guard(True, body, a2, repo, NEW_CODE)
+
+
+def test_every_link_of_a_longer_chain_is_checked(research, monkeypatch):
+    import copy
+    repo, _ = research
+    tag_as(repo, amend_base(), paper_score.TAG)
+    a1 = amended()
+    tag_as(repo, a1, paper_score.TAG + "-a1")
+    a2 = copy.deepcopy(a1)
+    a2["code_commit"] = a2["freeze"]["code_commit"] = "ccccccc1234567"
+    a2["freeze"]["models"]["m2"] = {"weights": "cc"}                  # a part gained (E34's model)
+    a2["amends"] = {"tag": paper_score.TAG + "-a1", "reason": "E34 scoring code",
+                    "paths": ["top_k"], "code_files": ["src/mycomap_vision/paper_score.py"]}
+    a2["top_k"] = 5
+    body = tag_as(repo, a2, paper_score.TAG + "-a2")
+    monkeypatch.setattr(paper_score, "code_changes",
+                        lambda a, b: ["src/mycomap_vision/paper_score.py"])
+    g = paper_score.guard(True, body, a2, repo, "ccccccc")
+    assert [r["tag"] for r in g["chain"]] == [paper_score.TAG, paper_score.TAG + "-a1",
+                                             paper_score.TAG + "-a2"]
+    a2bad = copy.deepcopy(a2)
+    a2bad["amends"]["tag"] = paper_score.TAG                           # skips its parent -a1
+    git(repo, "tag", "-d", paper_score.TAG + "-a2")
+    body = tag_as(repo, a2bad, paper_score.TAG + "-a2")
+    with pytest.raises(paper_score.FrozenError, match="its parent in the chain is .*-a1"):
+        paper_score.guard(True, body, a2bad, repo, "ccccccc")
+
+
+def test_code_changes_lists_the_files_between_two_commits_of_the_code(tmp_path, monkeypatch):
+    from mycomap_vision import config as cfgmod
+    code = tmp_path / "code"
+    (code / "src").mkdir(parents=True)
+    git(code, "init", "-q")
+    git(code, "config", "user.email", "t@example.org")
+    git(code, "config", "user.name", "t")
+    (code / "src" / "a.py").write_text("1\n", encoding="utf-8")
+    (code / "src" / "b.py").write_text("1\n", encoding="utf-8")
+    git(code, "add", "-A")
+    git(code, "commit", "-q", "-m", "one")
+    one = subprocess.run(["git", "-C", str(code), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    (code / "src" / "b.py").write_text("2\n", encoding="utf-8")
+    git(code, "commit", "-q", "-am", "two")
+    two = subprocess.run(["git", "-C", str(code), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    monkeypatch.setattr(cfgmod, "REPO_ROOT", code)
+    assert paper_score.code_changes(one, two) == ["src/b.py"]
+    with pytest.raises(paper_score.FrozenError, match="cannot compare code commits"):
+        paper_score.code_changes(one, "0" * 40)
+
+
+@pytest.mark.parametrize("block, refused", [
+    ({"tag": "other-tag", "reason": "r", "paths": [], "code_files": []}, "parent tag"),
+    ({"tag": "paper-analysis-freeze-v1", "paths": [], "code_files": []}, "reason"),
+    ({"tag": "paper-analysis-freeze-v1", "reason": "r", "paths": "x", "code_files": []}, "paths"),
+])
+def test_a_malformed_amends_block_is_refused(tmp_path, block, refused):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["amends"] = block
+    with pytest.raises(ValueError, match=refused):
+        paper_score.check_config(cfg)
