@@ -956,9 +956,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             served_cache.update(at=now, ready=ready, served=ready[0] if ready else None)
         return served_cache["served"], served_cache["ready"]
 
+    # When this process's app was made (epoch seconds), in /api/health: deploy.sh counts an
+    # answer only from the process it started (2026-10-27: a deploy passed while the site
+    # gave 502s).
+    started = int(time.time())
+
     @app.get("/api/health")
     def health(request: Request):
-        full = {"ok": True, "code_version": config.code_version(),
+        full = {"ok": True, "started": started, "code_version": config.code_version(),
                 "preload": {"state": warm.state, "models": warm.models,
                             "seconds": warm.seconds, "error": warm.error},
                 "nightly": nightly_health(),
