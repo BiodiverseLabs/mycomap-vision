@@ -103,6 +103,7 @@ def site(conn, tmp_path, admins=("admin-1",), unsealed=None, sealed=("105",),
                      where_looked=None, excluded_looked=maker if excluded else None,
                      excluded_unsealed=unsealed)
     app.state.test_loaded = loaded
+    app.state.test_store = store
     return app, maker, tmp_path
 
 

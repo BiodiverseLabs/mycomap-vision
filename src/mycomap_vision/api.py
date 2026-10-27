@@ -10,6 +10,7 @@ are in guards.py and set from the environment. Sign-in with a mycomap.org accoun
 from __future__ import annotations
 
 import html
+import io
 import json
 import logging
 import secrets
@@ -41,7 +42,9 @@ from . import (answercache, apidocs, early_answers, apiv1, byobservation, config
                speedlog, uploads,
                workqueue, yours)
 from .dates import real_date
+from .embed import CROP_VECTOR_SQL, apply_box
 from .embed import SCHEMA as EMBED_SCHEMA
+from .embed import _crops_sql as embed_crops_sql
 from .embed import normalise, photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge)
@@ -968,7 +971,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "fungus_gate": fungus_gate.summary() if fungus_gate else None,
                 "photo_tagger": (photo_tagger.summary() if photo_tagger else
                                  {"error": tagger_error[0]} if tagger_error else None),
-                "vectors": vector_storage()}
+                "vectors": vector_storage(),
+                "excluded_preload": (app.state.excluded_preload.health()
+                                     if getattr(app.state, "excluded_preload", None) else None)}
         given = request.headers.get("authorization", "")
         if org_secret and secrets.compare_digest(given.encode(),
                                                  f"Bearer {org_secret}".encode()):
@@ -2511,17 +2516,62 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def is_reviewer(request: Request) -> bool:
         return not app.state.feedback_viewer(request)[3]
 
-    def excluded_row(request: Request, photo_key: str) -> "xl.Excluded":
-        """The excluded photo as this viewer may see it, or 404: listed to them, and a photo
-        anyone may see now (rechecked on every read)."""
-        rows = xl.visible(excluded_list.rows(), is_reviewer(request))
-        hit = next((r for r in rows if r.photo_key == photo_key), None)
-        row = review_photos.one(photo_key) if hit else None
+    def excluded_hit(photo_key: str, reviewer: bool) -> "xl.Excluded | None":
+        """The excluded photo if it is listed to this viewer and anyone may see it now."""
+        hit = excluded_list.get(photo_key)
+        if hit is None or (not reviewer and hit.category in xl.REVIEWERS_ONLY):
+            return None
+        row = review_photos.one(photo_key)
         view = permission_view()
-        if (hit is None or row is None or review_photos.declined(row, view)
+        if (row is None or review_photos.declined(row, view)
                 or not view.may_show(row.license_class, row.owner_user_id)):
+            return None
+        return hit
+
+    def excluded_row(request: Request, photo_key: str) -> "xl.Excluded":
+        """The excluded photo as this viewer may see it, or 404 (rechecked on every read)."""
+        hit = excluded_hit(photo_key, is_reviewer(request))
+        if hit is None:
             raise HTTPException(404, "no such photo shown here", headers=NOT_INDEXED)
         return hit
+
+    def kept_crops(backbone: str) -> list[tuple[str, int, list, bool]]:
+        """Every kept specimen crop (feedback_photo_crops): (photo key, n, box, whether the
+        served model has its vector)."""
+        try:
+            return [(k, int(n), [float(v) for v in box], bool(e)) for k, n, *box, e in q(
+                f"select c.photo_key, c.n, c.l, c.t, c.r, c.b, e.photo_id is not null "
+                f"from feedback_photo_crops c left join embeddings e on e.backbone = ? "
+                f"and e.photo_id = {CROP_VECTOR_SQL} order by c.photo_key, c.n", (backbone,))]
+        except sqlite3.OperationalError:            # no crop was ever synced here
+            return []
+
+    def crops_waiting(backbone: str) -> int:
+        """Kept crops the nightly will embed but hasn't yet (its own rule, embed._crops_sql)."""
+        try:
+            return q("select count(*) " + embed_crops_sql(True), (backbone,))[0][0]
+        except sqlite3.OperationalError:
+            return 0
+
+    def excluded_crop(hit: "xl.Excluded", crop: int, backbone: str) -> list | None:
+        """Crop `crop`'s box, or 404 unless it is kept and its vector is in the index."""
+        if not crop:
+            return None
+        got = next((box for k, n, box, e in kept_crops(backbone)
+                    if k == hit.photo_key and n == crop and e), None)
+        if got is None:
+            raise HTTPException(404, "no such crop with a map here", headers=NOT_INDEXED)
+        return got
+
+    def excluded_stamp(hit: "xl.Excluded", backbone: str, box: list | None,
+                       name: str | None = None) -> dict:
+        """What a map of this photo (or crop) made now is made from (xl.STAMP_KEYS)."""
+        rel = served_release_dir()
+        return {"map_version": looked.VERSION, "backbone": backbone, "method": default_method(),
+                "release": rel.name if rel is not None else None,
+                "name": name if name is not None else manifest_names(
+                    [hit.record_key]).get(hit.record_key),
+                "box": box}
 
     def excluded_model(model: str) -> str:
         """v1's backbone, or 404: no other model's maps are made or served here (a base map
@@ -2537,14 +2587,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(403, "this photo's map is held back until the paper's sealed "
                                      "test is scored", headers=NOT_INDEXED)
 
-    def excluded_rid(photo_key: str, model: str) -> str:
-        return f"excluded:{model}:{photo_key}"
+    def excluded_rid(key: str, model: str) -> str:
+        return f"excluded:{model}:{key}"
 
-    def excluded_state(hit: "xl.Excluded", model: str):
-        doc = excluded_maps.get(hit.photo_key, model)
+    def excluded_current(key: str, model: str, stamp: dict) -> dict | None:
+        """The kept map, only while it was made from what is served now (xl.is_current)."""
+        doc = excluded_maps.get(key, model)
+        return doc if xl.is_current(doc, stamp) else None
+
+    def excluded_state(hit: "xl.Excluded", model: str, key: str, stamp: dict):
+        doc = excluded_current(key, model, stamp)
         if doc is not None:
             return JSONResponse({"status": "ready", **doc}, headers=NOT_INDEXED)
-        state = looked_worker.status(excluded_rid(hit.photo_key, model))
+        state = looked_worker.status(excluded_rid(key, model))
         if state is None:
             return JSONResponse({"status": "none"}, status_code=404, headers=NOT_INDEXED)
         return JSONResponse(state, status_code=202 if state["status"] == "working" else 503,
@@ -2558,9 +2613,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                         f"scientific_name) from records where observation_id "
                                         f"in ({marks})", tuple(keys)) if n}
 
-    def excluded_job(hit: "xl.Excluded", model: str, backbone: str) -> looked.Job:
-        """One photo's map as a job: the index, the name and the photo are read outside the
-        model lock (fetch); the map is made holding it (make)."""
+    def excluded_job(hit: "xl.Excluded", model: str, backbone: str, crop: int = 0,
+                     box: list | None = None, batch: bool = False,
+                     on_done: "Callable[[bool], None] | None" = None) -> looked.Job:
+        """One photo's (or one crop's) map as a job: the index, the name and the photo are read
+        outside the model lock (fetch); the map is made holding it (make). A crop is the
+        photo with its box applied in memory, as the nightly embeds it."""
+        key = xl.crop_key(hit.photo_key, crop) if crop else hit.photo_key
         row = review_photos.one(hit.photo_key)
         source, number = (("mo", hit.record_key[3:]) if hit.record_key.startswith("mo:")
                           else ("inat", hit.record_key))
@@ -2579,7 +2638,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             got = review_photos.image(row, "full")
             if got is None:
                 raise looked.NoMap("the photo could not be read just now")
-            return ident, method, name, hidden, got[0]
+            body = got[0]
+            if box is not None:
+                buf = io.BytesIO()
+                apply_box(Image.open(io.BytesIO(body)).convert("RGB"), box).save(
+                    buf, "JPEG", quality=95)
+                body = buf.getvalue()
+            return ident, method, name, hidden, body
 
         def make(got):
             ident, method, name, hidden, body = got
@@ -2590,14 +2655,21 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def finish(entries: list[dict]) -> None:
             e = entries[0]
             m = e["entry"]
-            excluded_maps.keep(hit.photo_key, model, {
+            with db_lock:
+                cal = evaluate.latest_calibration(conn, backbone, e["method"])
+            stamp = {**excluded_stamp(hit, backbone, box), "method": e["method"],
+                     "calibration": cal["run_id"] if cal else None}
+            excluded_maps.keep(key, model, {
                 "version": xl.VERSION, "name": e["name"], "model": model,
                 "backbone": backbone, "method": e["method"],
                 "made_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "map": {"crop": m["crop"], "grid": m["grid"], "map": m["map"]},
-                "rank": m.get("rank"), "top": xl.RANK_DEPTH})
-        return looked.Job(excluded_rid(hit.photo_key, model),
-                          [looked.Task(0, fetch, make)], finish)
+                "rank": m.get("rank"), "top": xl.RANK_DEPTH, "stamp": stamp,
+                **({"crop_of_photo": {"n": crop, "box": box}} if crop else {})})
+            if on_done:
+                on_done(True)
+        return looked.Job(excluded_rid(key, model), [looked.Task(0, fetch, make)], finish,
+                          batch=batch, on_error=(lambda why: on_done(False)) if on_done else None)
 
     @app.get("/api/research/excluded-photos")
     def excluded_photos(request: Request, category: str = "all", offset: int = 0,
@@ -2640,22 +2712,26 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                             headers=NOT_INDEXED)
 
     @app.get("/api/research/excluded-photos/looked")
-    def read_excluded_looked(request: Request, photo: str, model: str = "v1"):
-        """An excluded photo's map, to anyone: 200 once made, 202 while being made, 404 when
-        nobody has asked yet (or for any model but v1), 403 while the paper's seal holds it
-        back, 503 when it failed."""
+    def read_excluded_looked(request: Request, photo: str, model: str = "v1", crop: int = 0):
+        """An excluded photo's map (or, with `crop`, one of its kept specimen crops'), to
+        anyone: 200 once made from what is served now, 202 while being made, 404 when nobody
+        has asked yet, the kept one is stale, or for any model but v1, 403 while the paper's
+        seal holds it back, 503 when it failed."""
         read_limit(request)
         excluded_off()
         hit = excluded_row(request, photo)
-        excluded_model(model)
+        backbone = excluded_model(model)
         excluded_held(hit)
-        return excluded_state(hit, model)
+        box = excluded_crop(hit, crop, backbone)
+        key = xl.crop_key(hit.photo_key, crop) if crop else hit.photo_key
+        return excluded_state(hit, model, key, excluded_stamp(hit, backbone, box))
 
     @app.post("/api/research/excluded-photos/looked")
-    def ask_excluded_looked(request: Request, photo: str, model: str = "v1"):
-        """Asks for an excluded photo's map: anyone signed in. 200 when kept already, 202 while
-        it is made; 409 when it can't be made, 429 past 20 asks in 10 minutes or 200 in a day
-        (with the run maps' asks), or while too many maps are waiting. Who asked is not kept."""
+    def ask_excluded_looked(request: Request, photo: str, model: str = "v1", crop: int = 0):
+        """Asks for an excluded photo's (or crop's) map: anyone signed in. 200 when a current
+        one is kept already, 202 while it is made; 409 when it can't be made, 429 past 20 asks
+        in 10 minutes or 200 in a day (with the run maps' asks), or while too many maps people
+        asked for are waiting. It goes ahead of the preload's photos. Who asked is not kept."""
         excluded_off()
         who = person(request)
         if not who:
@@ -2664,18 +2740,21 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         hit = excluded_row(request, photo)
         backbone = excluded_model(model)
         excluded_held(hit)
-        rid = excluded_rid(hit.photo_key, model)
+        box = excluded_crop(hit, crop, backbone)
+        key = xl.crop_key(hit.photo_key, crop) if crop else hit.photo_key
+        stamp = excluded_stamp(hit, backbone, box)
+        rid = excluded_rid(key, model)
         state = looked_worker.status(rid)
-        if excluded_maps.get(hit.photo_key, model) is not None or (
+        if excluded_current(key, model, stamp) is not None or (
                 state and state["status"] == "working"):
-            return excluded_state(hit, model)
+            return excluded_state(hit, model, key, stamp)
         sub = str(who.get("sub"))
         wait = looked_asks.check(sub) or excluded_daily.check(sub)
         if wait:
             raise HTTPException(429, "you have asked for a lot of these; try again later",
                                 headers={"Retry-After": str(int(wait) + 1), **NOT_INDEXED})
         try:
-            looked_worker.submit(excluded_job(hit, model, backbone))
+            looked_worker.submit(excluded_job(hit, model, backbone, crop, box))
         except looked.Busy as e:
             raise HTTPException(429, "Vision is busy making other maps; try again in a minute",
                                 headers={"Retry-After": str(int(e.wait_seconds) + 1),
@@ -2683,7 +2762,73 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         state = looked_worker.status(rid)
         if state and state["status"] == "failed":
             raise HTTPException(409, state["detail"], headers=NOT_INDEXED)
-        return excluded_state(hit, model)
+        return excluded_state(hit, model, key, stamp)
+
+    # The preload (xl.Preloader; Steve, 2026-10-27): every slip photo's and kept crop's map
+    # made ahead of anyone asking, one batch photo at a time behind every identification and
+    # every person's ask. MV_EXCLUDED_PRELOAD=0 turns it off; MV_EXCLUDED_PRELOAD_WINDOW sets
+    # its hours (UTC, or "any"); MV_EXCLUDED_PRELOAD_CROP_WAIT=0 lets slips go before crops.
+    preload_names: dict[str, str] = {}
+
+    def preload_targets():
+        backbone = excluded_backbone()
+        slips = [r for r in excluded_list.rows() if r.category in xl.PRELOAD_CATEGORIES]
+        keys = sorted({r.record_key for r in slips})
+        preload_names.clear()
+        for i in range(0, len(keys), 900):
+            preload_names.update(manifest_names(keys[i:i + 900]))
+        if backbone is None:
+            return [xl.Target(r) for r in slips], [], 0
+        by_key = {r.photo_key: r for r in slips}
+        crops = [xl.Target(by_key[k], n, tuple(box)) for k, n, box, e in kept_crops(backbone)
+                 if e and k in by_key]
+        return [xl.Target(r) for r in slips], crops, crops_waiting(backbone)
+
+    def preload_stamp(t: "xl.Target") -> dict | None:
+        backbone = excluded_backbone()
+        if backbone is None:
+            return None
+        return excluded_stamp(t.hit, backbone, list(t.box) if t.box else None,
+                              name=preload_names.get(t.hit.record_key)
+                              or manifest_names([t.hit.record_key]).get(t.hit.record_key))
+
+    def preload_skip(t: "xl.Target") -> str | None:
+        if xl.held_back(feedback_store.gate, t.hit.record_key, unsealed):
+            return "held by the seal"
+        if excluded_hit(t.hit.photo_key, reviewer=False) is None:
+            return "not shown"
+        return None
+
+    nightly_seen = {"at": -1e9, "running": False}
+
+    def nightly_running() -> bool:
+        if layer and time.monotonic() - nightly_seen["at"] > 60:
+            nightly_seen.update(at=time.monotonic(),
+                                running=nightly_health().get("state") == "running")
+        return nightly_seen["running"]
+
+    def preload_window():
+        try:
+            return xl.parse_window(config.setting("MV_EXCLUDED_PRELOAD_WINDOW"))
+        except ValueError as e:
+            note(f"[preload] {e}; using {xl.PRELOAD_WINDOW}")
+            return xl.parse_window(None)
+
+    if excluded_on and looked_worker is not None:
+        preloader = xl.Preloader(
+            enabled=config.setting("MV_EXCLUDED_PRELOAD") != "0", window=preload_window(),
+            crop_wait=config.setting("MV_EXCLUDED_PRELOAD_CROP_WAIT") != "0",
+            worker=looked_worker, targets=preload_targets, stamp_now=preload_stamp,
+            stamps=lambda: excluded_maps.stamps(xl.MODEL),
+            stamp_of=lambda key: (excluded_maps.get(key, xl.MODEL) or {}).get("stamp"),
+            skip=preload_skip,
+            job=lambda t, done: excluded_job(t.hit, xl.MODEL, excluded_backbone(), t.crop,
+                                             list(t.box) if t.box else None, batch=True,
+                                             on_done=done),
+            nightly_running=nightly_running, note=note)
+        app.state.excluded_preload = preloader
+        if background and preloader.enabled:
+            start_background("excluded preload", 1.0, preloader.step, note)
     if background and org_named:           # unfinished Name Updates, and the log beside them
         def follow_name_updates():
             feedback_requests.poll_once()
