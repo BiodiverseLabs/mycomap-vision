@@ -60,9 +60,10 @@ TAB_CODES = tuple(c for c, _ in TABS)
 # several kinds). A flagged photo's reason starts at its flag's (suggested_reason). Dried
 # specimens and spore prints have their own reasons (Steve, 2026-10-19) instead of "Other",
 # and so do UV reactions, chemical spot tests (KOH, FeSO4 and like colour reactions),
-# phylogenetic trees or BLAST results, and drawings of microscopy or of the specimen (Steve,
-# 2026-10-21), and species descriptions (a reason only: no flag or tab finds them). A code
-# never changes once decisions use it; only its label may.
+# phylogenetic trees or BLAST results, and drawings (Steve, 2026-10-21; one reason for
+# drawings of microscopy and of the specimen since 2026-10-27), and species descriptions (a
+# reason only: no flag or tab finds them). A code never changes once decisions use it; only its
+# label may, and a retired one is shown as its successor (RETIRED_REASONS).
 REASONS: tuple[tuple[str, str], ...] = (
     ("micrograph", "Micrograph or microscope"),
     ("slip", "Field slip or label"),
@@ -74,21 +75,34 @@ REASONS: tuple[tuple[str, str], ...] = (
     ("uv", "UV reaction"),
     ("chemical", "Chemical spot test"),
     ("phylo_tree", "Phylogenetic tree / BLAST"),   # BLAST result screens too (Steve, 2026-10-21)
-    ("drawing_micro", "Drawing – microscopy"),
-    ("drawing_specimen", "Drawing – specimen"),
+    ("drawing", "Drawing"),
     ("species_description", "Species description"),   # a photo of a written description
     # Steve, 2026-10-21: a reason even while no flag finds these reliably.
     ("blurry", "Blurry or badly exposed"),
     ("other", "Other"),
 )
 REASON_CODES = tuple(c for c, _ in REASONS)
+# Reasons no longer offered (Steve, 2026-10-27: "Lets merge Drawings - Microscopy and specimens
+# into a single Drawings"). Past decisions keep their code, so the Human Feedback export and
+# E34/E35's lists are unchanged; every page shows them as their successor, and a save that
+# names one (an old open tab) stores the successor.
+RETIRED_REASONS = {"drawing_micro": "drawing", "drawing_specimen": "drawing"}
+assert set(RETIRED_REASONS.values()) <= set(REASON_CODES)
+
+
+def shown_reason(code: str | None) -> str | None:
+    """A stored reason as the pages show it: a retired code as its successor."""
+    return RETIRED_REASONS.get(code, code) if code else code
+
+
 REASON_OF_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat",
                  "people": "people", "gate": "not_fungus", "uv": "uv", "tree": "phylo_tree",
-                 "drawing": "drawing_micro", "chemical": "chemical", "spore_print": "spore_print",
+                 "drawing": "drawing", "chemical": "chemical", "spore_print": "spore_print",
                  "dried": "dried", "other": "other"}
 # The tab a photo left out for a reason belongs to, whatever flagged it (Steve, 2026-10-21: a
 # photo already excluded as, say, a UV reaction shows on that tab's Completed list).
-TAB_OF_REASON = {r: t for t, r in REASON_OF_TAB.items()} | {"drawing_specimen": "drawing"}
+TAB_OF_REASON = {r: t for t, r in REASON_OF_TAB.items()} | {
+    old: {r: t for t, r in REASON_OF_TAB.items()}[new] for old, new in RETIRED_REASONS.items()}
 # Tagger v2's bands (by-eye precision of its class x confidence ranges: high >= 85%, medium
 # 50-85%, low below), the order the band filter offers them.
 BANDS = ("high", "medium", "low")
@@ -167,7 +181,7 @@ record_of_link = fb.record_of_link          # one rule for record links (feedbac
 
 
 def excluded_reason(item: dict) -> str | None:
-    """The reason an item's latest decision left its photo out for, or None."""
+    """The reason an item's latest decision left its photo out for, as stored, or None."""
     last = item.get("last_decision") or None
     if not last or last.get("decision") != "exclude_photo":
         return None
@@ -181,7 +195,7 @@ def reason_flag(item: dict) -> dict | None:
     tab = TAB_OF_REASON.get(excluded_reason(item) or "")
     if tab is None:
         return None
-    return {"tab": tab, "kind": f"left out as {excluded_reason(item)}", "p": None,
+    return {"tab": tab, "kind": f"left out as {shown_reason(excluded_reason(item))}", "p": None,
             "strength": 0.0, "by_reason": True}
 
 
@@ -264,7 +278,7 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
                                "flags": tab_flags(it),
                                "status": it["status"],
                                "decision": last and {"decision": last["decision"],
-                                                     "reason": last.get("value"),
+                                                     "reason": shown_reason(last.get("value")),
                                                      "by": last.get("by_name") or last.get("by_user")},
                                "rule": it.get("rule") or ""})
 
@@ -635,7 +649,7 @@ def decide_record(store: fb.Store, record_key: str, photos: list[dict], person: 
     plan = []
     for p in photos:
         key, decision = str(p.get("photo_key") or ""), str(p.get("decision") or "")
-        reason = (p.get("reason") or "").strip() or None
+        reason = shown_reason((p.get("reason") or "").strip() or None)
         if key not in known:
             raise fb.FeedbackError(f"{key!r} is not a photo of {record_key}")
         if decision not in ("keep", "exclude"):
@@ -708,7 +722,7 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
                                                            or flags, tab),
                       "status": it["status"],
                       "decision": last and {"decision": last["decision"],
-                                            "reason": last.get("value")}})
+                                            "reason": shown_reason(last.get("value"))}})
         per_record[key] = per_record.get(key, 0) + 1
     if sort == "flagged":
         tiles.sort(key=lambda t: (-per_record[t["record_key"]], t["record_key"], -t["strength"]))
@@ -746,7 +760,7 @@ def batch_decide(store: fb.Store, decisions: list[dict], person: dict, note: str
         if item["item_type"] != ITEM_TYPE:
             raise fb.FeedbackError(f"item {item_id} is not a photo of this queue")
         decision = str(d.get("decision") or "")
-        reason = (d.get("reason") or "").strip() or None
+        reason = shown_reason((d.get("reason") or "").strip() or None)
         if decision not in ("keep", "exclude"):
             raise fb.FeedbackError("a photo's decision is keep or exclude")
         if decision == "exclude" and reason not in REASON_CODES:
@@ -758,7 +772,8 @@ def batch_decide(store: fb.Store, decisions: list[dict], person: dict, note: str
         value = reason if decision == "exclude" else None
         latest = (item.get("decisions") or [None])[-1]
         same = (latest is not None and item["status"] == "decided"
-                and latest["decision"] == code and (latest.get("value") or None) == value)
+                and latest["decision"] == code
+                and shown_reason(latest.get("value") or None) == value)
         plan.append((item_id, decision, code, value, d.get("note") or note, same))
     for item_id, _, code, value, why, same in plan:
         if not same:

@@ -23,7 +23,7 @@ def test_each_tagger_flag_goes_to_its_own_tab():
     both = pr.parse_flags("R6 micrograph probe p=0.62; R7 uv probe p=0.99")
     assert [(f["tab"], f["p"]) for f in both] == [("micrograph", 0.62), ("uv", 0.99)]
     assert pr.suggested_reason(pr.parse_flags("R7 tree probe p=0.97"), "tree") == "phylo_tree"
-    assert pr.suggested_reason(pr.parse_flags("R7 drawing probe p=0.97"), "drawing") == "drawing_micro"
+    assert pr.suggested_reason(pr.parse_flags("R7 drawing probe p=0.97"), "drawing") == "drawing"
     assert pr.suggested_reason(pr.parse_flags("R7 uv probe p=0.99"), "uv") == "uv"
     assert {"uv", "tree", "drawing"} <= set(pr.TAB_CODES) and pr.TAB_CODES[-1] == "other"
 

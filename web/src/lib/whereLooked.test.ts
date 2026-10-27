@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  cellColours, cropBox, firstPhoto, glowAlpha, markers, ownLine, refusalLine, spotlightAlpha, squareOf,
+  cellColours, cropBox, firstPhoto, markers, ownLine, refusalLine, spotlightAlpha, squareOf,
   unseenStrips, workingLine,
 } from "./whereLooked";
 import type { LookedPhoto, PhotoResult } from "./api";
@@ -20,19 +20,13 @@ test("Spotlight keeps a photo's strongest 30% of patches clear and dims the weak
   assert.deepEqual(spotlightAlpha(map.map((v) => v * 10)), a);
 });
 
-test("Glow shows nothing below a fifth of the top and grows toward the top", () => {
-  const a = glowAlpha([0, 40, 60, 128, 255]);
-  assert.deepEqual(a.slice(0, 2), [0, 0]);
-  assert.ok(a[2] > 0 && a[2] < a[3] && a[3] < a[4]);
-  assert.ok(Math.abs(a[4] - 0.9) < 1e-9);
-});
-
-test("each cell gets a colour and an opacity for the chosen style", () => {
-  const spot = cellColours([0, 255], "spot");
+test("Spotlight is the one look: each cell is dimmed, never coloured, the strongest not at all", () => {
+  const spot = cellColours([0, 255]);
   assert.deepEqual(spot[1], [18, 18, 18, 0]);                // the strongest cell: not dimmed
-  const glow = cellColours([0, 255], "glow");
-  assert.deepEqual(glow[1].slice(0, 3), [255, 255, 255]);   // the top: white
-  assert.equal(glow[0][3], 0);
+  assert.deepEqual(spot[0].slice(0, 3), [18, 18, 18]);
+  assert.ok(spot[0][3] > 0.79);
+  const map = Array.from({ length: 16 }, (_, i) => i * 17);
+  assert.deepEqual(cellColours(map).map((c) => c[3]), spotlightAlpha(map));
 });
 
 const tall: LookedPhoto["crop"] = { x: 0, y: 0.125, w: 1, h: 0.75 };

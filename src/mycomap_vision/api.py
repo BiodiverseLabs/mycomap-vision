@@ -342,7 +342,6 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                inat_suggestions: "inat_suggest.Suggestions | None | bool" = True,
                where_looked: "Callable | None | bool" = True,
                excluded_looked: "Callable | None | bool" = True,
-               excluded_base: str | None = None,
                excluded_unsealed: bool | None = None) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
@@ -405,9 +404,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     out in Human Feedback with "where Vision looked" on any of them, on the run maps' worker.
     True: on unless MV_EXCLUDED_LOOKED=0; None or False: off; tests pass the photo maker
     (called as maker(loaded backbone, backbone name, identifier, name, photo bytes, the
-    record's own columns to leave out) -> {crop, grid, map, rank}). `excluded_base`: the base
-    model its "base" maps come from (default MV_EXCLUDED_LOOKED_BASE, else bioclip-2-336),
-    offered only where it has reference vectors. `excluded_unsealed`: the paper's seal lifted
+    record's own columns to leave out) -> {crop, grid, map, rank}); v1's maps only (Steve,
+    2026-10-26: no base model). `excluded_unsealed`: the paper's seal lifted
     (default MV_EXCLUDED_LOOKED_UNSEALED=1; off until the v1-test scoring is committed).
 
     `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
@@ -789,8 +787,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
         # thread, after taking the one packed slot from the index serving now. Only for a
-        # backbone offered for identification: the Excluded photos page's base index
-        # (excluded_looked.py) must never take the slot from the served one.
+        # backbone offered for identification.
         if config.setting("MV_SEARCH_INT8") == "1" and backbone in ready_backbones():
             ref = getattr(getattr(getattr(ident, "nearest", None), "scorer", None), "ref", None)
             if not hasattr(ref, "use_int8"):
@@ -2481,7 +2478,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     # Research > Excluded photos (excluded_looked.py; Steve, 2026-10-26): the photos people left
     # out in Human Feedback, as a read-only viewer sees them there, and "where Vision looked" on
-    # any of them, from the served model or its base, on the run maps' worker. The paper's seal
+    # any of them, from the served model (v1 only), on the run maps' worker. The paper's seal
     # holds maps back for records past it until MV_EXCLUDED_LOOKED_UNSEALED=1.
     excluded_list = xl.Listing(feedback_store)
     excluded_maps = (xl.Maps((config.RELEASE_ROOT / "state" if config.RELEASE_ROOT
@@ -2490,7 +2487,6 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     excluded_daily = RateLimiter(200, 86400.0)
     app.state.excluded_limits = (looked_asks, excluded_daily)
     excluded_maker = excluded_looked if callable(excluded_looked) else None
-    base_backbone = excluded_base or config.setting("MV_EXCLUDED_LOOKED_BASE") or "bioclip-2-336"
     unsealed = (excluded_unsealed if excluded_unsealed is not None
                 else config.setting(xl.UNSEAL_SETTING) == "1")
 
@@ -2503,28 +2499,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         entry["rank"] = xl.rank_of(ident, looked.photo_vector(tower, body), name, hidden)
         return entry
 
-    base_shipped: dict = {"at": -1e9, "ok": False}
-
-    def base_ready() -> bool:
-        """The base model's vector files are here, every shard the manifest names (a release's
-        manifest lists backbones it ships no files for); looked at once a minute."""
-        now = time.monotonic()
-        if now - base_shipped["at"] > 60:
-            folder = (embeddings_root / base_backbone if embeddings_root
-                      else config.DATA_DIR / "embeddings" / base_backbone)
-            shards = [s for (s,) in q("select distinct shard from embeddings where backbone = ?",
-                                      (base_backbone,))]
-            base_shipped.update(at=now, ok=xl.vectors_shipped(shards, folder))
-        return base_shipped["ok"]
-
-    def excluded_models() -> dict[str, str]:
-        """{"v1": the served backbone, "base": its base model where its vectors are here}.
-        The base needn't be offered for identification (MV_BACKBONES): it is never served."""
+    def excluded_backbone() -> str | None:
+        """The served backbone, whose maps (v1's) are the only ones made here."""
         ready = ready_backbones()
-        out = {"v1": ready[0]} if ready else {}
-        if ready and base_backbone != ready[0] and base_ready():
-            out["base"] = base_backbone
-        return out
+        return ready[0] if ready else None
 
     def excluded_off() -> None:
         if not excluded_on:
@@ -2546,9 +2524,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return hit
 
     def excluded_model(model: str) -> str:
-        backbone = excluded_models().get(model)
+        """v1's backbone, or 404: no other model's maps are made or served here (a base map
+        kept before is never read)."""
+        backbone = excluded_backbone() if model == xl.MODEL else None
         if backbone is None:
-            raise HTTPException(404, f"no {model} maps here", headers=NOT_INDEXED)
+            raise HTTPException(404, f"no {model} maps here; only Vision v1's",
+                                headers=NOT_INDEXED)
         return backbone
 
     def excluded_held(hit: "xl.Excluded") -> None:
@@ -2628,7 +2609,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         rows = xl.visible(excluded_list.rows(), is_reviewer(request))
         mapped = excluded_maps.mapped()
         try:
-            chosen = xl.select(rows, category, set(mapped) if maps else None)
+            chosen = xl.select(rows, category, mapped if maps else None)
         except ValueError as e:
             raise HTTPException(400, str(e), headers=NOT_INDEXED) from None
         start = max(0, offset)
@@ -2651,17 +2632,18 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                           "license_code": i.get("license_code") if public else None,
                           "record_url": xl.record_url(r.record_key),
                           "held": held,
-                          "maps": sorted(mapped.get(r.photo_key, ())) if public and not held
+                          "maps": [xl.MODEL] if public and not held and r.photo_key in mapped
                           else []})
         return JSONResponse({"categories": xl.categories(rows), "total": len(chosen),
-                             "offset": start, "tiles": tiles, "models": list(excluded_models()),
+                             "offset": start, "tiles": tiles,
                              "as_of": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
                             headers=NOT_INDEXED)
 
     @app.get("/api/research/excluded-photos/looked")
     def read_excluded_looked(request: Request, photo: str, model: str = "v1"):
         """An excluded photo's map, to anyone: 200 once made, 202 while being made, 404 when
-        nobody has asked yet, 403 while the paper's seal holds it back, 503 when it failed."""
+        nobody has asked yet (or for any model but v1), 403 while the paper's seal holds it
+        back, 503 when it failed."""
         read_limit(request)
         excluded_off()
         hit = excluded_row(request, photo)

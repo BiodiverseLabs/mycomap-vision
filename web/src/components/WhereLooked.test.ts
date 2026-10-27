@@ -52,11 +52,20 @@ test("the panel says what the map means and doesn't, and opens on the strongest 
   assert.match(t, /The bright parts of each photo are where the evidence for Laetiporus sulphureus was/);
   assert.match(t, /It shows where , not why/);
   assert.match(t, /On its own, photo 2 puts Laetiporus sulphureus first, at 93%/);
-  assert.match(t, /Spotlight Glow/);
+  assert.match(t, /Spotlight strength/);
+  assert.match(t, /Clear: this photo's strongest evidence for the name/);
   assert.match(t, /Vision doesn't see this strip/);
   assert.match(t, /What this map does and doesn't mean/);
   assert.match(t, /hiding the brightest tenth of a photo cost Vision about six times as much score/);
   assert.match(t, /It doesn't show why/);
+});
+
+test("the panel has one look, Spotlight with its strength: no Glow, no style to choose", () => {
+  const h = renderToStaticMarkup(createElement(LookedPanel, { view: READY, r: R, urls: URLS }));
+  assert.doesNotMatch(h, /Glow/i);
+  assert.doesNotMatch(text(h), /Show as/);
+  assert.equal((h.match(/type="range"/g) ?? []).length, 1);
+  assert.match(h, /aria-label="Strength of the map"/);
 });
 
 test("the match shows the specimen the link shows, credited, as similar patterns not proof", () => {

@@ -164,3 +164,20 @@ def test_a_default_saved_by_the_reviewers_save_is_its_own_confirmation():
     assert fx.confirmation("summary: shown") == "shown"
     assert fx.confirmation("summary: flipped") == "flipped"
     assert fx.confirmation(None) == "record"
+
+def test_past_drawing_decisions_export_their_own_codes_and_a_new_one_exports_drawing(site):
+    """Steve, 2026-10-27: one Drawings reason. Rows decided before keep drawing_micro and
+    drawing_specimen in the reason column; only a new decision says "drawing"; and a reason
+    filter for micrographs (paper E35's micro arm) never takes a drawing."""
+    s, live, rel, tmp = site
+    decided(s)
+    decide(s, "inat:4", "exclude_photo", T0 + 5, "drawing_micro", None)
+    data, summary = fx.export(backup(live, tmp / "a.sqlite"), rel, CUT, KEY, live)
+    rows = {l.split("\t")[0]: dict(zip(fx.COLUMNS, l.split("\t")))
+            for l in data.decode().split("\n")[1:] if l}
+    assert rows["inat:4"]["reason"] == "drawing_micro"
+    assert summary["exclusions_by_reason"]["drawing_micro"] == 1
+    assert [k for k, r in rows.items() if r["reason"] == "micrograph"] == ["inat:1"]
+    decide(s, "inat:4", "exclude_photo", T0 + 6, "drawing_specimen", None)
+    again = fx.export(backup(live, tmp / "b.sqlite"), rel, CUT, KEY, live)[0]
+    assert "\tdrawing_specimen\t" in again.decode() and "\tdrawing\t" not in again.decode()

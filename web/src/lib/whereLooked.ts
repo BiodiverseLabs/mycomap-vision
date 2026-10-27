@@ -19,29 +19,10 @@ export function spotlightAlpha(map: number[], keep = KEEP): number[] {
   return rank.map((r) => Math.pow(Math.min(1, Math.max(0, (1 - keep - r) / (1 - keep))), 0.6) * 0.8);
 }
 
-/** Glow: per cell, its opacity (0 to 0.9): nothing below a fifth of the top. */
-export function glowAlpha(map: number[], floor = 0.2): number[] {
-  return map.map((v) => {
-    const t = Math.min(1, Math.max(0, (v / 255 - floor) / (1 - floor)));
-    return Math.pow(t, 0.8) * 0.9;
-  });
-}
-
-/** Cyan to white: stands out on the browns, oranges and yellows of most fungi. */
-const ICE: [number, number, number][] = [[0, 140, 190], [40, 200, 235], [150, 235, 250], [255, 255, 255]];
-
-export function glowColour(v: number): [number, number, number] {
-  const t = Math.min(1, Math.max(0, v / 255)) * (ICE.length - 1);
-  const i = Math.min(ICE.length - 2, Math.floor(t));
-  const f = t - i;
-  return ICE[i].map((c, k) => Math.round(c * (1 - f) + ICE[i + 1][k] * f)) as [number, number, number];
-}
-
-/** Each cell's colour for a style: [r, g, b, alpha]. */
-export function cellColours(map: number[], style: "spot" | "glow"): [number, number, number, number][] {
-  if (style === "spot") return spotlightAlpha(map).map((a) => [18, 18, 18, a]);
-  const a = glowAlpha(map);
-  return map.map((v, i) => [...glowColour(v), a[i]] as [number, number, number, number]);
+/** Each cell's colour: [r, g, b, alpha], the spotlight's dimming. Spotlight is the one look
+ *  (Steve, 2026-10-26: Glow is gone). */
+export function cellColours(map: number[]): [number, number, number, number][] {
+  return spotlightAlpha(map).map((a) => [18, 18, 18, a]);
 }
 
 const pc = (v: number) => `${+(v * 100).toFixed(2)}%`;

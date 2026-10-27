@@ -10,7 +10,6 @@ import {
   workingLine,
 } from "@/lib/whereLooked";
 
-export type Style = "spot" | "glow";
 type Ready = Extract<LookedView, { status: "ready" }>;
 
 /** The button, and the panel once the maps are there. Shown only where the server has the
@@ -83,13 +82,10 @@ export function LookedPanel({ view, r, urls, onHide }: {
   view: Ready; r: IdentifyResult; urls: string[]; onHide?: () => void;
 }) {
   const [cur, setCur] = useState<number | null>(() => firstPhoto(view.photos, r.per_photo));
-  const [style, setStyle] = useState<Style>("spot");
   const [strength, setStrength] = useState(75);
   const entry = view.photos.find((p) => p.photo === cur) ?? view.photos[0];
   if (!entry) return null;
   const own = ownLine(entry.photo, r.per_photo);
-  const seg = (on: boolean) =>
-    `rounded-full border px-3 py-1 text-[13px] ${on ? "border-[#4a7a22] bg-[#4a7a22] text-white" : "border-[#A87146]/25 bg-white text-[#4a3728]"}`;
   return (
     <section className="rounded-lg border border-[#A87146]/20 bg-white p-3 sm:p-4" aria-label="Where Vision looked"
              data-testid="panel-where-looked">
@@ -121,7 +117,7 @@ export function LookedPanel({ view, r, urls, onHide }: {
         <figure className="relative m-0 overflow-hidden rounded-md bg-[#111]" data-testid="figure-where-looked">
           {urls[entry.photo] && <img src={urls[entry.photo]} alt={`Your photo ${entry.photo + 1}`} className="block w-full" />}
           <div className="absolute" style={cropBox(entry.crop)}>
-            <MapLayer entry={entry} style={style} opacity={strength / 100} />
+            <MapLayer entry={entry} opacity={strength / 100} />
           </div>
           {unseenStrips(entry.crop).map((s) => (
             <div key={s.side} className="absolute flex items-center justify-center bg-[repeating-linear-gradient(135deg,rgba(255,255,255,.55)_0_6px,rgba(255,255,255,.35)_6px_12px)]"
@@ -133,15 +129,8 @@ export function LookedPanel({ view, r, urls, onHide }: {
           ))}
         </figure>
         <div>
-          <div className="mb-3">
-            <div className="mb-1 text-[11px] uppercase tracking-wide text-[#7a6a5a]">Show as</div>
-            <div className="flex flex-wrap gap-1.5">
-              <button type="button" className={seg(style === "spot")} onClick={() => setStyle("spot")}>Spotlight</button>
-              <button type="button" className={seg(style === "glow")} onClick={() => setStyle("glow")}>Glow</button>
-            </div>
-          </div>
           <label className="mb-3 block">
-            <span className="mb-1 block text-[11px] uppercase tracking-wide text-[#7a6a5a]">Strength</span>
+            <span className="mb-1 block text-[11px] uppercase tracking-wide text-[#7a6a5a]">Spotlight strength</span>
             <input type="range" min={0} max={100} value={strength} onChange={(e) => setStrength(+e.target.value)}
                    className="w-full accent-[#5e9a2c]" aria-label="Strength of the map" />
           </label>
@@ -151,9 +140,7 @@ export function LookedPanel({ view, r, urls, onHide }: {
             </p>
           )}
           <p className="mt-1 text-xs text-[#7a6a5a]">
-            {style === "spot"
-              ? "Clear: this photo's strongest evidence for the name. Dimmed: what mattered less."
-              : "Bright: what pushed this photo toward the name. Nothing: what barely mattered."}
+            Clear: this photo's strongest evidence for the name. Dimmed: what mattered less.
           </p>
         </div>
       </div>
@@ -177,10 +164,10 @@ export function LookedPanel({ view, r, urls, onHide }: {
   );
 }
 
-/** The map over the square the model sees: a canvas of grid x grid cells, scaled up smoothly
- *  (the Excluded photos page draws its maps with it too). */
-export function MapLayer({ entry, style, opacity }: {
-  entry: Pick<LookedPhoto, "grid" | "map">; style: Style; opacity: number;
+/** The map over the square the model sees, as a spotlight: a canvas of grid x grid cells,
+ *  scaled up smoothly (the Excluded photos page draws its maps with it too). */
+export function MapLayer({ entry, opacity }: {
+  entry: Pick<LookedPhoto, "grid" | "map">; opacity: number;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -188,11 +175,11 @@ export function MapLayer({ entry, style, opacity }: {
     if (!ctx) return;
     const g = entry.grid;
     const img = ctx.createImageData(g, g);
-    cellColours(entry.map, style).forEach(([r, gr, b, a], i) => {
+    cellColours(entry.map).forEach(([r, gr, b, a], i) => {
       img.data.set([r, gr, b, Math.round(a * 255)], i * 4);
     });
     ctx.putImageData(img, 0, 0);
-  }, [entry, style]);
+  }, [entry]);
   return <canvas ref={ref} width={entry.grid} height={entry.grid} className="block h-full w-full"
                  style={{ opacity, imageRendering: "auto" }} aria-hidden />;
 }

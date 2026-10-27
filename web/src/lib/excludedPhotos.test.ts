@@ -12,7 +12,7 @@ import {
   type ExcludedPage,
 } from "./excludedPhotos";
 import { researchBar, researchNav } from "./research";
-import { ExcludedPhotos } from "../pages/ExcludedPhotos";
+import { ExcludedPhotos, PhotoDialog } from "../pages/ExcludedPhotos";
 
 const render = (page?: ExcludedPage, extra: Partial<Parameters<typeof ExcludedPhotos>[0]> = {}) => renderToStaticMarkup(
   createElement(QueryClientProvider, { client: new QueryClient() }, createElement(Router, {
@@ -25,7 +25,7 @@ const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&#x27;/g, 
 const PAGE: ExcludedPage = {
   categories: [{ code: "slip", label: "Field slips and labels", count: 16245 },
                { code: "micrograph", label: "Micrographs", count: 37073 }],
-  total: 53318, offset: 0, models: ["v1", "base"], as_of: "2026-10-26T12:00:00Z",
+  total: 53318, offset: 0, as_of: "2026-10-26T12:00:00Z",
   tiles: [
     { photo_key: "inat:1", record_key: "369903305", name: "Hemimycena sp. 'CA01'", category: "slip", shown: "public",
       thumb: "https://x/small.jpg", photo_url: "https://x/large.jpg", owner_login: "benkeen", license_code: "cc0",
@@ -44,7 +44,7 @@ test("the page sits in the Research section for everyone, before For researchers
 });
 
 test("every category is a reason a person can give, labelled for the page", () => {
-  assert.equal(CATEGORIES.length, 15);
+  assert.equal(CATEGORIES.length, 14);
   assert.equal(categoryLabel("slip"), "Field slips and labels");
   assert.equal(categoryLabel("something-new"), "something-new");
 });
@@ -90,6 +90,28 @@ test("each refusal is said in words", () => {
 
 test("the addresses carry the category, page, map filter, photo and model", () => {
   assert.equal(listUrl("slip", 48, true), "/api/research/excluded-photos?category=slip&offset=48&limit=48&maps=1");
-  assert.equal(lookedUrl("mo:12", "base"), "/api/research/excluded-photos/looked?photo=mo%3A12&model=base");
+  assert.equal(lookedUrl("mo:12"), "/api/research/excluded-photos/looked?photo=mo%3A12&model=v1");
   assert.equal(rangeLine(0, 0, 0), "No photos");
+});
+
+test("a photo's map is v1's, as a spotlight: no Glow, no BioCLIP base, no side by side", () => {
+  const html = renderToStaticMarkup(createElement(PhotoDialog, { t: PAGE.tiles[0], me: { signin: "all", user: null },
+                                                                 onClose: () => {} }));
+  const t = text(html);
+  assert.match(t, /Spotlight strength/);
+  assert.equal((html.match(/type="range"/g) ?? []).length, 1);
+  assert.match(t, /Show where Vision looked/);
+  assert.match(html, /data-testid="figure-excluded-v1"/);
+  for (const gone of [/Glow/i, /BioCLIP/i, /base model/i, /Side by side/i, /Show as/, /button-compare-models/, /excluded-base/]) {
+    assert.doesNotMatch(html, gone);
+  }
+});
+
+test("drawings are one category: no separate microscopy or specimen drawings", () => {
+  assert.equal(categoryLabel("drawing"), "Drawings");
+  assert.deepEqual(CATEGORIES.filter((c) => /drawing/i.test(c.code + c.label)), [{ code: "drawing", label: "Drawings" }]);
+  const page = { ...PAGE, categories: [...PAGE.categories, { code: "drawing", label: "Drawings", count: 453 }] };
+  const t = text(render(page));
+  assert.match(t, /Drawings 453/);
+  assert.doesNotMatch(t, /Drawings? – (microscopy|specimen)/);
 });

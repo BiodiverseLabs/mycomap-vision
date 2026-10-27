@@ -1,9 +1,12 @@
 """Research > Excluded photos (Steve, 2026-10-26): every photo people left out of Vision in
 Human Feedback, by why it was left out, and "where Vision looked" (looked.py) on any of them,
-from the served model or the base model it was tuned from, for research on attention.
+from the served model (v1), for research on attention. v1 only (Steve, 2026-10-26): the BioCLIP
+base model and the side-by-side view are gone, so its tower and vectors are never loaded here;
+a request for another model is refused (404), and base maps kept before are never served.
 
 **Which photos.** A photo item of the "Photos that show no specimen" queue whose latest decision
-is `exclude_photo`; its category is that decision's value (photo_review.REASONS). Decisions are
+is `exclude_photo`; its category is that decision's value (photo_review.REASONS; a retired code
+as its successor, so both old drawing reasons are "Drawings"). Decisions are
 written only by a signed-in person (feedback_api), so a tagger's flag alone never puts a photo
 here. People photos (Steve, 2026-10-26) are listed only to Human Feedback reviewers.
 
@@ -39,14 +42,14 @@ from . import photo_review as pr
 
 FILE = "excluded-looked.sqlite"
 VERSION = 1
-MODELS = ("v1", "base")
+MODEL = "v1"
 REVIEWERS_ONLY = frozenset({"people"})
 CATEGORY_LABELS = {
     "micrograph": "Micrographs", "slip": "Field slips and labels",
     "habitat": "Habitat and scenes", "people": "People", "not_fungus": "Not a fungus",
     "dried": "Dried specimens", "spore_print": "Spore prints", "uv": "UV reactions",
     "chemical": "Chemical spot tests", "phylo_tree": "Phylogenetic trees / BLAST",
-    "drawing_micro": "Drawings – microscopy", "drawing_specimen": "Drawings – specimen",
+    "drawing": "Drawings",
     "species_description": "Species descriptions", "blurry": "Blurry or badly exposed",
     "other": "Other"}
 assert set(CATEGORY_LABELS) == set(pr.REASON_CODES)
@@ -77,6 +80,7 @@ def read_excluded(conn: sqlite3.Connection) -> list[Excluded]:
     for subject, record_keys, links, value, _ in conn.execute(EXCLUDED_SQL, (pr.ITEM_TYPE,)):
         rk = pr.record_of_item({"record_keys": json.loads(record_keys or "[]"),
                                 "links": json.loads(links or "[]")})
+        value = pr.shown_reason(value)
         if rk and value in CATEGORY_LABELS:
             out.append(Excluded(subject, rk, value))
     return out
@@ -127,101 +131,9 @@ def record_url(record_key: str) -> str:
     return f"https://www.inaturalist.org/observations/{record_key}"
 
 
-# --- the base model's vectors ------------------------------------------------------------------
-# A release's manifest keeps the embeddings rows of every backbone the laptop ever embedded, but
-# ships vector files only for the served ones (release.py), so rows alone don't make a backbone
-# usable. The base is offered only when its folder holds every shard the manifest names; shipping
-# it is a folder copy into <release>/embeddings/<base>/, read by serving.map_embeddings as
-# shard-NNNNN.ids.npy (int64 photo ids) and shard-NNNNN.npy (float, or int8 codes with
-# shard-NNNNN.scale.npy beside them), row r of a shard being the manifest's (photo_id, shard, r).
-
-def manifest_shards(conn: sqlite3.Connection, backbone: str) -> list[int]:
-    return [r[0] for r in conn.execute("select distinct shard from embeddings where backbone = ? "
-                                       "order by shard", (backbone,))]
-
-
-def vectors_shipped(shards: list[int], folder: Path) -> bool:
-    """Every shard's two files are in `folder` (the cheap check the server makes)."""
-    folder = Path(folder)
-    return bool(shards) and folder.is_dir() and all(
-        (folder / f"shard-{s:05d}.ids.npy").is_file() and (folder / f"shard-{s:05d}.npy").is_file()
-        for s in shards)
-
-
-def check_vectors(conn: sqlite3.Connection, backbone: str, folder: Path,
-                  dim: int | None = None, sample: int = 2000) -> dict:
-    """Whether `folder` holds `backbone`'s vectors exactly as `conn`'s manifest names them, and
-    loads as the server loads it (serving.map_embeddings): every shard's files, each row's photo
-    id, the vectors' shape, dtype and scales, `dim` when given, and unit length on a sample of
-    float rows. {"ok", "problems", "shards", "vectors", "dim", "dtype"}."""
-    import numpy as np
-
-    from .serving import SCALE_SUFFIX, map_embeddings
-    folder = Path(folder)
-    problems: list[str] = []
-    want: dict[int, dict[int, int]] = {}
-    for photo_id, shard, row in conn.execute(
-            "select photo_id, shard, row from embeddings where backbone = ?", (backbone,)):
-        want.setdefault(int(shard), {})[int(row)] = int(photo_id)
-    if not want:
-        return {"ok": False, "problems": [f"the manifest has no embeddings rows for {backbone}"],
-                "shards": 0, "vectors": 0, "dim": None, "dtype": None}
-    dims, dtypes, total = set(), set(), 0
-    rng = np.random.default_rng(0)
-    for s in sorted(want):
-        ids_f, vec_f = folder / f"shard-{s:05d}.ids.npy", folder / f"shard-{s:05d}.npy"
-        if not (ids_f.is_file() and vec_f.is_file()):
-            problems.append(f"shard {s}: {ids_f.name} or {vec_f.name} is missing")
-            continue
-        ids = np.load(ids_f)
-        v = np.load(vec_f, mmap_mode="r")
-        if ids.ndim != 1 or ids.dtype.kind not in "iu":
-            problems.append(f"shard {s}: photo ids are {ids.dtype} {ids.shape}, not 1-D integers")
-            continue
-        if v.ndim != 2 or len(v) != len(ids):
-            problems.append(f"shard {s}: {len(ids)} ids but vectors of shape {v.shape}")
-            continue
-        dims.add(int(v.shape[1]))
-        dtypes.add(str(v.dtype))
-        rows = want[s]
-        wrong = [r for r, pid in rows.items() if r >= len(ids) or int(ids[r]) != pid]
-        if wrong:
-            problems.append(f"shard {s}: {len(wrong)} manifest rows name another photo "
-                            f"(first: row {wrong[0]})")
-        if len(ids) != len(rows):
-            problems.append(f"shard {s}: {len(ids)} vectors, the manifest names {len(rows)}")
-        total += len(ids)
-        if v.dtype == np.int8:
-            sc_f = folder / f"shard-{s:05d}{SCALE_SUFFIX}"
-            if not sc_f.is_file() or np.load(sc_f).shape != (len(ids),):
-                problems.append(f"shard {s}: int8 codes without one scale per row in {sc_f.name}")
-        elif v.dtype.kind == "f":
-            pick = rng.choice(len(v), size=min(len(v), max(1, sample // len(want))), replace=False)
-            norms = np.linalg.norm(np.asarray(v[np.sort(pick)], dtype=np.float64), axis=1)
-            if not np.all(np.isfinite(norms)) or np.abs(norms - 1).max() > 1e-2:
-                problems.append(f"shard {s}: vectors are not unit length (norms "
-                                f"{norms.min():.3f}..{norms.max():.3f})")
-        else:
-            problems.append(f"shard {s}: vectors of dtype {v.dtype}")
-    if len(dims) > 1:
-        problems.append(f"shards differ in width: {sorted(dims)}")
-    if dim is not None and dims and dims != {dim}:
-        problems.append(f"vectors are {sorted(dims)} wide, the model's are {dim}")
-    if not problems:
-        try:
-            ids, vecs = map_embeddings(conn, backbone, folder)
-            if len(ids) != total:
-                problems.append(f"the server's loader read {len(ids)} vectors, not {total}")
-        except Exception as e:  # noqa: BLE001 - report what the server would hit
-            problems.append(f"the server's loader refused it: {type(e).__name__}: {e}")
-    return {"ok": not problems, "problems": problems, "shards": len(want), "vectors": total,
-            "dim": next(iter(dims)) if len(dims) == 1 else None,
-            "dtype": next(iter(dtypes)) if len(dtypes) == 1 else sorted(dtypes)}
-
-
 class Maps:
     """The kept maps: one row per photo and model, insert or replace (a newer VERSION), never
-    who asked."""
+    who asked. Only MODEL's are made or read now; rows of the old base model stay untouched."""
 
     SCHEMA = ("create table if not exists maps (photo_key text not null, model text not null, "
               "version integer not null, doc text not null, made_at text not null, "
@@ -250,14 +162,11 @@ class Maps:
                                doc["made_at"]))
             self._mapped.clear()
 
-    def mapped(self) -> dict[str, set[str]]:
-        """photo key -> the models with a kept map."""
+    def mapped(self, model: str = MODEL) -> set[str]:
+        """The photo keys with a kept map from `model`."""
         with self.lock:
-            out: dict[str, set[str]] = {}
-            for k, m in self.conn.execute("select photo_key, model from maps where version = ?",
-                                          (VERSION,)):
-                out.setdefault(k, set()).add(m)
-            return out
+            return {k for (k,) in self.conn.execute(
+                "select photo_key from maps where model = ? and version = ?", (model, VERSION))}
 
 
 class Listing:

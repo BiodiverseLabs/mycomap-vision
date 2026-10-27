@@ -5,12 +5,12 @@ import type { Me } from "@/lib/api";
 import { ApiError } from "@/lib/api";
 import { cropBox, POLL_MS, unseenStrips } from "@/lib/whereLooked";
 import {
-  categoryLabel, excludedApi, HELD_LINE, MAP_MODELS, PAGE_SIZE, rangeLine, rankLine, refusal,
-  type ExcludedLooked, type ExcludedPage, type ExcludedTile, type MapModel,
+  categoryLabel, excludedApi, HELD_LINE, MAP_MODEL_LABEL, PAGE_SIZE, rangeLine, rankLine, refusal,
+  type ExcludedLooked, type ExcludedPage, type ExcludedTile,
 } from "@/lib/excludedPhotos";
 import { nf } from "@/lib/researchView";
 import { ResearchHero, ResearchShell, Section } from "@/components/ResearchKit";
-import { MapLayer, type Style } from "@/components/WhereLooked";
+import { MapLayer } from "@/components/WhereLooked";
 import { useMe } from "@/components/researchQueries";
 
 // Research > Excluded photos (Steve, 2026-10-26): every photo people left out of Vision in Human
@@ -94,7 +94,7 @@ export function ExcludedPhotos({ me, page, loading, failed, category, withMaps, 
           owner said yes on mycomap.org. Who decided, and their notes, are never shown.
         </p>
       </Section>
-      {open && <PhotoDialog t={open} me={me} models={page?.models ?? ["v1"]} onClose={() => setOpen(null)} />}
+      {open && <PhotoDialog t={open} me={me} onClose={() => setOpen(null)} />}
     </ResearchShell>
   );
 }
@@ -135,20 +135,14 @@ function Tile({ t, onOpen }: { t: ExcludedTile; onOpen: () => void }) {
   );
 }
 
-/** One photo, large, with its map from either model on request. */
-function PhotoDialog({ t, me, models, onClose }: { t: ExcludedTile; me?: Me | null; models: MapModel[]; onClose: () => void }) {
-  const [model, setModel] = useState<MapModel>("v1");
-  const [compare, setCompare] = useState(false);
-  const [style, setStyle] = useState<Style>("spot");
+/** One photo, large, with v1's map on request, as a spotlight. */
+export function PhotoDialog({ t, me, onClose }: { t: ExcludedTile; me?: Me | null; onClose: () => void }) {
   const [strength, setStrength] = useState(75);
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", esc);
     return () => window.removeEventListener("keydown", esc);
   }, [onClose]);
-  const seg = (on: boolean) =>
-    `rounded-full border px-3 py-1 text-[13px] ${on ? "border-[#4a7a22] bg-[#4a7a22] text-white" : "border-[#A87146]/25 bg-white text-[#4a3728]"}`;
-  const both = compare && models.includes("base");
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-3 sm:p-8"
          role="dialog" aria-modal="true" aria-label="Excluded photo" onClick={onClose}>
@@ -171,32 +165,14 @@ function PhotoDialog({ t, me, models, onClose }: { t: ExcludedTile; me?: Me | nu
           </button>
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
-          {models.length > 1 && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] uppercase tracking-wide text-[#7a6a5a]">Model</span>
-              {MAP_MODELS.filter((m) => models.includes(m.code)).map((m) => (
-                <button key={m.code} type="button" className={seg(!both && model === m.code)}
-                        onClick={() => { setModel(m.code); setCompare(false); }}>{m.short}</button>
-              ))}
-              <button type="button" className={seg(both)} onClick={() => setCompare(!compare)}
-                      data-testid="button-compare-models">Side by side</button>
-            </div>
-          )}
-          <div className="flex items-center gap-1.5">
-            <span className="text-[11px] uppercase tracking-wide text-[#7a6a5a]">Show as</span>
-            <button type="button" className={seg(style === "spot")} onClick={() => setStyle("spot")}>Spotlight</button>
-            <button type="button" className={seg(style === "glow")} onClick={() => setStyle("glow")}>Glow</button>
-          </div>
           <label className="flex min-w-[160px] flex-1 items-center gap-2">
-            <span className="text-[11px] uppercase tracking-wide text-[#7a6a5a]">Strength</span>
+            <span className="shrink-0 text-[11px] uppercase tracking-wide text-[#7a6a5a]">Spotlight strength</span>
             <input type="range" min={0} max={100} value={strength} onChange={(e) => setStrength(+e.target.value)}
                    className="w-full accent-[#5e9a2c]" aria-label="Strength of the map" />
           </label>
         </div>
-        <div className={`mt-3 grid gap-4 ${both ? "sm:grid-cols-2" : ""}`}>
-          {(both ? (["v1", "base"] as MapModel[]) : [model]).map((m) => (
-            <MapFigure key={m} t={t} me={me} model={m} style={style} strength={strength} labelled={both} />
-          ))}
+        <div className="mt-3">
+          <MapFigure t={t} me={me} strength={strength} />
         </div>
         <details className="mt-3 rounded-md border border-[#A87146]/20 px-3 py-2 text-[13px] text-[#4a3728]">
           <summary className="cursor-pointer font-semibold">What this map does and doesn't mean</summary>
@@ -215,36 +191,33 @@ function PhotoDialog({ t, me, models, onClose }: { t: ExcludedTile; me?: Me | nu
   );
 }
 
-function MapFigure({ t, me, model, style, strength, labelled }: {
-  t: ExcludedTile; me?: Me | null; model: MapModel; style: Style; strength: number; labelled: boolean;
-}) {
+function MapFigure({ t, me, strength }: { t: ExcludedTile; me?: Me | null; strength: number }) {
   const [view, setView] = useState<ExcludedLooked | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
-  const label = MAP_MODELS.find((m) => m.code === model)!;
   // A map someone already asked for is open to anyone: read it straight away.
   useEffect(() => {
     if (t.held) return;
     let live = true;
     setView(null);
     setProblem(null);
-    excludedApi.read(t.photo_key, model).then((v) => { if (live) setView(v); }).catch(() => { if (live) setView({ status: "none" }); });
+    excludedApi.read(t.photo_key).then((v) => { if (live) setView(v); }).catch(() => { if (live) setView({ status: "none" }); });
     return () => { live = false; };
-  }, [t.photo_key, t.held, model]);
+  }, [t.photo_key, t.held]);
   useEffect(() => {
     if (view?.status !== "working") return;
     const id = setTimeout(() => {
-      excludedApi.read(t.photo_key, model).then(setView).catch((e) => {
+      excludedApi.read(t.photo_key).then(setView).catch((e) => {
         setProblem(refusal(e instanceof ApiError ? e.status : 0, String(e.message ?? "")));
       });
     }, POLL_MS);
     return () => clearTimeout(id);
-  }, [view, t.photo_key, model]);
+  }, [view, t.photo_key]);
   const ask = async () => {
     setAsking(true);
     setProblem(null);
     try {
-      setView(await excludedApi.ask(t.photo_key, model));
+      setView(await excludedApi.ask(t.photo_key));
     } catch (e) {
       setProblem(refusal(e instanceof ApiError ? e.status : 0, e instanceof Error ? e.message : ""));
     } finally {
@@ -254,27 +227,26 @@ function MapFigure({ t, me, model, style, strength, labelled }: {
   const ready = view?.status === "ready" ? view : null;
   if (t.held) {
     return (
-      <figure className="m-0" data-testid={`figure-excluded-${model}`}>
+      <figure className="m-0" data-testid="figure-excluded-v1">
         <Photo t={t} />
         <p className="mt-2 text-[13px] text-[#6f6257]" data-testid="text-excluded-held">{HELD_LINE}</p>
       </figure>
     );
   }
   return (
-    <figure className="m-0" data-testid={`figure-excluded-${model}`}>
-      {labelled && <figcaption className="mb-1 text-[13px] font-semibold text-[#4a3728]">{label.label}</figcaption>}
-      <Photo t={t} ready={ready} style={style} strength={strength} />
+    <figure className="m-0" data-testid="figure-excluded-v1">
+      <Photo t={t} ready={ready} strength={strength} />
       {ready ? (
         <p className="mt-2 text-[13px] text-[#5c4a3a]" data-testid="text-excluded-map-line">
-          {!labelled && <>{label.label}: </>}bright where this photo's evidence for <span className="sci">{ready.name}</span> was.
+          {MAP_MODEL_LABEL}: clear where this photo's evidence for <span className="sci">{ready.name}</span> was.
           {" "}On its own, the photo puts it {rankLine(ready.rank, ready.top)}.
         </p>
       ) : (
         <button type="button" onClick={ask} disabled={asking || view?.status === "working" || view === null}
                 className="mt-2 flex w-full items-center gap-2 rounded-md border border-myco-green bg-[#f4f9ee] px-3 py-2 text-sm font-semibold text-[#3f6b1d] hover:bg-[#eaf4df] disabled:opacity-80"
-                data-testid={`button-excluded-looked-${model}`}>
+                data-testid="button-excluded-looked-v1">
           <ScanEye className="h-4 w-4 shrink-0" aria-hidden />
-          <span>Show where {labelled ? label.short : "Vision"} looked</span>
+          <span>Show where Vision looked</span>
           <span className="ml-auto text-xs font-normal text-[#6b7a5c]">
             {view?.status === "working" ? (view.ahead > 0 ? "waiting for a quiet moment…" : "looking…")
               : asking ? "asking…" : me?.user ? "takes a few seconds" : "sign in to ask"}
@@ -287,8 +259,8 @@ function MapFigure({ t, me, model, style, strength, labelled }: {
 }
 
 /** The photo, with its map over the square the model sees once there is one. */
-function Photo({ t, ready, style = "spot", strength = 75 }: {
-  t: ExcludedTile; ready?: Extract<ExcludedLooked, { status: "ready" }> | null; style?: Style; strength?: number;
+function Photo({ t, ready, strength = 75 }: {
+  t: ExcludedTile; ready?: Extract<ExcludedLooked, { status: "ready" }> | null; strength?: number;
 }) {
   return (
     <div className="flex justify-center overflow-hidden rounded-md bg-[#111]">
@@ -297,7 +269,7 @@ function Photo({ t, ready, style = "spot", strength = 75 }: {
         {ready && (
           <>
             <div className="absolute" style={cropBox(ready.map.crop)}>
-              <MapLayer entry={ready.map} style={style} opacity={strength / 100} />
+              <MapLayer entry={ready.map} opacity={strength / 100} />
             </div>
             {unseenStrips(ready.map.crop).map((s) => (
               <div key={s.side} className="absolute bg-[repeating-linear-gradient(135deg,rgba(255,255,255,.55)_0_6px,rgba(255,255,255,.35)_6px_12px)]"
