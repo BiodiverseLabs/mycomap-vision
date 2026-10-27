@@ -1556,8 +1556,47 @@ def cmd_paper_attrs(conn, args) -> None:
                  "review": args.vocab_review,
                  "review_sha256": paper_attrs.sha256_file(Path(args.vocab_review))
                  if args.vocab_review else None}
+    secondary = None
+    if args.e31_snapshot or args.mo_created:
+        # E14's secondary rows (Steve, 27 Oct): created_at, inat_observation and RG as of
+        # iNat CV's training export.
+        from collections import Counter
+
+        from .paper_score import scored_and_reference
+        scored_rel, split, _r, _s = scored_and_reference(base, test)
+        scored = [dict(r) for r in scored_rel.records(split)]
+        inat_created, snap = {}, None
+        secondary = {"rg_rule": "rg_by_identifications: each identifier's latest ID before the "
+                                "date; a taxon at species or finer with >2/3 agreement and "
+                                ">=2 agreeing IDs (no data-quality votes)",
+                     "rg_as_of": args.rg_as_of}
+        if args.e31_snapshot:
+            from .expert_ids import CREATED_FILE, read_snapshot
+            snap_path = Path(args.e31_snapshot)
+            created_path = snap_path.with_name(CREATED_FILE)
+            inat_created, key_of = paper_attrs.read_created_tsv(created_path)
+            if args.rg_as_of:
+                snap = {key_of[str(r["observation_id"])]: r for r in read_snapshot(snap_path)
+                        if str(r["observation_id"]) in key_of}
+            secondary.update(e31_snapshot=str(snap_path),
+                             e31_snapshot_sha256=paper_attrs.sha256_file(snap_path),
+                             created_file_sha256=paper_attrs.sha256_file(created_path))
+        mo_ids = [int(r["source_id"]) for r in scored
+                  if r.get("source") == "mo" and str(r.get("source_id") or "").isdigit()]
+        mo_created, mo_stats = ({}, None)
+        if args.mo_created:
+            mo_created, mo_stats = paper_attrs.mo_created_at(
+                mo_ids, config.RAW_DIR / "mo", offline=args.mo_offline)
+        secondary["mo"] = mo_stats
+        for k, a in paper_attrs.secondary_attrs(scored, inat_created, mo_created, snap,
+                                                args.rg_as_of).items():
+            attrs.setdefault(k, {}).update(a)
+        secondary["created_known"] = sum(1 for a in attrs.values() if a.get("created_at"))
+        secondary["rg"] = dict(Counter(a.get("rg_at_inat_export") for a in attrs.values()
+                                       if "rg_at_inat_export" in a))
     out = paper_attrs.write(Path(args.out), attrs)
     Path(str(out) + ".json").write_text(json.dumps({
+        "secondary": secondary,
         "dataset_release": base.cite(), "test": args.test, "finds": len(attrs),
         "ecoregions": eco, "vocabulary": vocab, "season_days": paper_attrs.SEASON_DAYS,
         "core_share": paper_attrs.CORE_SHARE, "bands_km": [b for _, b in paper_attrs.BANDS_KM],
@@ -2896,6 +2935,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--vocab", help="COLUMN=MODEL: yes/no, is the true species one of the "
                                    "published model's classes (e.g. beit_vocab=fungitastic-beit-b384)")
     p.add_argument("--vocab-review", help="the reviewed crosswalk: credited pairs count too")
+    p.add_argument("--e31-snapshot", help="E31's identification snapshot (.jsonl.gz, its "
+                                          "created_at.tsv beside it): created_at for iNat finds")
+    p.add_argument("--rg-as-of", help="with --e31-snapshot: rg_at_inat_export as of this date "
+                                      "(iNat CV's training export, read at the cut)")
+    p.add_argument("--mo-created", action="store_true",
+                   help="created_at for MO finds from MO's public API (cached in data/raw/mo, "
+                        "anonymous, paced; read only)")
+    p.add_argument("--mo-offline", action="store_true",
+                   help="with --mo-created: the cache only, no MO request")
 
     p = sub.add_parser("paper-score", help="every table of the paper's sealed-test analysis, "
                                            "one command (paper_score.py)")
