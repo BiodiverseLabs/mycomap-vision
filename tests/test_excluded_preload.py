@@ -393,26 +393,34 @@ def test_a_crop_not_yet_embedded_has_no_map_and_holds_the_slips_back(conn, tmp_p
 
 # --- 2026-10-27: the first pass never ended ------------------------------------------------------
 
-def test_a_pass_reads_what_is_served_once_not_per_target(conn, tmp_path, any_time, monkeypatch):
-    """The served backbone comes from a count over every embeddings row (about a second on the
-    box, holding the manifest lock); read per target, the box's first pass of ~31k targets took
-    hours and never finished. A pass now reads it once, however many targets."""
+HEAVY = ("from embeddings group by", "observation_photos", "from records where observation_id in",
+         "from feedback_photo_crops")
+
+
+def test_a_pass_reads_nothing_heavy_on_the_shared_connection(conn, tmp_path, any_time,
+                                                             monkeypatch):
+    """2026-10-27, twice: read per target, the count over every embeddings row (a second on the
+    box) made the first pass of ~31k targets take hours, holding the manifest lock; and a pass's
+    crops-waiting count reads all of observation_photos (1.5-17 s). A pass now makes those reads
+    once, on a connection of its own, so nothing waits behind the lock."""
     from mycomap_vision import api
-    counts = []
+    shared = []
     real_open = api.open_manifest
 
     def counting(path):
         c = real_open(path)
-        c.set_trace_callback(lambda sql: counts.append(sql)
-                             if "from embeddings group by" in sql.lower() else None)
+        c.set_trace_callback(lambda sql: shared.append(sql)
+                             if any(h in sql.lower() for h in HEAVY) else None)
         return c
     monkeypatch.setattr(api, "open_manifest", counting)
+    ensure_crops_schema(conn)                         # the crop reads run, not just fail
+    conn.commit()
     app, _, _ = site(conn, tmp_path)
     p = app.state.excluded_preload
-    before = len(counts)
+    before = len(shared)
     p.pass_ = p.scan()
-    assert p.pass_.total["slips"] == 2
-    assert len(counts) - before <= 1, f"{len(counts) - before} counts over embeddings in one pass"
+    assert p.pass_.total["slips"] == 2 and p.pass_.crops_waiting == 0
+    assert shared[before:] == [], shared[before:]
 
 
 def test_a_pass_is_logged_and_an_error_shows_in_the_health_and_is_retried(conn, tmp_path,

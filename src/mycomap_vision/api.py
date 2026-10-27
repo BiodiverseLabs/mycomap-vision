@@ -2542,21 +2542,22 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             raise HTTPException(404, "no such photo shown here", headers=NOT_INDEXED)
         return hit
 
-    def kept_crops(backbone: str) -> list[tuple[str, int, list, bool]]:
+    def kept_crops(backbone: str, run=None) -> list[tuple[str, int, list, bool]]:
         """Every kept specimen crop (feedback_photo_crops): (photo key, n, box, whether the
-        served model has its vector)."""
+        served model has its vector). `run` replaces q (the preload's own connection)."""
         try:
-            return [(k, int(n), [float(v) for v in box], bool(e)) for k, n, *box, e in q(
+            return [(k, int(n), [float(v) for v in box], bool(e)) for k, n, *box, e in (run or q)(
                 f"select c.photo_key, c.n, c.l, c.t, c.r, c.b, e.photo_id is not null "
                 f"from feedback_photo_crops c left join embeddings e on e.backbone = ? "
                 f"and e.photo_id = {CROP_VECTOR_SQL} order by c.photo_key, c.n", (backbone,))]
         except sqlite3.OperationalError:            # no crop was ever synced here
             return []
 
-    def crops_waiting(backbone: str) -> int:
-        """Kept crops the nightly will embed but hasn't yet (its own rule, embed._crops_sql)."""
+    def crops_waiting(backbone: str, run=None) -> int:
+        """Kept crops the nightly will embed but hasn't yet (its own rule, embed._crops_sql).
+        It reads all of observation_photos (no index on photo_id alone): 1.5-17 s."""
         try:
-            return q("select count(*) " + embed_crops_sql(True), (backbone,))[0][0]
+            return (run or q)("select count(*) " + embed_crops_sql(True), (backbone,))[0][0]
         except sqlite3.OperationalError:
             return 0
 
@@ -2612,11 +2613,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return JSONResponse(state, status_code=202 if state["status"] == "working" else 503,
                             headers=NOT_INDEXED)
 
-    def manifest_names(keys: list[str]) -> dict[str, str]:
+    def manifest_names(keys: list[str], run=None) -> dict[str, str]:
         if not keys:
             return {}
         marks = ",".join("?" * len(keys))
-        return {str(k): n for k, n in q(f"select observation_id, coalesce(species, "
+        return {str(k): n for k, n in (run or q)(f"select observation_id, coalesce(species, "
                                         f"scientific_name) from records where observation_id "
                                         f"in ({marks})", tuple(keys)) if n}
 
@@ -2783,22 +2784,51 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     preload_served: dict = {}
 
     def preload_targets():
-        backbone = excluded_backbone()
-        rel = served_release_dir()
-        preload_served.clear()
-        preload_served.update(backbone=backbone, release=rel.name if rel is not None else None,
-                              method=default_method() if backbone else None)
-        slips = [r for r in excluded_list.rows() if r.category in xl.PRELOAD_CATEGORIES]
-        keys = sorted({r.record_key for r in slips})
-        preload_names.clear()
-        for i in range(0, len(keys), 900):
-            preload_names.update(manifest_names(keys[i:i + 900]))
-        if backbone is None:
-            return [xl.Target(r) for r in slips], [], 0
-        by_key = {r.photo_key: r for r in slips}
-        crops = [xl.Target(by_key[k], n, tuple(box)) for k, n, box, e in kept_crops(backbone)
-                 if e and k in by_key]
-        return [xl.Target(r) for r in slips], crops, crops_waiting(backbone)
+        """A pass's reads, on a read-only connection of its own: the count over every
+        embeddings row and the crops-waiting count take seconds each (more on a cold cache),
+        and on the shared connection they would hold db_lock that long."""
+        own = sqlite3.connect(f"file:{Path(manifest_path).as_posix()}?mode=ro", uri=True,
+                              timeout=30)
+        took: dict[str, float] = {}
+
+        def run(sql: str, params: tuple = ()):
+            return own.execute(sql, params).fetchall()
+
+        def timed(name, fn):
+            start = time.monotonic()
+            out = fn()
+            took[name] = round(time.monotonic() - start, 1)
+            return out
+        try:
+            counts = timed("backbone", lambda: dict(run(
+                "select backbone, count(*) from embeddings group by 1")))
+            ready = [b for b, n in counts.items() if n and b in limits.allowed_backbones]
+            backbone = ready[0] if ready else None
+            rel = served_release_dir()
+            preload_served.clear()
+            preload_served.update(backbone=backbone,
+                                  release=rel.name if rel is not None else None,
+                                  method=default_method() if backbone else None)
+            slips = timed("list", lambda: [r for r in excluded_list.rows()
+                                           if r.category in xl.PRELOAD_CATEGORIES])
+            keys = sorted({r.record_key for r in slips})
+            preload_names.clear()
+
+            def names():
+                for i in range(0, len(keys), 900):
+                    preload_names.update(manifest_names(keys[i:i + 900], run))
+            timed("names", names)
+            if backbone is None:
+                return [xl.Target(r) for r in slips], [], 0
+            by_key = {r.photo_key: r for r in slips}
+            crops = [xl.Target(by_key[k], n, tuple(box))
+                     for k, n, box, e in timed("crops", lambda: kept_crops(backbone, run))
+                     if e and k in by_key]
+            waiting = timed("waiting", lambda: crops_waiting(backbone, run))
+            return [xl.Target(r) for r in slips], crops, waiting
+        finally:
+            own.close()
+            note("[preload] reads (s): " + ", ".join(f"{k} {v}" for k, v in took.items()))
 
     def preload_stamp(t: "xl.Target") -> dict | None:
         """The stamp a map made now would carry, from this pass's reads alone."""
