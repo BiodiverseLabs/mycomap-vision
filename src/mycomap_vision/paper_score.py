@@ -1242,6 +1242,13 @@ def extras_files(block: dict | None) -> list[dict]:
     return [x for x in items if isinstance(x, dict) and x.get("file") and x.get("sha256")]
 
 
+def truth_resolution(taxonomy, species: str) -> str:
+    """A find's truth_resolves attribute: "yes" when its species label resolves one-to-one
+    to an iNat species at the snapshot (a formal name, or a provisional one by its exact
+    name, rule 4), "no", or "(no species)"."""
+    return "(no species)" if not species else "yes" if taxonomy.resolves(species) else "no"
+
+
 def genus_known(taxonomy, genus: str, species: str | None) -> bool:
     """Steve, 18 Oct: can iNat name this truth's genus? The shared Taxonomy.genus_known (one
     rule for paper-score and E31), on the truth's label (its species, else its genus) and
@@ -1484,8 +1491,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     # expert-paired tests (hypotheses with "truth_resolves": true), never their miss.
     if taxonomy is not None:
         for f in finds:
-            f.attrs["truth_resolves"] = ("(no species)" if not f.species else
-                                         "yes" if taxonomy.resolves(f.species) else "no")
+            f.attrs["truth_resolves"] = truth_resolution(taxonomy, f.species)
             f.attrs["truth_genus_known"] = ("(no genus)" if not f.genus else
                                             "yes" if genus_known(taxonomy, f.genus, f.species)
                                             else "no")

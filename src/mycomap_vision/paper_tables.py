@@ -306,7 +306,9 @@ def test_one(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
         sub = select(finds, spec, outcomes)
         r = paired(sub, outcomes[spec["a"]], outcomes[spec["b"]], spec["cell"],
                    spec.get("alternative", "greater"), reps, seed)
-        return {**r, "p_test": r["p"]}
+        return {**r, "p_test": r["p"],
+                "n_by_name_kind": paired_name_kinds(sub, outcomes[spec["a"]],
+                                                    outcomes[spec["b"]], spec["cell"])}
     if kind == "gee_depth":
         sub = [f for f in select(finds, spec, outcomes) if f.species]
         o = outcomes[spec["comparator"]]
@@ -338,6 +340,17 @@ def test_one(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
         return {"superiority": sup, "noninferiority": {**ni, "band": spec["band"]},
                 "p_test": ps.intersection_union(sup["p"], ni["p"])}
     raise ValueError(f"unknown hypothesis kind {kind!r}")
+
+
+def paired_name_kinds(finds, a, b, cell) -> dict:
+    """The paired finds' n by the truth's name kind (formal / provisional / one-word): the
+    finds _pairs keeps (rule 4: a provisional truth that resolves enters the iNat-paired
+    tests, so their n is reported split)."""
+    out: dict = defaultdict(int)
+    for f in finds:
+        if len(_pairs([f], a, b, cell)[0]):
+            out[f.name_kind] += 1
+    return dict(sorted(out.items()))
 
 
 def _pairs(finds, a, b, cell):

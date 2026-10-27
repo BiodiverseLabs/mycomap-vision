@@ -1846,3 +1846,45 @@ def test_the_freeze_spec_pins_the_twin_groups_files_for_a_grouped_method(tmp_pat
     assert spec("nearest+mean-records-balanced")["twins"] == {
         k: v["sha256"] for k, v in block.items()}
     assert "twins" not in spec("nearest+mean")
+
+
+
+def test_a_provisional_truth_that_resolves_enters_h1a_and_inat_is_matched_by_taxon_id():
+    """Rule 4 (27 Oct): H1a keeps truths that resolve one-to-one, formal or provisional.
+    A provisional truth iNat holds as a taxon is scored at species for iNat (its answer
+    matched by taxon id), enters H1a's paired set, and is counted as provisional in its n."""
+    from mycomap_vision import name_equiv as ne
+    from mycomap_vision import paper_tables as pt
+
+    def tx_(name, level, anc=()):
+        return {"name": name, "rank_level": level, "is_active": True, "ancestor_ids": list(anc)}
+    taxa = {1: tx_("Fungi", 70), 50: tx_("Russula", 20, [1]),
+            700: tx_("Russula sp. 'NC09'", 10, [1, 50]), 800: tx_("Russula emetica", 10, [1, 50])}
+    labels = ["Russula sp. 'NC09'", "Russula emetica", "Russula sp. 'NC10'"]
+    tax = ne.Taxonomy(taxa, labels)
+    key = po.AnswerKey(ne.ANSWER_KEY, tax)
+    finds = [po.Find("p1", "o1", "Russula sp. 'NC09'", "Russula", "", "provisional", 5, 1),
+             po.Find("f1", "o2", "Russula emetica", "Russula", "", "formal", 5, 1),
+             po.Find("p2", "o3", "Russula sp. 'NC10'", "Russula", "", "provisional", 5, 1)]
+    for f in finds:
+        f.attrs["truth_resolves"] = paper_score.truth_resolution(tax, f.species)
+        f.attrs["truth_genus_known"] = "yes"
+    assert [f.attrs["truth_resolves"] for f in finds] == ["yes", "yes", "no"]
+
+    def line(k, tid, name, formal):
+        return {"record_key": k, "truth": {"formal_species": formal},
+                # iNat's own spelling differs: the taxon id is what matches
+                "vision": {"species": [[tid, name, 90]], "genus": [[50, "Russula", 95]]},
+                "answered": {"vision": True}}
+    inat = {"p1": po.inat_outcome(line("p1", 700, "Russula sp NC09", False), finds[0], "vision", key),
+            "f1": po.inat_outcome(line("f1", 800, "Russula emetica", True), finds[1], "vision", key),
+            "p2": po.inat_outcome(line("p2", 700, "Russula sp NC09", False), finds[2], "vision", key)}
+    assert inat["p1"]["species_strict@1"] is True                     # scored, by taxon id
+    assert inat["p2"]["species_strict@1"] is None                     # no iNat taxon: unscored
+    vision = {f.key: po.from_ranked([f.species], ["Russula"], f, key=key) for f in finds}
+    spec = {"id": "H1a", "kind": "mcnemar", "a": "vision", "b": "inat",
+            "cell": "species_strict@1", "truth_resolves": True}
+    outcomes = {"vision": vision, "inat": inat}
+    assert [f.key for f in pt.select(finds, spec, outcomes)] == ["p1", "f1"]
+    r = pt.test_one(spec, finds, outcomes, 50, 1)
+    assert r["n"] == 2 and r["n_by_name_kind"] == {"formal": 1, "provisional": 1}
