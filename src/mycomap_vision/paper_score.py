@@ -12,6 +12,11 @@ that predicts, embeds or scores, and it refuses to run unless:
 - this code is the commit the config names (`code_commit`), unless `--allow-code <sha>`
   names the commit running, which marks every output "post hoc" in capitals.
 
+The one exception to "byte-identical" is the tagged config's `post_freeze` list: the fields
+it names (each a "TBD..." placeholder at the tag, with the rule that fills it) may be filled
+after the tag, and the freeze block may gain parts (never change one). Every other difference
+is refused, and each filled field is recorded with its sha256 (PLAN §8).
+
 `--test val` scores the base release's val split against its train split, and a draft
 test release (`dry-...-test`) runs freely: both are how this command is tested before the
 freeze. Nothing is ever written to the manifest: outputs go to `--out`.
@@ -109,7 +114,14 @@ def check_config(doc: dict) -> None:
     ids = [c["id"] for c in doc.get("comparators", [])]
     if len(ids) != len(set(ids)):
         raise ValueError("comparator ids must be unique")
+    check_post_freeze(doc)
+    # A post_freeze field still a "TBD..." placeholder is checked once it is filled (the
+    # sealed run's config), not before; the rest of its comparator is checked now.
+    pending = {e["path"] for e in doc.get("post_freeze") or []
+               if is_placeholder(config_path_get(doc, e["path"]))}
     for c in doc.get("comparators", []):
+        def later(key, c=c):
+            return f"comparators/{c.get('id')}/{key}" in pending
         if c.get("kind") not in KINDS:
             raise ValueError(f"comparator {c.get('id')}: kind is one of {KINDS}")
         if c["kind"] == "vision" and not (c.get("backbone") and c.get("method")):
@@ -117,7 +129,7 @@ def check_config(doc: dict) -> None:
         if c.get("answer_key") not in (None, doc["answer_key"], "exact"):
             raise ValueError(f"comparator {c['id']}: a comparator's own answer_key is only "
                              "\"exact\" (v1's published rule, a sensitivity row)")
-        if c["kind"] == "vision":
+        if c["kind"] == "vision" and not later("method"):
             # Any method the scoring code knows (an adopted E32 arm, e.g.
             # nearest+mean-records-balanced, once it is in methods.METHODS); a typo is
             # refused here, never first met when the sealed test is opened.
@@ -129,18 +141,19 @@ def check_config(doc: dict) -> None:
                 raise ValueError(f"comparator {c['id']}: {c['method']} scores by reference "
                                  "record, so the config pins its cross-post twin groups "
                                  "(a top-level \"twins\" block)")
-        if c.get("reference") not in REFERENCES:
+        if not later("reference") and c.get("reference") not in REFERENCES:
             raise ValueError(f"comparator {c['id']}: reference is one of "
                              f"{[r for r in REFERENCES if r]} (or none: every included photo), "
                              f"not {c.get('reference')!r}")
         if c.get("reference") and c["kind"] != "vision":
             raise ValueError(f"comparator {c['id']}: a reference is for a Vision comparator")
-        if c["kind"] == "vision" and "place" in c["method"] and not c.get("place"):
+        if (c["kind"] == "vision" and not later("method") and "place" in c["method"]
+                and not c.get("place")):
             # Without "place": true the scored records keep the release's true point.
             raise ValueError(f"comparator {c['id']}: {c['method']} reads each find's place, "
                              "so it takes \"place\": true (the public point, never the "
                              "release's true one)")
-        if c.get("place_setting"):
+        if c.get("place_setting") and not later("place_setting") and not later("method"):
             if "place" not in str(c.get("method", "")):
                 raise ValueError(f"comparator {c['id']}: place_setting is for a place method, "
                                  f"not {c.get('method')!r}")
@@ -275,6 +288,162 @@ def apply_errata(base, block: dict | None) -> dict | None:
     return block
 
 
+# --- fields filled after the tag (post_freeze) ---------------------------------------------------
+
+# PLAN §8: test-time outputs made at scoring by the pinned code (E14, E31a, the external
+# models' v1-test files, the attrs file), and models and lists declared before the tag but
+# finished after it by a pre-declared rule (E34 / E35).
+POST_FREEZE_KINDS = ("test_output", "declared_after_freeze")
+POST_FREEZE_PROTECTED = ("code_commit", "post_freeze", "freeze")
+
+
+def is_placeholder(value) -> bool:
+    return isinstance(value, str) and value.startswith("TBD")
+
+
+def config_path_get(doc, path: str):
+    """The value at `path` in the config: segments split by "/"; inside a list of objects a
+    segment picks the one entry whose "id" it is. KeyError when nothing is there, or when the
+    path does not end at an object's key."""
+    parts = str(path).split("/")
+    if not path or any(not seg for seg in parts):
+        raise KeyError(path)
+    node = doc
+    for i, seg in enumerate(parts):
+        if isinstance(node, dict) and seg in node:
+            node = node[seg]
+        elif isinstance(node, list) and i < len(parts) - 1:
+            hits = [x for x in node if isinstance(x, dict) and x.get("id") == seg]
+            if len(hits) != 1:
+                raise KeyError(path)
+            node = hits[0]
+        else:
+            raise KeyError(path)
+    return node
+
+
+def check_post_freeze(doc: dict) -> None:
+    """The config's post_freeze list is well formed: each entry names a path that exists, the
+    rule that fills it and its kind; no path is protected, repeated, or inside another."""
+    entries = doc.get("post_freeze")
+    if entries is None:
+        return
+    if not isinstance(entries, list):
+        raise ValueError("post_freeze: a list of {path, rule, kind}")
+    paths = []
+    for e in entries:
+        path = e.get("path") if isinstance(e, dict) else None
+        if not isinstance(path, str) or not path:
+            raise ValueError(f"post_freeze: every entry names a path ({e!r})")
+        if not str(e.get("rule") or "").strip():
+            raise ValueError(f"post_freeze {path}: names the rule that fills it")
+        if e.get("kind") not in POST_FREEZE_KINDS:
+            raise ValueError(f"post_freeze {path}: kind is one of {POST_FREEZE_KINDS}")
+        if path.split("/")[0] in POST_FREEZE_PROTECTED:
+            raise ValueError(f"post_freeze {path}: {path.split('/')[0]} is never filled after "
+                             "the tag")
+        try:
+            config_path_get(doc, path)
+        except KeyError:
+            raise ValueError(f"post_freeze {path}: no such field in the config (the path ends "
+                             "at an object's key; a list entry is picked by its id)") from None
+        paths.append(path)
+    for a in paths:
+        for b in paths:
+            if a == b and paths.count(a) > 1:
+                raise ValueError(f"post_freeze {a}: named twice")
+            if a != b and b.startswith(a + "/"):
+                raise ValueError(f"post_freeze {b}: inside {a}, also named")
+
+
+def post_freeze_differences(tagged: dict, given: dict) -> list[str]:
+    """Where `given` differs from the tagged config other than in the tagged post_freeze
+    fields and by parts added to the freeze block (empty: the same plan). Key sets count: a
+    key added or dropped anywhere else is a difference."""
+    allowed = {e["path"] for e in tagged.get("post_freeze") or []}
+    out: list[str] = []
+
+    def grow(a, b, path):
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in a:
+                if k not in b:
+                    out.append(f"{path}/{k}: frozen at the tag, missing now")
+                else:
+                    grow(a[k], b[k], f"{path}/{k}")
+        elif a != b:
+            out.append(f"{path}: changed since the tag (the freeze block may only gain parts)")
+
+    def walk(a, b, path):
+        if path in allowed:
+            return
+        if path == "freeze":
+            if a is None:
+                out.append("freeze: no freeze block in the tagged config")
+            else:
+                grow(a, b, "freeze")
+            return
+        if isinstance(a, dict) and isinstance(b, dict):
+            for k in sorted(set(a) | set(b)):
+                p = f"{path}/{k}" if path else k
+                if k not in b:
+                    out.append(f"{p}: in the tagged config, missing now")
+                elif k not in a:
+                    out.append(f"{p}: not in the tagged config")
+                else:
+                    walk(a[k], b[k], p)
+        elif isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                out.append(f"{path}: {len(a)} entries tagged, {len(b)} now")
+                return
+            for i, (x, y) in enumerate(zip(a, b)):
+                xid = x.get("id") if isinstance(x, dict) else None
+                yid = y.get("id") if isinstance(y, dict) else None
+                if xid != yid:
+                    out.append(f"{path}/{i}: entry {xid!r} tagged, {yid!r} now")
+                    continue
+                walk(x, y, f"{path}/{xid if xid is not None else i}")
+        elif a != b:
+            out.append(f"{path}: changed since the tag")
+
+    walk(tagged, given, "")
+    return out
+
+
+def post_freeze_records(tagged: dict, given: dict) -> list[dict]:
+    """Per tagged post_freeze entry, what the scoring record keeps: its path, kind and rule,
+    whether it is filled, and the sha256 of its value (canonical JSON)."""
+    from .paper_freeze import canonical_sha
+    out = []
+    for e in tagged.get("post_freeze") or []:
+        value = config_path_get(given, e["path"])
+        filled = not is_placeholder(value)
+        out.append({"path": e["path"], "kind": e["kind"], "rule": e["rule"], "filled": filled,
+                    **({"value_sha256": canonical_sha(value)} if filled else {})})
+    return out
+
+
+def post_freeze_files(config: dict, records: list[dict], resolve_path) -> None:
+    """A filled post_freeze ".../file" field: the file's own sha256 goes into its record. When
+    the object beside it pins a sha256 (filled, or fixed at the tag), the file must match."""
+    from .paper_freeze import sha256_file
+    for rec in records:
+        if not (rec["filled"] and rec["path"].endswith("/file")):
+            continue
+        p = Path(resolve_path(config_path_get(config, rec["path"])))
+        if not p.is_file():
+            raise FrozenError(f"post_freeze {rec['path']}: {p.name} not found, so its sha256 "
+                              "cannot be recorded")
+        rec["file_sha256"] = sha256_file(p)
+        try:
+            pinned = config_path_get(config, rec["path"][:-len("file")] + "sha256")
+        except KeyError:
+            continue
+        if not is_placeholder(pinned) and pinned != rec["file_sha256"]:
+            raise FrozenError(f"post_freeze {rec['path']}: the file's sha256 "
+                              f"{rec['file_sha256'][:12]} is not the {str(pinned)[:12]} "
+                              "pinned beside it")
+
+
 # --- the freeze guard -------------------------------------------------------------------------
 
 def _git(repo: Path, *args) -> subprocess.CompletedProcess:
@@ -301,13 +470,29 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
     tagged = _git(research_dir, "show", f"{TAG}:{CONFIG_IN_REPO}")
     if tagged.returncode:
         raise FrozenError(f"tag {TAG} has no {CONFIG_IN_REPO}")
+    tagged_doc = json.loads(tagged.stdout)
+    # The tagged post_freeze fields are placeholders: filling one never changes a value the
+    # tag decided.
+    try:
+        check_post_freeze(tagged_doc)
+    except ValueError as e:
+        raise FrozenError(f"the tagged config's post_freeze list: {e}") from None
+    for e in tagged_doc.get("post_freeze") or []:
+        if not is_placeholder(config_path_get(tagged_doc, e["path"])):
+            raise FrozenError(f"post_freeze {e['path']}: not a \"TBD...\" placeholder in the "
+                              f"config tagged {TAG}")
     if tagged.stdout != config_bytes:
         crlf = tagged.stdout.replace(b"\r", b"") == config_bytes.replace(b"\r", b"")
-        raise FrozenError(f"the config given is not the one tagged {TAG} "
-                          + ("(line endings differ: give the tagged bytes, as "
-                             f"git show {TAG}:{CONFIG_IN_REPO} prints them)" if crlf else
-                             f"(sha256 {sha256_bytes(config_bytes)[:12]} vs "
-                             f"{sha256_bytes(tagged.stdout)[:12]})"))
+        if crlf:
+            raise FrozenError(f"the config given is not the one tagged {TAG} (line endings "
+                              f"differ: give the tagged bytes, as git show "
+                              f"{TAG}:{CONFIG_IN_REPO} prints them)")
+        diff = post_freeze_differences(tagged_doc, config)
+        if diff:
+            raise FrozenError(f"the config given is not the one tagged {TAG} outside its "
+                              f"post_freeze fields (sha256 {sha256_bytes(config_bytes)[:12]} vs "
+                              f"{sha256_bytes(tagged.stdout)[:12]}): " + "; ".join(diff[:8])
+                              + (f" (+{len(diff) - 8} more)" if len(diff) > 8 else ""))
     if code_commit.endswith("-dirty") or code_commit == "unknown":
         raise FrozenError(f"the sealed test is scored only by committed code (this is "
                           f"{code_commit})")
@@ -322,7 +507,10 @@ def guard(sealed: bool, config_bytes: bytes, config: dict, research_dir: Path,
                               f"{code_commit[:12]} runs it as POST HOC")
     return {"sealed": True, "tag": TAG, "post_hoc": post_hoc,
             "config_sha256": sha256_bytes(config_bytes), "code_commit": code_commit,
-            "frozen_code_commit": frozen}
+            "frozen_code_commit": frozen,
+            **({"tagged_config_sha256": sha256_bytes(tagged.stdout),
+                "post_freeze": post_freeze_records(tagged_doc, config)}
+               if "post_freeze" in tagged_doc else {})}
 
 
 # --- finds ----------------------------------------------------------------------------------------
@@ -1147,6 +1335,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     code_commit = cfgmod.code_version()
     g = guard(sealed, config_bytes, config, research_dir or cfgmod.RESEARCH_DIR,
               code_commit, allow_code)
+    if g.get("post_freeze"):
+        post_freeze_files(config, g["post_freeze"], resolve)
     apply_errata(base, config.get("errata"))
     attrs_path = attrs_file(config.get("attrs"), attrs_path)
     # The whole predictor by hash (PLAN §8): the sealed test refuses any part that is not
@@ -1660,6 +1850,15 @@ def format_report(report: dict, config: dict) -> str:
         lines += ["## Freeze", "", "The predictor matches the config's freeze block."
                   if not diff else f"{len(diff)} part(s) differ from the config's freeze "
                   "block:", ""] + [f"- {d}" for d in diff[:40]] + [""]
+    pf = (report.get("guard") or {}).get("post_freeze")
+    if pf:
+        lines += [f"Filled after the tag (post_freeze): {sum(r['filled'] for r in pf)} of "
+                  f"{len(pf)}; the config tagged had sha256 "
+                  f"{report['guard']['tagged_config_sha256'][:12]}.", "",
+                  "| field | kind | filled | sha256 |", "|---|---|---|---|"]
+        lines += [f"| {r['path']} | {r['kind']} | {'yes' if r['filled'] else 'no'} | "
+                  f"{(r.get('file_sha256') or r.get('value_sha256') or '-')[:12]} |"
+                  for r in pf] + [""]
     lines += ["## Hypotheses", ""]
     for fam, hyps in report["hypotheses"].items():
         lines += [f"### Family {fam} (" + ("outside Holm: disclosed, no decision"

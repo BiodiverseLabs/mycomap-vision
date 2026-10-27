@@ -129,3 +129,45 @@ def test_a_changed_vector_after_the_freeze_is_seen(world, tmp_path):
     assert paper_freeze.check(before, after) == [
         f"vectors.m1.sha256: frozen {before['vectors']['m1']['sha256'][:16]}, "
         f"now {after['vectors']['m1']['sha256'][:16]}"]
+
+
+
+def test_a_sealed_run_takes_a_test_output_filled_after_the_tag_and_records_its_sha256(
+        world, tmp_path, monkeypatch):
+    """PLAN §8: the E14 file is made at scoring, after the tag. The tagged config holds a
+    TBD placeholder named in post_freeze; the sealed run scores the filled config and the
+    report records the file's own sha256."""
+    filled = config(tmp_path, ["7", "8"], code_commit="abcdef1234567")
+    inat = next(c for c in filled["comparators"] if c["id"] == "inat-vision")
+    filled["post_freeze"] = [{"path": "comparators/inat-vision/file",
+                              "rule": "E14: iNat computer vision on v1-test at scoring",
+                              "kind": "test_output"}]
+    filled["freeze"] = frozen_spec(world, filled)
+    tagged = json.loads(json.dumps(filled))
+    next(c for c in tagged["comparators"] if c["id"] == "inat-vision")["file"] = "TBD: e14"
+    tagged_body = json.dumps(tagged).encode()
+    _, _, repo = sealed_world(world, tmp_path, monkeypatch, None)
+    (repo / "paper" / "analysis-v1.json").write_bytes(tagged_body)
+    git(repo, "commit", "-q", "-am", "the plan with post_freeze")
+    git(repo, "tag", "-f", paper_score.TAG)
+    body = json.dumps(filled).encode()
+    rep = paper_score.run(world["conn"], world["base"], world["test"], filled, body,
+                          tmp_path / "out", research_dir=repo, log=lambda s: None)
+    g = rep["guard"]
+    assert g["sealed"] and rep["freeze"]["differences"] == []
+    assert g["tagged_config_sha256"] == paper_score.sha256_bytes(tagged_body)
+    (pf,) = g["post_freeze"]
+    assert pf["filled"] and pf["file_sha256"] == paper_freeze.sha256_file(
+        paper_score.resolve(inat["file"]))
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "Filled after the tag (post_freeze): 1 of 1" in md
+
+
+def test_a_calibration_left_for_after_the_tag_is_not_frozen_so_filling_it_adds_a_part(
+        world, tmp_path):
+    cfg = config(tmp_path, ["7", "8"])
+    vis = next(c for c in cfg["comparators"] if c["kind"] == "vision")
+    vis["calibration"] = "TBD: refit on val"
+    assert vis["id"] not in (frozen_spec(world, cfg).get("calibration") or {})
+    vis["calibration"] = {"species": {"temperature": 0.05}}
+    assert frozen_spec(world, cfg)["calibration"][vis["id"]] == vis["calibration"]

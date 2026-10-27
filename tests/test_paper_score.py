@@ -308,6 +308,188 @@ def test_a_crlf_copy_of_the_tagged_config_opens_the_sealed_guard(research, tmp_p
     assert g["sealed"] is True and g["config_sha256"] == paper_score.sha256_bytes(body)
 
 
+
+# --- fields filled after the tag (post_freeze; PLAN §8) -------------------------------------------
+
+def post_freeze_plan():
+    """A tagged plan with five fields left for after the tag: a test-time output and four
+    declared-after-freeze parts (a model, its calibration, a list and the list's sha256)."""
+    return {"format": 1, "code_commit": "abcdef1234567", "top_k": 10,
+            "comparators": [
+                {"id": "inat-vision", "kind": "inat", "file": "TBD: e14/v1-test/finds.jsonl"},
+                {"id": "public-v1.1", "kind": "vision", "backbone": "TBD: E34 retrain",
+                 "method": "nearest", "calibration": "TBD: refit on val"}],
+            "curation_v1_1": {"exclusions": {"file": "TBD at the cut-off", "sha256": "TBD"}},
+            "freeze": {"models": {"m1": {"weights": "aa"}}, "code_commit": "abcdef1234567"},
+            "post_freeze": [
+                {"path": "comparators/inat-vision/file", "rule": "E14 at scoring",
+                 "kind": "test_output"},
+                {"path": "comparators/public-v1.1/backbone", "rule": "the E34 retrain",
+                 "kind": "declared_after_freeze"},
+                {"path": "comparators/public-v1.1/calibration", "rule": "refit on val",
+                 "kind": "declared_after_freeze"},
+                {"path": "curation_v1_1/exclusions/file", "rule": "E34's list at the cut-off",
+                 "kind": "declared_after_freeze"},
+                {"path": "curation_v1_1/exclusions/sha256", "rule": "that list's sha256",
+                 "kind": "declared_after_freeze"}]}
+
+
+def tag_plan(repo, doc):
+    body = json.dumps(doc, indent=1).encode()
+    (repo / "paper" / "analysis-v1.json").write_bytes(body)
+    git(repo, "commit", "-q", "-am", "the plan to freeze")
+    git(repo, "tag", paper_score.TAG)
+    return body
+
+
+def filled_plan():
+    doc = post_freeze_plan()
+    doc["comparators"][0]["file"] = "e14/v1-test/finds.jsonl"
+    doc["comparators"][1]["backbone"] = "bioclip-2-336-ft-e34"
+    doc["comparators"][1]["calibration"] = {"species": {"temperature": 0.05}}
+    doc["freeze"]["models"]["bioclip-2-336-ft-e34"] = {"weights": "bb"}   # a part gained
+    return doc
+
+
+def sealed_guard(repo, doc):
+    body = json.dumps(doc, indent=1).encode()
+    return paper_score.guard(True, body, doc, repo, "abcdef1")
+
+
+def test_fields_named_post_freeze_may_be_filled_after_the_tag_and_each_is_recorded(research):
+    from mycomap_vision.paper_freeze import canonical_sha
+    repo, _ = research
+    tagged = tag_plan(repo, post_freeze_plan())
+    doc = filled_plan()
+    g = sealed_guard(repo, doc)
+    assert g["sealed"] is True and g["post_hoc"] is False
+    assert g["tagged_config_sha256"] == paper_score.sha256_bytes(tagged)
+    assert g["config_sha256"] != g["tagged_config_sha256"]
+    rec = {r["path"]: r for r in g["post_freeze"]}
+    assert [r["path"] for r in g["post_freeze"]] == [e["path"] for e in doc["post_freeze"]]
+    assert rec["comparators/inat-vision/file"]["kind"] == "test_output"
+    assert rec["comparators/public-v1.1/calibration"]["value_sha256"] == \
+        canonical_sha({"species": {"temperature": 0.05}})
+    assert [r["filled"] for r in g["post_freeze"]] == [True, True, True, False, False]
+    assert "value_sha256" not in rec["curation_v1_1/exclusions/file"]
+    # the tagged config itself, nothing filled yet, opens too and is recorded the same way
+    g0 = paper_score.guard(True, tagged, json.loads(tagged), repo, "abcdef1")
+    assert not any(r["filled"] for r in g0["post_freeze"])
+
+
+@pytest.mark.parametrize("change, named", [
+    (lambda d: d.update(top_k=5), "top_k: changed since the tag"),
+    (lambda d: d["comparators"][1].update(method="nearest+mean"),
+     "comparators/public-v1.1/method"),
+    (lambda d: d["comparators"][0].update(sha256="ab" * 32),          # a key added
+     "comparators/inat-vision/sha256: not in the tagged config"),
+    (lambda d: d["comparators"].pop(0), "comparators: 2 entries tagged, 1 now"),
+    (lambda d: d["comparators"].reverse(), "entry 'inat-vision' tagged, 'public-v1.1' now"),
+    (lambda d: d["post_freeze"][0].update(rule="anything goes"),
+     "post_freeze/0/rule: changed since the tag"),
+    (lambda d: d.pop("curation_v1_1"), "curation_v1_1: in the tagged config, missing now"),
+])
+def test_any_change_outside_the_post_freeze_fields_after_the_tag_is_refused(research, change,
+                                                                           named):
+    repo, _ = research
+    tag_plan(repo, post_freeze_plan())
+    doc = filled_plan()
+    change(doc)
+    with pytest.raises(paper_score.FrozenError, match="outside its post_freeze fields") as e:
+        sealed_guard(repo, doc)
+    assert named in str(e.value)
+
+
+@pytest.mark.parametrize("change, named", [
+    (lambda f: f["models"]["m1"].update(weights="cc"), "freeze/models/m1/weights: changed"),
+    (lambda f: f.pop("code_commit"), "freeze/code_commit: frozen at the tag, missing now"),
+])
+def test_the_freeze_block_may_gain_parts_after_the_tag_but_never_change_or_lose_one(
+        research, change, named):
+    repo, _ = research
+    tag_plan(repo, post_freeze_plan())
+    doc = filled_plan()
+    change(doc["freeze"])
+    with pytest.raises(paper_score.FrozenError, match="outside its post_freeze fields") as e:
+        sealed_guard(repo, doc)
+    assert named in str(e.value)
+
+
+def test_a_post_freeze_field_must_still_be_a_placeholder_in_the_tagged_config(research):
+    repo, _ = research
+    plan = post_freeze_plan()
+    plan["comparators"][1]["calibration"] = {"species": {"temperature": 0.07}}   # decided
+    body = tag_plan(repo, plan)
+    with pytest.raises(paper_score.FrozenError, match="not a \"TBD...\" placeholder"):
+        paper_score.guard(True, body, json.loads(body), repo, "abcdef1")
+
+
+@pytest.mark.parametrize("entry, refused", [
+    ({"path": "comparators/inat-vision/file", "kind": "test_output"}, "names the rule"),
+    ({"path": "comparators/inat-vision/file", "rule": "r", "kind": "later"}, "kind is one of"),
+    ({"path": "comparators/inat-vision/fiel", "rule": "r", "kind": "test_output"},
+     "no such field"),
+    ({"path": "comparators/inat-vision", "rule": "r", "kind": "test_output"}, "no such field"),
+    ({"path": "code_commit", "rule": "r", "kind": "declared_after_freeze"},
+     "never filled after the tag"),
+    ({"path": "freeze/models", "rule": "r", "kind": "declared_after_freeze"},
+     "never filled after the tag"),
+    ({"path": "comparators/inat-vision/file", "rule": "r", "kind": "test_output"}, "named twice"),
+    ({"path": "curation_v1_1/exclusions", "rule": "r", "kind": "declared_after_freeze"},
+     "inside curation_v1_1/exclusions"),
+])
+def test_a_malformed_post_freeze_list_is_refused_on_every_run(entry, refused):
+    doc = post_freeze_plan()
+    doc["post_freeze"].append(entry)
+    with pytest.raises(ValueError, match=refused):
+        paper_score.check_post_freeze(doc)
+
+
+def test_check_config_checks_a_post_freeze_placeholder_once_it_is_filled(tmp_path):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"].append({"id": "public-v1.1", "kind": "vision", "backbone": "m1",
+                               "method": "nearest",
+                               "reference": "TBD: public minus human-excluded photos"})
+    with pytest.raises(ValueError, match="reference is one of"):          # not declared later
+        paper_score.check_config(cfg)
+    cfg["post_freeze"] = [{"path": "comparators/public-v1.1/reference", "rule": "E34",
+                           "kind": "declared_after_freeze"}]
+    paper_score.check_config(cfg)                                          # pending: later
+    cfg["comparators"][-1]["reference"] = "every photo, really"            # filled: checked
+    with pytest.raises(ValueError, match="reference is one of"):
+        paper_score.check_config(cfg)
+    cfg["comparators"][-1]["reference"] = "public_trainable_only"
+    paper_score.check_config(cfg)
+
+
+def test_a_filled_post_freeze_file_is_recorded_by_its_own_sha256_and_must_match_its_pin(
+        tmp_path):
+    doc = filled_plan()
+    lst = tmp_path / "exclusions.tsv"
+    lst.write_bytes(b"photo\treason\n")
+    doc["curation_v1_1"]["exclusions"]["file"] = str(lst)
+    want = paper_score.sha256_file(lst)
+
+    def records(d):
+        return paper_score.post_freeze_records(post_freeze_plan(), d)
+    doc["curation_v1_1"]["exclusions"]["sha256"] = want
+    found = tmp_path / "finds.jsonl"
+    found.write_bytes(b"{}\n")
+    doc["comparators"][0]["file"] = str(found)
+    rec = records(doc)
+    paper_score.post_freeze_files(doc, rec, Path)
+    by = {r["path"]: r for r in rec}
+    assert by["curation_v1_1/exclusions/file"]["file_sha256"] == want
+    assert by["comparators/inat-vision/file"]["file_sha256"] == paper_score.sha256_file(found)
+    assert "file_sha256" not in by["comparators/public-v1.1/backbone"]
+    doc["curation_v1_1"]["exclusions"]["sha256"] = "0" * 64              # pinned, not this file
+    with pytest.raises(paper_score.FrozenError, match="is not the 000000000000 pinned"):
+        paper_score.post_freeze_files(doc, records(doc), Path)
+    doc["curation_v1_1"]["exclusions"]["file"] = str(tmp_path / "missing.tsv")
+    with pytest.raises(paper_score.FrozenError, match="missing.tsv not found"):
+        paper_score.post_freeze_files(doc, records(doc), Path)
+
+
 def test_a_sealed_test_release_is_refused_before_anything_is_read(world, tmp_path, monkeypatch,
                                                                   research):
     repo, _ = research
