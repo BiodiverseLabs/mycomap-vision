@@ -13,13 +13,12 @@ export const CATEGORIES: { code: string; label: string }[] = [
   { code: "dried", label: "Dried specimens" },
   { code: "spore_print", label: "Spore prints" },
   { code: "chemical", label: "Chemical spot tests" },
-  { code: "drawing_micro", label: "Drawings – microscopy" },
+  { code: "drawing", label: "Drawings" },
   { code: "phylo_tree", label: "Phylogenetic trees / BLAST" },
   { code: "people", label: "People" },
   { code: "other", label: "Other" },
   { code: "blurry", label: "Blurry or badly exposed" },
   { code: "not_fungus", label: "Not a fungus" },
-  { code: "drawing_specimen", label: "Drawings – specimen" },
   { code: "species_description", label: "Species descriptions" },
 ];
 

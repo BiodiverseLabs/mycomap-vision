@@ -5,7 +5,8 @@ base model and the side-by-side view are gone, so its tower and vectors are neve
 a request for another model is refused (404), and base maps kept before are never served.
 
 **Which photos.** A photo item of the "Photos that show no specimen" queue whose latest decision
-is `exclude_photo`; its category is that decision's value (photo_review.REASONS). Decisions are
+is `exclude_photo`; its category is that decision's value (photo_review.REASONS; a retired code
+as its successor, so both old drawing reasons are "Drawings"). Decisions are
 written only by a signed-in person (feedback_api), so a tagger's flag alone never puts a photo
 here. People photos (Steve, 2026-10-26) are listed only to Human Feedback reviewers.
 
@@ -48,7 +49,7 @@ CATEGORY_LABELS = {
     "habitat": "Habitat and scenes", "people": "People", "not_fungus": "Not a fungus",
     "dried": "Dried specimens", "spore_print": "Spore prints", "uv": "UV reactions",
     "chemical": "Chemical spot tests", "phylo_tree": "Phylogenetic trees / BLAST",
-    "drawing_micro": "Drawings – microscopy", "drawing_specimen": "Drawings – specimen",
+    "drawing": "Drawings",
     "species_description": "Species descriptions", "blurry": "Blurry or badly exposed",
     "other": "Other"}
 assert set(CATEGORY_LABELS) == set(pr.REASON_CODES)
@@ -79,6 +80,7 @@ def read_excluded(conn: sqlite3.Connection) -> list[Excluded]:
     for subject, record_keys, links, value, _ in conn.execute(EXCLUDED_SQL, (pr.ITEM_TYPE,)):
         rk = pr.record_of_item({"record_keys": json.loads(record_keys or "[]"),
                                 "links": json.loads(links or "[]")})
+        value = pr.shown_reason(value)
         if rk and value in CATEGORY_LABELS:
             out.append(Excluded(subject, rk, value))
     return out

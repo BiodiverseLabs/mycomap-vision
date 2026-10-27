@@ -44,7 +44,7 @@ test("the page sits in the Research section for everyone, before For researchers
 });
 
 test("every category is a reason a person can give, labelled for the page", () => {
-  assert.equal(CATEGORIES.length, 15);
+  assert.equal(CATEGORIES.length, 14);
   assert.equal(categoryLabel("slip"), "Field slips and labels");
   assert.equal(categoryLabel("something-new"), "something-new");
 });
@@ -105,4 +105,13 @@ test("a photo's map is v1's, as a spotlight: no Glow, no BioCLIP base, no side b
   for (const gone of [/Glow/i, /BioCLIP/i, /base model/i, /Side by side/i, /Show as/, /button-compare-models/, /excluded-base/]) {
     assert.doesNotMatch(html, gone);
   }
+});
+
+test("drawings are one category: no separate microscopy or specimen drawings", () => {
+  assert.equal(categoryLabel("drawing"), "Drawings");
+  assert.deepEqual(CATEGORIES.filter((c) => /drawing/i.test(c.code + c.label)), [{ code: "drawing", label: "Drawings" }]);
+  const page = { ...PAGE, categories: [...PAGE.categories, { code: "drawing", label: "Drawings", count: 453 }] };
+  const t = text(render(page));
+  assert.match(t, /Drawings 453/);
+  assert.doesNotMatch(t, /Drawings? – (microscopy|specimen)/);
 });

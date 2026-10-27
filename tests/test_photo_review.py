@@ -260,20 +260,18 @@ def test_dried_specimens_and_spore_prints_are_reasons_of_their_own(conn, tmp_pat
 
 def test_uv_chemical_tests_trees_and_drawings_are_reasons_of_their_own(conn, tmp_path):
     """Steve, 2026-10-21: a UV reaction, a chemical spot test (KOH, FeSO4 and the like), a
-    phylogenetic tree, or a drawing of microscopy or of the specimen is left out as itself,
-    not 'Other'."""
+    phylogenetic tree, or a drawing (one reason since 2026-10-27) is left out as itself, not
+    'Other'."""
     c, fstore = site_with_photos(conn, tmp_path)
     as_user(c, "admin-1")
     offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
     assert offered["uv"] == "UV reaction" and offered["chemical"] == "Chemical spot test"
     assert offered["phylo_tree"] == "Phylogenetic tree / BLAST"
-    assert offered["drawing_micro"] == "Drawing – microscopy"
-    assert offered["drawing_specimen"] == "Drawing – specimen"
+    assert offered["drawing"] == "Drawing"
     assert offered["species_description"] == "Species description"
     assert offered["blurry"] == "Blurry or badly exposed"
     assert list(offered)[-1] == "other"                           # "Other" stays last
-    for code in ("uv", "chemical", "phylo_tree", "drawing_micro", "drawing_specimen",
-                 "species_description", "blurry"):
+    for code in ("uv", "chemical", "phylo_tree", "drawing", "species_description", "blurry"):
         r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
             {"photo_key": "inat:1000", "decision": "exclude", "reason": code}]})
         assert r.status_code == 200, code
@@ -382,3 +380,58 @@ def test_the_queue_card_counts_photos_and_the_observations_they_are_in(conn, tmp
     assert (s["open"], s["decided"], s["records_open"], s["records_decided"]) == (2, 1, 1, 1)
     assert "records_open" not in {t["type"]: t for t in
                                   c.get("/api/feedback/summary").json()}["group_label"]
+
+# --- one Drawings reason (Steve, 2026-10-27) ----------------------------------------------------
+
+def test_drawings_are_one_reason_and_the_two_old_ones_are_no_longer_offered(conn, tmp_path):
+    c, _ = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    for path in ("/api/feedback/photo-review", "/api/feedback/photo-review/flagged"):
+        body = c.get(path).json()
+        drawings = [r for r in body["reasons"] if "rawing" in r["label"]]
+        assert drawings == [{"code": "drawing", "label": "Drawing"}], path
+    assert pr.REASON_OF_TAB["drawing"] == "drawing"
+    assert pr.suggested_reason(pr.parse_flags("R7 drawing probe p=0.97"), "drawing") == "drawing"
+
+
+@pytest.mark.parametrize("old", ["drawing_micro", "drawing_specimen"])
+def test_a_save_naming_an_old_drawing_reason_stores_the_one_drawing_code(conn, tmp_path, old):
+    """An open tab from before the merge still sends the old code: what is stored is the new."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+        {"photo_key": "inat:1000", "decision": "exclude", "reason": old}]})
+    assert r.status_code == 200
+    assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {
+        "inat:1000": "drawing"}
+    ids = {t["photo_key"]: t["item_id"] for t in
+           c.get("/api/feedback/photo-review/flagged").json()["tiles"]}
+    r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
+        {"item_id": ids["inat:1100"], "decision": "exclude", "reason": old}]})
+    assert r.status_code == 200
+    assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")}[
+        "inat:1100"] == "drawing"
+
+
+@pytest.mark.parametrize("old", ["drawing_micro", "drawing_specimen"])
+def test_a_past_drawing_decision_keeps_its_code_and_shows_as_drawing(conn, tmp_path, old):
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    item = next(i for i in fstore.items_of(pr.ITEM_TYPE) if i["subject"] == "inat:1000")
+    fstore.decide(item["id"], "exclude_photo", {"sub": "admin-1", "name": "A"}, value=old)
+    # The Summary's decided tiles and the full view's cards both say Drawing, on the Drawings tab.
+    tiles = c.get("/api/feedback/photo-review/flagged",
+                  params={"status": "decided", "tab": "drawing"}).json()["tiles"]
+    assert [(t["photo_key"], t["decision"]["reason"]) for t in tiles] == [("inat:1000", "drawing")]
+    cards = c.get("/api/feedback/photo-review", params={"status": "decided", "tab": "drawing"}
+                  ).json()["records"]
+    assert [p["decision"]["reason"] for r in cards for p in r["photos"] if p["decision"]] == [
+        "drawing"]
+    # Saved again unchanged (as Drawing): nothing new is written, and the stored code stays.
+    before = len(fstore.changes(applies="vision"))
+    r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
+        {"item_id": item["id"], "decision": "exclude", "reason": "drawing"}]})
+    assert r.status_code == 200 and r.json()["unchanged"] == 1
+    assert len(fstore.changes(applies="vision")) == before
+    assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {
+        "inat:1000": old}

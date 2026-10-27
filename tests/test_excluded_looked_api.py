@@ -364,3 +364,18 @@ def test_the_list_follows_new_decisions_within_its_check_interval(tmp_path):
     fstore.decide(item["id"], "keep_photo", ANN)                  # a later decision wins
     now[0] = 62.0
     assert listing.rows() == []
+
+def test_both_old_drawing_reasons_and_the_new_one_list_as_one_drawings_category(tmp_path):
+    fstore = fb.Store(tmp_path / "human-feedback.sqlite")
+    fstore.seed([photo_item(f"inat:{n}", str(10 + n), "R7 drawing probe p=0.9", projects=())
+                 for n in (1, 2, 3)], "test")
+    ids = {i["subject"]: i["id"] for i in fstore.items_of("non_specimen_photo")}
+    for key, code in (("inat:1", "drawing_micro"), ("inat:2", "drawing_specimen"),
+                      ("inat:3", "drawing")):
+        fstore.decide(ids[key], "exclude_photo", ANN, value=code)
+    rows = xl.read_excluded(fstore.conn)
+    assert {r.category for r in rows} == {"drawing"}
+    assert xl.categories(rows) == [{"code": "drawing", "label": "Drawings", "count": 3}]
+    assert "drawing_micro" not in xl.CATEGORY_LABELS and "drawing_specimen" not in xl.CATEGORY_LABELS
+    with pytest.raises(ValueError):
+        xl.select(rows, "drawing_micro")
