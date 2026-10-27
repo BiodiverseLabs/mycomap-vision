@@ -7,7 +7,8 @@ fixed before the sealed test is opened. On the sealed test this command is the o
 that predicts, embeds or scores, and it refuses to run unless:
 
 - the tag `paper-analysis-freeze-v1` exists in the research repo (config.RESEARCH_DIR),
-- the config given is byte-identical to that tag's `paper/analysis-v1.json`, and
+- the config given is byte-identical to that tag's `paper/analysis-v1.json` (CRLF line
+  endings read as LF, as git stores it: one sha256 from any checkout), and
 - this code is the commit the config names (`code_commit`), unless `--allow-code <sha>`
   names the commit running, which marks every output "post hoc" in capitals.
 
@@ -75,10 +76,27 @@ def sha256_file(path) -> str:
 # --- the configuration ----------------------------------------------------------------------------
 
 def load_config(path) -> tuple[dict, bytes]:
-    body = Path(path).read_bytes()
+    """The config and its bytes as git stores them. Research pins *.json to LF line endings
+    (.gitattributes), so a copy rewritten with CRLF (an editor, a builder on Windows) is
+    taken with LF: its sha256, the report's config_sha256, the checkpoint stamps and the
+    sealed guard's comparison with the tagged config are then the one value a clean checkout
+    gives. A carriage return anywhere else is refused."""
+    body = Path(path).read_bytes().replace(b"\r\n", b"\n")
+    if b"\r" in body:
+        raise ValueError(f"{path}: a carriage return outside a CRLF line ending; save the "
+                         "config with LF line endings")
     doc = json.loads(body)
     check_config(doc)
     return doc, body
+
+
+def config_sha_line(path, body: bytes) -> str:
+    """What paper-score prints about the config: the sha256 of the bytes it scores with (LF,
+    as git stores them), and whether the file on disk has CRLF line endings."""
+    crlf = b"\r\n" in Path(path).read_bytes()
+    return (f"config {Path(path).name}: sha256 {sha256_bytes(body)} (LF line endings, as git "
+            "stores it" + ("; the file on disk has CRLF line endings, read as LF" if crlf else "")
+            + ")")
 
 
 def check_config(doc: dict) -> None:

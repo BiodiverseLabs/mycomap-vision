@@ -1580,6 +1580,7 @@ def cmd_paper_score(conn, args) -> None:
     if base is None:
         raise SystemExit("paper-score needs --release <id>")
     config_doc, body = paper_score.load_config(args.config)
+    print(paper_score.config_sha_line(args.config, body), file=sys.stderr)
     if args.freeze_spec:
         # The predictor as it stands, for the config's "freeze" block; reads no scored
         # record, so it never touches a sealed test.
