@@ -1049,6 +1049,58 @@ def ensure_embedded(conn, spec: str, photo_ids: list[int], px: int | None = None
     return n
 
 
+def embed_fresh(conn, spec: str, photo_ids: list[int], px: int | None = None, loader=None,
+                log=print) -> tuple[np.ndarray, np.ndarray, int]:
+    """The sealed test's photos embedded now by the frozen model `spec` (at `px`), from the
+    copies on this machine, in memory: (photo ids, vectors, how many of them already had a
+    stored vector, which is never read). PLAN §8: the site's nightly layer embeds newly
+    validated records under the served backbone names, so a stored vector of a test photo
+    may come from other weights. Nothing is written to the manifest; a photo with no local
+    copy, or one that cannot be read, is refused."""
+    import sqlite3
+    import tempfile
+    from . import models
+    from .embed import embed_photos, load_embeddings
+    from .storage import open_store
+    loader = loader or models.load_backbone
+    want = list(dict.fromkeys(int(p) for p in photo_ids))
+    bb = loader(spec)
+    if px:
+        bb = Resized(bb, px)
+    stored = 0                     # under the name embed_photos stores this model's rows
+    if conn.execute("select 1 from sqlite_master where name = 'embeddings'").fetchone():
+        have = {r[0] for r in conn.execute("select photo_id from embeddings where backbone = ?",
+                                           (bb.name,))}
+        stored = sum(1 for p in want if p in have)
+    todo: dict[str, list] = defaultdict(list)
+    missing = []
+    for pid in want:
+        row = conn.execute("select store, path from photo_copies where photo_id = ? and "
+                           "size = 'large' and store not like 's3:%' order by store limit 1",
+                           (pid,)).fetchone()
+        if row is None:
+            missing.append(pid)
+        else:
+            todo[row[0]].append((pid, row[1]))
+    if missing:
+        raise FrozenError(f"{len(missing):,} sealed-test photos have no large copy on this "
+                          f"machine (e.g. {missing[:5]}): copy them first; the sealed test is "
+                          "embedded fresh, never from stored vectors")
+    with tempfile.TemporaryDirectory() as d:
+        mem = sqlite3.connect(":memory:")
+        skipped = []
+        for where, items in todo.items():
+            st = embed_photos(mem, open_store(where, cfgmod.DATA_DIR), bb, items,
+                              Path(d) / "vectors", log=log)
+            skipped += st.skipped
+        if skipped:
+            raise FrozenError(f"{len(skipped):,} sealed-test photos could not be embedded "
+                              f"(e.g. {skipped[:3]})")
+        ids, vecs = load_embeddings(mem, bb.name, root=Path(d) / "vectors")
+        mem.close()
+    return ids, vecs, stored
+
+
 def with_public_points(records: list, public: dict[str, tuple]) -> list:
     """The scored records with their public point only (paper rule: obscured where iNat
     obscures, MO's box centre), never the release's true point; none when there is none."""
@@ -1445,13 +1497,15 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     finds_by_ref = {r: finds_in_reference(finds, scored_rows, ref_rows_of[r]) for r in refs_used}
     finds_of = {c["id"]: finds_by_ref[c["reference"]] for c in config["comparators"]
                 if c.get("reference")}
+    fresh: dict = {}               # the sealed test: (backbone, px) -> its fresh vectors
+    test_vectors: dict = {}
     for comp in config["comparators"]:
         answers = None
         if comp["kind"] == "vision":
             b = comp["backbone"]
             px = comp.get("photo_px")
             wanted = [int(p["manifest_photo_id"]) for ph in photos.values() for p in ph]
-            if embed_missing is not None:
+            if embed_missing is not None and not g["sealed"]:
                 embed_missing(b, wanted, None)
             ids, vecs = load_embeddings(conn, b)
             row = {int(p): i for i, p in enumerate(ids.tolist())}
@@ -1459,7 +1513,27 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 comp.get("reference") == "public_trainable_only"))
             if comp.get("reference_as_of"):           # E7b: the reference as it stood then
                 ref = [r for r in ref if r.validated_on and r.validated_on <= comp["reference_as_of"]]
-            if px:
+            if g["sealed"]:
+                # PLAN §8: the sealed test's photos are embedded now by the frozen model (its
+                # files pinned by the freeze block), never read from stored vectors; their
+                # vectors_sha is recorded (a test output). References stay as stored, pinned
+                # by the freeze block's vectors part.
+                if (b, px) not in fresh:
+                    fresh[(b, px)] = embed_fresh(conn, b, wanted, px, log=log)
+                    fids, fvecs, stored = fresh[(b, px)]
+                    from .paper_freeze import vectors_sha
+                    test_vectors[sized_name(b, px) if px else b] = {
+                        **vectors_sha(fids, fvecs, wanted), "stored_vectors_not_read": stored}
+                    if stored:
+                        log(f"[fresh] {sized_name(b, px) if px else b}: {stored:,} stored "
+                            "vectors of sealed-test photos not read (embedded fresh)")
+                fids, fvecs, _ = fresh[(b, px)]
+                offset = len(vecs)
+                vecs = np.concatenate([vecs, np.asarray(fvecs, dtype=vecs.dtype)]) \
+                    if len(fvecs) else vecs
+                scored = scored_rel.as_records(split, {int(p): offset + i
+                                                       for i, p in enumerate(fids.tolist())})
+            elif px:
                 # E30: the scored photos as sent at `px` (references stay as stored).
                 qname = sized_name(b, px)
                 if embed_missing is not None:
@@ -1584,7 +1658,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "truth_genus_known": ({k: sum(1 for f in finds if f.attrs.get("truth_genus_known") == k)
                                for k in ("yes", "no", "(no genus)")}
                               if taxonomy is not None else None),
-        "freeze": {"predictor": freeze_now, "differences": freeze_diff},
+        "freeze": {"predictor": freeze_now, "differences": freeze_diff,
+                   **({"test_vectors": test_vectors} if test_vectors else {})},
         "dataset_release": dataset.cite(base),
         "scored": {"release": scored_rel.id, "split": split, "reference_splits": list(ref_splits),
                    **({"test_release": dataset.cite(scored_rel)} if scored_rel is not base else {})},
@@ -1850,6 +1925,13 @@ def format_report(report: dict, config: dict) -> str:
         lines += ["## Freeze", "", "The predictor matches the config's freeze block."
                   if not diff else f"{len(diff)} part(s) differ from the config's freeze "
                   "block:", ""] + [f"- {d}" for d in diff[:40]] + [""]
+    tv = (report.get("freeze") or {}).get("test_vectors")
+    if tv:
+        lines += ["The scored photos were embedded fresh by the frozen model (stored vectors "
+                  "of them are never read):", "", "| backbone | photos | sha256 | stored, not "
+                  "read |", "|---|---|---|---|"]
+        lines += [f"| {b} | {v['photos']:,} | {v['sha256'][:12]} | "
+                  f"{v['stored_vectors_not_read']:,} |" for b, v in tv.items()] + [""]
     pf = (report.get("guard") or {}).get("post_freeze")
     if pf:
         lines += [f"Filled after the tag (post_freeze): {sum(r['filled'] for r in pf)} of "

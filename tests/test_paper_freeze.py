@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from test_paper_score import config, git, run, world  # noqa: E402,F401
+from test_models_and_scoreboard import Const  # noqa: E402
 
 from mycomap_vision import config as cfgmod  # noqa: E402
 from mycomap_vision import embed, models, paper_freeze, paper_score  # noqa: E402
@@ -84,6 +85,8 @@ def sealed_world(world, tmp_path, monkeypatch, freeze):
     git(repo, "commit", "-q", "-m", "plan")
     git(repo, "tag", paper_score.TAG)
     monkeypatch.setattr(cfgmod, "code_version", lambda: "abcdef1234567")
+    # the frozen model the sealed run embeds the test photos with (fresh, PLAN §8)
+    monkeypatch.setattr(models, "load_backbone", lambda spec: Const(spec))
     return cfg, body, repo
 
 
@@ -171,3 +174,58 @@ def test_a_calibration_left_for_after_the_tag_is_not_frozen_so_filling_it_adds_a
     assert vis["id"] not in (frozen_spec(world, cfg).get("calibration") or {})
     vis["calibration"] = {"species": {"temperature": 0.05}}
     assert frozen_spec(world, cfg)["calibration"][vis["id"]] == vis["calibration"]
+
+
+
+def plant_stale_vectors(conn, data_dir, backbone, photo_ids, with_vector):
+    """Overwrite the stored vectors of `photo_ids` with `with_vector`, as a copy of the site's
+    nightly layer made under the same backbone name by other weights could."""
+    for pid in photo_ids:
+        shard, row = conn.execute("select shard, row from embeddings where backbone = ? and "
+                                  "photo_id = ?", (backbone, pid)).fetchone()
+        f = Path(data_dir) / "embeddings" / backbone / f"shard-{shard:05d}.npy"
+        v = np.load(f)
+        v[row] = with_vector
+        np.save(f, v)
+
+
+def test_the_sealed_test_embeds_its_photos_fresh_and_never_reads_a_stored_vector(
+        world, tmp_path, monkeypatch):
+    """PLAN §8: a stored vector of a sealed-test photo (here planted pointing at the other
+    species) is never read; the run embeds the photos with the frozen model and records their
+    vectors_sha, and the answers are the fresh vectors' ones."""
+    spec = frozen_spec(world, config(tmp_path, ["7", "8"], code_commit="abcdef1234567"))
+    cfg, body, repo = sealed_world(world, tmp_path, monkeypatch, spec)
+    test_photos = [int(r[0]) for r in world["test"].db.execute(
+        "select manifest_photo_id from photos where included = 1")]
+    ids, vecs = embed.load_embeddings(world["conn"], "m1")
+    want = paper_freeze.vectors_sha(ids, vecs, test_photos)      # the vectors as they should be
+    plant_stale_vectors(world["conn"], cfgmod.DATA_DIR, "m1", test_photos,
+                        -np.asarray(vecs[0], dtype=np.float16))
+    stale = paper_freeze.vectors_sha(*embed.load_embeddings(world["conn"], "m1"), test_photos)
+    assert stale["sha256"] != want["sha256"]
+    logged = []
+    rep = paper_score.run(world["conn"], world["base"], world["test"], cfg, body,
+                          tmp_path / "out", research_dir=repo, log=logged.append)
+    tv = rep["freeze"]["test_vectors"]["m1"]
+    assert tv["sha256"] == want["sha256"] and tv["photos"] == len(test_photos)
+    assert tv["stored_vectors_not_read"] == len(test_photos)
+    assert any("stored vectors of sealed-test photos not read" in m for m in logged)
+    t = rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]
+    assert t["table"]["species strict"]["top1"]["rate"] == 1.0
+    # the manifest still holds only the planted rows: the fresh vectors were never written
+    after = paper_freeze.vectors_sha(*embed.load_embeddings(world["conn"], "m1"), test_photos)
+    assert after["sha256"] == stale["sha256"]
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "embedded fresh by the frozen model" in md
+
+
+def test_a_sealed_test_photo_with_no_local_copy_is_refused(world, tmp_path, monkeypatch):
+    spec = frozen_spec(world, config(tmp_path, ["7", "8"], code_commit="abcdef1234567"))
+    cfg, body, repo = sealed_world(world, tmp_path, monkeypatch, spec)
+    pid = int(world["test"].db.execute(
+        "select manifest_photo_id from photos where included = 1").fetchone()[0])
+    world["conn"].execute("delete from photo_copies where photo_id = ?", (pid,))
+    with pytest.raises(paper_score.FrozenError, match="no large copy"):
+        paper_score.run(world["conn"], world["base"], world["test"], cfg, body,
+                        tmp_path / "out", research_dir=repo, log=lambda s: None)
