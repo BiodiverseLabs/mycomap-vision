@@ -1966,3 +1966,39 @@ def test_a_malformed_secondary_rows_block_is_refused(tmp_path, change, refused):
     change(cfg["secondary_rows"])
     with pytest.raises(ValueError, match=refused):
         paper_score.check_config(cfg)
+
+
+
+def test_paper_score_opens_the_manifest_read_only_and_leaves_its_bytes_unchanged(tmp_path,
+                                                                               monkeypatch):
+    """The paper's manifest is a read-only file pinned by sha256: paper-score (freeze spec
+    and scoring) opens it read-only, so it neither fails nor changes its bytes. Only
+    --embed-missing, which writes vectors, opens it for writing."""
+    import os
+    import sqlite3
+    from mycomap_vision import cli, config
+    m = tmp_path / "manifest-v1-paper.sqlite"
+    c = sqlite3.connect(m)
+    c.execute("create table t (x)")
+    c.commit()
+    c.close()
+    os.chmod(m, 0o444)
+    before = m.read_bytes()
+    monkeypatch.setattr(config, "MANIFEST_PATH", m)
+    seen = []
+
+    def stub(conn, args):
+        try:
+            conn.execute("create table u (y)")
+            seen.append("wrote")
+        except sqlite3.OperationalError as e:
+            seen.append(str(e))
+    monkeypatch.setattr(cli, "cmd_paper_score", stub)
+    try:
+        assert cli.main(["paper-score", "--release", "v1", "--test", "val",
+                         "--config", "c.json", "--freeze-spec"]) == 0
+        assert len(seen) == 1 and "readonly" in seen[0]
+        assert m.read_bytes() == before
+        assert not (tmp_path / (m.name + "-wal")).exists()
+    finally:
+        os.chmod(m, 0o644)
