@@ -260,6 +260,54 @@ def test_a_config_differing_only_in_line_endings_is_refused_and_says_so(research
         paper_score.guard(True, crlf, json.loads(crlf), repo, "abcdef1")
 
 
+
+def test_a_crlf_copy_of_the_config_has_the_sha_git_stores_everywhere_it_is_used(world, tmp_path):
+    """Research pins *.json to LF. A copy rewritten with CRLF (an editor, a Windows builder)
+    gives the same bytes, sha256, report config_sha256 and checkpoint stamps as the LF file a
+    clean checkout gives, so a run on it resumes the LF run's checkpoints."""
+    lf = tmp_path / "analysis.json"
+    lf.write_bytes(json.dumps(config(tmp_path, ["5", "6"]), indent=1).encode())
+    crlf = tmp_path / "analysis-crlf.json"
+    crlf.write_bytes(lf.read_bytes().replace(b"\n", b"\r\n"))
+    assert crlf.read_bytes() != lf.read_bytes()
+    doc_lf, body_lf = paper_score.load_config(lf)
+    doc_crlf, body_crlf = paper_score.load_config(crlf)
+    assert body_crlf == body_lf == lf.read_bytes() and doc_crlf == doc_lf
+    git_sha = paper_score.sha256_file(lf)
+    assert git_sha in paper_score.config_sha_line(crlf, body_crlf)
+    assert "CRLF" in paper_score.config_sha_line(crlf, body_crlf)
+    assert "CRLF" not in paper_score.config_sha_line(lf, body_lf)
+    first = paper_score.run(world["conn"], world["base"], "val", doc_lf, body_lf,
+                            tmp_path / "out", log=lambda s: None)
+    logged = []
+    again = paper_score.run(world["conn"], world["base"], "val", doc_crlf, body_crlf,
+                            tmp_path / "out", log=logged.append, resume=True)
+    assert first["config_sha256"] == again["config_sha256"] == git_sha
+    assert sum("resumed from its checkpoint" in m for m in logged) == 2
+
+
+def test_a_carriage_return_outside_a_crlf_ending_is_refused(tmp_path):
+    path = tmp_path / "analysis.json"
+    path.write_bytes(b'{"format": 1,\r "answer_key": "x"}')
+    with pytest.raises(ValueError, match="carriage return"):
+        paper_score.load_config(path)
+
+
+def test_a_crlf_copy_of_the_tagged_config_opens_the_sealed_guard(research, tmp_path,
+                                                                    monkeypatch):
+    repo, _ = research
+    body = json.dumps({"format": 1, "code_commit": "abcdef1234567"}, indent=1).encode()
+    (repo / "paper" / "analysis-v1.json").write_bytes(body)
+    git(repo, "commit", "-q", "-am", "multi-line plan")
+    git(repo, "tag", paper_score.TAG)
+    copy = tmp_path / "tagged-crlf.json"
+    copy.write_bytes(body.replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(paper_score, "check_config", lambda doc: None)
+    doc, read = paper_score.load_config(copy)
+    g = paper_score.guard(True, read, doc, repo, "abcdef1")
+    assert g["sealed"] is True and g["config_sha256"] == paper_score.sha256_bytes(body)
+
+
 def test_a_sealed_test_release_is_refused_before_anything_is_read(world, tmp_path, monkeypatch,
                                                                   research):
     repo, _ = research
