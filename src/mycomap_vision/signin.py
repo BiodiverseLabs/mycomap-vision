@@ -87,7 +87,8 @@ RESEARCH_API = ("/api/stats", "/api/models", "/api/scoreboard", "/api/prospectiv
                 "/api/how-good", "/api/speed/daily",
                 # Research > Excluded photos (excluded_looked.py): the list and kept maps; asking
                 # for a map (POST) needs sign-in.
-                "/api/research/excluded-photos", "/api/research/excluded-photos/looked")
+                "/api/research/excluded-photos", "/api/research/excluded-photos/looked",
+                "/api/research/excluded-photos/modified")
 _RESEARCH_RUN = re.compile(r"^/api/scoreboard/\d{1,9}$")
 
 

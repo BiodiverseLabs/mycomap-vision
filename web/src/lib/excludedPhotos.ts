@@ -68,7 +68,10 @@ export type ExcludedLooked =
       rank: number | null; top: number }
   | { status: "working"; photos: number; done: number; ahead: number }
   | { status: "none" }
-  | { status: "failed"; detail?: string };
+  | { status: "failed"; detail?: string }
+  /** No map can be made from what is served now (a name not in the reference set, or no other
+   *  DNA-verified record of it to compare with); kept, and not tried again until that changes. */
+  | { status: "no_map"; reason: string; made_at: string };
 
 export const PAGE_SIZE = 48;
 
@@ -118,6 +121,9 @@ export function rankLine(rank: number | null | undefined, top = 10): string {
   return rank === 1 ? "first" : `at number ${rank}`;
 }
 
+/** "No map: no other DNA-verified record of Mycena corticola to compare with." */
+export const noMapLine = (reason: string) => `No map: ${reason.replace(/\.$/, "")}.`;
+
 /** The line under the button for a refusal, in the run maps' words. */
 export function refusal(status: number, detail: string): string {
   if (status === 401) return "Sign in with your mycomap.org account to ask for a map. Maps someone already asked for are open to everyone.";
@@ -127,3 +133,77 @@ export function refusal(status: number, detail: string): string {
   if (status === 503) return "The map could not be made just now. Try again later.";
   return "The map could not be loaded. Try again later.";
 }
+
+// --- Modified photos (Steve, 2026-10-27): slip photos whose Recovered Labels crops go back into
+// Vision, before and after, with where Vision looked on both (modified_photos.py).
+
+/** A kept map as the Modified photos page draws it; null on a card: "map coming". */
+export interface ModifiedMap {
+  map: Omit<LookedPhoto, "photo" | "match">;
+  name: string | null;
+  rank: number | null;
+  top: number | null;
+  made_at: string | null;
+}
+
+export interface ModifiedCrop {
+  n: number;
+  /** The square the model reads, in the frame the detector saw (width x height). */
+  box: [number, number, number, number];
+  source: "detector" | "reviewer";
+  map: ModifiedMap | null;
+  /** Why no map can be made, when none can; null with no map: "map coming". */
+  no_map: string | null;
+}
+
+export interface ModifiedCard {
+  item_id: number;
+  photo_key: string;
+  record_key: string;
+  name: string | null;
+  record_url: string | null;
+  photo_url: string | null;
+  /** "hidden": not a photo anyone may see; the card is a placeholder, with no crops or maps. */
+  shown: "public" | "hidden";
+  /** The paper's seal holds this record's maps back. */
+  held: boolean;
+  owner_login?: string | null;
+  license_code?: string | null;
+  width: number;
+  height: number;
+  /** A reviewer saved the item; false: open, its crops used by default. */
+  decided: boolean;
+  decided_at: number | null;
+  edited: boolean;
+  crops: ModifiedCrop[];
+  map: ModifiedMap | null;
+  no_map: string | null;
+}
+
+export interface ModifiedPage {
+  total: number;
+  offset: number;
+  counts: { all: number; edited: number; detector: number };
+  filters: { code: string; label: string; count: number }[];
+  cards: ModifiedCard[];
+  /** Open items are listed too (they count as Included until reviewed). */
+  include_open: boolean;
+}
+
+export const MODIFIED_PAGE = 12;
+
+export function modifiedUrl(filter: string, offset: number, withMaps = false, limit = MODIFIED_PAGE): string {
+  const q = new URLSearchParams({ filter, offset: String(offset), limit: String(limit) });
+  if (withMaps) q.set("maps", "1");
+  return `/api/research/excluded-photos/modified?${q}`;
+}
+
+export async function fetchModified(filter: string, offset: number, withMaps = false): Promise<ModifiedPage> {
+  const res = await fetch(modifiedUrl(filter, offset, withMaps));
+  if (!res.ok) throw new ApiError(res.status, res.statusText);
+  return res.json();
+}
+
+/** "Crop 2 · reviewer's box" under an after image. */
+export const cropLine = (c: Pick<ModifiedCrop, "n" | "source">, many: boolean) =>
+  `${many ? `Crop ${c.n}` : "Crop"} · ${c.source === "reviewer" ? "box edited by a reviewer" : "detector's box"}`;

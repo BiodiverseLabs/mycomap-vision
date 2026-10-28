@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowUpRight, ImageOff, ScanEye, X } from "lucide-react";
 import type { Me } from "@/lib/api";
@@ -11,7 +11,9 @@ import {
 import { nf } from "@/lib/researchView";
 import { ResearchHero, ResearchShell, Section } from "@/components/ResearchKit";
 import { MapLayer } from "@/components/WhereLooked";
+import { ModifiedPhotos } from "@/components/ModifiedPhotos";
 import { useMe } from "@/components/researchQueries";
+import { fetchModified, noMapLine, type ModifiedPage } from "@/lib/excludedPhotos";
 
 // Research > Excluded photos (Steve, 2026-10-26): every photo people left out of Vision in Human
 // Feedback, by why, and "where Vision looked" on any of them, for looking at attention in its
@@ -23,9 +25,18 @@ export function ExcludedPhotosPage() {
   const [category, setCategory] = useState("all");
   const [offset, setOffset] = useState(0);
   const [withMaps, setWithMaps] = useState(false);
+  const [view, setView] = useState<View>("left_out");
+  const [filter, setFilter] = useState("all");
+  const [modOffset, setModOffset] = useState(0);
+  const [modMaps, setModMaps] = useState(false);
   const list = useQuery({
     queryKey: ["excluded-photos", category, offset, withMaps],
     queryFn: () => excludedApi.list(category, offset, withMaps),
+    placeholderData: (prev) => prev,
+  });
+  const modified = useQuery({
+    queryKey: ["excluded-modified", filter, modOffset, modMaps],
+    queryFn: () => fetchModified(filter, modOffset, modMaps),
     placeholderData: (prev) => prev,
   });
   return (
@@ -33,13 +44,24 @@ export function ExcludedPhotosPage() {
                     category={category} withMaps={withMaps}
                     onCategory={(c) => { setCategory(c); setOffset(0); }}
                     onWithMaps={(v) => { setWithMaps(v); setOffset(0); }}
-                    onPage={setOffset} />
+                    onPage={setOffset} view={view} onView={setView}
+                    modified={<ModifiedPhotos page={modified.data} loading={modified.isLoading} failed={modified.isError}
+                                              filter={filter} withMaps={modMaps}
+                                              onFilter={(f) => { setFilter(f); setModOffset(0); }}
+                                              onWithMaps={(v) => { setModMaps(v); setModOffset(0); }}
+                                              onPage={setModOffset} />}
+                    modifiedCount={modified.data?.counts.all} />
   );
 }
 
-export function ExcludedPhotos({ me, page, loading, failed, category, withMaps, onCategory, onWithMaps, onPage }: {
+/** The page's two views: the photos people left out, and the slip photos whose crops go back in. */
+type View = "left_out" | "modified";
+
+export function ExcludedPhotos({ me, page, loading, failed, category, withMaps, onCategory, onWithMaps, onPage,
+                                 view = "left_out", onView, modified, modifiedCount }: {
   me?: Me | null; page?: ExcludedPage; loading?: boolean; failed?: boolean; category: string; withMaps: boolean;
   onCategory: (c: string) => void; onWithMaps: (v: boolean) => void; onPage: (offset: number) => void;
+  view?: View; onView?: (v: View) => void; modified?: ReactNode; modifiedCount?: number;
 }) {
   const [open, setOpen] = useState<ExcludedTile | null>(null);
   const cats = page?.categories ?? [];
@@ -58,6 +80,19 @@ export function ExcludedPhotos({ me, page, loading, failed, category, withMaps, 
           </p>
         )}
       </ResearchHero>
+      {onView && (
+        <div className="mx-auto mt-6 flex max-w-[1080px] gap-1 border-b border-[#A87146]/20 px-4 sm:px-8" role="tablist" aria-label="Excluded photos view">
+          {([["left_out", "Left-out photos", page ? page.categories.reduce((n, c) => n + c.count, 0) : undefined],
+             ["modified", "Modified photos", modifiedCount]] as [View, string, number | undefined][]).map(([code, label, n]) => (
+            <button key={code} type="button" role="tab" aria-selected={view === code} onClick={() => onView(code)}
+                    data-testid={`tab-excluded-${code}`}
+                    className={`rounded-t-md border border-b-0 px-4 py-2 text-sm font-semibold ${view === code ? "border-[#A87146]/25 bg-white text-[#4a3728]" : "border-transparent text-[#7a6a5a] hover:text-[#4a3728]"}`}>
+              {label}{n != null && <span className="ml-1.5 font-normal text-[#8a7b6c]">{nf(n)}</span>}
+            </button>
+          ))}
+        </div>
+      )}
+      {view === "modified" ? <Section testId="section-excluded-modified">{modified}</Section> : (
       <Section testId="section-excluded-browse">
         <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Why the photo was left out">
           <Chip on={category === "all"} onClick={() => onCategory("all")} label="All" count={all} />
@@ -94,6 +129,7 @@ export function ExcludedPhotos({ me, page, loading, failed, category, withMaps, 
           owner said yes on mycomap.org. Who decided, and their notes, are never shown.
         </p>
       </Section>
+      )}
       {open && <PhotoDialog t={open} me={me} onClose={() => setOpen(null)} />}
     </ResearchShell>
   );
@@ -225,6 +261,7 @@ function MapFigure({ t, me, strength }: { t: ExcludedTile; me?: Me | null; stren
     }
   };
   const ready = view?.status === "ready" ? view : null;
+  const never = view?.status === "no_map" ? view : null;
   if (t.held) {
     return (
       <figure className="m-0" data-testid="figure-excluded-v1">
@@ -241,6 +278,8 @@ function MapFigure({ t, me, strength }: { t: ExcludedTile; me?: Me | null; stren
           {MAP_MODEL_LABEL}: clear where this photo's evidence for <span className="sci">{ready.name}</span> was.
           {" "}On its own, the photo puts it {rankLine(ready.rank, ready.top)}.
         </p>
+      ) : never ? (
+        <p className="mt-2 text-[13px] text-[#6f6257]" data-testid="text-excluded-no-map">{noMapLine(never.reason)}</p>
       ) : (
         <button type="button" onClick={ask} disabled={asking || view?.status === "working" || view === null}
                 className="mt-2 flex w-full items-center gap-2 rounded-md border border-myco-green bg-[#f4f9ee] px-3 py-2 text-sm font-semibold text-[#3f6b1d] hover:bg-[#eaf4df] disabled:opacity-80"
