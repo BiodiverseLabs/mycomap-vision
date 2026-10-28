@@ -196,7 +196,7 @@ def test_a_bad_config_is_refused():
             {"id": "a", "kind": "inat", "file": "x"}, {"id": "a", "kind": "inat", "file": "x"}]})
     with pytest.raises(ValueError, match="unknown comparator"):
         paper_score.check_config({"format": 1, "answer_key": KEY, "comparators": [], "hypotheses": {
-            "A": [{"id": "H1a", "a": "nope"}]}})
+            "A": [{"id": "H1a", "kind": "mcnemar", "a": "nope"}]}})
 
 
 # --- the freeze guard --------------------------------------------------------------------------
