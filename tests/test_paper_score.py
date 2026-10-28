@@ -2255,3 +2255,123 @@ def test_a_truth_where_key_takes_yes_or_no(tmp_path):
     cfg["secondary_rows"]["rows"][0]["where"]["truth_resolves"] = False
     with pytest.raises(ValueError, match="truth_resolves is \"yes\" or \"no\""):
         paper_score.check_config(cfg)
+
+
+# --- -a2 (Steve 28 Oct): v1-test restricted to the US, Canada and Puerto Rico ------------------
+
+SCOPE = {"countries": ["US", "CA", "PR"], "unknown": "out", "rule": "Steve 28 Oct",
+         "outside_comparators": ["vision-photos"]}
+
+
+def _scoped(f_key, country):
+    f = po.Find(f_key, "o" + f_key, "A x", "A", "", "formal", 5, 1)
+    f.attrs["country"] = country
+    return f
+
+
+def test_the_test_scope_keeps_its_countries_and_puts_other_and_unknown_countries_outside():
+    finds = [_scoped("1", "US"), _scoped("2", "MX"), _scoped("3", "unknown"),
+             _scoped("4", "CA"), _scoped("5", "PR")]
+    inside, outside = paper_score.test_scope_split(finds, SCOPE)
+    assert [f.key for f in inside] == ["1", "4", "5"]
+    assert [f.key for f in outside] == ["2", "3"]
+    assert paper_score.test_scope_split(finds, None) == (finds, [])
+    assert [paper_score.country_code(c) for c in (" us", "CA", "", None)] == [
+        "US", "CA", "unknown", "unknown"]
+
+
+def test_a_find_s_country_is_the_release_record_s_and_an_attrs_file_does_not_replace_it():
+    rows = [{"record_key": "1", "country": "us", "observer_login": "a", "species": "A x",
+             "genus": "A", "name_kind": "formal"},
+            {"record_key": "2", "country": None, "observer_login": "b", "species": "A x",
+             "genus": "A", "name_kind": "formal"}]
+    finds = paper_score.build_finds(rows, {}, [], None, {"1": {"country": "FR"}})
+    assert [f.attrs["country"] for f in finds] == ["US", "unknown"]
+
+
+def _with_country(monkeypatch, of_key):
+    real = paper_score.build_finds
+
+    def build(*a, **kw):
+        finds = real(*a, **kw)
+        for f in finds:
+            if f.key in of_key:
+                f.attrs["country"] = of_key[f.key]
+        return finds
+    monkeypatch.setattr(paper_score, "build_finds", build)
+
+
+def test_the_test_scope_takes_finds_outside_it_out_of_every_family_and_describes_them(
+        world, tmp_path, monkeypatch):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    cfg["secondary_rows"] = {"for": ["A1s", "H1a"], "rows": [{"id": "all-finds", "where": {}}]}
+    whole = run(world, tmp_path, "val", cfg)
+    assert whole["hypotheses"]["A"]["A1s"]["n"] == 2 and "test_scope" not in whole
+    _with_country(monkeypatch, {"6": "MX"})
+    cfg["test_scope"] = SCOPE
+    paper_score.check_config(cfg)
+    rep = run(world, tmp_path, "val", cfg)
+    assert rep["finds"]["scored"] == 1
+    assert rep["hypotheses"]["A"]["A1s"]["n"] == 1 and rep["hypotheses"]["C"]["H1a"]["n"] == 1
+    assert rep["secondary_rows"]["all-finds"]["finds"] == 1
+    std = rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]
+    assert std["table"]["species strict"]["top1"]["n"] == 1
+    ts = rep["test_scope"]
+    assert ts["in_scope_finds"] == 1 and ts["scope"]["countries"] == ["US", "CA", "PR"]
+    o = ts["outside_test_scope"]
+    assert (o["finds"], o["by_country"], o["unknown"]) == (1, {"MX": 1}, 0)
+    out_rate = o["comparators"]["vision-photos"]["species_strict@1"]
+    assert (out_rate["n"], out_rate["rate"]) == (1, 1.0)                   # dark B y, right
+    assert "p" not in out_rate and "p_test" not in out_rate                # never tested
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "## Outside the test scope (descriptive, never tested)" in md and "| MX | 1 |" in md
+
+
+def test_a_find_with_no_country_is_outside_and_every_find_outside_leaves_n_0(
+        world, tmp_path, monkeypatch):
+    _with_country(monkeypatch, {"5": "unknown", "6": "GB"})
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    cfg["test_scope"] = SCOPE
+    rep = run(world, tmp_path, "val", cfg)
+    # no find left in the test: the comparators have no outcomes, so every hypothesis is
+    # reported not tested (p 1 in Holm), as for a missing input
+    assert rep["finds"]["scored"] == 0
+    for fam in ("A", "C"):
+        assert all("not_tested" in h and h["p_holm"] == 1.0
+                   for h in rep["hypotheses"][fam].values())
+    o = rep["test_scope"]["outside_test_scope"]
+    assert (o["finds"], o["by_country"], o["unknown"]) == (2, {"GB": 1}, 1)
+    assert o["comparators"]["vision-photos"]["genus_strict@1"]["n"] == 2
+
+
+def test_a_scope_holding_every_find_scores_exactly_as_no_scope(world, tmp_path):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    cfg["secondary_rows"] = {"for": ["A1s", "H1a"], "rows": [{"id": "all-finds", "where": {}}]}
+    plain = run(world, tmp_path, "val", cfg)
+    cfg["test_scope"] = SCOPE                     # the world's finds are all US
+    scoped = run(world, tmp_path, "val", cfg)
+    for k in ("finds", "standard", "hypotheses", "secondary_rows", "slices", "calibration",
+              "errors", "generalisation", "inputs"):
+        assert json.dumps(scoped[k], sort_keys=True, default=str) == \
+            json.dumps(plain[k], sort_keys=True, default=str), k
+    o = scoped["test_scope"]["outside_test_scope"]
+    assert o["finds"] == 0 and o["comparators"]["vision-photos"]["species_strict@1"]["n"] == 0
+
+
+@pytest.mark.parametrize("change, refused", [
+    (lambda t: t.update(countries=[]), "non-empty list"),
+    (lambda t: t.update(countries="US"), "non-empty list"),
+    (lambda t: t.update(countries=["us"]), "upper-case"),
+    (lambda t: t.update(countries=["USA"]), "two-letter"),
+    (lambda t: t.update(countries=["US", "US"]), "distinct"),
+    (lambda t: t.update(unknown="in"), "unknown is one of"),
+    (lambda t: t.pop("unknown"), "unknown is one of"),
+    (lambda t: t.update(outside_comparators=["nope"]), "outside_comparators"),
+])
+def test_a_bad_test_scope_is_refused(tmp_path, change, refused):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["test_scope"] = dict(SCOPE)
+    paper_score.check_config(cfg)
+    change(cfg["test_scope"])
+    with pytest.raises(ValueError, match=refused):
+        paper_score.check_config(cfg)

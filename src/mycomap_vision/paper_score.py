@@ -230,7 +230,52 @@ def check_config(doc: dict) -> None:
                 if k in h and h[k] not in ids:
                     raise ValueError(f"{fam}/{hid}: unknown comparator {h[k]!r}")
     check_secondary_rows(doc)
+    check_test_scope(doc, ids)
     check_amends(doc)
+
+
+TEST_SCOPE_UNKNOWN = ("out",)
+OUTSIDE_SCOPE_COMPARATORS = ["public-photos"]
+OUTSIDE_SCOPE_CELLS = ["species_strict@1", "genus_strict@1"]
+
+
+def check_test_scope(doc: dict, ids: list[str]) -> None:
+    """The test_scope block (Steve 28 Oct): {"countries": [two-letter codes], "unknown":
+    "out", "rule": text, "outside_comparators": [ids] (optional; default public-photos)}."""
+    ts = doc.get("test_scope")
+    if ts is None:
+        return
+    if not isinstance(ts, dict):
+        raise ValueError("test_scope: an object")
+    c = ts.get("countries")
+    if (not isinstance(c, list) or not c or len(set(c)) != len(c)
+            or not all(isinstance(x, str) and re.fullmatch(r"[A-Z]{2}", x) for x in c)):
+        raise ValueError("test_scope: countries is a non-empty list of distinct two-letter "
+                         "upper-case codes")
+    if ts.get("unknown") not in TEST_SCOPE_UNKNOWN:
+        raise ValueError(f"test_scope: unknown is one of {TEST_SCOPE_UNKNOWN} (a find with no "
+                         "country leaves the test)")
+    oc = ts.get("outside_comparators", OUTSIDE_SCOPE_COMPARATORS)
+    if not isinstance(oc, list) or any(x not in ids for x in oc):
+        raise ValueError(f"test_scope: outside_comparators names comparators of the config, "
+                         f"not {oc!r}")
+
+
+def test_scope_split(finds: list, block: dict | None) -> tuple[list, list]:
+    """(the finds in the config's test_scope, the finds outside it): in it when the find's
+    country is one of the scope's countries; a find with no country is outside ("unknown":
+    "out"). No block: every find, none outside."""
+    if not block:
+        return finds, []
+    keep = set(block["countries"])
+    inside = [f for f in finds if f.attrs.get("country") in keep]
+    inside_keys = {f.key for f in inside}
+    return inside, [f for f in finds if f.key not in inside_keys]
+
+
+def country_code(value) -> str:
+    """A record's country as a two-letter upper-case code; "unknown" when blank."""
+    return str(value or "").strip().upper() or "unknown"
 
 
 def check_secondary_rows(doc: dict) -> None:
@@ -795,7 +840,9 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
                 extra_attrs: dict[str, dict] | None = None) -> list[po.Find]:
     """Finds from release rows: depth from the reference rows' species, attributes for the
     slices (source, month, season, licence class, observer new to the reference, name kind)
-    and any extra attributes given per record (e.g. ecoregion, distance band)."""
+    and any extra attributes given per record (e.g. ecoregion, distance band); the
+    record's country (the release's, which an extra attribute does not replace) for the
+    test scope."""
     from . import val_review as vr
     # PLAN rule 7: depth by answer key (a species pooled with its varieties; a hybrid
     # code its own), the one definition (name_equiv.ReferenceDepth)
@@ -818,6 +865,7 @@ def build_finds(scored_rows: list[dict], photos: dict[str, list[dict]],
                  else "cc",
                  "observer_new": "new" if is_new else "known"}
         attrs.update((extra_attrs or {}).get(key, {}))
+        attrs["country"] = country_code(r.get("country"))
         species = r.get("species") or ""
         out.append(po.Find(key, who or f"(unknown observer):{key}", species,
                            r.get("genus") or "", r.get("family") or "",
@@ -1720,6 +1768,16 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                            float(nd_cfg.get("cosine", 0.99)))
     finds = build_finds(scored_rows, photos, ref_rows, near,
                         read_attrs(attrs_path) if attrs_path else None)
+    # Steve, 28 Oct (-a2): the test is the finds of the scope's countries. Every table, test,
+    # row and metric below is on them; the finds outside it (or with no country) are kept
+    # apart and only described (report "test_scope").
+    scope = config.get("test_scope")
+    finds, outside = test_scope_split(finds, scope)
+    outside_ids = (scope or {}).get("outside_comparators", OUTSIDE_SCOPE_COMPARATORS)
+    outside_outcomes: dict = {}
+    if scope:
+        log(f"[test scope] {len(finds):,} finds in {', '.join(scope['countries'])}; "
+            f"{len(outside):,} outside it")
     gen = config.get("generalisation") or {}
     recent_after = gen.get("recent_after") or getattr(base, "val_cutoff", None)
     pre = gen.get("pretraining")
@@ -1820,7 +1878,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             log(f"[{comp['id']}] {b} / {comp['method']}: {len(scored):,} finds with vectors, "
                 f"{len(ref):,} reference records")
             truths = {f.key: {"species": f.species, "genus": f.genus, "family": f.family}
-                      for f in finds}
+                      for f in finds + outside}
             if comp.get("photos") == "first":            # E19: the first photo only
                 from dataclasses import replace
                 scored = [replace(r, photo_rows=r.photo_rows[:1]) for r in scored]
@@ -1859,6 +1917,9 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 calib[comp["id"]] = {k: a["cal"] for k, a in answers.items() if "cal" in a}
         outcomes[comp["id"]], inputs[comp["id"]] = outcomes_for(
             comp, finds, answers, conn, keys[comp["id"]])
+        if outside and comp["id"] in outside_ids:
+            outside_outcomes[comp["id"]] = outcomes_for(comp, outside, answers, conn,
+                                                        keys[comp["id"]])[0]
         top1[comp["id"]] = top_answers(comp, answers)
         if comp["kind"] == "inat" and comp.get("calibration_from_score", True):
             calib[comp["id"]] = {str(line["record_key"]): po.inat_confidence(
@@ -1874,7 +1935,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                                     "grouped_records": place_info.get(
                                                         "twin_records", 0)}}
                                          if twins_mod.is_grouped(comp["method"]) else {}),
-                                      finds_without_vectors=len(finds) - len(answers),
+                                      finds_without_vectors=sum(
+                                          1 for f in finds if f.key not in answers),
                                       predictions_sha256=sha256_file(path))
     # PLAN rule 5 (19 Oct): per-species rows beside the per-find rate, species grouped by
     # the config's answer key; secondary, outside every hypothesis test.
@@ -1905,8 +1967,9 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         # E10: the gate on the scored finds and the OOD set; each Vision comparator gets a
         # "<id> served" twin where a refused find is wrong (the plain row is gate-off).
         from . import paper_gate
+        in_keys = {f.key for f in finds}
         gate_report, twins = paper_gate.run_gate(
-            config["gate"], finds, photos, outcomes,
+            config["gate"], finds, {k: v for k, v in photos.items() if k in in_keys}, outcomes,
             [c["id"] for c in config["comparators"] if c["kind"] == "vision"],
             resolve, reps, seed, out=out / "gate", conn=conn, embed_list=gate_embed,
             sealed_open=bool(g["sealed"]))
@@ -1951,6 +2014,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "bootstrap": {"reps": reps, "seed": seed, "clusters": "observer"},
         "inputs": inputs,
         "finds": {"scored": len(finds), "by_name_kind": dict(Counter(f.name_kind for f in finds))},
+        **({"test_scope": {
+            "scope": scope, "in_scope_finds": len(finds),
+            "outside_test_scope": pt.outside_test_scope(
+                outside, outside_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS, reps, seed)}}
+           if scope else {}),
         "standard": pt.all_standard(finds, outcomes, reps, seed, finds_of=finds_of,
                                     **per_species_kw),
         "references": {r: {"records": len(ref_rows_of[r]),
@@ -2215,6 +2283,25 @@ def format_report(report: dict, config: dict) -> str:
         lines += [f"| {r['path']} | {r['kind']} | {'yes' if r['filled'] else 'no'} | "
                   f"{(r.get('file_sha256') or r.get('value_sha256') or '-')[:12]} |"
                   for r in pf] + [""]
+    if report.get("test_scope"):
+        ts = report["test_scope"]
+        o = ts["outside_test_scope"]
+        lines += ["## Outside the test scope (descriptive, never tested)", "",
+                  f"The test is the finds in {', '.join(ts['scope']['countries'])}: "
+                  f"{ts['in_scope_finds']:,} finds. Outside it: {o['finds']:,} finds "
+                  f"({o['primary']:,} in the primary scope).", "",
+                  "| country | finds |", "|---|---|"]
+        lines += [f"| {c} | {n:,} |" for c, n in o["by_country"].items()]
+        lines += [f"| unknown | {o['unknown']:,} |", "",
+                  "| comparator | cell | n | rate | 95% CI |", "|---|---|---|---|---|"]
+        for cid, cells in o["comparators"].items():
+            for cell, r in cells.items():
+                ci = r.get("ci95")
+                lines.append(f"| {cid} | {cell} | {r['n']:,} | "
+                             + ("-" if r["rate"] is None else f"{100 * r['rate']:.1f}%")
+                             + " | " + ("-" if not ci else
+                                        f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
+        lines.append("")
     if report.get("secondary_rows"):
         lines += ["## Secondary rows (descriptive, outside Holm)", "",
                   "| row | finds | share | unknown | hypothesis | n | difference | p |",

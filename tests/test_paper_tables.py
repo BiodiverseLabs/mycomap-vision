@@ -418,3 +418,24 @@ def test_secondary_rows_run_a_floor_and_give_an_inat_paired_test_n_0_where_inat_
     h = no["hypotheses"]["H1a"]
     assert h["n"] == 0 and h["p_test"] == 1.0 and h["difference"] is None
     assert yes["hypotheses"]["H1a"]["n"] == yes["finds"] > 0
+
+
+# --- the test scope (Steve 28 Oct): the finds outside it, described, never tested -------------
+
+def test_the_finds_outside_the_test_scope_are_counted_by_country_and_their_rate_given():
+    finds = [find("1", observer="g1"), find("2", observer="g1"), find("3", observer="g2"),
+             find("4", observer="g3"), find("5", observer="g3",
+                                         near_duplicate={"cosine": True})]
+    for f, c in zip(finds, ["MX", "MX", "unknown", "GB", "MX"]):
+        f.attrs["country"] = c
+    out = {"p": {"1": {S1: True, "genus_strict@1": True}, "2": {S1: False, "genus_strict@1": True},
+                 "3": {S1: True, "genus_strict@1": True}}}           # "4": no line, counts wrong
+    r = pt.outside_test_scope(finds, out, ["p"], [S1, "genus_strict@1"], REPS, 0)
+    assert (r["finds"], r["primary"]) == (5, 4)                 # the near-duplicate leaves
+    assert r["by_country"] == {"GB": 1, "MX": 3} and r["unknown"] == 1
+    sp = r["comparators"]["p"][S1]
+    assert (sp["n"], sp["right"], sp["rate"]) == (4, 2, 0.5) and sp["ci95"] is not None
+    assert r["comparators"]["p"]["genus_strict@1"]["rate"] == 0.75
+    none = pt.outside_test_scope([], {}, ["p"], [S1], REPS, 0)
+    assert none["finds"] == 0 and none["comparators"]["p"][S1]["n"] == 0
+    assert none["comparators"]["p"][S1]["rate"] is None
