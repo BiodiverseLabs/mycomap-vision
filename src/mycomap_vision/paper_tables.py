@@ -297,11 +297,63 @@ def select(finds: list[Find], spec: dict, outcomes: dict[str, dict]) -> list[Fin
 TAXONOMY_FILTERS = ("truth_resolves", "truth_genus_known")
 
 
+HYPOTHESIS_KINDS = ("mcnemar", "gee_depth", "iut", "floor")
+
+
+def floor_test(finds: list[Find], outcome: dict, cell: str, floor: float, alternative: str,
+               reps: int, seed: int) -> dict:
+    """One comparator's own rate at `cell` against a fixed floor (Steve's A1s/A1g, 28 Oct):
+    the finds the cell applies to (a find with no outcome line counts as wrong, as in
+    `_pairs`), the rate with its observer-clustered interval, and a one-sided Wald test of
+    the mean with an observer-clustered (CR1) standard error,
+    SE = sqrt(G/(G-1) * sum_g (sum_{i in g} (y_i - p))^2) / n, z = (p - floor) / SE, the
+    robust-Wald family of gee_depth's slope test. With fewer than two observers, or every
+    answer the same (SE 0), there is no test: z None and p 1."""
+    y, who, kinds = [], [], defaultdict(int)
+    for f in finds:
+        o = outcome.get(f.key)
+        v = o.get(cell) if o is not None else (False if _applies(f, cell) else None)
+        if v is None:
+            continue
+        y.append(float(bool(v)))
+        who.append(f.observer)
+        kinds[f.name_kind] += 1
+    n = len(y)
+    out = {"cell": cell, "n": n, "right": int(sum(y)), "floor": floor,
+           "alternative": alternative, "rate": None, "difference": None, "ci95": None,
+           "clusters": len(set(who)), "se_robust": None, "z": None, "p": 1.0,
+           "n_by_name_kind": dict(sorted(kinds.items()))}
+    if not n:
+        return out
+    yv = np.asarray(y)
+    p_hat = float(yv.mean())
+    out.update(rate=p_hat, difference=p_hat - floor, ci95=ps.cluster_ci(y, who, reps, seed))
+    sums: dict = defaultdict(float)
+    for v, g in zip(yv - p_hat, who):
+        sums[g] += v
+    G = len(sums)
+    if G < 2:
+        return out
+    se = float(np.sqrt(G / (G - 1) * sum(s * s for s in sums.values())) / n)
+    if se == 0:
+        return out
+    z = (p_hat - floor) / se
+    out.update(se_robust=se, z=z,
+               p=ps.normal_sf(z) if alternative == "greater" else ps.normal_sf(-z))
+    return out
+
+
 def test_one(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int,
              seed: int) -> dict:
-    """One pre-declared hypothesis: kind mcnemar (a vs b on a cell), gee_depth (H3), or
-    iut (superiority overall and non-inferiority in a band, one intersection-union test)."""
+    """One pre-declared hypothesis: kind mcnemar (a vs b on a cell), gee_depth (H3), iut
+    (superiority overall and non-inferiority in a band, one intersection-union test), or
+    floor (one comparator's rate against a fixed floor)."""
     kind = spec["kind"]
+    if kind == "floor":
+        r = floor_test(select(finds, spec, outcomes), outcomes[spec["comparator"]],
+                       spec["cell"], spec["floor"], spec.get("alternative", "greater"),
+                       reps, seed)
+        return {**r, "p_test": r["p"]}
     if kind == "mcnemar":
         sub = select(finds, spec, outcomes)
         r = paired(sub, outcomes[spec["a"]], outcomes[spec["b"]], spec["cell"],
@@ -422,7 +474,11 @@ def families(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
 
 # --- secondary rows (E14, Steve 27 Oct): descriptive, outside Holm -----------------------------
 
-WHERE_KEYS = ("name_kind", "created_after", "rg_at_inat_export", "inat_observation", "any_of")
+WHERE_KEYS = ("name_kind", "created_after", "rg_at_inat_export", "inat_observation",
+              "truth_resolves", "truth_genus_known", "any_of")
+# Attributes compared as given ("yes" / "no"); truth_resolves and truth_genus_known come from
+# the answer-key taxonomy (unknown, so the find is counted, when the run has none).
+WHERE_ATTRS = ("rg_at_inat_export", "inat_observation", "truth_resolves", "truth_genus_known")
 UNKNOWN = ("", None, "unknown")
 
 
@@ -441,7 +497,7 @@ def where_holds(f: Find, where: dict) -> bool | None:
         elif k == "created_after":
             c = f.attrs.get("created_at")
             verdicts.append(None if c in UNKNOWN else str(c)[:10] > str(v)[:10])
-        elif k in ("rg_at_inat_export", "inat_observation"):
+        elif k in WHERE_ATTRS:
             a = f.attrs.get(k)
             verdicts.append(None if a in UNKNOWN else a == v)
         else:

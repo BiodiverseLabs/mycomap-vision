@@ -3,6 +3,8 @@ becomes a per-find outcome (Vision's ranked names, iNat's taxon-id hits, the exp
 before-cutoff IDs, a published model's answer), what counts in each denominator, that
 near-duplicates leave the primary numbers, and the families' tests and Holm."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -321,3 +323,98 @@ def test_each_comparator_is_tabled_tested_and_sliced_on_its_own_finds():
     assert fam["B"]["pub-first"]["p_holm"] == 1.0                       # Holm on 2 p of 0.5
     assert fam["side"]["s"] == {"p_test": 0.5, "spec": fam["side"]["s"]["spec"],
                                 "p_holm": None, "reject": None, "outside_holm": True}
+
+
+# --- the floor kind (Steve's A1s / A1g, 28 Oct): a comparator's own rate against a floor ------
+
+S1 = "species_strict@1"
+
+
+def test_a_floor_test_is_the_cluster_robust_wald_of_the_rate_worked_by_hand():
+    # observers g1: right, right, wrong; g2: right, wrong; g3: right, and one find with no
+    # outcome line (the cell applies: counts wrong). Two one-word truths have no species
+    # cell (one with a line, one without): both leave the test.
+    finds = [find(str(i), observer=g) for i, g in
+             enumerate(["g1", "g1", "g1", "g2", "g2", "g3", "g3"], 1)]
+    finds += [find("8", species="", kind="one-word", observer="g1"),
+              find("9", species="", kind="one-word", observer="g2")]
+    line = {"1": True, "2": True, "3": False, "4": True, "5": False, "6": True}
+    out = {k: {S1: v} for k, v in line.items()}
+    out["8"] = {S1: None}
+    r = pt.floor_test(finds, out, S1, 0.5, "greater", REPS, 0)
+    # y = [1,1,0 | 1,0 | 1,0], n 7, p 4/7; cluster residual sums 2/7, -1/7, -1/7;
+    # SE = sqrt(3/2 * 6/49) / 7 = 3/49; z = (4/7 - 1/2) / (3/49) = 7/6.
+    assert (r["n"], r["right"], r["clusters"]) == (7, 4, 3)
+    assert r["rate"] == pytest.approx(4 / 7) and r["difference"] == pytest.approx(4 / 7 - 0.5)
+    assert r["se_robust"] == pytest.approx(3 / 49)
+    assert r["z"] == pytest.approx(7 / 6)
+    assert r["p"] == pytest.approx(0.5 * math.erfc((7 / 6) / math.sqrt(2)))
+    assert r["n_by_name_kind"] == {"formal": 7}
+    lo, hi = r["ci95"]
+    assert lo <= 4 / 7 <= hi
+    less = pt.floor_test(finds, out, S1, 0.5, "less", REPS, 0)
+    assert less["p"] == pytest.approx(1 - r["p"])
+
+
+def test_a_floor_test_with_one_observer_or_no_finds_has_no_test():
+    finds = [find(str(i), observer="g1") for i in range(4)]
+    out = {f.key: {S1: i % 2 == 0} for i, f in enumerate(finds)}
+    one = pt.floor_test(finds, out, S1, 0.5, "greater", REPS, 0)
+    assert one["n"] == 4 and one["z"] is None and one["p"] == 1.0
+    none = pt.floor_test([], {}, S1, 0.5, "greater", REPS, 0)
+    assert none["n"] == 0 and none["rate"] is None and none["p"] == 1.0
+
+
+def test_family_a_of_two_floors_and_the_depth_trend_is_holm_adjusted_over_three():
+    finds, out = world(300, seed=4)
+    spec = {"A": [{"id": "A1s", "kind": "floor", "comparator": "a", "cell": S1, "floor": 0.5},
+                  {"id": "A1g", "kind": "floor", "comparator": "a", "cell": "genus_strict@1",
+                   "floor": 0.6},
+                  {"id": "H3", "kind": "gee_depth", "comparator": "a", "cell": S1}],
+            "C": [{"id": "H1a", "kind": "mcnemar", "a": "a", "b": "b", "cell": S1}]}
+    res = pt.families(spec, finds, out, REPS, 0)
+    a = res["A"]
+    assert set(a) == {"A1s", "A1g", "H3"} and set(res["C"]) == {"H1a"}
+    assert a["A1s"]["n"] == 294 and a["A1s"]["p_test"] == a["A1s"]["p"] < 0.05
+    ps_ = sorted(a[h]["p_test"] for h in a)
+    first = min(a, key=lambda h: a[h]["p_test"])
+    assert a[first]["p_holm"] == pytest.approx(min(1, 3 * ps_[0]))
+    assert a["A1s"]["reject"] is True
+    # C is its own family: Holm over one, so its p is unadjusted
+    assert res["C"]["H1a"]["p_holm"] == pytest.approx(res["C"]["H1a"]["p_test"])
+
+
+def test_a_floor_whose_comparator_has_no_outcomes_is_not_tested_and_counts_p_1_in_holm():
+    finds, out = world(300, seed=4)
+    spec = {"A": [{"id": "A1s", "kind": "floor", "comparator": "a", "cell": S1, "floor": 0.5},
+                  {"id": "A1g", "kind": "floor", "comparator": "missing", "cell": S1,
+                   "floor": 0.5},
+                  {"id": "H3", "kind": "gee_depth", "comparator": "a", "cell": S1}]}
+    a = pt.families(spec, finds, out, REPS, 0)["A"]
+    assert "not_tested" in a["A1g"] and a["A1g"]["reject"] is False
+    assert a["A1g"]["p_holm"] == 1.0
+    p = sorted([a["A1s"]["p_test"], a["H3"]["p_test"], 1.0])
+    first = min(("A1s", "H3"), key=lambda h: a[h]["p_test"])
+    assert a[first]["p_holm"] == pytest.approx(min(1, 3 * p[0]))     # still over three
+
+
+def test_secondary_rows_run_a_floor_and_give_an_inat_paired_test_n_0_where_inat_cannot_name():
+    finds, out = world(60, seed=2)
+    for i, f in enumerate(finds):
+        if i != 59:                              # the last find has no taxonomy: unknown
+            f.attrs["truth_resolves"] = "no" if i % 3 == 0 else "yes"
+            f.attrs["truth_genus_known"] = "yes"
+    hyps = {"A": [{"id": "A1s", "kind": "floor", "comparator": "a", "cell": S1, "floor": 0.5}],
+            "C": [{"id": "H1a", "kind": "mcnemar", "a": "a", "b": "b", "cell": S1,
+                   "truth_resolves": True}]}
+    block = {"for": ["A1s", "H1a"], "rows": [
+        {"id": "inat-cannot-name-species", "where": {"truth_resolves": "no"}},
+        {"id": "inat-can-name-species", "where": {"truth_resolves": "yes"}}]}
+    rows = pt.secondary_rows(block, hyps, finds, out, REPS, 0)
+    no, yes = rows["inat-cannot-name-species"], rows["inat-can-name-species"]
+    n_no = sum(1 for i, f in enumerate(finds) if i >= 6 and i != 59 and i % 3 == 0)
+    assert no["finds"] == n_no and no["unknown"] == 1 and yes["unknown"] == 1
+    assert no["hypotheses"]["A1s"]["n"] == n_no and no["hypotheses"]["A1s"]["outside_holm"]
+    h = no["hypotheses"]["H1a"]
+    assert h["n"] == 0 and h["p_test"] == 1.0 and h["difference"] is None
+    assert yes["hypotheses"]["H1a"]["n"] == yes["finds"] > 0

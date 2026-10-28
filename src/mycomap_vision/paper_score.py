@@ -205,11 +205,30 @@ def check_config(doc: dict) -> None:
         # The gate's served twins ("<id> served") may be named by a hypothesis.
         ids = ids + [f"{c['id']} served" for c in doc.get("comparators", [])
                      if c.get("kind") == "vision"]
+    seen_hyp: dict = {}
     for fam, hyps in (doc.get("hypotheses") or {}).items():
         for h in hyps:
+            hid = h.get("id")
+            if not hid:
+                raise ValueError(f"{fam}: every hypothesis has an id")
+            if hid in seen_hyp:
+                raise ValueError(f"{fam}/{hid}: hypothesis id also used in family "
+                                 f"{seen_hyp[hid]} (ids are unique across families)")
+            seen_hyp[hid] = fam
+            if h.get("kind") not in pt.HYPOTHESIS_KINDS:
+                raise ValueError(f"{fam}/{hid}: kind is one of {pt.HYPOTHESIS_KINDS}, "
+                                 f"not {h.get('kind')!r}")
+            if h["kind"] == "floor":
+                if not h.get("comparator") or not h.get("cell"):
+                    raise ValueError(f"{fam}/{hid}: a floor names its comparator and cell")
+                fl = h.get("floor")
+                if isinstance(fl, bool) or not isinstance(fl, (int, float)) or not 0 < fl < 1:
+                    raise ValueError(f"{fam}/{hid}: floor is a rate strictly between 0 and 1")
+                if h.get("alternative", "greater") not in ("greater", "less"):
+                    raise ValueError(f"{fam}/{hid}: a floor's alternative is greater or less")
             for k in ("a", "b", "comparator"):
                 if k in h and h[k] not in ids:
-                    raise ValueError(f"{fam}/{h.get('id')}: unknown comparator {h[k]!r}")
+                    raise ValueError(f"{fam}/{hid}: unknown comparator {h[k]!r}")
     check_secondary_rows(doc)
     check_amends(doc)
 
@@ -249,6 +268,8 @@ def check_secondary_rows(doc: dict) -> None:
                 elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(v)):
                     raise ValueError(f"secondary_rows {rid}: created_after is a date "
                                      "(YYYY-MM-DD) or {\"config\": path}")
+            elif k in ("truth_resolves", "truth_genus_known") and v not in ("yes", "no"):
+                raise ValueError(f"secondary_rows {rid}: {k} is \"yes\" or \"no\"")
     for r in block.get("rows") or []:
         check(r.get("where") or {}, r["id"])
 
@@ -2227,6 +2248,8 @@ def format_report(report: dict, config: dict) -> str:
                 eff = (f"{pts(h['superiority']['difference'])} pts; band lower bound "
                        f"{pts(h['noninferiority']['lower_bound'])}")
                 n = h["superiority"]["n"]
+            elif "floor" in h:
+                eff, n = f"{pts(h['rate'])}% vs floor {pts(h['floor'])}%", h["n"]
             else:
                 eff, n = f"{pts(h['difference'])} pts", h["n"]
             holm = "-" if h.get("p_holm") is None else f"{h['p_holm']:.4g}"

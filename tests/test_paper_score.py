@@ -2173,3 +2173,85 @@ def test_a_malformed_amends_block_is_refused(tmp_path, block, refused):
     cfg["amends"] = block
     with pytest.raises(ValueError, match=refused):
         paper_score.check_config(cfg)
+
+
+# --- -a2 (Steve 28 Oct): Vision's own accuracy against a floor, family C, new where keys ---------
+
+def floor_family(cfg):
+    cfg["hypotheses"] = {
+        "A": [{"id": "A1s", "kind": "floor", "comparator": "vision-photos",
+               "cell": "species_strict@1", "floor": 0.5, "alternative": "greater"},
+              {"id": "A1g", "kind": "floor", "comparator": "vision-photos",
+               "cell": "genus_strict@1", "floor": 0.8, "alternative": "greater"}],
+        "C": [{"id": "H1a", "kind": "mcnemar", "a": "vision-photos", "b": "inat-vision",
+               "cell": "species_strict@1", "name_kind": "formal"}]}
+    return cfg
+
+
+def test_a_floor_family_scores_end_to_end_and_its_rows_render(world, tmp_path):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    cfg["secondary_rows"] = {"for": ["A1s", "H1a"], "rows": [
+        {"id": "all-finds", "where": {}},
+        {"id": "provisional", "where": {"name_kind": "provisional"}}]}
+    paper_score.check_config(cfg)
+    rep = run(world, tmp_path, "val", cfg)
+    a1s = rep["hypotheses"]["A"]["A1s"]
+    assert (a1s["n"], a1s["rate"], a1s["floor"]) == (2, 1.0, 0.5)
+    assert a1s["p_test"] == a1s["p"] and a1s["p_holm"] is not None
+    assert set(rep["hypotheses"]) == {"A", "C"}
+    rows = rep["secondary_rows"]
+    assert rows["all-finds"]["hypotheses"]["A1s"]["n"] == 2
+    assert rows["provisional"]["finds"] == 0
+    assert rows["provisional"]["hypotheses"]["A1s"]["n"] == 0
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "| A1s | 2 | 100.0% vs floor 50.0% |" in md and "### Family C" in md
+
+
+@pytest.mark.parametrize("change, refused", [
+    (lambda h: h["A"][0].update(kind="floors"), "kind is one of"),
+    (lambda h: h["A"][0].update(floor=0), "strictly between 0 and 1"),
+    (lambda h: h["A"][0].update(floor=1.0), "strictly between 0 and 1"),
+    (lambda h: h["A"][0].update(floor="0.5"), "strictly between 0 and 1"),
+    (lambda h: h["A"][0].update(floor=True), "strictly between 0 and 1"),
+    (lambda h: h["A"][0].pop("floor"), "strictly between 0 and 1"),
+    (lambda h: h["A"][0].pop("comparator"), "names its comparator"),
+    (lambda h: h["A"][0].update(comparator="nope"), "unknown comparator"),
+    (lambda h: h["A"][0].update(alternative="two-sided"), "greater or less"),
+    (lambda h: h["C"][0].update(id="A1g"), "unique across families"),
+    (lambda h: h["C"][0].update(kind="wilcoxon"), "kind is one of"),
+    (lambda h: h["C"][0].pop("id"), "has an id"),
+])
+def test_a_hypothesis_of_unknown_kind_or_a_bad_floor_or_a_repeated_id_is_refused(
+        tmp_path, change, refused):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    paper_score.check_config(cfg)
+    change(cfg["hypotheses"])
+    with pytest.raises(ValueError, match=refused):
+        paper_score.check_config(cfg)
+
+
+@pytest.mark.parametrize("where, want", [
+    ({"truth_resolves": "yes"}, [True, False, False, None]),
+    ({"truth_resolves": "no"}, [False, True, False, None]),
+    ({"truth_genus_known": "no"}, [False, True, False, None]),
+    ({"name_kind": "provisional"}, [False, True, False, False]),
+])
+def test_the_truth_where_keys_keep_the_finds_iNat_cannot_name_and_mark_no_taxonomy_unknown(
+        where, want):
+    from mycomap_vision import paper_tables as pt
+    finds = [_f("1", truth_resolves="yes", truth_genus_known="yes"),
+             _f("2", "provisional", truth_resolves="no", truth_genus_known="no"),
+             _f("3", "one-word", truth_resolves="(no species)", truth_genus_known="yes"),
+             _f("4")]                                            # no taxonomy in the run
+    assert [pt.where_holds(f, where) for f in finds] == want
+
+
+def test_a_truth_where_key_takes_yes_or_no(tmp_path):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["secondary_rows"] = {"for": ["H1a"], "rows": [
+        {"id": "inat-cannot-name-species", "where": {"truth_resolves": "no"}},
+        {"id": "inat-cannot-name-genus", "where": {"truth_genus_known": "no"}}]}
+    paper_score.check_config(cfg)
+    cfg["secondary_rows"]["rows"][0]["where"]["truth_resolves"] = False
+    with pytest.raises(ValueError, match="truth_resolves is \"yes\" or \"no\""):
+        paper_score.check_config(cfg)
