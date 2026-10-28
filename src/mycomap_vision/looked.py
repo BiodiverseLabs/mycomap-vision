@@ -63,6 +63,12 @@ class NoMap(ValueError):
     """This run's answer can't be mapped (no species answer, a model no longer served)."""
 
 
+class NeverMap(NoMap):
+    """No map can be made from what is served now, however often it is tried: the name is not
+    in the reference set, or no other DNA-verified record of it is there to compare with. Only
+    a new release (a new reference set) or the record's new name can change that."""
+
+
 # --- the model ---------------------------------------------------------------------------
 
 def vit_of(loaded) -> tuple[object, Callable] | None:
@@ -188,7 +194,7 @@ def target_for(ident, name: str, hidden: np.ndarray | None = None) -> Target:
     try:
         u = index.species.index(name)
     except ValueError:
-        raise NoMap(f"{name} is not in the reference set this model answers from") from None
+        raise NeverMap(f"{name} is not in the reference set this model answers from") from None
     lo = int(index.starts[u])
     hi = int(index.starts[u + 1]) if u + 1 < len(index.starts) else len(index.cols)
     cols = np.arange(lo, hi, dtype=np.int64)
@@ -201,7 +207,7 @@ def target_for(ident, name: str, hidden: np.ndarray | None = None) -> Target:
     if left_out:
         keep = ~np.isin(cols, hidden)
         if not keep.any():
-            raise NoMap(f"no other DNA-verified record of {name} to compare with")
+            raise NeverMap(f"no other DNA-verified record of {name} to compare with")
         cols = cols[keep]
         record = np.unique(record[keep], return_inverse=True)[1]
     vectors = np.asarray(ident.reference_vectors(cols), dtype=np.float32)
@@ -358,7 +364,7 @@ class Job:
     error: str | None = None
     finished: threading.Event = field(default_factory=threading.Event)
     batch: bool = False                           # the preload's: behind every person's ask
-    on_error: Callable[[str], None] | None = None  # told when the job fails
+    on_error: Callable[[Exception], None] | None = None  # told (the exception) when it fails
 
 
 class Worker:
@@ -478,7 +484,7 @@ class Worker:
                 while len(self._failed) > 500:
                     self._failed.popitem(last=False)
             if job.on_error is not None:
-                job.on_error(f"{type(e).__name__}: {e}")
+                job.on_error(e)
         finally:
             with self._cond:
                 self._current = None

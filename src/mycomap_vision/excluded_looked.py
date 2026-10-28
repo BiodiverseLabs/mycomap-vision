@@ -49,6 +49,14 @@ a new served model, release or method, a record's new name, or a crop's new box 
 stale, and a stale map is made again on the next ask or preload pass. The calibration run and
 the nightly layer's last run are stamped for the record but don't make a map stale: the rank is
 read from raw scores, and a night adds well under 1% of the reference photos.
+
+**No map possible** (2026-10-28: the first window's 153 "failed" maps were all this): a photo
+whose record's name is not in the reference set, or has no other DNA-verified record to compare
+with (looked.NeverMap), can never be mapped from what is served now. That outcome is kept beside
+the maps with its reason and the same stamp, shown on the page instead of "map coming", and not
+tried again while its stamp holds and for NO_MAP_DAYS (the nightly may add a second record of
+the name). Any other failure is logged ("[excluded preload] map failed: <key>: <why>") and tried
+on later passes, at most GIVE_UP_AFTER times per photo while the server runs.
 """
 
 from __future__ import annotations
@@ -85,6 +93,8 @@ PRELOAD_WINDOW = "07:45-12:45"          # UTC: after the 07:00 nightly, before U
 PRELOAD_CATEGORIES = ("slip",)
 # What a map is made from; a map is current while these match what is served now.
 STAMP_KEYS = ("map_version", "backbone", "method", "release", "name", "box")
+NO_MAP_DAYS = 7                  # a kept "no map possible" is tried again after this long
+GIVE_UP_AFTER = 3                # failed tries per photo before the preload leaves it alone
 CROP_MARK = "#crop"
 
 # Each item's latest decision, grouped once (0.6 s on the live store's 79k decisions; the
@@ -167,6 +177,18 @@ def is_current(doc: dict | None, now: dict) -> bool:
     return isinstance(stamp, dict) and all(stamp.get(k) == now.get(k) for k in STAMP_KEYS)
 
 
+def no_map_current(doc: dict | None, now: dict, when: datetime) -> bool:
+    """Whether a kept "no map possible" still holds: made from what is served now (is_current)
+    and less than NO_MAP_DAYS ago."""
+    if not is_current(doc, now):
+        return False
+    try:
+        made = datetime.strptime(doc["made_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (when - made).total_seconds() < NO_MAP_DAYS * 86400
+
+
 def preload_on(setting: str | None, on_box: bool) -> bool:
     """MV_EXCLUDED_PRELOAD: "1" on, "0" off; unset, on only on the box (a served release)."""
     return setting == "1" or (setting != "0" and on_box)
@@ -210,6 +232,12 @@ class Maps:
               "version integer not null, doc text not null, made_at text not null, "
               "primary key (photo_key, model))")
 
+    # A photo (or crop) no map can be made for from what is served now (looked.NeverMap), with
+    # why and the stamp it was tried under (module docstring, "No map possible").
+    NO_MAP_SCHEMA = ("create table if not exists no_maps (photo_key text not null, model text "
+                     "not null, reason text not null, stamp text not null, made_at text not null, "
+                     "primary key (photo_key, model))")
+
     def __init__(self, path: Path | str):
         self.path = Path(path)
         if str(path) != ":memory:":
@@ -218,6 +246,7 @@ class Maps:
         self.lock = threading.Lock()
         with self.lock, self.conn:
             self.conn.execute(self.SCHEMA)
+            self.conn.execute(self.NO_MAP_SCHEMA)
         self._mapped: dict[str, set[str]] = {}         # model -> keys, until a map is kept
 
     def get(self, photo_key: str, model: str) -> dict | None:
@@ -231,7 +260,30 @@ class Maps:
             self.conn.execute("insert or replace into maps values (?,?,?,?,?)",
                               (photo_key, model, VERSION, json.dumps(doc, separators=(",", ":")),
                                doc["made_at"]))
+            self.conn.execute("delete from no_maps where photo_key = ? and model = ?",
+                              (photo_key, model))
             self._mapped.clear()
+
+    def keep_no_map(self, photo_key: str, model: str, reason: str, stamp: dict,
+                    made_at: str) -> None:
+        with self.lock, self.conn:
+            self.conn.execute("insert or replace into no_maps values (?,?,?,?,?)",
+                              (photo_key, model, reason, json.dumps(stamp, separators=(",", ":")),
+                               made_at))
+
+    def no_map(self, photo_key: str, model: str = MODEL) -> dict | None:
+        """{"reason", "stamp", "made_at"} when no map could be made for this key, else None."""
+        with self.lock:
+            r = self.conn.execute("select reason, stamp, made_at from no_maps where photo_key = ? "
+                                  "and model = ?", (photo_key, model)).fetchone()
+        return {"reason": r[0], "stamp": json.loads(r[1]), "made_at": r[2]} if r else None
+
+    def no_maps(self, model: str = MODEL) -> dict[str, dict]:
+        """Every kept "no map possible", by key (a preload pass reads them once)."""
+        with self.lock:
+            rows = self.conn.execute("select photo_key, reason, stamp, made_at from no_maps "
+                                     "where model = ?", (model,)).fetchall()
+        return {k: {"reason": r, "stamp": json.loads(st), "made_at": m} for k, r, st, m in rows}
 
     def mapped(self, model: str = MODEL) -> set[str]:
         """The photo keys with a kept map from `model` (read once, again after a keep)."""
@@ -306,6 +358,7 @@ class Pass:
     skipped: dict[str, int] = field(default_factory=dict)
     crops_waiting: int = 0
     at: float = 0.0
+    no_map: dict[str, int] = field(default_factory=lambda: {"slips": 0, "crops": 0})
 
 
 class Preloader:
@@ -316,8 +369,10 @@ class Preloader:
       their vector);
     - `stamp_now(target)` -> the stamp a map made now would carry (None: the model is not
       ready, nothing is made); `stamps()` every kept map's stamp by key, `stamp_of(key)` one;
+      `no_maps()` every kept "no map possible" by key (Maps.no_maps);
     - `skip(target)` -> why it can't be mapped now ("held", "not shown"), or None;
-    - `job(target, on_done)` -> the looked.Job that makes and keeps it, calling on_done(ok);
+    - `job(target, on_done)` -> the looked.Job that makes and keeps it, calling
+      on_done(ok, why, never): `never` when no map is possible (looked.NeverMap);
     - `nightly_running()`, and the worker (`submit`, `batch_pending`).
 
     step() is one tick of its thread: it submits at most one photo, and only while the worker
@@ -326,18 +381,20 @@ class Preloader:
     def __init__(self, *, enabled: bool, window: tuple[int, int] | None, crop_wait: bool,
                  worker, targets: Callable, stamp_now: Callable, stamps: Callable,
                  stamp_of: Callable, skip: Callable, job: Callable, nightly_running: Callable[[], bool],
-                 rescan_seconds: float = 3600.0, clock=time.monotonic,
+                 no_maps: Callable[[], dict] = dict, rescan_seconds: float = 3600.0,
+                 clock=time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc), note=print):
         self.enabled, self.window, self.crop_wait = enabled, window, crop_wait
         self.worker, self.targets, self.stamp_now, self.stamps = worker, targets, stamp_now, stamps
-        self.stamp_of = stamp_of
+        self.stamp_of, self.no_maps = stamp_of, no_maps
         self.skip_reason, self.job, self.nightly_running = skip, job, nightly_running
         self.rescan_seconds, self.clock, self.now, self.note = rescan_seconds, clock, now, note
         self.state = "off" if not enabled else "starting"
         self.pass_: Pass | None = None
         self.last_pass_seconds: float | None = None
         self._retry_at = -1e9                     # after an error, the next try (clock)
-        self.made = self.failed = 0
+        self.made = self.failed = self.never = 0
+        self.fails: dict[str, int] = {}           # failed tries by key, while the server runs
         self.last_map_at: str | None = None
         self.lock = threading.Lock()
 
@@ -345,24 +402,28 @@ class Preloader:
         """A new pass: every target whose kept map is not current, slip photos first. Logged
         at its start and end."""
         started = self.clock()
-        self.note("[preload] pass starting")
+        self.note("[excluded preload] pass starting")
         slips, crops, waiting = self.targets()
-        kept = self.stamps()
+        kept, never, when = self.stamps(), self.no_maps(), self.now()
         total = {"slips": len(slips), "crops": len(crops)}
         done = {"slips": 0, "crops": 0}
+        no_map = {"slips": 0, "crops": 0}
         todo: list[Target] = []
         for kind, group in (("slips", slips), ("crops", crops)):
             for t in group:
                 now = self.stamp_now(t)
                 if now is not None and is_current({"stamp": kept.get(t.key)}, now):
                     done[kind] += 1
+                elif now is not None and no_map_current(never.get(t.key), now, when):
+                    no_map[kind] += 1
                 else:
                     todo.append(t)
         self.last_pass_seconds = round(self.clock() - started, 1)
-        self.note(f"[preload] pass ready in {self.last_pass_seconds} s: {total['slips']} slips "
-                  f"({done['slips']} current), {total['crops']} crops ({done['crops']} current), "
+        self.note(f"[excluded preload] pass ready in {self.last_pass_seconds} s: "
+                  f"{total['slips']} slips ({done['slips']} current), {total['crops']} crops "
+                  f"({done['crops']} current), {sum(no_map.values())} no map possible, "
                   f"{len(todo)} to make, {waiting} crops waiting for their vector")
-        return Pass(todo, total, done, {}, waiting, self.clock())
+        return Pass(todo, total, done, {}, waiting, self.clock(), no_map)
 
     def _due(self, t: Target) -> bool:
         return not (t.crop == 0 and self.crop_wait and self.pass_ and self.pass_.crops_waiting)
@@ -376,7 +437,7 @@ class Preloader:
             try:
                 self.state = self._step()
             except Exception as e:  # noqa: BLE001 - say so, never stop the server
-                self.note(f"[preload] {type(e).__name__}: {e}")
+                self.note(f"[excluded preload] {type(e).__name__}: {e}")
                 self.state = f"error: {type(e).__name__}: {e}"[:200]
                 self._retry_at = self.clock() + 60.0
             return self.state
@@ -404,6 +465,8 @@ class Preloader:
             p.todo.remove(t)
             kind = "crops" if t.crop else "slips"
             why = self.skip_reason(t)
+            if why is None and self.fails.get(t.key, 0) >= GIVE_UP_AFTER:
+                why = "given up"
             if why is not None:
                 p.skipped[why] = p.skipped.get(why, 0) + 1
                 continue
@@ -415,22 +478,35 @@ class Preloader:
                 p.done[kind] += 1
                 continue
             try:
-                self.worker.submit(self.job(t, lambda ok, kind=kind: self._made(kind, ok)))
+                self.worker.submit(self.job(
+                    t, lambda ok, why=None, never=False, kind=kind, key=t.key:
+                    self._made(kind, key, ok, why, never)))
             except Exception as e:  # noqa: BLE001 - this photo alone; the pass goes on
-                self.note(f"[preload] {t.key}: {type(e).__name__}: {e}")
-                self._made(kind, False)
+                self._made(kind, t.key, False, f"{type(e).__name__}: {e}")
             return "making a map"
 
-    def _made(self, kind: str, ok: bool) -> None:
+    def _made(self, kind: str, key: str, ok: bool, why: str | None = None,
+              never: bool = False) -> None:
+        """A job's outcome: made; no map possible (kept by the job, counted, not retried); or
+        failed (logged with why, tried again on a later pass up to GIVE_UP_AFTER times)."""
         if ok:
             self.made += 1
             if self.pass_:
                 self.pass_.done[kind] += 1
             self.last_map_at = self.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif never:
+            self.never += 1
+            if self.pass_:
+                self.pass_.no_map[kind] += 1
+            self.note(f"[excluded preload] no map possible: {key}: {why}")
         else:
             self.failed += 1
+            n = self.fails[key] = self.fails.get(key, 0) + 1
             if self.pass_:
                 self.pass_.skipped["failed"] = self.pass_.skipped.get("failed", 0) + 1
+            self.note(f"[excluded preload] map failed: {key}: {why}"
+                      + (f" (try {n}; given up until the server restarts)"
+                         if n >= GIVE_UP_AFTER else f" (try {n})"))
 
     def health(self) -> dict:
         """For /api/health: on or off, its window, what it is doing, and per kind how many
@@ -442,6 +518,8 @@ class Preloader:
                    self.window[1] % 60),
                # "doing", not "state": deploy.sh reads the health's two "state" keys.
                "doing": self.state, "made": self.made, "failed": self.failed,
+               "no_map_found": self.never,
+               "given_up": sum(1 for n in self.fails.values() if n >= GIVE_UP_AFTER),
                "last_map_at": self.last_map_at, "last_pass_seconds": self.last_pass_seconds,
                "last_map_seconds": (round(self.worker.last_seconds, 2)
                                     if getattr(self.worker, "last_seconds", None) else None)}
@@ -450,5 +528,6 @@ class Preloader:
                     "crops": sum(1 for t in p.todo if t.crop)}
             out.update({k: {"total": p.total[k], "done": p.done[k], "remaining": left[k]}
                         for k in ("slips", "crops")})
-            out.update(skipped=dict(sorted(p.skipped.items())), crops_waiting=p.crops_waiting)
+            out.update(skipped=dict(sorted(p.skipped.items())), crops_waiting=p.crops_waiting,
+                       no_map_possible=dict(p.no_map))
         return out

@@ -37,7 +37,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, inat_suggest, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
-               excluded_looked as xl, looked, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
+               excluded_looked as xl, looked, modified_photos as mp, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, research_public, serving, sessions as session_store, sources,
                speedlog, uploads,
                workqueue, yours)
@@ -2498,6 +2498,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                      if excluded_on else None)
     excluded_daily = RateLimiter(200, 86400.0)
     app.state.excluded_limits = (looked_asks, excluded_daily)
+    modified_source = mp.Source(feedback_store)
     excluded_maker = excluded_looked if callable(excluded_looked) else None
     unsealed = (excluded_unsealed if excluded_unsealed is not None
                 else config.setting(xl.UNSEAL_SETTING) == "1")
@@ -2603,10 +2604,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         doc = excluded_maps.get(key, model)
         return doc if xl.is_current(doc, stamp) else None
 
+    def excluded_no_map(key: str, model: str, stamp: dict) -> dict | None:
+        """The kept "no map possible", only while it still holds (xl.no_map_current)."""
+        doc = excluded_maps.no_map(key, model)
+        return doc if xl.no_map_current(doc, stamp, datetime.now(timezone.utc)) else None
+
     def excluded_state(hit: "xl.Excluded", model: str, key: str, stamp: dict):
         doc = excluded_current(key, model, stamp)
         if doc is not None:
             return JSONResponse({"status": "ready", **doc}, headers=NOT_INDEXED)
+        never = excluded_no_map(key, model, stamp)
+        if never is not None:
+            return JSONResponse({"status": "no_map", "reason": never["reason"],
+                                 "made_at": never["made_at"]}, headers=NOT_INDEXED)
         state = looked_worker.status(excluded_rid(key, model))
         if state is None:
             return JSONResponse({"status": "none"}, status_code=404, headers=NOT_INDEXED)
@@ -2623,10 +2633,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def excluded_job(hit: "xl.Excluded", model: str, backbone: str, crop: int = 0,
                      box: list | None = None, batch: bool = False,
-                     on_done: "Callable[[bool], None] | None" = None) -> looked.Job:
+                     on_done: "Callable[..., None] | None" = None) -> looked.Job:
         """One photo's (or one crop's) map as a job: the index, the name and the photo are read
         outside the model lock (fetch); the map is made holding it (make). A crop is the
-        photo with its box applied in memory, as the nightly embeds it."""
+        photo with its box applied in memory, as the nightly embeds it. When no map is possible
+        from what is served (looked.NeverMap) that is kept, with why, under the map's stamp.
+        `on_done(ok, why, never)`."""
         key = xl.crop_key(hit.photo_key, crop) if crop else hit.photo_key
         row = review_photos.one(hit.photo_key)
         source, number = (("mo", hit.record_key[3:]) if hit.record_key.startswith("mo:")
@@ -2642,7 +2654,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             name = (ident.col_record[int(own[0])].species if len(own)
                     else manifest_names([hit.record_key]).get(hit.record_key))
             if not name or name not in ident.index.species:
-                raise looked.NoMap("the record's name is not in the reference set")
+                raise looked.NeverMap("the record's name is not in the reference set")
             got = review_photos.image(row, "full")
             if got is None:
                 raise looked.NoMap("the photo could not be read just now")
@@ -2676,8 +2688,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 **({"crop_of_photo": {"n": crop, "box": box}} if crop else {})})
             if on_done:
                 on_done(True)
+
+        def failed(e: Exception) -> None:
+            never = isinstance(e, looked.NeverMap)
+            if never:
+                excluded_maps.keep_no_map(
+                    key, model, str(e), excluded_stamp(hit, backbone, box),
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            if on_done:
+                on_done(False, f"{type(e).__name__}: {e}", never)
         return looked.Job(excluded_rid(key, model), [looked.Task(0, fetch, make)], finish,
-                          batch=batch, on_error=(lambda why: on_done(False)) if on_done else None)
+                          batch=batch, on_error=failed)
 
     @app.get("/api/research/excluded-photos")
     def excluded_photos(request: Request, category: str = "all", offset: int = 0,
@@ -2724,7 +2745,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         """An excluded photo's map (or, with `crop`, one of its kept specimen crops'), to
         anyone: 200 once made from what is served now, 202 while being made, 404 when nobody
         has asked yet, the kept one is stale, or for any model but v1, 403 while the paper's
-        seal holds it back, 503 when it failed."""
+        seal holds it back, 503 when it failed; 200 {"status": "no_map", "reason"} when no map
+        is possible from what is served now (excluded_looked.py, "No map possible")."""
         read_limit(request)
         excluded_off()
         hit = excluded_row(request, photo)
@@ -2753,8 +2775,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         stamp = excluded_stamp(hit, backbone, box)
         rid = excluded_rid(key, model)
         state = looked_worker.status(rid)
-        if excluded_current(key, model, stamp) is not None or (
-                state and state["status"] == "working"):
+        if (excluded_current(key, model, stamp) is not None
+                or excluded_no_map(key, model, stamp) is not None
+                or (state and state["status"] == "working")):
             return excluded_state(hit, model, key, stamp)
         sub = str(who.get("sub"))
         wait = looked_asks.check(sub) or excluded_daily.check(sub)
@@ -2768,9 +2791,77 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                 headers={"Retry-After": str(int(e.wait_seconds) + 1),
                                          **NOT_INDEXED}) from None
         state = looked_worker.status(rid)
-        if state and state["status"] == "failed":
+        if (state and state["status"] == "failed"
+                and excluded_no_map(key, model, stamp) is None):
             raise HTTPException(409, state["detail"], headers=NOT_INDEXED)
         return excluded_state(hit, model, key, stamp)
+
+    def served_now() -> tuple[str | None, str | None, str | None]:
+        """(backbone, method, release) as the preload's last pass read them (the backbone is a
+        count over every embeddings row), else read now."""
+        if preload_served.get("backbone"):
+            return preload_served["backbone"], preload_served["method"], preload_served["release"]
+        backbone = excluded_backbone()
+        rel = served_release_dir()
+        return (backbone, default_method() if backbone else None,
+                rel.name if rel is not None else None)
+
+    @app.get("/api/research/excluded-photos/modified")
+    def excluded_modified(request: Request, filter: str = "all", offset: int = 0,
+                          limit: int = mp.PAGE_SIZE, maps: int = 0):
+        """Research > Excluded photos > Modified photos (modified_photos.py): slip photos whose
+        Recovered labels crops go back into Vision, a page at a time, before and after. Each
+        photo and crop carries its kept current map, a "no map possible" reason, or neither
+        (map coming); a photo not shown publicly is a placeholder, and the paper's seal holds
+        maps back, as on the rest of the page. `maps=1`: only photos with a kept map. Open to
+        anyone; never who decided."""
+        read_limit(request)
+        excluded_off()
+        slips = {r.photo_key for r in excluded_list.rows() if r.category == "slip"}
+        try:
+            got = mp.page(modified_source.cards(), slips, filter, offset, limit,
+                          excluded_maps.mapped() if maps else None)
+        except ValueError as e:
+            raise HTTPException(400, str(e), headers=NOT_INDEXED) from None
+        cards = got["cards"]
+        info = review_photos.many([(c["photo_key"], c["record_key"]) for c in cards])
+        shown = {d["photo_key"]: d for d in review_photos.for_viewer(
+            [i["row"] for i in info.values()], reviewer=False, thumb="grid")}
+        names = manifest_names(sorted({c["record_key"] for c in cards if c["record_key"]}))
+        backbone, method, release = served_now()
+        when = datetime.now(timezone.utc)
+
+        def kept(key: str, stamp: dict) -> tuple[dict | None, str | None]:
+            doc = excluded_maps.get(key, xl.MODEL)
+            if xl.is_current(doc, stamp):
+                return mp.map_view(doc), None
+            never = excluded_maps.no_map(key, xl.MODEL)
+            return None, (never["reason"] if xl.no_map_current(never, stamp, when) else None)
+        for c in cards:
+            ph, i = shown.get(c["photo_key"]) or {}, info.get(c["photo_key"]) or {}
+            public = ph.get("shown") == "public"
+            held = xl.held_back(feedback_store.gate, c["record_key"] or "", unsealed)
+            name = names.get(c["record_key"])
+            c.update(name=name, record_url=xl.record_url(c["record_key"] or ""),
+                     shown="public" if public else "hidden", held=held,
+                     photo_url=ph.get("full") if public else None,
+                     owner_login=i.get("owner_login") if public else None,
+                     license_code=i.get("license_code") if public else None,
+                     map=None, no_map=None)
+            if not public:
+                c["crops"] = []                           # a placeholder: nothing of the photo
+                continue
+            if held or backbone is None:
+                for k in c["crops"]:
+                    k.update(map=None, no_map=None)
+                continue
+            base = {"map_version": looked.VERSION, "backbone": backbone, "method": method,
+                    "release": release, "name": name}
+            c["map"], c["no_map"] = kept(c["photo_key"], {**base, "box": None})
+            for k in c["crops"]:
+                k["map"], k["no_map"] = kept(xl.crop_key(c["photo_key"], k["n"]),
+                                             {**base, "box": k["fraction"]})
+        return JSONResponse(got, headers=NOT_INDEXED)
 
     # The preload (xl.Preloader; Steve, 2026-10-27): every slip photo's and kept crop's map
     # made ahead of anyone asking, one batch photo at a time behind every identification and
@@ -2828,7 +2919,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return [xl.Target(r) for r in slips], crops, waiting
         finally:
             own.close()
-            note("[preload] reads (s): " + ", ".join(f"{k} {v}" for k, v in took.items()))
+            note("[excluded preload] reads (s): " + ", ".join(f"{k} {v}" for k, v in took.items()))
 
     def preload_stamp(t: "xl.Target") -> dict | None:
         """The stamp a map made now would carry, from this pass's reads alone."""
@@ -2858,7 +2949,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         try:
             return xl.parse_window(config.setting("MV_EXCLUDED_PRELOAD_WINDOW"))
         except ValueError as e:
-            note(f"[preload] {e}; using {xl.PRELOAD_WINDOW}")
+            note(f"[excluded preload] {e}; using {xl.PRELOAD_WINDOW}")
             return xl.parse_window(None)
 
     if excluded_on and looked_worker is not None:
@@ -2870,6 +2961,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             worker=looked_worker, targets=preload_targets, stamp_now=preload_stamp,
             stamps=lambda: excluded_maps.stamps(xl.MODEL),
             stamp_of=lambda key: (excluded_maps.get(key, xl.MODEL) or {}).get("stamp"),
+            no_maps=lambda: excluded_maps.no_maps(xl.MODEL),
             skip=preload_skip,
             job=lambda t, done: excluded_job(t.hit, xl.MODEL, preload_served["backbone"], t.crop,
                                              list(t.box) if t.box else None, batch=True,

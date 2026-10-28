@@ -430,8 +430,8 @@ def test_a_pass_is_logged_and_an_error_shows_in_the_health_and_is_retried(conn, 
     said = []
     p.note = said.append
     p.step()
-    assert said[0] == "[preload] pass starting"
-    assert said[1].startswith("[preload] pass ready in ") and "2 slips" in said[1]
+    assert said[0] == "[excluded preload] pass starting"
+    assert said[1].startswith("[excluded preload] pass ready in ") and "2 slips" in said[1]
     clock = [1000.0]
     q, w, _ = preloader(slips=[hit(1)])
     q.clock = lambda: clock[0]
@@ -441,7 +441,7 @@ def test_a_pass_is_logged_and_an_error_shows_in_the_health_and_is_retried(conn, 
         raise RuntimeError("the manifest is locked")
     q.targets = broken
     assert q.step() == "error: RuntimeError: the manifest is locked"
-    assert said[-1] == "[preload] RuntimeError: the manifest is locked"
+    assert said[-1] == "[excluded preload] RuntimeError: the manifest is locked"
     assert q.health()["doing"].startswith("error:")
     q.targets = lambda: ([xl.Target(hit(1))], [], 0)
     clock[0] += 30
