@@ -1105,6 +1105,13 @@ function HomeTitle({ full }: { full: boolean }) {
           votes. Free, from the nonprofit MycoMap.
         </p>
       )}
+      {/* Scope (Steve, 2026-10-28; paper O11): a regional tool, bounded by its reference. */}
+      {full && (
+        <p className="mt-2 max-w-[620px] text-[13px] text-[#7a6552] sm:text-sm" data-testid="text-scope">
+          Built for the macrofungi of the US, Canada and Puerto Rico, where its DNA-verified
+          references come from. Less useful in Mexico, Central America and the rest of the Caribbean.
+        </p>
+      )}
     </>
   );
 }
