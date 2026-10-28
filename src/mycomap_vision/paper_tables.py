@@ -472,6 +472,25 @@ def families(spec: dict, finds: list[Find], outcomes: dict[str, dict], reps: int
     return out
 
 
+# --- the test scope (Steve 28 Oct): finds outside it, described, never tested --------------------
+
+def outside_test_scope(finds: list[Find], outcomes: dict[str, dict], comparators: list[str],
+                       cells: list[str], reps: int, seed: int) -> dict:
+    """The finds left out by the config's test_scope: their number by country (no country:
+    "unknown", on its own line) and, for each comparator named, the rate at each cell with
+    its observer-clustered interval over their primary scope: the estimate a floor reports,
+    with no test. No finds: n 0."""
+    by_country: dict = defaultdict(int)
+    for f in finds:
+        by_country[f.attrs.get("country") or "unknown"] += 1
+    unknown = by_country.pop("unknown", 0)
+    primary = in_scope(finds, "primary", "all")
+    return {"finds": len(finds), "primary": len(primary),
+            "by_country": dict(sorted(by_country.items())), "unknown": unknown,
+            "comparators": {cid: {cell: rate(primary, outcomes.get(cid) or {}, cell, reps, seed)
+                                  for cell in cells} for cid in comparators}}
+
+
 # --- secondary rows (E14, Steve 27 Oct): descriptive, outside Holm -----------------------------
 
 WHERE_KEYS = ("name_kind", "created_after", "rg_at_inat_export", "inat_observation",
