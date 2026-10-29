@@ -1527,10 +1527,7 @@ def cmd_v1_test_count(args) -> None:
 
     from . import dataset_release as dr
     from . import prospective, v1_test_count
-    path = Path(args.manifest) if args.manifest else None
-    if path is None:
-        from . import nightly
-        path = nightly.served_manifest()
+    path = Path(args.manifest) if args.manifest else config.MANIFEST_PATH
     conn = v1_test_count.open_manifest(path)
     base = None
     if not args.no_base:
@@ -1542,7 +1539,8 @@ def cmd_v1_test_count(args) -> None:
     seal = args.seal or prospective.seal_time() or prospective.SEAL_DEFAULT
     countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
     rep = v1_test_count.count(conn, seal=seal, countries=countries, base=base,
-                              review_records=rrev, review_photos=rph)
+                              review_records=rrev, review_photos=rph,
+                              strict_originals=args.strict_originals)
     rep["manifest"] = str(path)
     print(json.dumps(rep, indent=1) if args.json else v1_test_count.format_count(rep))
 
@@ -2963,9 +2961,18 @@ def main(argv: list[str] | None = None) -> int:
     release_options(q)
 
     p = sub.add_parser("v1-test-count", help="the sealed test's size so far by green day, "
-                                             "counts only, manifest read-only (v1_test_count.py)")
-    p.add_argument("--manifest", help="the manifest to read (default: the live one, the "
-                                      "nightly layer copy on the box)")
+                                             "counts only, manifest read-only; run it on the "
+                                             "laptop against a copy of the box's live manifest "
+                                             "(v1_test_count.py)",
+                       description="The sealed test's size so far, by green day; counts only. "
+                                   "Run it on the laptop: copy the box's live manifest (the "
+                                   "nightly layer's manifest.sqlite, copied with SQLite's "
+                                   "backup) and give the copy with --manifest. The v1 dataset "
+                                   "release must be in data/research-releases/v1 here (the box "
+                                   "holds none). The manifest is opened read-only and nothing "
+                                   "is written.")
+    p.add_argument("--manifest", help="the manifest to read: a copy of the box's live manifest "
+                                      "(default: this machine's own manifest)")
     p.add_argument("--base", default="v1", help="the base dataset release (default v1)")
     p.add_argument("--no-base", action="store_true",
                    help="no base release on this machine: count by the seal rule alone")
@@ -2977,6 +2984,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="the test scope's countries (default US,CA,PR)")
     p.add_argument("--review", action="append", help="a review list (TSV) the cut will use; "
                                                      "repeatable")
+    p.add_argument("--strict-originals", action="store_true",
+                   help="the cut's rule: a photo counts only with its original kept here "
+                        "(default: a downloaded photo counts, and records without an original "
+                        "are reported apart)")
     p.add_argument("--json", action="store_true", help="the count as JSON")
 
     p = sub.add_parser("paper-attrs", help="per-find attributes for paper-score: distance band "

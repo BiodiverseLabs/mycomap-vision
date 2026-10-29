@@ -468,9 +468,13 @@ def _photo_key(source: str, manifest_id: int, source_photo_id) -> str:
 
 def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             review_photos: dict | None = None, north_america_only: bool = True,
-            only_keys: set[str] | None = None) -> Built:
+            only_keys: set[str] | None = None, need_original: bool = True) -> Built:
     """Every candidate record and photo from a manifest (a private copy), with labels,
-    inclusion reasons and photos' originals. Splits are assigned afterwards."""
+    inclusion reasons and photos' originals. Splits are assigned afterwards.
+
+    `need_original` False (counting only, never a build: v1_test_count): a photo with no
+    kept original that was downloaded (photos.status 'done'; the server box embeds and
+    keeps no original) goes on through the other photo rules instead of `no_original`."""
     from . import guests, holdouts, names, taxonomy
     from .evaluate import clean
     from .permissions import EXCLUDED_FROM_USE_SQL
@@ -604,10 +608,10 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
     photos, owners, photo_stores, stores = [], [], [], {}
     seen = set()
     for (oid, pid, pos, psource, spid, owner_id, soid, login, owner_name, lic, lclass, attrib,
-         url, checked) in conn.execute(f"""
+         url, checked, pstatus) in conn.execute(f"""
         select op.observation_id, op.photo_id, op.position, {psrc}, {pspid}, p.owner_user_id,
                {psoid}, p.owner_login, p.owner_name, p.license_code, p.license_class,
-               p.attribution, p.source_url, p.license_checked_at
+               p.attribution, p.source_url, p.license_checked_at, p.status
         from observation_photos op join photos p on p.photo_id = op.photo_id
         order by op.observation_id, op.position, op.photo_id"""):
         rec = keep.get(oid)
@@ -622,7 +626,7 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             reason = "record_excluded"
         elif psource != rec["source"]:
             reason = "other_source"             # a photo of another source's record
-        elif copy is None:
+        elif copy is None and (need_original or pstatus != "done"):
             reason = "no_original"
         elif pid in withdrawn:
             reason = "permission_withdrawn"
