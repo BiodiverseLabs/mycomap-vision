@@ -1520,6 +1520,33 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_v1_test_count(args) -> None:
+    """The sealed test's size so far, by the day each record turned green (v1_test_count.py):
+    counts only, from the manifest opened read-only."""
+    from pathlib import Path
+
+    from . import dataset_release as dr
+    from . import prospective, v1_test_count
+    path = Path(args.manifest) if args.manifest else None
+    if path is None:
+        from . import nightly
+        path = nightly.served_manifest()
+    conn = v1_test_count.open_manifest(path)
+    base = None
+    if not args.no_base:
+        try:
+            base = dr.load_release(args.base, check_files=not args.no_check)
+        except dr.ReleaseError as e:
+            raise SystemExit(f"{e}; give --no-base to count by the seal rule alone")
+    rrev, rph, _ = dr.read_review_lists([Path(f) for f in args.review or []])
+    seal = args.seal or prospective.seal_time() or prospective.SEAL_DEFAULT
+    countries = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
+    rep = v1_test_count.count(conn, seal=seal, countries=countries, base=base,
+                              review_records=rrev, review_photos=rph)
+    rep["manifest"] = str(path)
+    print(json.dumps(rep, indent=1) if args.json else v1_test_count.format_count(rep))
+
+
 def cmd_paper_attrs(conn, args) -> None:
     """Per-find attributes for paper-score's slices and the place band (paper_attrs.py):
     data, not model output, from public points and dates only."""
@@ -2935,6 +2962,23 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--redo", action="store_true", help="replace answers stored before")
     release_options(q)
 
+    p = sub.add_parser("v1-test-count", help="the sealed test's size so far by green day, "
+                                             "counts only, manifest read-only (v1_test_count.py)")
+    p.add_argument("--manifest", help="the manifest to read (default: the live one, the "
+                                      "nightly layer copy on the box)")
+    p.add_argument("--base", default="v1", help="the base dataset release (default v1)")
+    p.add_argument("--no-base", action="store_true",
+                   help="no base release on this machine: count by the seal rule alone")
+    p.add_argument("--no-check", action="store_true",
+                   help="open the base without re-hashing its files")
+    p.add_argument("--seal", help="the seal moment (default: MV_PROSPECTIVE_SEAL, else "
+                                  "2026-10-12T13:17:51+00:00)")
+    p.add_argument("--countries", default=",".join(("US", "CA", "PR")),
+                   help="the test scope's countries (default US,CA,PR)")
+    p.add_argument("--review", action="append", help="a review list (TSV) the cut will use; "
+                                                     "repeatable")
+    p.add_argument("--json", action="store_true", help="the count as JSON")
+
     p = sub.add_parser("paper-attrs", help="per-find attributes for paper-score: distance band "
                                            "and season, from public points (paper_attrs.py)")
     release_options(p)
@@ -3088,6 +3132,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "experiments-check":   # the private registry only: no manifest
         return cmd_experiments_check(args)
+    if args.command == "v1-test-count":       # opens the manifest itself, read-only
+        cmd_v1_test_count(args)
+        return 0
     if args.command == "pull-release":        # before any release exists: no manifest yet
         cmd_pull_release(None, args)
         return 0
