@@ -62,7 +62,13 @@ FINETUNE_RATES = {"bioclip-2": 70.7}   # photos seen per second while training
 # (x1.77), fine-tune 19,524 steps x 64 in 402.8 min = 51.7/s (x1.37); the laptop's RTX 4070
 # had guessed x(2.48, 2.27). 448 is not measured: the 336 cost times the laptop's 448/336 step
 # (5.03/2.48 = 2.03 embed, 4.20/2.27 = 1.85 fine-tune).
-INPUT_SIZE_COST = {"bioclip-2-336": (1.77, 1.37), "bioclip-2-448": (3.59, 2.53)}
+# BioCLIP 2.5 Huge (ViT-H/14) at 336 is NOT measured on the L4: the measured 336 cost times
+# the laptop's ViT-H/ViT-L ratio at 336 (RTX 4070, synthetic batches, 29 Oct: embed x2.01,
+# last-4-block train step x1.97 at 8 photos a pass, x1.90 at 16), i.e. 1.77 x 2.01 = 3.55 and
+# 1.37 x 1.97 = 2.70. Peak memory there: 5.5 GB at 16 photos a pass, ~11 GB projected at 64,
+# so the L4's 24 GB holds v1's whole batch in one pass. Replace with the run's own speeds.
+INPUT_SIZE_COST = {"bioclip-2-336": (1.77, 1.37), "bioclip-2-448": (3.59, 2.53),
+                   "bioclip-2.5-336": (3.55, 2.70)}
 for _alias, (_embed, _train) in INPUT_SIZE_COST.items():
     EMBED_RATES[_alias] = round(EMBED_RATES["bioclip-2"] / _embed, 1)
     FINETUNE_RATES[_alias] = round(FINETUNE_RATES["bioclip-2"] / _train, 1)
