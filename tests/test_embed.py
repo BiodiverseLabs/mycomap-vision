@@ -159,3 +159,34 @@ def test_embedding_stops_between_batches_when_asked_and_keeps_what_it_did(conn, 
                          should_stop=lambda: backbone.calls >= 2, log=lambda s: None)
     assert stats.stopped and stats.embedded == 4
     assert len(photos_to_embed(conn, "mean-colour", "large", store.location, "local")) == 1
+
+
+def test_vectors_still_load_from_a_read_only_manifest_without_the_source_size_table(conn, tmp_path):
+    """embedding_sources is created only where vectors are written: a read-only manifest from
+    before it (a scoring copy, paper-score's) still loads its vectors, sizes unknown."""
+    import sqlite3
+
+    from mycomap_vision import backbone_screen
+    from mycomap_vision.embed import recorded_sizes
+    store = seed(conn, tmp_path)
+    todo = photos_to_embed(conn, "mean-colour", "large", store.location, str(tmp_path))
+    embed_photos(conn, store, MeanColour(), todo, tmp_path / "emb", log=lambda s: None)
+    conn.execute("drop table embedding_sources")
+    conn.commit()
+    path = conn.execute("pragma database_list").fetchone()[2]
+    ro = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    ids, vecs = load_embeddings(ro, "mean-colour", tmp_path / "emb")
+    assert len(ids) == 5 and recorded_sizes(ro, "mean-colour") == {}
+    assert backbone_screen.source_sizes(ro, "mean-colour", ids.tolist()) == {"unknown": 5}
+
+
+def test_the_copy_size_is_recorded_only_when_the_caller_names_it(conn, tmp_path):
+    from mycomap_vision.embed import recorded_sizes
+    store = seed(conn, tmp_path)
+    todo = photos_to_embed(conn, "mean-colour", "large", store.location, str(tmp_path))
+    embed_photos(conn, store, MeanColour(), todo[:2], tmp_path / "emb", log=lambda s: None,
+                 source_size="large")
+    embed_photos(conn, store, MeanColour(), todo[2:], tmp_path / "emb", log=lambda s: None)
+    assert recorded_sizes(conn, "mean-colour") == {todo[0][0]: "large", todo[1][0]: "large"}
+    embed_photos(conn, store, MeanColour(), todo[:1], tmp_path / "emb", log=lambda s: None)
+    assert recorded_sizes(conn, "mean-colour") == {todo[1][0]: "large"}   # unknown again

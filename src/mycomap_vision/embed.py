@@ -42,6 +42,27 @@ create table if not exists embed_runs (
 );
 """
 
+# The photo copy size a vector was made from, when the caller said (embed_photos'
+# source_size). A side table, so the embeddings rows keep their shape (other manifests and
+# the trainer copy them whole), created only where vectors are written: SCHEMA runs on
+# read-only manifests too. No row: made before sizes were recorded, size unknown.
+SOURCES_SCHEMA = """
+create table if not exists embedding_sources (
+  backbone    text not null,
+  photo_id    integer not null,
+  source_size text not null,
+  primary key (backbone, photo_id)
+);
+"""
+
+
+def recorded_sizes(conn: sqlite3.Connection, backbone: str) -> dict[int, str]:
+    """{photo id: copy size} of the backbone's vectors whose size was recorded."""
+    if not conn.execute("select 1 from sqlite_master where name = 'embedding_sources'").fetchone():
+        return {}
+    return dict(conn.execute("select photo_id, source_size from embedding_sources where "
+                             "backbone = ?", (backbone,)).fetchall())
+
 
 class Backbone(Protocol):
     """`prepare` (optional) turns one image into model input; it runs in the reader
@@ -206,12 +227,15 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
                  todo: list[tuple[int, str]], out_dir: Path, batch_size: int = 32,
                  shard_rows: int = 8192, readers: int = 8,
                  log: Callable[[str], None] = print,
-                 should_stop: Callable[[], bool] | None = None) -> EmbedStats:
+                 should_stop: Callable[[], bool] | None = None,
+                 source_size: str | None = None) -> EmbedStats:
     """Embed `todo`: (photo_id, relpath), or (crop vector id, relpath, box) for a specimen
     crop (crops_to_embed). A photo that can't be read or decoded is skipped and listed in
     stats.skipped with the reason. `should_stop()` is asked before each batch; when it
-    says stop, what is embedded so far is saved and stats.stopped is set."""
-    conn.executescript(SCHEMA)
+    says stop, what is embedded so far is saved and stats.stopped is set. `source_size`:
+    the copy size every photo in `todo` was read at, recorded in embedding_sources (None:
+    any earlier record for these vectors is dropped, their size being unknown now)."""
+    conn.executescript(SCHEMA + SOURCES_SCHEMA)
     out_dir.mkdir(parents=True, exist_ok=True)
     stats = EmbedStats()
     started = time.monotonic()
@@ -232,6 +256,12 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
                 "insert or replace into embeddings (backbone, photo_id, shard, row, created_at) "
                 "values (?, ?, ?, ?, ?)",
                 [(backbone.name, pid, shard, i, now) for i, pid in enumerate(buf_ids)])
+            if source_size is None:
+                conn.executemany("delete from embedding_sources where backbone = ? and "
+                                 "photo_id = ?", [(backbone.name, pid) for pid in buf_ids])
+            else:
+                conn.executemany("insert or replace into embedding_sources values (?, ?, ?)",
+                                 [(backbone.name, pid, source_size) for pid in buf_ids])
         stats.shards += 1
         shard += 1
         buf_vecs, buf_ids = [], []
@@ -299,7 +329,7 @@ def archive_embeddings(conn: sqlite3.Connection, backbone: str, label: str,
     .ids.npy file says which photos it holds. Refuses to overwrite an earlier archive."""
     import shutil
     data_dir = data_dir or config.DATA_DIR
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA + SOURCES_SCHEMA)
     src = data_dir / "embeddings" / backbone
     dest = data_dir / "embeddings-archive" / f"{backbone}-{label}"
     if dest.exists():
@@ -313,6 +343,7 @@ def archive_embeddings(conn: sqlite3.Connection, backbone: str, label: str,
         shutil.move(str(src), str(dest))
     with conn:
         conn.execute("delete from embeddings where backbone = ?", (backbone,))
+        conn.execute("delete from embedding_sources where backbone = ?", (backbone,))
     return {"backbone": backbone, "rows": rows, "archive": str(dest)}
 
 
