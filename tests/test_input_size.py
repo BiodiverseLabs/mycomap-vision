@@ -97,6 +97,34 @@ def test_the_336_rates_are_the_l4_runs_own():
     assert trainer.FINETUNE_RATES["bioclip-2-336"] == 51.6
 
 
+def test_bioclip_25_at_336_is_the_huge_snapshot_resized_like_bioclip_2():
+    """The paired fine-tune test's base: BioCLIP 2.5 Huge's own weights at 336 px, named so
+    the fine-tuned model is bioclip-2.5-336-ft-<run> and its meta carries the base_spec the
+    sealed run's delivery spec names."""
+    assert models.resolve_spec("bioclip-2.5-336") == \
+        "open_clip:hf-hub:imageomics/bioclip-2.5-vith14?img_size=336"
+    assert models.storage_name("bioclip-2.5-336") == "bioclip-2.5-336"
+    assert models.storage_name("open_clip:hf-hub:imageomics/bioclip-2.5-vith14?img_size=336") \
+        == "bioclip-2.5-336"
+    assert trainer.finetuned_name("bioclip-2.5-336", "r") == "bioclip-2.5-336-ft-r"
+
+
+def test_the_estimate_counts_bioclip_25_as_slower_than_bioclip_2_at_336_not_as_unmeasured():
+    """ViT-H/14 costs about twice ViT-L/14 per photo (laptop ratio x the L4's measured 336
+    rates); a backbone with no rate would fall back to the 15/s and 40/s guesses instead."""
+    huge = trainer.estimate(trainer.plan_stages(["bioclip-2.5-336"], ["bioclip-2.5-336"], "r"),
+                            100_000)
+    large = trainer.estimate(trainer.plan_stages(["bioclip-2-336"], ["bioclip-2-336"], "r"),
+                             100_000)
+    rates = {r["stage"].split(" ")[0]: r["photos_per_second"] for r in huge["stages"]}
+    assert rates["embed"] == 34.5 and rates["finetune"] == 26.2
+    assert rates["embed"] != trainer.UNMEASURED_EMBED_RATE
+    assert rates["finetune"] != trainer.UNMEASURED_FINETUNE_RATE
+    work = huge["total_hours"] - huge["setup_hours"] - huge["compare_hours"]
+    base = large["total_hours"] - large["setup_hours"] - large["compare_hours"]
+    assert 1.8 < work / base < 2.1
+
+
 # --- the fine-tune at a size the GPU can't hold in one pass ---------------------------------
 
 def tiny_data(conn, tmp_path):

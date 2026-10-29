@@ -40,6 +40,12 @@ ALIASES: dict[str, Alias] = {
                            "BioCLIP 2 at 336 px input (position embeddings resized)"),
     "bioclip-2-448": Alias("open_clip:hf-hub:imageomics/bioclip-2?img_size=448",
                            "BioCLIP 2 at 448 px input (position embeddings resized)"),
+    # BioCLIP 2.5 Huge (ViT-H/14, MIT; Hugging Face snapshot 6e3d04e, weights sha256
+    # ac2e37c2...ae97) at 336 px, as BioCLIP 2 is run at 336: the base of the paired fine-tune
+    # test against MycoMap Vision v1 (research bioclip25-paired-finetune, Steve 29 Oct).
+    "bioclip-2.5-336": Alias("open_clip:hf-hub:imageomics/bioclip-2.5-vith14?img_size=336",
+                             "BioCLIP 2.5 Huge (ViT-H/14) at 336 px input "
+                             "(position embeddings resized)"),
     # BioCLIP 2's predecessor (ViT-B/16, 224 px): the ablation beside it in the screen.
     "bioclip": Alias("open_clip:hf-hub:imageomics/bioclip",
                      "BioCLIP (v1), tree-of-life CLIP, ViT-B/16, 224 px"),
