@@ -159,3 +159,58 @@ def test_an_erratum_given_to_the_release_leaves_the_subset_and_is_recorded(world
     plain = dataset.load(BASE, True)                       # the same draw without it: refused
     with pytest.raises(ValueError, match="drawn once"):
         bs.make_subset(plain, bs.results_dir(rel.id), reference_records=100, queries=10)
+
+
+def test_a_reused_vector_not_made_from_a_large_copy_is_embedded_again_and_never_read(world):
+    """The v1 screen reused vectors of the 28 Sep sample made from 500 px medium copies
+    beside the 1024 px large ones it embedded (audit 2026-10-29): the screen now reuses only
+    vectors recorded as made from a large copy, and scores the one the index points at."""
+    from mycomap_vision import config
+    from mycomap_vision.embed import embed_photos, load_embeddings
+    from mycomap_vision.storage import open_store
+    conn, rel = world["conn"], dataset.load(BASE, True)
+    doc = bs.make_subset(rel, bs.results_dir(rel.id), reference_records=100, queries=10)
+    # earlier work: two subset photos in one shard under the same name, made with other
+    # vectors (twist) to tell them apart; one recorded as from a large copy, one of unknown
+    # size (made before sizes were recorded, like the 28 Sep medium vectors)
+    first = bs.photos_to_embed(conn, "m1", doc["photos"])
+    where, items = next(iter(first.items()))
+    embed_photos(conn, open_store(where, config.DATA_DIR), Const("m1", twist=1.0), items[:2],
+                 config.DATA_DIR / "embeddings" / "m1", log=lambda s: None)
+    kept, stale = items[0][0], items[1][0]
+    conn.execute("insert into embedding_sources values ('m1', ?, 'large')", (kept,))
+    assert sum(map(len, bs.photos_to_embed(conn, "m1", doc["photos"]).values())) == 5
+    assert sum(map(len, bs.photos_to_embed(conn, "m1", doc["photos"],
+                                           source_size="large").values())) == 6
+    done = bs.embed(conn, doc, ["m1"], loader=lambda s: Const(s), log=lambda s: None)
+    assert done["m1"]["embedded"] == 6                     # the unknown one again too
+    assert bs.embed(conn, doc, ["m1"], loader=lambda s: Const(s),
+                    log=lambda s: None)["m1"]["embedded"] == 0
+    ids, vecs = load_embeddings(conn, "m1")
+    assert ids.tolist().count(stale) == 2                  # its old vector is still in shard 0
+    keep = bs.indexed_rows(conn, "m1", ids, set(doc["photos"]))
+    assert sorted(ids[keep].tolist()) == sorted(doc["photos"])      # each photo once
+    fresh = bs.embed(conn, doc, ["m2"], loader=lambda s: Const(s), log=lambda s: None)
+    assert fresh["m2"]["embedded"] == 7
+    i2, v2 = load_embeddings(conn, "m2")
+    want = dict(zip(i2.tolist(), v2.tolist()))
+    got = dict(zip(ids[keep].tolist(), vecs[keep].tolist()))
+    assert got[stale] == want[stale]                       # the new vector, never the old
+    assert got[kept] != want[kept]                         # a recorded large one is reused
+    res = bs.score(conn, rel, doc, ["m1"], ["nearest"], log=lambda s: None)
+    assert res["vectors_by_source_size"] == {"m1": {"large": 7}}
+
+
+def test_the_screen_reports_vectors_of_unknown_source_size(world):
+    conn, rel = world["conn"], dataset.load(BASE, True)
+    doc = bs.make_subset(rel, bs.results_dir(rel.id), reference_records=100, queries=10)
+    from mycomap_vision import config
+    from mycomap_vision.embed import embed_photos
+    from mycomap_vision.storage import open_store
+    for where, items in bs.photos_to_embed(conn, "m1", doc["photos"]).items():
+        embed_photos(conn, open_store(where, config.DATA_DIR), Const("m1"), items,
+                     config.DATA_DIR / "embeddings" / "m1", log=lambda s: None)
+    said = []
+    res = bs.score(conn, rel, doc, ["m1"], ["nearest"], log=said.append)
+    assert res["vectors_by_source_size"] == {"m1": {"unknown": 7}}
+    assert any("WARNING m1" in s for s in said)

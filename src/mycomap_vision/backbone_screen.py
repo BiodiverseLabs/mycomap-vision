@@ -30,8 +30,10 @@ import csv
 import hashlib
 import json
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
+
+import numpy as np
 
 from . import config
 
@@ -40,6 +42,7 @@ REFERENCE_RECORDS = 16_000
 CAP = 50
 QUERIES = 2_000
 HALVES = ("val-excl-former-heldout", "val-former-heldout")
+SOURCE_SIZE = "large"            # the photo copies every screen vector is made from
 
 
 def results_dir(rel_id: str, root: Path | None = None) -> Path:
@@ -145,13 +148,28 @@ def load_subset(rel_id: str, root: Path | None = None) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def photos_to_embed(conn, backbone: str, photo_ids: list[int]) -> dict[str, list]:
+def photos_to_embed(conn, backbone: str, photo_ids: list[int],
+                    source_size: str | None = None) -> dict[str, list]:
     """The subset's photos `backbone` has no vector for, grouped by the local store that
     holds a large copy: {store location: [(photo id, path)]}. A photo with no local copy
-    is refused (this step never reads S3: copy the photos first)."""
-    have = {r[0] for r in conn.execute("select photo_id from embeddings where backbone = ?",
-                                       (backbone,))} if conn.execute(
-        "select 1 from sqlite_master where name = 'embeddings'").fetchone() else set()
+    is refused (this step never reads S3: copy the photos first).
+
+    With `source_size`, a stored vector counts only when it is recorded as made from a copy
+    of that size (embed.embedding_sources); any other is embedded again. The v1 screen
+    reused 2,605-3,159 vectors per backbone made from 500 px medium copies of the 28 Sep
+    sample, beside 1024 px large ones (audit 2026-10-29)."""
+    from .embed import SCHEMA
+    if not conn.execute("select 1 from sqlite_master where name = 'embeddings'").fetchone():
+        have = set()
+    elif source_size is None:
+        have = {r[0] for r in conn.execute("select photo_id from embeddings where backbone = ?",
+                                           (backbone,))}
+    else:
+        conn.executescript(SCHEMA)
+        have = {r[0] for r in conn.execute(
+            "select e.photo_id from embeddings e join embedding_sources s on s.backbone = "
+            "e.backbone and s.photo_id = e.photo_id where e.backbone = ? and s.source_size = ?",
+            (backbone, source_size))}
     out: dict[str, list] = defaultdict(list)
     missing = []
     for pid in photo_ids:
@@ -172,7 +190,8 @@ def photos_to_embed(conn, backbone: str, photo_ids: list[int]) -> dict[str, list
 
 def embed(conn, subset: dict, backbones: list[str], batch_size: int = 16, readers: int = 8,
           loader=None, log=print) -> dict:
-    """Embed the subset's photos for each backbone (only those it lacks)."""
+    """Embed the subset's photos for each backbone: those it has no vector for that was
+    made from a large copy (photos_to_embed), so every screen vector comes from one size."""
     from . import models
     from .embed import embed_photos
     from .storage import open_store
@@ -180,7 +199,7 @@ def embed(conn, subset: dict, backbones: list[str], batch_size: int = 16, reader
     done = {}
     for spec in backbones:
         name = models.storage_name(spec)
-        todo = photos_to_embed(conn, name, subset["photos"])
+        todo = photos_to_embed(conn, name, subset["photos"], source_size=SOURCE_SIZE)
         n = sum(len(v) for v in todo.values())
         log(f"[{name}] {n:,} of {len(subset['photos']):,} subset photos to embed")
         stats = {"embedded": 0, "skipped": 0, "seconds": 0.0}
@@ -189,13 +208,48 @@ def embed(conn, subset: dict, backbones: list[str], batch_size: int = 16, reader
             for where, items in todo.items():
                 s = embed_photos(conn, open_store(where, config.DATA_DIR), backbone, items,
                                  config.DATA_DIR / "embeddings" / name, batch_size=batch_size,
-                                 readers=readers, log=lambda m: log(f"[{name}] {m.strip()}"))
+                                 readers=readers, log=lambda m: log(f"[{name}] {m.strip()}"),
+                                 source_size=SOURCE_SIZE)
                 stats["embedded"] += s.embedded
                 stats["skipped"] += len(s.skipped)
                 stats["seconds"] += getattr(s, "seconds", 0.0) or 0.0
             del backbone
         done[name] = stats
     return done
+
+
+def indexed_rows(conn, backbone: str, ids, wanted: set[int], root: Path | None = None
+                 ) -> list[int]:
+    """Positions in load_embeddings' (ids, vectors) of the wanted photos' current vectors:
+    the shard row the embeddings table points at. load_embeddings reads whole shard files,
+    and a photo embedded again (photos_to_embed with a source size) keeps its old vector in
+    its old shard, so the ids alone could hold a photo twice; the old one is never read."""
+    root = root or config.DATA_DIR / "embeddings" / backbone
+    rows = conn.execute("select photo_id, shard, row from embeddings where backbone = ?",
+                        (backbone,)).fetchall()
+    start, at = {}, 0
+    for s in sorted({s for _, s, _ in rows}):       # load_embeddings' order and lengths
+        start[s] = at
+        at += len(np.load(root / f"shard-{s:05d}.ids.npy", mmap_mode="r"))
+    keep = []
+    for pid, s, r in rows:
+        if pid in wanted:
+            i = start[s] + r
+            if int(ids[i]) != pid:
+                raise ValueError(f"{backbone}: shard {s} row {r} holds photo {int(ids[i])}, "
+                                 f"the embeddings table says {pid}")
+            keep.append(i)
+    return sorted(keep)
+
+
+def source_sizes(conn, backbone: str, photo_ids: list[int]) -> dict[str, int]:
+    """How many of these vectors were made from each photo copy size ('unknown': made
+    before sizes were recorded, embed.embedding_sources)."""
+    from .embed import SCHEMA
+    conn.executescript(SCHEMA)
+    known = dict(conn.execute("select photo_id, source_size from embedding_sources where "
+                              "backbone = ?", (backbone,)).fetchall())
+    return dict(sorted(Counter(known.get(int(p), "unknown") for p in photo_ids).items()))
 
 
 def score(conn, rel, subset: dict, backbones: list[str], methods: list[str],
@@ -210,18 +264,25 @@ def score(conn, rel, subset: dict, backbones: list[str], methods: list[str],
         raise ValueError("the subset was drawn from another release")
     rel.check_photos_match(conn)
     wanted = set(subset["photos"])
-    loaded = {}
+    loaded, sizes = {}, {}
     for b in backbones:
-        ids, vecs = load_embeddings(conn, storage_name(b))
-        keep = [i for i, p in enumerate(ids.tolist()) if int(p) in wanted]
-        loaded[storage_name(b)] = (ids[keep], vecs[keep])
+        name = storage_name(b)
+        ids, vecs = load_embeddings(conn, name)
+        keep = indexed_rows(conn, name, ids, wanted)
+        loaded[name] = (ids[keep], vecs[keep])
+        sizes[name] = source_sizes(conn, name, ids[keep].tolist())
     common = set.intersection(*(set(int(p) for p in ids.tolist())
                                 for ids, _ in loaded.values()))
     same = {p: p for p in common}
     refs = set(subset["references"])
     ref = [r for r in rel.as_records("train", same) if r.observation_id in refs]
     out = {"species_sha256": subset["species_sha256"], "photos_scored": len(common),
-           "photos_in_subset": len(wanted), "references": len(ref), "halves": {}}
+           "photos_in_subset": len(wanted), "references": len(ref),
+           "vectors_by_source_size": sizes, "halves": {}}
+    for name, by in sizes.items():
+        if set(by) != {SOURCE_SIZE}:
+            log(f"WARNING {name}: subset vectors by source copy size {by}; "
+                f"mv backbone-screen embed makes every one from a {SOURCE_SIZE} copy")
     for half, q in subset["queries"].items():
         keys = set(q["records"])
         test = [r for r in rel.as_records("val", same) if r.observation_id in keys]
