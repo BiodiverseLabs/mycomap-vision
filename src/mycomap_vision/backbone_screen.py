@@ -158,18 +158,13 @@ def photos_to_embed(conn, backbone: str, photo_ids: list[int],
     of that size (embed.embedding_sources); any other is embedded again. The v1 screen
     reused 2,605-3,159 vectors per backbone made from 500 px medium copies of the 28 Sep
     sample, beside 1024 px large ones (audit 2026-10-29)."""
-    from .embed import SCHEMA
-    if not conn.execute("select 1 from sqlite_master where name = 'embeddings'").fetchone():
-        have = set()
-    elif source_size is None:
-        have = {r[0] for r in conn.execute("select photo_id from embeddings where backbone = ?",
-                                           (backbone,))}
-    else:
-        conn.executescript(SCHEMA)
-        have = {r[0] for r in conn.execute(
-            "select e.photo_id from embeddings e join embedding_sources s on s.backbone = "
-            "e.backbone and s.photo_id = e.photo_id where e.backbone = ? and s.source_size = ?",
-            (backbone, source_size))}
+    from .embed import recorded_sizes
+    have = {r[0] for r in conn.execute("select photo_id from embeddings where backbone = ?",
+                                       (backbone,))} if conn.execute(
+        "select 1 from sqlite_master where name = 'embeddings'").fetchone() else set()
+    if source_size is not None:
+        sizes = recorded_sizes(conn, backbone)
+        have = {p for p in have if sizes.get(p) == source_size}
     out: dict[str, list] = defaultdict(list)
     missing = []
     for pid in photo_ids:
@@ -245,10 +240,8 @@ def indexed_rows(conn, backbone: str, ids, wanted: set[int], root: Path | None =
 def source_sizes(conn, backbone: str, photo_ids: list[int]) -> dict[str, int]:
     """How many of these vectors were made from each photo copy size ('unknown': made
     before sizes were recorded, embed.embedding_sources)."""
-    from .embed import SCHEMA
-    conn.executescript(SCHEMA)
-    known = dict(conn.execute("select photo_id, source_size from embedding_sources where "
-                              "backbone = ?", (backbone,)).fetchall())
+    from .embed import recorded_sizes
+    known = recorded_sizes(conn, backbone)
     return dict(sorted(Counter(known.get(int(p), "unknown") for p in photo_ids).items()))
 
 

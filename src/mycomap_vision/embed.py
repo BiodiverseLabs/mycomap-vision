@@ -32,16 +32,6 @@ create table if not exists embeddings (
   primary key (backbone, photo_id)
 );
 
--- The photo copy size a vector was made from, when the caller said (embed_photos'
--- source_size). A side table, so the embeddings rows keep their shape (other manifests and
--- the trainer copy them whole). No row: made before sizes were recorded, size unknown.
-create table if not exists embedding_sources (
-  backbone    text not null,
-  photo_id    integer not null,
-  source_size text not null,
-  primary key (backbone, photo_id)
-);
-
 -- One row per embedding run, for the speed shown next to accuracy.
 create table if not exists embed_runs (
   backbone   text not null,
@@ -51,6 +41,27 @@ create table if not exists embed_runs (
   created_at text not null
 );
 """
+
+# The photo copy size a vector was made from, when the caller said (embed_photos'
+# source_size). A side table, so the embeddings rows keep their shape (other manifests and
+# the trainer copy them whole), created only where vectors are written: SCHEMA runs on
+# read-only manifests too. No row: made before sizes were recorded, size unknown.
+SOURCES_SCHEMA = """
+create table if not exists embedding_sources (
+  backbone    text not null,
+  photo_id    integer not null,
+  source_size text not null,
+  primary key (backbone, photo_id)
+);
+"""
+
+
+def recorded_sizes(conn: sqlite3.Connection, backbone: str) -> dict[int, str]:
+    """{photo id: copy size} of the backbone's vectors whose size was recorded."""
+    if not conn.execute("select 1 from sqlite_master where name = 'embedding_sources'").fetchone():
+        return {}
+    return dict(conn.execute("select photo_id, source_size from embedding_sources where "
+                             "backbone = ?", (backbone,)).fetchall())
 
 
 class Backbone(Protocol):
@@ -224,7 +235,7 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
     says stop, what is embedded so far is saved and stats.stopped is set. `source_size`:
     the copy size every photo in `todo` was read at, recorded in embedding_sources (None:
     any earlier record for these vectors is dropped, their size being unknown now)."""
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA + SOURCES_SCHEMA)
     out_dir.mkdir(parents=True, exist_ok=True)
     stats = EmbedStats()
     started = time.monotonic()
@@ -318,7 +329,7 @@ def archive_embeddings(conn: sqlite3.Connection, backbone: str, label: str,
     .ids.npy file says which photos it holds. Refuses to overwrite an earlier archive."""
     import shutil
     data_dir = data_dir or config.DATA_DIR
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA + SOURCES_SCHEMA)
     src = data_dir / "embeddings" / backbone
     dest = data_dir / "embeddings-archive" / f"{backbone}-{label}"
     if dest.exists():
