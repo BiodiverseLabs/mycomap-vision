@@ -128,6 +128,119 @@ def test_a_report_is_split_at_mycomap_orgs_row_limit(tmp_path, monkeypatch):
     assert [len(b["rows"]) for b in sent] == [q.MAX_ROWS, 3]
 
 
+# --- 2026-10-29/30: reports lost to a kept-alive connection the far end had closed -------------
+
+@pytest.fixture
+def org_that_drops_idle_connections():
+    """A stand-in for mycomap.org behind Cloudflare and nginx: it answers the first report on a
+    connection and closes that connection, with no response, when a second report comes on it
+    (what a kept-alive connection closed while idle looks like: RemoteDisconnected)."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    got: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.seen = getattr(self, "seen", 0) + 1
+            if self.seen > 1:                         # the stale connection: closed, no answer
+                self.close_connection = True
+                return
+            got.append({"auth": self.headers["Authorization"], "body": body,
+                        "path": self.path})
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", got
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_report_on_a_connection_the_far_end_closed_is_sent_again_on_a_fresh_one(
+        tmp_path, org_that_drops_idle_connections):
+    base, got = org_that_drops_idle_connections
+    qs, clock = quotas(tmp_path)
+    post = q.org_poster(base, "k1")
+    qs.count(cred(), 1, 2)
+    assert q.report(qs, post, clock=lambda: clock[0]) == 1
+    qs.count(cred(), 1, 3)                            # a later report: the running totals
+    assert q.report(qs, post, clock=lambda: clock[0]) == 1
+    assert [g["body"]["rows"][0]["photos"] for g in got] == [2, 5]
+    assert {g["auth"] for g in got} == {"Bearer k1"}
+    assert {g["path"] for g in got} == {"/api/vision/usage"}
+
+
+class FakeSession:
+    def __init__(self, outcomes, made):
+        self.outcomes, self.closed, self.bodies = outcomes, False, []
+        made.append(self)
+
+    def post(self, url, json, timeout, headers):
+        self.bodies.append(json)
+        out = self.outcomes.pop(0)
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+    def close(self):
+        self.closed = True
+
+
+class Answer:
+    def __init__(self, status):
+        self.status = status
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            import requests
+            raise requests.HTTPError(f"{self.status}")
+
+
+def poster_with(outcomes):
+    made: list[FakeSession] = []
+    post = q.org_poster("https://org.test", "k1",
+                        session_factory=lambda: FakeSession(outcomes, made))
+    return post, made
+
+
+def test_a_reset_or_closed_connection_is_tried_once_more_and_the_stale_session_dropped():
+    import http.client
+
+    import requests
+    for error in (requests.ConnectionError(http.client.RemoteDisconnected("closed")),
+                  requests.ConnectionError(ConnectionResetError(104, "reset by peer"))):
+        post, made = poster_with([error, Answer(200)])
+        post({"period": "2026-10", "rows": [1]})
+        assert len(made) == 2 and made[0].closed and not made[1].closed
+        assert made[0].bodies == made[1].bodies == [{"period": "2026-10", "rows": [1]}]
+
+
+def test_only_one_retry_and_never_for_an_http_error_or_a_read_timeout():
+    import requests
+    post, made = poster_with([requests.ConnectionError("down"), requests.ConnectionError("down")])
+    with pytest.raises(requests.ConnectionError):     # reported; the next report sends it all
+        post({"rows": []})
+    assert len(made) == 2
+    post, made = poster_with([Answer(503)])
+    with pytest.raises(requests.HTTPError):
+        post({"rows": []})
+    assert len(made) == 1
+    post, made = poster_with([requests.ReadTimeout("slow")])
+    with pytest.raises(requests.ReadTimeout):
+        post({"rows": []})
+    assert len(made) == 1
+
+
 # --- through the API --------------------------------------------------------------------
 
 def app(conn, tmp_path, mode="enforce", posted=None):
