@@ -242,14 +242,33 @@ def report(quotas: Quotas, post: Callable[[dict], None], clock: Callable[[], flo
     return sent
 
 
-def org_poster(base_url: str, key: str, timeout: float = 15.0) -> Callable[[dict], None]:
-    """The real `post` for `report`: mycomap.org's POST /api/vision/usage."""
+def org_poster(base_url: str, key: str, timeout: float = 15.0,
+               session_factory: Callable | None = None) -> Callable[[dict], None]:
+    """The real `post` for `report`: mycomap.org's POST /api/vision/usage.
+
+    A report goes every 5 minutes, longer than Cloudflare and nginx keep an idle connection
+    open, so the kept-alive one is sometimes already closed when a report goes out on it (29-30
+    Oct: 9 reports lost to "RemoteDisconnected"). A connection error (closed, reset, refused) is
+    tried once more on a fresh connection; the same running totals sent twice are harmless. An
+    HTTP error status or a read timeout is not tried again."""
     import requests
+    make = session_factory or requests.Session
     url = base_url.rstrip("/") + "/api/vision/usage"
-    session = requests.Session()
+    kept = {"session": make()}
+
+    def send(body: dict):
+        return kept["session"].post(url, json=body, timeout=timeout,
+                                    headers={"Authorization": f"Bearer {key}"})
 
     def post(body: dict) -> None:
-        r = session.post(url, json=body, timeout=timeout,
-                         headers={"Authorization": f"Bearer {key}"})
+        try:
+            r = send(body)
+        except requests.ConnectionError:
+            try:
+                kept["session"].close()
+            except Exception:  # noqa: BLE001 - the stale session is dropped either way
+                pass
+            kept["session"] = make()
+            r = send(body)
         r.raise_for_status()
     return post
