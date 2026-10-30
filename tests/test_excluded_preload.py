@@ -2,10 +2,12 @@
 plan): every slip photo's and kept crop's "where Vision looked" map made ahead of anyone asking.
 What it makes and skips (the seal, photos not shown), one batch photo at a time behind every
 identification and every person's ask (Identify waits at most one map), its window, its off
-switch, crops only once embedded and slips after them, the stamp that makes a kept map stale,
-and its progress in /api/health."""
+switch, crops only once embedded and slips after them (never waiting for the nightly), the
+stamp that makes a kept map stale, its progress in /api/health, and the line it logs when it
+has made nothing for half an hour."""
 
 import io
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -128,8 +130,10 @@ STAMP = {"map_version": 1, "backbone": "m1", "method": "x", "release": "r1", "na
 
 
 def preloader(slips=(), crops=(), waiting=0, kept=None, skip=None, window=None, enabled=True,
-              crop_wait=True, nightly=False, now=AT(9)):
+              crop_wait=True, nightly=False, now=AT(9), names=None):
+    """names: record key -> its name in the stamp (default STAMP's "A x")."""
     kept = {} if kept is None else kept
+    names = names or {}
     w = FakeWorker()
     made = []
 
@@ -139,7 +143,8 @@ def preloader(slips=(), crops=(), waiting=0, kept=None, skip=None, window=None, 
     p = xl.Preloader(
         enabled=enabled, window=window, crop_wait=crop_wait, worker=w,
         targets=lambda: ([xl.Target(h) for h in slips], list(crops), waiting),
-        stamp_now=lambda t: {**STAMP, "box": list(t.box) if t.box else None},
+        stamp_now=lambda t: {**STAMP, "name": names.get(t.hit.record_key, STAMP["name"]),
+                             "box": list(t.box) if t.box else None},
         stamps=lambda: dict(kept), stamp_of=lambda k: kept.get(k),
         skip=skip or (lambda t: None), job=make_job, nightly_running=lambda: nightly,
         now=lambda: now, note=lambda s: None)
@@ -186,34 +191,79 @@ def test_held_and_hidden_photos_are_skipped_and_counted():
     assert p.health()["skipped"] == {"held by the seal": 1, "not shown": 1}
 
 
-def test_slips_wait_for_crops_to_be_embedded_and_embedded_crops_go_first():
+def test_embedded_crops_go_first_and_slips_never_wait_for_the_nightly():
+    """2026-10-29/30, twice: every slip photo waited while any kept crop waited for its vector,
+    the nightly embeds 3,000 crops a night and 20-26k waited, so once a night's crops were mapped
+    nothing was made until the next nightly ended (16:33-09:39 the second time)."""
     crop = xl.Target(hit(1), 1, (0.1, 0.1, 0.9, 0.9))
-    p, w, made = preloader(slips=[hit(1), hit(2)], crops=[crop], waiting=5)
+    p, w, made = preloader(slips=[hit(1), hit(2)], crops=[crop], waiting=20509)
     run(p, w)
-    assert made == ["inat:1#crop1"] and p.state == "waiting for crops to be embedded"
-    assert p.health()["crops_waiting"] == 5
+    assert made == ["inat:1#crop1", "inat:1", "inat:2"] and p.state == "done"
+    assert p.health()["crops_waiting"] == 20509
     p2, w2, made2 = preloader(slips=[hit(1), hit(2)], crops=[crop], waiting=5, crop_wait=False)
     run(p2, w2)
     assert made2 == ["inat:1", "inat:2", "inat:1#crop1"]          # slips first, then crops
 
 
-def test_once_the_night_has_embedded_the_crops_the_next_pass_lets_the_slips_go():
-    waiting = [3]
+def test_the_box_on_29_october_makes_its_slips_once_the_crops_it_can_make_are_done():
+    """The 18:24 pass that made nothing until 09:39: every crop it could make was made or not
+    shown, its slips all waited for 23,561 crops the nightly had not embedded yet."""
+    slips = [hit(n) for n in range(1, 41)]
+    hidden = [xl.Target(hit(n), 1, (0.1, 0.1, 0.9, 0.9)) for n in range(100, 110)]
+    p, w, made = preloader(slips=slips, crops=hidden, waiting=23561,
+                           skip=lambda t: "not shown" if t.crop else None)
+    run(p, w, 60)
+    assert made == [f"inat:{n}" for n in range(1, 41)] and p.state == "done"
+    assert p.health()["skipped"] == {"not shown": 10}
+
+
+def test_slips_whose_names_still_have_crops_waiting_go_last():
+    crop = xl.Target(hit(9), 1, (0.1, 0.1, 0.9, 0.9))
+    p, w, made = preloader(slips=[hit(1), hit(2), hit(3)], crops=[crop],
+                           waiting={"B y": 4, "C z": 1}, names={"1": "B y", "2": "A x",
+                                                               "3": "D w", "9": "B y"})
+    run(p, w)
+    assert made == ["inat:9#crop1", "inat:2", "inat:3", "inat:1"]
+    h = p.health()
+    assert h["crops_waiting"] == 5 and h["slips_last"] == 1 and h["doing"] == "done"
+
+
+def test_a_target_it_cannot_make_costs_one_look_per_pass():
+    """With 23,561 crops waiting a pass walked every waiting slip again for each crop it passed
+    over (19.6 s of one tick with the box's 37,862 slips and 815 hidden crops) and once a second
+    after that; the pass now queues its targets once, in order."""
+    slips = [hit(n) for n in range(20000)]
+    hidden = [xl.Target(hit(n), 1, (0.1, 0.1, 0.9, 0.9)) for n in range(400)]
+    looks = []
+    p, w, made = preloader(slips=slips, crops=hidden, waiting=23561,
+                           skip=lambda t: looks.append(t.key) or ("not shown" if t.crop else None))
+    p.pass_ = p.scan()
+    started = time.perf_counter()
+    p.step()
+    assert time.perf_counter() - started < 1.0
+    assert len(looks) == 401 and len(made) == 1           # the 400 passed over, then one slip
+    w.pending = True
+    for _ in range(50):
+        p.step()
+    assert len(looks) == 401
+
+
+def test_a_new_pass_after_the_night_puts_its_newly_embedded_crops_first():
+    crops: list = []
     clock = [0.0]
     w = FakeWorker()
     made = []
     p = xl.Preloader(enabled=True, window=None, crop_wait=True, worker=w,
-                     targets=lambda: ([xl.Target(hit(1))], [], waiting[0]),
+                     targets=lambda: ([xl.Target(hit(1)), xl.Target(hit(2))], list(crops), 3),
                      stamp_now=lambda t: dict(STAMP), stamps=dict, stamp_of=lambda k: None,
                      skip=lambda t: None, job=lambda t, done: made.append(t.key) or ("j", t.key, done),
                      nightly_running=lambda: False, rescan_seconds=3600, clock=lambda: clock[0],
                      note=lambda s: None)
-    assert p.step() == "waiting for crops to be embedded"
-    waiting[0] = 0                                    # the nightly embedded them
-    clock[0] = 3599
-    assert p.step() == "waiting for crops to be embedded" and not made
+    assert p.step() == "making a map" and made == ["inat:1"]        # never waits for the night
+    w.jobs.pop()[2](True)
+    crops.append(xl.Target(hit(1), 1, (0.1, 0.1, 0.9, 0.9)))        # the nightly embedded one
     clock[0] = 3600
-    assert p.step() == "making a map" and made == ["inat:1"]
+    assert p.step() == "making a map" and made == ["inat:1", "inat:1#crop1"]
 
 
 def test_a_crops_map_is_stale_when_its_box_changes():
@@ -364,10 +414,10 @@ def test_an_embedded_crop_gets_its_own_map_of_the_box_alone(conn, tmp_path, any_
     app.state.test_root = tmp_path / "emb"
     keep_crop(conn, app)
     tick(app)
-    assert len(maker.calls) == 2                     # the slip photo, then its crop
-    whole, crop = (Image.open(io.BytesIO(c["photo"])) for c in maker.calls)
+    assert len(maker.calls) == 2                     # the embedded crop first, then its photo
+    crop, whole = (Image.open(io.BytesIO(c["photo"])) for c in maker.calls)
     assert abs(crop.width - whole.width / 2) <= 2 and abs(crop.height - whole.height / 2) <= 2
-    assert maker.calls[1]["hidden_records"] == {"103"}        # its record left out, as ever
+    assert maker.calls[0]["hidden_records"] == {"103"}        # its record left out, as ever
     got = visitor(app).get(LOOKED, params={"photo": "inat:1003", "crop": 1}).json()
     assert got["status"] == "ready" and got["crop_of_photo"] == {
         "n": 1, "box": [0.25, 0.25, 0.75, 0.75]}
@@ -377,18 +427,84 @@ def test_an_embedded_crop_gets_its_own_map_of_the_box_alone(conn, tmp_path, any_
     assert visitor(app).get(LOOKED, params={"photo": "inat:1003", "crop": 2}).status_code == 404
 
 
-def test_a_crop_not_yet_embedded_has_no_map_and_holds_the_slips_back(conn, tmp_path, any_time,
-                                                                      monkeypatch):
+def test_a_crop_not_yet_embedded_has_no_map_and_its_slip_is_still_made(conn, tmp_path,
+                                                                         any_time):
     app, maker, _ = site(conn, tmp_path)
     keep_crop(conn, app, embed=False)
-    monkeypatch.setattr(app.state.excluded_preload, "targets",
-                        lambda real=app.state.excluded_preload.targets: (*real()[:2], 1))
+    conn.execute("update records set north_america = 1 where observation_id = '103'")
+    conn.commit()                                     # a crop the nightly will embed
+    p = app.state.excluded_preload
     tick(app)
-    assert not maker.calls
-    assert app.state.excluded_preload.state == "waiting for crops to be embedded"
+    assert p.targets()[2] == {"B y": 1}               # counted by its record's name
+    assert p.pass_.crops_waiting == 1 and p.pass_.slips_last == 2    # 103 and 105 are B y
+    assert [c["name"] for c in maker.calls] == ["B y"] and p.state == "done"
     assert visitor(app).get(LOOKED, params={"photo": "inat:1003", "crop": 1}).status_code == 404
     assert person(app, "m").post(LOOKED, params={"photo": "inat:1003", "crop": 1}
                                  ).status_code == 404
+
+
+# --- 2026-10-30: nothing made, nothing said ------------------------------------------------------
+
+def test_when_nothing_is_made_for_half_an_hour_one_line_says_why():
+    """The stalls of 29-30 Oct showed only hourly "pass ready" lines while nothing was made for
+    17 hours. Now: one line once nothing is made for STALL_MINUTES, once per state, again only
+    after a map is made."""
+    clock, said = [0.0], []
+    p, w, made = preloader(slips=[hit(1), hit(2)], waiting=7)
+    p.clock, p.note = (lambda: clock[0]), said.append
+    p._progress_at = p._state_since = 0.0
+    assert p.step() == "making a map" and made == ["inat:1"]
+    w.pending = True                                  # the worker never finishes it
+    for minute in range(1, 30):
+        clock[0] = minute * 60.0
+        p.step()
+    assert [s for s in said if "nothing made" in s] == []
+    for minute in range(30, 90):
+        clock[0] = minute * 60.0
+        p.step()
+    assert [s for s in said if "nothing made" in s] == [
+        "[excluded preload] nothing made for 30 min: the map worker has had a preload photo in "
+        "hand all that time; 1 to make (2 slips last), 0 current, 0 no map possible, "
+        "skipped {}, 7 crops waiting for their vector"]
+    w.pending = False
+    w.jobs.pop()[2](True)                             # it finishes: a map is made
+    p.step()
+    w.jobs.pop()[2](True)
+    for minute in range(90, 200):
+        clock[0] = minute * 60.0
+        p.step()
+    stalled = [s for s in said if "nothing made" in s]
+    assert len(stalled) == 2 and re.match(
+        r"\[excluded preload\] nothing made for 3\d min: nothing left to make; 0 to make",
+        stalled[1]), stalled
+
+
+def test_the_nightly_and_the_window_say_why_too_but_making_maps_never_does():
+    clock, said = [0.0], []
+    p, w, made = preloader(slips=[hit(n) for n in range(200)], nightly=True)
+    p.clock, p.note = (lambda: clock[0]), said.append
+    p._progress_at = p._state_since = 0.0
+    for minute in range(0, 120):
+        clock[0] = minute * 60.0
+        p.step()
+    assert [s for s in said if "nothing made" in s] == [
+        "[excluded preload] nothing made for 30 min: the nightly update is running; no pass yet"]
+    p.nightly_running = lambda: False
+    said.clear()
+    for minute in range(120, 300):                    # a map a minute: never stalled
+        clock[0] = minute * 60.0
+        p.step()
+        if w.jobs:
+            w.jobs.pop()[2](True)
+    assert len(made) == 180 and not [s for s in said if "nothing made" in s]
+    q, _, _ = preloader(slips=[hit(1)], window=xl.parse_window("07:45-12:45"), now=AT(20))
+    q.clock, q.note = (lambda: clock[0]), said.append
+    q._progress_at = clock[0]
+    q.step()
+    clock[0] += 31 * 60
+    q.step()
+    assert said[-1].startswith("[excluded preload] nothing made for ") and (
+        "outside its window (07:45-12:45 UTC)" in said[-1])
 
 
 # --- 2026-10-27: the first pass never ended ------------------------------------------------------
