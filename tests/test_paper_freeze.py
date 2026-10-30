@@ -229,3 +229,17 @@ def test_a_sealed_test_photo_with_no_local_copy_is_refused(world, tmp_path, monk
     with pytest.raises(paper_score.FrozenError, match="no large copy"):
         paper_score.run(world["conn"], world["base"], world["test"], cfg, body,
                         tmp_path / "out", research_dir=repo, log=lambda s: None)
+
+
+def test_the_sealed_test_refuses_a_comparator_not_yet_filled(world, tmp_path, monkeypatch):
+    from test_paper_score import _with_followup
+    spec = frozen_spec(world, config(tmp_path, ["7", "8"], code_commit="abcdef1234567"))
+    cfg, body, repo = sealed_world(world, tmp_path, monkeypatch, spec)
+    cfg = _with_followup(cfg)
+    body = json.dumps(cfg).encode()
+    (repo / "paper" / "analysis-v1.json").write_bytes(body)
+    git(repo, "commit", "-qam", "with the followup family")
+    git(repo, "tag", "-f", paper_score.TAG)
+    with pytest.raises(paper_score.FrozenError, match="bioclip25-recipe .backbone, calibration"):
+        paper_score.run(world["conn"], world["base"], world["test"], cfg, body,
+                        tmp_path / "out", research_dir=repo, log=lambda s: None)

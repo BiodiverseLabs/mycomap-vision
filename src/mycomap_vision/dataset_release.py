@@ -461,6 +461,13 @@ def public_trainable(license_class: str, answer: str | None) -> int:
     return int(license_class in CC_CLASSES or answer == "granted")
 
 
+def reason_class(reason: str | None) -> str:
+    """A photo-exclusion reason, with drawing, drawing_micro and drawing_specimen as one:
+    "drawing" (paper a3-spec §2)."""
+    r = (reason or "").strip()
+    return "drawing" if r.startswith("drawing") else r
+
+
 def _photo_key(source: str, manifest_id: int, source_photo_id) -> str:
     if source == "inat":
         return f"inat:{manifest_id}"
@@ -1265,6 +1272,17 @@ class Release:
         with no photo drops out of those reads. Not an erratum: no record or label changes.
         The file is pinned: refused unless its sha256 is `expect_sha256`; cite() then names
         it with its counts."""
+        self._photos_out, self.photo_exclusions = self.photo_exclusion_set(
+            path, expect_sha256, reasons)
+        return self.photo_exclusions
+
+    def photo_exclusion_set(self, path, expect_sha256: str, reasons=None,
+                            merge_drawing: bool = False) -> tuple[frozenset, dict]:
+        """(the manifest photo ids of a pinned photo-exclusion list's exclude_photo rows, with
+        `reasons` only one arm's, in this release's train and val; what it counted), changing
+        nothing: use_photo_exclusions for the whole release, paper-score per comparator.
+        merge_drawing: drawing, drawing_micro and drawing_specimen are one reason, "drawing"
+        (paper a3-spec §2)."""
         path = Path(path)
         body = path.read_bytes()
         sha = hashlib.sha256(body).hexdigest()
@@ -1274,12 +1292,14 @@ class Release:
         rows = list(csv.DictReader(io.StringIO(body.decode("utf-8")), delimiter="\t"))
         if not rows or "photo_key" not in rows[0]:
             raise ReleaseError(f"{path.name}: needs a photo_key column and at least one row")
-        wanted = sorted(set(reasons)) if reasons else None
+        def why(reason):
+            return reason_class(reason) if merge_drawing else reason
+        wanted = sorted({why(x) for x in reasons}) if reasons else None
         if wanted and "reason" not in rows[0]:
             raise ReleaseError(f"{path.name}: has no reason column to choose {wanted} from")
         keys = {r["photo_key"].strip() for r in rows
                 if (r.get("decision") or "exclude_photo") == "exclude_photo"
-                and (wanted is None or r["reason"] in wanted)}
+                and (wanted is None or why(r["reason"]) in wanted)}
         if wanted and not keys:
             raise ReleaseError(f"{path.name}: no excluded photo has reason {wanted}")
         found = {}
@@ -1296,8 +1316,7 @@ class Release:
                 f"using (record_key) where p.included = 1 and r.included = 1 and r.split in ({q})",
                 TRAINABLE):
             left[split][key] += pid not in out
-        self._photos_out = out
-        self.photo_exclusions = {
+        return out, {
             "file": path.name, "sha256": sha, "reasons": wanted or "all",
             "photos_listed": len(keys),
             "photos_left_out": {s: sum(sp == s for _, sp in found.values()) for s in TRAINABLE},
@@ -1305,7 +1324,6 @@ class Release:
                                            for s in TRAINABLE},
             "other_split_kept": sum(sp not in TRAINABLE for _, sp in found.values()),
             "not_in_release": len(keys) - len(found)}
-        return self.photo_exclusions
 
     def _photos_out_of(self, splits) -> frozenset:
         """use_photo_exclusions' photos when `splits` is a learning or reference read (it
@@ -1438,13 +1456,15 @@ class Release:
             tuple(splits)) if r[1] not in skip and r[0] not in drop]
 
     def as_records(self, splits=TRAINABLE, photo_row: dict[int, int] | None = None,
-                   public_trainable_only: bool = False) -> list:
+                   public_trainable_only: bool = False, exclude: frozenset = frozenset()
+                   ) -> list:
         """evaluate.Record objects for these splits: labels, dates and photos from the
         release, coordinates from private.sqlite (None when it was not shipped). photo_rows
         hold photo_row[photo id] for photos with a vector (all included photos when
         photo_row is None). public_trainable_only: the photos the final public model may
         learn from (CC or permission granted); a record left with none is left out. A read
-        that holds train (learning, a reference) leaves out use_photo_exclusions' photos."""
+        that holds train (learning, a reference) leaves out use_photo_exclusions' photos;
+        `exclude` (photo_exclusion_set) leaves out more, for this read only."""
         from .evaluate import Record, real_date
         splits = (splits,) if isinstance(splits, str) else tuple(splits)
         places = {r[0]: (r[1], r[2]) for r in self.private.execute(
@@ -1452,7 +1472,7 @@ class Release:
             if self.has_private else {}
         photos: dict[str, list[int]] = defaultdict(list)
         pt = " and public_trainable = 1" if public_trainable_only else ""
-        drop = self._photos_out_of(splits)
+        drop = self._photos_out_of(splits) | frozenset(exclude)
         for key, pid in self.db.execute(
                 f"select record_key, manifest_photo_id from photos where included = 1{pt} "
                 "order by record_key, position, photo_key"):
