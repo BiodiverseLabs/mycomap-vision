@@ -1157,6 +1157,12 @@ def check_reference(c: dict) -> None:
         if r is not None and (not isinstance(r, list) or not r
                               or not all(isinstance(x, str) and x for x in r)):
             raise ValueError(f"comparator {c['id']}: exclude_photos reasons is a list of reasons")
+        from .photo_review import REASON_CODES, RETIRED_REASONS
+        unknown = sorted(set(r or []) - set(REASON_CODES) - set(RETIRED_REASONS))
+        if unknown:
+            raise ValueError(f"comparator {c['id']}: exclude_photos reasons {unknown} are not "
+                             f"the exporter's reason codes (photo_review.REASONS: "
+                             f"{', '.join(REASON_CODES)})")
         return
     if ref not in REFERENCES:
         raise ValueError(f"comparator {c['id']}: reference is one of "
@@ -1172,8 +1178,9 @@ def query_photo_vectors(conn, wanted: list[int], sealed: bool, embed_missing=Non
     from . import paper_qfilter
     from .embed import load_embeddings
     if sealed:
-        ids, vecs, stored = embed_fresh(conn, paper_qfilter.BACKBONE, wanted, log=log)
-        return ids, vecs, {"fresh": True, "stored_vectors_not_read": stored}
+        ids, vecs, stored, undecodable = embed_fresh(conn, paper_qfilter.BACKBONE, wanted, log=log)
+        return ids, vecs, {"fresh": True, "stored_vectors_not_read": stored,
+                           "photos_not_decodable": len(undecodable)}
     if embed_missing is not None:
         embed_missing(paper_qfilter.BACKBONE, wanted, None)
     ids, vecs = load_embeddings(conn, paper_qfilter.BACKBONE)
@@ -1265,23 +1272,27 @@ def reference_exclusions(base, comparators: list[dict]) -> dict[str, tuple[froze
 
 
 def check_reference_subsets(doc: dict, read_rows=None,
-                            require_files: bool = True) -> list[str]:
+                            require_files: bool = True) -> dict[str, dict]:
     """Each arm's exclusion list against E34's frozen list (curation_v1_1/exclusions/file,
     once filled): every photo an arm leaves out is in E34's list with one of the arm's reasons
-    (drawing classes as one; any reason for an arm with none). Returns what was checked;
-    ValueError on a photo outside. Skipped while E34's list is a placeholder, and (without
+    (drawing classes as one; any reason for an arm with none), or E34's export decided it
+    again AFTER the arm's row (its latest decision: keep_photo, or another reason): the photo
+    left E34's list after the arm's list froze (an E35 list may freeze before E34's), counted
+    and reported, never refused. Returns {arm id: {"photos", "left_e34_after_arm": {"keep",
+    "other_reason"}}}; ValueError on any other photo outside (E34 never decided it, or not
+    later than the arm). Skipped while E34's list is a placeholder, and (without
     `require_files`, as check_config runs it) while any of the files is not on this machine."""
     import csv as csvmod
     import io
     from .dataset_release import reason_class
     e34 = ((doc.get("curation_v1_1") or {}).get("exclusions") or {})
     if is_placeholder(e34.get("file")) or not e34.get("file"):
-        return []
+        return {}
     arms = [c["reference"]["exclude_photos"]["file"] for c in doc.get("comparators", [])
             if isinstance(c.get("reference"), dict)]
     if not require_files and read_rows is None and not all(
             Path(resolve(f)).is_file() for f in [e34["file"], *arms]):
-        return []
+        return {}
 
     def rows(f):
         if read_rows:
@@ -1291,28 +1302,50 @@ def check_reference_subsets(doc: dict, read_rows=None,
 
     def excluded(rs):
         return [r for r in rs if (r.get("decision") or "exclude_photo") == "exclude_photo"]
+    def when(r):
+        try:
+            return datetime.fromisoformat(str(r.get("decided_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    e34_rows = rows(e34["file"])
     base_reasons: dict = {}
-    for r in excluded(rows(e34["file"])):
+    for r in excluded(e34_rows):
         base_reasons.setdefault(r["photo_key"].strip(), set()).add(reason_class(r.get("reason")))
-    checked = []
+    latest: dict = {}                 # E34's latest decision on each photo, any decision
+    for r in e34_rows:
+        k, t = r["photo_key"].strip(), when(r)
+        if t is not None and (k not in latest or t > latest[k][0]):
+            latest[k] = (t, r)
+    checked: dict = {}
     for c in doc.get("comparators", []):
         ref = c.get("reference")
         if not isinstance(ref, dict):
             continue
         ex = ref["exclude_photos"]
         if ex["file"] == e34["file"]:
-            checked.append(c["id"])
+            checked[c["id"]] = {"photos": None, "left_e34_after_arm": {"keep": 0,
+                                                                       "other_reason": 0}}
             continue
         want = {reason_class(x) for x in ex.get("reasons") or []}
+        n, left = 0, {"keep": 0, "other_reason": 0}
         for r in excluded(rows(ex["file"])):
             if want and reason_class(r.get("reason")) not in want:
                 continue
-            have = base_reasons.get(r["photo_key"].strip(), set())
-            if not have or (want and not (have & want)):
-                raise ValueError(f"comparator {c['id']}: {Path(ex['file']).name} leaves out "
-                                 f"{r['photo_key']}, which E34's list does not have with "
-                                 f"{sorted(want) or 'any reason'}")
-        checked.append(c["id"])
+            n += 1
+            key = r["photo_key"].strip()
+            have = base_reasons.get(key, set())
+            if have and (not want or have & want):
+                continue
+            t, later = when(r), latest.get(key)
+            if t is not None and later is not None and later[0] > t:
+                d = later[1]
+                left["keep" if (d.get("decision") or "") == "keep_photo" else "other_reason"] += 1
+                continue
+            raise ValueError(f"comparator {c['id']}: {Path(ex['file']).name} leaves out "
+                             f"{r['photo_key']}, which E34's list does not have with "
+                             f"{sorted(want) or 'any reason'}, nor decided again after the "
+                             "arm's list")
+        checked[c["id"]] = {"photos": n, "left_e34_after_arm": left}
     return checked
 
 
@@ -1653,14 +1686,19 @@ def ensure_embedded(conn, spec: str, photo_ids: list[int], px: int | None = None
     return n
 
 
+NOT_DECODABLE = "UnidentifiedImageError"     # no allowed decoder knows the bytes (embed.decode)
+
+
 def embed_fresh(conn, spec: str, photo_ids: list[int], px: int | None = None, loader=None,
-                log=print) -> tuple[np.ndarray, np.ndarray, int]:
+                log=print) -> tuple[np.ndarray, np.ndarray, int, list[int]]:
     """The sealed test's photos embedded now by the frozen model `spec` (at `px`), from the
     copies on this machine, in memory: (photo ids, vectors, how many of them already had a
-    stored vector, which is never read). PLAN §8: the site's nightly layer embeds newly
-    validated records under the served backbone names, so a stored vector of a test photo
-    may come from other weights. Nothing is written to the manifest; a photo with no local
-    copy, or one that cannot be read, is refused."""
+    stored vector, which is never read, the photos not decodable). A photo no allowed
+    decoder recognises (a GIF: embed.decode's format allowlist) is not decodable: it has no
+    vector for any model, decided by its bytes alone, and is counted, not refused. PLAN §8:
+    the site's nightly layer embeds newly validated records under the served backbone names,
+    so a stored vector of a test photo may come from other weights. Nothing is written to the manifest; a photo with no local
+    copy, or one that cannot be read otherwise (truncated, corrupt, gone), is refused."""
     import sqlite3
     import tempfile
     from . import models
@@ -1697,12 +1735,18 @@ def embed_fresh(conn, spec: str, photo_ids: list[int], px: int | None = None, lo
             st = embed_photos(mem, open_store(where, cfgmod.DATA_DIR), bb, items,
                               Path(d) / "vectors", log=log)
             skipped += st.skipped
-        if skipped:
-            raise FrozenError(f"{len(skipped):,} sealed-test photos could not be embedded "
-                              f"(e.g. {skipped[:3]})")
+        not_decodable = sorted(int(pid) for pid, why in skipped
+                               if str(why).startswith(NOT_DECODABLE))
+        failed = [(pid, why) for pid, why in skipped if not str(why).startswith(NOT_DECODABLE)]
+        if failed:
+            raise FrozenError(f"{len(failed):,} sealed-test photos could not be embedded "
+                              f"(e.g. {failed[:3]})")
+        if not_decodable:
+            log(f"[fresh] {bb.name}: {len(not_decodable):,} photos not decodable (a format the "
+                "decoder refuses, e.g. GIF): no vector, counted")
         ids, vecs = load_embeddings(mem, bb.name, root=Path(d) / "vectors")
         mem.close()
-    return ids, vecs, stored
+    return ids, vecs, stored, not_decodable
 
 
 def with_public_points(records: list, public: dict[str, tuple]) -> list:
@@ -2140,7 +2184,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     # `finds`. The pairing of tests is by find key either way.
     # a3-spec §2: a reference may leave out the photos of a pinned exclusion list (E34 v1.1,
     # the E35 arms), for its comparators only.
-    check_reference_subsets(config)
+    subsets = check_reference_subsets(config)
     ref_excl = reference_exclusions(base, config["comparators"])
     policy_of = {reference_label(c): reference_policy(c) for c in config["comparators"]
                  if c.get("reference")}
@@ -2152,6 +2196,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 if c.get("reference")}
     fresh: dict = {}               # the sealed test: (backbone, px) -> its fresh vectors
     test_vectors: dict = {}
+    not_decodable: set = set()     # sealed-test photos no model has a vector for (e.g. GIF)
     # a3-spec §1: a comparator's query_photo_filter leaves out the scored photos its pinned
     # rules flag (BioCLIP 2 224 vectors; fresh on the sealed test), its queries only.
     qfilters: dict = {}
@@ -2211,14 +2256,16 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 # by the freeze block's vectors part.
                 if (b, px) not in fresh:
                     fresh[(b, px)] = embed_fresh(conn, b, wanted, px, log=log)
-                    fids, fvecs, stored = fresh[(b, px)]
+                    fids, fvecs, stored, undecodable = fresh[(b, px)]
                     from .paper_freeze import vectors_sha
                     test_vectors[sized_name(b, px) if px else b] = {
-                        **vectors_sha(fids, fvecs, wanted), "stored_vectors_not_read": stored}
+                        **vectors_sha(fids, fvecs, wanted), "stored_vectors_not_read": stored,
+                        "photos_not_decodable": len(undecodable)}
+                    not_decodable |= set(undecodable)
                     if stored:
                         log(f"[fresh] {sized_name(b, px) if px else b}: {stored:,} stored "
                             "vectors of sealed-test photos not read (embedded fresh)")
-                fids, fvecs, _ = fresh[(b, px)]
+                fids, fvecs = fresh[(b, px)][:2]
                 offset = len(vecs)
                 vecs = np.concatenate([vecs, np.asarray(fvecs, dtype=vecs.dtype)]) \
                     if len(fvecs) else vecs
@@ -2360,7 +2407,15 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                for k in ("yes", "no", "(no genus)")}
                               if taxonomy is not None else None),
         "freeze": {"predictor": freeze_now, "differences": freeze_diff,
-                   **({"test_vectors": test_vectors} if test_vectors else {})},
+                   **({"test_vectors": test_vectors} if test_vectors else {}),
+                   # a find with no decodable photo has no Vision answer: a miss wherever
+                   # the cell applies, counted here
+                   **({"not_decodable": {
+                       "photos": len(not_decodable),
+                       "finds_with_no_decodable_photo": sum(
+                           1 for f in finds if photos.get(f.key) and all(
+                               int(x["manifest_photo_id"]) in not_decodable
+                               for x in photos[f.key]))}} if test_vectors else {})},
         "dataset_release": dataset.cite(base),
         "scored": {"release": scored_rel.id, "split": split, "reference_splits": list(ref_splits),
                    **({"test_release": dataset.cite(scored_rel)} if scored_rel is not base else {})},
@@ -2411,6 +2466,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                "records_left_with_no_photo": len(reference_rows(
                                    base, ref_splits, policy_of[r])) - len(ref_rows_of[r])}
                               if r in ref_excl else {}),
+                           **({"against_e34": {c["id"]: subsets[c["id"]]
+                                               for c in config["comparators"]
+                                               if c["id"] in subsets
+                                               and reference_label(c) == r}}
+                              if subsets else {}),
                            "comparators": [c for c, fs in finds_of.items()
                                            if fs is finds_by_ref[r]]} for r in refs_used},
         # The same tables on named subsets of the finds (config "subsets": {name: {attr:
@@ -2660,9 +2720,15 @@ def format_report(report: dict, config: dict) -> str:
     if tv:
         lines += ["The scored photos were embedded fresh by the frozen model (stored vectors "
                   "of them are never read):", "", "| backbone | photos | sha256 | stored, not "
-                  "read |", "|---|---|---|---|"]
+                  "read | not decodable |", "|---|---|---|---|---|"]
         lines += [f"| {b} | {v['photos']:,} | {v['sha256'][:12]} | "
-                  f"{v['stored_vectors_not_read']:,} |" for b, v in tv.items()] + [""]
+                  f"{v['stored_vectors_not_read']:,} | {v.get('photos_not_decodable', 0):,} |"
+                  for b, v in tv.items()] + [""]
+        nd = report["freeze"].get("not_decodable") or {}
+        lines += [f"Photos not decodable (a format the decoder refuses, e.g. GIF): "
+                  f"{nd.get('photos', 0):,}; finds with no decodable photo, scored as misses "
+                  f"for every Vision comparator: {nd.get('finds_with_no_decodable_photo', 0):,}.",
+                  ""]
     pf = (report.get("guard") or {}).get("post_freeze")
     if pf:
         lines += [f"Filled after the tag (post_freeze): {sum(r['filled'] for r in pf)} of "
