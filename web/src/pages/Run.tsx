@@ -11,6 +11,7 @@ import { publicModelName } from "@/lib/publicNames";
 import { runPhotos } from "@/lib/runLink";
 import { OthersRun, ResultCard, WhatNext } from "@/pages/Identify";
 import { InatSuggestions } from "@/components/InatSuggestions";
+import { HiddenPhotosLine } from "@/components/HiddenPhotosLine";
 
 /** A run's own link, /r/<id>: the answer as it was given, read-only, to anyone with the
  *  link. Whoever ran it also gets their own part and Delete; signed-in viewers can identify
@@ -78,6 +79,7 @@ export function RunPage({ id }: { id: string }) {
               {r.results.map((res, i) => (
                 <ResultCard key={`${res.model.backbone}/${res.model.method}`} r={res} urls={runPhotos(r)}
                             photos={r.kind === "photos" ? r.photos : r.observation?.photos_used ?? res.photos}
+                            observation={r.observation}
                             runId={i === 0 ? r.id : undefined} />
               ))}
             </div>
@@ -91,7 +93,7 @@ export function RunPage({ id }: { id: string }) {
 }
 
 /** The run's photos, and when and with what it was answered. */
-function RunFacts({ r }: { r: RunView }) {
+export function RunFacts({ r }: { r: RunView }) {
   const o = r.observation;
   const urls = runPhotos(r);
   const model = r.results[0]?.model;
@@ -109,8 +111,11 @@ function RunFacts({ r }: { r: RunView }) {
           <p className="font-medium text-[#4a3728]">{urls.length} photo{urls.length === 1 ? "" : "s"} of one find</p>
         )}
         <div className="grid grid-cols-3 gap-2" data-testid="run-photos">
-          {urls.map((u, i) => <RunPhoto key={i} url={u} n={i + 1} source={o ? sourceName(o.source) : null} />)}
+          {urls.map((u, i) => (
+            <RunPhoto key={i} url={u} n={i + 1} source={o ? sourceName(o.source) : null} href={o?.url ?? null} />
+          ))}
         </div>
+        <HiddenPhotosLine urls={urls} observation={o} testId="run-hidden-photos" />
         <ul className="space-y-1 text-xs text-muted-foreground" data-testid="run-facts">
           <li className="flex items-center gap-1.5">
             <CalendarClock className="h-3.5 w-3.5" aria-hidden /> Answered {localWhen(r.answered_at)}
@@ -127,18 +132,22 @@ function RunFacts({ r }: { r: RunView }) {
 
 /** One photo. An observation's photo is shown from its source, as the Identify page shows it;
  *  one that isn't Creative Commons, or was deleted or made private there since, is a
- *  numbered placeholder saying so. */
-function RunPhoto({ url, n, source }: { url: string; n: number; source: string | null }) {
+ *  numbered placeholder saying so, linked to the observation (new tab) where it has one. */
+function RunPhoto({ url, n, source, href }: { url: string; n: number; source: string | null; href: string | null }) {
   const [gone, setGone] = useState(false);
   if (!url || gone) {
-    return (
-      <div className="aspect-square w-full rounded-md border bg-muted flex flex-col items-center justify-center gap-1 p-1 text-center text-[11px] leading-tight text-muted-foreground"
-           data-testid="run-photo-missing">
+    const look = "aspect-square w-full rounded-md border bg-muted flex flex-col items-center justify-center gap-1 p-1 text-center text-[11px] leading-tight text-muted-foreground";
+    const inside = (
+      <>
         <ImageOff className="h-4 w-4" aria-hidden />
         Photo {n}
         <span>{!url ? "not Creative Commons" : source ? `no longer at ${source}` : "not available"}</span>
-      </div>
+      </>
     );
+    return href
+      ? <a href={href} target="_blank" rel="noreferrer" className={`${look} hover:bg-muted/70`}
+           title={`Open on ${source ?? "its source"}`} data-testid="run-photo-missing">{inside}</a>
+      : <div className={look} data-testid="run-photo-missing">{inside}</div>;
   }
   return <img src={url} alt={`Photo ${n}`} onError={() => setGone(true)}
               className="aspect-square w-full rounded-md border object-cover" />;

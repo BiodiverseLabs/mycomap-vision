@@ -68,3 +68,21 @@ export function observationFromQuery(search: string): { text: string; ref: Obser
   const ref = parseObservationLink(text);
   return ref ? { text, ref } : null;
 }
+
+/**
+ * The line under a set of an observation's photos when some can't be shown here (not
+ * Creative Commons): how many, and a link to the observation at its source, where they
+ * show, to open in a new tab (Steve, 2026-10-30). Null when every photo shows, or with no
+ * observation link. `urls` is one address per photo, "" where it may not be shown.
+ */
+export function hiddenPhotosLine(
+  urls: string[],
+  o: { source: ObservationSource; url: string | null } | null | undefined,
+): { note: string; href: string; link: string } | null {
+  const n = urls.filter((u) => !u).length;
+  if (!o?.url || n === 0) return null;
+  const note = n === urls.length
+    ? (n === 1 ? "This photo isn't Creative Commons" : "These photos aren't Creative Commons")
+    : `${n} of these photos ${n === 1 ? "isn't" : "aren't"} Creative Commons`;
+  return { note, href: o.url, link: `See ${n === 1 ? "it" : "them"} on ${sourceName(o.source)}` };
+}
