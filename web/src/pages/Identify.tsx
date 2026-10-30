@@ -2,7 +2,7 @@ import { createContext, lazy, Suspense, useContext, useEffect, useMemo, useRef, 
          type RefObject, type SetStateAction } from "react";
 import { useQuery, useMutation, type UseQueryResult } from "@tanstack/react-query";
 import { ArrowUpRight, CalendarDays, Camera, Check, ChevronRight, Circle, CircleHelp, Cpu, Dna, ImagePlus,
-         Lightbulb, Link2, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, Pencil, Plus, RotateCcw,
+         ImageOff, Lightbulb, Link2, Loader2, LocateFixed, Lock, Map as MapIcon, MapPin, Microscope, Pencil, Plus, RotateCcw,
          TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,7 +36,9 @@ import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/p
 import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import { applyPick } from "@/lib/mapPick";
 import { localWhen, runDetails, type Answered } from "@/lib/keptRun";
-import { observationFromQuery, parseObservationLink, sourceName, type ObservationRef } from "@/lib/observationLink";
+import { observationFromQuery, parseObservationLink, sourceName, type ObservationRef, type ObservationSource }
+  from "@/lib/observationLink";
+import { HiddenPhotosLine } from "@/components/HiddenPhotosLine";
 import { CopyLink } from "@/components/CopyLink";
 import { keptLine, liveRuns, RUN_ID, runPath, runPhotos } from "@/lib/runLink";
 
@@ -377,6 +379,7 @@ export function IdentifyPage() {
               {answer.results.map((r, i) => (
                 <ResultCard key={`${modelKey(r.model.backbone, r.model.method)}@${submittedAt}`}
                             r={r} urls={shownUrls} photos={shownPhotos ?? r.photos}
+                            observation={viaLink ? byLink.data?.observation : undefined}
                             onInclude={pending ? undefined : includePhoto}
                             runId={i === 0 && !pending ? answer.run?.id : undefined} />
               ))}
@@ -1198,12 +1201,14 @@ export function WhatNext({ results, className = "mt-6" }: { results: IdentifyRes
   );
 }
 
-export function ResultCard({ r, urls, photos, onInclude, runId }: {
+export function ResultCard({ r, urls, photos, onInclude, runId, observation }: {
   r: IdentifyResult; urls: string[]; photos: number;
   /** Runs it again with a photo counted (true) or left out again (false); none on a run's page. */
   onInclude?: (photo: number, on: boolean) => void;
   /** The run's link id, on the answer "Where Vision looked" explains (the first model's). */
   runId?: string;
+  /** The iNat or MO observation the photos are from, linked where some can't be shown here. */
+  observation?: { source: ObservationSource; url: string | null } | null;
 }) {
   // null: all photos together (the main answer). A number: that photo on its own.
   const [view, setView] = useState<number | null>(null);
@@ -1233,7 +1238,7 @@ export function ResultCard({ r, urls, photos, onInclude, runId }: {
         <div className="space-y-6 px-4 py-5 sm:px-6">
           {answer && <SafetyNote />}
           {r.per_photo.length > 1 && (
-            <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} />
+            <PhotoSwitcher r={r} urls={urls} view={view} setView={setView} observation={observation} />
           )}
           {runId && answer && !gate.notFungus && <WhereLooked runId={runId} r={r} urls={urls} />}
           {!photo && <LeftOutByType r={r} onInclude={onInclude} />}
@@ -1470,11 +1475,12 @@ const ordinal = (n: number) => {
 
 /** All photos together, or one photo on its own. Each tile shows how that photo alone
  *  rates the overall species answer, so a photo pulling the other way stands out. */
-function PhotoSwitcher({ r, urls, view, setView }: {
+function PhotoSwitcher({ r, urls, view, setView, observation }: {
   r: IdentifyResult;
   urls: string[];
   view: number | null;
   setView: (v: number | null) => void;
+  observation?: { source: ObservationSource; url: string | null } | null;
 }) {
   const top = r.ranks.species[0]?.name;
   const tile = (on: boolean) =>
@@ -1521,8 +1527,15 @@ function PhotoSwitcher({ r, urls, view, setView }: {
                 : place ? `Photo ${p.photo + 1} on its own puts ${place.name} ${ordinal(place.position)}` : undefined}
             >
               <span className="relative h-14 w-14 overflow-hidden rounded border bg-muted">
-                {urls[p.photo] && (
+                {urls[p.photo] ? (
                   <img src={urls[p.photo]} alt={`Your photo ${p.photo + 1}`} className="h-full w-full object-cover" />
+                ) : observation && (
+                  // An observation's photo that isn't Creative Commons: said so, as on the run's page.
+                  <span className="flex h-full w-full flex-col items-center justify-center gap-0.5 pb-3 text-center text-[9px] leading-none text-muted-foreground"
+                        data-testid={`photo-not-cc-${p.photo}`}>
+                    <ImageOff className="h-3.5 w-3.5" aria-hidden />
+                    not CC
+                  </span>
                 )}
                 <span className="absolute bottom-0.5 left-0.5 rounded bg-black/60 px-1 text-[10px] text-white">
                   {p.photo + 1}
@@ -1542,6 +1555,7 @@ function PhotoSwitcher({ r, urls, view, setView }: {
           );
         })}
       </div>
+      <div className="mt-1"><HiddenPhotosLine urls={urls} observation={observation} testId="switcher-hidden-photos" /></div>
     </div>
   );
 }

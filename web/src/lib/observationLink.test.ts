@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { observationFromQuery, parseObservationLink } from "./observationLink";
+import { hiddenPhotosLine, observationFromQuery, parseObservationLink } from "./observationLink";
 
 test("an iNaturalist observation link is read, from any site of the network", () => {
   for (const link of [
@@ -52,4 +52,26 @@ test("a link to the page with ?observation= names the observation to identify", 
   for (const search of ["", "?observation=", "?observation=12345", "?observation=gbif:1", "?other=inat:1"]) {
     assert.equal(observationFromQuery(search), null, search);
   }
+});
+
+const OBS = { source: "inat" as const, url: "https://www.inaturalist.org/observations/213312794" };
+
+test("photos that aren't Creative Commons get a line linking to the observation at its source (Steve, 30 Oct)", () => {
+  assert.deepEqual(hiddenPhotosLine(["", "", ""], OBS), {
+    note: "These photos aren't Creative Commons", href: OBS.url, link: "See them on iNaturalist",
+  });
+  assert.deepEqual(hiddenPhotosLine(["https://a/1.jpg", "", "https://a/3.jpg"], OBS), {
+    note: "1 of these photos isn't Creative Commons", href: OBS.url, link: "See it on iNaturalist",
+  });
+  assert.equal(hiddenPhotosLine(["https://a/1.jpg", "", ""], OBS)?.note, "2 of these photos aren't Creative Commons");
+  assert.equal(hiddenPhotosLine([""], OBS)?.note, "This photo isn't Creative Commons");
+  assert.equal(hiddenPhotosLine([""], { source: "mo", url: "https://mushroomobserver.org/1" })?.link,
+               "See it on Mushroom Observer");
+});
+
+test("no line when every photo shows, or there is no observation to link to", () => {
+  assert.equal(hiddenPhotosLine(["https://a/1.jpg", "https://a/2.jpg"], OBS), null);
+  assert.equal(hiddenPhotosLine(["", ""], null), null);
+  assert.equal(hiddenPhotosLine(["", ""], undefined), null);
+  assert.equal(hiddenPhotosLine(["", ""], { source: "inat", url: null }), null);
 });
