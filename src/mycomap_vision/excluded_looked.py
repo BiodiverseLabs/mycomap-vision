@@ -39,9 +39,10 @@ time on the same worker, behind every identification and every person's ask, so 
 at most one map. It runs in a time window (MV_EXCLUDED_PRELOAD_WINDOW, UTC, default
 PRELOAD_WINDOW; "any": whenever the box is idle), never while the nightly update runs, and off
 with MV_EXCLUDED_PRELOAD=0; it is on by default only on the box (a served release), and
-MV_EXCLUDED_PRELOAD=1 turns it on elsewhere. A pass makes the embedded crops' maps first, then the slip photos', and
-a slip photo whose record's name still has a kept crop waiting for its vector goes last, so as
-many maps as can be are made against the reference set with the crops in it
+MV_EXCLUDED_PRELOAD=1 turns it on elsewhere. A pass makes the embedded crops' maps first, then
+the slip photos', and a slip photo whose record's name still has a kept crop waiting for its
+vector goes last, so as many maps as can be are made against the reference set with the crops
+in it
 (MV_EXCLUDED_PRELOAD_CROP_WAIT=0: slips first, in no such order). Slips never wait for the
 nightly (2026-10-30): with 20-26k crops waiting and the nightly embedding 3,000 a night, the old
 wait (every slip held while any crop waited) made nothing for most of each day for a week. A
