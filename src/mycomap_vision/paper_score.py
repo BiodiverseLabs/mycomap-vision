@@ -147,10 +147,14 @@ def check_config(doc: dict) -> None:
                 raise ValueError(f"comparator {c['id']}: {c['method']} scores by reference "
                                  "record, so the config pins its cross-post twin groups "
                                  "(a top-level \"twins\" block)")
-        if not later("reference") and c.get("reference") not in REFERENCES:
-            raise ValueError(f"comparator {c['id']}: reference is one of "
-                             f"{[r for r in REFERENCES if r]} (or none: every included photo), "
-                             f"not {c.get('reference')!r}")
+        if not later("reference"):
+            check_reference(c)
+        if c.get("query_photo_filter") is not None and not later("query_photo_filter"):
+            if c["kind"] != "vision":
+                raise ValueError(f"comparator {c['id']}: a query_photo_filter is for a Vision "
+                                 "comparator")
+            from . import paper_qfilter
+            paper_qfilter.check_spec(c["id"], c["query_photo_filter"])
         if c.get("reference") and c["kind"] != "vision":
             raise ValueError(f"comparator {c['id']}: a reference is for a Vision comparator")
         if (c["kind"] == "vision" and not later("method") and "place" in c["method"]
@@ -232,6 +236,7 @@ def check_config(doc: dict) -> None:
     check_secondary_rows(doc)
     check_test_scope(doc, ids)
     check_truth_independence(doc, ids)
+    check_reference_subsets(doc, require_files=False)
     check_amends(doc)
 
 
@@ -1131,15 +1136,199 @@ def place_setting_used(name: str | None):
 REFERENCES = (None, "public_trainable_only")
 
 
-def reference_rows(base, ref_splits, reference: str | None) -> list[dict]:
+def check_reference(c: dict) -> None:
+    """A comparator's reference: a policy (REFERENCES), or (a3-spec §2) {"policy",
+    "exclude_photos": {"file", "sha256", "key": "photo_key", "reasons": [..] (optional: one
+    arm's rows of the list)}}: the policy's photos minus the listed ones."""
+    ref = c.get("reference")
+    if isinstance(ref, dict):
+        ex = ref.get("exclude_photos")
+        if ref.get("policy") not in REFERENCES or not isinstance(ex, dict):
+            raise ValueError(f"comparator {c['id']}: a reference with exclusions is {{\"policy\": "
+                             f"one of {[r for r in REFERENCES if r]}, \"exclude_photos\": "
+                             "{file, sha256, key}}")
+        if not (isinstance(ex.get("file"), str) and ex["file"]
+                and re.fullmatch(r"[0-9a-f]{64}", str(ex.get("sha256") or ""))):
+            raise ValueError(f"comparator {c['id']}: exclude_photos pins its file by sha256")
+        if ex.get("key") != "photo_key":
+            raise ValueError(f"comparator {c['id']}: exclude_photos key is photo_key (the "
+                             "release's photo key)")
+        r = ex.get("reasons")
+        if r is not None and (not isinstance(r, list) or not r
+                              or not all(isinstance(x, str) and x for x in r)):
+            raise ValueError(f"comparator {c['id']}: exclude_photos reasons is a list of reasons")
+        return
+    if ref not in REFERENCES:
+        raise ValueError(f"comparator {c['id']}: reference is one of "
+                         f"{[r for r in REFERENCES if r]} (or none: every included photo), "
+                         f"not {ref!r}")
+
+
+def query_photo_vectors(conn, wanted: list[int], sealed: bool, embed_missing=None,
+                        log=print) -> tuple[np.ndarray, np.ndarray, dict]:
+    """The scored photos' frozen BioCLIP 2 (224) vectors for the query photo filters: on the
+    sealed test embedded now (embed_fresh: never the stored ones), else the stored vectors.
+    (photo ids, vectors, what was read)."""
+    from . import paper_qfilter
+    from .embed import load_embeddings
+    if sealed:
+        ids, vecs, stored = embed_fresh(conn, paper_qfilter.BACKBONE, wanted, log=log)
+        return ids, vecs, {"fresh": True, "stored_vectors_not_read": stored}
+    if embed_missing is not None:
+        embed_missing(paper_qfilter.BACKBONE, wanted, None)
+    ids, vecs = load_embeddings(conn, paper_qfilter.BACKBONE)
+    have = set(ids.tolist())
+    return ids, vecs, {"fresh": False,
+                       "photos_without_vectors": sum(1 for p in set(wanted) if p not in have)}
+
+
+def query_checkpoint_sha(models_root=None) -> str | None:
+    """The sha256 of the BioCLIP 2 hub checkpoint this machine embeds with (paper_freeze's
+    base:<file> of the alias)."""
+    from . import paper_freeze, paper_qfilter
+    from .finetune import models_dir
+    files = paper_freeze.model_files(paper_qfilter.BACKBONE, Path(models_root or models_dir()))
+    return next((v for k, v in files.items() if k.startswith("base:")), None)
+
+
+def query_photo_flags(spec: dict, ids, vecs) -> dict[int, set]:
+    """{photo id: the rules of `spec` that flag it} over the given vectors (paper_qfilter)."""
+    from . import paper_qfilter
+    pins = paper_qfilter.load(spec, resolve)
+    got = paper_qfilter.flags(vecs, pins["bundle"], pins["gate"], pins["tagger"],
+                              pins["threshold"], spec["rules"]) if len(ids) else {}
+    out: dict[int, set] = {}
+    for r, hit in got.items():
+        for j in np.flatnonzero(hit).tolist():
+            out.setdefault(int(ids[j]), set()).add(r)
+    return out
+
+
+def query_filter_report(q: dict, finds: list, outcome: dict, reps: int, seed: int) -> dict:
+    """A filtered comparator's report entry: what its filter left out, and the second row.
+    The main row (its standard tables) scores a find left with no photo as a miss; the second
+    row, at OUTSIDE_SCOPE_CELLS over the primary scope, leaves such finds out."""
+    emptied = set(q["finds_left_with_no_photo"])
+    kept = [f for f in pt.in_scope(finds, "primary", "all") if f.key not in emptied]
+    return {**{k: v for k, v in q.items() if k != "finds_left_with_no_photo"},
+            "finds_left_with_no_photo": len(emptied),
+            "dropped_row": {cell: pt.rate(kept, outcome, cell, reps, seed)
+                            for cell in OUTSIDE_SCOPE_CELLS}}
+
+
+def pending_comparators(config: dict) -> dict[str, list[str]]:
+    """{comparator id: its fields still holding a "TBD..." placeholder (at any depth)}:
+    comparators that cannot be scored yet."""
+    def holds(v):
+        if isinstance(v, dict):
+            return any(holds(x) for x in v.values())
+        if isinstance(v, list):
+            return any(holds(x) for x in v)
+        return is_placeholder(v)
+    out = {}
+    for c in config.get("comparators", []):
+        fields = [k for k, v in c.items() if not k.startswith("_") and holds(v)]
+        if fields:
+            out[c["id"]] = fields
+    return out
+
+
+def reference_policy(c: dict) -> str | None:
+    ref = c.get("reference")
+    return ref.get("policy") if isinstance(ref, dict) else ref
+
+
+def reference_label(c: dict) -> str | None:
+    """The name a comparator's reference goes by in the report (comparators with the same
+    reference share it): its policy, with an exclusion list its file, sha256 and reasons."""
+    ref = c.get("reference")
+    if not isinstance(ref, dict):
+        return ref
+    ex = ref["exclude_photos"]
+    return (f"{ref['policy'] or 'every photo'} minus {Path(ex['file']).name} "
+            f"({ex['sha256'][:12]})" + (f" [{', '.join(sorted(ex['reasons']))}]"
+                                        if ex.get("reasons") else ""))
+
+
+def reference_exclusions(base, comparators: list[dict]) -> dict[str, tuple[frozenset, dict]]:
+    """{reference label: (the photo ids its list leaves out, the list's counts)} for every
+    comparator whose reference has an exclusion list (Release.photo_exclusion_set: refused
+    unless the file is the one pinned), the drawing reasons as one."""
+    out = {}
+    for c in comparators:
+        ref = c.get("reference")
+        if isinstance(ref, dict) and reference_label(c) not in out:
+            ex = ref["exclude_photos"]
+            out[reference_label(c)] = base.photo_exclusion_set(
+                resolve(ex["file"]), ex["sha256"], ex.get("reasons"), merge_drawing=True)
+    return out
+
+
+def check_reference_subsets(doc: dict, read_rows=None,
+                            require_files: bool = True) -> list[str]:
+    """Each arm's exclusion list against E34's frozen list (curation_v1_1/exclusions/file,
+    once filled): every photo an arm leaves out is in E34's list with one of the arm's reasons
+    (drawing classes as one; any reason for an arm with none). Returns what was checked;
+    ValueError on a photo outside. Skipped while E34's list is a placeholder, and (without
+    `require_files`, as check_config runs it) while any of the files is not on this machine."""
+    import csv as csvmod
+    import io
+    from .dataset_release import reason_class
+    e34 = ((doc.get("curation_v1_1") or {}).get("exclusions") or {})
+    if is_placeholder(e34.get("file")) or not e34.get("file"):
+        return []
+    arms = [c["reference"]["exclude_photos"]["file"] for c in doc.get("comparators", [])
+            if isinstance(c.get("reference"), dict)]
+    if not require_files and read_rows is None and not all(
+            Path(resolve(f)).is_file() for f in [e34["file"], *arms]):
+        return []
+
+    def rows(f):
+        if read_rows:
+            return read_rows(f)
+        body = Path(resolve(f)).read_bytes().decode("utf-8")
+        return list(csvmod.DictReader(io.StringIO(body), delimiter="\t"))
+
+    def excluded(rs):
+        return [r for r in rs if (r.get("decision") or "exclude_photo") == "exclude_photo"]
+    base_reasons: dict = {}
+    for r in excluded(rows(e34["file"])):
+        base_reasons.setdefault(r["photo_key"].strip(), set()).add(reason_class(r.get("reason")))
+    checked = []
+    for c in doc.get("comparators", []):
+        ref = c.get("reference")
+        if not isinstance(ref, dict):
+            continue
+        ex = ref["exclude_photos"]
+        if ex["file"] == e34["file"]:
+            checked.append(c["id"])
+            continue
+        want = {reason_class(x) for x in ex.get("reasons") or []}
+        for r in excluded(rows(ex["file"])):
+            if want and reason_class(r.get("reason")) not in want:
+                continue
+            have = base_reasons.get(r["photo_key"].strip(), set())
+            if not have or (want and not (have & want)):
+                raise ValueError(f"comparator {c['id']}: {Path(ex['file']).name} leaves out "
+                                 f"{r['photo_key']}, which E34's list does not have with "
+                                 f"{sorted(want) or 'any reason'}")
+        checked.append(c["id"])
+    return checked
+
+
+def reference_rows(base, ref_splits, reference: str | None,
+                   exclude: frozenset = frozenset()) -> list[dict]:
     """The reference records as release rows: every included record of `ref_splits`, or
     with "public_trainable_only" those with at least one public-trainable included photo
-    (as Release.as_records keeps them)."""
+    (as Release.as_records keeps them); with `exclude` (photo ids of an exclusion list), a
+    record left with no photo leaves too."""
     rows = [dict(r) for r in base.records(ref_splits)]
-    if reference != "public_trainable_only":
+    if reference != "public_trainable_only" and not exclude:
         return rows
-    keep = {str(k) for (k,) in base.db.execute(
-        "select distinct record_key from photos where included = 1 and public_trainable = 1")}
+    pt_only = " and public_trainable = 1" if reference == "public_trainable_only" else ""
+    keep = {str(k) for k, pid in base.db.execute(
+        f"select record_key, manifest_photo_id from photos where included = 1{pt_only}")
+        if pid not in exclude}
     return [r for r in rows if str(r["record_key"]) in keep]
 
 
@@ -1826,6 +2015,17 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                           + (f" (+{len(freeze_diff) - 8} more)" if len(freeze_diff) > 8 else ""))
     for d in freeze_diff:
         log(f"[freeze] {d}")
+    # A comparator with a field still "TBD..." cannot be scored: the sealed test refuses it;
+    # val and draft runs set it aside and list it (hypotheses naming it: not tested).
+    pending = pending_comparators(config)
+    if pending and g["sealed"]:
+        raise FrozenError("comparators with fields not yet filled: " + "; ".join(
+            f"{cid} ({', '.join(f)})" for cid, f in pending.items()))
+    if pending:
+        log(f"[pending] {len(pending)} comparator(s) set aside, fields not yet filled: "
+            + ", ".join(pending))
+        config = {**config, "comparators": [c for c in config["comparators"]
+                                            if c["id"] not in pending]}
     # An erratum given to the base release (--errata; Release.use_errata) has already left
     # its records out of every split base reads: references and depth alike.
     errata = set(base.errata.keys) if getattr(base, "errata", None) is not None else set()
@@ -1877,7 +2077,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     # apart and only described (report "test_scope").
     scope = config.get("test_scope")
     finds, outside = test_scope_split(finds, scope)
-    outside_ids = (scope or {}).get("outside_comparators", OUTSIDE_SCOPE_COMPARATORS)
+    outside_ids = [c for c in (scope or {}).get("outside_comparators",
+                                                 OUTSIDE_SCOPE_COMPARATORS) if c not in pending]
     outside_outcomes: dict = {}
     if scope:
         log(f"[test scope] {len(finds):,} finds in {', '.join(scope['countries'])}; "
@@ -1893,7 +2094,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             finds, {str(r["record_key"]): r for r in scored_rows}, ti_snapshot)
         log(f"[truth independence] {len(assisted):,} Vision-assisted finds left out; "
             f"{len(ti_info['holds']):,} Vision holds kept")
-    ti_ids = (ti or {}).get("describe_comparators", OUTSIDE_SCOPE_COMPARATORS)
+    ti_ids = [c for c in (ti or {}).get("describe_comparators", OUTSIDE_SCOPE_COMPARATORS)
+              if c not in pending]
     assisted_outcomes: dict = {}
     gen = config.get("generalisation") or {}
     recent_after = gen.get("recent_after") or getattr(base, "val_cutoff", None)
@@ -1936,13 +2138,24 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     # O1: a comparator with its own reference (the public model's openly licensed one) has
     # its finds' depth and "observer new" counted there; every other comparator shares
     # `finds`. The pairing of tests is by find key either way.
-    refs_used = sorted({c["reference"] for c in config["comparators"] if c.get("reference")})
-    ref_rows_of = {r: reference_rows(base, ref_splits, r) for r in refs_used}
+    # a3-spec §2: a reference may leave out the photos of a pinned exclusion list (E34 v1.1,
+    # the E35 arms), for its comparators only.
+    check_reference_subsets(config)
+    ref_excl = reference_exclusions(base, config["comparators"])
+    policy_of = {reference_label(c): reference_policy(c) for c in config["comparators"]
+                 if c.get("reference")}
+    refs_used = sorted(policy_of)
+    ref_rows_of = {r: reference_rows(base, ref_splits, policy_of[r],
+                                     ref_excl.get(r, (frozenset(), None))[0]) for r in refs_used}
     finds_by_ref = {r: finds_in_reference(finds, scored_rows, ref_rows_of[r]) for r in refs_used}
-    finds_of = {c["id"]: finds_by_ref[c["reference"]] for c in config["comparators"]
+    finds_of = {c["id"]: finds_by_ref[reference_label(c)] for c in config["comparators"]
                 if c.get("reference")}
     fresh: dict = {}               # the sealed test: (backbone, px) -> its fresh vectors
     test_vectors: dict = {}
+    # a3-spec §1: a comparator's query_photo_filter leaves out the scored photos its pinned
+    # rules flag (BioCLIP 2 224 vectors; fresh on the sealed test), its queries only.
+    qfilters: dict = {}
+    qvectors = None
     for comp in config["comparators"]:
         answers = None
         if comp["kind"] == "vision":
@@ -1951,10 +2164,44 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             wanted = [int(p["manifest_photo_id"]) for ph in photos.values() for p in ph]
             if embed_missing is not None and not g["sealed"]:
                 embed_missing(b, wanted, None)
+            qdrop: frozenset = frozenset()
+            if comp.get("query_photo_filter"):
+                spec = comp["query_photo_filter"]
+                if g["sealed"]:
+                    got_sha = query_checkpoint_sha()
+                    if got_sha != spec["backbone_sha256"]:
+                        raise FrozenError(f"[{comp['id']}] query_photo_filter: the BioCLIP 2 "
+                                          f"checkpoint here is {str(got_sha)[:12]}, not the "
+                                          f"pinned {spec['backbone_sha256'][:12]}")
+                if qvectors is None:
+                    qvectors = query_photo_vectors(conn, wanted, bool(g["sealed"]),
+                                                   embed_missing, log)
+                flagged = query_photo_flags(spec, qvectors[0], qvectors[1])
+                wset = set(wanted)
+                qdrop = frozenset(flagged)            # flagged by this comparator's rules
+                emptied = {k for k, ph in photos.items()
+                           if ph and all(int(x["manifest_photo_id"]) in qdrop for x in ph)}
+                qfilters[comp["id"]] = {
+                    "rules": spec["rules"], "photos": len(wset),
+                    "photos_removed": len(qdrop & wset),
+                    "removed_by_rule": {r: sum(1 for pid, rs in flagged.items()
+                                               if r in rs and pid in wset)
+                                        for r in spec["rules"]},
+                    "finds_left_with_no_photo": sorted(emptied),
+                    "vectors": {k: v for k, v in qvectors[2].items()},
+                    "pins": {"bundle": spec["bundle"]["sha256"],
+                             "backbone_sha256": spec["backbone_sha256"],
+                             **({"gate": spec["gate"]["files"]} if "gate" in spec else {}),
+                             **({"tagger_v21": spec["tagger_v21"]["sha256"]}
+                                if "tagger_v21" in spec else {})}}
+                log(f"[{comp['id']}] query photo filter {spec['rules']}: "
+                    f"{qfilters[comp['id']]['photos_removed']:,} photos left out, "
+                    f"{len(emptied):,} finds with none left (scored as misses)")
             ids, vecs = load_embeddings(conn, b)
             row = {int(p): i for i, p in enumerate(ids.tolist())}
             ref = base.as_records(ref_splits, row, public_trainable_only=(
-                comp.get("reference") == "public_trainable_only"))
+                reference_policy(comp) == "public_trainable_only"),
+                exclude=ref_excl.get(reference_label(comp), (frozenset(), None))[0])
             if comp.get("reference_as_of"):           # E7b: the reference as it stood then
                 ref = [r for r in ref if r.validated_on and r.validated_on <= comp["reference_as_of"]]
             if g["sealed"]:
@@ -1976,7 +2223,8 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 vecs = np.concatenate([vecs, np.asarray(fvecs, dtype=vecs.dtype)]) \
                     if len(fvecs) else vecs
                 scored = scored_rel.as_records(split, {int(p): offset + i
-                                                       for i, p in enumerate(fids.tolist())})
+                                                       for i, p in enumerate(fids.tolist())},
+                                               exclude=qdrop)
             elif px:
                 # E30: the scored photos as sent at `px` (references stay as stored).
                 qname = sized_name(b, px)
@@ -1986,9 +2234,10 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                 offset = len(vecs)
                 vecs = np.concatenate([vecs, qvecs]) if len(qvecs) else vecs
                 scored = scored_rel.as_records(split, {int(p): offset + i
-                                                       for i, p in enumerate(qids.tolist())})
+                                                       for i, p in enumerate(qids.tolist())},
+                                               exclude=qdrop)
             else:
-                scored = scored_rel.as_records(split, row)
+                scored = scored_rel.as_records(split, row, exclude=qdrop)
             if comp.get("place"):
                 public = public if public is not None else public_points(scored_rel)
                 scored = with_public_points(scored, public)
@@ -2077,7 +2326,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         # depth, counted there
         by_ref = {r: recoverability_units(base, ref_rows_of[r], config["answer_key"])
                   for r in refs_used}
-        recover_units_of = {cid: by_ref[c["reference"]][0] for c in config["comparators"]
+        recover_units_of = {cid: by_ref[reference_label(c)][0] for c in config["comparators"]
                             for cid in [c["id"]] if c.get("reference")}
         recover_cite = {"full reference": recover_cite,
                         **{r: by_ref[r][1] for r in refs_used}} if refs_used else recover_cite
@@ -2134,11 +2383,15 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "bootstrap": {"reps": reps, "seed": seed, "clusters": "observer"},
         "inputs": inputs,
         "finds": {"scored": len(finds), "by_name_kind": dict(Counter(f.name_kind for f in finds))},
+        **({"pending_comparators": pending} if pending else {}),
         **({"test_scope": {
             "scope": scope, "in_scope_finds": len(finds),
             "outside_test_scope": pt.outside_test_scope(
                 outside, outside_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS, reps, seed)}}
            if scope else {}),
+        **({"query_photo_filters": {cid: query_filter_report(
+            q, finds_of.get(cid, finds), outcomes.get(cid) or {}, reps, seed)
+            for cid, q in qfilters.items()}} if qfilters else {}),
         **({"truth_independence": {
             "rule": ti.get("rule"),
             "snapshot": ({"file": Path(ti["snapshot"]["file"]).name,
@@ -2154,6 +2407,10 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         "standard": pt.all_standard(finds, outcomes, reps, seed, finds_of=finds_of,
                                     **per_species_kw),
         "references": {r: {"records": len(ref_rows_of[r]),
+                           **({"exclude_photos": ref_excl[r][1],
+                               "records_left_with_no_photo": len(reference_rows(
+                                   base, ref_splits, policy_of[r])) - len(ref_rows_of[r])}
+                              if r in ref_excl else {}),
                            "comparators": [c for c, fs in finds_of.items()
                                            if fs is finds_by_ref[r]]} for r in refs_used},
         # The same tables on named subsets of the finds (config "subsets": {name: {attr:
@@ -2433,6 +2690,29 @@ def format_report(report: dict, config: dict) -> str:
                              + ("-" if r["rate"] is None else f"{100 * r['rate']:.1f}%")
                              + " | " + ("-" if not ci else
                                         f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
+        lines.append("")
+    if report.get("pending_comparators"):
+        lines += ["## Comparators not scored (fields not yet filled)", ""] + [
+            f"- {cid}: {', '.join(f)}" for cid, f in report["pending_comparators"].items()] + [""]
+    if report.get("query_photo_filters"):
+        lines += ["## Query photo filters (E34 (b), E35)", "",
+                  "Each filtered comparator leaves out the scored photos its rules flag (the "
+                  "reference is never filtered). A find left with no photo is a miss in the "
+                  "main tables and is left out of the second row below.", "",
+                  "| comparator | rules | photos left out | finds with none left | cell | "
+                  "second row n | rate | 95% CI |", "|---|---|---|---|---|---|---|---|"]
+        for cid, q in report["query_photo_filters"].items():
+            for cell, r in q["dropped_row"].items():
+                ci = r.get("ci95")
+                lines.append(f"| {cid} | {', '.join(q['rules'])} | {q['photos_removed']:,} | "
+                             f"{q['finds_left_with_no_photo']:,} | {cell} | {r['n']:,} | "
+                             + ("-" if r["rate"] is None else f"{100 * r['rate']:.1f}%")
+                             + " | " + ("-" if not ci else
+                                        f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
+        lines += ["", "Photos left out by rule (a photo may meet several):", ""]
+        for cid, q in report["query_photo_filters"].items():
+            lines.append(f"- {cid}: " + ", ".join(f"{r} {n:,}" for r, n in
+                                                   q["removed_by_rule"].items()))
         lines.append("")
     if report.get("truth_independence"):
         ti = report["truth_independence"]

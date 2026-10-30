@@ -17,6 +17,7 @@ from test_models_and_scoreboard import Const  # noqa: E402
 
 from mycomap_vision import backbone_screen, paper_score  # noqa: E402
 from mycomap_vision import paper_outcomes as po  # noqa: E402
+from mycomap_vision import dataset_release as dr  # noqa: E402
 from mycomap_vision.replications.fungitastic import dataset  # noqa: E402
 
 REPS = 200
@@ -2488,3 +2489,177 @@ def test_a_bad_truth_independence_block_is_refused(tmp_path, change, refused):
     change(cfg["truth_independence"])
     with pytest.raises(ValueError, match=refused):
         paper_score.check_config(cfg)
+
+
+# --- -a3 (a3-spec §2): a reference minus a pinned photo exclusion list, per comparator ----------
+
+def _exclusions(tmp_path, rows, name="exclusions.tsv"):
+    p = tmp_path / name
+    p.write_text("photo_key\tdecision\treason\n" + "".join(f"{k}\t{d}\t{r}\n" for k, d, r in rows),
+                 encoding="utf-8", newline="\n")
+    return p, paper_score.sha256_file(p)
+
+
+def _train_photos(base, record_key):
+    return [(k, int(pid)) for k, pid in base.db.execute(
+        "select p.photo_key, p.manifest_photo_id from photos p join records r using "
+        "(record_key) where p.included = 1 and r.split = 'train' and p.record_key = ? "
+        "order by p.photo_key", (record_key,))]
+
+
+def _excl_ref(path, sha, policy=None, **kw):
+    return {"policy": policy, "exclude_photos": {"file": str(path), "sha256": sha,
+                                                 "key": "photo_key", **kw}}
+
+
+def test_an_exclusion_list_leaves_out_exactly_its_photos_and_a_record_left_empty(world, tmp_path):
+    base = world["base"]
+    gone = _train_photos(base, "3")                     # every photo of train record 3
+    p, sha = _exclusions(tmp_path, [(k, "exclude_photo", "micrograph") for k, _ in gone]
+                         + [("nope:1", "exclude_photo", "micrograph"),
+                            (_train_photos(base, "4")[0][0], "keep_photo", "")])
+    pids, info = base.photo_exclusion_set(p, sha)
+    assert pids == frozenset(pid for _, pid in gone)    # a keep_photo row takes nothing out
+    assert info["not_in_release"] == 1 and info["records_left_with_no_photo"]["train"] == 1
+    every = {r.observation_id for r in base.as_records("train")}
+    assert every - {r.observation_id for r in base.as_records("train", exclude=pids)} == {"3"}
+    rows = paper_score.reference_rows(base, ("train",), None, pids)
+    assert "3" not in {r["record_key"] for r in rows} and len(rows) == len(every) - 1
+
+
+def test_one_arm_takes_its_reasons_only_and_the_drawing_classes_are_one(world, tmp_path):
+    base = world["base"]
+    (k3, pid3), (k4, pid4) = _train_photos(base, "3")[0], _train_photos(base, "4")[0]
+    p, sha = _exclusions(tmp_path, [(k3, "exclude_photo", "drawing_micro"),
+                                    (k4, "exclude_photo", "habitat")])
+    assert base.photo_exclusion_set(p, sha, ["drawing"], merge_drawing=True)[0] == {pid3}
+    assert base.photo_exclusion_set(p, sha, ["habitat"], merge_drawing=True)[0] == {pid4}
+    with pytest.raises(dr.ReleaseError, match="no excluded photo has reason"):
+        base.photo_exclusion_set(p, sha, ["drawing"])          # unmerged: no such reason
+    with pytest.raises(dr.ReleaseError, match="not the"):
+        base.photo_exclusion_set(p, "0" * 64)
+
+
+def test_a_comparator_s_exclusion_list_shapes_its_reference_only(world, tmp_path):
+    base = world["base"]
+    p, sha = _exclusions(tmp_path, [(k, "exclude_photo", "micrograph")
+                                    for k, _ in _train_photos(base, "3")])
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"][1]["reference"] = _excl_ref(p, sha)          # vision-mean only
+    paper_score.check_config(cfg)
+    rep = run(world, tmp_path, "val", cfg)
+    label = paper_score.reference_label(cfg["comparators"][1])
+    assert "exclusions.tsv" in label and sha[:12] in label
+    ref = rep["references"][label]
+    assert ref["comparators"] == ["vision-mean"]
+    assert ref["records_left_with_no_photo"] == 1
+    assert ref["exclude_photos"]["sha256"] == sha and ref["exclude_photos"]["photos_listed"] == 1
+    # both comparators score the same finds; only the arm's reference is smaller
+    full = rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]
+    arm = rep["standard"]["comparators"]["vision-mean"]["primary"]["all"]
+    assert full["table"]["species strict"]["top1"]["n"] == arm["table"]["species strict"]["top1"]["n"]
+    cfg["comparators"][1]["reference"]["exclude_photos"]["sha256"] = "0" * 64
+    with pytest.raises(dr.ReleaseError, match="not the"):
+        run(world, tmp_path, "val", cfg)
+
+
+def test_an_arm_s_list_must_be_inside_e34_s_list_with_its_reason(tmp_path):
+    files = {"e34.tsv": [{"photo_key": "a", "decision": "exclude_photo", "reason": "micrograph"},
+                         {"photo_key": "b", "decision": "exclude_photo", "reason": "drawing"},
+                         {"photo_key": "c", "decision": "exclude_photo", "reason": "habitat"}],
+             "micro.tsv": [{"photo_key": "a", "decision": "exclude_photo", "reason": "micrograph"}],
+             "draw.tsv": [{"photo_key": "b", "decision": "exclude_photo",
+                           "reason": "drawing_specimen"}],
+             "bad.tsv": [{"photo_key": "c", "decision": "exclude_photo", "reason": "micrograph"}]}
+    doc = config(tmp_path, ["5", "6"], curation_v1_1={"exclusions": {"file": "e34.tsv"}})
+
+    def arm(f, reasons):
+        return {"id": f, "kind": "vision", "backbone": "m1", "method": "nearest",
+                "reference": _excl_ref(f, "a" * 64, reasons=reasons)}
+    doc["comparators"] += [arm("micro.tsv", ["micrograph"]), arm("draw.tsv", ["drawing"]),
+                           arm("e34.tsv", None)]
+    assert paper_score.check_reference_subsets(doc, read_rows=files.get) == [
+        "micro.tsv", "draw.tsv", "e34.tsv"]
+    doc["comparators"].append(arm("bad.tsv", ["micrograph"]))      # c is habitat in E34
+    with pytest.raises(ValueError, match="E34's list does not have"):
+        paper_score.check_reference_subsets(doc, read_rows=files.get)
+    doc["curation_v1_1"]["exclusions"]["file"] = "TBD at the cut-off"
+    assert paper_score.check_reference_subsets(doc, read_rows=files.get) == []
+
+
+@pytest.mark.parametrize("ref, refused", [
+    ({"policy": "cc_only", "exclude_photos": {}}, "a reference with exclusions"),
+    ({"policy": None}, "a reference with exclusions"),
+    ({"policy": None, "exclude_photos": {"file": "x.tsv", "sha256": "TBD", "key": "photo_key"}},
+     "pins its file by sha256"),
+    ({"policy": None, "exclude_photos": {"file": "x.tsv", "sha256": "a" * 64, "key": "uuid"}},
+     "key is photo_key"),
+    ({"policy": None, "exclude_photos": {"file": "x.tsv", "sha256": "a" * 64,
+                                         "key": "photo_key", "reasons": []}}, "reasons is"),
+    ("cc_only", "reference is one of"),
+])
+def test_a_bad_reference_is_refused(tmp_path, ref, refused):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"][0]["reference"] = ref
+    with pytest.raises(ValueError, match=refused):
+        paper_score.check_config(cfg)
+
+
+def test_an_arm_answers_from_its_reduced_reference(world, tmp_path):
+    # every train photo of B y (records 3 and 4) is on vision-mean's list: it can no longer
+    # name B y for val find 6, while vision-photos (the full reference) still does
+    base = world["base"]
+    p, sha = _exclusions(tmp_path, [(k, "exclude_photo", "micrograph") for rk in ("3", "4")
+                                    for k, _ in _train_photos(base, rk)])
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["comparators"][1]["reference"] = _excl_ref(p, sha)
+    rep = run(world, tmp_path, "val", cfg)
+    full = rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]
+    arm = rep["standard"]["comparators"]["vision-mean"]["primary"]["all"]
+    assert full["table"]["species strict"]["top1"]["rate"] == 1.0
+    assert arm["table"]["species strict"]["top1"]["rate"] == 0.5
+
+
+def test_the_run_refuses_an_arm_list_outside_e34_s(world, tmp_path):
+    base = world["base"]
+    (k3, _), (k4, _) = _train_photos(base, "3")[0], _train_photos(base, "4")[0]
+    e34, _ = _exclusions(tmp_path, [(k3, "exclude_photo", "micrograph")], "e34.tsv")
+    p, sha = _exclusions(tmp_path, [(k4, "exclude_photo", "micrograph")], "arm.tsv")
+    cfg = config(tmp_path, ["5", "6"], curation_v1_1={"exclusions": {"file": str(e34)}})
+    cfg["comparators"][1]["reference"] = _excl_ref(p, sha, reasons=["micrograph"])
+    with pytest.raises(ValueError, match="E34's list does not have"):
+        run(world, tmp_path, "val", cfg)
+
+
+# --- -a3: comparators whose fields are not yet filled (bioclip25-recipe, the v1.1 arms) ---------
+
+def _with_followup(cfg):
+    cfg["comparators"].append({"id": "bioclip25-recipe", "kind": "vision",
+                               "backbone": "TBD: the 2.5 paired fine-tune, as delivered",
+                               "method": "nearest", "calibration": "TBD: fit on v1 val",
+                               "_role": "reserved for the follow-up paper"})
+    cfg["hypotheses"]["followup"] = [
+        {"id": f"F1{r[0]}", "kind": "mcnemar", "a": "bioclip25-recipe", "b": "vision-photos",
+         "cell": f"{r}_strict@1", "alternative": "two-sided"} for r in ("species", "genus")]
+    return cfg
+
+
+def test_a_comparator_not_yet_filled_is_set_aside_on_val_and_its_family_is_not_tested(
+        world, tmp_path):
+    plain = run(world, tmp_path, "val", config(tmp_path, ["5", "6"]))
+    cfg = _with_followup(config(tmp_path, ["5", "6"]))
+    paper_score.check_config(cfg)
+    rep = run(world, tmp_path, "val", cfg)
+    assert rep["pending_comparators"] == {"bioclip25-recipe": ["backbone", "calibration"]}
+    fam = rep["hypotheses"]["followup"]
+    assert all("not_tested" in h and h["p_holm"] == 1.0 for h in fam.values())
+    assert "bioclip25-recipe" not in rep["standard"]["comparators"]
+    for k in ("standard", "finds", "slices", "errors"):                # the rest unchanged
+        assert json.dumps(rep[k], sort_keys=True, default=str) == \
+            json.dumps(plain[k], sort_keys=True, default=str), k
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "## Comparators not scored (fields not yet filled)" in md
+    assert paper_score.pending_comparators(
+        {"comparators": [{"id": "x", "reference": {"policy": None, "exclude_photos": {
+            "file": "TBD", "sha256": "TBD"}}}, {"id": "y", "_note": "TBD later"}]}) == {
+        "x": ["reference"]}
