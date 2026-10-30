@@ -249,7 +249,8 @@ create table records (
   validated_on text, green_projects text, observed_on text, country text, state text,
   north_america integer not null, observer_login text, inat_uuid text,
   included integer not null, reason text not null, split text,
-  benchmark text, benchmark_split text
+  benchmark text, benchmark_split text,
+  vision_assisted integer, held_by_vision integer
 );
 create table photos (
   photo_key text primary key, manifest_photo_id integer not null, record_key text not null,
@@ -495,6 +496,10 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
               "p.box_west, p.fetched_at, p.status" if has_points else ", ".join(["null"] * 9))
     pt_join = ("left join mo_public_points p on p.observation_id = r.observation_id"
                if has_points else "")
+    # .org's DNA + Vision verdicts (records.VISION_ASSISTED_FIELD) and Vision holds, from the
+    # green feed: 1/0, or null in a manifest without the column (not known, never "no").
+    truth_sel = ", ".join(f"r.{c}" if c in rcols else "null"
+                          for c in ("vision_assisted", "held_by_vision"))
     held = holdouts.held_out_ids(conn)
     bench: dict[str, tuple[str, str]] = {}
     if "heldout_records" in tables:
@@ -511,7 +516,8 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
                r.observed_on, r.country, r.state, r.north_america, r.label_conflict,
                r.latitude, r.longitude, o.status, o.user_login, o.uuid, {mo_sel},
                o.inat_latitude, o.inat_longitude, o.obscured, o.geoprivacy,
-               o.taxon_geoprivacy, o.positional_accuracy, o.fetched_at, {pt_sel}
+               o.taxon_geoprivacy, o.positional_accuracy, o.fetched_at, {pt_sel},
+               {truth_sel}
         from records r
         left join inat_observations o on o.observation_id = r.observation_id
         {mo_join}
@@ -521,7 +527,7 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
          observed, country, state, na, conflict, lat, lon, inat_status, inat_login, uuid,
          mo_status, mo_login, *pub) = row
         (i_lat, i_lon, i_obs, i_geo, i_tgeo, i_acc, i_at, m_lat, m_lon, m_hidden, m_n, m_s,
-         m_e, m_w, m_at, m_status) = pub
+         m_e, m_w, m_at, m_status, assisted, vision_held) = pub
         if only_keys is not None and key not in only_keys:
             continue
         name = clean(name)
@@ -570,7 +576,9 @@ def collect(conn: sqlite3.Connection, *, review_records: dict | None = None,
             (f"mo:{mo_login}" if mo_login else None),
             "inat_uuid": uuid if source == "inat" else None,
             "included": 0, "reason": reason, "split": None,
-            "benchmark": b[0], "benchmark_split": b[1]})
+            "benchmark": b[0], "benchmark_split": b[1],
+            "vision_assisted": None if assisted is None else int(bool(assisted)),
+            "held_by_vision": None if vision_held is None else int(bool(vision_held))})
         places.append({"record_key": key, "lat_micro": micro(lat), "lon_micro": micro(lon)})
         inat_pub = None if inat_status is None else {
             "latitude": i_lat, "longitude": i_lon, "obscured": i_obs, "geoprivacy": i_geo,

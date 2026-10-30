@@ -484,11 +484,42 @@ def outside_test_scope(finds: list[Find], outcomes: dict[str, dict], comparators
     for f in finds:
         by_country[f.attrs.get("country") or "unknown"] += 1
     unknown = by_country.pop("unknown", 0)
+    d = described(finds, outcomes, comparators, cells, reps, seed)
+    return {"finds": d["finds"], "primary": d["primary"],
+            "by_country": dict(sorted(by_country.items())), "unknown": unknown,
+            "comparators": d["comparators"]}
+
+
+def described(finds: list[Find], outcomes: dict[str, dict], comparators: list[str],
+              cells: list[str], reps: int, seed: int) -> dict:
+    """Finds kept out of every test, described: how many (and in the primary scope), and per
+    comparator named the rate at each cell with its observer-clustered interval over their
+    primary scope, with no test."""
     primary = in_scope(finds, "primary", "all")
     return {"finds": len(finds), "primary": len(primary),
-            "by_country": dict(sorted(by_country.items())), "unknown": unknown,
             "comparators": {cid: {cell: rate(primary, outcomes.get(cid) or {}, cell, reps, seed)
                                   for cell in cells} for cid in comparators}}
+
+
+# --- truth independence (Steve 30 Oct, -a3): Vision holds, kept and counted ------------------
+
+def hold_outcomes(finds: list[Find], holds: dict[str, str | None]) -> dict:
+    """The kept finds auto-validation held for a person because Vision was confident of
+    another genus (`holds`: {find key: Vision's genus, or None when not known}), split by
+    whether the final label kept the DNA genus or took Vision's."""
+    out = {"holds": 0, "kept_dna_genus": 0, "took_vision_genus": 0, "vision_genus_unknown": 0}
+    for f in finds:
+        if f.key not in holds:
+            continue
+        out["holds"] += 1
+        g = holds[f.key]
+        if not g:
+            out["vision_genus_unknown"] += 1
+        elif g.strip().lower() == (f.genus or "").strip().lower():
+            out["took_vision_genus"] += 1
+        else:
+            out["kept_dna_genus"] += 1
+    return out
 
 
 # --- secondary rows (E14, Steve 27 Oct): descriptive, outside Holm -----------------------------
