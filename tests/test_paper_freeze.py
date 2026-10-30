@@ -243,3 +243,65 @@ def test_the_sealed_test_refuses_a_comparator_not_yet_filled(world, tmp_path, mo
     with pytest.raises(paper_score.FrozenError, match="bioclip25-recipe .backbone, calibration"):
         paper_score.run(world["conn"], world["base"], world["test"], cfg, body,
                         tmp_path / "out", research_dir=repo, log=lambda s: None)
+
+
+def _replace_photo(world, record_key, body):
+    """Overwrite the kept copy of the test release photo of `record_key` with `body`."""
+    from mycomap_vision.storage import open_store
+    pid = int(world["test"].db.execute(
+        "select manifest_photo_id from photos where record_key = ?", (record_key,)).fetchone()[0])
+    store, path = world["conn"].execute(
+        "select store, path from photo_copies where photo_id = ? and size = 'large'",
+        (pid,)).fetchone()
+    open_store(store, cfgmod.DATA_DIR).put(path, body)
+
+
+def _gif() -> bytes:
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), (200, 30, 30)).save(buf, "GIF")
+    return buf.getvalue()
+
+
+def _sealed_with_inat_right(world, tmp_path, monkeypatch):
+    from test_paper_score import e14
+    spec = frozen_spec(world, config(tmp_path, ["7", "8"], code_commit="abcdef1234567"))
+    cfg, body, repo = sealed_world(world, tmp_path, monkeypatch, spec)
+    cfg["comparators"][2]["file"] = e14(tmp_path / "e14-right.jsonl", ["7", "8"], True)
+    body = json.dumps(cfg).encode()
+    (repo / "paper" / "analysis-v1.json").write_bytes(body)
+    git(repo, "commit", "-qam", "iNat answers both")
+    git(repo, "tag", "-f", paper_score.TAG)
+    return cfg, body, repo
+
+
+def test_a_find_whose_photos_are_all_gifs_is_a_counted_miss_for_every_vision_comparator(
+        world, tmp_path, monkeypatch):
+    # Vision 8031df2: embed.decode opens only the allowed photo formats; a GIF is not
+    # decodable for any model. The sealed run counts it, and the find with no decodable
+    # photo stays in every table and paired test as a Vision miss.
+    cfg, body, repo = _sealed_with_inat_right(world, tmp_path, monkeypatch)
+    _replace_photo(world, "8", _gif())
+    rep = paper_score.run(world["conn"], world["base"], world["test"], cfg, body,
+                          tmp_path / "out", research_dir=repo, log=lambda s: None)
+    nd = rep["freeze"]["not_decodable"]
+    assert nd == {"photos": 1, "finds_with_no_decodable_photo": 1}
+    assert rep["freeze"]["test_vectors"]["m1"]["photos_not_decodable"] == 1
+    for cid in ("vision-photos", "vision-mean"):
+        t = rep["standard"]["comparators"][cid]["primary"]["all"]["table"]["species strict"]
+        assert (t["top1"]["n"], t["top1"]["rate"]) == (2, 0.5), cid       # 8: a miss
+    h1a = rep["hypotheses"]["A"]["H1a"]           # vision-photos vs inat-vision, which answers 8
+    assert (h1a["n"], h1a["only_a"], h1a["only_b"]) == (2, 0, 1)
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "finds with no decodable photo, scored as misses" in md
+
+
+def test_a_photo_that_cannot_be_read_for_another_reason_still_refuses_the_sealed_run(
+        world, tmp_path, monkeypatch):
+    cfg, body, repo = _sealed_with_inat_right(world, tmp_path, monkeypatch)
+    from test_dataset_release import jpeg
+    _replace_photo(world, "8", jpeg(5)[:400])                 # a truncated JPEG
+    with pytest.raises(paper_score.FrozenError, match="could not be embedded"):
+        paper_score.run(world["conn"], world["base"], world["test"], cfg, body,
+                        tmp_path / "out", research_dir=repo, log=lambda s: None)
