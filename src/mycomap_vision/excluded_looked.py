@@ -39,9 +39,17 @@ time on the same worker, behind every identification and every person's ask, so 
 at most one map. It runs in a time window (MV_EXCLUDED_PRELOAD_WINDOW, UTC, default
 PRELOAD_WINDOW; "any": whenever the box is idle), never while the nightly update runs, and off
 with MV_EXCLUDED_PRELOAD=0; it is on by default only on the box (a served release), and
-MV_EXCLUDED_PRELOAD=1 turns it on elsewhere. Slip photos wait until no kept crop is still waiting for its vector
-(MV_EXCLUDED_PRELOAD_CROP_WAIT=0 skips that wait), so their maps are made against the reference
-set with the crops in it. The seal and the public-photo rule apply as for an ask.
+MV_EXCLUDED_PRELOAD=1 turns it on elsewhere. A pass makes the embedded crops' maps first, then
+the slip photos', and a slip photo whose record's name still has a kept crop waiting for its
+vector goes last, so as many maps as can be are made against the reference set with the crops
+in it
+(MV_EXCLUDED_PRELOAD_CROP_WAIT=0: slips first, in no such order). Slips never wait for the
+nightly (2026-10-30): with 20-26k crops waiting and the nightly embedding 3,000 a night, the old
+wait (every slip held while any crop waited) made nothing for most of each day for a week. A
+target that can't be made (held by the seal, not shown, given up, no map possible) is passed
+over once per pass. When nothing is made for STALL_MINUTES, one line says why
+("[excluded preload] nothing made for 30 min: ..."), once per state until a map is made. The
+seal and the public-photo rule apply as for an ask.
 
 **Stale maps.** Every map carries a stamp of what it was made from (STAMP_KEYS). A map is
 served, and counts as preloaded, only while its stamp matches what is served now (is_current):
@@ -65,6 +73,8 @@ import json
 import sqlite3
 import threading
 import time
+from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +105,7 @@ PRELOAD_CATEGORIES = ("slip",)
 STAMP_KEYS = ("map_version", "backbone", "method", "release", "name", "box")
 NO_MAP_DAYS = 7                  # a kept "no map possible" is tried again after this long
 GIVE_UP_AFTER = 3                # failed tries per photo before the preload leaves it alone
+STALL_MINUTES = 30               # nothing made this long: the preload logs one line saying why
 CROP_MARK = "#crop"
 
 # Each item's latest decision, grouped once (0.6 s on the live store's 79k decisions; the
@@ -351,14 +362,16 @@ class Target:
 
 @dataclass
 class Pass:
-    """One pass over every target: what was already current, what is left, what was skipped."""
-    todo: list[Target]
+    """One pass over every target: what was already current, what is left in the order it is
+    made (`todo`), what was skipped, and how many slips go last for their name's crops."""
+    todo: deque
     total: dict[str, int]
     done: dict[str, int]
     skipped: dict[str, int] = field(default_factory=dict)
     crops_waiting: int = 0
     at: float = 0.0
     no_map: dict[str, int] = field(default_factory=lambda: {"slips": 0, "crops": 0})
+    slips_last: int = 0
 
 
 class Preloader:
@@ -366,7 +379,7 @@ class Preloader:
     it its reads and its worker:
 
     - `targets()` -> (slip photos, embedded crops as Targets, kept crops still waiting for
-      their vector);
+      their vector: a count, or {record name: count} so a slip of such a name goes last);
     - `stamp_now(target)` -> the stamp a map made now would carry (None: the model is not
       ready, nothing is made); `stamps()` every kept map's stamp by key, `stamp_of(key)` one;
       `no_maps()` every kept "no map possible" by key (Maps.no_maps);
@@ -376,13 +389,14 @@ class Preloader:
     - `nightly_running()`, and the worker (`submit`, `batch_pending`).
 
     step() is one tick of its thread: it submits at most one photo, and only while the worker
-    has no batch photo queued or in hand."""
+    has no batch photo queued or in hand. A pass's targets are queued once, in the order they
+    are made, so a target passed over costs one look per pass and none per tick."""
 
     def __init__(self, *, enabled: bool, window: tuple[int, int] | None, crop_wait: bool,
                  worker, targets: Callable, stamp_now: Callable, stamps: Callable,
                  stamp_of: Callable, skip: Callable, job: Callable, nightly_running: Callable[[], bool],
                  no_maps: Callable[[], dict] = dict, rescan_seconds: float = 3600.0,
-                 clock=time.monotonic,
+                 stall_minutes: float = STALL_MINUTES, clock=time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc), note=print):
         self.enabled, self.window, self.crop_wait = enabled, window, crop_wait
         self.worker, self.targets, self.stamp_now, self.stamps = worker, targets, stamp_now, stamps
@@ -397,6 +411,11 @@ class Preloader:
         self.fails: dict[str, int] = {}           # failed tries by key, while the server runs
         self.last_map_at: str | None = None
         self.lock = threading.Lock()
+        # The stall line: nothing made since `_progress_at`, in `state` since `_state_since`.
+        self.stall_seconds = stall_minutes * 60.0
+        self._progress_at = self._state_since = self.clock()
+        self._state_was: str | None = None
+        self._said: set[str] = set()
 
     def scan(self) -> Pass:
         """A new pass: every target whose kept map is not current, slip photos first. Logged
@@ -404,11 +423,13 @@ class Preloader:
         started = self.clock()
         self.note("[excluded preload] pass starting")
         slips, crops, waiting = self.targets()
+        names = set(waiting) if isinstance(waiting, Mapping) else None
+        waiting = sum(waiting.values()) if isinstance(waiting, Mapping) else int(waiting or 0)
         kept, never, when = self.stamps(), self.no_maps(), self.now()
         total = {"slips": len(slips), "crops": len(crops)}
         done = {"slips": 0, "crops": 0}
         no_map = {"slips": 0, "crops": 0}
-        todo: list[Target] = []
+        left: dict[str, list[Target]] = {"slips": [], "crops": [], "last": []}
         for kind, group in (("slips", slips), ("crops", crops)):
             for t in group:
                 now = self.stamp_now(t)
@@ -416,17 +437,21 @@ class Preloader:
                     done[kind] += 1
                 elif now is not None and no_map_current(never.get(t.key), now, when):
                     no_map[kind] += 1
+                elif (kind == "slips" and self.crop_wait and waiting
+                      and (names is None or (now or {}).get("name") in names)):
+                    left["last"].append(t)       # its name's crops still wait for the nightly
                 else:
-                    todo.append(t)
+                    left[kind].append(t)
+        todo = deque(left["crops"] + left["slips"] + left["last"] if self.crop_wait
+                     else left["slips"] + left["crops"])
         self.last_pass_seconds = round(self.clock() - started, 1)
         self.note(f"[excluded preload] pass ready in {self.last_pass_seconds} s: "
                   f"{total['slips']} slips ({done['slips']} current), {total['crops']} crops "
                   f"({done['crops']} current), {sum(no_map.values())} no map possible, "
-                  f"{len(todo)} to make, {waiting} crops waiting for their vector")
-        return Pass(todo, total, done, {}, waiting, self.clock(), no_map)
-
-    def _due(self, t: Target) -> bool:
-        return not (t.crop == 0 and self.crop_wait and self.pass_ and self.pass_.crops_waiting)
+                  f"{len(todo)} to make, {waiting} crops waiting for their vector"
+                  + (f" ({len(left['last'])} slips of their names go last)" if left["last"]
+                     else ""))
+        return Pass(todo, total, done, {}, waiting, self.clock(), no_map, len(left["last"]))
 
     def step(self) -> str:
         """One tick: the state it is in afterwards. An error is logged, shown in the health
@@ -440,7 +465,43 @@ class Preloader:
                 self.note(f"[excluded preload] {type(e).__name__}: {e}")
                 self.state = f"error: {type(e).__name__}: {e}"[:200]
                 self._retry_at = self.clock() + 60.0
+            self._watch()
             return self.state
+
+    def _watch(self) -> None:
+        """The stall line: when nothing has been made for STALL_MINUTES and the state has held
+        that long, say why, once per state until a map is made."""
+        t = self.clock()
+        if self.state != self._state_was:
+            self._state_was, self._state_since = self.state, t
+        if (self.state == "off" or self.state in self._said
+                or t - max(self._progress_at, self._state_since) < self.stall_seconds):
+            return
+        self._said.add(self.state)
+        self.note(f"[excluded preload] nothing made for {int((t - self._progress_at) // 60)} "
+                  f"min: {self.why()}")
+
+    def why(self) -> str:
+        """Why nothing is being made now, with what the pass has left."""
+        reason = {
+            "outside its window": f"outside its window ({self.window_text()})",
+            "waiting for the nightly update": "the nightly update is running",
+            "making a map": "the map worker has had a preload photo in hand all that time",
+            "waiting for the model": "the served model is not ready",
+            "done": "nothing left to make",
+        }.get(self.state, self.state)
+        p = self.pass_
+        if p is None:
+            return reason + "; no pass yet"
+        return (f"{reason}; {len(p.todo)} to make ({p.slips_last} slips last), "
+                f"{p.done['slips'] + p.done['crops']} current, "
+                f"{p.no_map['slips'] + p.no_map['crops']} no map possible, "
+                f"skipped {dict(sorted(p.skipped.items()))}, "
+                f"{p.crops_waiting} crops waiting for their vector")
+
+    def window_text(self) -> str:
+        return "any" if self.window is None else "%02d:%02d-%02d:%02d UTC" % (
+            self.window[0] // 60, self.window[0] % 60, self.window[1] // 60, self.window[1] % 60)
 
     def _step(self) -> str:
         if not self.enabled:
@@ -456,13 +517,8 @@ class Preloader:
         if self.pass_ is None or self.clock() - self.pass_.at >= self.rescan_seconds:
             self.pass_ = self.scan()
         p = self.pass_
-        while True:
-            t = next((t for t in p.todo if self._due(t)), None)
-            if t is None:
-                if p.todo:                       # only slip photos left, crops still embedding
-                    return "waiting for crops to be embedded"
-                return "done"
-            p.todo.remove(t)
+        while p.todo:
+            t = p.todo.popleft()
             kind = "crops" if t.crop else "slips"
             why = self.skip_reason(t)
             if why is None and self.fails.get(t.key, 0) >= GIVE_UP_AFTER:
@@ -472,7 +528,7 @@ class Preloader:
                 continue
             stamp = self.stamp_now(t)
             if stamp is None:
-                p.todo.insert(0, t)
+                p.todo.appendleft(t)
                 return "waiting for the model"
             if is_current({"stamp": self.stamp_of(t.key)}, stamp):    # asked for meanwhile
                 p.done[kind] += 1
@@ -484,11 +540,15 @@ class Preloader:
             except Exception as e:  # noqa: BLE001 - this photo alone; the pass goes on
                 self._made(kind, t.key, False, f"{type(e).__name__}: {e}")
             return "making a map"
+        return "done"
 
     def _made(self, kind: str, key: str, ok: bool, why: str | None = None,
               never: bool = False) -> None:
         """A job's outcome: made; no map possible (kept by the job, counted, not retried); or
         failed (logged with why, tried again on a later pass up to GIVE_UP_AFTER times)."""
+        if ok or never:                           # an outcome: the stall line may say so again
+            self._progress_at = self.clock()
+            self._said.clear()
         if ok:
             self.made += 1
             if self.pass_:
@@ -512,10 +572,7 @@ class Preloader:
         """For /api/health: on or off, its window, what it is doing, and per kind how many
         maps are current, left and skipped, with the last map's time."""
         p = self.pass_
-        out = {"enabled": self.enabled,
-               "window": "any" if self.window is None else "%02d:%02d-%02d:%02d UTC" % (
-                   self.window[0] // 60, self.window[0] % 60, self.window[1] // 60,
-                   self.window[1] % 60),
+        out = {"enabled": self.enabled, "window": self.window_text(),
                # "doing", not "state": deploy.sh reads the health's two "state" keys.
                "doing": self.state, "made": self.made, "failed": self.failed,
                "no_map_found": self.never,
@@ -529,5 +586,5 @@ class Preloader:
             out.update({k: {"total": p.total[k], "done": p.done[k], "remaining": left[k]}
                         for k in ("slips", "crops")})
             out.update(skipped=dict(sorted(p.skipped.items())), crops_waiting=p.crops_waiting,
-                       no_map_possible=dict(p.no_map))
+                       slips_last=p.slips_last, no_map_possible=dict(p.no_map))
         return out

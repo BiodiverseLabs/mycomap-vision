@@ -2554,13 +2554,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         except sqlite3.OperationalError:            # no crop was ever synced here
             return []
 
-    def crops_waiting(backbone: str, run=None) -> int:
-        """Kept crops the nightly will embed but hasn't yet (its own rule, embed._crops_sql).
-        It reads all of observation_photos (no index on photo_id alone): 1.5-17 s."""
+    def crops_waiting(backbone: str, run=None) -> dict[str, int]:
+        """Kept crops the nightly will embed but hasn't yet (its own rule, embed._crops_sql),
+        counted by their record's name (as manifest_names reads it): the preload makes a slip
+        photo of such a name last. It reads all of observation_photos (no index on photo_id
+        alone): 1.5-17 s."""
         try:
-            return (run or q)("select count(*) " + embed_crops_sql(True), (backbone,))[0][0]
+            return {n: c for n, c in (run or q)(
+                "select coalesce(r.species, r.scientific_name), count(*) "
+                + embed_crops_sql(True) + " group by 1", (backbone,))}
         except sqlite3.OperationalError:
-            return 0
+            return {}
 
     def excluded_crop(hit: "xl.Excluded", crop: int, backbone: str) -> list | None:
         """Crop `crop`'s box, or 404 unless it is kept and its vector is in the index."""
@@ -2867,7 +2871,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # made ahead of anyone asking, one batch photo at a time behind every identification and
     # every person's ask. On by default on the box (a served release); MV_EXCLUDED_PRELOAD=0
     # turns it off, =1 on elsewhere; MV_EXCLUDED_PRELOAD_WINDOW sets
-    # its hours (UTC, or "any"); MV_EXCLUDED_PRELOAD_CROP_WAIT=0 lets slips go before crops.
+    # its hours (UTC, or "any"); MV_EXCLUDED_PRELOAD_CROP_WAIT=0 lets slips go before crops
+    # (by default crops go first, and slips whose name has crops still waiting go last).
     # What is served is read ONCE per pass (preload_targets), never per target: the served
     # backbone comes from a count over every embeddings row (~1 s on the box under db_lock),
     # and a pass has tens of thousands of targets (2026-10-27: the first pass never ended).
@@ -2910,7 +2915,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     preload_names.update(manifest_names(keys[i:i + 900], run))
             timed("names", names)
             if backbone is None:
-                return [xl.Target(r) for r in slips], [], 0
+                return [xl.Target(r) for r in slips], [], {}
             by_key = {r.photo_key: r for r in slips}
             crops = [xl.Target(by_key[k], n, tuple(box))
                      for k, n, box, e in timed("crops", lambda: kept_crops(backbone, run))
