@@ -3,8 +3,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  cellColours, cropBox, firstPhoto, markers, ownLine, refusalLine, spotlightAlpha, squareOf,
-  unseenStrips, workingLine,
+  cellColours, cropBox, darkness, firstPhoto, markers, ownLine, refusalLine, spotlightAlpha, squareOf,
+  STRENGTH_DEFAULT, unseenStrips, workingLine,
 } from "./whereLooked";
 import type { LookedPhoto, PhotoResult } from "./api";
 
@@ -38,6 +38,30 @@ test("the map sits on the centre square the model sees, and the unseen strips ar
   assert.equal(strips[0].style.height, "12.5%");
   assert.deepEqual(unseenStrips({ x: 0.25, y: 0, w: 0.5, h: 1 }).map((s) => s.side), ["left", "right"]);
   assert.deepEqual(unseenStrips({ x: 0, y: 0, w: 1, h: 1 }), []);
+});
+
+test("the slider starts where its old top was, and goes on darker to black", () => {
+  assert.equal(STRENGTH_DEFAULT, 75);
+  assert.equal(darkness(0), 0);
+  assert.ok(Math.abs(darkness(STRENGTH_DEFAULT) - 0.8) < 1e-12, "the default dims as the old full strength did");
+  assert.equal(darkness(100), 1);
+  assert.ok(darkness(90) > 0.8 && darkness(90) < 1);
+  assert.equal(darkness(140), 1);
+  const map = Array.from({ length: 100 }, (_, i) => i);
+  // The default looks exactly as the old full strength (cells at 0.8, no extra opacity).
+  assert.deepEqual(cellColours(map).map((c) => c[3]), spotlightAlpha(map, 0.3, 0.8));
+  const full = cellColours(map, 100).map((c) => c[3]);
+  assert.equal(full[0], 1, "the weakest cell goes black at full strength");
+  assert.equal(full.filter((a) => a === 0).length, cellColours(map).filter((c) => c[3] === 0).length,
+               "strength darkens; it never changes which cells stay clear");
+});
+
+test("one strip of each pair says Vision doesn't see it, only where the words fit", () => {
+  assert.deepEqual(unseenStrips(tall).map((s) => s.label), [true, false]);
+  const wide = unseenStrips({ x: 0.125, y: 0, w: 0.75, h: 1 });
+  assert.deepEqual(wide.map((s) => [s.side, s.label]), [["left", true], ["right", false]]);
+  assert.deepEqual(unseenStrips({ x: 0.03, y: 0, w: 0.94, h: 1 }).map((s) => s.label), [false, false],
+                   "a thin strip is striped but not labelled");
 });
 
 test("a photo is placed so that only its seen square fills the match square", () => {

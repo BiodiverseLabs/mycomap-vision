@@ -60,6 +60,35 @@ test("the panel says what the map means and doesn't, and opens on the strongest 
   assert.match(t, /It doesn't show why/);
 });
 
+test("the panel says which methods and settings made its maps", () => {
+  const h = renderToStaticMarkup(createElement(LookedPanel, { view: READY, r: R, urls: URLS }));
+  const t = text(h);
+  assert.match(h, /data-testid="details-how-maps-made"/);
+  assert.match(t, /How these maps are made/);
+  assert.match(t, /a vision transformer \(ViT-L\/14, 24 layers\)/);
+  assert.doesNotMatch(t, /bioclip|fine-?tun/i, "outside Research the site never names the backbone");
+  assert.match(t, /336 px .* 24 × 24 grid of 14-px patches/);
+  assert.match(t, /0\.6 × the mean cosine similarity to the 2 closest DNA-verified records/);
+  assert.match(t, /gradient-weighted attention rollout \(Chefer, Gur & Wolf, 2021\)/);
+  assert.match(t, /"register" tokens \(Darcet et al\., 2023\): after layer 20 .* over 2 × the photo's median/);
+  assert.match(t, /3 × 3 weighted average \(centre weight 4\)/);
+  assert.match(t, /the top 30% stay clear/);
+  assert.match(t, /75 is the usual setting, 100 is black/);
+  assert.match(t, /mutual nearest neighbours/, "the panel shows matches, so it says how they are found");
+  assert.match(h, /value="75"/, "the slider starts at the old full strength");
+});
+
+test("the label on an unseen strip is a plain tag, not a pill that wraps into a circle", () => {
+  const wide: LookedPhoto = { ...photo(1, null), crop: { x: 0.125, y: 0, w: 0.75, h: 1 } };
+  const h = renderToStaticMarkup(createElement(LookedPanel, { view: { ...READY, photos: [wide] }, r: R, urls: URLS }));
+  const tag = h.match(/<span class="([^"]*)" data-testid="text-unseen-strip">/);
+  assert.ok(tag, "the wide photo's side strip is labelled");
+  assert.match(tag[1], /whitespace-nowrap/);
+  assert.match(tag[1], /writing-mode:vertical-rl/, "a side strip's label runs along it");
+  assert.doesNotMatch(tag[1], /rounded-full/);
+  assert.equal((h.match(/data-testid="text-unseen-strip"/g) ?? []).length, 1);
+});
+
 test("the panel has one look, Spotlight with its strength: no Glow, no style to choose", () => {
   const h = renderToStaticMarkup(createElement(LookedPanel, { view: READY, r: R, urls: URLS }));
   assert.doesNotMatch(h, /Glow/i);
