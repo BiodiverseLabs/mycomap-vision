@@ -1157,6 +1157,12 @@ def check_reference(c: dict) -> None:
         if r is not None and (not isinstance(r, list) or not r
                               or not all(isinstance(x, str) and x for x in r)):
             raise ValueError(f"comparator {c['id']}: exclude_photos reasons is a list of reasons")
+        from .photo_review import REASON_CODES, RETIRED_REASONS
+        unknown = sorted(set(r or []) - set(REASON_CODES) - set(RETIRED_REASONS))
+        if unknown:
+            raise ValueError(f"comparator {c['id']}: exclude_photos reasons {unknown} are not "
+                             f"the exporter's reason codes (photo_review.REASONS: "
+                             f"{', '.join(REASON_CODES)})")
         return
     if ref not in REFERENCES:
         raise ValueError(f"comparator {c['id']}: reference is one of "
@@ -1265,23 +1271,27 @@ def reference_exclusions(base, comparators: list[dict]) -> dict[str, tuple[froze
 
 
 def check_reference_subsets(doc: dict, read_rows=None,
-                            require_files: bool = True) -> list[str]:
+                            require_files: bool = True) -> dict[str, dict]:
     """Each arm's exclusion list against E34's frozen list (curation_v1_1/exclusions/file,
     once filled): every photo an arm leaves out is in E34's list with one of the arm's reasons
-    (drawing classes as one; any reason for an arm with none). Returns what was checked;
-    ValueError on a photo outside. Skipped while E34's list is a placeholder, and (without
+    (drawing classes as one; any reason for an arm with none), or E34's export decided it
+    again AFTER the arm's row (its latest decision: keep_photo, or another reason): the photo
+    left E34's list after the arm's list froze (an E35 list may freeze before E34's), counted
+    and reported, never refused. Returns {arm id: {"photos", "left_e34_after_arm": {"keep",
+    "other_reason"}}}; ValueError on any other photo outside (E34 never decided it, or not
+    later than the arm). Skipped while E34's list is a placeholder, and (without
     `require_files`, as check_config runs it) while any of the files is not on this machine."""
     import csv as csvmod
     import io
     from .dataset_release import reason_class
     e34 = ((doc.get("curation_v1_1") or {}).get("exclusions") or {})
     if is_placeholder(e34.get("file")) or not e34.get("file"):
-        return []
+        return {}
     arms = [c["reference"]["exclude_photos"]["file"] for c in doc.get("comparators", [])
             if isinstance(c.get("reference"), dict)]
     if not require_files and read_rows is None and not all(
             Path(resolve(f)).is_file() for f in [e34["file"], *arms]):
-        return []
+        return {}
 
     def rows(f):
         if read_rows:
@@ -1291,28 +1301,50 @@ def check_reference_subsets(doc: dict, read_rows=None,
 
     def excluded(rs):
         return [r for r in rs if (r.get("decision") or "exclude_photo") == "exclude_photo"]
+    def when(r):
+        try:
+            return datetime.fromisoformat(str(r.get("decided_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    e34_rows = rows(e34["file"])
     base_reasons: dict = {}
-    for r in excluded(rows(e34["file"])):
+    for r in excluded(e34_rows):
         base_reasons.setdefault(r["photo_key"].strip(), set()).add(reason_class(r.get("reason")))
-    checked = []
+    latest: dict = {}                 # E34's latest decision on each photo, any decision
+    for r in e34_rows:
+        k, t = r["photo_key"].strip(), when(r)
+        if t is not None and (k not in latest or t > latest[k][0]):
+            latest[k] = (t, r)
+    checked: dict = {}
     for c in doc.get("comparators", []):
         ref = c.get("reference")
         if not isinstance(ref, dict):
             continue
         ex = ref["exclude_photos"]
         if ex["file"] == e34["file"]:
-            checked.append(c["id"])
+            checked[c["id"]] = {"photos": None, "left_e34_after_arm": {"keep": 0,
+                                                                       "other_reason": 0}}
             continue
         want = {reason_class(x) for x in ex.get("reasons") or []}
+        n, left = 0, {"keep": 0, "other_reason": 0}
         for r in excluded(rows(ex["file"])):
             if want and reason_class(r.get("reason")) not in want:
                 continue
-            have = base_reasons.get(r["photo_key"].strip(), set())
-            if not have or (want and not (have & want)):
-                raise ValueError(f"comparator {c['id']}: {Path(ex['file']).name} leaves out "
-                                 f"{r['photo_key']}, which E34's list does not have with "
-                                 f"{sorted(want) or 'any reason'}")
-        checked.append(c["id"])
+            n += 1
+            key = r["photo_key"].strip()
+            have = base_reasons.get(key, set())
+            if have and (not want or have & want):
+                continue
+            t, later = when(r), latest.get(key)
+            if t is not None and later is not None and later[0] > t:
+                d = later[1]
+                left["keep" if (d.get("decision") or "") == "keep_photo" else "other_reason"] += 1
+                continue
+            raise ValueError(f"comparator {c['id']}: {Path(ex['file']).name} leaves out "
+                             f"{r['photo_key']}, which E34's list does not have with "
+                             f"{sorted(want) or 'any reason'}, nor decided again after the "
+                             "arm's list")
+        checked[c["id"]] = {"photos": n, "left_e34_after_arm": left}
     return checked
 
 
@@ -2140,7 +2172,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     # `finds`. The pairing of tests is by find key either way.
     # a3-spec §2: a reference may leave out the photos of a pinned exclusion list (E34 v1.1,
     # the E35 arms), for its comparators only.
-    check_reference_subsets(config)
+    subsets = check_reference_subsets(config)
     ref_excl = reference_exclusions(base, config["comparators"])
     policy_of = {reference_label(c): reference_policy(c) for c in config["comparators"]
                  if c.get("reference")}
@@ -2411,6 +2443,11 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
                                "records_left_with_no_photo": len(reference_rows(
                                    base, ref_splits, policy_of[r])) - len(ref_rows_of[r])}
                               if r in ref_excl else {}),
+                           **({"against_e34": {c["id"]: subsets[c["id"]]
+                                               for c in config["comparators"]
+                                               if c["id"] in subsets
+                                               and reference_label(c) == r}}
+                              if subsets else {}),
                            "comparators": [c for c, fs in finds_of.items()
                                            if fs is finds_by_ref[r]]} for r in refs_used},
         # The same tables on named subsets of the finds (config "subsets": {name: {attr:

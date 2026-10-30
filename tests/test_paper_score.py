@@ -2563,28 +2563,96 @@ def test_a_comparator_s_exclusion_list_shapes_its_reference_only(world, tmp_path
         run(world, tmp_path, "val", cfg)
 
 
-def test_an_arm_s_list_must_be_inside_e34_s_list_with_its_reason(tmp_path):
-    files = {"e34.tsv": [{"photo_key": "a", "decision": "exclude_photo", "reason": "micrograph"},
-                         {"photo_key": "b", "decision": "exclude_photo", "reason": "drawing"},
-                         {"photo_key": "c", "decision": "exclude_photo", "reason": "habitat"}],
-             "micro.tsv": [{"photo_key": "a", "decision": "exclude_photo", "reason": "micrograph"}],
-             "draw.tsv": [{"photo_key": "b", "decision": "exclude_photo",
-                           "reason": "drawing_specimen"}],
-             "bad.tsv": [{"photo_key": "c", "decision": "exclude_photo", "reason": "micrograph"}]}
-    doc = config(tmp_path, ["5", "6"], curation_v1_1={"exclusions": {"file": "e34.tsv"}})
+# The exporter's reason codes for the E35 arms (photo_review.REASONS), as the fills use them.
+E35_REASONS = {"micro": ["micrograph"], "habitat": ["habitat"], "slips": ["slip"]}
+ARM_FROZE = "2026-11-05T23:59:00Z"
 
-    def arm(f, reasons):
-        return {"id": f, "kind": "vision", "backbone": "m1", "method": "nearest",
-                "reference": _excl_ref(f, "a" * 64, reasons=reasons)}
-    doc["comparators"] += [arm("micro.tsv", ["micrograph"]), arm("draw.tsv", ["drawing"]),
-                           arm("e34.tsv", None)]
-    assert paper_score.check_reference_subsets(doc, read_rows=files.get) == [
-        "micro.tsv", "draw.tsv", "e34.tsv"]
-    doc["comparators"].append(arm("bad.tsv", ["micrograph"]))      # c is habitat in E34
+
+def _row(key, reason, at, decision="exclude_photo"):
+    return {"photo_key": key, "decision": decision, "reason": reason, "decided_at": at}
+
+
+def _arm(f, reasons):
+    return {"id": f, "kind": "vision", "backbone": "m1", "method": "nearest",
+            "reference": _excl_ref(f, "a" * 64, reasons=reasons)}
+
+
+def test_the_e35_reasons_are_the_exporter_s_codes():
+    from mycomap_vision.photo_review import REASON_CODES
+    assert all(r in REASON_CODES for rs in E35_REASONS.values() for r in rs)
+
+
+def test_an_arm_s_list_must_be_inside_e34_s_list_with_its_reason(tmp_path):
+    early = "2026-11-01T10:00:00Z"
+    files = {"e34.tsv": [_row("a", "micrograph", early), _row("b", "drawing", early),
+                         _row("c", "habitat", early)],
+             "micro.tsv": [_row("a", "micrograph", early)],
+             "draw.tsv": [_row("b", "drawing_specimen", early)],
+             "bad.tsv": [_row("c", "micrograph", early)]}
+    doc = config(tmp_path, ["5", "6"], curation_v1_1={"exclusions": {"file": "e34.tsv"}})
+    doc["comparators"] += [_arm("micro.tsv", E35_REASONS["micro"]), _arm("draw.tsv", ["drawing"]),
+                           _arm("e34.tsv", None)]
+    got = paper_score.check_reference_subsets(doc, read_rows=files.get)
+    assert list(got) == ["micro.tsv", "draw.tsv", "e34.tsv"]
+    assert got["micro.tsv"] == {"photos": 1, "left_e34_after_arm": {"keep": 0, "other_reason": 0}}
+    doc["comparators"].append(_arm("bad.tsv", E35_REASONS["micro"]))   # c is habitat in E34
     with pytest.raises(ValueError, match="E34's list does not have"):
         paper_score.check_reference_subsets(doc, read_rows=files.get)
     doc["curation_v1_1"]["exclusions"]["file"] = "TBD at the cut-off"
-    assert paper_score.check_reference_subsets(doc, read_rows=files.get) == []
+    assert paper_score.check_reference_subsets(doc, read_rows=files.get) == {}
+
+
+def test_a_photo_re_decided_after_the_arm_froze_is_counted_not_refused(tmp_path):
+    # the arm's list froze on 5 Nov; E34's export (14 Nov) holds each photo's latest decision
+    before, after = "2026-11-04T09:00:00Z", "2026-11-10T09:00:00Z"
+    arm = [_row("k", "micrograph", before), _row("o", "micrograph", before),
+           _row("s", "micrograph", before)]
+    e34 = [_row("k", "", after, "keep_photo"),            # re-decided: keep
+           _row("o", "habitat", after),                     # re-decided: another reason
+           _row("s", "micrograph", before)]                 # still the arm's reason
+    files = {"e34.tsv": e34, "micro.tsv": arm}
+    doc = config(tmp_path, ["5", "6"], curation_v1_1={"exclusions": {"file": "e34.tsv"}})
+    doc["comparators"].append(_arm("micro.tsv", E35_REASONS["micro"]))
+    got = paper_score.check_reference_subsets(doc, read_rows=files.get)
+    assert got["micro.tsv"] == {"photos": 3, "left_e34_after_arm": {"keep": 1, "other_reason": 1}}
+    # two rows for one photo (two review items): its latest decision counts, whatever the order
+    files["e34.tsv"] = [_row("k", "dried", "2026-11-01T09:00:00Z")] + e34
+    got = paper_score.check_reference_subsets(doc, read_rows=files.get)
+    assert got["micro.tsv"]["left_e34_after_arm"] == {"keep": 1, "other_reason": 1}
+    files["e34.tsv"] = e34
+    # a later decision is what lets a photo leave: one no later than the arm's row refuses
+    files["e34.tsv"] = [_row("k", "", before, "keep_photo")] + e34[1:]
+    with pytest.raises(ValueError, match="nor decided again after"):
+        paper_score.check_reference_subsets(doc, read_rows=files.get)
+    # and so does a photo E34 never decided, or a row with no time to compare
+    files["e34.tsv"] = e34[1:]
+    with pytest.raises(ValueError, match="nor decided again after"):
+        paper_score.check_reference_subsets(doc, read_rows=files.get)
+    files["e34.tsv"] = [_row("k", "", "", "keep_photo")] + e34[1:]
+    with pytest.raises(ValueError, match="nor decided again after"):
+        paper_score.check_reference_subsets(doc, read_rows=files.get)
+
+
+def test_the_run_reports_photos_that_left_e34_s_list_after_the_arm_froze(world, tmp_path):
+    base = world["base"]
+    (k3, _), (k4, _) = _train_photos(base, "3")[0], _train_photos(base, "4")[0]
+    e34 = tmp_path / "e34.tsv"
+    e34.write_text("photo_key\tdecision\treason\tdecided_at\n"
+                   f"{k3}\texclude_photo\tmicrograph\t2026-11-04T09:00:00Z\n"
+                   f"{k4}\tkeep_photo\t\t2026-11-10T09:00:00Z\n", encoding="utf-8", newline="\n")
+    arm = tmp_path / "arm.tsv"
+    arm.write_text("photo_key\tdecision\treason\tdecided_at\n"
+                   f"{k3}\texclude_photo\tmicrograph\t2026-11-04T09:00:00Z\n"
+                   f"{k4}\texclude_photo\tmicrograph\t2026-11-04T09:00:00Z\n",
+                   encoding="utf-8", newline="\n")
+    cfg = config(tmp_path, ["5", "6"], curation_v1_1={"exclusions": {"file": str(e34)}})
+    cfg["comparators"][1]["reference"] = _excl_ref(arm, paper_score.sha256_file(arm),
+                                                   reasons=E35_REASONS["micro"])
+    rep = run(world, tmp_path, "val", cfg)
+    ref = rep["references"][paper_score.reference_label(cfg["comparators"][1])]
+    assert ref["against_e34"]["vision-mean"] == {
+        "photos": 2, "left_e34_after_arm": {"keep": 1, "other_reason": 0}}
+    assert ref["exclude_photos"]["photos_listed"] == 2      # both still out of the arm's reference
 
 
 @pytest.mark.parametrize("ref, refused", [
@@ -2596,6 +2664,9 @@ def test_an_arm_s_list_must_be_inside_e34_s_list_with_its_reason(tmp_path):
      "key is photo_key"),
     ({"policy": None, "exclude_photos": {"file": "x.tsv", "sha256": "a" * 64,
                                          "key": "photo_key", "reasons": []}}, "reasons is"),
+    ({"policy": None, "exclude_photos": {"file": "x.tsv", "sha256": "a" * 64,
+                                         "key": "photo_key", "reasons": ["no_specimen"]}},
+     "not the exporter's reason codes"),
     ("cc_only", "reference is one of"),
 ])
 def test_a_bad_reference_is_refused(tmp_path, ref, refused):
