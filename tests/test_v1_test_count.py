@@ -69,6 +69,7 @@ def world(tmp_path):
     rec("29", vdate="2026-10-22", country="PR", copy=False)               # downloaded, no original kept
     rec("31", vdate="2026-10-22", copy=False, photo="pending")            # never downloaded
     rec("30", vdate="2026-10-23", country=" pr")                          # read as PR
+    add_photo(conn, store, "30", next(pid))                               # 30 has two photos
     conn.commit()
     base = Base(keys=["27", "1"], shas=[hashlib.sha256(jpeg(999)).hexdigest()])
     yield {"conn": conn, "path": path, "base": base}
@@ -199,3 +200,20 @@ def test_the_text_report_has_one_line_per_day_and_the_totals(world):
                                                           base=world["base"]))
     assert "2026-10-19" in text and "total in scope 4" in text
     assert "MX 1" in text and "crosspost_twin" in text
+
+
+def test_gif_photos_and_finds_whose_photos_are_all_gifs_are_counted(world):
+    c = world["conn"]
+    c.execute("update photos set source_url = 'https://example.org/photos/1/original.gif?x=1' "
+              "where photo_id = (select photo_id from observation_photos where "
+              "observation_id = '20')")
+    c.execute("update photos set source_url = 'https://example.org/photos/2/original.gif' "
+              "where photo_id = (select min(photo_id) from observation_photos where "
+              "observation_id = '30')")                       # one of its two photos
+    rep = v1_test_count.count(c, seal=SEAL, base=world["base"])
+    assert (rep["total"]["gif_photos"], rep["total"]["all_gif_finds"]) == (2, 1)
+    by_day = {r["day"]: r for r in rep["days"]}
+    assert by_day["2026-10-20"]["all_gif_finds"] == 1
+    assert "all GIFs" in v1_test_count.format_count(rep)
+    assert v1_test_count.is_gif({"original_path": "photos/large/1/9.GIF"})
+    assert not v1_test_count.is_gif({"source_url": "https://x/gif/1.jpg"})

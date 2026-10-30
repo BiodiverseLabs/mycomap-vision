@@ -27,6 +27,11 @@ field, so a 0 cannot be told from "not sent"; first_green_at arrives with it in 
 feed version, so its count says whether the feed's newer fields reach post-seal records at
 all. No column: "not populated".
 
+GIF photos (the sealed run decodes only the allowed photo formats, so a GIF has no vector for
+any model, and a find whose photos are all GIFs has no Vision answer: a miss) are counted per
+day among the in-scope finds' usable photos, by the extension of the photo's source URL or
+kept copy (iNat keeps the original's), so the count is by extension, not by the bytes.
+
 How to run it: on the laptop, against a copy of the box's live manifest (the nightly
 layer's manifest.sqlite, copied consistently with SQLite's backup, never a plain copy of a
 database being written), with the v1 dataset release in data/research-releases/v1:
@@ -79,7 +84,13 @@ def green_day(rec: dict) -> str:
 
 COUNTS = ("candidates", "in_scope", "outside_scope", "excluded", "originals_not_fetched",
           "in_scope_vision_assisted", "vision_assisted_1", "vision_assisted_0",
-          "first_green_at_given")
+          "first_green_at_given", "gif_photos", "all_gif_finds")
+
+
+def is_gif(photo: dict) -> bool:
+    """A release photo whose source URL or kept copy has the .gif extension."""
+    url = str(photo.get("source_url") or "").lower().split("?")[0]
+    return url.endswith(".gif") or str(photo.get("original_path") or "").lower().endswith(".gif")
 
 
 def count(conn: sqlite3.Connection, *, seal: str, countries=DEFAULT_COUNTRIES, base=None,
@@ -98,6 +109,10 @@ def count(conn: sqlite3.Connection, *, seal: str, countries=DEFAULT_COUNTRIES, b
     dropped = dr.separate_from_base(base, built) if base is not None else 0
     with_original = {p["record_key"] for p in built.photos
                      if p["included"] and p["original_sha256"]}
+    usable: dict = defaultdict(list)                   # record key -> its usable photos
+    for ph in built.photos:
+        if ph["included"]:
+            usable[ph["record_key"]].append(ph)
     keep = set(countries)
     days: dict = defaultdict(lambda: dict.fromkeys(COUNTS, 0))
     reasons: Counter = Counter()
@@ -124,6 +139,10 @@ def count(conn: sqlite3.Connection, *, seal: str, countries=DEFAULT_COUNTRIES, b
             d["originals_not_fetched"] += 1
         if rec.get("vision_assisted"):
             d["in_scope_vision_assisted"] += 1
+        gifs = sum(is_gif(ph) for ph in usable[r["record_key"]])
+        d["gif_photos"] += gifs
+        if gifs and gifs == len(usable[r["record_key"]]):
+            d["all_gif_finds"] += 1
     rows, running = [], 0
     for day in sorted(days, key=lambda k: (k == "unknown", k)):
         running += days[day]["in_scope"]
@@ -177,6 +196,9 @@ def format_count(rep: dict) -> str:
               f"photo dropped: {rep['photos_identical_to_base_dropped']:,}",
               f"originals not fetched (counted in scope; the cut needs them): "
               f"{t['originals_not_fetched']:,}",
+              f"GIF photos among the in-scope finds (by extension; not decodable at the sealed "
+              f"run): {t['gif_photos']:,}; in-scope finds whose photos are all GIFs (no Vision "
+              f"answer, scored as misses): {t['all_gif_finds']:,}",
               f"vision_assisted over all {t['candidates']:,} post-seal candidates: "
               + (f"{t['vision_assisted_1']:,} assisted, {t['vision_assisted_0']:,} not (0 is "
                  f"also what a feed row without the field gives); in scope "
