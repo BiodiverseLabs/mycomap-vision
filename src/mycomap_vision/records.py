@@ -88,10 +88,16 @@ def parse_validation_date(s: str | None) -> str | None:
 #   the benchmark of Vision's answers leaves these records out (early_answers.py). Read
 #   leniently: true, a method string equal to VISION_ASSISTED_METHOD, or a list holding it.
 #   PROVISIONAL NAME: .org's feat/vision-agreement-autovalidate fixes the final one.
+# HELD_BY_VISION_FIELD: .org's auto-validation once held the record for a person because Vision
+#   was confident of another genus (kept when a person later validated it; .org's
+#   visionGreenRecords.ts VISION_FIELDS, a boolean). Read into records.held_by_vision for the
+#   paper; nothing here acts on it yet. Read leniently like VISION_ASSISTED_FIELD (true, 1,
+#   "true"/"yes"/"1", or a list holding one); missing is 0.
 # FIRST_GREEN_FIELD: the moment (UTC, ISO 8601) the record first turned green, when the feed
 #   gives one. Without it only the day (validation_date_N) is known. Also provisional.
 VISION_ASSISTED_FIELD = "validated_with_vision"
 VISION_ASSISTED_METHOD = "DNA + MycoMap Vision"
+HELD_BY_VISION_FIELD = "held_by_vision"
 FIRST_GREEN_FIELD = "first_green_at"
 
 
@@ -106,6 +112,19 @@ def vision_assisted(value) -> bool:
         return v in ("true", "yes", "1", VISION_ASSISTED_METHOD.lower())
     if isinstance(value, (list, tuple)):
         return any(vision_assisted(v) for v in value)
+    return False
+
+
+def held_by_vision(value) -> bool:
+    """Whether a feed row's HELD_BY_VISION_FIELD says auto-validation held it for a person."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    if isinstance(value, (list, tuple)):
+        return any(held_by_vision(v) for v in value)
     return False
 
 
@@ -199,6 +218,9 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
             # Any of its rows green by the DNA + Vision rule marks the record.
             "vision_assisted": int(any(vision_assisted(g.get(VISION_ASSISTED_FIELD))
                                        for g in group)),
+            # Likewise any of its rows held for a person because Vision named another genus.
+            "held_by_vision": int(any(held_by_vision(g.get(HELD_BY_VISION_FIELD))
+                                      for g in group)),
             "first_green_at": min(greens) if greens else None,
         })
     return records
@@ -232,9 +254,10 @@ _COLUMNS = [
     "genus", "species", "infraspecies", "latitude", "longitude", "observed_on", "state",
     "country", "continent", "north_america", "sequence_id", "green_projects", "validated_on",
     "label_conflict", "names_json", "exported_at", "vision_assisted", "first_green_at",
+    "held_by_vision",
 ]
 # Columns a record dict built by older code may lack, and what they are then.
-_LATER_DEFAULTS = {"vision_assisted": 0, "first_green_at": None}
+_LATER_DEFAULTS = {"vision_assisted": 0, "first_green_at": None, "held_by_vision": 0}
 
 
 def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:

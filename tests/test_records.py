@@ -83,3 +83,65 @@ def test_records_no_longer_green_leave_the_candidate_list(conn):
     save_records(conn, build_records([row("2", "Renamed")], "t2"))
     got = conn.execute("select observation_id, scientific_name from records").fetchall()
     assert [tuple(r) for r in got] == [("2", "Renamed")]
+
+
+# --- held_by_vision (.org's green feed, VISION_FIELDS; for the paper) ---------------------------
+
+def test_a_record_held_for_a_person_because_vision_named_another_genus_is_marked(conn):
+    rows = [row("1", held_by_vision=True), row("2", held_by_vision=False), row("3"),
+            row("4", held_by_vision="true"), row("5"), row("5", held_by_vision=True)]
+    recs = {r["observation_id"]: r for r in build_records(rows, "t")}
+    assert {k: r["held_by_vision"] for k, r in recs.items()} == {
+        "1": 1, "2": 0, "3": 0, "4": 1, "5": 1}            # missing is 0; any row of it marks it
+    save_records(conn, list(recs.values()))
+    got = dict(conn.execute("select observation_id, held_by_vision from records").fetchall())
+    assert got == {"1": 1, "2": 0, "3": 0, "4": 1, "5": 1}
+
+
+def test_held_by_vision_is_its_own_flag_beside_vision_assisted(conn):
+    save_records(conn, build_records([row("1", validated_with_vision=True),
+                                      row("2", held_by_vision=True)], "t"))
+    got = {r[0]: (r[1], r[2]) for r in conn.execute(
+        "select observation_id, vision_assisted, held_by_vision from records")}
+    assert got == {"1": (1, 0), "2": (0, 1)}
+
+
+def test_a_record_built_by_older_code_without_the_flag_is_saved_as_not_held(conn):
+    [rec] = build_records([row("1", held_by_vision=True)], "t")
+    del rec["held_by_vision"]
+    save_records(conn, [rec])
+    assert conn.execute("select held_by_vision from records").fetchone()[0] == 0
+
+
+def test_the_held_by_vision_flag_is_read_leniently_from_the_feed():
+    from mycomap_vision.records import HELD_BY_VISION_FIELD, held_by_vision
+    assert HELD_BY_VISION_FIELD == "held_by_vision"         # .org's VISION_FIELDS name
+    assert held_by_vision(True) and held_by_vision(1) and held_by_vision(" TRUE ")
+    assert held_by_vision("yes") and held_by_vision([False, True])
+    assert not held_by_vision(None) and not held_by_vision(False) and not held_by_vision(0)
+    assert not held_by_vision("false") and not held_by_vision("") and not held_by_vision([])
+
+
+def test_a_manifest_made_before_the_column_gains_it_and_keeps_its_records(tmp_path):
+    import sqlite3
+
+    from mycomap_vision import manifest
+    path = tmp_path / "old.sqlite"
+    c = manifest.connect(path)
+    save_records(c, build_records([row("1", validated_with_vision=True)], "t"))
+    c.execute("alter table records drop column held_by_vision")    # as older code made it
+    c.commit()
+    c.close()
+    old = sqlite3.connect(path)
+    manifest.upgrade(old)                              # the API's way in
+    assert [tuple(r) for r in old.execute(
+        "select observation_id, scientific_name, vision_assisted, held_by_vision "
+        "from records")] == [("1", "Amanita muscaria", 1, 0)]
+    old.execute("alter table records drop column held_by_vision")
+    old.commit()
+    old.close()
+    c = manifest.connect(path)                          # the nightly's and the CLI's way in
+    assert c.execute("select held_by_vision from records").fetchone()[0] == 0
+    save_records(c, build_records([row("1", held_by_vision=True)], "t2"))
+    assert c.execute("select held_by_vision from records").fetchone()[0] == 1
+    c.close()
