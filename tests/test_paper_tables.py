@@ -439,3 +439,11 @@ def test_the_finds_outside_the_test_scope_are_counted_by_country_and_their_rate_
     none = pt.outside_test_scope([], {}, ["p"], [S1], REPS, 0)
     assert none["finds"] == 0 and none["comparators"]["p"][S1]["n"] == 0
     assert none["comparators"]["p"][S1]["rate"] is None
+
+
+def test_vision_holds_are_split_by_whether_the_final_label_took_vision_s_genus():
+    finds = [po.Find(k, "o", f"{g} x", g, "", "formal", 3, 1)
+             for k, g in (("1", "Russula"), ("2", "Lactarius"), ("3", "Amanita"), ("4", "A"))]
+    holds = {"1": "russula", "2": "Russula", "3": None, "9": "Boletus"}   # 9 is not scored
+    assert pt.hold_outcomes(finds, holds) == {"holds": 3, "kept_dna_genus": 1,
+                                              "took_vision_genus": 1, "vision_genus_unknown": 1}

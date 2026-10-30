@@ -231,6 +231,7 @@ def check_config(doc: dict) -> None:
                     raise ValueError(f"{fam}/{hid}: unknown comparator {h[k]!r}")
     check_secondary_rows(doc)
     check_test_scope(doc, ids)
+    check_truth_independence(doc, ids)
     check_amends(doc)
 
 
@@ -259,6 +260,109 @@ def check_test_scope(doc: dict, ids: list[str]) -> None:
     if not isinstance(oc, list) or any(x not in ids for x in oc):
         raise ValueError(f"test_scope: outside_comparators names comparators of the config, "
                          f"not {oc!r}")
+
+
+TRUTH_EXCLUDE = ("vision_assisted",)
+SNAPSHOT_COLUMNS = ("kind", "platform", "observation_id", "genus", "created_at")
+SNAPSHOT_KINDS = ("dna_vision", "hold")
+
+
+def check_truth_independence(doc: dict, ids: list[str]) -> None:
+    """The truth_independence block (Steve 30 Oct, -a3): {"exclude": "vision_assisted",
+    "snapshot": {"file", "sha256"} (post_freeze, filled at the cut), "describe_comparators":
+    [ids] (optional; default public-photos), and text: sources, holds, rule}."""
+    ti = doc.get("truth_independence")
+    if ti is None:
+        return
+    if not isinstance(ti, dict):
+        raise ValueError("truth_independence: an object")
+    if ti.get("exclude") not in TRUTH_EXCLUDE:
+        raise ValueError(f"truth_independence: exclude is one of {TRUTH_EXCLUDE}")
+    snap = ti.get("snapshot")
+    if not isinstance(snap, dict) or not all(isinstance(snap.get(k), str) and snap.get(k)
+                                             for k in ("file", "sha256")):
+        raise ValueError("truth_independence: snapshot is {file, sha256} (\"TBD...\" until "
+                         "the cut fills them)")
+    if not is_placeholder(snap["sha256"]) and not re.fullmatch(r"[0-9a-f]{64}", snap["sha256"]):
+        raise ValueError("truth_independence: snapshot sha256 is 64 hex digits")
+    dc = ti.get("describe_comparators", OUTSIDE_SCOPE_COMPARATORS)
+    if not isinstance(dc, list) or any(x not in ids for x in dc):
+        raise ValueError(f"truth_independence: describe_comparators names comparators of the "
+                         f"config, not {dc!r}")
+
+
+def read_truth_snapshot(path: Path, sha256: str) -> dict:
+    """The cut's snapshot of .org's verdict sources (TSV, UTF-8, LF, header SNAPSHOT_COLUMNS;
+    kind dna_vision: an observation_validation_methods row with evidence dna_vision; kind hold:
+    an autovalidation_vision_holds row, genus = the genus Vision held for): {"assisted": {record
+    key}, "holds": {record key: Vision's genus or None}, "rows", "sha256"}. Refused when the
+    file is not the one pinned, or a row is malformed."""
+    from . import sources
+    got = sha256_file(path)
+    if got != sha256:
+        raise FrozenError(f"truth_independence snapshot {Path(path).name}: sha256 {got[:12]} is "
+                          f"not the pinned {sha256[:12]}")
+    lines = Path(path).read_text(encoding="utf-8").split("\n")
+    if tuple(lines[0].split("\t")) != SNAPSHOT_COLUMNS:
+        raise ValueError("truth_independence snapshot: the header is the tab-separated "
+                         + ", ".join(SNAPSHOT_COLUMNS))
+    assisted, holds, n = set(), {}, 0
+    for i, line in enumerate(lines[1:], 2):
+        if not line:
+            continue
+        cells = line.split("\t")
+        if len(cells) != len(SNAPSHOT_COLUMNS):
+            raise ValueError(f"truth_independence snapshot line {i}: {len(cells)} cells")
+        row = dict(zip(SNAPSHOT_COLUMNS, cells))
+        if row["kind"] not in SNAPSHOT_KINDS:
+            raise ValueError(f"truth_independence snapshot line {i}: kind {row['kind']!r}")
+        key = sources.record_key(row["platform"].strip().lower(), row["observation_id"])
+        if row["kind"] == "dna_vision":
+            assisted.add(key)
+        else:
+            holds[key] = holds.get(key) or (row["genus"].strip() or None)
+        n += 1
+    return {"assisted": assisted, "holds": holds, "rows": n, "sha256": got}
+
+
+def truth_snapshot(ti: dict, sealed: bool, log=print) -> dict | None:
+    """The truth_independence block's snapshot, read (read_truth_snapshot), or None while it is
+    a "TBD..." placeholder: allowed on val and drafts (the release's field alone), refused
+    for the sealed test."""
+    snap = ti["snapshot"]
+    if is_placeholder(snap["file"]) or is_placeholder(snap["sha256"]):
+        if sealed:
+            raise FrozenError("truth_independence: the cut's snapshot (snapshot.file and "
+                              "sha256) is not filled; the sealed test needs it")
+        log("[truth independence] no snapshot yet: the release's field alone")
+        return None
+    return read_truth_snapshot(resolve(snap["file"]), snap["sha256"])
+
+
+def truth_split(finds: list, rows: dict[str, dict], snapshot: dict | None
+                ) -> tuple[list, list, dict]:
+    """(the finds kept, the Vision-assisted finds left out, what was counted): a find is
+    Vision-assisted when its release record says so (vision_assisted 1) or the snapshot lists
+    it; a hold (release held_by_vision 1, or a snapshot hold) is kept and listed with Vision's
+    genus when the snapshot gives it."""
+    snap_a = (snapshot or {}).get("assisted", set())
+    snap_h = (snapshot or {}).get("holds", {})
+    kept, out = [], []
+    by_source = {"release": 0, "snapshot": 0, "both": 0}
+    holds: dict = {}
+    for f in finds:
+        r = rows.get(f.key) or {}
+        rel, snap = bool(r.get("vision_assisted")), f.key in snap_a
+        if rel or snap:
+            by_source["both" if rel and snap else "release" if rel else "snapshot"] += 1
+            out.append(f)
+            continue
+        kept.append(f)
+        if r.get("held_by_vision") or f.key in snap_h:
+            holds[f.key] = snap_h.get(f.key)
+    release_has = any("vision_assisted" in r for r in rows.values())
+    return kept, out, {"by_source": by_source, "holds": holds,
+                       "release_carries_fields": release_has}
 
 
 def test_scope_split(finds: list, block: dict | None) -> tuple[list, list]:
@@ -1778,6 +1882,19 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     if scope:
         log(f"[test scope] {len(finds):,} finds in {', '.join(scope['countries'])}; "
             f"{len(outside):,} outside it")
+    # Steve, 30 Oct (-a3): a find whose DNA verdict came with Vision's help leaves the test
+    # right after the scope, like the scope's outsiders (report "truth_independence").
+    ti = config.get("truth_independence")
+    assisted: list = []
+    ti_info, ti_snapshot = None, None
+    if ti:
+        ti_snapshot = truth_snapshot(ti, bool(g["sealed"]), log)
+        finds, assisted, ti_info = truth_split(
+            finds, {str(r["record_key"]): r for r in scored_rows}, ti_snapshot)
+        log(f"[truth independence] {len(assisted):,} Vision-assisted finds left out; "
+            f"{len(ti_info['holds']):,} Vision holds kept")
+    ti_ids = (ti or {}).get("describe_comparators", OUTSIDE_SCOPE_COMPARATORS)
+    assisted_outcomes: dict = {}
     gen = config.get("generalisation") or {}
     recent_after = gen.get("recent_after") or getattr(base, "val_cutoff", None)
     pre = gen.get("pretraining")
@@ -1878,7 +1995,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             log(f"[{comp['id']}] {b} / {comp['method']}: {len(scored):,} finds with vectors, "
                 f"{len(ref):,} reference records")
             truths = {f.key: {"species": f.species, "genus": f.genus, "family": f.family}
-                      for f in finds + outside}
+                      for f in finds + outside + assisted}
             if comp.get("photos") == "first":            # E19: the first photo only
                 from dataclasses import replace
                 scored = [replace(r, photo_rows=r.photo_rows[:1]) for r in scored]
@@ -1920,6 +2037,9 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         if outside and comp["id"] in outside_ids:
             outside_outcomes[comp["id"]] = outcomes_for(comp, outside, answers, conn,
                                                         keys[comp["id"]])[0]
+        if assisted and comp["id"] in ti_ids:
+            assisted_outcomes[comp["id"]] = outcomes_for(comp, assisted, answers, conn,
+                                                         keys[comp["id"]])[0]
         top1[comp["id"]] = top_answers(comp, answers)
         if comp["kind"] == "inat" and comp.get("calibration_from_score", True):
             calib[comp["id"]] = {str(line["record_key"]): po.inat_confidence(
@@ -2019,6 +2139,18 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             "outside_test_scope": pt.outside_test_scope(
                 outside, outside_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS, reps, seed)}}
            if scope else {}),
+        **({"truth_independence": {
+            "rule": ti.get("rule"),
+            "snapshot": ({"file": Path(ti["snapshot"]["file"]).name,
+                          "sha256": ti_snapshot["sha256"], "rows": ti_snapshot["rows"]}
+                         if ti_snapshot else None),
+            "release_carries_fields": ti_info["release_carries_fields"],
+            "excluded": {**pt.described(assisted, assisted_outcomes, ti_ids,
+                                        OUTSIDE_SCOPE_CELLS, reps, seed),
+                         "by_source": ti_info["by_source"]},
+            "holds_kept": {**pt.hold_outcomes(finds, ti_info["holds"]),
+                           "vision_genus_from": "snapshot" if ti_snapshot else None}}}
+           if ti else {}),
         "standard": pt.all_standard(finds, outcomes, reps, seed, finds_of=finds_of,
                                     **per_species_kw),
         "references": {r: {"records": len(ref_rows_of[r]),
@@ -2302,6 +2434,33 @@ def format_report(report: dict, config: dict) -> str:
                              + " | " + ("-" if not ci else
                                         f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
         lines.append("")
+    if report.get("truth_independence"):
+        ti = report["truth_independence"]
+        e, h = ti["excluded"], ti["holds_kept"]
+        lines += ["## Vision-assisted (excluded; descriptive, never tested)", "",
+                  f"Finds whose DNA verdict came with MycoMap Vision's agreement leave every "
+                  f"family, slice, row and table: {e['finds']:,} finds ({e['primary']:,} in the "
+                  f"primary scope); by source: release field {e['by_source']['release']:,}, "
+                  f"snapshot {e['by_source']['snapshot']:,}, both {e['by_source']['both']:,}. "
+                  + (f"Snapshot {ti['snapshot']['file']} (sha256 {ti['snapshot']['sha256'][:12]}, "
+                     f"{ti['snapshot']['rows']:,} rows)." if ti["snapshot"] else
+                     "No snapshot (the release's field alone).")
+                  + ("" if ti["release_carries_fields"] else
+                     " The scored release carries no vision_assisted field."), "",
+                  "| comparator | cell | n | rate | 95% CI |", "|---|---|---|---|---|"]
+        for cid, cells in e["comparators"].items():
+            for cell, r in cells.items():
+                ci = r.get("ci95")
+                lines.append(f"| {cid} | {cell} | {r['n']:,} | "
+                             + ("-" if r["rate"] is None else f"{100 * r['rate']:.1f}%")
+                             + " | " + ("-" if not ci else
+                                        f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
+        lines += ["", "## Vision holds (kept)", "",
+                  f"{h['holds']:,} kept finds were held for a person because Vision was "
+                  f"confident of another genus: the final label kept the DNA genus "
+                  f"{h['kept_dna_genus']:,}, took Vision's genus {h['took_vision_genus']:,}, "
+                  f"Vision's genus not known {h['vision_genus_unknown']:,}"
+                  + ("." if h["vision_genus_from"] else " (no snapshot: the count only)."), ""]
     if report.get("secondary_rows"):
         lines += ["## Secondary rows (descriptive, outside Holm)", "",
                   "| row | finds | share | unknown | hypothesis | n | difference | p |",

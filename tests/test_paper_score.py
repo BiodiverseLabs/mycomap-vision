@@ -2375,3 +2375,116 @@ def test_a_bad_test_scope_is_refused(tmp_path, change, refused):
     change(cfg["test_scope"])
     with pytest.raises(ValueError, match=refused):
         paper_score.check_config(cfg)
+
+
+# --- -a3 (Steve 30 Oct): Vision-assisted finds leave the test; Vision holds stay in -------------
+
+def _snapshot(tmp_path, rows, name="truth-snapshot.tsv"):
+    p = tmp_path / name
+    p.write_text("\t".join(paper_score.SNAPSHOT_COLUMNS) + "\n"
+                 + "".join("\t".join(r) + "\n" for r in rows), encoding="utf-8", newline="\n")
+    return p, paper_score.sha256_file(p)
+
+
+def _truth(path="TBD: at the cut", sha="TBD: at the cut", **kw):
+    return {"exclude": "vision_assisted", "rule": "Steve 30 Oct",
+            "snapshot": {"file": str(path), "sha256": sha}, **kw}
+
+
+def _find(key, genus="A"):
+    return po.Find(key, "o" + key, f"{genus} x", genus, "", "formal", 5, 1)
+
+
+def test_a_find_is_vision_assisted_by_its_release_field_or_the_snapshot_and_holds_stay():
+    finds = [_find("1"), _find("2"), _find("3"), _find("4"), _find("5")]
+    rows = {"1": {"vision_assisted": 1}, "2": {"vision_assisted": 0},
+            "3": {"vision_assisted": 0, "held_by_vision": 1}, "4": {}, "5": {}}
+    snap = {"assisted": {"1", "4"}, "holds": {"2": "Russula"}}
+    kept, out, info = paper_score.truth_split(finds, rows, snap)
+    assert [f.key for f in kept] == ["2", "3", "5"] and [f.key for f in out] == ["1", "4"]
+    assert info["by_source"] == {"release": 0, "snapshot": 1, "both": 1}
+    assert info["holds"] == {"2": "Russula", "3": None}
+    kept, out, info = paper_score.truth_split(finds, rows, None)       # the field alone
+    assert [f.key for f in out] == ["1"] and info["by_source"]["release"] == 1
+    assert info["release_carries_fields"]
+    assert not paper_score.truth_split(finds, {}, None)[2]["release_carries_fields"]
+
+
+def test_the_snapshot_is_read_by_record_key_and_refused_when_not_the_pinned_file(tmp_path):
+    p, sha = _snapshot(tmp_path, [("dna_vision", "inat", "4", "", "2026-10-29T03:18:10Z"),
+                                  ("hold", "mo", "7", "Amanita", "2026-10-25T01:00:00Z"),
+                                  ("hold", "inat", "8", "", "2026-10-25T01:00:00Z")])
+    got = paper_score.read_truth_snapshot(p, sha)
+    assert got["assisted"] == {"4"} and got["holds"] == {"mo:7": "Amanita", "8": None}
+    assert got["rows"] == 3 and got["sha256"] == sha
+    with pytest.raises(paper_score.FrozenError, match="not the pinned"):
+        paper_score.read_truth_snapshot(p, "0" * 64)
+    bad, bsha = _snapshot(tmp_path, [("waiver", "inat", "4", "", "x")], "bad.tsv")
+    with pytest.raises(ValueError, match="kind"):
+        paper_score.read_truth_snapshot(bad, bsha)
+    hdr = tmp_path / "hdr.tsv"
+    hdr.write_text("platform\tobservation_id\n", encoding="utf-8", newline="\n")
+    with pytest.raises(ValueError, match="header"):
+        paper_score.read_truth_snapshot(hdr, paper_score.sha256_file(hdr))
+
+
+def test_an_unfilled_snapshot_is_refused_for_the_sealed_test_only():
+    assert paper_score.truth_snapshot(_truth(), sealed=False, log=lambda *a: None) is None
+    with pytest.raises(paper_score.FrozenError, match="not filled"):
+        paper_score.truth_snapshot(_truth(), sealed=True)
+
+
+def test_vision_assisted_finds_leave_every_family_and_are_described_and_holds_are_counted(
+        world, tmp_path):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    cfg["secondary_rows"] = {"for": ["A1s", "H1a"], "rows": [{"id": "all-finds", "where": {}}]}
+    p, sha = _snapshot(tmp_path, [("dna_vision", "inat", "6", "", "2026-10-29T03:18:10Z"),
+                                  ("hold", "inat", "5", "A", "2026-10-25T01:00:00Z")])
+    cfg["truth_independence"] = _truth(p, sha, describe_comparators=["vision-photos"])
+    paper_score.check_config(cfg)
+    rep = run(world, tmp_path, "val", cfg)
+    assert rep["finds"]["scored"] == 1
+    assert rep["hypotheses"]["A"]["A1s"]["n"] == 1 and rep["hypotheses"]["C"]["H1a"]["n"] == 1
+    assert rep["secondary_rows"]["all-finds"]["finds"] == 1
+    std = rep["standard"]["comparators"]["vision-photos"]["primary"]["all"]
+    assert std["table"]["species strict"]["top1"]["n"] == 1
+    ti = rep["truth_independence"]
+    assert ti["snapshot"] == {"file": "truth-snapshot.tsv", "sha256": sha, "rows": 2}
+    e = ti["excluded"]
+    assert (e["finds"], e["by_source"]) == (1, {"release": 0, "snapshot": 1, "both": 0})
+    r = e["comparators"]["vision-photos"]["species_strict@1"]
+    assert (r["n"], r["rate"]) == (1, 1.0) and "p" not in r                # never tested
+    h = ti["holds_kept"]
+    assert (h["holds"], h["took_vision_genus"], h["kept_dna_genus"]) == (1, 1, 0)
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "## Vision-assisted (excluded; descriptive, never tested)" in md
+    assert "## Vision holds (kept)" in md
+
+
+def test_with_no_truth_block_or_nobody_assisted_the_scores_are_unchanged(world, tmp_path):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    plain = run(world, tmp_path, "val", cfg)
+    assert "truth_independence" not in plain
+    cfg["truth_independence"] = _truth()                 # no snapshot yet, no field set
+    same = run(world, tmp_path, "val", cfg)
+    for k in ("finds", "standard", "hypotheses", "slices", "calibration", "errors", "inputs"):
+        assert json.dumps(same[k], sort_keys=True, default=str) == \
+            json.dumps(plain[k], sort_keys=True, default=str), k
+    assert same["truth_independence"]["excluded"]["finds"] == 0
+    assert same["truth_independence"]["snapshot"] is None
+
+
+@pytest.mark.parametrize("change, refused", [
+    (lambda t: t.update(exclude="held_by_vision"), "exclude is one of"),
+    (lambda t: t.pop("snapshot"), "snapshot is"),
+    (lambda t: t.update(snapshot={"file": "x.tsv"}), "snapshot is"),
+    (lambda t: t.update(snapshot={"file": "x.tsv", "sha256": "abc"}), "64 hex"),
+    (lambda t: t.update(describe_comparators=["nope"]), "describe_comparators"),
+])
+def test_a_bad_truth_independence_block_is_refused(tmp_path, change, refused):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["truth_independence"] = _truth(describe_comparators=["vision-photos"])
+    paper_score.check_config(cfg)
+    change(cfg["truth_independence"])
+    with pytest.raises(ValueError, match=refused):
+        paper_score.check_config(cfg)

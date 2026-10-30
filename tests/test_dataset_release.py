@@ -750,3 +750,37 @@ def test_the_zenodo_bundle_lists_cc_photos_with_their_licences_and_hashes(world)
     assert not any(f["path"] == dr.PRIVATE_DB for f in files)
     blob = b"".join(p.read_bytes() for p in z.iterdir())
     assert b"45.123456" not in blob and b"45123456" not in blob
+
+
+def _truth_fields(world, rid):
+    rel = dr.load_release(rid, world["root"], allow_draft=True)
+    try:
+        return {r["record_key"]: (r["vision_assisted"], r["held_by_vision"]) for r in rel.db.execute(
+            "select record_key, vision_assisted, held_by_vision from records")}, rel.release_hash
+    finally:
+        rel.close()
+
+
+def test_a_release_carries_vision_assisted_and_held_by_vision_and_hashes_them(world):
+    # -a3 (Steve 30 Oct): the green feed's DNA + Vision verdict and Vision's holds travel with
+    # each record into the release, so a v1-test find's truth independence is part of its hash
+    c = world["conn"]
+    if "held_by_vision" in {r[1] for r in c.execute("pragma table_info(records)")}:
+        c.execute("alter table records drop column held_by_vision")   # a manifest before it
+    c.execute("update records set vision_assisted = 1 where observation_id = '1'")
+    c.commit()
+    c.execute("pragma wal_checkpoint(truncate)")
+    fields, before = _truth_fields(world, build(world)["id"])
+    assert fields["1"] == (1, None) and fields["2"] == (0, None)   # no held_by_vision column yet
+    c.execute("alter table records add column held_by_vision integer not null default 0")
+    c.execute("update records set held_by_vision = 1 where observation_id = '2'")
+    c.commit()
+    c.execute("pragma wal_checkpoint(truncate)")
+    fields, with_holds = _truth_fields(world, build(world)["id"])
+    assert fields["1"] == (1, 0) and fields["2"] == (0, 1)
+    c.execute("update records set vision_assisted = 0 where observation_id = '1'")
+    c.commit()
+    c.execute("pragma wal_checkpoint(truncate)")
+    fields, flipped = _truth_fields(world, build(world)["id"])
+    assert fields["1"] == (0, 0)
+    assert len({before, with_holds, flipped}) == 3
