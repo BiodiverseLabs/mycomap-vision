@@ -6,8 +6,8 @@
 // Photo rule: a photo the server sends as "hidden" never gets an image URL here, and an admin's
 // "private" photo is only ever Vision's own same-origin copy, shown by a plain <img>.
 
-import type { PhotoFlag, PhotoReviewDecisionBody, PhotoBandFilter, PhotoReviewSort, PhotoReviewTab, ReviewPhoto,
-              ReviewRecord } from "./api";
+import type { FeedbackStatus, PhotoFlag, PhotoOutcome, PhotoOutcomeFilter, PhotoReviewDecisionBody, PhotoBandFilter,
+              PhotoReviewSort, PhotoReviewTab, ReviewPhoto, ReviewRecord } from "./api";
 
 export const PHOTO_REVIEW_TYPE = "non_specimen_photo";
 export const REVIEW_PAGE_SIZE = 10;
@@ -29,6 +29,36 @@ export function bandCount(data: { tabs?: { code: string; bands?: Record<string, 
   const n = tab === "all"
     ? data.tabs.reduce((a, t) => a + (t.bands?.[band] ?? 0), 0)
     : data.tabs.find((t) => t.code === tab)?.bands?.[band];
+  return n == null ? "" : ` (${n.toLocaleString("en-US")})`;
+}
+
+/** The Outcome filter (Steve, 2026-10-30: "filter for things that were originally flagged but
+ *  then changed to included or another category"). "Originally flagged" is the photo's flag for
+ *  the tab from the tagger or the seeded queue, before any person's decision
+ *  (photo_review.outcome_of). Each has a title: the plain sentence the select's hover shows. */
+export const OUTCOME_FILTERS: { code: PhotoOutcomeFilter; label: string; title: string }[] = [
+  { code: "all", label: "All outcomes", title: "Every photo, whatever was decided" },
+  { code: "as_flagged", label: "Kept as flagged",
+    title: "Flagged for this tab, and the person left it out for this tab's reason" },
+  { code: "included", label: "Changed to included",
+    title: "Flagged for this tab, but the person kept the photo" },
+  { code: "moved", label: "Moved to another category",
+    title: "Flagged for this tab, but the person left it out for a different reason" },
+  { code: "not_flagged", label: "Not flagged for this tab",
+    title: "Never flagged for this tab: here only because a person left it out for this tab's reason" },
+];
+
+/** The outcome the lists are asked for: the one picked, in Decided only. Open photos have no
+ *  outcome yet, so in Open the filter rests at "All outcomes" (the pick comes back in Decided). */
+export const outcomeInUse = (status: FeedbackStatus, outcome: PhotoOutcomeFilter): PhotoOutcomeFilter =>
+  status === "decided" ? outcome : "all";
+
+/** " (n)" after an outcome's name: how many the list would show with it picked (photos in
+ *  Summary, records in Full), when the counts are loaded; nothing for "All outcomes". */
+export function outcomeCount(counts: Partial<Record<PhotoOutcome, number>> | null | undefined,
+                             code: PhotoOutcomeFilter): string {
+  if (code === "all" || !counts) return "";
+  const n = counts[code];
   return n == null ? "" : ` (${n.toLocaleString("en-US")})`;
 }
 

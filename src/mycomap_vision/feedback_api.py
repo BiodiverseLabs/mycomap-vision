@@ -518,6 +518,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                         "suggested_decision": pr.suggested_decision(f["flags"]) if f else None,
                         "band": pr.band_of(f["flags"]) if f else None,
                         "status": f["status"] if f else None,
+                        "outcome": f.get("outcome") if f else None,
                         "decision": f["decision"] if f else None})
         out = {k: v for k, v in rec.items() if k not in ("flagged", "in_tab")} | {"photos": out}
         return fp.read_only(out) if ro else out
@@ -525,21 +526,24 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.get("/api/feedback/photo-review/flagged")
     def fb_photo_review_flagged(request: Request, tab: str = "all", status: str = "open",
                                 sort: str = "p", q: str = "", offset: int = 0, limit: int = 150,
-                                band: str = "all"):
+                                band: str = "all", outcome: str = "all"):
         """The Summary view (Steve, 2026-10-21): the queue's flagged photos in the tab, one tile
         each, paged (at most SUMMARY_MAX_PAGE), with the record's name and link, the flags, the
         suggested reason, and a small thumbnail: public photos straight from their source, others
-        from /api/feedback/photo/…?size=grid (private, no-store)."""
+        from /api/feedback/photo/…?size=grid (private, no-store). `outcome` keeps the photos whose
+        flag in the tab came to it (photo_review.outcome_of); "outcomes" counts the photos each
+        would keep (Steve, 2026-10-30)."""
         _, projects, _, ro = viewer(request)
+        counts: dict = {}
         try:
             tiles = pr.flagged_tiles(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, q,
-                                     band)
+                                     band, outcome, counts)
         except fb.FeedbackError as e:
             bad(e)
         start = max(0, offset)
         page = tiles[start:start + min(max(1, limit), SUMMARY_MAX_PAGE)]
         out = photo_tiles(page, ro)
-        return {"total": len(tiles), "offset": start, "tiles": out,
+        return {"total": len(tiles), "offset": start, "tiles": out, "outcomes": counts,
                 "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
 
     def photo_tiles(page: list[dict], ro: bool, thumb: str = "grid") -> list[dict]:
@@ -640,15 +644,15 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.get("/api/feedback/photo-review")
     def fb_photo_review(request: Request, tab: str = "all", status: str = "open",
                         sort: str = "p", min_flagged: int = 1, q: str = "", offset: int = 0,
-                        limit: int = 10, band: str = "all"):
+                        limit: int = 10, band: str = "all", outcome: str = "all"):
         _, projects, _, ro = viewer(request)
         try:
             out = pr.cards(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, min_flagged,
-                           q, band)
+                           q, band, outcome)
         except fb.FeedbackError as e:
             bad(e)
         page = out["records"][max(0, offset):max(0, offset) + min(max(1, limit), 50)]
-        return {"tabs": out["tabs"], "total": out["total"], "reasons": [
+        return {"tabs": out["tabs"], "total": out["total"], "outcomes": out["outcomes"], "reasons": [
                     {"code": c, "label": t} for c, t in pr.REASONS],
                 "records": [card(r, projects is None, ro) for r in page]}
 
