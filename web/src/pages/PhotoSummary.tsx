@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Lock, RotateCcw, X } from "lucide-react";
 import { BODY, BTN, Ext, FIELD, INK, Placeholder, QuickReasons } from "@/components/ReviewPhotos";
-import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoBandFilter, type PhotoReviewSort,
-         type PhotoReviewTab } from "@/lib/api";
+import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoBandFilter,
+         type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewSort, type PhotoReviewTab } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { QUICK_REASONS, quickReasons, tileImage, type Choice } from "@/lib/photoReview";
 import { AUTOSAVE_MS, autoDue, batchBody, beginSend, decidedText, discardChanges, freshPage, gridColumns, gridKey,
@@ -29,10 +29,14 @@ import { SaveBar } from "@/components/ReviewSave";
 
 type Reasons = FlaggedPage["reasons"];
 
-export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp, tileSize, pageSize = SUMMARY_PAGE_SIZE, onTotal, autosave, onPending, canLeave,
-                              discard }: {
-  tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; band?: PhotoBandFilter; help: boolean;
+export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "all", help, onHelp, tileSize, pageSize = SUMMARY_PAGE_SIZE, onTotal,
+                              onOutcomes, autosave, onPending, canLeave, discard }: {
+  tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; band?: PhotoBandFilter;
+  /** The Outcome filter (lib/photoReview.ts OUTCOME_FILTERS). */
+  outcome?: PhotoOutcomeFilter; help: boolean;
   onHelp: () => void; tileSize: TileSize; pageSize?: number; onTotal: (n: number | null) => void;
+  /** The photos each outcome would show, for the Outcome filter's counts. */
+  onOutcomes?: (c: Record<PhotoOutcome, number> | null) => void;
   /** Auto-save on: saves as the reviewer goes. Off: only Save and Save page write. */
   autosave: boolean;
   /** The unsaved changes on the page (always 0 with Auto-save on). */
@@ -66,8 +70,8 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
   }, []);
 
   const list = useQuery({
-    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, pageSize, offset, gen],
-    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, offset, limit: pageSize }),
+    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, outcome, pageSize, offset, gen],
+    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, outcome, offset, limit: pageSize }),
     placeholderData: (prev) => prev,
     refetchOnWindowFocus: false,
     staleTime: Infinity,
@@ -80,8 +84,10 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
     for (const t of fresh.tiles) tilesRef.current.set(t.item_id, t);
     updateStates((s) => freshPage(s, fresh.tiles.map((t) => t.item_id)));
     onTotal(fresh.total);
-  }, [fresh, onTotal, updateStates]);
+    onOutcomes?.(fresh.outcomes ?? null);
+  }, [fresh, onTotal, onOutcomes, updateStates]);
   useEffect(() => () => onTotal(null), [onTotal]);
+  useEffect(() => () => onOutcomes?.(null), [onOutcomes]);
 
   // --- saving ---------------------------------------------------------------------------------
   const sendRef = useRef<(due: PhotoBatchDecision[], o?: { keepalive?: boolean }) => void>(() => {});
@@ -196,16 +202,16 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
   const loaded = useCallback((id: number) => updateStates((s) => markLoaded(s, id)), [updateStates]);
 
   // A filter change (or a new page size) starts at the first page; the page shown is saved first.
-  const filters = useRef({ tab, status, sort, q, band, pageSize });
+  const filters = useRef({ tab, status, sort, q, band, outcome, pageSize });
   useEffect(() => {
     const f = filters.current;
     if (f.tab === tab && f.status === status && f.sort === sort && f.q === q && f.band === band
-        && f.pageSize === pageSize) return;
-    filters.current = { tab, status, sort, q, band, pageSize };
+        && f.outcome === outcome && f.pageSize === pageSize) return;
+    filters.current = { tab, status, sort, q, band, outcome, pageSize };
     flushRef.current();
     setOffset(0);
     setGen((g) => g + 1);
-  }, [tab, status, sort, q, band, pageSize]);
+  }, [tab, status, sort, q, band, outcome, pageSize]);
 
   const go = (next: number) => {
     if (!canLeave()) return;
@@ -264,7 +270,7 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", help, onHelp,
         </p>
       )}
       {fresh && tiles.length > 0 && (
-        <Grid key={`${tab}|${status}|${sort}|${q}|${band}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
+        <Grid key={`${tab}|${status}|${sort}|${q}|${band}|${outcome}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
               marks={marks} states={states} tileSize={tileSize} help={help} onHelp={onHelp} manual={!autosave}
               onFlip={flip} onReason={pickReason} onQuick={quick} onRetry={retryTile} onSave={saveTile} onSeen={seen} onLoaded={loaded} />
       )}

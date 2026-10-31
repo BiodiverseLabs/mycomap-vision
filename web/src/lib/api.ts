@@ -747,6 +747,11 @@ export type PhotoReviewTab = "micrograph" | "slip" | "habitat" | "people" | "gat
 export type PhotoBand = "high" | "medium" | "low";
 export type PhotoBandFilter = PhotoBand | "all";
 export type PhotoReviewSort = "p" | "p_asc" | "flagged";
+/** What became of a decided photo's flag in the tab (Steve, 2026-10-30; photo_review.outcome_of):
+ *  left out for the tab's reason, kept, left out for another reason, or in the tab only by the
+ *  reason a person gave (never flagged for it). */
+export type PhotoOutcome = "as_flagged" | "included" | "moved" | "not_flagged";
+export type PhotoOutcomeFilter = PhotoOutcome | "all";
 
 /** Why a rule flagged a photo: its tab, the probe or view, its p, and how strongly it counts. */
 export interface PhotoFlag {
@@ -780,6 +785,8 @@ export interface ReviewPhoto {
   /** Tagger v2's band for the photo, when it has a v2 flag. */
   band?: PhotoBand | null;
   status: FeedbackStatus | null;
+  /** What became of its flag in the tab shown; null while open. Absent from older servers. */
+  outcome?: PhotoOutcome | null;
   decision: { decision: string; reason: string | null; by: string | null } | null;
 }
 
@@ -806,6 +813,8 @@ export interface PhotoReviewTabCount {
 export interface PhotoReviewPage {
   tabs: PhotoReviewTabCount[];
   total: number;
+  /** The records each outcome would keep, every other filter as asked. Absent from older servers. */
+  outcomes?: Record<PhotoOutcome, number>;
   reasons: { code: string; label: string }[];
   records: ReviewRecord[];
 }
@@ -841,6 +850,8 @@ export interface FlaggedTile {
   /** Tagger v2's band for the photo, when it has a v2 flag. */
   band?: PhotoBand | null;
   status: FeedbackStatus;
+  /** What became of its flag in the tab shown; null while open. Absent from older servers. */
+  outcome?: PhotoOutcome | null;
   decision: { decision: string; reason: string | null } | null;
   shown: "public" | "private" | "hidden";
   thumb?: string;
@@ -856,6 +867,8 @@ export interface FlaggedTile {
 export interface FlaggedPage {
   total: number;
   offset: number;
+  /** The photos each outcome would keep, every other filter as asked. Absent from older servers. */
+  outcomes?: Record<PhotoOutcome, number>;
   reasons: { code: string; label: string }[];
   tiles: FlaggedTile[];
 }
@@ -1020,6 +1033,31 @@ export interface LabelReviewDecisionBody {
 export const feedbackChangesUrl = (applies: "org" | "vision", all = false) =>
   `/api/feedback/changes.tsv?applies=${applies}&all=${all}`;
 
+/** The photo review's filters, as both of its lists take them. */
+export interface PhotoReviewQuery {
+  tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort; q?: string; offset?: number;
+  limit?: number; band?: PhotoBandFilter; outcome?: PhotoOutcomeFilter;
+}
+
+/** The record view's query string (GET /api/feedback/photo-review). `outcome` is sent only when
+ *  one is picked, so the other filters' queries are as they were. */
+export function photoReviewQuery(p: PhotoReviewQuery & { min_flagged?: number }): string {
+  const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
+                                   min_flagged: String(p.min_flagged ?? 1), band: p.band ?? "all",
+                                   offset: String(p.offset ?? 0), limit: String(p.limit ?? 10) });
+  if (p.outcome && p.outcome !== "all") qs.set("outcome", p.outcome);
+  return qs.toString();
+}
+
+/** The Summary's query string (GET /api/feedback/photo-review/flagged); `outcome` as above. */
+export function photoFlaggedQuery(p: PhotoReviewQuery): string {
+  const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
+                                   band: p.band ?? "all",
+                                   offset: String(p.offset ?? 0), limit: String(p.limit ?? 150) });
+  if (p.outcome && p.outcome !== "all") qs.set("outcome", p.outcome);
+  return qs.toString();
+}
+
 const fbItem = (id: number) => `/api/feedback/items/${encodeURIComponent(String(id))}`;
 
 export const feedbackApi = {
@@ -1045,25 +1083,14 @@ export const feedbackApi = {
   reveal: (id: number) => postJson<Revealed>(`${fbItem(id)}/reveal`),
   refresh: (id: number) =>
     postJson<{ item: FeedbackItemDetail; refreshed: RefreshedRecord[] }>(`${fbItem(id)}/refresh`),
-  photoReview: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort;
-                     min_flagged?: number; q?: string; offset?: number; limit?: number;
-                     band?: PhotoBandFilter }) => {
-    const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
-                                     min_flagged: String(p.min_flagged ?? 1), band: p.band ?? "all",
-                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 10) });
-    return getJson<PhotoReviewPage>(`/api/feedback/photo-review?${qs}`);
-  },
+  photoReview: (p: PhotoReviewQuery & { min_flagged?: number }) =>
+    getJson<PhotoReviewPage>(`/api/feedback/photo-review?${photoReviewQuery(p)}`),
   photoReviewDecide: (recordKey: string, body: PhotoReviewDecisionBody) =>
     postJson<PhotoReviewDecided>(
       `/api/feedback/photo-review/${encodeURIComponent(recordKey)}/decision`, body),
   /** The Summary view's page of flagged photos (at most 200). */
-  photoReviewFlagged: (p: { tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort; q?: string;
-                            offset?: number; limit?: number; band?: PhotoBandFilter }) => {
-    const qs = new URLSearchParams({ tab: p.tab, status: p.status, sort: p.sort ?? "p", q: p.q ?? "",
-                                     band: p.band ?? "all",
-                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 150) });
-    return getJson<FlaggedPage>(`/api/feedback/photo-review/flagged?${qs}`);
-  },
+  photoReviewFlagged: (p: PhotoReviewQuery) =>
+    getJson<FlaggedPage>(`/api/feedback/photo-review/flagged?${photoFlaggedQuery(p)}`),
   /** Keep / exclude decisions on photo items, written whole or not at all (a 400 says why).
    *  `keepalive`: sent as the page is hidden or left. */
   photoReviewBatch: (body: PhotoBatchBody, opts: { keepalive?: boolean } = {}) =>
