@@ -291,6 +291,17 @@ off. The proposals come from a GPU batch job on the laptop (`mv feedback slip-cr
 SAM: about 1.3 s a photo there, 30–55 s on this box's CPU), seeded here with
 `mv feedback seed --slip-crops <tsv>`.
 
+The queue's **Priority: last photo** tranche (Steve, 2026-11-01) is a list seeded on its own:
+the slip photos of v1 train/val records that every saved photo exclusion leaves with no photo,
+ranked slip-only records first, then records with other exclusions too, and within each the
+species that would leave training entirely first (`recovered_labels.rank_priority`). Seed it
+after any crops it needs, from a store backup taken just before: `mv feedback seed --slip-crops
+<tsv> --priority <list.tsv>`, then `mv feedback seal-check`. The list REPLACES the tranche (an
+empty list clears it) and only marks items (table `recovered_priority`): no item or decision
+changes, and the paper's exports are byte-identical with or without it. The laptop job can be
+limited to the list's photos with `mv feedback slip-crops --photos <list.tsv>`. The page opens
+on the tranche while it has open photos.
+
 The release is never written. The server works on a layer beside it,
 `/srv/mycomap-vision/state/nightly/<release id>/` (a copy of the release's
 manifest, the nightly shards and iNat's answers). A new release starts a fresh

@@ -601,7 +601,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                             sort: str = "riskiest", q: str = "", offset: int = 0,
                             limit: int = 30):
         """Recovered labels (Steve, 2026-10-26): one tile per excluded slip photo with the crop
-        boxes the detector proposes, paged (at most 100), smallest specimen first. The photo
+        boxes the detector proposes, paged (at most 100), smallest specimen first, or the
+        priority list's order (tranche "priority": records that would lose every photo). The photo
         as this viewer may see it (the photo rule); a read-only viewer gets the boxes on the
         original only, and the page shows them no enlarged crop. "still_excluded" False: a
         person has since kept the photo, or left it out for another reason, so its crops
@@ -609,13 +610,17 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         _, projects, _, ro = viewer(request)
         items = items_cached(rl.ITEM_TYPE, projects)
         slips = rl.photo_reasons(items_cached(pr.ITEM_TYPE, None))
+        # The priority tranche (Steve, 2026-11-01): photos of records that would otherwise lose
+        # every photo, marked by their own list (recovered_labels.seed_priority).
+        prio = cached(("recovered-priority",), lambda: rl.priorities(store))
         try:
-            tiles = rl.tiles(items, tranche, status, sort, q, slips)
+            tiles = rl.tiles(items, tranche, status, sort, q, slips, prio)
         except fb.FeedbackError as e:
             bad(e)
         start = max(0, offset)
         page = tiles[start:start + min(max(1, limit), 100)]
         return {"total": len(tiles), "offset": start, "tranches": rl.tranche_counts(items),
+                "priority": rl.priority_counts(items, prio),
                 "reasons": [{"code": c, "label": t} for c, t in pr.REASONS],
                 "tiles": photo_tiles(page, ro, thumb="full")}
 

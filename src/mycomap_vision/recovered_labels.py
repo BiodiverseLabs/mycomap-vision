@@ -57,7 +57,32 @@ TRANCHES: tuple[tuple[str, str, float | None, float | None], ...] = (
     ("rule", "Earlier rules (no tagger p)", None, None),
 )
 TRANCHE_CODES = tuple(c for c, *_ in TRANCHES)
-SORTS = ("riskiest", "largest", "newest")
+SORTS = ("riskiest", "largest", "newest", "priority")
+
+# The priority tranche (Steve, 2026-11-01: "could we add these to a priority tranche in the
+# recovered labels section, so those get the crop application review first?"): the slip photos
+# of v1 train/val records that every person-saved photo exclusion leaves with NO photo. It is
+# not a slip band: a photo keeps its band and is also marked, by a list seeded on its own
+# (`mv feedback seed --priority`, table recovered_priority), never by changing an item or a
+# decision. Within it, records whose only exclusions are slips first, then records with slips
+# and other exclusions (habitat, dried, micrograph, UV, ...); within each, records of a species
+# that would otherwise leave training entirely first, then the species with the fewest train
+# records left.
+PRIORITY = "priority"
+PRIORITY_LABEL = "Priority: last photo"
+PRIORITY_GROUPS: tuple[tuple[str, str], ...] = (
+    ("slip_only", "only slips excluded"),
+    ("slip_and_other", "slips and other photos excluded"),
+)
+PRIORITY_GROUP_CODES = tuple(c for c, _ in PRIORITY_GROUPS)
+PRIORITY_COLUMNS = ("rank", "photo_key", "record_key", "group", "lost_species", "label",
+                    "train_left", "split", "reasons")
+PRIORITY_SCHEMA = """
+create table if not exists recovered_priority (
+  subject text primary key, rank integer not null, grp text not null,
+  lost integer not null default 0, record_key text not null, seed text not null, at real not null
+)
+"""
 # The tagger whose slip p places a photo: R10 (the HF-retrained probe, 2026-10-26).
 TAGGER = "R10"
 
@@ -269,15 +294,19 @@ def photo_reasons(photo_items: list[dict]) -> dict[str, str]:
 
 
 def tiles(items: list[dict], tranche: str = "all", status: str = "open", sort: str = "riskiest",
-          query: str = "", slips: set[str] | dict | None = None) -> list[dict]:
+          query: str = "", slips: set[str] | dict | None = None,
+          priority: dict[str, dict] | None = None) -> list[dict]:
     """The queue's photos, one tile each with its crops (each with its box now, the detector's
     "proposed" box, and the decision it carries). Sorted riskiest first (the smallest
-    specimen: where false finds sit), or largest, or newest. With `slips` (photo key -> its
-    exclusion reason, photo_reasons; or the set of photos left out as slips), each tile says
-    its "reason", and a photo no longer left out as a slip is shown as such
-    ("still_excluded": False): its crops count for nothing."""
-    if tranche != "all" and tranche not in TRANCHE_CODES:
-        raise fb.FeedbackError(f"tranche is all or one of {', '.join(TRANCHE_CODES)}")
+    specimen: where false finds sit), or largest, or newest, or in the priority list's order
+    (its photos first, the rest riskiest first). With `slips` (photo key -> its exclusion
+    reason, photo_reasons; or the set of photos left out as slips), each tile says its
+    "reason", and a photo no longer left out as a slip is shown as such ("still_excluded":
+    False): its crops count for nothing. `priority` (priorities) marks each tile of the
+    priority list ("priority": {rank, group, lost}); tranche "priority" is only those."""
+    if tranche not in ("all", PRIORITY) and tranche not in TRANCHE_CODES:
+        raise fb.FeedbackError(f"tranche is all, {PRIORITY} or one of {', '.join(TRANCHE_CODES)}")
+    priority = priority or {}
     if status not in ("open", "decided"):
         raise fb.FeedbackError("status is open or decided")
     if sort not in SORTS:
@@ -288,7 +317,10 @@ def tiles(items: list[dict], tranche: str = "all", status: str = "open", sort: s
         if it["status"] != status:
             continue
         ev = it.get("evidence") or {}
-        if tranche != "all" and ev.get("tranche") != tranche:
+        if tranche == PRIORITY:
+            if it["subject"] not in priority:
+                continue
+        elif tranche != "all" and ev.get("tranche") != tranche:
             continue
         key = pr.record_of_item(it)
         if key is None:
@@ -318,11 +350,15 @@ def tiles(items: list[dict], tranche: str = "all", status: str = "open", sort: s
                     "height": ev.get("height"), "specimen_area": ev.get("specimen_area") or 0.0,
                     "crops": crops, "status": it["status"],
                     "still_excluded": still, "reason": reason,
+                    "priority": priority.get(it["subject"]),
                     "created_at": it.get("created_at") or 0})
     if sort == "riskiest":
         out.sort(key=lambda t: (t["specimen_area"], t["photo_key"]))
     elif sort == "largest":
         out.sort(key=lambda t: (-t["specimen_area"], t["photo_key"]))
+    elif sort == "priority":
+        out.sort(key=lambda t: ((t["priority"] or {}).get("rank") or float("inf"),
+                                t["specimen_area"], t["photo_key"]))
     else:
         out.sort(key=lambda t: (-t["created_at"], t["photo_key"]))
     for t in out:
@@ -342,7 +378,172 @@ def tranche_counts(items: list[dict]) -> list[dict]:
     return out
 
 
-KEEP = "keep"            # a tile's reason picker: keep the whole photo in Vision
+# --- the priority tranche (Steve, 2026-11-01) --------------------------------------------------
+
+def priority_group(reasons) -> str:
+    """A record's priority group from the reasons its excluded photos have: "slip_only" when
+    every one is a field slip, else "slip_and_other"."""
+    return "slip_only" if set(reasons) == {SLIP_REASON} else "slip_and_other"
+
+
+def rank_priority(records: list[dict]) -> list[dict]:
+    """The priority list's lines (PRIORITY_COLUMNS), one per slip photo, best first.
+    `records`: each {record_key, label, split, slip_photos: [photo keys excluded as slips],
+    reasons: every reason its excluded photos have, lost: whether its species would leave
+    training entirely, train_left: the species' train records that keep a photo}. A record
+    with no slip photo is left out (no crop can bring it back). Records are ranked by group
+    (slip only first), then lost species first, then fewest train records left, then label and
+    key; a record's photos share its rank."""
+    keep = [r for r in records if r.get("slip_photos")]
+    keep.sort(key=lambda r: (PRIORITY_GROUP_CODES.index(priority_group(r["reasons"])),
+                             0 if r.get("lost") else 1, int(r.get("train_left") or 0),
+                             r.get("label") or "", r["record_key"]))
+    out = []
+    for rank, r in enumerate(keep, 1):
+        for key in sorted(set(r["slip_photos"])):
+            out.append({"rank": rank, "photo_key": key, "record_key": r["record_key"],
+                        "group": priority_group(r["reasons"]),
+                        "lost_species": 1 if r.get("lost") else 0, "label": r.get("label") or "",
+                        "train_left": int(r.get("train_left") or 0), "split": r.get("split") or "",
+                        "reasons": ",".join(sorted(set(r["reasons"])))})
+    return out
+
+
+def write_priority(rows: list[dict], path) -> str:
+    """Write the priority list (TSV, LF, PRIORITY_COLUMNS); gives its sha256."""
+    import hashlib
+    import io
+    from pathlib import Path
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=PRIORITY_COLUMNS, delimiter="\t", lineterminator="\n")
+    w.writeheader()
+    for r in rows:
+        w.writerow({k: r[k] for k in PRIORITY_COLUMNS})
+    data = buf.getvalue().encode("utf-8")
+    Path(path).write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_priority(path) -> list[dict]:
+    """The priority list as rows {rank, photo_key, record_key, group, lost}; refuses a file whose
+    columns, rank, group or lost_species are not the list's, or that names a photo twice."""
+    rows, seen = [], set()
+    with open(path, encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        missing = {"rank", "photo_key", "record_key", "group", "lost_species"} - set(
+            reader.fieldnames or [])
+        if missing:
+            raise fb.FeedbackError(f"the priority list has no {', '.join(sorted(missing))} column")
+        for r in reader:
+            key = (r["photo_key"] or "").strip()
+            try:
+                rank = int(r["rank"])
+            except (TypeError, ValueError):
+                rank = 0
+            if not key or rank < 1:
+                raise fb.FeedbackError(f"line for {key or '?'}: a photo key and a rank of 1 or "
+                                       "more")
+            if r["group"] not in PRIORITY_GROUP_CODES:
+                raise fb.FeedbackError(f"{key}: group is one of {', '.join(PRIORITY_GROUP_CODES)}")
+            if r["lost_species"] not in ("0", "1"):
+                raise fb.FeedbackError(f"{key}: lost_species is 0 or 1")
+            if key in seen:
+                raise fb.FeedbackError(f"{key} is in the priority list twice")
+            seen.add(key)
+            rows.append({"rank": rank, "photo_key": key, "record_key": r["record_key"].strip(),
+                         "group": r["group"], "lost": r["lost_species"] == "1"})
+    return rows
+
+
+def seed_priority(store: fb.Store, path) -> dict:
+    """Make the priority tranche the list at `path` (read_priority): the list REPLACES the one
+    before (an empty list clears it). Only marks: no item or decision is added, changed or
+    reopened, so every decision stands. A photo with no Recovered labels item (the detector
+    found no specimen on it, or it was never cropped) is not marked ("no_item"); a row whose
+    record the paper's seal refuses is not marked either. A row whose record is not its item's
+    refuses the whole file. Written whole or not at all, and named in the store's seeds."""
+    import hashlib
+    import time
+    from pathlib import Path
+    rows = read_priority(path)
+    sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    items = {r["subject"]: r for r in store.conn.execute(
+        "select id, subject, status, record_keys, links from items where item_type = ?",
+        (ITEM_TYPE,))}
+    marks, no_item, refused = [], [], {"sealed": [], "unknown": []}
+    for r in rows:
+        it = items.get(r["photo_key"])
+        if it is None:
+            no_item.append(r)
+            continue
+        rec = pr.record_of_item({"record_keys": json.loads(it["record_keys"] or "[]"),
+                                 "links": json.loads(it["links"] or "[]")})
+        if rec != r["record_key"]:
+            raise fb.FeedbackError(f"{r['photo_key']} is a photo of record {rec}, not "
+                                   f"{r['record_key']}: is this list for this store?")
+        if store.gate is not None:
+            verdict, key = store.gate.judge_row({"record_keys": [r["record_key"]]})
+            if verdict != "ok":
+                refused[verdict].append(key)
+                continue
+        marks.append((r, it))
+    name, now = Path(path).name, time.time()
+    with store._lock, store.conn:
+        store.conn.execute(PRIORITY_SCHEMA)
+        store.conn.execute("delete from recovered_priority")
+        store.conn.executemany(
+            "insert into recovered_priority (subject, rank, grp, lost, record_key, seed, at) "
+            "values (?,?,?,?,?,?,?)",
+            [(r["photo_key"], r["rank"], r["group"], int(r["lost"]), r["record_key"], name, now)
+             for r, _ in marks])
+        store.conn.execute("insert or replace into seeds values (?,?,?,?,?)",
+                           (name, sha, len(rows), len(marks), now))
+    marked_records = {r["record_key"] for r, _ in marks}
+    out = {"seed": name, "sha256": sha, "rows": len(rows),
+           "records": len({r["record_key"] for r in rows}),
+           "marked": len(marks), "marked_records": len(marked_records),
+           "marked_open": sum(1 for _, it in marks if it["status"] == "open"),
+           "marked_decided": sum(1 for _, it in marks if it["status"] != "open"),
+           "no_item": len(no_item),
+           "records_with_no_item": len({r["record_key"] for r in no_item} - marked_records)}
+    if store.gate is not None:
+        out.update(refused_sealed=len(refused["sealed"]), refused_unknown=len(refused["unknown"]),
+                   refused_records=sorted(set(refused["sealed"] + refused["unknown"]))[:50])
+    return out
+
+
+def read_photo_keys(path) -> set[str]:
+    """Photo keys from a file: its photo_key column when its first line names one (the
+    priority list, a seed file), else one key a line. `mv feedback slip-crops --photos`."""
+    with open(path, encoding="utf-8", newline="") as f:
+        lines = f.read().splitlines()
+    if lines and "photo_key" in lines[0].split("\t"):
+        return {r["photo_key"].strip() for r in csv.DictReader(lines, delimiter="\t")
+                if (r.get("photo_key") or "").strip()}
+    return {x.strip() for x in lines if x.strip()}
+
+
+def priorities(store: fb.Store) -> dict[str, dict]:
+    """photo key -> {rank, group, lost} for every photo of the priority tranche (none before a
+    priority list was seeded: the table is made by the first seed)."""
+    import sqlite3
+    try:
+        rows = store.conn.execute("select subject, rank, grp, lost from recovered_priority")
+        return {s: {"rank": rank, "group": g, "lost": bool(lost)} for s, rank, g, lost in rows}
+    except sqlite3.OperationalError:
+        return {}
+
+
+def priority_counts(items: list[dict], priority: dict[str, dict]) -> dict:
+    """The priority tranche's photos open and decided (among `items`: a reviewer's own)."""
+    c = {"open": 0, "decided": 0}
+    for it in items:
+        if it["subject"] in priority:
+            c["open" if it["status"] == "open" else "decided"] += 1
+    return c
+
+
+KEEP = "keep"           # a tile's reason picker: keep the whole photo in Vision
 
 
 def min_side(w: int, h: int) -> int:

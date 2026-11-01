@@ -1361,7 +1361,8 @@ def cmd_feedback(conn, args) -> None:
                                   if args.twin_locations else None,
                                   answer_key_groups=Path(args.answer_key_groups)
                                   if args.answer_key_groups else None,
-                                  slip_crops=Path(args.slip_crops) if args.slip_crops else None)
+                                  slip_crops=Path(args.slip_crops) if args.slip_crops else None,
+                                  priority=Path(args.priority) if args.priority else None)
         print(json.dumps({"store": str(path), "seeds": out}, indent=2))
     else:
         print(json.dumps({"store": str(path), "types": store.summary()}, indent=2))
@@ -1389,6 +1390,9 @@ def _slip_crops(conn, args) -> None:
         raise SystemExit(f"slip-crops refused: {e}") from None
     picks = [p for p in rl.slip_photos_in_copy(copy) if p["tranche"] in tranches]
     copy.close()
+    if args.photos:                     # only these photos (e.g. the priority list's)
+        wanted = rl.read_photo_keys(Path(args.photos))
+        picks = [p for p in picks if p["photo_key"] in wanted]
     # Only v1 train or val photos, never a v1-test record before the unseal; the paper's seal
     # is asserted on each photo as well (recovered_labels.v1_check).
     import sqlite3
@@ -2803,6 +2807,10 @@ def main(argv: list[str] | None = None) -> int:
                                                "the paper lead's groups file")
     q.add_argument("--slip-crops", help="the specimen detector's seed file (mv feedback "
                                         "slip-crops): the Recovered labels queue")
+    q.add_argument("--priority", help="the Recovered labels priority list (photos of records "
+                                      "that would lose every photo; recovered_labels."
+                                      "rank_priority): REPLACES the priority tranche; only "
+                                      "marks items, after --slip-crops")
     q.add_argument("--blind-ratio", type=float, default=0.25)
     q.add_argument("--seed", type=int, default=20261018)
     q.add_argument("--store", help="the queue file (default <release root>/state/"
@@ -2852,6 +2860,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="comma-separated: high (p >= 0.6), medium, low, rule (default high: "
                         "Steve, 2026-10-26)")
     q.add_argument("--out", required=True, help="the seed TSV, appended to (a rerun resumes)")
+    q.add_argument("--photos", help="only these photos: a file with a photo_key column (the "
+                                    "priority list) or one photo key a line")
     q.add_argument("--limit", type=int, help="at most this many photos this run")
     q.add_argument("--device", default="cuda", choices=("cuda", "cpu"))
     q.add_argument("--threads", type=int, help="CPU threads (cpu only)")
