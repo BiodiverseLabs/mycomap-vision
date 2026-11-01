@@ -65,7 +65,9 @@ class FinetuneConfig:
 
 @dataclass
 class TrainSet:
-    items: list[tuple[int, str]]            # (photo_id, path in the store)
+    # (photo_id, path in the store), or (crop vector id, its photo's path, box) for a specimen
+    # crop (Release.use_photo_crops): the box is cut from the decoded photo in memory.
+    items: list[tuple]
     labels: np.ndarray                      # (n, 3): species, genus, family index; -1 unknown
     names: dict[str, list[str]]
     base_rows: np.ndarray                   # row of each item in the base embeddings
@@ -88,7 +90,9 @@ def train_photo_policy(release, photo_ids, public_trainable_only: bool, left_out
     'public_trainable': CC including NC, plus all-rights-reserved photos whose owner granted
     permission), the photos and their licence classes, and the photos the policy left out."""
     from .dataset_release import CC_CLASSES
-    want = set(int(p) for p in photo_ids)
+    ids = [int(p) for p in photo_ids]
+    want = {p for p in ids if p >= 0}
+    crops = [p for p in ids if p < 0]           # crop vectors (use_photo_crops), not photos
     by: dict[str, int] = {}
     for pid, lclass, pt in release.db.execute(
             "select manifest_photo_id, license_class, public_trainable from photos "
@@ -102,6 +106,8 @@ def train_photo_policy(release, photo_ids, public_trainable_only: bool, left_out
            "photos_left_out_by_policy": left_out}
     if getattr(release, "photo_exclusions", None) is not None:
         out["photo_exclusions"] = dict(release.photo_exclusions)    # use_photo_exclusions
+    if getattr(release, "photo_crops", None) is not None:
+        out["photo_crops"] = {**release.photo_crops, "crops_trained_on": len(crops)}
     return out
 
 
@@ -131,6 +137,7 @@ def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, siz
     left_out = 0
     if public_trainable_only:
         allowed = set(release.photo_ids(("train",), public_trainable_only=True))
+        allowed |= {vid for vid, pid, _ in release.crop_rows() if pid in allowed}
         kept_ref = []
         for rec in shared.ref:
             before = len(rec.photo_rows)
@@ -152,14 +159,19 @@ def build_trainset(conn: sqlite3.Connection, base: str, store_location: str, siz
     for rec in shared.ref:
         lab = [pos[rank].get(evaluate.truth(rec, rank), -1) for rank in RANKS]
         for pid in rec.photo_rows:              # photo ids here (shared_records)
-            if pid in paths:
+            crop = release.crop_photo(pid) if release is not None and pid < 0 else None
+            if crop is not None and crop[0] in paths:      # a specimen crop: its photo, boxed
+                items.append((pid, paths[crop[0]], crop[1]))
+            elif pid in paths:
                 items.append((pid, paths[pid]))
-                labels.append(lab)
-                rows.append(row_of[pid])
-                units.append(unit_pos[rec.unit])
+            else:
+                continue
+            labels.append(lab)
+            rows.append(row_of[pid])
+            units.append(unit_pos[rec.unit])
     if not items:
         raise ValueError(f"no {size} photos of reference records in {store_location}")
-    policy = (train_photo_policy(release, [pid for pid, _ in items], public_trainable_only,
+    policy = (train_photo_policy(release, [it[0] for it in items], public_trainable_only,
                                  left_out) if release is not None else None)
     return TrainSet(items, np.asarray(labels, dtype=np.int64).reshape(-1, 3), names,
                     np.asarray(rows, dtype=np.int64), shared.cutoff, len(shared.ref), vecs,
@@ -313,11 +325,16 @@ class PhotoDataset:
         from .storage import open_store
         if self._store is None:
             self._store = open_store(self.location, Path(self.location))
+        item = self.items[i]
         try:
-            img = Image.open(io.BytesIO(self._store.get(self.items[i][1])))
-            if self.draft and img.format == "JPEG":
+            img = Image.open(io.BytesIO(self._store.get(item[1])))
+            # A specimen crop is decoded whole: a draft would shrink its box's pixels too.
+            if self.draft and img.format == "JPEG" and len(item) < 3:
                 img.draft("RGB", (self.draft, self.draft))     # decode big JPEGs smaller, fast
             img = ImageOps.exif_transpose(img).convert("RGB")
+            if len(item) > 2:                    # (crop vector id, path, box): as embed.py does
+                from .embed import apply_box
+                img = apply_box(img, item[2])
             return self.transform(img), self.labels[i]
         except Exception:
             return None

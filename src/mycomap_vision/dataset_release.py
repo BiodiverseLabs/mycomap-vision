@@ -61,6 +61,11 @@ PHOTO_REASONS = ("record_excluded", "other_source", "no_original", "permission_w
                  "mo_not_for_use", "review", "shared_other_label", "copy_in_train",
                  "copy_in_base", "ok")
 
+# A specimen crop of a photo left out as a field slip (recovered_labels.py) is a vector of its
+# own: embed.crop_vector_id, -(photo id x CROP_SLOTS + n), the same numbers as embed.py.
+CROP_SLOTS = 16
+SLIP_REASON = "slip"
+
 MANIFEST = "MANIFEST.json"
 SUMS = "SHA256SUMS"
 CARD = "DATASET_CARD.md"
@@ -1256,6 +1261,11 @@ class Release:
     errata: object | None = field(default=None, repr=False)     # errata.Errata
     photo_exclusions: dict | None = field(default=None, repr=False)
     _photos_out: frozenset = field(default=frozenset(), repr=False)
+    _exclusions_file: tuple | None = field(default=None, repr=False)   # (path, sha256)
+    # use_photo_crops: what the crop list gave (cited), and per record its crop vectors as
+    # (crop vector id, photo id, box), in the list's order.
+    photo_crops: dict | None = field(default=None, repr=False)
+    _crops: dict = field(default_factory=dict, repr=False)
 
     def use_errata(self, errata) -> None:
         """Leave out an erratum's records (errata.py) from every split this release
@@ -1278,7 +1288,108 @@ class Release:
         it with its counts."""
         self._photos_out, self.photo_exclusions = self.photo_exclusion_set(
             path, expect_sha256, reasons)
+        self._exclusions_file = (Path(path), str(expect_sha256).lower())
+        self._crops, self.photo_crops = {}, None      # crops follow the exclusions they need
         return self.photo_exclusions
+
+    def use_photo_crops(self, path, expect_sha256: str) -> dict:
+        """Add the specimen crops Recovered labels kept (`mv feedback export-photo-crops`) as
+        EXTRA views of their records, never in place of a photo (decision O12): each crop is
+        one more vector of its record in every read that holds the train split (learning and
+        the reference), like use_photo_exclusions' reads; a read of val or test alone (the
+        queries) is unchanged. A crop counts only while its photo stays out as a field slip
+        (recovered_labels.py): its photo must be one this run's exclusion list leaves out
+        (use_photo_exclusions first) with reason "slip", on the record the crop names, in
+        this release's train or val. Any other row is counted under not_used, never applied.
+        A record whose photos were all left out keeps its crops, so it stays in. A crop is
+        coordinates on its photo (l, t, r, b as fractions; the square the model reads),
+        applied in memory: its vector id is embed.crop_vector_id(photo id, n). The file is
+        pinned by its sha256; cite() names it with its counts."""
+        if self.photo_exclusions is None:
+            raise ReleaseError("crops are added only where a photo is left out as a field slip: "
+                               "apply the photo-exclusion list first (--exclude-photos)")
+        path = Path(path)
+        body = path.read_bytes()
+        sha = hashlib.sha256(body).hexdigest()
+        if sha != str(expect_sha256 or "").lower():
+            raise ReleaseError(f"{path.name}: sha256 {sha[:12]}, not the "
+                               f"{str(expect_sha256)[:12]} it was pinned to: not the crop list "
+                               "the run named")
+        rows = list(csv.DictReader(io.StringIO(body.decode("utf-8")), delimiter="\t"))
+        need = {"photo_key", "record_key", "n", "l", "t", "r", "b"}
+        if not rows or not need <= set(rows[0]):
+            raise ReleaseError(f"{path.name}: needs the columns {sorted(need)} and at least one "
+                               "row (mv feedback export-photo-crops)")
+        reason_of = self._exclusion_reasons()
+        q = ",".join("?" * len(TRAINABLE))
+        photo = {key: (pid, rk) for key, pid, rk in self.db.execute(
+            "select p.photo_key, p.manifest_photo_id, p.record_key from photos p join records r "
+            f"using (record_key) where p.included = 1 and r.included = 1 and r.split in ({q})",
+            TRAINABLE)}
+        crops: dict[str, list[tuple[int, int, tuple]]] = defaultdict(list)
+        not_used: Counter = Counter()
+        seen = set()
+        for r in rows:
+            key, rk = r["photo_key"].strip(), r["record_key"].strip()
+            try:
+                n = int(r["n"])
+                box = tuple(float(r[c]) for c in ("l", "t", "r", "b"))
+            except ValueError:
+                raise ReleaseError(f"{path.name}: crop {key} n={r['n']!r} is not a crop number "
+                                   "with four fractions") from None
+            if not (0 < n < CROP_SLOTS and 0 <= box[0] < box[2] <= 1
+                    and 0 <= box[1] < box[3] <= 1):
+                raise ReleaseError(f"{path.name}: crop {key} #{n} has no usable box {box}")
+            if (key, n) in seen:
+                raise ReleaseError(f"{path.name}: crop {key} #{n} is listed twice")
+            seen.add((key, n))
+            if key not in photo:
+                not_used["photo_not_in_release"] += 1
+            elif photo[key][1] != rk:
+                not_used["other_record"] += 1
+            elif photo[key][0] not in self._photos_out:
+                not_used["photo_not_left_out"] += 1
+            elif reason_of.get(key) != SLIP_REASON:
+                not_used["photo_left_out_not_as_slip"] += 1
+            else:
+                pid = int(photo[key][0])
+                crops[rk].append((-(pid * CROP_SLOTS + n), pid, box))
+        left: dict[str, int] = defaultdict(int)
+        for rk, pid in self.db.execute(
+                "select p.record_key, p.manifest_photo_id from photos p join records r using "
+                f"(record_key) where p.included = 1 and r.included = 1 and r.split in ({q})",
+                TRAINABLE):
+            left[rk] += pid not in self._photos_out
+        self._crops = dict(crops)
+        self.photo_crops = {
+            "file": path.name, "sha256": sha, "crops_listed": len(rows),
+            "crops_used": sum(len(v) for v in crops.values()),
+            "photos": len({pid for v in crops.values() for _, pid, _ in v}),
+            "records": len(crops),
+            "records_kept_by_crops_alone": sum(1 for rk in crops if not left[rk]),
+            "not_used": dict(sorted(not_used.items()))}
+        return self.photo_crops
+
+    def _exclusion_reasons(self) -> dict[str, str]:
+        """photo key -> reason, of the applied exclusion list's exclude_photo rows."""
+        path, sha = self._exclusions_file
+        body = Path(path).read_bytes()
+        if hashlib.sha256(body).hexdigest() != sha:
+            raise ReleaseError(f"{Path(path).name} changed since it was applied")
+        return {r["photo_key"].strip(): (r.get("reason") or "").strip()
+                for r in csv.DictReader(io.StringIO(body.decode("utf-8")), delimiter="\t")
+                if (r.get("decision") or "exclude_photo") == "exclude_photo"}
+
+    def crop_rows(self) -> list[tuple[int, int, tuple]]:
+        """Every crop use_photo_crops kept: (crop vector id, photo id, box), by record."""
+        return [c for rk in sorted(self._crops) for c in self._crops[rk]]
+
+    def crop_photo(self, vector_id: int) -> tuple[int, tuple] | None:
+        """(photo id, box) of one of use_photo_crops' crop vectors, or None."""
+        if not hasattr(self, "_crop_index") or self._crop_index[0] is not self._crops:
+            self._crop_index = (self._crops, {vid: (pid, box) for vid, pid, box
+                                              in self.crop_rows()})
+        return self._crop_index[1].get(int(vector_id))
 
     def photo_exclusion_set(self, path, expect_sha256: str, reasons=None,
                             merge_drawing: bool = False) -> tuple[frozenset, dict]:
@@ -1412,6 +1523,8 @@ class Release:
             out["errata"] = self.errata.cite()
         if self.photo_exclusions is not None:
             out["photo_exclusions"] = dict(self.photo_exclusions)
+        if self.photo_crops is not None:
+            out["photo_crops"] = dict(self.photo_crops)
         return out
 
     def record_keys(self) -> list[str]:
@@ -1467,7 +1580,9 @@ class Release:
         hold photo_row[photo id] for photos with a vector (all included photos when
         photo_row is None). public_trainable_only: the photos the final public model may
         learn from (CC or permission granted); a record left with none is left out. A read
-        that holds train (learning, a reference) leaves out use_photo_exclusions' photos;
+        that holds train (learning, a reference) leaves out use_photo_exclusions' photos
+        and, given photo_row (vectors), adds use_photo_crops' crop vectors after each record's
+        photos (a crop of a photo the public model may not learn from is left out with it);
         `exclude` (photo_exclusion_set) leaves out more, for this read only."""
         from .evaluate import Record, real_date
         splits = (splits,) if isinstance(splits, str) else tuple(splits)
@@ -1477,11 +1592,16 @@ class Release:
         photos: dict[str, list[int]] = defaultdict(list)
         pt = " and public_trainable = 1" if public_trainable_only else ""
         drop = self._photos_out_of(splits) | frozenset(exclude)
+        allowed = set()
         for key, pid in self.db.execute(
                 f"select record_key, manifest_photo_id from photos where included = 1{pt} "
                 "order by record_key, position, photo_key"):
+            allowed.add(pid)
             if pid not in drop:
                 photos[key].append(pid)
+        if self._crops and "train" in splits and photo_row is not None:
+            for key, crops in self._crops.items():
+                photos[key].extend(vid for vid, pid, _ in crops if pid in allowed)
         out = []
         for r in self.records(splits):
             pids = photos.get(r["record_key"], [])

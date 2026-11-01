@@ -216,7 +216,9 @@ def cmd_aws_launch_trainer(conn, args) -> None:
                                         public_trainable_only=args.public_trainable_only,
                                         exclude_photos=args.exclude_photos,
                                         exclude_photo_reasons=_split(
-                                            args.exclude_photo_reasons or "")),
+                                            args.exclude_photo_reasons or ""),
+                                        photo_crops=args.photo_crops,
+                                        no_compare=args.no_compare),
                      indent=2))
 
 
@@ -238,6 +240,10 @@ def trainer_release(args):
         print(json.dumps({"photo_exclusions": rel.use_photo_exclusions(
             args.exclude_photos, args.exclude_photos_sha256,
             _split(getattr(args, "exclude_photo_reasons", None) or ""))}))
+    if getattr(args, "photo_crops", None):
+        # The launch's specimen crops (extra views of slip-excluded photos), pinned the same way.
+        print(json.dumps({"photo_crops": rel.use_photo_crops(args.photo_crops,
+                                                             args.photo_crops_sha256)}))
     return rel
 
 
@@ -272,7 +278,8 @@ def cmd_aws_train_job(conn, args) -> None:
                           picek_place_cells_sha256=args.picek_place_cells_sha256,
                           resume=trainer.RunFiles(store.client, store.bucket)
                           if args.resume else None, release=trainer_release(args),
-                          seed=args.seed, public_trainable_only=args.public_trainable_only)
+                          seed=args.seed, public_trainable_only=args.public_trainable_only,
+                          no_compare=args.no_compare)
     if watcher is not None:
         watcher.stop()
     print(json.dumps(out, indent=2))
@@ -2170,6 +2177,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude-photo-reasons", metavar="R1,R2",
                    help="with --exclude-photos: only its rows with these reasons (an E35 arm, "
                         "e.g. slip)")
+    p.add_argument("--photo-crops", metavar="TSV",
+                   help="with --exclude-photos: a Recovered labels crop export (mv feedback "
+                        "export-photo-crops); each crop of a photo the list leaves out as a "
+                        "field slip is an EXTRA view of its record, trained on and embedded "
+                        "into the reference. It ships with the run, pinned by its sha256")
+    p.add_argument("--no-compare", action="store_true",
+                   help="no comparison at the end: for a model trained on every record (no "
+                        "val split held out), which reports no accuracy")
     p.add_argument("--manifest", metavar="FILE",
                    help="launch from a copy of this manifest instead of the live one: the one a "
                         "dataset release was cut from (e.g. data/manifest-v1-freeze.sqlite), "
@@ -2207,6 +2222,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exclude-photos", help="the photo-exclusion list the launch shipped")
     p.add_argument("--exclude-photos-sha256", help="its sha256 at launch")
     p.add_argument("--exclude-photo-reasons", help="only its rows with these reasons")
+    p.add_argument("--photo-crops", help="the specimen-crop list the launch shipped")
+    p.add_argument("--photo-crops-sha256", help="its sha256 at launch")
+    p.add_argument("--no-compare", action="store_true", help="skip the final comparison")
     p.add_argument("--stop-after-hours", type=float,
                    help="stop cleanly (between batches) after this long and upload what "
                         "finished; set by the launcher to leave time before the hard limit")

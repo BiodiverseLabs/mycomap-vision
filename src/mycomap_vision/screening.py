@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import config, evaluate, models
-from .embed import embed_photos, photos_to_embed
+from .embed import crops_to_embed, embed_photos, photos_to_embed
 from .storage import PhotoStore
 
 
@@ -47,8 +47,11 @@ def screen(conn: sqlite3.Connection, store: PhotoStore, candidates: list[str],
            embeddings_root=None, compare: bool = True, readers: int = 8,
            after_embed: Callable[[str], None] | None = None,
            should_stop: Callable[[], bool] | None = None,
-           skip_threshold: float | None = None, log=print) -> ScreenResult:
-    """`after_embed(name)` runs once a candidate has embedded every readable photo (the
+           skip_threshold: float | None = None, crops: bool = False,
+           log=print) -> ScreenResult:
+    """`crops`: also embed the manifest's specimen crops (feedback_photo_crops, each a vector
+    of its own: embed.crops_to_embed), as a release run with use_photo_crops does.
+    `after_embed(name)` runs once a candidate has embedded every readable photo (the
     AWS trainer uploads its shards there, so a later failure doesn't lose the hours
     spent). Unreadable photos are skipped and listed in result.skipped; a candidate
     fails when they are more than `skip_threshold` of its photos. `should_stop()` is
@@ -66,6 +69,9 @@ def screen(conn: sqlite3.Connection, store: PhotoStore, candidates: list[str],
         try:
             todo = photos_to_embed(conn, name, size, store.location, str(config.DATA_DIR))
             log(f"[{name}] {len(todo):,} photos to embed")
+            if crops:
+                todo += crops_to_embed(conn, name, size, store.location)
+                log(f"[{name}] {len(todo) - len(todo_photos(todo)):,} specimen crops to embed")
             per_second, skipped, seconds = None, [], 0.0
             if todo:
                 started = time.monotonic()
@@ -93,6 +99,8 @@ def screen(conn: sqlite3.Connection, store: PhotoStore, candidates: list[str],
                     log(f"[{name}] skipped photo {pid}: {why}")
             left = {pid for pid, _ in photos_to_embed(conn, name, size, store.location,
                                                       str(config.DATA_DIR))}
+            if crops:
+                left |= {c[0] for c in crops_to_embed(conn, name, size, store.location)}
             left -= {pid for pid, _ in skipped}
             if left:
                 raise RuntimeError(f"{len(left):,} photos still not embedded")
@@ -129,3 +137,8 @@ def _free_gpu() -> None:
             torch.cuda.empty_cache()
     except ImportError:
         pass
+
+
+def todo_photos(todo: list) -> list:
+    """The photos of an embedding to-do list, without its specimen crops (3-tuples)."""
+    return [t for t in todo if len(t) < 3]
