@@ -160,7 +160,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
           </select>
         </label>
         <label className="flex min-w-0 items-center gap-2 text-sm"
-               title="Tagger v2's confidence: High is checked at 85% or better by eye, Medium 50-85%, Low below, and Very low holds a tagger's least likely photos. Every band starts as Exclude; only “Probably shows the specimen” starts as Include.">
+               title="Tagger v2's confidence: High is checked at 85% or better by eye, Medium 50-85%, Low below, and Very low holds a tagger's least likely photos. High, Medium and Low start as Exclude; Very low and “Probably shows the specimen” start as Include.">
           <span className="text-muted-foreground">Confidence</span>
           <select className={FIELD} value={band} onChange={(e) => setBand(e.target.value as PhotoBandFilter)}
                   data-testid="photo-review-band">
@@ -180,7 +180,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
                placeholder="Record or name" aria-label="Search records or names"
                className={`${FIELD} w-full min-w-[12rem] basis-full sm:basis-auto sm:flex-1 sm:max-w-xs`} data-testid="photo-review-search" />
         {full && !readOnly && <label className="flex min-h-10 min-w-0 items-center gap-2 text-sm"
-               title="Open flagged photos in this tab start as Exclude with their suggested reason, shown dashed until you confirm or keep them. Save sends them too.">
+               title="Open flagged photos in this tab start as Exclude with their suggested reason, shown dashed until you confirm or keep them; Very low photos start as Include. Save sends them too.">
           <input type="checkbox" className="h-4 w-4 accent-myco-green" checked={mode === "suggest"}
                  onChange={(e) => pickMode(e.target.checked)} data-testid="photo-review-suggest" />
           <span className={BODY}>Suggest Exclude for flagged photos</span>
@@ -692,7 +692,7 @@ function RecordCard(p: {
         </button>
         <span className="text-xs text-muted-foreground">
           {chosen} of {photos.length} photo{photos.length === 1 ? "" : "s"} chosen
-          {suggested > 0 && ` · ${suggested} suggested (dashed): saved as shown unless you change them`}
+          {suggested > 0 && ` · ${suggested} suggested (Exclude dashed): saved as shown unless you change them`}
         </span>
         {changed.size > 0 && (
           <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[11px] font-semibold text-white">

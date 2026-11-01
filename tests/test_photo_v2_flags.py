@@ -94,8 +94,27 @@ def test_a_uv_rescore_rebands_and_reranks_open_photos_and_never_touches_decided_
     assert pr.item_outcome(after, "uv") == "included"
     done = pr.flagged_tiles(items, "uv", status="decided")
     assert [(t["photo_key"], t["band"]) for t in done] == [("inat:3", "low")]
-    # a very_low photo still starts as Exclude, like every band
-    assert next(t for t in open_ if t["photo_key"] == "inat:2")["suggested_decision"] == "exclude"
+    # Steve, 2026-11-01: "Very low starts as Include"; the high one still starts as Exclude
+    vl = next(t for t in open_ if t["photo_key"] == "inat:2")
+    assert (vl["suggested_decision"], vl["suggested_reason"]) == ("keep", "uv")
+    hi = next(t for t in open_ if t["photo_key"] == "inat:1")
+    assert (hi["suggested_decision"], hi["suggested_reason"]) == ("exclude", "uv")
+
+
+def test_very_low_photos_start_as_include_and_every_other_band_as_exclude():
+    def start(rule):
+        return pr.suggested_decision(pr.placing_flags(rule))
+    assert start("R11.1 v2 uv p=0.0400 (very_low)") == "keep"
+    assert start("R12 v2 slip p=0.0500 (very_low)") == "keep"                 # any tab's very_low
+    for band in ("high", "medium", "low"):
+        assert start(f"R11.1 v2 uv p=0.5000 ({band})") == "exclude"
+    assert start("R9 v2 uv p=0.41") == "exclude"                              # no band
+    assert start("R9 v2 specimen p=0.91") == "keep"                           # as before
+    assert start("R6 micrograph probe p=0.90") == "exclude"                   # no v2 flag
+    # only the latest v2 flag counts: a very_low re-score after a low flag starts as Include,
+    # a newer low flag after a very_low one as Exclude
+    assert start("R11 v2 uv p=0.45 (low); R11.1 v2 uv p=0.0400 (very_low)") == "keep"
+    assert start("R11.1 v2 uv p=0.0400 (very_low); R12 v2 uv p=0.30 (low)") == "exclude"
 
 
 def test_only_specimen_photos_start_as_include_a_low_band_photo_in_a_group_starts_excluded():
@@ -156,3 +175,20 @@ def test_the_api_filters_by_the_very_low_band_and_counts_it(conn, tmp_path):
     assert next(t for t in cards["tabs"] if t["code"] == "uv")["bands"] == {
         "high": 1, "medium": 0, "low": 0, "very_low": 1}
     assert c.get("/api/feedback/photo-review", params={"band": "very-low"}).status_code == 400
+
+
+def test_the_api_starts_very_low_photos_as_include_in_the_summary_and_full_views(conn, tmp_path):
+    c, fstore = site_with_photos(conn, tmp_path)
+    fstore.seed([photo_item("inat:1000", "100", "R11.1 v2 uv p=0.0400 (very_low)"),
+                 photo_item("inat:1001", "101", "R11.1 v2 uv p=0.8000 (high)")], "uv")
+    as_user(c, "admin-1")
+    tiles = {t["photo_key"]: t for t in
+             c.get("/api/feedback/photo-review/flagged", params={"tab": "uv"}).json()["tiles"]}
+    assert (tiles["inat:1000"]["suggested_decision"], tiles["inat:1000"]["suggested_reason"]) == ("keep", "uv")
+    assert tiles["inat:1001"]["suggested_decision"] == "exclude"
+    cards = {r["record_key"]: r for r in
+             c.get("/api/feedback/photo-review", params={"tab": "uv"}).json()["records"]}
+    vl = next(p for p in cards["100"]["photos"] if p["photo_key"] == "inat:1000")
+    assert (vl["band"], vl["suggested_decision"], vl["suggested_reason"]) == ("very_low", "keep", "uv")
+    hi = next(p for p in cards["101"]["photos"] if p["photo_key"] == "inat:1001")
+    assert (hi["band"], hi["suggested_decision"]) == ("high", "exclude")

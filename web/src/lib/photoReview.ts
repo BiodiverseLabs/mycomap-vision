@@ -6,7 +6,7 @@
 // Photo rule: a photo the server sends as "hidden" never gets an image URL here, and an admin's
 // "private" photo is only ever Vision's own same-origin copy, shown by a plain <img>.
 
-import type { FeedbackStatus, PhotoFlag, PhotoOutcome, PhotoOutcomeFilter, PhotoReviewDecisionBody, PhotoBandFilter,
+import type { FeedbackStatus, PhotoFlag, PhotoOutcome, PhotoOutcomeFilter, PhotoReviewDecisionBody, PhotoBand, PhotoBandFilter,
               PhotoReviewSort, PhotoReviewTab, ReviewPhoto, ReviewRecord } from "./api";
 
 export const PHOTO_REVIEW_TYPE = "non_specimen_photo";
@@ -153,23 +153,43 @@ export function flaggedForBulk(photo: Pick<ReviewPhoto, "flagged" | "in_tab">, t
   return tab === "all" ? photo.flagged : photo.in_tab;
 }
 
+/** The band whose open photos start as Include, not Exclude (Steve, 2026-11-01: "seed UV, Very
+ *  low starts as Include"). The server says so too (suggested_decision "keep"). */
+export const INCLUDE_BAND: PhotoBand = "very_low";
+
+/** An open photo starts as Include: the server suggests keeping it (tagger v2 reads it as a
+ *  specimen photo, or it is in the Very low band), or its band is Very low. */
+export const startsAsInclude = (photo: { suggested_decision?: "keep" | "exclude" | null; band?: PhotoBand | null }): boolean =>
+  photo.suggested_decision === "keep" || photo.band === INCLUDE_BAND;
+
 /** "Suggest" mode proposes leaving out an OPEN photo flagged in the tab shown; never a decided
- *  one, one flagged only for other tabs, or an unflagged one. */
-export const suggestsExclude = (photo: Pick<ReviewPhoto, "flagged" | "in_tab" | "status" | "suggested_decision">,
+ *  one, one flagged only for other tabs, an unflagged one, or one that starts as Include. */
+export const suggestsExclude = (photo: Pick<ReviewPhoto, "flagged" | "in_tab" | "status" | "suggested_decision" | "band">,
                                 tab: PhotoReviewTab): boolean =>
-  photo.status === "open" && flaggedForBulk(photo, tab) && photo.suggested_decision !== "keep";
+  photo.status === "open" && flaggedForBulk(photo, tab) && !startsAsInclude(photo);
+
+/** "Suggest" mode proposes keeping an OPEN photo flagged in the tab shown when it is in the Very
+ *  low band (INCLUDE_BAND): it starts as Include and is saved as kept unless changed. */
+export const suggestsInclude = (photo: Pick<ReviewPhoto, "flagged" | "in_tab" | "status" | "band">,
+                                tab: PhotoReviewTab): boolean =>
+  photo.status === "open" && flaggedForBulk(photo, tab) && photo.band === INCLUDE_BAND;
 
 /** The choices under a preselection mode: the reviewer's own choices stay, earlier suggestions
  *  go, and in "suggest" mode each suggestible photo with no choice starts as a suggested Exclude
- *  with its own reason. Used when a card starts and when the mode is switched. */
+ *  with its own reason, or, in the Very low band, as a suggested Include that keeps its reason
+ *  (Exclude brings it back). Used when a card starts and when the mode is switched. */
 export function withMode(record: Pick<ReviewRecord, "photos">, tab: PhotoReviewTab, mode: PreselectMode,
                          choices: PhotoChoices, picked: PickedReasons = {}): PhotoChoices {
   const out: PhotoChoices = {};
   for (const [k, c] of Object.entries(choices)) if (!c.suggested) out[k] = c;
   if (mode !== "suggest") return out;
   for (const p of record.photos) {
-    if (out[p.photo_key] || !suggestsExclude(p, tab)) continue;
-    out[p.photo_key] = { decision: "exclude", reason: reasonFor(p, picked), suggested: true };
+    if (out[p.photo_key]) continue;
+    if (suggestsExclude(p, tab)) {
+      out[p.photo_key] = { decision: "exclude", reason: reasonFor(p, picked), suggested: true };
+    } else if (suggestsInclude(p, tab)) {
+      out[p.photo_key] = { decision: "keep", reason: reasonFor(p, picked), suggested: true };
+    }
   }
   return out;
 }

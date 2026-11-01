@@ -107,9 +107,12 @@ TAB_OF_REASON = {r: t for t, r in REASON_OF_TAB.items()} | {
 # 50-85%, low below), the order the band filter offers them. "very_low" (Steve, 2026-11-01: "a new
 # Low category bottom confidence after the retrain") is the bottom band, below low: a tagger's
 # least likely photos, by its precision on held-out decisions, go there instead of filling low.
-# Any tab's flags may carry it; the UV retrain (R11.1) is the first. It starts as Exclude, like
-# every band.
+# Any tab's flags may carry it; the UV retrain (R11.1) is the first. Unlike every other band, a
+# very_low photo starts as Include (Steve, 2026-11-01: "seed UV, Very low starts as Include"):
+# most are not of the tab's kind, so an untouched one is kept, not left out.
 BANDS = ("high", "medium", "low", "very_low")
+# The band whose open photos start as Include (suggested_decision).
+INCLUDE_BAND = "very_low"
 
 
 def suggested_reason(flags: list[dict], tab: str = "all") -> str | None:
@@ -126,11 +129,14 @@ def suggested_reason(flags: list[dict], tab: str = "all") -> str | None:
 
 
 def suggested_decision(flags: list[dict]) -> str:
-    """How an open photo starts: "keep" when tagger v2 reads it as a specimen photo, else
-    "exclude" with its suggested reason, whatever its band (Steve, 2026-10-21: a low-confidence
-    photo in a group still starts as Exclude; the band filter is how to look at those first)."""
+    """How an open photo starts: "keep" when tagger v2 reads it as a specimen photo, or when its
+    v2 flag is in the very_low band (INCLUDE_BAND; Steve, 2026-11-01: "Very low starts as
+    Include"); else "exclude" with its suggested reason, in the high, medium and low bands
+    (Steve, 2026-10-21: a low-confidence photo in a group still starts as Exclude; the band
+    filter is how to look at those first). A very_low photo keeps its suggested reason, so
+    flipping it to Exclude brings the tab's reason back."""
     v2 = [f for f in flags if f.get("v2")]
-    if v2 and v2[-1]["tab"] == "specimen":
+    if v2 and (v2[-1]["tab"] == "specimen" or v2[-1].get("band") == INCLUDE_BAND):
         return "keep"
     return "exclude"
 
