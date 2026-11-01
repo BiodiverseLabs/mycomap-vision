@@ -6,8 +6,8 @@ import { useQuery } from "@tanstack/react-query";
 import { ScanEye } from "lucide-react";
 import { api, ApiError, lookedApi, type IdentifyResult, type LookedPhoto, type LookedView } from "@/lib/api";
 import {
-  cellColours, cropBox, firstPhoto, markers, ownLine, POLL_MS, refusalLine, squareOf, unseenStrips,
-  workingLine,
+  cellColours, cropBox, firstPhoto, KEEP, markers, ownLine, POLL_MS, refusalLine, squareOf,
+  STRENGTH_DEFAULT, unseenStrips, workingLine,
 } from "@/lib/whereLooked";
 
 type Ready = Extract<LookedView, { status: "ready" }>;
@@ -82,7 +82,7 @@ export function LookedPanel({ view, r, urls, onHide }: {
   view: Ready; r: IdentifyResult; urls: string[]; onHide?: () => void;
 }) {
   const [cur, setCur] = useState<number | null>(() => firstPhoto(view.photos, r.per_photo));
-  const [strength, setStrength] = useState(75);
+  const [strength, setStrength] = useState(STRENGTH_DEFAULT);
   const entry = view.photos.find((p) => p.photo === cur) ?? view.photos[0];
   if (!entry) return null;
   const own = ownLine(entry.photo, r.per_photo);
@@ -117,13 +117,16 @@ export function LookedPanel({ view, r, urls, onHide }: {
         <figure className="relative m-0 overflow-hidden rounded-md bg-[#111]" data-testid="figure-where-looked">
           {urls[entry.photo] && <img src={urls[entry.photo]} alt={`Your photo ${entry.photo + 1}`} className="block w-full" />}
           <div className="absolute" style={cropBox(entry.crop)}>
-            <MapLayer entry={entry} opacity={strength / 100} />
+            <MapLayer entry={entry} strength={strength} />
           </div>
           {unseenStrips(entry.crop).map((s) => (
-            <div key={s.side} className="absolute flex items-center justify-center bg-[repeating-linear-gradient(135deg,rgba(255,255,255,.55)_0_6px,rgba(255,255,255,.35)_6px_12px)]"
+            <div key={s.side} className="absolute flex items-center justify-center overflow-hidden bg-[repeating-linear-gradient(135deg,rgba(255,255,255,.55)_0_6px,rgba(255,255,255,.35)_6px_12px)]"
                  style={s.style}>
-              {(s.side === "top" || s.side === "left") && (
-                <span className="rounded-full bg-white/90 px-2 text-[11px] text-[#4a3728]">Vision doesn't see this strip</span>
+              {s.label && (
+                <span className={`whitespace-nowrap rounded bg-white/90 text-[11px] leading-4 text-[#4a3728] ${s.side === "left" ? "rotate-180 px-0.5 py-2 [writing-mode:vertical-rl]" : "px-2 py-0.5"}`}
+                      data-testid="text-unseen-strip">
+                  Vision doesn't see this strip
+                </span>
               )}
             </div>
           ))}
@@ -159,15 +162,60 @@ export function LookedPanel({ view, r, urls, onHide }: {
           <li>Each photo is scored on its own centre square; the answer above combines all your photos.</li>
         </ul>
       </details>
+      <HowMapsAreMade match />
       <p className="mt-2 text-[11px] text-[#8a7b6c]">Made when someone first asked, and kept with this result's link.</p>
     </section>
   );
 }
 
-/** The map over the square the model sees, as a spotlight: a canvas of grid x grid cells,
- *  scaled up smoothly (the Excluded photos page draws its maps with it too). */
-export function MapLayer({ entry, opacity }: {
-  entry: Pick<LookedPhoto, "grid" | "map">; opacity: number;
+/** The methods behind the maps, with their settings (looked.py; Steve, 2026-10-30: say which
+ *  algorithms and parameters made them). `match`: the panel also shows matched spots. */
+export function HowMapsAreMade({ match = false }: { match?: boolean }) {
+  return (
+    <details className="mt-2 rounded-md border border-[#A87146]/20 px-3 py-2 text-[13px] text-[#4a3728]"
+             data-testid="details-how-maps-made">
+      <summary className="cursor-pointer font-semibold">How these maps are made</summary>
+      <ul className="mt-2 list-disc space-y-1.5 pl-4">
+        <li><b>What the model sees.</b> MycoMap Vision v1 is a vision transformer (ViT-L/14, 24 layers)
+          trained on the DNA-verified records of dataset release v1. Each photo is shrunk so its short
+          side is 336 px and its centre square is cut out (the striped strips are what is cut off). The
+          model reads that square as a 24 × 24 grid of 14-px patches.</li>
+        <li><b>The score being mapped.</b> Vision's own score for the name, as it is served: 0.6 × the
+          mean cosine similarity to the 2 closest DNA-verified records of that name (each by its best
+          photo), plus 0.4 × the similarity to the name's average.</li>
+        <li><b>The map: gradient-weighted attention rollout</b> (Chefer, Gur &amp; Wolf, 2021). In each
+          of the model's 24 layers, every attention head's weights are multiplied by the gradient of
+          that score, negative values are dropped and the heads are averaged; the layers are then chained
+          from first to last. The result says how much each patch fed the score. It costs about 2.5
+          forward passes, roughly 2.7 s a photo on the server's CPU.</li>
+        <li><b>Two clean-ups.</b> The model keeps a few patches as scratch space, "register" tokens
+          (Darcet et al., 2023): after layer 20 their activations are over 2 × the photo's median. They
+          show up as bright specks that hiding them shows don't matter, so each takes the median of its
+          neighbours. The map is then smoothed with a 3 × 3 weighted average (centre weight 4).</li>
+        <li><b>The spotlight.</b> Patches are ranked, not scaled, so every photo shows its own strongest
+          evidence: the top {Math.round(KEEP * 100)}% stay clear and the rest dim by rank. The strength
+          slider sets how dark the weakest patches go: {STRENGTH_DEFAULT} is the usual setting, 100 is
+          black.</li>
+        {match && (
+          <li><b>The matched spots.</b> Patch tokens from the model's last layer, for your photo and the
+            specimen photo. A pair is two patches that are each other's closest match (mutual nearest
+            neighbours), taken only from your photo's brightest 10% of patches, skipping register
+            patches and a 2-patch border. Pairs are kept at least 5 patches apart, and the 3 most alike
+            are shown.</li>
+        )}
+        <li><b>Why this method.</b> On 314 photos from v1's validation set it was compared with raw
+          attention, plain attention rollout and occlusion (hiding each patch in turn). It was the most
+          faithful of the affordable ones; occlusion took about 144 s a photo.</li>
+      </ul>
+    </details>
+  );
+}
+
+/** The map over the square the model sees, as a spotlight at the slider's strength: a canvas
+ *  of grid x grid cells, scaled up smoothly (the Excluded photos page draws its maps with it
+ *  too). */
+export function MapLayer({ entry, strength }: {
+  entry: Pick<LookedPhoto, "grid" | "map">; strength: number;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -175,13 +223,13 @@ export function MapLayer({ entry, opacity }: {
     if (!ctx) return;
     const g = entry.grid;
     const img = ctx.createImageData(g, g);
-    cellColours(entry.map).forEach(([r, gr, b, a], i) => {
+    cellColours(entry.map, strength).forEach(([r, gr, b, a], i) => {
       img.data.set([r, gr, b, Math.round(a * 255)], i * 4);
     });
     ctx.putImageData(img, 0, 0);
-  }, [entry]);
+  }, [entry, strength]);
   return <canvas ref={ref} width={entry.grid} height={entry.grid} className="block h-full w-full"
-                 style={{ opacity, imageRendering: "auto" }} aria-hidden />;
+                 style={{ imageRendering: "auto" }} aria-hidden />;
 }
 
 /** The photo's seen square beside the specimen photo's, with the numbered matching spots. */

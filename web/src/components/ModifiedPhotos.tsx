@@ -4,7 +4,7 @@
 // crop is the original image shown through CSS (recoveredLabels.cropBackground): no new file.
 import { useState } from "react";
 import { ArrowRight, ArrowUpRight, ImageOff, ScanEye } from "lucide-react";
-import { cropBox, unseenStrips } from "@/lib/whereLooked";
+import { cropBox, STRENGTH_DEFAULT, unseenStrips } from "@/lib/whereLooked";
 import { boxStyle, cropBackground } from "@/lib/recoveredLabels";
 import {
   cropLine, HELD_LINE, MODIFIED_PAGE, noMapLine, rangeLine, rankLine, type ModifiedCard, type ModifiedCrop, type ModifiedMap,
@@ -17,7 +17,7 @@ export function ModifiedPhotos({ page, loading, failed, filter, withMaps, onFilt
   page?: ModifiedPage; loading?: boolean; failed?: boolean; filter: string; withMaps: boolean;
   onFilter: (f: string) => void; onWithMaps: (v: boolean) => void; onPage: (offset: number) => void;
 }) {
-  const [strength, setStrength] = useState(75);
+  const [strength, setStrength] = useState(STRENGTH_DEFAULT);
   return (
     <div data-testid="section-modified">
       <p className="max-w-3xl text-sm text-[#5c4a3a]">
@@ -136,7 +136,7 @@ function CropFigure({ c, k, many, strength }: { c: ModifiedCard; k: ModifiedCrop
            role="img" aria-label={`${cropLine(k, many)}, the part of the photo Vision reads`}>
         {k.map && (
           <div className="absolute" style={cropBox(k.map.map.crop)}>
-            <MapLayer entry={k.map.map} opacity={strength / 100} />
+            <MapLayer entry={k.map.map} strength={strength} />
           </div>
         )}
       </div>
@@ -151,7 +151,7 @@ function Overlay({ m, strength }: { m: ModifiedMap; strength: number }) {
   return (
     <>
       <div className="absolute" style={cropBox(m.map.crop)}>
-        <MapLayer entry={m.map} opacity={strength / 100} />
+        <MapLayer entry={m.map} strength={strength} />
       </div>
       {unseenStrips(m.map.crop).map((s) => (
         <div key={s.side} className="absolute bg-[repeating-linear-gradient(135deg,rgba(255,255,255,.55)_0_6px,rgba(255,255,255,.35)_6px_12px)]"

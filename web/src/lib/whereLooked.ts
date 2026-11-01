@@ -8,21 +8,34 @@ export const KEEP = 0.3;
 /** How often the page asks again while the maps are made. */
 export const POLL_MS = 1500;
 
-/** Spotlight: per cell, how much to darken it (0 to 0.8). By rank, not by value, so every
+/** Where the strength slider starts. The old top of the slider (the weakest cells dimmed by
+ *  0.8) sits here now, with darker settings up to black above it (Steve, 2026-10-30: only
+ *  full strength was useful). */
+export const STRENGTH_DEFAULT = 75;
+
+/** How dark the slider's strength (0 to 100) makes the weakest cells: 0 to 0.8 up to
+ *  STRENGTH_DEFAULT, then on to 1 (black) at 100. */
+export function darkness(strength: number): number {
+  const s = Math.min(100, Math.max(0, strength));
+  return s <= STRENGTH_DEFAULT ? (s / STRENGTH_DEFAULT) * 0.8
+    : 0.8 + ((s - STRENGTH_DEFAULT) / (100 - STRENGTH_DEFAULT)) * 0.2;
+}
+
+/** Spotlight: per cell, how much to darken it (0 to `dark`). By rank, not by value, so every
  *  photo shows its own strongest evidence, whatever the scale of its map. */
-export function spotlightAlpha(map: number[], keep = KEEP): number[] {
+export function spotlightAlpha(map: number[], keep = KEEP, dark = 0.8): number[] {
   const n = map.length;
   if (n < 2) return map.map(() => 0);
   const order = map.map((v, i) => [v, i] as const).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
   const rank = new Array<number>(n);
   order.forEach(([, i], pos) => { rank[i] = pos / (n - 1); });
-  return rank.map((r) => Math.pow(Math.min(1, Math.max(0, (1 - keep - r) / (1 - keep))), 0.6) * 0.8);
+  return rank.map((r) => Math.pow(Math.min(1, Math.max(0, (1 - keep - r) / (1 - keep))), 0.6) * dark);
 }
 
-/** Each cell's colour: [r, g, b, alpha], the spotlight's dimming. Spotlight is the one look
- *  (Steve, 2026-10-26: Glow is gone). */
-export function cellColours(map: number[]): [number, number, number, number][] {
-  return spotlightAlpha(map).map((a) => [18, 18, 18, a]);
+/** Each cell's colour at a slider strength: [r, g, b, alpha], the spotlight's dimming.
+ *  Spotlight is the one look (Steve, 2026-10-26: Glow is gone). */
+export function cellColours(map: number[], strength = STRENGTH_DEFAULT): [number, number, number, number][] {
+  return spotlightAlpha(map, KEEP, darkness(strength)).map((a) => [18, 18, 18, a]);
 }
 
 const pc = (v: number) => `${+(v * 100).toFixed(2)}%`;
@@ -32,16 +45,24 @@ export function cropBox(crop: LookedPhoto["crop"]): { left: string; top: string;
   return { left: pc(crop.x), top: pc(crop.y), width: pc(crop.w), height: pc(crop.h) };
 }
 
-/** The strips of the photo the model never sees (a tall or wide photo), as CSS boxes. */
-export function unseenStrips(crop: LookedPhoto["crop"]): { side: "top" | "bottom" | "left" | "right"; style: Record<string, string> }[] {
-  const out: { side: "top" | "bottom" | "left" | "right"; style: Record<string, string> }[] = [];
+/** A strip gets its "Vision doesn't see this strip" label only when it is at least this share
+ *  of the photo across: a thinner one can't hold the words. */
+export const STRIP_LABEL_MIN = 0.06;
+
+type Strip = { side: "top" | "bottom" | "left" | "right"; style: Record<string, string>; label: boolean };
+
+/** The strips of the photo the model never sees (a tall or wide photo), as CSS boxes. One of
+ *  each pair (top, left) carries the label, if it is wide enough; a side strip's label runs
+ *  along it (Steve, 2026-10-30: the words wrapped into a circle on a wide photo). */
+export function unseenStrips(crop: LookedPhoto["crop"]): Strip[] {
+  const out: Strip[] = [];
   if (crop.y > 0.01) {
-    out.push({ side: "top", style: { left: "0", right: "0", top: "0", height: pc(crop.y) } });
-    out.push({ side: "bottom", style: { left: "0", right: "0", bottom: "0", height: pc(1 - crop.y - crop.h) } });
+    out.push({ side: "top", style: { left: "0", right: "0", top: "0", height: pc(crop.y) }, label: crop.y >= STRIP_LABEL_MIN });
+    out.push({ side: "bottom", style: { left: "0", right: "0", bottom: "0", height: pc(1 - crop.y - crop.h) }, label: false });
   }
   if (crop.x > 0.01) {
-    out.push({ side: "left", style: { top: "0", bottom: "0", left: "0", width: pc(crop.x) } });
-    out.push({ side: "right", style: { top: "0", bottom: "0", right: "0", width: pc(1 - crop.x - crop.w) } });
+    out.push({ side: "left", style: { top: "0", bottom: "0", left: "0", width: pc(crop.x) }, label: crop.x >= STRIP_LABEL_MIN });
+    out.push({ side: "right", style: { top: "0", bottom: "0", right: "0", width: pc(1 - crop.x - crop.w) }, label: false });
   }
   return out;
 }

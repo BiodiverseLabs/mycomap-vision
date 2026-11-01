@@ -3,14 +3,14 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowUpRight, ImageOff, ScanEye, X } from "lucide-react";
 import type { Me } from "@/lib/api";
 import { ApiError } from "@/lib/api";
-import { cropBox, POLL_MS, unseenStrips } from "@/lib/whereLooked";
+import { cropBox, POLL_MS, STRENGTH_DEFAULT, unseenStrips } from "@/lib/whereLooked";
 import {
   categoryLabel, excludedApi, HELD_LINE, MAP_MODEL_LABEL, PAGE_SIZE, rangeLine, rankLine, refusal,
   type ExcludedLooked, type ExcludedPage, type ExcludedTile,
 } from "@/lib/excludedPhotos";
 import { nf } from "@/lib/researchView";
 import { ResearchHero, ResearchShell, Section } from "@/components/ResearchKit";
-import { MapLayer } from "@/components/WhereLooked";
+import { HowMapsAreMade, MapLayer } from "@/components/WhereLooked";
 import { ModifiedPhotos } from "@/components/ModifiedPhotos";
 import { useMe } from "@/components/researchQueries";
 import { fetchModified, noMapLine, type ModifiedPage } from "@/lib/excludedPhotos";
@@ -173,7 +173,7 @@ function Tile({ t, onOpen }: { t: ExcludedTile; onOpen: () => void }) {
 
 /** One photo, large, with v1's map on request, as a spotlight. */
 export function PhotoDialog({ t, me, onClose }: { t: ExcludedTile; me?: Me | null; onClose: () => void }) {
-  const [strength, setStrength] = useState(75);
+  const [strength, setStrength] = useState(STRENGTH_DEFAULT);
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", esc);
@@ -222,6 +222,7 @@ export function PhotoDialog({ t, me, onClose }: { t: ExcludedTile; me?: Me | nul
             <li>Vision sees only the photo's centre square; the striped strips are never seen.</li>
           </ul>
         </details>
+        <HowMapsAreMade />
       </div>
     </div>
   );
@@ -298,7 +299,7 @@ function MapFigure({ t, me, strength }: { t: ExcludedTile; me?: Me | null; stren
 }
 
 /** The photo, with its map over the square the model sees once there is one. */
-function Photo({ t, ready, strength = 75 }: {
+function Photo({ t, ready, strength = STRENGTH_DEFAULT }: {
   t: ExcludedTile; ready?: Extract<ExcludedLooked, { status: "ready" }> | null; strength?: number;
 }) {
   return (
@@ -308,7 +309,7 @@ function Photo({ t, ready, strength = 75 }: {
         {ready && (
           <>
             <div className="absolute" style={cropBox(ready.map.crop)}>
-              <MapLayer entry={ready.map} opacity={strength / 100} />
+              <MapLayer entry={ready.map} strength={strength} />
             </div>
             {unseenStrips(ready.map.crop).map((s) => (
               <div key={s.side} className="absolute bg-[repeating-linear-gradient(135deg,rgba(255,255,255,.55)_0_6px,rgba(255,255,255,.35)_6px_12px)]"

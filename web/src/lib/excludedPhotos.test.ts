@@ -102,6 +102,9 @@ test("a photo's map is v1's, as a spotlight: no Glow, no BioCLIP base, no side b
   assert.equal((html.match(/type="range"/g) ?? []).length, 1);
   assert.match(t, /Show where Vision looked/);
   assert.match(html, /data-testid="figure-excluded-v1"/);
+  assert.match(t, /How these maps are made/);
+  assert.match(t, /gradient-weighted attention rollout/);
+  assert.doesNotMatch(t, /mutual nearest neighbours/, "no matched spots here, so no word on how they are found");
   for (const gone of [/Glow/i, /BioCLIP/i, /base model/i, /Side by side/i, /Show as/, /button-compare-models/, /excluded-base/]) {
     assert.doesNotMatch(html, gone);
   }
