@@ -17,7 +17,7 @@
 
 import type { FlaggedTile, PhotoBatchBody, PhotoBatchDecision, PhotoReviewTab } from "./api";
 import { recordLabel } from "./feedback";
-import { flagLabel, type Choice } from "./photoReview";
+import { flagLabel, startsAsInclude, type Choice } from "./photoReview";
 
 /** The Summary's photos per page: the default, and the choices (Steve, 2026-10-21), each
  *  remembered per viewer. The server serves at most the largest. */
@@ -115,16 +115,19 @@ export interface Mark { decision: Choice; reason: string | null; readOnly?: bool
 /** By item id. */
 export type Marks = Record<number, Mark>;
 
-type MarkTile = Pick<FlaggedTile, "item_id" | "status" | "decision" | "suggested_reason" | "suggested_decision">;
+type MarkTile = Pick<FlaggedTile, "item_id" | "status" | "decision" | "suggested_reason" | "suggested_decision">
+  & Partial<Pick<FlaggedTile, "band">>;
 
-/** How a page starts: an open tile as Exclude with its suggested reason, in every band, or as
- *  Include when the server suggests keeping it (tagger v2 reads it as a specimen photo); a
- *  decided tile shows its stored decision, read-only. */
+/** How a page starts: an open tile as Exclude with its suggested reason in the high, medium and
+ *  low bands, or as Include when it starts as Include (startsAsInclude: the server suggests
+ *  keeping it, as for a photo tagger v2 reads as a specimen photo, or it is in the Very low band;
+ *  Steve, 2026-11-01). An Include keeps its reason, so Exclude brings it back. A decided tile
+ *  shows its stored decision, read-only. */
 export function initialMarks(tiles: MarkTile[]): Marks {
   const out: Marks = {};
   for (const t of tiles) {
     if (t.status === "open") {
-      out[t.item_id] = t.suggested_decision === "keep"
+      out[t.item_id] = startsAsInclude(t)
         ? { decision: "keep", reason: t.suggested_reason ?? null }
         : { decision: "exclude", reason: t.suggested_reason ?? null };
       continue;
