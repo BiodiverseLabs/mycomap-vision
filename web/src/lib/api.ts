@@ -907,6 +907,10 @@ export interface RecoveredTile {
   still_excluded: boolean | null;
   /** The photo's exclusion reason now (photo review REASONS), "keep" when it is kept. */
   reason?: string | null;
+  /** In the priority tranche (Steve, 2026-11-01): a photo of a record that every saved photo
+   *  exclusion leaves with no photo; its rank in the list, its group, and whether its species
+   *  would leave training entirely. Null when not in the list. */
+  priority?: RecoveredPriority | null;
   shown: "public" | "private" | "hidden";
   thumb?: string;
   full?: string;
@@ -921,7 +925,15 @@ export interface RecoveredPage {
   /** The exclusion reasons a tile's picker offers (the photo review's). */
   reasons?: { code: string; label: string }[];
   tranches: { code: string; open: number; decided: number }[];
+  /** The priority tranche's photos open and decided (not a slip band: its photos keep theirs). */
+  priority?: { open: number; decided: number };
   tiles: RecoveredTile[];
+}
+
+export interface RecoveredPriority {
+  rank: number;
+  group: "slip_only" | "slip_and_other" | string;
+  lost: boolean;
 }
 
 /** Photo views (Steve, 2026-10-21): one photo of the queue, with the tagger's suggested views

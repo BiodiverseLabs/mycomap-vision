@@ -840,3 +840,186 @@ def test_starting_the_server_never_syncs_the_crops(conn, tmp_path, monkeypatch):
     c, _, _ = make_site(conn, tmp_path)
     r = c.get("/api/health")
     assert r.status_code == 200 and r.json()["ok"] is True
+
+
+
+# --- the priority tranche (Steve, 2026-11-01): records that would lose every photo ---------------
+
+PRIO_COLS = "\t".join(rl.PRIORITY_COLUMNS)
+
+
+def prio_line(rank, key, record, group="slip_only", lost=0, label="A x"):
+    return "\t".join(map(str, (rank, key, record, group, lost, label, 0, "train", "slip")))
+
+
+def write_prio(path, lines):
+    path.write_text(PRIO_COLS + "\n" + "".join(x + "\n" for x in lines), encoding="utf-8")
+    return path
+
+
+def store_rows(s):
+    """Every item and decision row as stored: what a priority list must never change."""
+    return ([tuple(r) for r in s.conn.execute("select * from items order by id")],
+            [tuple(r) for r in s.conn.execute("select * from decisions order by id")])
+
+
+def test_the_priority_list_puts_slip_only_records_first_then_species_that_would_vanish():
+    def rec(key, reasons, lost=False, left=5, label="A x", slips=None):
+        return {"record_key": key, "label": label, "split": "train", "reasons": set(reasons),
+                "lost": lost, "train_left": left,
+                "slip_photos": [f"inat:{key}"] if slips is None else slips}
+    rows = rl.rank_priority([
+        rec("1", {"slip", "habitat"}, lost=True, left=0),     # slips and other photos
+        rec("2", {"slip"}, left=9),
+        rec("3", {"slip"}, lost=True, left=0, label="Z z", slips=["inat:3b", "inat:3a"]),
+        rec("4", {"slip"}, left=2),
+        rec("7", {"slip"}, left=0, label="A a"),              # a val-only species: none to lose
+        rec("5", {"dried"}, lost=True, left=0, slips=[]),     # no slip photo: no crop to give
+        rec("6", {"slip", "uv"}, left=1)])
+    assert [(r["rank"], r["photo_key"]) for r in rows] == [
+        (1, "inat:3a"), (1, "inat:3b"), (2, "inat:7"), (3, "inat:4"), (4, "inat:2"), (5, "inat:1"),
+        (6, "inat:6")]
+    assert [r["group"] for r in rows] == ["slip_only"] * 5 + ["slip_and_other"] * 2
+    assert [r["lost_species"] for r in rows] == [1, 1, 0, 0, 0, 1, 0]
+    assert rows[5]["reasons"] == "habitat,slip"
+    assert rl.priority_group({"slip"}) == "slip_only" and rl.priority_group(
+        {"slip", "dried"}) == "slip_and_other"
+
+
+def test_a_priority_list_only_marks_items_and_every_decision_stands(store, tmp_path):
+    s, _ = store
+    two = item_of(s, "inat:2")["id"]
+    rl.batch_decide(s, [{"item_id": two, "include": []}], ME)       # decided before the list
+    before = store_rows(s)
+    out = rl.seed_priority(s, write_prio(tmp_path / "prio.tsv", [
+        prio_line(1, "inat:2", "11", lost=1), prio_line(2, "inat:1", "10"),
+        prio_line(3, "inat:5", "14")]))                              # no specimen: no item
+    assert store_rows(s) == before                                   # nothing added or changed
+    assert {k: out[k] for k in ("rows", "records", "marked", "marked_open", "marked_decided",
+                                "no_item", "records_with_no_item")} == {
+        "rows": 3, "records": 3, "marked": 2, "marked_open": 1, "marked_decided": 1,
+        "no_item": 1, "records_with_no_item": 1}
+    prio = rl.priorities(s)
+    assert prio == {"inat:2": {"rank": 1, "group": "slip_only", "lost": True},
+                    "inat:1": {"rank": 2, "group": "slip_only", "lost": False}}
+    items = s.items_of(rl.ITEM_TYPE)
+    assert [t["photo_key"] for t in rl.tiles(items, "priority", priority=prio)] == ["inat:1"]
+    done = rl.tiles(items, "priority", status="decided", priority=prio)
+    assert [t["photo_key"] for t in done] == ["inat:2"] and done[0]["crops"][0]["decision"] == "reject"
+    assert rl.priority_counts(items, prio) == {"open": 1, "decided": 1}
+    # the slip bands are untouched: a priority photo keeps its band
+    assert {c["code"]: c["open"] + c["decided"] for c in rl.tranche_counts(items)} == {
+        "high": 1, "medium": 1, "low": 0, "rule": 0}
+    assert rl.tiles(items, "all", priority=prio)[0]["priority"] == prio["inat:1"]
+    assert rl.tiles(items, "all")[0]["priority"] is None
+    # the seed is named in the store's seeds, so the page's cache sees it
+    assert tuple(s.conn.execute("select rows, added from seeds where name = 'prio.tsv'")
+                 .fetchone()) == (3, 2)
+    # a new list replaces the old; an empty one clears the tranche
+    rl.seed_priority(s, write_prio(tmp_path / "prio2.tsv", [prio_line(1, "inat:1", "10")]))
+    assert list(rl.priorities(s)) == ["inat:1"]
+    rl.seed_priority(s, write_prio(tmp_path / "prio3.tsv", []))
+    assert rl.priorities(s) == {} and store_rows(s) == before
+
+
+def test_the_priority_order_puts_the_lists_photos_first_in_rank_then_the_rest_riskiest(store, tmp_path):
+    s, _ = store
+    items = s.items_of(rl.ITEM_TYPE)
+    assert rl.priorities(s) == {}                                    # no list seeded yet
+    assert [t["photo_key"] for t in rl.tiles(items, "priority", priority={})] == []
+    rl.seed_priority(s, write_prio(tmp_path / "prio.tsv", [prio_line(1, "inat:2", "11")]))
+    prio = rl.priorities(s)
+    # riskiest alone puts inat:1 (2% specimen) first; the priority order puts the list first
+    assert [t["photo_key"] for t in rl.tiles(items, priority=prio)] == ["inat:1", "inat:2"]
+    assert [t["photo_key"] for t in rl.tiles(items, sort="priority", priority=prio)] == [
+        "inat:2", "inat:1"]
+
+
+def test_a_priority_list_for_another_store_or_with_a_bad_line_refuses_the_whole_file(store, tmp_path):
+    s, _ = store
+    rl.seed_priority(s, write_prio(tmp_path / "ok.tsv", [prio_line(1, "inat:1", "10")]))
+    for name, lines in (
+            ("wrong-record", [prio_line(1, "inat:2", "11"), prio_line(2, "inat:1", "99")]),
+            ("bad-group", [prio_line(1, "inat:2", "11", group="habitat")]),
+            ("bad-lost", [prio_line(1, "inat:2", "11", lost=2)]),
+            ("bad-rank", [prio_line(0, "inat:2", "11")]),
+            ("twice", [prio_line(1, "inat:2", "11"), prio_line(2, "inat:2", "11")])):
+        with pytest.raises(fb.FeedbackError):
+            rl.seed_priority(s, write_prio(tmp_path / f"{name}.tsv", lines))
+    (tmp_path / "cols.tsv").write_text("photo_key\trank\ninat:2\t1\n", encoding="utf-8")
+    with pytest.raises(fb.FeedbackError, match="column"):
+        rl.seed_priority(s, tmp_path / "cols.tsv")
+    assert list(rl.priorities(s)) == ["inat:1"]                      # the list before stands
+
+
+def test_the_seal_keeps_a_record_first_green_after_it_out_of_the_priority_tranche(store, tmp_path):
+    s, _ = store
+    seal = "2026-10-12T13:17:51+00:00"
+    s.gate = fb.SealGate({"10": "2026-09-01", "11": "2026-10-20"}.get, seal=seal)
+    out = rl.seed_priority(s, write_prio(tmp_path / "prio.tsv", [
+        prio_line(1, "inat:1", "10"), prio_line(2, "inat:2", "11")]))
+    assert (out["marked"], out["refused_sealed"], out["refused_records"]) == (1, 1, ["11"])
+    assert list(rl.priorities(s)) == ["inat:1"]
+
+
+def test_seed_files_marks_the_priority_list_after_the_crops_it_adds(tmp_path, conn):
+    s = open_store(tmp_path / "f.sqlite")
+    s.seed([slip_item("inat:1", "10")], "slips")
+    decide_photo(s, "inat:1", "exclude_photo", "slip")
+    crops = write_seed(tmp_path / "crops.tsv", [seed_line("inat:1", "10", 0.8, [[0, 0, 100, 100]])])
+    prio = write_prio(tmp_path / "prio.tsv", [prio_line(1, "inat:1", "10")])
+    out = fb.seed_files(s, conn, slip_crops=crops, priority=prio)
+    assert out[0]["added"] == 1 and out[1]["marked"] == 1
+    assert list(rl.priorities(s)) == ["inat:1"]
+
+
+def test_the_job_reads_only_the_photos_a_list_names(tmp_path):
+    keys = tmp_path / "keys.txt"
+    keys.write_text("inat:1\n\ninat:2\n", encoding="utf-8")
+    assert rl.read_photo_keys(keys) == {"inat:1", "inat:2"}
+    prio = write_prio(tmp_path / "prio.tsv", [prio_line(1, "inat:3", "10"),
+                                              prio_line(1, "inat:4", "10")])
+    assert rl.read_photo_keys(prio) == {"inat:3", "inat:4"}
+
+
+def test_the_paper_exports_are_byte_identical_with_a_priority_list(tmp_path, conn):
+    s, live, rel = paper_site(tmp_path, conn)
+    fb.seed_files(s, conn, slip_crops=write_seed(tmp_path / "crops.tsv", [
+        seed_line("inat:1", "10", 0.8, [[0, 0, 100, 100]]),
+        seed_line("inat:2", "11", 0.8, [[0, 0, 100, 100]])]))
+    s.conn.execute("update items set created_at = ? where item_type = ?", (T0 + 2, rl.ITEM_TYPE))
+    s.conn.commit()
+    excl, _ = fx.export(backup(live, tmp_path / "a.sqlite"), rel, CUT, KEY, live)
+    crops, _ = fx.export_crops(backup(live, tmp_path / "b.sqlite"), rel, CUT, KEY, live)
+    rl.seed_priority(s, write_prio(tmp_path / "prio.tsv", [prio_line(1, "inat:2", "11"),
+                                                           prio_line(2, "inat:1", "10")]))
+    assert len(rl.priorities(s)) == 2
+    assert fx.export(backup(live, tmp_path / "c.sqlite"), rel, CUT, KEY, live)[0] == excl
+    assert fx.export_crops(backup(live, tmp_path / "d.sqlite"), rel, CUT, KEY, live)[0] == crops
+
+
+def test_the_api_shows_the_priority_tranche_in_its_order_with_its_counts(conn, tmp_path):
+    c, fstore = site_with_photos(conn, tmp_path)
+    for key in ("inat:1000", "inat:1100"):
+        decide_photo(fstore, key, "exclude_photo", "slip")
+    fstore.seed([{**r, "projects": ["p1"]} for r in rl.rows_from_slip_crops(write_seed(
+        tmp_path / "crops.tsv", [seed_line("inat:1000", "100", 0.9, [[10, 10, 90, 90]], area=0.01),
+                                 seed_line("inat:1100", "100", 0.45, [[0, 0, 50, 50]], area=0.3)]))[0]],
+                "crops")
+    as_user(c, "admin-1")
+    body = c.get("/api/feedback/recovered-labels", params={"tranche": "priority"}).json()
+    assert body["total"] == 0 and body["priority"] == {"open": 0, "decided": 0}   # no list yet
+    rl.seed_priority(fstore, write_prio(tmp_path / "prio.tsv", [
+        prio_line(1, "inat:1100", "100", lost=1)]))
+    body = c.get("/api/feedback/recovered-labels",
+                 params={"tranche": "priority", "sort": "priority"}).json()
+    assert [t["photo_key"] for t in body["tiles"]] == ["inat:1100"]
+    assert body["tiles"][0]["priority"] == {"rank": 1, "group": "slip_only", "lost": True}
+    assert body["priority"] == {"open": 1, "decided": 0}
+    assert {t["code"]: t["open"] for t in body["tranches"]} == {
+        "high": 1, "medium": 1, "low": 0, "rule": 0}                    # the bands as before
+    every = c.get("/api/feedback/recovered-labels", params={"sort": "priority"}).json()
+    assert [t["photo_key"] for t in every["tiles"]] == ["inat:1100", "inat:1000"]
+    c.cookies.clear()                                                   # read-only sees it too
+    ro = c.get("/api/feedback/recovered-labels", params={"tranche": "priority"}).json()
+    assert ro["total"] == 1 and ro["tiles"][0]["priority"]["lost"] is True

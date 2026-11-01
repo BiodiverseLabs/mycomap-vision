@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { RecoveredCrop, RecoveredTile } from "./api";
-import { boxOf, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, decisionKey, dragBox, effectiveBox, flipCrop, minSide,
+import { boxOf, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, decisionKey, dragBox, effectiveBox, fallbackTranche, flipCrop, minSide,
+         PRIORITY, priorityBadge, RECOVERED_SORTS, sortFor, TRANCHES, trancheCount,
          pendingDecisions, startChoice, tileDecision, tileFacts, tileSave, tileSaveDecision } from "./recoveredLabels";
 
 const crop = (n: number, box: RecoveredCrop["box"], decision: RecoveredCrop["decision"] = null): RecoveredCrop =>
@@ -137,4 +138,54 @@ test("a tile saves on its own: what it saved is not sent again, and a change aft
   const edited = { [cropKey(1, 2)]: [180, 180, 300, 300] as RecoveredCrop["box"] };
   assert.deepEqual(tileSaveDecision(a, {}, edited, { 1: "dried" }),
                    [{ item_id: 1, include: [1, 2], boxes: { "2": [180, 180, 300, 300] }, reason: "dried" }]);
+});
+
+// --- the priority tranche (Steve, 2026-11-01): records that would lose every photo -------------
+
+const page = (open: number, decided = 0) => ({
+  priority: { open, decided },
+  tranches: [{ code: "high", open: 5, decided: 1 }, { code: "medium", open: 3, decided: 0 },
+             { code: "low", open: 0, decided: 0 }, { code: "rule", open: 2, decided: 4 }],
+});
+
+test("the page opens on the priority tranche in its own order, and every other tranche smallest first", () => {
+  assert.equal(TRANCHES[0].code, PRIORITY);
+  assert.equal(sortFor(PRIORITY), "priority");
+  assert.equal(sortFor("high"), "riskiest");
+  assert.ok(RECOVERED_SORTS.some((s) => s.code === "priority"));
+});
+
+test("an empty priority tranche falls back to every tranche, but never once the reviewer has picked one", () => {
+  assert.equal(fallbackTranche(page(0), PRIORITY, "open", false), "all");
+  assert.equal(fallbackTranche({}, PRIORITY, "open", false), "all");          // no priority list on the server
+  assert.equal(fallbackTranche(page(3), PRIORITY, "open", false), null);      // photos open: stay
+  assert.equal(fallbackTranche(page(0), PRIORITY, "open", true), null);       // the reviewer chose it
+  assert.equal(fallbackTranche(page(0), PRIORITY, "decided", false), null);   // the Decided view: stay
+  assert.equal(fallbackTranche(page(0), "high", "open", false), null);
+  assert.equal(fallbackTranche(undefined, PRIORITY, "open", false), null);    // not loaded yet
+});
+
+test("the picker counts the priority list on its own and every tranche as the slip bands only", () => {
+  // a priority photo keeps its slip band, so "every tranche" must not count it twice
+  assert.equal(trancheCount(page(4, 2), PRIORITY, "open"), " (4)");
+  assert.equal(trancheCount(page(4, 2), PRIORITY, "decided"), " (2)");
+  assert.equal(trancheCount(page(4, 2), "all", "open"), " (10)");
+  assert.equal(trancheCount(page(4, 2), "all", "decided"), " (5)");
+  assert.equal(trancheCount(page(4, 2), "rule", "decided"), " (4)");
+  assert.equal(trancheCount({ tranches: [] }, PRIORITY, "open"), " (0)");
+  assert.equal(trancheCount(undefined, "high", "open"), "");
+  assert.equal(trancheCount({ tranches: [{ code: "high", open: 1200, decided: 0 }] }, "high", "open"), " (1,200)");
+});
+
+test("a priority tile says it is the record's last photo, and when its species would vanish", () => {
+  assert.equal(priorityBadge(null), null);
+  assert.equal(priorityBadge(undefined), null);
+  const plain = priorityBadge({ rank: 1234, group: "slip_only", lost: false })!;
+  assert.equal(plain.text, "Last photo");
+  assert.match(plain.title, /^Priority 1,234: every other photo of this record is excluded as a field slip/);
+  assert.doesNotMatch(plain.title, /species/);
+  const lost = priorityBadge({ rank: 2, group: "slip_and_other", lost: true })!;
+  assert.equal(lost.text, "Last photo · species would vanish");
+  assert.match(lost.title, /slips and other kinds/);
+  assert.match(lost.title, /no other training record left$/);
 });

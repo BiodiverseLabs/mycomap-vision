@@ -10,7 +10,8 @@ import { tileImage } from "@/lib/photoReview";
 import { AUTOSAVE_MS } from "@/lib/photoSummary";
 import { autosaveOnText, readAutosave, writeAutosave } from "@/lib/reviewSave";
 import { type Box, boxOf, type BoxEdits, boxStyle, cropBackground, cropKey, cropShare, cropsUsed, dragBox, effectiveBox, flipCrop,
-         type Handle, KEEP_PHOTO, pendingDecisions, RECOVERED_SORTS, type ReasonEdits, startChoice, tileFacts, TRANCHES,
+         type Handle, KEEP_PHOTO, pendingDecisions, PRIORITY, priorityBadge, RECOVERED_SORTS, type ReasonEdits, startChoice,
+         fallbackTranche, sortFor, tileFacts, TRANCHES, trancheCount,
          type CropMarks, decisionKey, type RecoveredDecision, type Sent, tileDecision, type TileSave, tileSave,
          tileSaveDecision } from "@/lib/recoveredLabels";
 
@@ -31,8 +32,10 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
   const readOnly = useContext(ReadOnlyContext);
   const qc = useQueryClient();
   const [status, setStatus] = useState<FeedbackStatus>("open");
-  const [tranche, setTranche] = useState("all");
-  const [sort, setSort] = useState("riskiest");
+  // Steve, 2026-11-01: the priority tranche (records that would lose every photo) comes first.
+  const [tranche, setTranche] = useState(PRIORITY);
+  const [sort, setSort] = useState(sortFor(PRIORITY));
+  const picked = useRef(false);
   const [offset, setOffset] = useState(0);
   const [marks, setMarks] = useState<CropMarks>({});
   const [edits, setEdits] = useState<BoxEdits>({});
@@ -53,6 +56,11 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
   const tiles = data?.tiles ?? [];
   const discard = () => { setMarks({}); setEdits({}); setReasons({}); };
   useEffect(() => { discard(); setSeen(new Set()); setSent({}); setFlight({}); }, [status, tranche, sort, offset]);
+  // Nothing open in the priority tranche (or no list): open on every tranche instead.
+  useEffect(() => {
+    const to = fallbackTranche(list.isPlaceholderData ? undefined : data, tranche, status, picked.current);
+    if (to) { setTranche(to); setSort(sortFor(to)); setOffset(0); }
+  }, [data, list.isPlaceholderData, tranche, status]);
   const pending = useMemo(() => (readOnly ? [] : pendingDecisions(tiles, marks, seen, edits, reasons, sent)),
                           [tiles, marks, seen, edits, reasons, sent, readOnly]);
   const pendingIds = useMemo(() => new Set(pending.map((d) => d.item_id)), [pending]);
@@ -95,14 +103,7 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
     setAutosave(on);
     writeAutosave(browserStorage, on);
   };
-  const count = (code: string) => {
-    const t = data?.tranches.find((x) => x.code === code);
-    if (code === "all") {
-      const n = (data?.tranches ?? []).reduce((a, x) => a + (status === "open" ? x.open : x.decided), 0);
-      return data ? ` (${n.toLocaleString("en-US")})` : "";
-    }
-    return t ? ` (${(status === "open" ? t.open : t.decided).toLocaleString("en-US")})` : "";
-  };
+  const count = (code: string) => trancheCount(data, code, status);
   return (
     <section className="min-w-0 space-y-3" data-testid="recovered-labels">
       <div className="min-w-0">
@@ -121,9 +122,10 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
           ))}
         </div>
         <label className="flex min-w-0 items-center gap-2 text-sm"
-               title="The photo-type tagger's slip p when the photo was put up for review">
+               title="Priority: photos of records that would otherwise lose every photo. The bands: the photo-type tagger's slip p when the photo was put up for review">
           <span className="text-muted-foreground">Tranche</span>
-          <select className={FIELD} value={tranche} onChange={(e) => { const v = e.target.value; leaving(() => { setTranche(v); setOffset(0); })(); }}
+          <select className={FIELD} value={tranche}
+                  onChange={(e) => { const v = e.target.value; leaving(() => { picked.current = true; setTranche(v); setSort(sortFor(v)); setOffset(0); })(); }}
                   data-testid="recovered-tranche">
             {TRANCHES.map((t) => <option key={t.code} value={t.code}>{t.label}{count(t.code)}</option>)}
           </select>
@@ -145,6 +147,13 @@ export function RecoveredLabels({ summary }: { summary: FeedbackSummary }) {
       {!readOnly && !autosave && (
         <SaveBar count={pending.length} busy={busy} onSave={save} onDiscard={discard} sticky
                  note="Each tile has its own Save. A photo you have seen counts as reviewed; Save page saves every unsaved tile as shown." />
+      )}
+      {tranche === PRIORITY && (
+        <p className="max-w-3xl text-xs text-muted-foreground" data-testid="recovered-priority-note">
+          Priority: field-slip photos of records that every saved photo exclusion would leave with no photo at all, so a crop
+          is the record's only way back into Vision. Records whose only exclusions are slips come first, then records with
+          other exclusions too; within each, species that would otherwise leave training entirely first.
+        </p>
       )}
       {status === "open" && (
         <p className="text-xs text-muted-foreground">
@@ -221,6 +230,7 @@ function Tile({ tile, marks, edits, readOnly, reasons, reason, manual, save, onS
   const moved = tile.crops.some((c) => box(c).some((v, i) => v !== effectiveBox(c.box)[i]));
   const used = cropsUsed(reason);
   const changed = tile.crops.some((c) => choice(c.n) !== startChoice(tile, c)) || moved || reason !== (tile.reason ?? "slip");
+  const badge = priorityBadge(tile.priority);
   return (
     <li ref={ref} className={`min-w-0 rounded-lg border bg-white p-2 dark:bg-card ${
           save === "failed" ? "border-red-500" : save === "unsaved" && changed ? "border-amber-400 border-dashed"
@@ -297,6 +307,12 @@ function Tile({ tile, marks, edits, readOnly, reasons, reason, manual, save, onS
           })}
         </div>
       </div>
+      {badge && (
+        <p className="mt-1" data-testid={`recovered-priority-${tile.item_id}`}>
+          <span className="inline-flex rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-semibold text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
+                title={badge.title}>{badge.text}</span>
+        </p>
+      )}
       <p className={`mt-1 truncate text-xs italic ${INK}`} title={tile.label}>{tile.label || "(no name)"}</p>
       <p className="flex min-w-0 flex-wrap justify-between gap-x-2 text-xs">
         <Ext href={tile.link}>{recordLabel(tile.record_key)}</Ext>

@@ -4,12 +4,19 @@
 // the page draws the box over the original and, for reviewers, shows the box's part of the same
 // image by CSS. The public read-only view shows only the outline on the original.
 
-import type { RecoveredCrop, RecoveredTile } from "./api";
+import type { FeedbackStatus, RecoveredCrop, RecoveredPage, RecoveredPriority, RecoveredTile } from "./api";
 
 export const RECOVERED_TYPE = "recovered_label";
 
-/** The slip tranches (the photo-type tagger's slip p when the photo was seeded), best first. */
+/** The priority tranche (Steve, 2026-11-01: "so those get the crop application review first"):
+ *  slip photos of records that every saved photo exclusion leaves with no photo, in the list's
+ *  order. Not a slip band: a photo in it keeps its band too (recovered_labels.seed_priority). */
+export const PRIORITY = "priority";
+
+/** The tranches: the priority list first, then the slip bands (the photo-type tagger's slip p
+ *  when the photo was seeded), best first. */
 export const TRANCHES: { code: string; label: string }[] = [
+  { code: PRIORITY, label: "Priority: last photo" },
   { code: "all", label: "Every tranche" },
   { code: "high", label: "High (p ≥ 0.60)" },
   { code: "medium", label: "Medium (0.40–0.60)" },
@@ -21,7 +28,48 @@ export const RECOVERED_SORTS: { code: string; label: string }[] = [
   { code: "riskiest", label: "Smallest specimen first" },
   { code: "largest", label: "Largest specimen first" },
   { code: "newest", label: "Newest exclusion first" },
+  { code: "priority", label: "Priority order" },
 ];
+
+/** The sort a tranche opens with: the priority list's own order (slip-only records first, then
+ *  species that would vanish), else smallest specimen first. */
+export function sortFor(tranche: string): string {
+  return tranche === PRIORITY ? "priority" : "riskiest";
+}
+
+/** The page opens on the priority tranche; once its first page says nothing is open there (or
+ *  the server has no priority list), it falls back to every tranche. Null: stay. Only while the
+ *  reviewer has not picked a tranche. */
+export function fallbackTranche(page: Pick<RecoveredPage, "priority"> | undefined, tranche: string,
+                                status: FeedbackStatus, picked: boolean): string | null {
+  if (picked || !page || tranche !== PRIORITY || status !== "open") return null;
+  return (page.priority?.open ?? 0) > 0 ? null : "all";
+}
+
+/** The count beside a tranche in the picker: the priority list's own, every slip band's for
+ *  "all" (each photo is in exactly one band), else the band's. "" before the page loads. */
+export function trancheCount(page: Pick<RecoveredPage, "tranches" | "priority"> | undefined, code: string,
+                             status: FeedbackStatus): string {
+  if (!page) return "";
+  const pick = (c: { open: number; decided: number }) => (status === "open" ? c.open : c.decided);
+  let n: number | undefined;
+  if (code === PRIORITY) n = page.priority ? pick(page.priority) : 0;
+  else if (code === "all") n = page.tranches.reduce((a, x) => a + pick(x), 0);
+  else { const t = page.tranches.find((x) => x.code === code); n = t && pick(t); }
+  return n === undefined ? "" : ` (${n.toLocaleString("en-US")})`;
+}
+
+/** The tile's priority badge: why this photo comes first. Null when it is not in the list. */
+export function priorityBadge(p: RecoveredPriority | null | undefined): { text: string; title: string } | null {
+  if (!p) return null;
+  const why = p.group === "slip_only" ? "every other photo of this record is excluded as a field slip"
+    : "every other photo of this record is excluded (slips and other kinds)";
+  return {
+    text: p.lost ? "Last photo · species would vanish" : "Last photo",
+    title: `Priority ${p.rank.toLocaleString("en-US")}: ${why}, so a crop is the record's only way back into Vision` +
+      (p.lost ? "; its species has no other training record left" : ""),
+  };
+}
 
 /** A box as CSS percentages of the photo it is drawn on. */
 export function boxStyle(box: RecoveredCrop["box"], width: number, height: number) {

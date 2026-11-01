@@ -827,12 +827,15 @@ def seed_files(store: Store, conn: sqlite3.Connection, queue: Path | None = None
                blind_ratio: float = 0.25, seed: int = 20261018,
                twin_locations: Path | None = None,
                answer_key_groups: Path | None = None,
-               slip_crops: Path | None = None) -> list[dict]:
+               slip_crops: Path | None = None,
+               priority: Path | None = None) -> list[dict]:
     """Seed the queue from the miss review's files. With `hits`, every model-flagged type
     also gets a blind sample of finds Vision answered right: blind_ratio of its items. Every
     row passes the paper's seal (SealGate, from this manifest when the store has none).
     `slip_crops` is the specimen detector's file (`mv feedback slip-crops`): only photos a
-    person still leaves out as a field slip are queued ("not_slip_excluded" counts the rest)."""
+    person still leaves out as a field slip are queued ("not_slip_excluded" counts the rest).
+    `priority` is the Recovered labels priority list (recovered_labels.seed_priority), read after
+    `slip_crops` so it can mark the photos that file adds; it only marks items."""
     import hashlib
     if store.gate is None:
         store.gate = SealGate.from_manifest(conn)
@@ -847,6 +850,9 @@ def seed_files(store: Store, conn: sqlite3.Connection, queue: Path | None = None
         sha = hashlib.sha256(Path(slip_crops).read_bytes()).hexdigest()
         done = store.seed(with_projects(keep, conn), Path(slip_crops).name, sha)
         out.append(done | counts | {"not_slip_excluded": len(rows) - len(keep)})
+    if priority is not None:
+        from . import recovered_labels as rl
+        out.append(rl.seed_priority(store, Path(priority)))
     for path, reader in ((queue, rows_from_queue_seed), (crosswalk, rows_from_crosswalk),
                          (twin_locations, rows_from_twin_locations),
                          (answer_key_groups, lambda p: rows_from_answer_key_groups(p, store))):
