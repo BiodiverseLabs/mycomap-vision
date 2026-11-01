@@ -32,14 +32,23 @@ test("the record view never suggests Exclude for a photo the server suggests kee
   assert.equal(suggestsExclude(p({ suggested_decision: "exclude" }), "slip"), true);
 });
 
-test("the band filter offers all, high, medium, low with the tab's open counts", () => {
-  assert.deepEqual(BAND_FILTERS.map((b) => b.code), ["all", "high", "medium", "low"]);
+test("the band filter offers all, high, medium, low and very low with the tab's open counts", () => {
+  assert.deepEqual(BAND_FILTERS.map((b) => b.code), ["all", "high", "medium", "low", "very_low"]);
   const data = { tabs: [{ code: "slip", bands: { high: 1200, medium: 3, low: 0 } },
                         { code: "uv", bands: { high: 0, medium: 40, low: 7 } }] };
   assert.equal(bandCount(data, "slip", "high"), " (1,200)");
   assert.equal(bandCount(data, "all", "medium"), " (43)");
   assert.equal(bandCount(data, "slip", "all"), "");
   assert.equal(bandCount(undefined, "slip", "high"), "");
+});
+
+test("Very low is the bottom of the Confidence dropdown and counts its tab's open photos", () => {
+  assert.deepEqual(BAND_FILTERS[BAND_FILTERS.length - 1], { code: "very_low", label: "Very low" });
+  const data: { tabs: { code: string; bands?: Record<string, number> }[] } = { tabs: [{ code: "uv", bands: { high: 417, medium: 439, low: 1266, very_low: 3693 } },
+                        { code: "slip", bands: { high: 2, medium: 0, low: 1 } }] };   // an older server: no very_low
+  assert.equal(bandCount(data, "uv", "very_low"), " (3,693)");
+  assert.equal(bandCount(data, "all", "very_low"), " (3,693)");
+  assert.equal(bandCount(data, "slip", "very_low"), "");
 });
 
 test("every v2 kind has a Summary tab", () => {

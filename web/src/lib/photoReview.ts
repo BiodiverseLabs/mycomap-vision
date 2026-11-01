@@ -13,12 +13,15 @@ export const PHOTO_REVIEW_TYPE = "non_specimen_photo";
 export const REVIEW_PAGE_SIZE = 10;
 
 /** Tagger v2's bands, for the filter (Steve, 2026-10-21). A photo with no v2 flag shows only
- *  under "All". */
+ *  under "All". "Very low" is the bottom band (Steve, 2026-11-01: "a new Low category bottom
+ *  confidence after the retrain"): a tagger's least likely photos, kept out of Low. Any tab may
+ *  have it; the UV retrain is the first to fill it. */
 export const BAND_FILTERS: { code: PhotoBandFilter; label: string }[] = [
   { code: "all", label: "All confidence" },
   { code: "high", label: "High" },
   { code: "medium", label: "Medium" },
   { code: "low", label: "Low" },
+  { code: "very_low", label: "Very low" },
 ];
 
 /** " (n)" after a band's name: the tab's open photos in that band, when the record view's

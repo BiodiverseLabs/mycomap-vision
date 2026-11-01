@@ -52,10 +52,50 @@ def test_bands_filter_every_tab_and_the_tabs_count_them():
     assert pr.flagged_tiles(items(), "habitat", band="high") == []           # no v2 flag: All only
     assert [t["photo_key"] for t in pr.flagged_tiles(items(), "habitat")] == ["inat:6"]
     uv = next(t for t in pr.cards(items(), "uv")["tabs"] if t["code"] == "uv")
-    assert uv["bands"] == {"high": 0, "medium": 1, "low": 1}
+    assert uv["bands"] == {"high": 0, "medium": 1, "low": 1, "very_low": 0}
     assert [r["record_key"] for r in pr.cards(items(), "uv", band="low")["records"]] == ["12"]
     with pytest.raises(fb.FeedbackError):
         pr.flagged_tiles(items(), "uv", band="certain")
+
+
+# The bottom band (Steve, 2026-11-01: "a new Low category bottom confidence after the retrain"),
+# filled first by the UV retrain's re-score of the open UV tab ("R11.1 v2 uv p=... (very_low)").
+
+def test_very_low_is_the_bottom_band_and_any_v2_flag_can_carry_it():
+    assert pr.BANDS[-1] == "very_low" and pr.BANDS[:3] == ("high", "medium", "low")
+    f = pr.parse_flags("R11 v2 uv p=0.45 (low); R11.1 v2 uv p=0.0400 (very_low)")
+    assert [(x["tab"], x["band"], x["p"]) for x in f] == [("uv", "low", 0.45), ("uv", "very_low", 0.04)]
+    assert pr.band_of(pr.placing_flags("R11 v2 uv p=0.45 (low); R11.1 v2 uv p=0.0400 (very_low)"), "uv") == "very_low"
+    # another tab may use it later
+    assert pr.band_of(pr.parse_flags("R12 v2 slip p=0.05 (very_low)"), "slip") == "very_low"
+
+
+def test_a_uv_rescore_rebands_and_reranks_open_photos_and_never_touches_decided_ones(tmp_path):
+    s = fb.Store(tmp_path / "f.sqlite")
+    s.seed([photo_item("inat:1", "10", "R11 v2 uv p=0.450 (low)"),
+            photo_item("inat:2", "11", "R11 v2 uv p=0.600 (low)"),
+            photo_item("inat:3", "12", "R11 v2 uv p=0.550 (low)")], "r11")
+    three = next(i for i in s.items_of(pr.ITEM_TYPE) if i["subject"] == "inat:3")
+    s.decide(three["id"], "keep_photo", {"sub": "a"})
+    before = next(i for i in s.items_of(pr.ITEM_TYPE) if i["subject"] == "inat:3")
+    res = s.seed([photo_item("inat:1", "10", "R11.1 v2 uv p=0.9100 (high)"),
+                  photo_item("inat:2", "11", "R11.1 v2 uv p=0.0300 (very_low)"),
+                  photo_item("inat:3", "12", "R11.1 v2 uv p=0.0100 (very_low)")], "uv-r11.1")
+    assert (res["added"], res["flags_added"], res["already_decided"]) == (0, 2, 1)
+    items = s.items_of(pr.ITEM_TYPE)
+    open_ = pr.flagged_tiles(items, "uv")
+    assert [(t["photo_key"], t["band"]) for t in open_] == [("inat:1", "high"), ("inat:2", "very_low")]  # new rank
+    assert [t["photo_key"] for t in pr.flagged_tiles(items, "uv", band="very_low")] == ["inat:2"]
+    assert pr.flagged_tiles(items, "uv", band="low") == []
+    uv = next(t for t in pr.cards(items, "uv")["tabs"] if t["code"] == "uv")
+    assert uv["bands"] == {"high": 1, "medium": 0, "low": 0, "very_low": 1}
+    after = next(i for i in items if i["subject"] == "inat:3")
+    assert after["rule"] == before["rule"] == "R11 v2 uv p=0.550 (low)"        # decided: unchanged
+    assert pr.item_outcome(after, "uv") == "included"
+    done = pr.flagged_tiles(items, "uv", status="decided")
+    assert [(t["photo_key"], t["band"]) for t in done] == [("inat:3", "low")]
+    # a very_low photo still starts as Exclude, like every band
+    assert next(t for t in open_ if t["photo_key"] == "inat:2")["suggested_decision"] == "exclude"
 
 
 def test_only_specimen_photos_start_as_include_a_low_band_photo_in_a_group_starts_excluded():
@@ -99,3 +139,20 @@ def test_the_api_filters_by_band_and_refuses_an_unknown_one(conn, tmp_path):
     photo = next(p for p in cards["records"][0]["photos"] if p["photo_key"] == "inat:1000")
     assert photo["band"] == "high" and photo["suggested_decision"] == "exclude"
     assert c.get("/api/feedback/photo-review/flagged", params={"band": "certain"}).status_code == 400
+
+
+def test_the_api_filters_by_the_very_low_band_and_counts_it(conn, tmp_path):
+    c, fstore = site_with_photos(conn, tmp_path)
+    fstore.seed([photo_item("inat:1000", "100", "R11 v2 uv p=0.500 (low)"),
+                 photo_item("inat:1000", "100", "R11.1 v2 uv p=0.0400 (very_low)"),
+                 photo_item("inat:1001", "101", "R11.1 v2 uv p=0.8000 (high)")], "uv")
+    as_user(c, "admin-1")
+    vl = c.get("/api/feedback/photo-review/flagged", params={"tab": "uv", "band": "very_low"})
+    assert vl.status_code == 200
+    assert [(t["photo_key"], t["band"]) for t in vl.json()["tiles"]] == [("inat:1000", "very_low")]
+    assert c.get("/api/feedback/photo-review/flagged", params={"tab": "uv", "band": "low"}).json()["tiles"] == []
+    cards = c.get("/api/feedback/photo-review", params={"tab": "uv", "band": "very_low"}).json()
+    assert [r["record_key"] for r in cards["records"]] == ["100"]
+    assert next(t for t in cards["tabs"] if t["code"] == "uv")["bands"] == {
+        "high": 1, "medium": 0, "low": 0, "very_low": 1}
+    assert c.get("/api/feedback/photo-review", params={"band": "very-low"}).status_code == 400

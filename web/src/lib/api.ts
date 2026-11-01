@@ -743,8 +743,9 @@ export interface FeedbackDecisionBody {
 
 export type PhotoReviewTab = "micrograph" | "slip" | "habitat" | "people" | "gate" | "uv" | "tree" | "drawing"
   | "chemical" | "spore_print" | "dried" | "specimen" | "other" | "all";
-/** Tagger v2's confidence bands (by-eye precision: high >= 85%, medium 50-85%, low below). */
-export type PhotoBand = "high" | "medium" | "low";
+/** Tagger v2's confidence bands (by-eye precision: high >= 85%, medium 50-85%, low below), and
+ *  the bottom band very_low below low (Steve, 2026-11-01): a tagger's least likely photos. */
+export type PhotoBand = "high" | "medium" | "low" | "very_low";
 export type PhotoBandFilter = PhotoBand | "all";
 export type PhotoReviewSort = "p" | "p_asc" | "flagged";
 /** What became of a decided photo's flag in the tab (Steve, 2026-10-30; photo_review.outcome_of):

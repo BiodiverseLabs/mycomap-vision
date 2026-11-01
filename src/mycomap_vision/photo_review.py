@@ -104,8 +104,12 @@ REASON_OF_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat
 TAB_OF_REASON = {r: t for t, r in REASON_OF_TAB.items()} | {
     old: {r: t for t, r in REASON_OF_TAB.items()}[new] for old, new in RETIRED_REASONS.items()}
 # Tagger v2's bands (by-eye precision of its class x confidence ranges: high >= 85%, medium
-# 50-85%, low below), the order the band filter offers them.
-BANDS = ("high", "medium", "low")
+# 50-85%, low below), the order the band filter offers them. "very_low" (Steve, 2026-11-01: "a new
+# Low category bottom confidence after the retrain") is the bottom band, below low: a tagger's
+# least likely photos, by its precision on held-out decisions, go there instead of filling low.
+# Any tab's flags may carry it; the UV retrain (R11.1) is the first. It starts as Exclude, like
+# every band.
+BANDS = ("high", "medium", "low", "very_low")
 
 
 def suggested_reason(flags: list[dict], tab: str = "all") -> str | None:
@@ -143,11 +147,14 @@ _PROBE = re.compile(r"\b(" + "|".join(PROBE_TABS) + r") probe p=([0-9.]+)")
 _VIEW = re.compile(r"view (\w+) p=([0-9.]+)")
 _GATE = re.compile(r"gate not_fungus p\(fungus\)=([0-9.]+)")
 # Tagger v2 (one softmax over every kind, trained on Steve's decisions): "R9 v2 slip p=0.83
-# (high)". Its class names the tab; "specimen" is a photo it reads as an ordinary one.
+# (high)". Its class names the tab; "specimen" is a photo it reads as an ordinary one. A later
+# review-only re-score of one class writes the same form, so its flag places and bands the photo
+# over the older ones: "R11.1 v2 uv p=0.043 (very_low)" (the UV retrain on the UV tab's decisions,
+# 2026-11-01, which also weighs who took the photo; the research repo's uv-tagger-retrain entry).
 V2_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat", "people": "people",
           "uv": "uv", "chemical": "chemical", "spore_print": "spore_print", "dried": "dried",
           "tree": "tree", "drawing": "drawing", "not_fungus": "gate", "specimen": "specimen"}
-_V2 = re.compile(r"\bv2 (\w+) p=([0-9.]+)(?: \((high|medium|low)\))?")
+_V2 = re.compile(r"\bv2 (\w+) p=([0-9.]+)(?: \((" + "|".join(BANDS) + r")\))?")
 
 
 def parse_flags(rule: str) -> list[dict]:
