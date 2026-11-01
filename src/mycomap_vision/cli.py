@@ -279,7 +279,7 @@ def cmd_aws_train_job(conn, args) -> None:
                           resume=trainer.RunFiles(store.client, store.bucket)
                           if args.resume else None, release=trainer_release(args),
                           seed=args.seed, public_trainable_only=args.public_trainable_only,
-                          no_compare=args.no_compare)
+                          no_compare=getattr(args, "no_compare", False))
     if watcher is not None:
         watcher.stop()
     print(json.dumps(out, indent=2))
