@@ -62,13 +62,15 @@ FINETUNE_RATES = {"bioclip-2": 70.7}   # photos seen per second while training
 # (x1.77), fine-tune 19,524 steps x 64 in 402.8 min = 51.7/s (x1.37); the laptop's RTX 4070
 # had guessed x(2.48, 2.27). 448 is not measured: the 336 cost times the laptop's 448/336 step
 # (5.03/2.48 = 2.03 embed, 4.20/2.27 = 1.85 fine-tune).
-# BioCLIP 2.5 Huge (ViT-H/14) at 336 is NOT measured on the L4: the measured 336 cost times
+# BioCLIP 2.5 Huge (ViT-H/14) at 336 was first ESTIMATED (before the L4 ran it): the 336 cost times
 # the laptop's ViT-H/ViT-L ratio at 336 (RTX 4070, synthetic batches, 29 Oct: embed x2.01,
 # last-4-block train step x1.97 at 8 photos a pass, x1.90 at 16), i.e. 1.77 x 2.01 = 3.55 and
 # 1.37 x 1.97 = 2.70. Peak memory there: 5.5 GB at 16 photos a pass, ~11 GB projected at 64,
-# so the L4's 24 GB holds v1's whole batch in one pass. Replace with the run's own speeds.
+# so the L4's 24 GB holds v1's whole batch in one pass. MEASURED since on the L4 (the paired
+# run 20261029-152340, 2026-10-29/30): embed 35.8 and 35.7 photos/s (x3.42), fine-tune
+# 19,524 steps x 64 in 729.6 min = 28.5/s (x2.48), whole batch in one pass.
 INPUT_SIZE_COST = {"bioclip-2-336": (1.77, 1.37), "bioclip-2-448": (3.59, 2.53),
-                   "bioclip-2.5-336": (3.55, 2.70)}
+                   "bioclip-2.5-336": (3.42, 2.48)}
 for _alias, (_embed, _train) in INPUT_SIZE_COST.items():
     EMBED_RATES[_alias] = round(EMBED_RATES["bioclip-2"] / _embed, 1)
     FINETUNE_RATES[_alias] = round(FINETUNE_RATES["bioclip-2"] / _train, 1)
@@ -178,9 +180,13 @@ def checkpoint_epochs(doc: dict) -> dict[str, int]:
 
 def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
              factor: float = L4_FACTOR, epochs_done: dict[str, int] | None = None,
-             picek_photos: int | None = None) -> dict:
+             picek_photos: int | None = None, compare: bool = True,
+             train_photos: int | None = None) -> dict:
     """Hours a run should take: photos / rate per stage (EMBED_RATES, FINETUNE_RATES,
-    laptop-measured) times `factor`, plus setup and the comparison. Fine-tuning counts
+    laptop-measured) times `factor`, plus setup and the comparison (none with `compare`
+    False: a --no-compare run). `train_photos`: the photos (and crops) a fine-tune learns
+    from, when that is not `photos` (a release run: the train split left after its
+    exclusion list, plus crops; its embed stages still count `photos`). Fine-tuning counts
     every photo `epochs` times (it trains on the reference records only, a little less).
     `epochs_done` (checkpoint_epochs): epochs a resumed Picek stage need not train again.
     `picek_photos`: the photos a Picek stage trains and validates on each epoch, when that is
@@ -189,7 +195,8 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
     if epochs is None:
         from .finetune import FinetuneConfig
         epochs = FinetuneConfig.epochs
-    rows, total = [], SETUP_HOURS + COMPARE_HOURS
+    compare_hours = COMPARE_HOURS if compare else 0.0
+    rows, total = [], SETUP_HOURS + compare_hours
     rule_less = {"min": 0.0, "expected": 0.0}     # hours an epoch rule may save off `total`
     for s in stages:
         key = s.base or s.name
@@ -237,14 +244,16 @@ def estimate(stages: list[Stage], photos: int, epochs: float | None = None,
             fallback = UNMEASURED_EMBED_RATE
         else:
             rate = FINETUNE_RATES.get(key)
-            work = photos * epochs
+            work = (photos if train_photos is None else train_photos) * epochs
             fallback = UNMEASURED_FINETUNE_RATE
         hours = work / (rate or fallback) / 3600 * factor
         total += hours
         rows.append({"stage": f"{s.kind} {s.name}", "photos_per_second": rate or fallback,
-                     "measured": rate is not None, "hours": round(hours, 1)})
+                     "measured": rate is not None, "hours": round(hours, 1)}
+                    | ({"photos": train_photos} if s.kind == "finetune"
+                       and train_photos is not None else {}))
     out = {"photos": photos, "factor": factor, "stages": rows,
-           "setup_hours": SETUP_HOURS, "compare_hours": COMPARE_HOURS,
+           "setup_hours": SETUP_HOURS, "compare_hours": compare_hours,
            "total_hours": round(total, 1)}           # the most: --max-hours is checked on it
     if any("epochs" in r for r in rows):
         out["total_hours_min"] = round(total - rule_less["min"], 1)
@@ -364,6 +373,27 @@ def restrict_to_release(conn: sqlite3.Connection, release, store_location: str, 
                          f"copy holds {kept:,} of them: it is not the manifest the release "
                          "was cut from")
     return {"records": kept, "dropped": dropped, "photos": len(want)}
+
+
+NO_COMPARE_NOTE = ("skipped (--no-compare): the model was trained on every record it could be "
+                   "scored on, so this run reports no accuracy (paper PLAN §8 guard rail a)")
+
+
+def write_release_crops(conn: sqlite3.Connection, release) -> int:
+    """Make this instance copy's crop table (feedback_photo_crops) hold exactly the release's
+    crops (use_photo_crops), so embed.crops_to_embed finds them. Returns how many."""
+    from .dataset_release import CROP_SLOTS
+    from .feedback import ensure_crops_schema
+    ensure_crops_schema(conn)
+    keys = dict(release.db.execute("select manifest_photo_id, photo_key from photos"))
+    rows = []
+    for vid, pid, box in release.crop_rows():
+        n = -vid - pid * CROP_SLOTS
+        rows.append((pid, n, keys[pid], *box, release.photo_crops["sha256"][:12]))
+    with conn:
+        conn.execute("delete from feedback_photo_crops")
+        conn.executemany("insert into feedback_photo_crops values (?,?,?,?,?,?,?,?)", rows)
+    return len(rows)
 
 
 def write_index(conn: sqlite3.Connection, dest: Path) -> Path:
@@ -518,7 +548,8 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
             picek_place_cells: str | None = None, picek_place_cells_sha256: str | None = None,
             should_stop: Callable[[], bool] | None = None,
             interrupted: Callable[[], bool] | None = None, resume=None, release=None,
-            seed: int = 0, public_trainable_only: bool = False, log=print) -> dict:
+            seed: int = 0, public_trainable_only: bool = False, no_compare: bool = False,
+            log=print) -> dict:
     """Embed, fine-tune, compare and upload, stage by stage (plan_stages). `upload(path,
     key)` copies one file to the bucket. `finetuner(conn, base, name, embeddings_root,
     models_dir)` fine-tunes (default: finetune.finetune with its default settings) and
@@ -534,7 +565,14 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
     result.json and every model it trains. `seed` (the fine-tune's FinetuneConfig.seed:
     a second seed for the paper's spread, E22) and `public_trainable_only` (the public
     model, E23: only photos the released weights may learn from; needs `release`) are
-    recorded in progress.json and result.json, and kept by a resumed attempt."""
+    recorded in progress.json and result.json, and kept by a resumed attempt.
+    A release with specimen crops (Release.use_photo_crops) has them written into this
+    copy's crop table (write_release_crops), so every embed stage embeds them too (the base:
+    the fine-tune's starting class averages; the fine-tuned model: the reference) and the
+    fine-tune trains on them as extra views of their records.
+    `no_compare`: no comparison at the end (comparison_id None, and progress.json says why):
+    a model trained on every record (the v2 beta: no val split held out) has nothing it may
+    be scored on, and its run must report no accuracy (paper PLAN §8, seal guard rail a)."""
     if public_trainable_only and release is None and not picek_release:
         raise ValueError("public-trainable-only training needs the shipped release")
     data_dir = data_dir or config.DATA_DIR
@@ -585,6 +623,12 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         log(f"dataset release {release.id} (release_hash {release.release_hash[:12]}): "
             f"{r['records']:,} records, {r['photos']:,} photos; {r['dropped']:,} manifest "
             "records outside it left out")
+    with_crops = bool(release is not None and getattr(release, "photo_crops", None))
+    if with_crops:
+        n = write_release_crops(conn, release)
+        log(f"specimen crops {release.photo_crops['file']} (sha256 "
+            f"{release.photo_crops['sha256'][:12]}): {n:,} crops as extra views of "
+            f"{release.photo_crops['records']:,} records")
     if sample_records:
         kept = restrict_to_sample(conn, sample_records, store.location, size)
         log(f"REHEARSAL: kept {kept:,} random records; results won't be merged home")
@@ -667,7 +711,7 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         if s.kind == "embed":
             r = screen(conn, store, [s.spec], [], size=size, methods=methods,
                        batch_size=batch_size, embeddings_root=root, readers=readers,
-                       compare=False, should_stop=stopping, log=log, **kw)
+                       compare=False, should_stop=stopping, crops=with_crops, log=log, **kw)
             bad = r.skipped.get(s.name, [])
             skip_file = None
             if bad:
@@ -736,6 +780,9 @@ def run_job(conn: sqlite3.Connection, store, backbones: list[str], methods: list
         progress.data["comparison"] = (f"skipped: the run was stopped by {why_stopped()}; "
                                        "run mv compare on the laptop after pulling, or "
                                        "resume the run")
+    elif no_compare:
+        progress.data["comparison"] = NO_COMPARE_NOTE
+        log(f"comparison {NO_COMPARE_NOTE}")
     elif embedded:
         progress.data["state"] = "comparing"
         progress.save()

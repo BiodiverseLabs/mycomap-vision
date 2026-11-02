@@ -110,14 +110,15 @@ def test_bioclip_25_at_336_is_the_huge_snapshot_resized_like_bioclip_2():
 
 
 def test_the_estimate_counts_bioclip_25_as_slower_than_bioclip_2_at_336_not_as_unmeasured():
-    """ViT-H/14 costs about twice ViT-L/14 per photo (laptop ratio x the L4's measured 336
-    rates); a backbone with no rate would fall back to the 15/s and 40/s guesses instead."""
+    """ViT-H/14 costs about twice ViT-L/14 per photo, as the L4 measured in the paired run
+    20261029-152340 (embed 35.8/s, fine-tune 28.5/s); a backbone with no rate would fall back
+    to the 15/s and 40/s guesses instead."""
     huge = trainer.estimate(trainer.plan_stages(["bioclip-2.5-336"], ["bioclip-2.5-336"], "r"),
                             100_000)
     large = trainer.estimate(trainer.plan_stages(["bioclip-2-336"], ["bioclip-2-336"], "r"),
                              100_000)
     rates = {r["stage"].split(" ")[0]: r["photos_per_second"] for r in huge["stages"]}
-    assert rates["embed"] == 34.5 and rates["finetune"] == 26.2
+    assert rates["embed"] == 35.8 and rates["finetune"] == 28.5
     assert rates["embed"] != trainer.UNMEASURED_EMBED_RATE
     assert rates["finetune"] != trainer.UNMEASURED_FINETUNE_RATE
     work = huge["total_hours"] - huge["setup_hours"] - huge["compare_hours"]

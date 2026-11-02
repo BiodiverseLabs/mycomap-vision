@@ -359,7 +359,9 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
                              release: dict | None = None, seed: int = 0,
                              public_trainable_only: bool = False,
                              photo_exclusions_sha256: str | None = None,
-                             photo_exclusion_reasons: list[str] | None = None) -> str:
+                             photo_exclusion_reasons: list[str] | None = None,
+                             photo_crops_sha256: str | None = None,
+                             no_compare: bool = False) -> str:
     # The job is killed at max_hours, and stops itself STOP_MARGIN_HOURS before that so
     # it can upload what it finished; the backstop leaves 30 minutes on top for setup
     # and the log upload.
@@ -414,6 +416,17 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
             if not all(re.fullmatch(r"[a-z][a-z_]*", r) for r in photo_exclusion_reasons):
                 raise ValueError(f"not exclusion reasons: {photo_exclusion_reasons!r}")
             exclusions_arg += f" --exclude-photo-reasons {','.join(photo_exclusion_reasons)}"
+    if photo_crops_sha256 is not None:
+        if photo_exclusions_sha256 is None:
+            raise ValueError("a specimen-crop list ships only with the photo-exclusion list "
+                             "whose slip photos it crops")
+        if not re.fullmatch(r"[0-9a-f]{64}", photo_crops_sha256):
+            raise ValueError(f"not a crop list hash: {photo_crops_sha256!r}")
+        release_cmd += ("# The specimen crops of the photos left out as field slips: extra views.\n"
+                        f'aws s3 cp "s3://$BUCKET/$RUN/{PHOTO_CROPS_KEY}" '
+                        f"data/{PHOTO_CROPS_KEY} || exit 1\n")
+        exclusions_arg += (f" --photo-crops data/{PHOTO_CROPS_KEY}"
+                           f" --photo-crops-sha256 {photo_crops_sha256}")
     return TRAINER_USER_DATA.format(
         bucket=bucket_name, run_id=run_id, region=config.setting("MV_AWS_REGION", "us-east-2"),
         backstop_minutes=int(max_hours * 60) + 30, job_seconds=int(max_hours * 3600),
@@ -441,7 +454,8 @@ def render_trainer_user_data(run_id: str, backbones: list[str], methods: list[st
         spot_arg=" --spot" if spot else "", resume_arg=" --resume" if resume else "",
         # The fine-tune's seed and photo policy (an int and a flag: nothing a shell reads).
         train_arg=(f" --seed {int(seed)}" if int(seed) else "")
-        + (" --public-trainable-only" if public_trainable_only else ""))
+        + (" --public-trainable-only" if public_trainable_only else "")
+        + (" --no-compare" if no_compare else ""))
 
 
 PICEK_IDS_KEY = "picek-exclude-ids.txt"
@@ -449,6 +463,7 @@ RELEASE_PREFIX = "release/"            # runs/<run>/release/<id>/<file>: what tr
 PICEK_LABELS_KEY = "picek-labels.json"
 PICEK_PLACE_KEY = "picek-place-cells.json"   # retrain.place_cells_doc (a release run)
 PHOTO_EXCLUSIONS_KEY = "photo-exclusions.tsv"  # --exclude-photos (a release fine-tune)
+PHOTO_CROPS_KEY = "photo-crops.tsv"            # --photo-crops (with --exclude-photos)
 
 
 def release_for_script(rel, place_doc: dict | None) -> dict:
@@ -539,6 +554,14 @@ def check_release_photos(conn, rel, store_location: str, size: str) -> int:
         raise ValueError(f"{len(missing):,} photos of release {rel.id} have no {size} copy in "
                          f"{store_location} (e.g. {sorted(missing)[:5]}): fetch them first")
     return len(want)
+
+
+def release_photo_count(rel) -> int:
+    """Every included photo of the release's train and val records: what an embed stage of a
+    release run embeds, whatever a photo-exclusion list leaves out of training."""
+    return rel.db.execute(
+        "select count(*) from photos p join records r using (record_key) where p.included = 1 "
+        "and r.included = 1 and r.split in ('train', 'val')").fetchone()[0]
 
 
 def picek_cache_gb(picek: list[str] | None, photos: int) -> int:
@@ -760,7 +783,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                    release: str | None = None, allow_draft: bool = False,
                    seed: int = 0, public_trainable_only: bool = False,
                    exclude_photos: str | Path | None = None,
-                   exclude_photo_reasons: list[str] | None = None, log=print) -> dict:
+                   exclude_photo_reasons: list[str] | None = None,
+                   photo_crops: str | Path | None = None, no_compare: bool = False,
+                   log=print) -> dict:
     """Check the request, the time it needs and the commit it ships, all before anything
     is paid for; then upload the code and the manifest and start the instance.
 
@@ -774,6 +799,16 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     are never changed); `exclude_photo_reasons` keeps only rows with those reasons (one
     E35 arm). It needs `release` and `finetune`, not a Picek preset; the file ships with
     the run, pinned by its sha256, and the instance applies it again. Not resumable yet.
+
+    `photo_crops`: a Recovered labels crop export (mv feedback export-photo-crops); each crop
+    of a photo the exclusion list leaves out as a field slip becomes an extra view of its
+    record (Release.use_photo_crops: trained on, and embedded into the reference by every
+    embed stage). It needs `exclude_photos`, ships pinned by its sha256 like it, and the
+    instance applies it again. Not resumable yet.
+
+    `no_compare`: no comparison at the end of the run (trainer.run_job). A release fine-tune
+    whose release holds no val record is refused without it: there is nothing to compare
+    on (the v2 beta trains on every record and reports no accuracy).
 
     `release`: the Picek stage trains on that dataset release (docs/dataset-release.md),
     verified (every file against MANIFEST.json) before anything else; a draft needs
@@ -810,6 +845,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
     if exclude_photos and (resume or picek or not (release and finetune)):
         raise ValueError("--exclude-photos leaves photos out of a release fine-tune: give "
                          "--release and --finetune, with no --picek and no --resume")
+    if photo_crops and not exclude_photos:
+        raise ValueError("--photo-crops adds crops of photos left out as field slips: give "
+                         "the --exclude-photos list that leaves them out")
     rel = None
     if release:
         from .replications.fungitastic import dataset
@@ -835,6 +873,21 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             f"reference ({gone['train']:,} records left with none), {out_['val']:,} val photos "
             f"left out of a train + val reference only (val queries unchanged); "
             f"{x['not_in_release']:,} not in {rel.id}")
+    crops_sha = None
+    if photo_crops:
+        crops_sha = hashlib.sha256(Path(photo_crops).read_bytes()).hexdigest()
+        c = rel.use_photo_crops(photo_crops, crops_sha)
+        if not c["crops_used"]:
+            raise ValueError(f"--photo-crops {c['file']}: no crop is of a photo this run leaves "
+                             f"out as a field slip ({c['not_used']}); nothing to add")
+        log(f"Specimen crops {c['file']} (sha256 {crops_sha[:12]}): {c['crops_used']:,} of "
+            f"{c['crops_listed']:,} added as extra views ({c['photos']:,} slip photos, "
+            f"{c['records']:,} records, {c['records_kept_by_crops_alone']:,} of them kept in "
+            f"by their crops alone); not used: {c['not_used'] or 'none'}")
+    if rel is not None and finetune and not no_compare and not rel.records("val"):
+        raise ValueError(f"release {rel.id} holds no val record: the run would have nothing "
+                         "to compare on. Give --no-compare (a model trained on every record "
+                         "reports no accuracy)")
     b = bucket()
     done: set = set()
     prev = None
@@ -868,8 +921,10 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                    picek)
     if rel is not None and finetune:
         photos = check_release_photos(conn, rel, f"s3://{b}/", size)
-        log(f"  the fine-tune trains on {rel.id}'s train split, compared on val (after "
-            f"{rel.val_cutoff}): {photos:,} photos, every one in S3 as the release hashed it")
+        log(f"  the fine-tune trains on {rel.id}'s train split, "
+            + ("with no comparison (--no-compare)" if no_compare
+               else f"compared on val (after {rel.val_cutoff})")
+            + f": {photos:,} photos, every one in S3 as the release hashed it")
         if public_trainable_only:
             public = len(rel.photo_ids(("train",), public_trainable_only=True))
             log(f"  public-trainable photos only: {public:,} of the train split's "
@@ -887,6 +942,15 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         log(f"  already done, restored on the instance: "
             f"{', '.join(f'{k} {n}' for k, n in sorted(done))}")
     est_photos = photos_for_estimate(conn, photos, size, f"s3://{b}/", sample_records)
+    train_photos = None
+    if rel is not None and finetune:
+        # An embed stage embeds every photo of the release's records, the ones the exclusion
+        # list leaves out of training too, and every crop; the fine-tune learns from the
+        # train split's photos left in, and the crops (extra views).
+        crops = rel.photo_crops["crops_used"] if rel.photo_crops else 0
+        est_photos = release_photo_count(rel) + crops
+        train_photos = len(rel.photo_ids(("train",),
+                                         public_trainable_only=public_trainable_only)) + crops
     picek_photos = None
     if rel is not None and picek:      # the recipe trains and validates on the release's splits
         picek_photos = len(rel.photo_ids(("train", "val"),
@@ -894,7 +958,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         picek_photos = round(picek_photos * est_photos / max(photos, 1))   # a rehearsal's share
     est = trainer.estimate(left, est_photos,
                            epochs_done=trainer.checkpoint_epochs(prev) if prev else None,
-                           picek_photos=picek_photos)
+                           picek_photos=picek_photos, compare=not no_compare,
+                           train_photos=train_photos)
     log(trainer.format_estimate(est))
     check_run_time(est, max_hours, allow_over_time, log)
     labels, exclude_ids, place_doc = (picek_launch_labels(conn, f"s3://{b}/", size,
@@ -911,7 +976,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                               dry_run_dir, ec2_check, log, rel, place_doc, seed=seed,
                               public_trainable_only=public_trainable_only,
                               exclude_photos=exclude_photos, exclusions_sha=exclusions_sha,
-                              exclusion_reasons=exclude_photo_reasons)
+                              exclusion_reasons=exclude_photo_reasons,
+                              photo_crops=photo_crops, crops_sha=crops_sha,
+                              no_compare=no_compare)
     if prev is not None and prev.get("code_version") not in (None, sha):
         log(f"Note: run {resume} ran commit {str(prev.get('code_version'))[:10]}; the rest "
             f"runs commit {sha[:10]} (both are recorded in progress.json)")
@@ -955,6 +1022,9 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
         if exclusions_sha is not None:
             s3.upload_file(str(exclude_photos), b, f"runs/{run_id}/{PHOTO_EXCLUSIONS_KEY}")
             log(f"Uploaded the photo-exclusion list (sha256 {exclusions_sha[:12]})")
+        if crops_sha is not None:
+            s3.upload_file(str(photo_crops), b, f"runs/{run_id}/{PHOTO_CROPS_KEY}")
+            log(f"Uploaded the specimen-crop list (sha256 {crops_sha[:12]})")
     if picek:
         s3.put_object(Bucket=b, Key=f"runs/{run_id}/{PICEK_LABELS_KEY}",
                       Body=json.dumps(labels, indent=2).encode())
@@ -977,7 +1047,8 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
                                          if rel else None, seed=seed,
                                          public_trainable_only=public_trainable_only,
                                          photo_exclusions_sha256=exclusions_sha,
-                                         photo_exclusion_reasons=exclude_photo_reasons)
+                                         photo_exclusion_reasons=exclude_photo_reasons,
+                                         photo_crops_sha256=crops_sha, no_compare=no_compare)
     resp = start_instance(ec2, trainer_instance_args(run_id, ami, user_data, instance_type,
                                                      root, snapshot_gb, spot, spot_max_price,
                                                      extra_gb=picek_cache_gb(picek, photos)
@@ -994,6 +1065,7 @@ def launch_trainer(conn, backbones: list[str], methods: list[str], size: str = "
             "sample_records": sample_records, "seed": int(seed),
             "public_trainable_only": bool(public_trainable_only),
             "code_version": sha, "max_hours": max_hours, "estimate_hours": est["total_hours"],
+            "no_compare": bool(no_compare),
             "log": f"s3://{b}/runs/{run_id}/train.log",
             "progress": f"s3://{b}/runs/{run_id}/progress.json"}
 
@@ -1031,7 +1103,8 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                    ec2_check: bool, log=print, rel=None, place_doc: dict | None = None,
                    seed: int = 0, public_trainable_only: bool = False,
                    exclude_photos=None, exclusions_sha: str | None = None,
-                   exclusion_reasons: list[str] | None = None) -> dict:
+                   exclusion_reasons: list[str] | None = None, photo_crops=None,
+                   crops_sha: str | None = None, no_compare: bool = False) -> dict:
     """The rest of launch_trainer with nothing sent (see its `dry_run`)."""
     from .replications.fungitastic import dataset
     run_id = "dry-run-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -1048,9 +1121,12 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                                          if rel else None, seed=seed,
                                          public_trainable_only=public_trainable_only,
                                          photo_exclusions_sha256=exclusions_sha,
-                                         photo_exclusion_reasons=exclusion_reasons)
+                                         photo_exclusion_reasons=exclusion_reasons,
+                                         photo_crops_sha256=crops_sha, no_compare=no_compare)
     if exclusions_sha is not None:
         (dest / PHOTO_EXCLUSIONS_KEY).write_bytes(Path(exclude_photos).read_bytes())
+    if crops_sha is not None:
+        (dest / PHOTO_CROPS_KEY).write_bytes(Path(photo_crops).read_bytes())
     if rel is not None:
         import shutil as _sh
         shipped = dest / "release" / rel.id
@@ -1110,7 +1186,8 @@ def dry_run_launch(conn, sha: str, names: list[str], methods: list[str], max_hou
                "file": PICEK_PLACE_KEY, "cells": len(place_doc["cells"]),
                "sha256": _place_sha(place_doc)},
            "seed": int(seed), "public_trainable_only": bool(public_trainable_only),
-           "estimate_hours": est["total_hours"],
+           "estimate_hours": est["total_hours"], "estimate": est,
+           "no_compare": bool(no_compare),
            "instance_type": instance_type, "disk_gb": args["BlockDeviceMappings"][0]["Ebs"][
                "VolumeSize"], "ec2_request": str(dest / "ec2-request.json"), "ec2": ec2_result,
            "sent": "nothing: no S3 upload, no instance"}
