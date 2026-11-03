@@ -2378,6 +2378,128 @@ def test_a_bad_test_scope_is_refused(tmp_path, change, refused):
         paper_score.check_config(cfg)
 
 
+# --- -a4 (Steve 3 Nov): truths that are slime moulds or lichens leave the test --------------------
+
+TAXA = {"name": "test", "out_families": {"slime_moulds": ["Physaraceae", "Trichiaceae"],
+                                         "lichens": ["Parmeliaceae", "Cladoniaceae"]},
+        "mixed_families": {"_rule": "a note", "Verrucariaceae": {
+            "group": "lichens", "lichenized_genera": ["Verrucaria"]}}}
+
+
+def _taxa_file(tmp_path, doc=None, name="taxa.json"):
+    p = tmp_path / name
+    p.write_text(json.dumps(doc or TAXA), encoding="utf-8", newline="\n")
+    return p, paper_score.sha256_file(p)
+
+
+def _taxon(key, genus, family):
+    return po.Find(key, "o" + key, f"{genus} x", genus, family, "formal", 5, 1)
+
+
+def test_slime_mould_and_lichen_truths_leave_and_mushroom_lichens_microfungi_and_no_family_stay(
+        tmp_path):
+    path, sha = _taxa_file(tmp_path)
+    taxa = paper_score.read_truth_taxa(path, sha)
+    finds = [_taxon("1", "Physarum", "Physaraceae"),          # slime mould: out
+             _taxon("2", "Cladonia", "Cladoniaceae"),          # lichen: out
+             _taxon("3", "Verrucaria", "Verrucariaceae"),      # mixed family, lichenized: out
+             _taxon("4", "Thelidium", "Verrucariaceae"),       # mixed family, not listed: stays
+             _taxon("5", "Lichenomphalia", "Hygrophoraceae"),  # mushroom-forming lichen: stays
+             _taxon("6", "Puccinia", "Pucciniaceae"),          # microfungus: stays
+             _taxon("7", "Amanita", "Amanitaceae"),            # macrofungus: stays
+             _taxon("8", "Xus", "")]                           # no family: stays
+    keep, out, by_group = paper_score.truth_taxa_split(finds, taxa)
+    assert [f.key for f in keep] == ["4", "5", "6", "7", "8"]
+    assert [f.key for f in out] == ["1", "2", "3"]
+    assert by_group == {"slime_moulds": 1, "lichens": 2}
+    assert paper_score.truth_taxa_split(finds, None) == (finds, [], {})
+
+
+def test_the_truth_taxa_definition_is_refused_when_not_the_pinned_file_or_malformed(tmp_path):
+    path, sha = _taxa_file(tmp_path)
+    with pytest.raises(paper_score.FrozenError, match="is not the pinned"):
+        paper_score.read_truth_taxa(path, "0" * 64)
+    for bad in ({"out_families": {}},
+                {"out_families": {"lichens": []}},
+                {"out_families": {"lichens": ["Parmeliaceae"]},
+                 "mixed_families": {"Verrucariaceae": {"group": "nope",
+                                                       "lichenized_genera": ["Verrucaria"]}}},
+                {"out_families": {"lichens": ["Parmeliaceae"]},
+                 "mixed_families": {"Verrucariaceae": {"group": "lichens"}}}):
+        p, s = _taxa_file(tmp_path, bad, "bad.json")
+        with pytest.raises(ValueError, match="exclude_truth_taxa"):
+            paper_score.read_truth_taxa(p, s)
+
+
+@pytest.mark.parametrize("value", [
+    "taxa.json", {"file": "taxa.json"}, {"file": "taxa.json", "sha256": "abc"},
+    {"file": "", "sha256": "a" * 64}, {"file": "taxa.json", "sha256": "a" * 64, "extra": 1}])
+def test_a_bad_exclude_truth_taxa_pin_is_refused(tmp_path, value):
+    cfg = config(tmp_path, ["5", "6"])
+    cfg["test_scope"] = {**SCOPE, "exclude_truth_taxa": {"file": "taxa.json", "sha256": "a" * 64}}
+    paper_score.check_config(cfg)
+    cfg["test_scope"]["exclude_truth_taxa"] = value
+    with pytest.raises(ValueError, match="exclude_truth_taxa is"):
+        paper_score.check_config(cfg)
+
+
+def _with_family(monkeypatch, of_key):
+    real = paper_score.build_finds
+
+    def build(*a, **kw):
+        finds = real(*a, **kw)
+        for f in finds:
+            if f.key in of_key:
+                f.family, f.genus = of_key[f.key]
+        return finds
+    monkeypatch.setattr(paper_score, "build_finds", build)
+
+
+def test_a_lichen_truth_leaves_every_family_and_is_counted_and_described(
+        world, tmp_path, monkeypatch):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    cfg["secondary_rows"] = {"for": ["A1s", "H1a"], "rows": [{"id": "all-finds", "where": {}}]}
+    path, sha = _taxa_file(tmp_path)
+    cfg["test_scope"] = {**SCOPE, "exclude_truth_taxa": {"file": str(path), "sha256": sha}}
+    paper_score.check_config(cfg)
+    _with_family(monkeypatch, {"6": ("Parmeliaceae", "Parmelia")})
+    rep = run(world, tmp_path, "val", cfg)
+    assert rep["finds"]["scored"] == 1
+    assert rep["hypotheses"]["A"]["A1s"]["n"] == 1 and rep["hypotheses"]["C"]["H1a"]["n"] == 1
+    assert rep["secondary_rows"]["all-finds"]["finds"] == 1
+    t = rep["test_scope"]["outside_taxa"]
+    assert (t["finds"], t["by_group"], t["sha256"]) == (
+        1, {"slime_moulds": 0, "lichens": 1}, sha)
+    r = t["comparators"]["vision-photos"]["species_strict@1"]
+    assert r["n"] == 1 and "p" not in r                                    # described, never tested
+    assert rep["test_scope"]["outside_test_scope"]["finds"] == 0           # not a country outsider
+    md = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "## Out of scope by truth taxon (descriptive, never tested)" in md
+    assert "| lichens | 1 |" in md
+
+
+def test_a_definition_matching_no_truth_scores_exactly_as_the_scope_alone(world, tmp_path):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    cfg["test_scope"] = SCOPE
+    plain = run(world, tmp_path, "val", cfg)
+    path, sha = _taxa_file(tmp_path)
+    cfg["test_scope"] = {**SCOPE, "exclude_truth_taxa": {"file": str(path), "sha256": sha}}
+    scoped = run(world, tmp_path, "val", cfg)
+    for k in ("finds", "standard", "hypotheses", "calibration", "errors"):
+        assert json.dumps(scoped[k], sort_keys=True, default=str) == \
+            json.dumps(plain[k], sort_keys=True, default=str), k
+    assert scoped["test_scope"]["outside_taxa"]["finds"] == 0
+
+
+def test_a_changed_truth_taxa_file_stops_the_run(world, tmp_path):
+    cfg = floor_family(config(tmp_path, ["5", "6"]))
+    path, sha = _taxa_file(tmp_path)
+    cfg["test_scope"] = {**SCOPE, "exclude_truth_taxa": {"file": str(path), "sha256": sha}}
+    path.write_text(json.dumps({**TAXA, "name": "edited"}), encoding="utf-8")
+    with pytest.raises(paper_score.FrozenError, match="is not the pinned"):
+        run(world, tmp_path, "val", cfg)
+
+
 # --- -a3 (Steve 30 Oct): Vision-assisted finds leave the test; Vision holds stay in -------------
 
 def _snapshot(tmp_path, rows, name="truth-snapshot.tsv"):

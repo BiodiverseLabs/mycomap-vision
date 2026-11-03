@@ -265,6 +265,75 @@ def check_test_scope(doc: dict, ids: list[str]) -> None:
     if not isinstance(oc, list) or any(x not in ids for x in oc):
         raise ValueError(f"test_scope: outside_comparators names comparators of the config, "
                          f"not {oc!r}")
+    tx = ts.get("exclude_truth_taxa")
+    if tx is not None:
+        if (not isinstance(tx, dict) or set(tx) != {"file", "sha256"}
+                or not isinstance(tx["file"], str) or not tx["file"]
+                or not isinstance(tx["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", tx["sha256"])):
+            raise ValueError("test_scope: exclude_truth_taxa is {file, sha256}, the pinned "
+                             "definition and its 64-hex sha256")
+
+
+def read_truth_taxa(path: Path, sha256: str) -> dict:
+    """The pinned definition of truths outside the test's scope (Steve 3 Nov, -a4: slime moulds
+    and lichens): {"groups": {group: {family}}, "mixed": {family: (group, {genus})}, "sha256"}.
+    A JSON object with "out_families" ({group: [families]}) and "mixed_families" ({family:
+    {"group": one of the groups, "lichenized_genera": [genera]}}; keys starting "_" are notes).
+    Refused when the file is not the one pinned, or its shape is not this."""
+    got = sha256_file(path)
+    if got != sha256:
+        raise FrozenError(f"test_scope exclude_truth_taxa {Path(path).name}: sha256 {got[:12]} "
+                          f"is not the pinned {sha256[:12]}")
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def names(v) -> bool:
+        return isinstance(v, list) and bool(v) and all(isinstance(x, str) and x for x in v)
+    of = doc.get("out_families")
+    if not isinstance(of, dict) or not of or not all(names(v) for v in of.values()):
+        raise ValueError("exclude_truth_taxa: out_families is {group: [family names]}")
+    groups = {g: set(v) for g, v in of.items()}
+    mixed = {}
+    for fam, m in (doc.get("mixed_families") or {}).items():
+        if fam.startswith("_"):
+            continue
+        if (not isinstance(m, dict) or m.get("group") not in groups
+                or not names(m.get("lichenized_genera"))):
+            raise ValueError(f"exclude_truth_taxa: mixed family {fam} is {{group: one of "
+                             f"{sorted(groups)}, lichenized_genera: [genera]}}")
+        mixed[fam] = (m["group"], set(m["lichenized_genera"]))
+    return {"groups": groups, "mixed": mixed, "sha256": got}
+
+
+def truth_taxon_group(find, taxa: dict) -> str | None:
+    """The out-of-scope group of a find's truth (read_truth_taxa), or None when it stays: its
+    family is listed, or its family is a mixed one and its genus is one of that family's listed
+    genera. A truth with no family stays. Answers are never looked at."""
+    fam = (find.family or "").strip()
+    for g, fams in taxa["groups"].items():
+        if fam in fams:
+            return g
+    if fam in taxa["mixed"]:
+        g, genera = taxa["mixed"][fam]
+        if (find.genus or "").strip() in genera:
+            return g
+    return None
+
+
+def truth_taxa_split(finds: list, taxa: dict | None) -> tuple[list, list, dict]:
+    """(the finds that stay, the finds whose truth is out of scope, {group: n}). No
+    definition: every find stays."""
+    if not taxa:
+        return finds, [], {}
+    keep, out, by_group = [], [], {g: 0 for g in taxa["groups"]}
+    for f in finds:
+        g = truth_taxon_group(f, taxa)
+        if g is None:
+            keep.append(f)
+        else:
+            out.append(f)
+            by_group[g] += 1
+    return keep, out, by_group
 
 
 TRUTH_EXCLUDE = ("vision_assisted",)
@@ -2127,6 +2196,16 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     if scope:
         log(f"[test scope] {len(finds):,} finds in {', '.join(scope['countries'])}; "
             f"{len(outside):,} outside it")
+    # Steve, 3 Nov (-a4): finds whose truth is a slime mould or a lichen leave the test right
+    # after the country scope, by the pinned definition; counted by group and described like
+    # the scope's outsiders. Answers are never filtered.
+    taxa_pin = (scope or {}).get("exclude_truth_taxa")
+    taxa = read_truth_taxa(resolve(taxa_pin["file"]), taxa_pin["sha256"]) if taxa_pin else None
+    finds, taxa_out, taxa_by_group = truth_taxa_split(finds, taxa)
+    taxa_outcomes: dict = {}
+    if taxa:
+        log(f"[test scope] {len(taxa_out):,} finds left out by truth taxon: "
+            + ", ".join(f"{g} {n:,}" for g, n in taxa_by_group.items()))
     # Steve, 30 Oct (-a3): a find whose DNA verdict came with Vision's help leaves the test
     # right after the scope, like the scope's outsiders (report "truth_independence").
     ti = config.get("truth_independence")
@@ -2333,6 +2412,9 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         if outside and comp["id"] in outside_ids:
             outside_outcomes[comp["id"]] = outcomes_for(comp, outside, answers, conn,
                                                         keys[comp["id"]])[0]
+        if taxa_out and comp["id"] in outside_ids:
+            taxa_outcomes[comp["id"]] = outcomes_for(comp, taxa_out, answers, conn,
+                                                     keys[comp["id"]])[0]
         if assisted and comp["id"] in ti_ids:
             assisted_outcomes[comp["id"]] = outcomes_for(comp, assisted, answers, conn,
                                                          keys[comp["id"]])[0]
@@ -2442,7 +2524,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         **({"test_scope": {
             "scope": scope, "in_scope_finds": len(finds),
             "outside_test_scope": pt.outside_test_scope(
-                outside, outside_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS, reps, seed)}}
+                outside, outside_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS, reps, seed),
+            **({"outside_taxa": {
+                "file": Path(taxa_pin["file"]).name, "sha256": taxa["sha256"],
+                "by_group": taxa_by_group,
+                **pt.described(taxa_out, taxa_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS,
+                               reps, seed)}} if taxa else {})}}
            if scope else {}),
         **({"query_photo_filters": {cid: query_filter_report(
             q, finds_of.get(cid, finds), outcomes.get(cid) or {}, reps, seed)
@@ -2757,6 +2844,23 @@ def format_report(report: dict, config: dict) -> str:
                              + " | " + ("-" if not ci else
                                         f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
         lines.append("")
+        if ts.get("outside_taxa"):
+            t = ts["outside_taxa"]
+            lines += ["## Out of scope by truth taxon (descriptive, never tested)", "",
+                      f"Finds whose truth is in the pinned definition {t['file']} (sha256 "
+                      f"{t['sha256'][:12]}) leave every family, slice, row and table: "
+                      f"{t['finds']:,} finds ({t['primary']:,} in the primary scope). Answers "
+                      "are never filtered.", "", "| group | finds |", "|---|---|"]
+            lines += [f"| {g} | {n:,} |" for g, n in t["by_group"].items()]
+            lines += ["", "| comparator | cell | n | rate | 95% CI |", "|---|---|---|---|---|"]
+            for cid, cells in t["comparators"].items():
+                for cell, r in cells.items():
+                    ci = r.get("ci95")
+                    lines.append(f"| {cid} | {cell} | {r['n']:,} | "
+                                 + ("-" if r["rate"] is None else f"{100 * r['rate']:.1f}%")
+                                 + " | " + ("-" if not ci else
+                                            f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
+            lines.append("")
     if report.get("pending_comparators"):
         lines += ["## Comparators not scored (fields not yet filled)", ""] + [
             f"- {cid}: {', '.join(f)}" for cid, f in report["pending_comparators"].items()] + [""]
