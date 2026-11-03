@@ -247,7 +247,9 @@ OUTSIDE_SCOPE_CELLS = ["species_strict@1", "genus_strict@1"]
 
 def check_test_scope(doc: dict, ids: list[str]) -> None:
     """The test_scope block (Steve 28 Oct): {"countries": [two-letter codes], "unknown":
-    "out", "rule": text, "outside_comparators": [ids] (optional; default public-photos)}."""
+    "out", "rule": text, "outside_comparators": [ids] (optional; default public-photos),
+    "exclude_truth_taxa": {file, sha256} (optional; Steve 3 Nov, -a4: slime moulds and
+    lichens, read_truth_taxa)}."""
     ts = doc.get("test_scope")
     if ts is None:
         return
@@ -265,6 +267,83 @@ def check_test_scope(doc: dict, ids: list[str]) -> None:
     if not isinstance(oc, list) or any(x not in ids for x in oc):
         raise ValueError(f"test_scope: outside_comparators names comparators of the config, "
                          f"not {oc!r}")
+    tx = ts.get("exclude_truth_taxa")
+    if tx is not None:
+        if not (isinstance(tx, dict) and isinstance(tx.get("file"), str) and tx["file"]
+                and re.fullmatch(r"[0-9a-f]{64}", str(tx.get("sha256") or ""))):
+            raise ValueError("test_scope: exclude_truth_taxa is {file, sha256 (64 hex digits)}")
+        path = resolve(tx["file"])
+        if path.is_file():                 # its own shape too, when the file is on this machine
+            truth_taxa_rules(json.loads(path.read_text(encoding="utf-8")))
+
+
+def truth_taxa_rules(doc: dict) -> dict:
+    """The rules of a truth-taxa scope file (paper/scope/truth-taxa-out-of-scope-v1.json):
+    {"families": {family: group}, "mixed": {family: (group, {genus})}}, names lower-cased.
+    Its "out_families" is {group: [families]}; its "mixed_families" is {family: {"group": one
+    of those groups, "lichenized_genera": [genera]}} ("_" keys are notes). ValueError on any
+    other shape, or a family listed twice."""
+    out = doc.get("out_families") if isinstance(doc, dict) else None
+    if not isinstance(out, dict) or not out:
+        raise ValueError("exclude_truth_taxa: out_families is {group: [families]}")
+    families: dict = {}
+    for group, fams in out.items():
+        if group.startswith("_"):
+            continue
+        if not isinstance(fams, list) or not fams or not all(isinstance(f, str) and f.strip()
+                                                             for f in fams):
+            raise ValueError(f"exclude_truth_taxa: out_families {group!r} is a list of families")
+        for f in fams:
+            if families.setdefault(f.strip().lower(), group) != group:
+                raise ValueError(f"exclude_truth_taxa: {f} is in two groups")
+    mixed_doc = doc.get("mixed_families") or {}
+    if not isinstance(mixed_doc, dict):
+        raise ValueError("exclude_truth_taxa: mixed_families is {family: {lichenized_genera}}")
+    mixed: dict = {}
+    for fam, entry in mixed_doc.items():
+        if fam.startswith("_"):
+            continue
+        genera = entry.get("lichenized_genera") if isinstance(entry, dict) else None
+        if not isinstance(genera, list) or not genera or not all(
+                isinstance(g, str) and g.strip() for g in genera):
+            raise ValueError(f"exclude_truth_taxa: mixed family {fam} lists its "
+                             "lichenized_genera")
+        group = entry.get("group")
+        if group not in out or str(group).startswith("_"):
+            raise ValueError(f"exclude_truth_taxa: mixed family {fam} names its group, one of "
+                             f"{sorted(g for g in out if not g.startswith('_'))}")
+        if fam.strip().lower() in families:
+            raise ValueError(f"exclude_truth_taxa: {fam} is both wholly out and mixed")
+        mixed[fam.strip().lower()] = (group, {g.strip().lower() for g in genera})
+    return {"families": families, "mixed": mixed}
+
+
+def read_truth_taxa(path: Path, sha256: str) -> dict:
+    """The pinned truth-taxa scope file's rules (truth_taxa_rules), refused unless its sha256
+    is the one the config pins."""
+    got = sha256_file(path)
+    if got != sha256:
+        raise FrozenError(f"test_scope exclude_truth_taxa {Path(path).name}: sha256 {got[:12]} "
+                          f"is not the pinned {sha256[:12]}")
+    return {**truth_taxa_rules(json.loads(Path(path).read_text(encoding="utf-8"))),
+            "file": Path(path).name, "sha256": got}
+
+
+def truth_taxa_split(finds: list, rules: dict) -> tuple[list, dict[str, list]]:
+    """(the finds kept, {group: the finds left out}): a find leaves when its truth family (the
+    release's family for its label) is wholly out, or is a mixed family and its truth genus is
+    one of that family's listed genera. A truth with no family stays. Answers are untouched."""
+    kept, out = [], {g: [] for g in sorted(set(rules["families"].values()))}
+    for f in finds:
+        fam, genus = (f.family or "").strip().lower(), (f.genus or "").strip().lower()
+        group = rules["families"].get(fam)
+        if group is None and fam in rules["mixed"] and genus in rules["mixed"][fam][1]:
+            group = rules["mixed"][fam][0]
+        if group is None:
+            kept.append(f)
+        else:
+            out[group].append(f)
+    return kept, out
 
 
 TRUTH_EXCLUDE = ("vision_assisted",)
@@ -2127,6 +2206,17 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
     if scope:
         log(f"[test scope] {len(finds):,} finds in {', '.join(scope['countries'])}; "
             f"{len(outside):,} outside it")
+    # Steve, 3 Nov (-a4): finds whose truth is a slime mould or a lichen leave the test next,
+    # before the Vision-assisted exclusion; counted by group and described.
+    taxa_block = (scope or {}).get("exclude_truth_taxa")
+    taxa_rules, outside_taxa = None, {}
+    if taxa_block:
+        taxa_rules = read_truth_taxa(resolve(taxa_block["file"]), taxa_block["sha256"])
+        finds, outside_taxa = truth_taxa_split(finds, taxa_rules)
+        log(f"[test scope] {sum(len(v) for v in outside_taxa.values()):,} finds left out as "
+            + " / ".join(f"{g.replace('_', ' ')} {len(v):,}" for g, v in outside_taxa.items()))
+    taxa_out = [f for fs in outside_taxa.values() for f in fs]
+    taxa_outcomes: dict = {}
     # Steve, 30 Oct (-a3): a find whose DNA verdict came with Vision's help leaves the test
     # right after the scope, like the scope's outsiders (report "truth_independence").
     ti = config.get("truth_independence")
@@ -2291,7 +2381,7 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
             log(f"[{comp['id']}] {b} / {comp['method']}: {len(scored):,} finds with vectors, "
                 f"{len(ref):,} reference records")
             truths = {f.key: {"species": f.species, "genus": f.genus, "family": f.family}
-                      for f in finds + outside + assisted}
+                      for f in finds + outside + taxa_out + assisted}
             if comp.get("photos") == "first":            # E19: the first photo only
                 from dataclasses import replace
                 scored = [replace(r, photo_rows=r.photo_rows[:1]) for r in scored]
@@ -2333,6 +2423,9 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         if outside and comp["id"] in outside_ids:
             outside_outcomes[comp["id"]] = outcomes_for(comp, outside, answers, conn,
                                                         keys[comp["id"]])[0]
+        if taxa_out and comp["id"] in outside_ids:
+            taxa_outcomes[comp["id"]] = outcomes_for(comp, taxa_out, answers, conn,
+                                                     keys[comp["id"]])[0]
         if assisted and comp["id"] in ti_ids:
             assisted_outcomes[comp["id"]] = outcomes_for(comp, assisted, answers, conn,
                                                          keys[comp["id"]])[0]
@@ -2442,7 +2535,12 @@ def run(conn, base, test, config: dict, config_bytes: bytes, out: Path,
         **({"test_scope": {
             "scope": scope, "in_scope_finds": len(finds),
             "outside_test_scope": pt.outside_test_scope(
-                outside, outside_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS, reps, seed)}}
+                outside, outside_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS, reps, seed),
+            **({"outside_taxa": {
+                "file": taxa_rules["file"], "sha256": taxa_rules["sha256"],
+                "groups": {g: pt.described(fs, taxa_outcomes, outside_ids, OUTSIDE_SCOPE_CELLS,
+                                           reps, seed) for g, fs in outside_taxa.items()}}}
+               if taxa_rules else {})}}
            if scope else {}),
         **({"query_photo_filters": {cid: query_filter_report(
             q, finds_of.get(cid, finds), outcomes.get(cid) or {}, reps, seed)
@@ -2757,6 +2855,26 @@ def format_report(report: dict, config: dict) -> str:
                              + " | " + ("-" if not ci else
                                         f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
         lines.append("")
+        tx = ts.get("outside_taxa")
+        if tx:
+            lines += ["## Slime moulds and lichens (left out of the test; descriptive, never "
+                      "tested)", "",
+                      f"Finds whose truth is in {tx['file']} (sha256 {tx['sha256'][:12]}) leave "
+                      "every family, slice, row and table; answers are not filtered.", "",
+                      "| group | finds | comparator | cell | n | rate | 95% CI |",
+                      "|---|---|---|---|---|---|---|"]
+            for g, d in tx["groups"].items():
+                for cid, cells in d["comparators"].items():
+                    for cell, r in cells.items():
+                        ci = r.get("ci95")
+                        lines.append(f"| {g.replace('_', ' ')} | {d['finds']:,} | {cid} | {cell} | "
+                                     f"{r['n']:,} | "
+                                     + ("-" if r["rate"] is None else f"{100 * r['rate']:.1f}%")
+                                     + " | " + ("-" if not ci else
+                                                f"{100 * ci[0]:.1f}-{100 * ci[1]:.1f}%") + " |")
+                if not d["comparators"]:
+                    lines.append(f"| {g.replace('_', ' ')} | {d['finds']:,} | - | - | - | - | - |")
+            lines.append("")
     if report.get("pending_comparators"):
         lines += ["## Comparators not scored (fields not yet filled)", ""] + [
             f"- {cid}: {', '.join(f)}" for cid, f in report["pending_comparators"].items()] + [""]
