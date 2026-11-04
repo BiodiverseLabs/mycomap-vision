@@ -35,7 +35,8 @@ create table if not exists records (
   first_seen_at    text,               -- export that first listed it; null = before tracking
   vision_assisted  integer not null default 0,  -- green by .org's DNA + MycoMap Vision rule (records.VISION_ASSISTED_FIELD)
   first_green_at   text,               -- .org's first green moment (UTC) when its feed gives one (records.FIRST_GREEN_FIELD)
-  held_by_vision   integer not null default 0  -- .org's auto-validation held it for a person: Vision named another genus (records.HELD_BY_VISION_FIELD)
+  held_by_vision   integer not null default 0, -- .org's auto-validation held it for a person: Vision named another genus (records.HELD_BY_VISION_FIELD)
+  vision_genus_only integer not null default 0  -- green because Vision matched the DNA's genus alone: labelled as that genus (records.VISION_GENUS_ONLY_FIELD)
 );
 
 create table if not exists inat_observations (
@@ -166,7 +167,8 @@ _LATER_COLUMNS = {
                "source_owner_id": "integer", "license_text": "text", "ok_for_export": "integer"},
     "records": {"first_seen_at": "text", "org_source": "text", "source_id": "text",
                 "vision_assisted": "integer not null default 0", "first_green_at": "text",
-                "held_by_vision": "integer not null default 0"},
+                "held_by_vision": "integer not null default 0",
+                "vision_genus_only": "integer not null default 0"},
 }
 
 

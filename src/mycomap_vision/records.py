@@ -93,11 +93,18 @@ def parse_validation_date(s: str | None) -> str | None:
 #   visionGreenRecords.ts VISION_FIELDS, a boolean). Read into records.held_by_vision for the
 #   paper; nothing here acts on it yet. Read leniently like VISION_ASSISTED_FIELD (true, 1,
 #   "true"/"yes"/"1", or a list holding one); missing is 0.
+# VISION_GENUS_ONLY_FIELD: .org's DNA + Vision rule went green because Vision matched the DNA's
+#   genus, and nothing else vouches for the species (.org's visionGreenRecords.ts VISION_FIELDS, a
+#   boolean; Steve, 2026-11-04). Vision only confirmed the genus, so the record is a record of the
+#   genus here, whatever species .org holds it under: its label is the one word, which every
+#   reader of the label already treats as genus rank (taxonomy.labels_for). names_json keeps the
+#   name .org gave. Read leniently like HELD_BY_VISION_FIELD; missing is 0.
 # FIRST_GREEN_FIELD: the moment (UTC, ISO 8601) the record first turned green, when the feed
 #   gives one. Without it only the day (validation_date_N) is known. Also provisional.
 VISION_ASSISTED_FIELD = "validated_with_vision"
 VISION_ASSISTED_METHOD = "DNA + MycoMap Vision"
 HELD_BY_VISION_FIELD = "held_by_vision"
+VISION_GENUS_ONLY_FIELD = "vision_genus_only"
 FIRST_GREEN_FIELD = "first_green_at"
 
 
@@ -113,6 +120,15 @@ def vision_assisted(value) -> bool:
     if isinstance(value, (list, tuple)):
         return any(vision_assisted(v) for v in value)
     return False
+
+
+def genus_of_row(row: dict) -> str | None:
+    """A feed row's genus: its genus column, else the first word of its name."""
+    genus = " ".join((row.get("genus") or "").split())
+    if genus:
+        return genus
+    words = (row.get("scientific_name") or "").split()
+    return words[0] if words else None
 
 
 def held_by_vision(value) -> bool:
@@ -180,7 +196,10 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
     for oid, group in by_id.items():
         first = group[0]
         org_source = (first.get("source") or "").strip() or None
-        names = sorted({(g.get("scientific_name") or "").strip() for g in group} - {""})
+        # held_by_vision reads a boolean field leniently; the same reading serves this one.
+        genus_only = any(held_by_vision(g.get(VISION_GENUS_ONLY_FIELD)) for g in group)
+        org_names = sorted({(g.get("scientific_name") or "").strip() for g in group} - {""})
+        names = sorted({genus_of_row(g) or "" for g in group} - {""}) if genus_only else org_names
         projects: list[str] = []
         dates: list[str] = []
         for g in group:
@@ -197,11 +216,13 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
             "source": sources.normalise(org_source),
             "org_source": org_source,
             "source_id": str(first.get("observation_id")).strip(),
-            "scientific_name": names[0] if len(names) == 1 else (first.get("scientific_name") or None),
+            "scientific_name": names[0] if len(names) == 1 else (
+                genus_of_row(first) if genus_only else first.get("scientific_name") or None),
             "phylum": first.get("phylum"), "class": first.get("class"),
             "order": first.get("order"), "family": first.get("family"),
-            "genus": first.get("genus"), "species": first.get("species"),
-            "infraspecies": first.get("infraspecies"),
+            "genus": genus_of_row(first) if genus_only else first.get("genus"),
+            "species": None if genus_only else first.get("species"),
+            "infraspecies": None if genus_only else first.get("infraspecies"),
             "latitude": lat, "longitude": lng,
             # 1970-01-01 is .org's placeholder for "no date": stored as none, so
             # evaluation falls back to iNat's date.
@@ -213,7 +234,7 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
             "green_projects": json.dumps(projects),
             "validated_on": min(dates) if dates else None,
             "label_conflict": int(len(names) > 1),
-            "names_json": json.dumps(names),
+            "names_json": json.dumps(org_names),
             "exported_at": exported_at,
             # Any of its rows green by the DNA + Vision rule marks the record.
             "vision_assisted": int(any(vision_assisted(g.get(VISION_ASSISTED_FIELD))
@@ -221,6 +242,7 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
             # Likewise any of its rows held for a person because Vision named another genus.
             "held_by_vision": int(any(held_by_vision(g.get(HELD_BY_VISION_FIELD))
                                       for g in group)),
+            "vision_genus_only": int(genus_only),
             "first_green_at": min(greens) if greens else None,
         })
     return records
@@ -254,10 +276,11 @@ _COLUMNS = [
     "genus", "species", "infraspecies", "latitude", "longitude", "observed_on", "state",
     "country", "continent", "north_america", "sequence_id", "green_projects", "validated_on",
     "label_conflict", "names_json", "exported_at", "vision_assisted", "first_green_at",
-    "held_by_vision",
+    "held_by_vision", "vision_genus_only",
 ]
 # Columns a record dict built by older code may lack, and what they are then.
-_LATER_DEFAULTS = {"vision_assisted": 0, "first_green_at": None, "held_by_vision": 0}
+_LATER_DEFAULTS = {"vision_assisted": 0, "first_green_at": None, "held_by_vision": 0,
+                   "vision_genus_only": 0}
 
 
 def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:

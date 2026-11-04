@@ -1,5 +1,7 @@
 import json
 
+from mycomap_vision.taxonomy import labels_for
+
 from mycomap_vision.records import (build_records, is_north_america, parse_export,
                                     parse_validation_date, save_records)
 
@@ -83,6 +85,56 @@ def test_records_no_longer_green_leave_the_candidate_list(conn):
     save_records(conn, build_records([row("2", "Renamed")], "t2"))
     got = conn.execute("select observation_id, scientific_name from records").fetchall()
     assert [tuple(r) for r in got] == [("2", "Renamed")]
+
+
+# --- vision_genus_only (.org's green feed, VISION_FIELDS) ----------------------------------------
+
+def test_a_genus_only_vision_match_is_labelled_as_the_genus_not_the_species(conn):
+    rows = [row("1", "Hebeloma alpinicola", genus="Hebeloma", species="Hebeloma alpinicola",
+                infraspecies="x", validated_with_vision=True, vision_genus_only=True)]
+    rec = build_records(rows, "t")[0]
+    assert (rec["scientific_name"], rec["genus"], rec["species"], rec["infraspecies"]) == (
+        "Hebeloma", "Hebeloma", None, None)
+    assert rec["vision_genus_only"] == 1 and rec["vision_assisted"] == 1
+    assert json.loads(rec["names_json"]) == ["Hebeloma alpinicola"]    # what .org holds it under
+    save_records(conn, [rec])
+    got = conn.execute("select scientific_name, species, vision_genus_only from records").fetchone()
+    assert tuple(got) == ("Hebeloma", None, 1)
+
+
+def test_every_reader_of_the_label_then_sees_a_genus_with_no_species():
+    lab = labels_for("Hebeloma", "Hebeloma", "Hymenogastraceae", False, None)
+    assert (lab.species, lab.genus, lab.unit) == ("", "Hebeloma", "Hebeloma")
+
+
+def test_a_species_match_or_no_flag_keeps_the_species(conn):
+    rows = [row("1", "Hebeloma alpinicola", genus="Hebeloma", species="Hebeloma alpinicola",
+                validated_with_vision=True, vision_genus_only=False),
+            row("2", "Hebeloma velatum", genus="Hebeloma", species="Hebeloma velatum")]
+    recs = {r["observation_id"]: r for r in build_records(rows, "t")}
+    assert recs["1"]["scientific_name"] == "Hebeloma alpinicola" and recs["1"]["vision_genus_only"] == 0
+    assert recs["2"]["scientific_name"] == "Hebeloma velatum" and recs["2"]["vision_genus_only"] == 0
+
+
+def test_the_genus_comes_from_the_name_when_the_genus_column_is_blank():
+    rec = build_records([row("1", "Hebeloma alpinicola", genus=None, vision_genus_only=True)], "t")[0]
+    assert (rec["scientific_name"], rec["genus"]) == ("Hebeloma", "Hebeloma")
+
+
+def test_two_species_of_one_genus_are_no_label_conflict_once_genus_only():
+    rows = [row("1", "Hebeloma alpinicola", genus="Hebeloma", vision_genus_only=True),
+            row("1", "Hebeloma velatum", genus="Hebeloma", vision_genus_only=True)]
+    rec = build_records(rows, "t")[0]
+    assert rec["label_conflict"] == 0 and rec["scientific_name"] == "Hebeloma"
+    assert json.loads(rec["names_json"]) == ["Hebeloma alpinicola", "Hebeloma velatum"]
+
+
+def test_a_record_already_stored_under_the_species_comes_back_as_a_rename(conn):
+    stored = row("1", "Hebeloma alpinicola", genus="Hebeloma", validated_with_vision=True)
+    save_records(conn, build_records([stored], "t"))
+    out = save_records(conn, build_records([{**stored, "vision_genus_only": True}], "t2"))
+    assert out["renamed"] == 1 and out["removed"] == 0 and out["new"] == 0
+    assert conn.execute("select scientific_name from records").fetchone()[0] == "Hebeloma"
 
 
 # --- held_by_vision (.org's green feed, VISION_FIELDS; for the paper) ---------------------------
