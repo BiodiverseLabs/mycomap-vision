@@ -1951,7 +1951,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # specimen matched to each is the one the link shows for it today, and the maps are made
     # one photo at a time behind every identification.
     # The Excluded photos page's maps (excluded_looked.py) take turns on the same worker.
-    looked_worker = (looked.Worker(model_queue.idle, gpu_lock, background=background, note=note)
+    # Preload photos (batch jobs) start only after QUIET_SECONDS with no identification
+    # (Steve, 2026-11-07); MV_EXCLUDED_PRELOAD_QUIET_SECONDS sets it, 0 = whenever idle.
+    quiet_setting = _setting_number("MV_EXCLUDED_PRELOAD_QUIET_SECONDS")
+    quiet_seconds = looked.QUIET_SECONDS if quiet_setting is None else max(0.0, quiet_setting)
+
+    def preload_quiet() -> bool:
+        return model_queue.quiet_seconds() >= quiet_seconds
+
+    looked_worker = (looked.Worker(model_queue.idle, gpu_lock, background=background, note=note,
+                                   quiet=preload_quiet)
                      if looked_on or excluded_on else None)
     looked_asks = RateLimiter(20, 600.0)
     looked_targets: "OrderedDict[tuple, looked.Target]" = OrderedDict()
@@ -3006,7 +3015,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             job=lambda t, done: excluded_job(t.hit, xl.MODEL, preload_served["backbone"], t.crop,
                                              list(t.box) if t.box else None, batch=True,
                                              on_done=done),
-            nightly_running=nightly_running, note=note)
+            nightly_running=nightly_running, quiet=preload_quiet, note=note)
         app.state.excluded_preload = preloader
         if background and preloader.enabled:
             start_background("excluded preload", 1.0, preloader.step, note)

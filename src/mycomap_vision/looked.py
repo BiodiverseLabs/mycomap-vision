@@ -31,6 +31,15 @@ outside the lock. A request is refused (Busy) while too many photos are already 
 one photo at a time) never counts toward that limit and always waits behind every person's
 ask; it is never stopped mid-map, so a person's ask waits at most for the one batch photo
 being made. Each map's time is logged ("[looked] <id>: map 4.1 s, read 0.3 s").
+
+**Quiet first** (Steve, 2026-11-07, "Make maps give way to .org's queue"): a batch photo starts
+only once the model queue has been quiet for a while (`quiet()`: on the box, QUIET_SECONDS since
+the last identification arrived or was answered). mycomap.org's auto-validation sends its next
+record as soon as the last is answered, so between two of its identifications the queue is
+idle for a moment but never quiet; before this, a preload map slipped into every such gap and
+each identification waited ~12 s behind one. A batch photo that is waiting for quiet steps
+back for a person's ask, which still waits only for the queue to be idle. A map already being
+made is never stopped.
 """
 
 from __future__ import annotations
@@ -51,6 +60,7 @@ REGISTER_FACTOR = 2.0                       # token norm over this x the photo's
 MATCH_PAIRS = 3
 MATCH_SHARE = 0.1                           # the photo's strongest share of patches matched
 MAP_LEVELS = 255
+QUIET_SECONDS = 60.0                        # batch photos wait this long after an identification
 
 
 class Busy(RuntimeError):
@@ -369,13 +379,15 @@ class Job:
 
 class Worker:
     """One map at a time, behind the identifications (module docstring). `idle()` says the
-    model queue has nothing waiting or running; `lock` is the model lock. With
+    model queue has nothing waiting or running; `quiet()` that it has been quiet long enough
+    for a batch photo to start (default: always); `lock` is the model lock. With
     background=False a job runs in the caller's thread (tests)."""
 
     def __init__(self, idle: Callable[[], bool], lock, max_waiting_photos: int = 30,
                  seconds_per_photo: float = 3.0, poll: float = 0.2, background: bool = True,
-                 failed_for: float = 600.0, clock=time.monotonic, sleep=time.sleep, note=print):
-        self.idle, self.lock = idle, lock
+                 failed_for: float = 600.0, clock=time.monotonic, sleep=time.sleep, note=print,
+                 quiet: Callable[[], bool] = lambda: True):
+        self.idle, self.lock, self.quiet = idle, lock, quiet
         self.max_waiting_photos, self.seconds_per_photo = max_waiting_photos, seconds_per_photo
         self.poll, self.background, self.failed_for = poll, background, failed_for
         self.clock, self.sleep, self.note = clock, sleep, note
@@ -448,7 +460,25 @@ class Worker:
                     self._cond.wait()
             self._run_next()
 
+    def _people_waiting(self) -> bool:
+        with self._cond:
+            return any(not j.batch for j in self._queue)
+
+    def _step_back(self, job: Job) -> None:
+        """Put a batch job that has made nothing back at the head of the batch jobs."""
+        with self._cond:
+            at = next((i for i, j in enumerate(self._queue) if j.batch), len(self._queue))
+            self._queue.insert(at, job)
+            self._current = None
+
     def _run_next(self) -> None:
+        with self._cond:
+            if not self._queue:
+                return
+            head_waits = self._queue[0].batch
+        if head_waits and not self.quiet():             # not even read until quiet
+            self.sleep(self.poll)
+            return
         with self._cond:
             if not self._queue:
                 return
@@ -456,12 +486,18 @@ class Worker:
             self._current = job
             job.started = self.clock()
         entries: list[dict] = []
+        stepped_back = False
         try:
             for task in job.tasks:
                 read_at = self.clock()
                 got = task.fetch()                      # the network, outside the lock
                 read = self.clock() - read_at
-                while not self.idle():                  # identifications first
+                # Identifications first; a batch photo also waits for quiet, and steps back
+                # for a person's ask while it has made nothing.
+                while not self.idle() or (job.batch and not self.quiet()):
+                    if job.batch and not entries and self._people_waiting():
+                        stepped_back = True
+                        return
                     self.sleep(self.poll)
                 with self.lock:
                     start = self.clock()
@@ -486,6 +522,9 @@ class Worker:
             if job.on_error is not None:
                 job.on_error(e)
         finally:
-            with self._cond:
-                self._current = None
-            job.finished.set()
+            if stepped_back:
+                self._step_back(job)
+            else:
+                with self._cond:
+                    self._current = None
+                job.finished.set()

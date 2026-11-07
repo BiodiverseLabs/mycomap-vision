@@ -395,13 +395,15 @@ class Preloader:
     def __init__(self, *, enabled: bool, window: tuple[int, int] | None, crop_wait: bool,
                  worker, targets: Callable, stamp_now: Callable, stamps: Callable,
                  stamp_of: Callable, skip: Callable, job: Callable, nightly_running: Callable[[], bool],
-                 no_maps: Callable[[], dict] = dict, rescan_seconds: float = 3600.0,
+                 no_maps: Callable[[], dict] = dict, quiet: Callable[[], bool] = lambda: True,
+                 rescan_seconds: float = 3600.0,
                  stall_minutes: float = STALL_MINUTES, clock=time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc), note=print):
         self.enabled, self.window, self.crop_wait = enabled, window, crop_wait
         self.worker, self.targets, self.stamp_now, self.stamps = worker, targets, stamp_now, stamps
         self.stamp_of, self.no_maps = stamp_of, no_maps
         self.skip_reason, self.job, self.nightly_running = skip, job, nightly_running
+        self.quiet = quiet
         self.rescan_seconds, self.clock, self.now, self.note = rescan_seconds, clock, now, note
         self.state = "off" if not enabled else "starting"
         self.pass_: Pass | None = None
@@ -486,6 +488,8 @@ class Preloader:
         reason = {
             "outside its window": f"outside its window ({self.window_text()})",
             "waiting for the nightly update": "the nightly update is running",
+            "giving way to identifications": "identifications kept coming (maps wait for a "
+                                             "quiet spell)",
             "making a map": "the map worker has had a preload photo in hand all that time",
             "waiting for the model": "the served model is not ready",
             "done": "nothing left to make",
@@ -510,6 +514,8 @@ class Preloader:
             return "outside its window"
         if self.nightly_running():
             return "waiting for the nightly update"
+        if not self.quiet():                      # looked.Worker holds a queued photo back too
+            return "giving way to identifications"
         if self.worker.batch_pending():
             return "making a map"
         # A fresh pass every rescan_seconds, done or not: new exclusions, crops the night
