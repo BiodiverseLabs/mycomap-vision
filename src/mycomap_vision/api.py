@@ -310,6 +310,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                nightly_fetch: Callable[[], tuple[list[dict], str]] | None = None,
                nightly_steps: "nightly.Steps | None" = None,
                nightly_fetch_pending: Callable[[], tuple[list[dict], str]] | None = None,
+               waiting_fetch: Callable[[str], dict] | None = None,
                photo_fetcher: Callable[[], object] | None = None,
                paper_file: Path = PAPER_FILE,
                experiments_dir: Path | None = None,
@@ -355,7 +356,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     (nightly.py). `manifest_path` is then its manifest, the index adds its shards, and
     with `background` the nightly update runs on its schedule. `nightly_fetch`,
     `nightly_fetch_pending`, `nightly_steps` and `photo_fetcher` replace the reads of
-    mycomap.org and iNat (tests).
+    mycomap.org and iNat (tests); `waiting_fetch(since)` replaces the read of the records
+    validated since the last night (nightly.fetch_green_since).
 
     `preload` (default: MV_PRELOAD) names models to load and index on a background
     thread at startup, so the first person to identify doesn't wait for it (about
@@ -1091,6 +1093,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         # Photographers' answers are cheap and change any minute: always the current ones.
         # Never their counts (research_public.permission_status).
         return {**research_public.stats(stats_cache.get()),
+                "waiting": research_public.waiting(waiting_cache.get() if waiting_cache else None),
                 "permissions": research_public.permission_status(permission_status())}
 
     @app.get("/api/scoreboard")
@@ -2271,6 +2274,38 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 start_background("usage report",
                                  _setting_number("MV_USAGE_REPORT_SECONDS") or 300,
                                  app.state.report_usage, note)
+
+    # Records validated on mycomap.org since the last nightly read and not held here yet:
+    # the How it works page's "waiting for tonight's update" (nightly.waiting). Asked every
+    # MV_WAITING_SECONDS (900) at most, on a connection of its own; only with a nightly
+    # layer and mycomap.org's address and key, so a test or a laptop never asks .org.
+    def compute_waiting() -> dict | None:
+        base_url, key = config.setting("MV_ORG_BASE_URL"), permissions.org_key()
+        if not (base_url and key):
+            return None
+        own = sqlite3.connect(manifest_path, timeout=30)
+        try:
+            since = nightly.last_read_at(own)
+            if not since:
+                return None
+            fetch = waiting_fetch or (lambda s: nightly.fetch_green_since(base_url, key, s))
+            out = nightly.waiting(own, fetch(since))
+        except Exception as e:  # noqa: BLE001 - no figure rather than a stale or wrong one
+            note(f"[waiting] not counted: {type(e).__name__}: {e}")
+            return None
+        finally:
+            own.close()
+        if out["green_without_record"]:
+            note(f"[waiting] {out['green_without_record']} records turned green on mycomap.org "
+                 f"since {since} with no observations row behind them: no nightly read sees "
+                 "them until .org imports them (an export sync)")
+        return out
+
+    waiting_cache = (Cached(compute_waiting, _setting_number("MV_WAITING_SECONDS") or 900, note=note)
+                     if layer else None)
+    app.state.waiting_cache = waiting_cache
+    if background and waiting_cache:
+        threading.Thread(target=waiting_cache.get, name="waiting", daemon=True).start()
 
     # The nightly update (nightly.py): runs here because this process holds the model.
     nightly_settings = nightly_settings or (nightly.Settings.from_env() if layer else None)

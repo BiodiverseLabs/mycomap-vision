@@ -80,6 +80,7 @@ from .storage import LocalStore
 
 PATH = "/api/vision/green-records"
 PENDING_PATH = "/api/vision/pending-records"
+SINCE_PATH = "/api/vision/green-records/since"
 PAGE_LIMIT = 5000
 MAX_PAGES = 1000                 # 5 million records: far past any real answer
 LOCK_STALE_SECONDS = 6 * 3600    # a lock this old was left by a run that died
@@ -474,6 +475,63 @@ def fetch_pending(base_url: str, key: str, session: requests.Session | None = No
     advance predictions; checked as fetch_green, but an empty list is an answer."""
     return fetch_pages(base_url, key, PENDING_PATH, "pending", session=session, limit=limit,
                        timeout=timeout, allow_empty=True, pauses=pauses, sleep=sleep, log=log)
+
+
+def fetch_green_since(base_url: str, key: str, since: str,
+                      session: requests.Session | None = None, timeout: float = 30) -> dict:
+    """The green records that changed on mycomap.org since `since` (GET
+    /api/vision/green-records/since): its whole answer, checked. One try: this feeds a
+    count on the How it works page, and a missed refresh keeps the last one. Refuses
+    (NightlyRefused, never with the key) anything but a well-formed 200."""
+    session = session or requests.Session()
+    url = base_url.rstrip("/") + SINCE_PATH
+    headers = {"Authorization": f"Bearer {key}", "User-Agent": config.USER_AGENT}
+    try:
+        resp = session.get(url, params={"since": since}, headers=headers, timeout=timeout)
+    except requests.RequestException as e:
+        raise _fail(f"could not reach {base_url}: {type(e).__name__}") from None
+    if resp.status_code != 200:
+        raise _fail(f"mycomap.org answered {resp.status_code} for the records since {since}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        raise _fail("the records since the last read were not JSON") from None
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if not isinstance(records, list) or payload.get("count") != len(records) \
+            or not isinstance(payload.get("generatedAt"), str) \
+            or any(not isinstance(r, dict) or r.get("observation_id") in (None, "") for r in records):
+        raise _fail("the records since the last read are not a records list")
+    return payload
+
+
+def last_read_at(conn: sqlite3.Connection) -> str | None:
+    """mycomap.org's clock at the last good nightly read: everything validated since then
+    is what the next night adds."""
+    ensure_schema(conn)
+    row = conn.execute("select generated_at from nightly_runs where ok = 1 "
+                       "and coalesce(generated_at, '') <> '' order by id desc limit 1").fetchone()
+    return row[0] if row else None
+
+
+def waiting(conn: sqlite3.Connection, payload: dict) -> dict:
+    """Of mycomap.org's records since the last read (fetch_green_since), the ones the next
+    night adds: records this set does not hold yet, counted as the weekly figure counts
+    (reference_stats' recent_week: North America, one name). Re-validations and renames of
+    records already here are left out. `green_without_record`: green checks on .org with
+    no record behind them, which no nightly read can see (for the log, not the page)."""
+    recs = build_records(payload.get("records") or [], payload.get("generatedAt") or "")
+    keys = [r["observation_id"] for r in recs]
+    held: set[str] = set()
+    for i in range(0, len(keys), 500):
+        chunk = keys[i:i + 500]
+        held.update(k for (k,) in conn.execute(
+            f"select observation_id from records where observation_id in ({','.join('?' * len(chunk))})",
+            chunk))
+    new = [r for r in recs if r["observation_id"] not in held]
+    return {"records": sum(1 for r in new if r["north_america"] and not r["label_conflict"]),
+            "since": payload.get("since"), "as_of": payload.get("generatedAt"),
+            "truncated": bool(payload.get("truncated")),
+            "green_without_record": int(payload.get("greenWithoutRecord") or 0)}
 
 
 def org_says_no_key(resp) -> bool:
