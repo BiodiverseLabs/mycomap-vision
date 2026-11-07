@@ -251,6 +251,9 @@ export interface Stats {
   photographers?: number;
   /** Records DNA-verified in the week to the newest validation (ISO dates). */
   recent_week?: { records: number; from: string; through: string } | null;
+  /** Records validated on mycomap.org since the last nightly read and not held yet: what
+   *  tonight's update adds (North America, one name). Null when it can't be counted. */
+  waiting?: { records: number; since: string | null; as_of: string | null } | null;
 }
 
 export interface ScoreRun {

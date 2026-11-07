@@ -118,6 +118,16 @@ def stats(figures: dict) -> dict:
     return {k: v for k, v in figures.items() if k not in STATS_HIDDEN}
 
 
+def waiting(figure: dict | None) -> dict | None:
+    """Records validated on mycomap.org since the last nightly read and not held yet
+    (nightly.waiting): how many, and since when. Not the count of green checks with no
+    record behind them, which is for the server log."""
+    if not figure:
+        return None
+    return {"records": figure["records"], "since": figure.get("since"),
+            "as_of": figure.get("as_of")}
+
+
 def permission_status(status: dict) -> dict:
     """permissions.status_report without the counts, or the last failure's own words (which
     can name hosts): whether photos may be shown, and when the answers were last read."""

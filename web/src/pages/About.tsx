@@ -68,8 +68,20 @@ export function HowItWorks(d: HowItWorksData) {
 
 /* ------------------------------------------------------------------ 1. hero */
 
+/** Records validated since the last nightly read, when there are any to tell. */
+function waitingRecords(s?: Stats): number | null {
+  const n = s?.waiting?.records;
+  return typeof n === "number" && n > 0 ? n : null;
+}
+
+/** The line under the weekly figure: what tonight's update adds on top of it. */
+export function waitingLine(n: number): string {
+  return `+${num(n)} more validated since, added in tonight's update`;
+}
+
 function Hero({ s, referencePhotos }: { s?: Stats; referencePhotos?: number }) {
   const week = s?.recent_week && s.recent_week.records > 0 ? s.recent_week : null;
+  const waiting = waitingRecords(s);
   return (
     <div className="bg-[#f8f5f0] border-b border-[#A87146]/10">
       <div className="mx-auto max-w-[1080px] px-4 sm:px-8 py-10">
@@ -89,7 +101,8 @@ function Hero({ s, referencePhotos }: { s?: Stats; referencePhotos?: number }) {
           {referencePhotos ? <Tile value={num(referencePhotos)} label="reference photos your photos are compared with" /> : null}
           {s && <Tile value={num(s.names)} label="names in the reference set" />}
           {week && <Tile value={`+${num(week.records)}`}
-                         label={`records DNA-verified in the week to ${longDate(week.through)}`} />}
+                         label={`records DNA-verified in the week to ${longDate(week.through)}`}
+                         note={waiting ? <span data-testid="hero-waiting">{waitingLine(waiting)}</span> : undefined} />}
         </div>
         <div className="flex flex-wrap gap-2.5 mt-6">
           <a href="/" className="inline-flex items-center gap-1.5 rounded-md bg-myco-green px-4 py-2.5 text-sm font-medium text-white">
@@ -244,6 +257,7 @@ function NamesByRecordsCard({ s }: { s?: Stats }) {
 
 function DnaNotVotes({ s }: { s?: Stats }) {
   const week = s?.recent_week && s.recent_week.records > 0 ? s.recent_week : null;
+  const waiting = waitingRecords(s);
   return (
     <Wrap band testId="section-dna">
       <Kicker>DNA-verified references only · Updated daily</Kicker>
@@ -280,6 +294,11 @@ function DnaNotVotes({ s }: { s?: Stats }) {
               <span className="text-[13px] text-muted-foreground">
                 North American records DNA-verified in the week to {longDate(week.through)}
               </span>
+              {waiting && (
+                <span className="basis-full text-[13px] text-[#4f7a16]" data-testid="weekly-waiting">
+                  {waitingLine(waiting)}
+                </span>
+              )}
             </div>
           )}
         </Card>

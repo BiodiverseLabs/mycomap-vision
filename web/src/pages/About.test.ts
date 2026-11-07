@@ -171,3 +171,24 @@ test("How it works: range and season and the photo-type tagger are already in, n
   assert.match(t, /Range and season Already in: when you give a place and date, Vision weighs each name/);
   assert.match(t, /Already in: micrographs and photos of data slips are set aside\. To come: recognising cap, underside, stem and more\./);
 });
+
+// Steve, 2026-11-06: "+154 this week" while he had validated far more. The weekly figure
+// counts what the set holds; what was validated after the last nightly read waits for
+// tonight, and both weekly counters now say how many.
+test("records validated since the last nightly read are counted under both weekly figures", () => {
+  const html = page({ stats: { ...STATS, waiting: { records: 1190, since: "2026-11-06T08:00:41.000Z", as_of: null } } });
+  assert.match(html, /data-testid="hero-waiting"/);
+  assert.match(html, /data-testid="weekly-waiting"/);
+  const t = text(html);
+  assert.equal(t.match(/\+1,190 more validated since, added in tonight's update/g)?.length, 2);
+  assert.ok(t.includes("+2,946"), "the weekly figure itself is unchanged");
+});
+
+test("no waiting line when nothing is waiting, the count is missing, or the week has no figure", () => {
+  for (const waiting of [undefined, null, { records: 0, since: null, as_of: null }]) {
+    const html = page({ stats: { ...STATS, waiting } as Stats });
+    assert.doesNotMatch(html, /hero-waiting|weekly-waiting|more validated since/);
+  }
+  const noWeek = page({ stats: { ...STATS, recent_week: null, waiting: { records: 5, since: null, as_of: null } } });
+  assert.doesNotMatch(noWeek, /more validated since/);
+});
