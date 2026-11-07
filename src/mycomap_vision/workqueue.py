@@ -68,6 +68,7 @@ class ModelQueue:
         self._jobs: list[Job] = []
         self._running_photos = 0
         self._busy = False                          # a batch is being answered
+        self._last_seen: float | None = None        # last job arrived or finished (clock)
         self._cond = threading.Condition()
         self._seq = itertools.count()
         self.batches = 0                            # searches run (for tests and health)
@@ -99,6 +100,7 @@ class ModelQueue:
         job.seq, job.arrived = next(self._seq), self.clock()
         with self._cond:
             self._jobs.append(job)
+            self._last_seen = job.arrived
             self._cond.notify()
         return job.future.result(timeout=timeout)
 
@@ -107,6 +109,19 @@ class ModelQueue:
         (looked.Worker makes its maps only then)."""
         with self._cond:
             return not self._jobs and not self._busy
+
+    def quiet_seconds(self) -> float:
+        """Seconds since the last identification arrived or was answered: 0 while one is
+        waiting or running, infinite before the first. A stream of identifications sent one
+        after another (mycomap.org's auto-validation asks for the next record as soon as the
+        last is answered) leaves the queue idle for a moment between each, but never quiet;
+        the Excluded photos preload waits for quiet (looked.Worker, Steve 2026-11-07)."""
+        with self._cond:
+            if self._jobs or self._busy:
+                return 0.0
+            if self._last_seen is None:
+                return float("inf")
+            return max(0.0, self.clock() - self._last_seen)
 
     def state(self) -> dict:
         with self._cond:
@@ -146,6 +161,7 @@ class ModelQueue:
                 with self._cond:
                     self._running_photos = 0
                     self._busy = False
+                    self._last_seen = self.clock()
 
     def run_batch(self, batch: list[Job]) -> None:
         """Embed each job, score them all in one search, finish each. A job that fails
