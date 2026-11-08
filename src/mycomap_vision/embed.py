@@ -216,6 +216,7 @@ class EmbedStats:
     # unembedded, and screening decides whether there are too many (skip_threshold).
     skipped: list = field(default_factory=list)
     stopped: bool = False          # should_stop() said stop before every batch was done
+    base_errors: int = 0           # batches whose base vectors (with_base) failed
 
 
 def _batches(items: list, n: int) -> Iterable[list]:
@@ -228,13 +229,19 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
                  shard_rows: int = 8192, readers: int = 8,
                  log: Callable[[str], None] = print,
                  should_stop: Callable[[], bool] | None = None,
-                 source_size: str | None = None) -> EmbedStats:
+                 source_size: str | None = None,
+                 with_base: Callable[[list[int], np.ndarray], None] | None = None) -> EmbedStats:
     """Embed `todo`: (photo_id, relpath), or (crop vector id, relpath, box) for a specimen
     crop (crops_to_embed). A photo that can't be read or decoded is skipped and listed in
     stats.skipped with the reason. `should_stop()` is asked before each batch; when it
     says stop, what is embedded so far is saved and stats.stopped is set. `source_size`:
     the copy size every photo in `todo` was read at, recorded in embedding_sources (None:
-    any earlier record for these vectors is dropped, their size being unknown now)."""
+    any earlier record for these vectors is dropped, their size being unknown now).
+
+    `with_base(photo_ids, base_vectors)`: each batch's frozen base vectors as well, from the same
+    pass (the backbone's encode_with_base: the nightly photo review, nightly_review.py). Its
+    failure, or the fork's, never costs a vector: the batch is embedded with encode() and
+    the failure counted (stats.base_errors)."""
     conn.executescript(SCHEMA + SOURCES_SCHEMA)
     out_dir.mkdir(parents=True, exist_ok=True)
     stats = EmbedStats()
@@ -299,13 +306,30 @@ def embed_photos(conn: sqlite3.Connection, store: PhotoStore, backbone: Backbone
             stats.skipped.extend(bad)
             if not good:
                 continue
-            vecs = normalise(backbone.encode([img for _, img in good]))
+            imgs = [img for _, img in good]
+            raw, base = None, None
+            if with_base is not None:
+                try:
+                    pair = backbone.encode_with_base(imgs)
+                    if pair is not None and np.shape(pair[0]) == (len(good), backbone.dim):
+                        raw, base = pair
+                except Exception as e:  # noqa: BLE001 - the batch is embedded without it
+                    stats.base_errors += 1
+                    log(f"  base vectors failed for a batch, embedding it without: "
+                        f"{type(e).__name__}: {e}"[:300])
+            vecs = normalise(backbone.encode(imgs) if raw is None else raw)
             if vecs.shape != (len(good), backbone.dim):
                 raise RuntimeError(f"{backbone.name} returned {vecs.shape}, "
                                    f"expected ({len(good)}, {backbone.dim})")
             buf_vecs.append(vecs)
             buf_ids.extend(pid for pid, _ in good)
             stats.embedded += len(good)
+            if base is not None:
+                try:
+                    with_base([pid for pid, _ in good], np.asarray(base))
+                except Exception as e:  # noqa: BLE001 - the vectors are kept regardless
+                    stats.base_errors += 1
+                    log(f"  base vectors not used: {type(e).__name__}: {e}"[:300])
             if len(buf_ids) >= shard_rows:
                 flush()
                 log(f"  {stats.embedded:,}/{len(todo):,} photos, "

@@ -157,10 +157,13 @@ _GATE = re.compile(r"gate not_fungus p\(fungus\)=([0-9.]+)")
 # review-only re-score of one class writes the same form, so its flag places and bands the photo
 # over the older ones: "R11.1 v2 uv p=0.043 (very_low)" (the UV retrain on the UV tab's decisions,
 # 2026-11-01, which also weighs who took the photo; the research repo's uv-tagger-retrain entry).
+# The nightly photo review (nightly_review.py) names the served tagger's version in the same form,
+# "nightly v2.1-336 micrograph p=0.910 (high)", and is read the same way.
 V2_TAB = {"micrograph": "micrograph", "slip": "slip", "habitat": "habitat", "people": "people",
           "uv": "uv", "chemical": "chemical", "spore_print": "spore_print", "dried": "dried",
           "tree": "tree", "drawing": "drawing", "not_fungus": "gate", "specimen": "specimen"}
-_V2 = re.compile(r"\bv2 (\w+) p=([0-9.]+)(?: \((" + "|".join(BANDS) + r")\))?")
+_V2 = re.compile(r"\bv2(?:\.[0-9]+)?(?:-[0-9]+)? (\w+) p=([0-9.]+)(?: \(("
+                 + "|".join(BANDS) + r")\))?")
 
 
 def parse_flags(rule: str) -> list[dict]:

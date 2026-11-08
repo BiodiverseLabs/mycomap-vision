@@ -37,6 +37,7 @@ from PIL import Image
 
 from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, inat_suggest, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
+               nightly_review,
                excluded_looked as xl, looked, modified_photos as mp, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
                quotas as quota_rules, research_public, serving, sessions as session_store, sources,
                speedlog, uploads,
@@ -2374,12 +2375,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     return backbone_model(backbone)
             return get
         served = {b: loaded(b) for b in ready_backbones()}
+        # The nightly photo review (MV_NIGHTLY_PHOTO_REVIEW=1, nightly_review.py): tonight's
+        # photos tagged by the served tagger, the non-specimen ones queued for a person, through
+        # the store's seal gate. Never excludes a photo; never fails the night.
+        try:
+            review = nightly_review.NightlyReview.from_env(photo_tagger, feedback_store)
+        except Exception as e:  # noqa: BLE001 - the night runs without it
+            note(f"[nightly] photo review not set up: {type(e).__name__}: {e}")
+            review = None
         own = manifest.connect(manifest_path)
         own.execute("pragma busy_timeout = 30000")      # the permissions sync writes too
         try:
             report = nightly.run_once(own, layer, fetch, served, nightly_settings,
                                       encode_lock=gpu_lock, accept_removals=accept_removals,
-                                      steps=nightly_steps, log=note)
+                                      steps=nightly_steps, photo_review=review, log=note)
         finally:
             own.close()
         if confused_with is not None:          # tonight's table, if the read took

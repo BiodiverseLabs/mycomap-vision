@@ -66,6 +66,15 @@ def notes(block: dict | None, now: datetime | None = None,
             out.append(("warn", f"{backbone}: the nights added {size.get('nightly_photos', 0):,} "
                                 f"photos, {size.get('share', 0):.0%} of the release's: time for "
                                 "a new release"))
+    pr = block.get("photo_review")
+    if isinstance(pr, dict):        # the nightly photo review (nightly_review.py), when on
+        line = (f"photo review: {pr.get('tagged', 0):,} photos tagged, {pr.get('queued', 0):,} "
+                f"queued, {pr.get('already_queued', 0):,} already queued, "
+                f"{pr.get('already_decided', 0):,} already decided, "
+                f"{pr.get('refused_sealed', 0) + pr.get('refused_unknown', 0):,} refused by the "
+                "paper's seal")
+        out.append(("warn", line + "; it failed, see `mv nightly`") if pr.get("failed")
+                   else ("ok", line))
     cw = block.get("confused_with")
     if isinstance(cw, dict):
         failed = int(cw.get("failures_in_a_row") or 0)
