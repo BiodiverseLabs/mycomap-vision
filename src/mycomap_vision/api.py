@@ -1619,10 +1619,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"id": rid, "url": f"/r/{rid}"}
 
     def observation_run(who: dict | None, keys: list, held: list, wanted: list, view,
-                        timer: "apiv1.Timer", about: dict) -> dict | None:
+                        timer: "apiv1.Timer", about: dict, card: bool = True) -> dict | None:
         """The link of an observation's kept answer: one per kept answer, the same for
         everyone who opens it, its id keyed with the server's secret. It keeps no photos:
-        the observation's own (Creative Commons) photo addresses at its source."""
+        the observation's own (Creative Commons) photo addresses at its source. `card`
+        False leaves its link-preview card to the first time someone opens the link."""
         if run_store is None or not held or any(h is None for h in held):
             return None
 
@@ -1634,7 +1635,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                repr(float(held[0].answered_at)))
             if run_store.get(rid) is not None:
                 run_store.opened_by(run_owner(who), rid, "observation")
-                card_later(rid)                 # a no-op once its card is kept
+                if card:
+                    card_later(rid)             # a no-op once its card is kept
                 return {"id": rid, "url": f"/r/{rid}"}
             parts = [run_part(site_index(backbone, method, view, timer), h.payload["result"],
                               h.payload.get("spare") or [], h.payload.get("vectors"),
@@ -1642,7 +1644,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                      for (backbone, method), h in zip(wanted, held)]
             kept = keep_run("observation", who, parts, held[0].payload["used"], rid=rid,
                             observation=run_links.public_observation(about), answered_at=at)
-            card_later(rid)                     # its link card, off this request
+            if card:
+                card_later(rid)                 # its link card, off this request
             return kept
         return without_failing(link)
 
@@ -3273,22 +3276,25 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
             def held_v1(source: str, number: str, backbone: str, method: str, top_k: int,
                         use_place: bool, use_date: bool, view, timer,
-                        include=()) -> dict | None:
+                        include=(), want_run: bool = False) -> dict | None:
                 """The answer Vision holds for an observation, in the v1 shape: the newer of
                 identify-by-observation's (`kept_from` api) and the site's Identify page's
                 ("from a link", `kept_from` site; same model, place and date), under
                 whichever answers version it was given (Steve, 2026-10-19: kept until someone
                 runs it again). `answered` says when, who asked, and whether Vision still
                 answers from the same reference set; an older one has its specimens' photos
-                checked against who may be shown now. None when nothing is held."""
+                checked against who may be shown now. None when nothing is held. `want_run`
+                adds `run`: the public /r/<id> link of the site's copy of the answer, the
+                same link the Identify page gives, or null when there is none to make."""
                 version = answers_version(backbone, method, view)
                 api = answer_cache.held(answercache.answer_key(
                     "v1", source, number, backbone, method,
                     {"top_k": top_k, "place": use_place, "date": use_date,
                      **type_options(include)}))
-                site = answer_cache.held(answercache.answer_key(
+                site_key = answercache.answer_key(
                     "site", source, number, backbone, method,
-                    {"place": use_place, "date": use_date, **type_options(include)}))
+                    {"place": use_place, "date": use_date, **type_options(include)})
+                site = answer_cache.held(site_key)
                 # An older answer that matched the observation to itself is not served.
                 ident = None
                 if any(k is not None and k.version != version for k in (api, site)):
@@ -3327,6 +3333,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         body["model"] = {**body["model"], "version": held["release"]}
                 body["model"] = {**body["model"], "answers_version": kept.version}
                 body.update(cached=True, kept_from=kept_from, answered=kept.about(version))
+                if want_run:
+                    body["run"] = (None if site is None else observation_run(
+                        None, [site_key], [site], [(backbone, method)], view, timer,
+                        site.payload["observation"], card=False))
                 return body
 
             def log_kept_v1(path: str, body: dict, source: str, number: str, backbone: str,
@@ -3338,7 +3348,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                            answers_version=(body.get("model") or {}).get("answers_version"),
                            model=f"{backbone}/{method}",
                            release=(body.get("model") or {}).get("version"),
-                           asked_by=identifylog.credential_asker(cred), client_ref=client_ref)
+                           asked_by=identifylog.credential_asker(cred), client_ref=client_ref,
+                           run_id=(body.get("run") or {}).get("id"))
 
             def v1_identify_observation(request: Request, source: str, observation_id: str,
                                         payload: dict | None = Body(None)):
@@ -3570,12 +3581,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # earlier identify-by-observation or from someone's run on the site's Identify
             # page, in the v1 shape. Nothing is read or scored and nothing counted, so .org
             # can show a record's answer the moment it exists. 404 `not_answered` otherwise.
+            # `run_link=true` (.org's server key only; Steve, 2026-11-08, for the link in the
+            # auto-validation comment on iNaturalist) also keeps the answer at its public
+            # /r/<id> link and says it in `run`. A run is stored and opened to anyone with
+            # the link, so a member's or developer's key may not ask for one.
             def v1_kept_answer(request: Request, source: str, observation_id: str,
                                model: str | None = None, top_k: int = 5,
                                use_place: bool = True, use_date: bool = True,
-                               include: str = ""):
+                               include: str = "", run_link: bool = False):
                 timer = apiv1.Timer()
                 cred: apiv1.Credential = request.state.credential
+                if run_link and cred.kind != "server":
+                    raise apiv1.V1Error(403, "forbidden", "run_link is for mycomap.org's "
+                                        "server key")
                 if source not in byobservation.SOURCES:
                     raise apiv1.V1Error(404, "not_found", "answers are kept for inat or mo")
                 number = byobservation.valid_id(observation_id)
@@ -3589,7 +3607,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     raise apiv1.V1Error(400, "bad_request", str(e)) from None
                 backbone, method = v1_model(model)
                 body = held_v1(source, number, backbone, method, top_k, use_place, use_date,
-                               permission_view(), timer, counted_anyway)
+                               permission_view(), timer, counted_anyway, want_run=run_link)
                 if body is None:
                     raise apiv1.V1Error(404, "not_answered", "Vision holds no answer for "
                                         "this observation")

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from test_api import open_limits, png
 from test_api_v1_by_observation import fetcher
-from test_api_v1_identify import FakeOrg as Introspect, SERVER_KEY
+from test_api_v1_identify import FakeOrg as Introspect, SERVER_KEY, app_token, bearer
 from test_models_and_scoreboard import Const, seed_two_species
 from test_signin import HERE, ISSUER, PUBLIC_KEY, SECRET, mint
 
@@ -551,3 +551,87 @@ def test_the_identify_page_starts_its_example_while_its_scripts_load(conn, tmp_p
     assert "link" not in member.get("/about").headers, "only the Identify page has the example"
     monkeypatch.delenv("MV_EXAMPLE_RUN")
     assert "link" not in member.get("/").headers, "no example, nothing to start"
+
+
+# --- a kept answer's public link, for mycomap.org's comment on iNaturalist ------------------
+
+SERVER = bearer(SERVER_KEY)
+
+
+def answered_for_org(app, number=555):
+    res = visitor(app).post(f"/api/v1/identify/inat/{number}", json={}, headers=SERVER)
+    assert res.status_code == 200, res.text
+
+
+def kept_link(app, number=555, headers=SERVER):
+    return visitor(app).get(f"/api/v1/answers/inat/{number}", params={"run_link": "true"},
+                            headers=headers)
+
+
+def stored_runs(bucket) -> list[str]:
+    root = bucket / runs.PREFIX
+    return sorted(p.name for p in root.iterdir()) if root.exists() else []
+
+
+def test_orgs_server_key_gets_a_public_link_anyone_can_open_signed_out(conn, tmp_path):
+    app, _, _ = site(conn, tmp_path, by_observation=True)
+    answered_for_org(app)
+    res = kept_link(app)
+    assert res.status_code == 200, res.text
+    run = res.json()["run"]
+    assert run["url"] == f"/r/{run['id']}" and run_path(run["url"])
+    assert res.json()["ranks"]                               # still the answer itself
+    opened = visitor(app).get(f"/api/runs/{run['id']}")
+    assert opened.status_code == 200, opened.text
+    shown = opened.json()
+    assert (shown["observation"]["source"], shown["observation"]["id"]) == ("inat", "555")
+    assert "place" not in shown["observation"]
+    assert "owner" not in shown and shown["mine"] is False
+
+
+def test_the_comments_link_is_the_one_the_identify_page_gives(conn, tmp_path):
+    app, _, _ = site(conn, tmp_path, by_observation=True)
+    on_site = by_link(person(app, "user-1")).json()["run"]["id"]
+    assert kept_link(app).json()["run"]["id"] == on_site
+
+
+def test_asking_for_the_link_twice_keeps_one_run(conn, tmp_path):
+    app, _, bucket = site(conn, tmp_path, by_observation=True)
+    answered_for_org(app)
+    first, again = kept_link(app).json()["run"], kept_link(app).json()["run"]
+    assert first == again and stored_runs(bucket) == [first["id"]]
+
+
+def test_an_answer_read_without_asking_for_a_link_keeps_no_run(conn, tmp_path):
+    app, _, bucket = site(conn, tmp_path, by_observation=True)
+    answered_for_org(app)
+    res = visitor(app).get("/api/v1/answers/inat/555", headers=SERVER)
+    assert res.status_code == 200 and "run" not in res.json()
+    assert stored_runs(bucket) == []
+
+
+def test_only_orgs_server_key_may_ask_for_a_link(conn, tmp_path):
+    app, _, bucket = site(conn, tmp_path, by_observation=True)
+    answered_for_org(app)
+    refused = kept_link(app, headers=bearer(app_token(sub="u_member9")))
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] == "forbidden"
+    assert stored_runs(bucket) == []
+
+
+def test_no_answer_held_makes_no_link(conn, tmp_path):
+    app, _, bucket = site(conn, tmp_path, by_observation=True)
+    assert kept_link(app).status_code == 404
+    assert stored_runs(bucket) == []
+
+
+def test_the_answer_is_served_without_a_link_when_the_run_cant_be_kept(conn, tmp_path):
+    app, store, _ = site(conn, tmp_path, by_observation=True)
+    answered_for_org(app)
+
+    def out_of_reach(*_a, **_k):
+        raise OSError("the bucket is out of reach")
+    store.keep = out_of_reach
+    res = kept_link(app)
+    assert res.status_code == 200, res.text
+    assert res.json()["run"] is None and res.json()["ranks"]
