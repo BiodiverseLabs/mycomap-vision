@@ -153,7 +153,12 @@ answered from a proxy's cache.
   "site"`; same model, place and date options, put in this shape: `observation.place` is
   null, and order, class and phylum aren't listed). `"cached": true`, with `answered` as
   above. 404 `not_answered` when there is none. .org's Validate Records uses it so an
-  answer got on the site shows on the record at once.
+  answer got on the site shows on the record at once. With `run_link=true` (.org's server
+  key only, 403 `forbidden` for any other credential) the answer is also kept at its
+  public link and the response says it in `"run": {"id", "url": "/r/<id>"}`: the same
+  link the site's Identify page gives for that answer, open to anyone who has it. `run`
+  is null when no link can be made (no copy of the answer for the site, or storage out
+  of reach); the answer is served either way.
 
 ### 3.3 Sessions (the app)
 

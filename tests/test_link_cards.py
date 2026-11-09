@@ -663,3 +663,17 @@ def test_a_kept_runs_photos_are_read_only_from_the_sources_own_photo_hosts():
                                  MO_PHOTO.format(id=5001, size="960"), large(9001)])
     assert [i for i, _ in pairs] == [3]
     assert f.session.urls() == [large(9001)]
+
+
+def test_a_link_asked_for_by_org_reads_no_photos_until_someone_opens_it(conn, tmp_path):
+    source = licensed_source()
+    jobs = Jobs()
+    app, _, _ = site(conn, tmp_path, by_observation=True, web_dist=dist(tmp_path),
+                     observation_fetcher=source, card_writer=jobs)
+    assert visitor(app).post("/api/v1/identify/inat/600", json={}, headers=SERVER).status_code == 200
+    reads = len(photo_reads(source.session))
+    run = visitor(app).get("/api/v1/answers/inat/600", params={"run_link": "true"},
+                           headers=SERVER).json()["run"]
+    assert not jobs and len(photo_reads(source.session)) == reads
+    assert visitor(app).get(run["url"]).status_code == 200
+    assert len(jobs) == 1                                   # its card, now that it is wanted

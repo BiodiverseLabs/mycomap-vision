@@ -447,3 +447,15 @@ def test_the_log_sits_in_state_on_the_box_and_beside_the_manifest_elsewhere(tmp_
     assert il.default_path(tmp_path / "m.sqlite") == tmp_path / "srv" / "state" / il.FILE
     monkeypatch.setattr(config, "RELEASE_ROOT", None)
     assert il.default_path(tmp_path / "m.sqlite") == tmp_path / il.FILE
+
+
+def test_a_kept_answer_read_for_its_link_is_logged_with_that_link(conn, tmp_path):
+    app, _, _ = site(conn, tmp_path, by_observation=True)
+    client = visitor(app)
+    assert client.post("/api/v1/identify/inat/555", json={}, headers=SERVER).status_code == 200
+    run = client.get("/api/v1/answers/inat/555", params={"run_link": "true"},
+                     headers=SERVER).json()["run"]
+    assert client.get("/api/v1/answers/inat/555", headers=SERVER).status_code == 200
+    _, with_link, plain = rows(app)
+    assert (with_link["path"], with_link["run_id"]) == (il.V1_ANSWERS, run["id"])
+    assert (plain["path"], plain["run_id"]) == (il.V1_ANSWERS, None)
