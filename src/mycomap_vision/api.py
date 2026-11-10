@@ -166,44 +166,77 @@ def trained_through(conn: sqlite3.Connection) -> dict[str, str]:
         return {}
 
 
+# How long /api/stats waits for the first "waiting" count before answering without it.
+WAITING_WAIT_SECONDS = 1.0
+
+
 class Cached:
     """A value that is slow to compute and changes slowly (the Data page's statistics: 14 s
     over the full reference set). Answered from memory; once older than `max_age` it is
     recomputed on a background thread while the old value keeps being answered. Only the
-    first caller ever waits, and a failed refresh keeps the old value."""
+    first caller ever waits, and a failed refresh keeps the old value.
 
-    def __init__(self, compute: Callable[[], dict], max_age: float,
+    Any answer is kept, None included: "no figure" is an answer too. Before 10 Nov 2026 a
+    None was taken for "not computed yet", so the How it works page's waiting count, which is
+    None whenever mycomap.org does not answer, was asked of .org again on every /api/stats
+    call; with .org slow that held the page's figures back 30 to 60 s each time."""
+
+    def __init__(self, compute: Callable[[], dict | None], max_age: float,
                  clock: Callable[[], float] = time.monotonic, note=print):
         self.compute, self.max_age, self.clock, self.note = compute, max_age, clock, note
         self._lock = threading.Lock()          # guards the fields below
         self._computing = threading.Lock()     # one computation at a time
         self._value: dict | None = None
+        self._have = False                     # a value (None included) has been computed
+        self._ready = threading.Event()        # set once _have
         self._at = 0.0
         self._refreshing = False
 
-    def get(self) -> dict:
+    def _store(self, value) -> None:
         with self._lock:
-            if self._value is not None:
-                if self.clock() - self._at >= self.max_age and not self._refreshing:
-                    self._refreshing = True
-                    threading.Thread(target=self._refresh, name="cached refresh",
-                                     daemon=True).start()
+            self._value, self._have, self._at = value, True, self.clock()
+        self._ready.set()
+
+    def _start_refresh(self) -> None:
+        """Call holding _lock."""
+        if not self._refreshing:
+            self._refreshing = True
+            threading.Thread(target=self._refresh, name="cached refresh", daemon=True).start()
+
+    def get(self) -> dict | None:
+        with self._lock:
+            if self._have:
+                if self.clock() - self._at >= self.max_age:
+                    self._start_refresh()
                 return self._value
         with self._computing:                  # the first caller computes; others wait for it
             with self._lock:
-                if self._value is not None:
+                if self._have:
                     return self._value
             value = self.compute()
-            with self._lock:
-                self._value, self._at = value, self.clock()
+            self._store(value)
             return value
+
+    def peek(self, wait: float = 0.0) -> dict | None:
+        """The value, never computed on the caller's time: before the first value exists,
+        one computation starts behind and the caller waits at most `wait` seconds for it,
+        then gets None. For a figure that depends on another site (/api/stats "waiting"),
+        so that site being slow never holds up the page."""
+        with self._lock:
+            if self._have:
+                if self.clock() - self._at >= self.max_age:
+                    self._start_refresh()
+                return self._value
+            self._start_refresh()
+        self._ready.wait(wait)
+        with self._lock:
+            return self._value if self._have else None
 
     def _refresh(self) -> None:
         try:
             with self._computing:
                 value = self.compute()
-            with self._lock:
-                self._value, self._at = value, self.clock()
+            self._store(value)
         except Exception as e:  # noqa: BLE001 - the old value keeps being answered
             self.note(f"[stats] refresh failed, keeping the last figures: {type(e).__name__}: {e}")
         finally:
@@ -1093,7 +1126,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         # Photographers' answers are cheap and change any minute: always the current ones.
         # Never their counts (research_public.permission_status).
         return {**research_public.stats(stats_cache.get()),
-                "waiting": research_public.waiting(waiting_cache.get() if waiting_cache else None),
+                "waiting": research_public.waiting(
+                    waiting_cache.peek(WAITING_WAIT_SECONDS) if waiting_cache else None),
                 "permissions": research_public.permission_status(permission_status())}
 
     @app.get("/api/scoreboard")
@@ -2317,7 +2351,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                      if layer else None)
     app.state.waiting_cache = waiting_cache
     if background and waiting_cache:
-        threading.Thread(target=waiting_cache.get, name="waiting", daemon=True).start()
+        waiting_cache.peek()            # counted once at startup, behind
 
     # The nightly update (nightly.py): runs here because this process holds the model.
     nightly_settings = nightly_settings or (nightly.Settings.from_env() if layer else None)
