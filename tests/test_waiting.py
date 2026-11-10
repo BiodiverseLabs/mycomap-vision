@@ -198,3 +198,50 @@ def test_without_the_nightly_update_there_is_no_figure(box, monkeypatch):
                                    background=False, note=lambda s: None,
                                    waiting_fetch=lambda s: pytest.fail("asked .org")))
     assert client.get("/api/stats").json()["waiting"] is None
+
+
+# --- mycomap.org slow or down never holds up the page (10 Nov 2026) ----------------------
+# .org's export answered 503 or timed out; the None that left was taken for "not counted
+# yet", so every /api/stats call asked .org again and waited 30-60 s, and the How it works
+# page showed its records, names and weekly tiles only after that.
+
+def test_a_failed_read_is_not_asked_again_on_every_call(box, monkeypatch):
+    layer = nightly.prepare(box, **QUIET)
+    night(layer, seed_rows())
+    asked = []
+
+    def fetch(since):
+        asked.append(since)
+        raise nightly.NightlyRefused("mycomap.org answered 503; nothing was changed")
+
+    client = site(box, layer, fetch, monkeypatch)
+    for _ in range(5):
+        assert client.get("/api/stats").json()["waiting"] is None
+    assert len(asked) == 1                      # once per MV_WAITING_SECONDS, not per call
+
+
+def test_the_stats_answer_at_once_while_mycomap_org_is_slow(box, monkeypatch):
+    import threading
+    import time
+
+    layer = nightly.prepare(box, **QUIET)
+    night(layer, seed_rows())
+    release = threading.Event()
+
+    def fetch(since):
+        release.wait(10)                        # .org takes its time
+        return since_answer([row(300, "C z")])
+
+    client = site(box, layer, fetch, monkeypatch)
+    started = time.monotonic()
+    first = client.get("/api/stats")
+    took = time.monotonic() - started
+    assert first.status_code == 200 and first.json()["waiting"] is None
+    assert first.json()["records"] > 0          # the page's own figures are there
+    assert took < 3, f"/api/stats waited {took:.1f} s on mycomap.org"
+    release.set()
+    for _ in range(100):                        # the count arrives behind, for later calls
+        if client.get("/api/stats").json()["waiting"]:
+            break
+        time.sleep(0.02)
+    assert client.get("/api/stats").json()["waiting"]["records"] == 1

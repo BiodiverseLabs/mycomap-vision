@@ -91,3 +91,32 @@ def test_the_figures_are_counted_once_an_hour_but_photographers_answers_are_curr
     assert again["permissions"]["last_good_sync"].startswith("2026-10-22")
     # Never how many said yes or no (research_public.permission_status).
     assert "granted" not in again["permissions"] and "withdrawn" not in again["permissions"]
+
+
+def test_no_figure_is_an_answer_too_and_is_kept_until_it_is_stale():
+    clock, calls = Clock(), []
+    c = Cached(lambda: calls.append(1), max_age=60, clock=clock)      # always None
+    assert c.get() is None and c.get() is None and c.peek() is None
+    assert len(calls) == 1
+    clock.t = 61
+    c.peek()
+    for _ in range(100):
+        if len(calls) == 2:
+            break
+        time.sleep(0.02)
+    assert len(calls) == 2                                           # stale: asked again, once
+
+
+def test_peek_never_computes_on_the_callers_time():
+    release, calls = threading.Event(), []
+
+    def compute():
+        calls.append(1)
+        release.wait(5)
+        return {"n": 1}
+    c = Cached(compute, max_age=60, clock=Clock())
+    started = time.monotonic()
+    assert c.peek(wait=0.1) is None and c.peek() is None
+    assert time.monotonic() - started < 1
+    release.set()
+    assert c._ready.wait(5) and c.peek() == {"n": 1} and len(calls) == 1
