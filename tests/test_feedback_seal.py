@@ -4,6 +4,8 @@ label snapshot. Every way an item is added goes through Store.seed, which refuse
 record, and one whose date the box cannot tell, counting both; the pinned v1 record keys are
 accepted whatever their date; with the seal off (MV_PROSPECTIVE_SEAL=off) everything passes."""
 
+import hashlib
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -134,3 +136,144 @@ def test_the_pinned_v1_keys_file_is_written_once(tmp_path):
     assert out["records"] == 2 and (tmp_path / "k.txt").read_text() == "a\nb\n"
     with pytest.raises(FileExistsError):
         fb.write_record_keys(SimpleNamespace(db=db, id="v1"), tmp_path / "k.txt")
+
+
+# --- the held keys (the paper coordinator): a private list of records (a blind label check)
+# held out of every queue whatever the seal says, until the list is emptied. Its records are only
+# ever counted, never named, and a list that can't be trusted holds every record.
+
+HOLD_SETTINGS = ("MV_FEEDBACK_HOLD_KEYS", "MV_FEEDBACK_HOLD_SHA256")
+
+
+def hold_list(tmp_path, keys, name="hold.txt"):
+    body = "".join(f"{k}\n" for k in keys).encode("utf-8")
+    f = tmp_path / name
+    f.write_bytes(body)
+    return f, hashlib.sha256(body).hexdigest()
+
+
+def record_item(*keys):
+    return {"item_type": "label_vs_own_dna", "subject": keys[0], "rule": "R5",
+            "record_keys": list(keys)}
+
+
+def queued(s):
+    return {r[0] for r in s.conn.execute("select subject from items")}
+
+
+def test_a_held_record_is_judged_held_before_the_seal_and_held_is_a_rows_worst_verdict():
+    dates = {"old": "2026-09-01", "new": "2026-10-20", "4242": "2026-09-01"}
+    gate = fb.SealGate(dates.get, frozenset(), SEAL, held=frozenset({"4242"}))
+    assert gate.judge("4242") == "held" and gate.judge("old") == "ok"
+    lifted = fb.SealGate(dates.get, frozenset(), None, held=frozenset({"4242"}))
+    assert lifted.judge("4242") == "held"                # the seal off holds it still
+    assert lifted.judge("new") == "ok"
+    assert gate.judge_row({"record_keys": ["old", "4242"]}) == ("held", "4242")
+    assert gate.judge_row({"record_keys": ["new", "4242"]}) == ("held", "4242")
+    assert gate.judge_row({"record_keys": ["old", "new"]}) == ("sealed", "new")
+    assert gate.judge_row({"links": ["https://www.inaturalist.org/observations/4242"]})[0] == "held"
+
+
+@pytest.mark.parametrize("seal", ["on", "off"])
+def test_a_held_record_is_refused_by_seeding_whatever_the_seal_and_never_named(
+        tmp_path, conn, monkeypatch, seal):
+    if seal == "off":
+        monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    else:
+        monkeypatch.delenv("MV_PROSPECTIVE_SEAL", raising=False)
+    add_records(conn, {"11": "2026-09-01", "4242": "2026-09-01", "12": "2026-10-15"})
+    f, sha = hold_list(tmp_path, ["4242", "7777"])
+    monkeypatch.setenv("MV_FEEDBACK_HOLD_KEYS", str(f))
+    monkeypatch.setenv("MV_FEEDBACK_HOLD_SHA256", sha)
+    s = fb.Store(tmp_path / "f.sqlite", gate=fb.SealGate.from_manifest(conn))
+    assert s.gate.held == {"4242", "7777"} and not s.gate.hold_all
+    out = s.seed([record_item("11"), record_item("4242"), record_item("12")], "t")
+    assert out["refused_held"] == 1
+    assert "4242" not in out["refused_records"] and "4242" not in json.dumps(out)
+    assert "4242" not in queued(s) and "11" in queued(s)
+    assert ("12" in queued(s)) == (seal == "off")         # the seal still decides the rest
+    assert out["refused_sealed"] == (0 if seal == "off" else 1)
+
+
+def test_a_held_record_is_refused_even_when_it_is_on_the_pinned_v1_keys(tmp_path, conn):
+    add_records(conn, {"13": "2026-10-12"})
+    keys = tmp_path / "v1-keys.txt"
+    keys.write_text("13\n", encoding="utf-8")
+    f, sha = hold_list(tmp_path, ["13"])
+    gate = fb.SealGate.from_manifest(conn, seal=SEAL, v1_keys_path=keys, hold_keys_path=f,
+                                     hold_sha256=sha)
+    assert "13" in gate.v1_keys and gate.judge("13") == "held"
+    out = fb.Store(tmp_path / "f.sqlite", gate=gate).seed([record_item("13")], "t")
+    assert (out["added"], out["refused_held"], out["refused_unknown"]) == (0, 1, 0)
+
+
+def test_an_item_naming_one_ok_record_and_one_held_record_is_held(tmp_path):
+    gate = fb.SealGate({"11": "2026-09-01", "4242": "2026-09-01"}.get, frozenset(), SEAL,
+                       held=frozenset({"4242"}))
+    s = fb.Store(tmp_path / "f.sqlite", gate=gate)
+    out = s.seed([record_item("11", "4242")], "t")
+    assert (out["added"], out["refused_held"], out["refused_records"]) == (0, 1, [])
+    assert queued(s) == set()
+
+
+@pytest.mark.parametrize("case", ["wrong sha256", "no sha256", "no file", "sha256 but no list"])
+def test_a_hold_list_that_cannot_be_trusted_holds_every_record(tmp_path, conn, monkeypatch, case):
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    for name in HOLD_SETTINGS:
+        monkeypatch.delenv(name, raising=False)
+    add_records(conn, {"11": "2026-09-01"})
+    f, sha = hold_list(tmp_path, ["4242"])
+    path, digest = {"wrong sha256": (f, hashlib.sha256(b"another list").hexdigest()),
+                    "no sha256": (f, None),
+                    "no file": (tmp_path / "gone.txt", sha),
+                    "sha256 but no list": (None, sha)}[case]
+    if path is not None:
+        monkeypatch.setenv("MV_FEEDBACK_HOLD_KEYS", str(path))
+    if digest is not None:
+        monkeypatch.setenv("MV_FEEDBACK_HOLD_SHA256", digest)
+    gate = fb.SealGate.from_manifest(conn)                    # never raises at startup
+    assert gate.hold_all and gate.hold_problem and "4242" not in gate.hold_problem
+    assert gate.judge("11") == "held" and gate.judge("4242") == "held"
+    out = fb.Store(tmp_path / "f.sqlite", gate=gate).seed([record_item("11")], "t")
+    assert (out["added"], out["refused_held"]) == (0, 1)
+
+
+def test_the_right_sha256_or_no_hold_list_at_all_holds_nothing_else(tmp_path, conn, monkeypatch):
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    for name in HOLD_SETTINGS:
+        monkeypatch.delenv(name, raising=False)
+    assert not fb.SealGate.from_manifest(conn).hold_all          # no list: nothing held
+    f, sha = hold_list(tmp_path, ["4242"])
+    gate = fb.SealGate.from_manifest(conn, hold_keys_path=f, hold_sha256=sha.upper())
+    assert not gate.hold_all and gate.judge("11") == "ok" and gate.judge("4242") == "held"
+
+
+def test_an_emptied_hold_list_releases_its_records(tmp_path, conn, monkeypatch):
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    add_records(conn, {"4242": "2026-09-01"})
+    f, sha = hold_list(tmp_path, [])
+    gate = fb.SealGate.from_manifest(conn, hold_keys_path=f, hold_sha256=sha)
+    assert not gate.hold_all and gate.held == frozenset()
+    out = fb.Store(tmp_path / "f.sqlite", gate=gate).seed([record_item("4242")], "t")
+    assert (out["added"], out["refused_held"]) == (1, 0)
+
+
+def test_seal_check_fails_on_a_held_item_and_names_it_by_item_id_only(tmp_path):
+    s = fb.Store(tmp_path / "f.sqlite")
+    s.seed([record_item("old"), record_item("4242")], "t")
+    held_id = next(r[0] for r in s.conn.execute("select id from items where subject = ?",
+                                                ("4242",)))
+    s.decide(held_id, "unsure", {"sub": "a"})
+    gate = fb.SealGate(lambda k: "2026-01-01", frozenset(), None, held=frozenset({"4242"}))
+    out = fb.seal_check(s, gate)
+    q = out["queues"]["label_vs_own_dna"]
+    assert (q["items"], q["held"], q["sealed"], q["unknown"], q["decisions_on_failing"]) == (
+        2, 1, 0, 0, 1)
+    assert out["held"] == [{"item": held_id, "type": "label_vs_own_dna"}]
+    assert out["ok"] is False and out["held_keys"] == 1
+    assert "4242" not in json.dumps(out)
+    assert fb.seal_check(s, fb.SealGate(lambda k: "2026-01-01", frozenset(), None))["ok"] is True
+    untrusted = fb.SealGate(lambda k: "2026-01-01", frozenset(), None, hold_all=True,
+                            hold_problem="the hold list can't be read")
+    out = fb.seal_check(s, untrusted)
+    assert out["ok"] is False and out["hold_all"] and len(out["held"]) == 2

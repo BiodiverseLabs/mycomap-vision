@@ -1105,8 +1105,8 @@ def health(conn: sqlite3.Connection, settings: Settings, zone: tzinfo | None = N
 
 
 # The photo review's counts health shows (nightly_review.NightlyReview.queue).
-PHOTO_REVIEW_COUNTS = ("tagged", "queued", "already_queued", "already_decided", "refused_sealed",
-                       "refused_unknown")
+PHOTO_REVIEW_COUNTS = ("tagged", "queued", "already_queued", "already_decided", "refused_held",
+                       "refused_sealed", "refused_unknown")
 
 
 def status(conn: sqlite3.Connection, settings: Settings, now: datetime | None = None,

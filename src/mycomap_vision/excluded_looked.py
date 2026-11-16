@@ -23,7 +23,9 @@ puts that name among every species (top RANK_DEPTH, else "not in its top 10"). M
 
 **The paper's seal** (Paper Coordinator, 2026-10-26; PLAN §8): this page is research-facing, so
 no map is made or shown for a photo whose record is not judged "ok" by feedback.SealGate (a v1
-record, or first green on a day before the seal); the photo still shows. One switch lifts it,
+record, or first green on a day before the seal); the photo still shows. The seal here is pinned
+at research_public.SEAL, whatever MV_PROSPECTIVE_SEAL says (api.excluded_gate; the paper
+coordinator), and the queues' hold list does not apply. One switch lifts it,
 MV_EXCLUDED_LOOKED_UNSEALED=1, set only once the paper's v1-test scoring is committed. Requests
 keep no requester and write nothing to the identify log.
 

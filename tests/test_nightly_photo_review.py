@@ -379,8 +379,8 @@ def test_health_and_mv_nightly_show_the_reviews_counts(layer, tmp_path):
     finally:
         conn.close()
     assert h["photo_review"] == {"tagged": 5, "queued": 4, "already_queued": 0,
-                                 "already_decided": 0, "refused_sealed": 0, "refused_unknown": 0,
-                                 "failed": False}
+                                 "already_decided": 0, "refused_held": 0, "refused_sealed": 0,
+                                 "refused_unknown": 0, "failed": False}
     assert last["photo_review"]["queued"] == 4
     lines = dict((t.split(":")[0], lvl) for lvl, t in nightly_notes.notes(
         {"enabled": True, "state": "ok", "last_ok_at": h["last_ok_at"],
@@ -574,3 +574,52 @@ def test_mv_feedback_seed_nightly_tags_dry_run_goes_through_the_seal(layer, tmp_
     finally:
         conn.close()
     assert items(store) == {}
+
+
+# --- the held keys (feedback.SealGate.held): out of the queue whatever the seal ----------------
+
+def test_a_held_record_is_refused_at_night_with_the_seal_off_counted_apart_and_queued_once_released(
+        layer, tmp_path):
+    store = make_store(tmp_path, layer, None)                      # MV_PROSPECTIVE_SEAL=off
+    store.gate.held = frozenset({"300"})
+    report = night(layer, new_rows(), FakeOutside(NEW), review(store))
+    r = report["photo_review"]
+    assert (r["tagged"], r["specimen"], r["queued"], r["refused_held"], r["refused_sealed"],
+            r["refused_unknown"]) == (5, 1, 3, 1, 0, 0)
+    # every non-specimen tag lands in exactly one count
+    assert (r["queued"] + r["already_queued"] + r["already_decided"] + r["refused_held"]
+            + r["refused_sealed"] + r["refused_unknown"]) == r["candidates"] - r["specimen"]
+    assert "inat:3000" not in items(store)
+    conn = manifest.connect(layer.manifest)
+    try:
+        h = nightly.health(conn, nightly.Settings())
+    finally:
+        conn.close()
+    assert h["photo_review"]["refused_held"] == 1
+    text = [t for _, t in nightly_notes.notes({"enabled": True, "state": "ok",
+                                               "photo_review": h["photo_review"]})]
+    assert any("refused by the paper's seal, 1 held" in t for t in text)
+    # The list emptied: the next night queues the kept tag without reading the photo again.
+    store.gate.held = frozenset()
+    model = Fork("m1")
+    again = night(layer, new_rows(), FakeOutside(NEW), review(store), model=lambda n: model)
+    assert (again["photo_review"]["queued"], again["photo_review"]["refused_held"]) == (1, 0)
+    assert model.forks == 0 and "inat:3000" in items(store)
+
+
+def test_the_catch_up_counts_held_records_apart_from_unknown_ones(layer, tmp_path):
+    reds = {300: MICRO_HIGH, 301: SLIP_HIGH}
+    rows = seed_rows() + [row(300, "C z", "10/14/2026"), row(301, "C z", "10/14/2026")]
+    arrived(layer, rows, reds)
+    store = make_store(tmp_path, layer, None)                      # MV_PROSPECTIVE_SEAL=off
+    store.gate.held = frozenset({"300"})
+    fetch, fetched = fake_fetch(reds)
+    conn = manifest.connect(layer.manifest)
+    try:
+        plan = nightly_review.catch_up(conn, store, tagger(), "2026-10-12", dry_run=True,
+                                       fetch=fetch, **QUIET)
+    finally:
+        conn.close()
+    assert (plan["to_tag"], plan["refused_held"], plan["refused_sealed"],
+            plan["refused_unknown"], plan["refused_records"]) == (1, 1, 0, 0, 0)
+    assert fetched == []

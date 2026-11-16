@@ -1353,7 +1353,9 @@ def cmd_feedback(conn, args) -> None:
     path = Path(args.store) if args.store else feedback.default_path()
     store = feedback.Store(path)
     if args.action == "seal-check":
-        gate = feedback.SealGate.from_manifest(conn, v1_keys_path=args.v1_keys)
+        gate = feedback.SealGate.from_manifest(conn, v1_keys_path=args.v1_keys,
+                                               hold_keys_path=args.hold_keys,
+                                               hold_sha256=args.hold_sha256)
         out = feedback.seal_check(store, gate)
         print(json.dumps({"store": str(path), **out}, indent=2))
         if not out["ok"]:
@@ -2884,6 +2886,10 @@ def main(argv: list[str] | None = None) -> int:
                                            "is unknown); run after every re-seed")
     q.add_argument("--store")
     q.add_argument("--v1-keys", help="the pinned v1 record keys (default MV_FEEDBACK_V1_KEYS)")
+    q.add_argument("--hold-keys", help="the records held out of every queue (default "
+                                       "MV_FEEDBACK_HOLD_KEYS); a held item fails the check")
+    q.add_argument("--hold-sha256", help="the hold list's sha256 (default "
+                                         "MV_FEEDBACK_HOLD_SHA256); a mismatch holds everything")
     q = fsub.add_parser("seed-nightly-tags",
                         help="(server box) the nightly photo review's catch-up: tag the photos "
                              "of records first green since a day with the served photo-type "

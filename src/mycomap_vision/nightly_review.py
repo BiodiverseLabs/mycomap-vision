@@ -88,7 +88,7 @@ create index if not exists photo_type_tags_state on photo_type_tags (queue_state
 # What queueing made of a tag. FINAL ones are never tried again; the others are retried each
 # night (a refused one once the seal is off; an out-of-band one if the bands change).
 QUEUE_STATES = ("queued", "already_queued", "already_decided", "specimen", "out_of_band",
-                "refused_sealed", "refused_unknown", "no_record")
+                "refused_held", "refused_sealed", "refused_unknown", "no_record")
 FINAL = ("queued", "already_queued", "already_decided", "specimen")
 
 
@@ -258,9 +258,10 @@ def queue_tags(conn: sqlite3.Connection, store: fb.Store, bands, seed_name: str,
     """Queue the kept tags not queued yet (all of them, or only `photo_ids`): each non-specimen
     tag in `bands` goes through store.seed (with its seal gate) as one photo item. Counts:
     candidates (tags tried), specimen, out_of_band, queued (new items), already_queued (an open
-    item: it gains the flag when it lacks it, flags_added), already_decided, refused_sealed,
-    refused_unknown, no_record (the photo is in no record now). `dry_run`: the same counts,
-    judged by the same gate and queue, with nothing seeded or marked."""
+    item: it gains the flag when it lacks it, flags_added), already_decided, refused_held (a
+    held record, feedback.SealGate.held), refused_sealed, refused_unknown, no_record (the photo
+    is in no record now). `dry_run`: the same counts, judged by the same gate and queue, with
+    nothing seeded or marked."""
     ensure_schema(conn)
     bands = tuple(bands)
     sql = ("select photo_id, fingerprint, version, base, type, p, band from photo_type_tags "
@@ -273,7 +274,7 @@ def queue_tags(conn: sqlite3.Connection, store: fb.Store, bands, seed_name: str,
         tags = [t for t in tags if t["photo_id"] in wanted]
     counts = {"candidates": len(tags), "specimen": 0, "out_of_band": 0, "queued": 0,
               "already_queued": 0, "flags_added": 0, "already_decided": 0,
-              "refused_sealed": 0, "refused_unknown": 0, "no_record": 0}
+              "refused_held": 0, "refused_sealed": 0, "refused_unknown": 0, "no_record": 0}
     if not tags:
         return {**counts, "seed": None, "bands": list(bands)}
     where = _photo_records(conn, sorted({t["photo_id"] for t in tags}))
@@ -314,17 +315,20 @@ def queue_tags(conn: sqlite3.Connection, store: fb.Store, bands, seed_name: str,
         counts["queued"] = out["added"]
         counts["flags_added"] = out.get("flags_added", 0)
         counts["already_decided"] = out.get("already_decided", 0)
+        counts["refused_held"] = out.get("refused_held", 0)
         counts["refused_sealed"] = out.get("refused_sealed", 0)
         counts["refused_unknown"] = out.get("refused_unknown", 0)
         counts["already_queued"] = (len(rows) - counts["queued"] - counts["already_decided"]
-                                    - counts["refused_sealed"] - counts["refused_unknown"])
+                                    - counts["refused_held"] - counts["refused_sealed"]
+                                    - counts["refused_unknown"])
     if dry_run:
         return {**counts, "seed": None, "bands": list(bands), "dry_run": True}
     _set_state(conn, states)
     log(f"[nightly] photo review: {counts['queued']:,} queued, {counts['already_queued']:,} "
         f"already queued, {counts['already_decided']:,} already decided, "
         f"{counts['refused_sealed']:,} refused by the seal ({counts['refused_unknown']:,} "
-        f"unknown), {counts['specimen']:,} specimen, {counts['out_of_band']:,} out of band")
+        f"unknown), {counts['refused_held']:,} held, {counts['specimen']:,} specimen, "
+        f"{counts['out_of_band']:,} out of band")
     return {**counts, "seed": seed_name if rows else None, "bands": list(bands)}
 
 
@@ -481,10 +485,11 @@ def catch_up(conn: sqlite3.Connection, store: fb.Store, tagger: phototypes.Photo
     gate = store.gate
     found = backlog(conn, store, since, tagger.fingerprint())
     todo = found.pop("to_tag")
-    ok, sealed, unknown = [], [], []
+    ok, held, sealed, unknown = [], [], [], []
     for r in todo:
         verdict = gate.judge(r["record"])
-        (ok if verdict == "ok" else sealed if verdict == "sealed" else unknown).append(r)
+        (ok if verdict == "ok" else held if verdict == "held" else
+         sealed if verdict == "sealed" else unknown).append(r)
     every = len(ok)
     if limit is not None:
         ok = ok[:max(0, int(limit))]
@@ -501,10 +506,12 @@ def catch_up(conn: sqlite3.Connection, store: fb.Store, tagger: phototypes.Photo
             "already_decided": found["already_decided"],
             "tagged_not_queued": found["tagged"], "tagged_specimen": found["tagged_done"],
             "to_tag": every, "this_run": len(ok),
-            "refused_sealed": len(sealed), "refused_unknown": len(unknown),
+            "refused_held": len(held), "refused_sealed": len(sealed),
+            "refused_unknown": len(unknown),
             "refused_records": len({r["record"] for r in sealed + unknown}),
             "kept_tags_would_queue": kept["queued"],
-            "kept_tags_refused": kept["refused_sealed"] + kept["refused_unknown"],
+            "kept_tags_refused": (kept["refused_held"] + kept["refused_sealed"]
+                                  + kept["refused_unknown"]),
             "downloads_by_host": by_host,
             "seconds_per_photo": per, "cpu_seconds": round(len(ok) * per),
             "cpu_hours": round(len(ok) * per / 3600, 2),

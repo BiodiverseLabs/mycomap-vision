@@ -1023,3 +1023,23 @@ def test_the_api_shows_the_priority_tranche_in_its_order_with_its_counts(conn, t
     c.cookies.clear()                                                   # read-only sees it too
     ro = c.get("/api/feedback/recovered-labels", params={"tranche": "priority"}).json()
     assert ro["total"] == 1 and ro["tiles"][0]["priority"]["lost"] is True
+
+
+def test_a_held_record_is_kept_out_of_the_priority_tranche_with_the_seal_off_and_never_named(
+        store, tmp_path):
+    s, _ = store
+    s.gate = fb.SealGate(lambda k: None, seal=None, held=frozenset({"11"}))   # seal off
+    out = rl.seed_priority(s, write_prio(tmp_path / "prio.tsv", [
+        prio_line(1, "inat:1", "10"), prio_line(2, "inat:2", "11")]))
+    assert (out["marked"], out["refused_held"], out["refused_sealed"], out["refused_records"]) == (
+        1, 1, 0, [])
+    assert list(rl.priorities(s)) == ["inat:1"]
+
+
+def test_a_held_records_crops_cannot_be_decided_and_the_job_never_reads_its_photo(store):
+    s, _ = store
+    s.gate = fb.SealGate(lambda k: None, seal=None, held=frozenset({"11"}))
+    with pytest.raises(fb.FeedbackError, match="seal"):
+        rl.batch_decide(s, [{"item_id": item_of(s, "inat:2")["id"], "include": []}], ME)
+    check = rl.v1_check({"10": "train", "11": "train"}, s.gate)
+    assert check({"record_key": "10"}) is None and check({"record_key": "11"}) == "seal: held"

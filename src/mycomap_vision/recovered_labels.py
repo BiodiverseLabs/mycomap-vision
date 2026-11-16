@@ -470,7 +470,7 @@ def seed_priority(store: fb.Store, path) -> dict:
     items = {r["subject"]: r for r in store.conn.execute(
         "select id, subject, status, record_keys, links from items where item_type = ?",
         (ITEM_TYPE,))}
-    marks, no_item, refused = [], [], {"sealed": [], "unknown": []}
+    marks, no_item, refused = [], [], {"held": [], "sealed": [], "unknown": []}
     for r in rows:
         it = items.get(r["photo_key"])
         if it is None:
@@ -507,7 +507,9 @@ def seed_priority(store: fb.Store, path) -> dict:
            "no_item": len(no_item),
            "records_with_no_item": len({r["record_key"] for r in no_item} - marked_records)}
     if store.gate is not None:
-        out.update(refused_sealed=len(refused["sealed"]), refused_unknown=len(refused["unknown"]),
+        # A held record (feedback.SealGate.held) is counted, never named: the list is private.
+        out.update(refused_held=len(refused["held"]), refused_sealed=len(refused["sealed"]),
+                   refused_unknown=len(refused["unknown"]),
                    refused_records=sorted(set(refused["sealed"] + refused["unknown"]))[:50])
     return out
 

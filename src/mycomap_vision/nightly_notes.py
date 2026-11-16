@@ -72,7 +72,7 @@ def notes(block: dict | None, now: datetime | None = None,
                 f"queued, {pr.get('already_queued', 0):,} already queued, "
                 f"{pr.get('already_decided', 0):,} already decided, "
                 f"{pr.get('refused_sealed', 0) + pr.get('refused_unknown', 0):,} refused by the "
-                "paper's seal")
+                f"paper's seal, {pr.get('refused_held', 0):,} held")
         out.append(("warn", line + "; it failed, see `mv nightly`") if pr.get("failed")
                    else ("ok", line))
     cw = block.get("confused_with")

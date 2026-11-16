@@ -380,3 +380,25 @@ def test_both_old_drawing_reasons_and_the_new_one_list_as_one_drawings_category(
     assert "drawing_micro" not in xl.CATEGORY_LABELS and "drawing_specimen" not in xl.CATEGORY_LABELS
     with pytest.raises(ValueError):
         xl.select(rows, "drawing_micro")
+
+
+def test_with_mv_prospective_seal_off_the_maps_stay_held_at_the_papers_fixed_seal(conn, tmp_path):
+    """The paper coordinator: MV_PROSPECTIVE_SEAL=off opens the review queues, never a public page;
+    only MV_EXCLUDED_LOOKED_UNSEALED lifts this page's seal."""
+    app, maker, _ = site(conn, tmp_path)
+    # what SealGate.from_manifest gives with the setting off: no seal of its own
+    app.state.feedback.gate = fb.SealGate(lambda k: "2026-10-20" if k == "105" else "2026-01-01",
+                                          seal=None)
+    tile = {t["photo_key"]: t for t in visitor(app).get(LIST).json()["tiles"]}["inat:1005"]
+    assert tile["held"] is True
+    assert person(app, "m").post(LOOKED, params={"photo": "inat:1005"}).status_code == 403
+    assert person(app, "m").post(LOOKED, params={"photo": "inat:1003"}).status_code == 200
+    assert len(maker.calls) == 1
+
+
+def test_the_queues_private_hold_list_is_not_shown_on_the_public_page(conn, tmp_path):
+    app, _, _ = site(conn, tmp_path, sealed=())
+    app.state.feedback.gate = fb.SealGate(lambda k: "2026-01-01", seal=SEAL,
+                                          held=frozenset({"103"}))
+    tiles = {t["photo_key"]: t for t in visitor(app).get(LIST).json()["tiles"]}
+    assert tiles["inat:1003"]["held"] is tiles["inat:1000"]["held"] is False
