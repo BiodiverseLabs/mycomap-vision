@@ -482,7 +482,7 @@ def seed_priority(store: fb.Store, path) -> dict:
             raise fb.FeedbackError(f"{r['photo_key']} is a photo of record {rec}, not "
                                    f"{r['record_key']}: is this list for this store?")
         if store.gate is not None:
-            verdict, key = store.gate.judge_row({"record_keys": [r["record_key"]]})
+            verdict, key = store.gate.judge_row({"record_keys": [r["record_key"]]}, ITEM_TYPE)
             if verdict != "ok":
                 refused[verdict].append(key)
                 continue
@@ -650,7 +650,8 @@ def batch_decide(store: fb.Store, decisions: list[dict], person: dict,
             except KeyError:
                 raise fb.FeedbackError(f"{item['subject']}'s exclusion is not one you can "
                                        "review") from None
-            if store.gate is not None and store.gate.judge_row(photo)[0] != "ok":
+            # judged as this queue (strict), not as the photo queue the exclusion sits in
+            if store.gate is not None and store.gate.judge_row(photo, ITEM_TYPE)[0] != "ok":
                 raise fb.FeedbackError(f"{item['subject']} is under the paper's seal")
         plan.append((item, ("include_crops", crop_value(chosen, edited)) if chosen
                      else ("reject_crops", None), photo, reason))
@@ -718,7 +719,7 @@ def v1_check(splits: dict[str, str], gate: "fb.SealGate"):
             return "v1 test"
         if split not in TRAINABLE:
             return "not a v1 train or val record"
-        verdict = gate.judge(photo["record_key"])
+        verdict = gate.judge(photo["record_key"], ITEM_TYPE)
         return None if verdict == "ok" else f"seal: {verdict}"
     return check
 

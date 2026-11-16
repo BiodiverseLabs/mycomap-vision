@@ -623,3 +623,26 @@ def test_the_catch_up_counts_held_records_apart_from_unknown_ones(layer, tmp_pat
     assert (plan["to_tag"], plan["refused_held"], plan["refused_sealed"],
             plan["refused_unknown"], plan["refused_records"]) == (1, 1, 0, 0, 0)
     assert fetched == []
+
+
+def test_with_the_seal_off_the_catch_up_dry_run_counts_post_seal_records_as_ok(
+        layer, tmp_path, monkeypatch):
+    """The photo review is a photo queue (feedback.POST_SEAL_QUEUES): with MV_PROSPECTIVE_SEAL off
+    it takes records first green after the paper's seal, though label queues still refuse them."""
+    reds = {300: MICRO_HIGH, 301: SLIP_HIGH}
+    rows = seed_rows() + [row(300, "C z", "10/20/2026"), row(301, "C z", "10/20/2026")]
+    arrived(layer, rows, reds)
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    store = fb.Store(tmp_path / "human-feedback.sqlite")
+    store.gate = fb.SealGate.from_manifest(sqlite3.connect(layer.manifest,
+                                                           check_same_thread=False))
+    assert store.gate.seal is None and store.gate.judge("300") == "sealed"   # strict elsewhere
+    fetch, fetched = fake_fetch(reds)
+    conn = manifest.connect(layer.manifest)
+    try:
+        plan = nightly_review.catch_up(conn, store, tagger(), "2026-10-12", dry_run=True,
+                                       fetch=fetch, **QUIET)
+    finally:
+        conn.close()
+    assert (plan["to_tag"], plan["refused_sealed"], plan["refused_unknown"]) == (2, 0, 0)
+    assert fetched == []

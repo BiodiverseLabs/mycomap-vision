@@ -458,7 +458,12 @@ server restart rather than starve sshd.
 
 No review queue may hold a v1-test record: one first green after dataset release v1's label
 snapshot, 2026-10-12 13:17:51 UTC (`MV_PROSPECTIVE_SEAL`; set it to `off` only after the
-paper's freeze). Every way an item is added goes through the seal:
+paper's freeze). Turning it off opens only the photo queues (Photos that show no specimen, Photo
+views: `feedback.POST_SEAL_QUEUES`); every other queue keeps the fixed seal until submission,
+because public Human Feedback shows Vision's answers beside their names (the paper coordinator,
+15 Nov 2026). A private hold list (`MV_FEEDBACK_HOLD_KEYS`, pinned by `MV_FEEDBACK_HOLD_SHA256`)
+keeps its records out of every queue whatever the seal. Every way an item is added goes through
+the seal:
 
 - seeding (`mv feedback seed`);
 - a reviewer's photo item;

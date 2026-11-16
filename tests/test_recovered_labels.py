@@ -33,8 +33,9 @@ def slip_item(key, record, rule="R10 v2 slip p=0.83 (high)", projects=("p1",)):
 
 
 def open_store(path):
-    """A store whose seal lets every record through (these records have no manifest dates)."""
-    return fb.Store(path, gate=fb.SealGate(lambda key: None, seal=None))
+    """A store whose seal lets every record through: each record first green before the
+    paper's seal (the recovered_label queue keeps the fixed seal whatever the setting)."""
+    return fb.Store(path, gate=fb.SealGate(lambda key: "2026-01-01", seal=None))
 
 
 def decide_photo(s, key, decision, reason=None):
@@ -424,7 +425,8 @@ def test_the_job_reads_slips_from_a_copy_writes_seed_lines_and_resumes(tmp_path,
                 "slip_area": 0.4, "specimen_area": 0.1, "on_slip_area": 0.0,
                 "crops": [{"box": [0, 0, 5, 5], "area": 0.1}] if len(seen) == 1 else []}
     out = tmp_path / "seed.tsv"
-    check = rl.v1_check({"10": "train", "11": "val"}, fb.SealGate(lambda key: None, seal=None))
+    check = rl.v1_check({"10": "train", "11": "val"},
+                        fb.SealGate(lambda key: "2026-01-01", seal=None))
     first = rl.run_slip_crops(picks, lambda p: Image.new("RGB", (20, 10)), detect, out, check,
                               limit=1)
     assert (first["photos"], first["with_crops"], first["already_done"]) == (1, 1, 0)
@@ -1028,7 +1030,7 @@ def test_the_api_shows_the_priority_tranche_in_its_order_with_its_counts(conn, t
 def test_a_held_record_is_kept_out_of_the_priority_tranche_with_the_seal_off_and_never_named(
         store, tmp_path):
     s, _ = store
-    s.gate = fb.SealGate(lambda k: None, seal=None, held=frozenset({"11"}))   # seal off
+    s.gate = fb.SealGate(lambda k: "2026-01-01", seal=None, held=frozenset({"11"}))  # seal off
     out = rl.seed_priority(s, write_prio(tmp_path / "prio.tsv", [
         prio_line(1, "inat:1", "10"), prio_line(2, "inat:2", "11")]))
     assert (out["marked"], out["refused_held"], out["refused_sealed"], out["refused_records"]) == (
@@ -1038,7 +1040,7 @@ def test_a_held_record_is_kept_out_of_the_priority_tranche_with_the_seal_off_and
 
 def test_a_held_records_crops_cannot_be_decided_and_the_job_never_reads_its_photo(store):
     s, _ = store
-    s.gate = fb.SealGate(lambda k: None, seal=None, held=frozenset({"11"}))
+    s.gate = fb.SealGate(lambda k: "2026-01-01", seal=None, held=frozenset({"11"}))
     with pytest.raises(fb.FeedbackError, match="seal"):
         rl.batch_decide(s, [{"item_id": item_of(s, "inat:2")["id"], "include": []}], ME)
     check = rl.v1_check({"10": "train", "11": "train"}, s.gate)

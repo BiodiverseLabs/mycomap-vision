@@ -487,7 +487,7 @@ def catch_up(conn: sqlite3.Connection, store: fb.Store, tagger: phototypes.Photo
     todo = found.pop("to_tag")
     ok, held, sealed, unknown = [], [], [], []
     for r in todo:
-        verdict = gate.judge(r["record"])
+        verdict = gate.judge(r["record"], ITEM_TYPE)      # a photo queue (POST_SEAL_QUEUES)
         (ok if verdict == "ok" else held if verdict == "held" else
          sealed if verdict == "sealed" else unknown).append(r)
     every = len(ok)

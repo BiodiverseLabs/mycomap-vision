@@ -239,8 +239,8 @@ def test_a_record_pair_shows_both_copies_photos_and_other_items_none(conn, tmp_p
     """One find, two places (Steve, 2026-10-21): the item carries each copy's photos, so a
     reviewer sees at once whether the two records are one find. A copy Vision holds no photos
     of gets an empty list; a single-record item gets no photos here."""
-    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")   # mo:999 has no date; the seal: test_feedback_seal
     c, fstore, _ = make_site(conn, tmp_path)
+    fstore.gate = fb.SealGate(lambda k: "2026-01-01")   # mo:999 has no date (test_feedback_seal)
     fstore.seed([{"item_type": "twin_location_conflict", "subject": "mo:999 + 101",
                   "granularity": "record pair", "rule": "twins", "record_keys": ["mo:999", "101"],
                   "records": 2, "projects": ["p1"]}], "twins")
@@ -271,8 +271,8 @@ def test_a_record_pair_lists_each_copys_place_as_its_site_does_and_no_coordinate
         return {"results": [{"id": 101, "place_guess": "Hobart, Tasmania, Australia",
                              "location": "-42.9,147.3"}]}
 
-    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
     c, fstore, _ = make_site(conn, tmp_path, places=PairPlaces(get=get, mo_interval=0, inat_interval=0))
+    fstore.gate = fb.SealGate(lambda k: "2026-01-01")   # mo:999 has no date (test_feedback_seal)
     fstore.seed([{"item_type": "twin_location_conflict", "subject": "mo:999 + 101",
                   "granularity": "record pair", "rule": "twins", "record_keys": ["mo:999", "101"],
                   "records": 2, "projects": ["p1"]}], "twins")
