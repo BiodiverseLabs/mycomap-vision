@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import research_public
+
 
 @dataclass(frozen=True)
 class Option:
@@ -448,10 +450,12 @@ class Store:
 
         With a seal gate (SealGate), a row whose record was first green after the seal (the
         paper's sealed v1-test), or whose date the box cannot tell, is not added: the result
-        counts them ("refused_sealed", "refused_unknown") and names their records."""
+        counts them ("refused_sealed", "refused_unknown") and names their records. A row with
+        a held record (SealGate.held, whatever the seal) is not added either and only counted
+        ("refused_held"): the hold list is private, so its records are never named."""
         now = time.time()
         added = flags_added = already_decided = 0
-        refused = {"sealed": [], "unknown": []}
+        refused = {"held": [], "sealed": [], "unknown": []}
         with self._lock, self.conn:
             for r in rows:
                 t = TYPES.get(r["item_type"])
@@ -488,7 +492,8 @@ class Store:
         if any(TYPES.get(r["item_type"]) and r["item_type"] in FLAG_MERGE_TYPES for r in rows):
             out.update(flags_added=flags_added, already_decided=already_decided)
         if self.gate is not None:
-            out.update(refused_sealed=len(refused["sealed"]),
+            out.update(refused_held=len(refused["held"]),
+                       refused_sealed=len(refused["sealed"]),
                        refused_unknown=len(refused["unknown"]),
                        refused_records=sorted(set(refused["sealed"] + refused["unknown"]))[:50])
         return out
@@ -996,6 +1001,21 @@ def crops_fingerprint(conn: sqlite3.Connection) -> str:
 # is refused as unknown, unless it is on the pinned list of v1's record keys
 # (MV_FEEDBACK_V1_KEYS: one key a line, `mv dataset record-keys`). (The coordinator and the paper
 # coordinator, 2026-10-20, after 3 v1-test records were found queued.)
+#
+# Held keys (the paper coordinator): a fixed private list of record keys (an
+# upcoming blind label check) is held out of every queue whatever the seal says, until the list
+# is emptied: MV_FEEDBACK_HOLD_KEYS (one key a line) pinned by MV_FEEDBACK_HOLD_SHA256 (of the
+# file's raw bytes). It fails closed: a list that is named but missing or unreadable, a sha256
+# that is unset or does not match, or a sha256 with no list, holds every record. The list is
+# private: a held record's key is never named in a seed's output, a log or a check.
+#
+# Which queues the setting opens (the paper coordinator's ruling of 15 Nov 2026, "until
+# submission; lifting it is a code change"): only the photo queues, which show no species
+# answer, may take records first green after the paper's seal once MV_PROSPECTIVE_SEAL is off.
+# Every other queue stays cut at the fixed research_public.SEAL whatever the setting says,
+# because public Human Feedback shows Vision's top 5 beside a record's name. A judgement with no
+# item type is made the strict way.
+POST_SEAL_QUEUES = ("non_specimen_photo", "photo_view")
 
 def record_of_link(link: str) -> str | None:
     """The record key a record link names (MO 'mo:<n>', iNat '<n>')."""
@@ -1019,44 +1039,96 @@ def row_records(row: dict) -> list[str]:
     return []
 
 
+def read_hold_keys(path: str | Path | None,
+                   sha256: str | None) -> tuple[frozenset, bool, str | None]:
+    """The held record keys in `path`, pinned by `sha256` (hex, of the file's raw bytes):
+    (keys, hold_all, problem). Never raises: anything wrong holds every record (hold_all) and
+    says why in `problem`, which names no key."""
+    import hashlib
+    if not path and not sha256:
+        return frozenset(), False, None
+    if not path:
+        return frozenset(), True, "MV_FEEDBACK_HOLD_SHA256 is set but no hold list is named"
+    if not sha256:
+        return frozenset(), True, "a hold list is named but MV_FEEDBACK_HOLD_SHA256 is not set"
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        return frozenset(), True, f"the hold list can't be read ({type(e).__name__})"
+    if hashlib.sha256(raw).hexdigest() != sha256.strip().lower():
+        return frozenset(), True, "the hold list's sha256 does not match MV_FEEDBACK_HOLD_SHA256"
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return frozenset(), True, "the hold list is not UTF-8"
+    return frozenset(x.strip() for x in text.split("\n") if x.strip()), False, None
+
+
 @dataclass
 class SealGate:
     """Is a record first green before the seal? `validated(key)` gives the manifest's earliest
     green date (ISO, a day) or None; `v1_keys` the pinned v1 record keys (or empty); `seal`
-    the seal moment (None: no seal, everything passes)."""
+    the setting's seal moment (prospective.seal_time(); None: lifted). The setting's seal applies
+    only to the POST_SEAL_QUEUES; every other queue, and a judgement with no item type, is cut
+    at the earlier of it and the fixed research_public.SEAL, even with the setting lifted
+    (strict_seal). `held`: record keys held out of every queue whatever the seal (judged
+    "held" before anything else); `hold_all`: the hold list could not be trusted, so every
+    record is held (`hold_problem` says why)."""
     validated: Callable[[str], str | None]
     v1_keys: frozenset = frozenset()
     seal: str | None = None
+    held: frozenset = field(default=frozenset(), repr=False)
+    hold_all: bool = False
+    hold_problem: str | None = None
 
-    def judge(self, key: str) -> str:
-        if self.seal is None or key in self.v1_keys:
+    def strict_seal(self) -> str:
+        """The seal every queue but the photo queues keeps until submission."""
+        fixed = research_public.SEAL
+        return fixed if self.seal is None else min(self.seal, fixed)
+
+    def seal_for(self, item_type: str | None) -> str | None:
+        """The seal a queue of `item_type` is judged against (None: no item type, strict)."""
+        return self.seal if item_type in POST_SEAL_QUEUES else self.strict_seal()
+
+    def judge(self, key: str, item_type: str | None = None) -> str:
+        """A record's verdict for a queue of `item_type`; with none, the strict way."""
+        if self.hold_all or key in self.held:
+            return "held"
+        seal = self.seal_for(item_type)
+        if seal is None or key in self.v1_keys:
             return "ok"
         day = (self.validated(key) or "")[:10]
-        seal_day = self.seal[:10]
+        seal_day = seal[:10]
         if day and day < seal_day:
             return "ok"
         if day and day > seal_day:
             return "sealed"
         return "unknown"                  # the seal's own day, no date, or not in the manifest
 
-    def judge_row(self, row: dict) -> tuple[str, str | None]:
-        """("ok"|"sealed"|"unknown", the deciding record): the worst of the row's records."""
-        worst, which = "ok", None
-        for key in row_records(row):
-            v = self.judge(key)
-            if v == "sealed":
-                return v, key
-            if v == "unknown" and worst == "ok":
-                worst, which = v, key
-        return worst, which
+    def judge_row(self, row: dict, item_type: str | None = None) -> tuple[str, str | None]:
+        """("ok"|"held"|"sealed"|"unknown", the deciding record): the worst of the row's
+        records, "held" the worst of all, judged for the queue `item_type` (default the row's
+        own item_type; a row with none is judged the strict way)."""
+        queue = item_type or row.get("item_type")
+        verdicts = [(self.judge(key, queue), key) for key in row_records(row)]
+        for worst in ("held", "sealed", "unknown"):
+            for v, key in verdicts:
+                if v == worst:
+                    return v, key
+        return "ok", None
 
     @classmethod
     def from_manifest(cls, conn: sqlite3.Connection, seal: str | None = None,
                       v1_keys_path: str | Path | None = None,
-                      lock: threading.Lock | None = None) -> "SealGate":
+                      lock: threading.Lock | None = None,
+                      hold_keys_path: str | Path | None = None,
+                      hold_sha256: str | None = None) -> "SealGate":
         """The gate for a manifest: each record's date read when asked (under `lock`, the
         API's manifest lock, when given), the seal from prospective.seal_time() unless given,
-        the v1 keys from `v1_keys_path` or MV_FEEDBACK_V1_KEYS."""
+        the v1 keys from `v1_keys_path` or MV_FEEDBACK_V1_KEYS (read with the seal lifted too:
+        the strict queues still need them), and the held keys, whatever the
+        seal, from `hold_keys_path` and `hold_sha256` or MV_FEEDBACK_HOLD_KEYS and
+        MV_FEEDBACK_HOLD_SHA256 (read_hold_keys: never raises, fails closed)."""
         import contextlib
         from . import config, prospective
         seal_at = prospective.seal_time() if seal is None else seal
@@ -1068,30 +1140,42 @@ class SealGate:
             return r[0] if r else None
         path = v1_keys_path or config.setting("MV_FEEDBACK_V1_KEYS")
         keys = frozenset(x.strip() for x in Path(path).read_text(encoding="utf-8").split("\n")
-                         if x.strip()) if path and seal_at else frozenset()
-        return cls(validated, keys, seal_at)
+                         if x.strip()) if path else frozenset()
+        held, hold_all, problem = read_hold_keys(
+            hold_keys_path or config.setting("MV_FEEDBACK_HOLD_KEYS"),
+            hold_sha256 or config.setting("MV_FEEDBACK_HOLD_SHA256"))
+        return cls(validated, keys, seal_at, held, hold_all, problem)
 
 
 def seal_check(store: Store, gate: SealGate) -> dict:
     """Every queue's items judged by the seal, with the decisions on any that fail: the check
-    the re-seed procedure runs (`mv feedback seal-check`)."""
+    the re-seed procedure runs (`mv feedback seal-check`), each by its own queue's rule
+    (SealGate.judge_row: only POST_SEAL_QUEUES follow the setting). A held item is listed by its
+    item id only, never its record (the hold list is private), and any held item fails the
+    check."""
     per: dict[str, dict] = {}
     decided = dict(store.conn.execute("select item_id, count(*) from decisions group by 1"))
     bad: dict[str, list] = {}
     for r in store.conn.execute("select * from items"):
         it = Store._item(r)
-        c = per.setdefault(it["item_type"], {"items": 0, "sealed": 0, "unknown": 0,
+        c = per.setdefault(it["item_type"], {"items": 0, "held": 0, "sealed": 0, "unknown": 0,
                                              "decisions_on_failing": 0})
         c["items"] += 1
         verdict, key = gate.judge_row(it)
         if verdict != "ok":
             c[verdict] += 1
             c["decisions_on_failing"] += decided.get(it["id"], 0)
-            bad.setdefault(verdict, []).append({"item": it["id"], "type": it["item_type"],
-                                                "record": key})
-    return {"seal": gate.seal, "v1_keys": len(gate.v1_keys), "queues": per,
+            entry = {"item": it["id"], "type": it["item_type"]}
+            if verdict != "held":
+                entry["record"] = key
+            bad.setdefault(verdict, []).append(entry)
+    return {"seal": gate.seal, "strict_seal": gate.strict_seal(),
+            "post_seal_queues": list(POST_SEAL_QUEUES), "v1_keys": len(gate.v1_keys),
+            "held_keys": len(gate.held),
+            "hold_all": gate.hold_all, "hold_problem": gate.hold_problem, "queues": per,
+            "held": bad.get("held", [])[:200],
             "sealed": bad.get("sealed", []), "unknown": bad.get("unknown", [])[:200],
-            "ok": not bad.get("sealed") and not bad.get("unknown")}
+            "ok": not bad.get("held") and not bad.get("sealed") and not bad.get("unknown")}
 
 
 def write_record_keys(release, path: Path) -> dict:

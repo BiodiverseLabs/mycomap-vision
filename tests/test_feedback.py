@@ -185,7 +185,6 @@ def test_seed_files_from_the_miss_review_load(tmp_path):
 
 def test_seeding_from_files_adds_projects_and_a_blind_sample(tmp_path, conn, monkeypatch):
     from mycomap_vision import manifest  # noqa: F401  (conn fixture's schema)
-    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")   # seeding itself; the seal: test_feedback_seal
     conn.execute("insert into records (observation_id, source, scientific_name, north_america, "
                  "green_projects, exported_at) values ('7', 'inat', 'Laccaria nobilis', 1, "
                  "'[\"Idaho Fungi\"]', 'now'), ('8', 'inat', 'Laccaria laccata group', 1, "
@@ -201,7 +200,8 @@ def test_seeding_from_files_adds_projects_and_a_blind_sample(tmp_path, conn, mon
     h = tmp_path / "hits.tsv"
     h.write_text("record_key\tlabel\n" + "".join(f"{i}\tRussula emetica\n" for i in range(100, 120)),
                  encoding="utf-8")
-    s = fb.Store(tmp_path / "f.sqlite")
+    # seeding itself, every record before the seal; the seal: test_feedback_seal
+    s = fb.Store(tmp_path / "f.sqlite", gate=fb.SealGate(lambda k: "2026-01-01"))
     out = fb.seed_files(s, conn, queue=q, hits=h, blind_ratio=0.5, seed=3)
     assert out[0]["added"] == 3 and out[1]["added"] == 1          # 2 flagged x 0.5 = 1 blind
     group = s.items("group_label")["items"][0]
@@ -249,8 +249,8 @@ def test_twin_location_conflicts_seed_without_coordinates_and_decide_on_org(tmp_
                  "unclear: both look precise\n"
                  "7.4\t1\t2\tnamed location\t3\t4\t\tagrocybe arvalis\tMO copy: named location\n",
                  encoding="utf-8")
-    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")   # seeding itself; the seal: test_feedback_seal
-    s = fb.Store(tmp_path / "f.sqlite")
+    # seeding itself, every record before the seal; the seal: test_feedback_seal
+    s = fb.Store(tmp_path / "f.sqlite", gate=fb.SealGate(lambda k: "2026-01-01"))
     out = fb.seed_files(s, conn, twin_locations=f)
     assert out[0]["added"] == 2
     items = {i["subject"]: i for i in s.items("twin_location_conflict")["items"]}

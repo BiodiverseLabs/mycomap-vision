@@ -274,3 +274,29 @@ def test_an_older_provenance_table_gains_the_state_columns_and_keeps_its_rows(co
     assert cols[5:] == [c for c, _ in prospective.STATE_COLUMNS]
     assert tuple(conn.execute("select model_version, calibration_run from prediction_provenance"
                               ).fetchone()) == ("v", None)
+
+
+def test_the_sites_advance_predictions_stay_cut_at_the_papers_seal_with_the_setting_off(
+        conn, tmp_path, monkeypatch):
+    """The paper coordinator: MV_PROSPECTIVE_SEAL=off opens the review queues, never a page.
+    /api/prospective is cut at research_public.SEAL, as /api/early-answers is, until submission."""
+    from fastapi.testclient import TestClient
+    from test_api import open_limits
+    from test_models_and_scoreboard import Const, seed_two_species
+    from mycomap_vision import research_public
+    from mycomap_vision.api import create_app
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    seed_two_species(conn, tmp_path)
+    conn.commit()
+    app = create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
+                     backbone_loader=lambda n: Const(n), limits=open_limits(), background=False)
+    predicted(conn, "70", "A x")
+    predicted(conn, "71", "A y")
+    green_list(conn, ["70"], "2026-10-01T00:00:00+00:00")          # before the seal
+    green_list(conn, ["70", "71"], "2026-10-20T00:00:00+00:00")    # a v1-test record
+    conn.commit()
+    assert prospective.report(conn)[0]["resolved"] == 2              # the setting is off...
+    body = TestClient(app).get("/api/prospective").json()
+    assert body["sealed_after"] == research_public.SEAL
+    [m] = body["models"]
+    assert (m["resolved"], m["species_top1"]) == (1, 1.0)            # ...and the page is not

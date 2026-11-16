@@ -1139,11 +1139,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     @app.get("/api/prospective")
     def prospective_report(request: Request):
+        """Advance predictions (prospective.report). Always cut at the paper's fixed seal
+        (research_public.SEAL), whatever MV_PROSPECTIVE_SEAL says: that setting only opens the
+        review queues; no sealed-test score on any page before submission."""
         from . import prospective
         with db_lock:
-            models_ = prospective.report(conn)
+            models_ = prospective.report(conn, sealed_after=research_public.SEAL)
         return {"models": research_public.prospective(models_, person(request) is not None),
-                "sealed_after": prospective.seal_time()}
+                "sealed_after": research_public.SEAL}
 
     @app.get("/api/early-answers")
     def early_answers_report(request: Request):
@@ -2592,6 +2595,23 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     excluded_maker = excluded_looked if callable(excluded_looked) else None
     unsealed = (excluded_unsealed if excluded_unsealed is not None
                 else config.setting(xl.UNSEAL_SETTING) == "1")
+    pinned_gate: list = [None, None]
+
+    def excluded_gate() -> "feedback.SealGate | None":
+        """The Excluded photos page's seal (a public page): the queues' gate with its seal pinned
+        at research_public.SEAL whatever MV_PROSPECTIVE_SEAL says, so no v1-test record's map or
+        rank shows before submission and MV_EXCLUDED_LOOKED_UNSEALED alone lifts it. The queues'
+        hold list (SealGate.held) is left out: it is for queues, and marking its records held
+        on a public page would name them."""
+        import dataclasses
+        gate = feedback_store.gate
+        if gate is None:
+            return None
+        if pinned_gate[0] is not gate:
+            pinned_gate[:] = [gate, dataclasses.replace(gate, seal=research_public.SEAL,
+                                                        held=frozenset(), hold_all=False,
+                                                        hold_problem=None)]
+        return pinned_gate[1]
 
     def real_excluded_maker(loaded, backbone: str, ident: Identifier, name: str, body: bytes,
                             hidden) -> dict:
@@ -2686,7 +2706,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return backbone
 
     def excluded_held(hit: "xl.Excluded") -> None:
-        if xl.held_back(feedback_store.gate, hit.record_key, unsealed):
+        if xl.held_back(excluded_gate(), hit.record_key, unsealed):
             raise HTTPException(403, "this photo's map is held back until the paper's sealed "
                                      "test is scored", headers=NOT_INDEXED)
 
@@ -2817,7 +2837,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         for r in page:
             ph, i = shown.get(r.photo_key) or {}, info.get(r.photo_key) or {}
             public = ph.get("shown") == "public"
-            held = xl.held_back(feedback_store.gate, r.record_key, unsealed)
+            held = xl.held_back(excluded_gate(), r.record_key, unsealed)
             tiles.append({"photo_key": r.photo_key, "record_key": r.record_key,
                           "name": names.get(r.record_key), "category": r.category,
                           "shown": "public" if public else "hidden",
@@ -2934,7 +2954,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         for c in cards:
             ph, i = shown.get(c["photo_key"]) or {}, info.get(c["photo_key"]) or {}
             public = ph.get("shown") == "public"
-            held = xl.held_back(feedback_store.gate, c["record_key"] or "", unsealed)
+            held = xl.held_back(excluded_gate(), c["record_key"] or "", unsealed)
             name = names.get(c["record_key"])
             c.update(name=name, record_url=xl.record_url(c["record_key"] or ""),
                      shown="public" if public else "hidden", held=held,
@@ -3026,7 +3046,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 "box": list(t.box) if t.box else None}
 
     def preload_skip(t: "xl.Target") -> str | None:
-        if xl.held_back(feedback_store.gate, t.hit.record_key, unsealed):
+        if xl.held_back(excluded_gate(), t.hit.record_key, unsealed):
             return "held by the seal"
         if excluded_hit(t.hit.photo_key, reviewer=False) is None:
             return "not shown"
