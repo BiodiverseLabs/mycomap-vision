@@ -1371,8 +1371,51 @@ def cmd_feedback(conn, args) -> None:
                                   slip_crops=Path(args.slip_crops) if args.slip_crops else None,
                                   priority=Path(args.priority) if args.priority else None)
         print(json.dumps({"store": str(path), "seeds": out}, indent=2))
+    elif args.action == "seed-nightly-tags":
+        print(json.dumps({"store": str(path), **_seed_nightly_tags(conn, store, args)}, indent=2))
     else:
         print(json.dumps({"store": str(path), "types": store.summary()}, indent=2))
+
+
+def _seed_nightly_tags(conn, store, args) -> dict:
+    """`mv feedback seed-nightly-tags`: the nightly photo review's catch-up
+    (nightly_review.catch_up), through the box's seal gate. The dry run changes nothing."""
+    from datetime import date
+
+    from . import feedback, nightly, nightly_review, phototypes
+    try:
+        date.fromisoformat(args.since)
+    except ValueError:
+        raise SystemExit(f"--since is a day, YYYY-MM-DD, not {args.since!r}") from None
+    try:
+        tagger = phototypes.PhotoTagger.from_setting()
+    except phototypes.Refused as e:
+        raise SystemExit(f"the photo-type tagger can't be served: {e}") from None
+    if tagger is None:
+        raise SystemExit("set MV_PHOTO_TAGGER to the served photo-type tagger")
+    try:
+        bands = (tuple(_split(args.bands)) if args.bands else nightly_review.bands_from_env())
+        if set(bands) - set(phototypes.BANDS):
+            raise ValueError(f"--bands names {', '.join(phototypes.BANDS)}")
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
+    conn.execute("pragma busy_timeout = 30000")      # the server writes the layer too
+    store.gate = feedback.SealGate.from_manifest(conn)
+    layer = (nightly.layer_for(config.RELEASE_ROOT)
+             if nightly.enabled() and config.RELEASE_ROOT else None)
+
+    def load_model():
+        import torch
+
+        from . import models
+        if args.threads:
+            torch.set_num_threads(args.threads)
+        return models.load_backbone(tagger.base)
+    return nightly_review.catch_up(
+        conn, store, tagger, args.since, bands=bands, dry_run=args.dry_run, limit=args.limit,
+        load_model=load_model, work_dir=(layer.root / "review-photos") if layer else None,
+        busy=(lambda: layer.lock.exists()) if layer else None,
+        log=lambda s: print(s, file=sys.stderr))
 
 
 def _slip_crops(conn, args) -> None:
@@ -2841,6 +2884,24 @@ def main(argv: list[str] | None = None) -> int:
                                            "is unknown); run after every re-seed")
     q.add_argument("--store")
     q.add_argument("--v1-keys", help="the pinned v1 record keys (default MV_FEEDBACK_V1_KEYS)")
+    q = fsub.add_parser("seed-nightly-tags",
+                        help="(server box) the nightly photo review's catch-up: tag the photos "
+                             "of records first green since a day with the served photo-type "
+                             "tagger and queue the non-specimen ones, through the paper's seal "
+                             "(nightly_review.py); nothing is excluded until a person decides")
+    q.add_argument("--since", required=True, help="first green on or after this day, YYYY-MM-DD")
+    q.add_argument("--dry-run", action="store_true",
+                   help="change nothing: how many it would tag and queue, how many the seal "
+                        "refuses, and the CPU time")
+    q.add_argument("--limit", type=int, default=3000,
+                   help="photos tagged in one run (default 3000, ~2 h of the box's CPU); a "
+                        "rerun goes on from where it stopped")
+    q.add_argument("--bands", help="bands queued, comma-separated (default "
+                                   "MV_NIGHTLY_PHOTO_REVIEW_BANDS, else high,medium,low)")
+    q.add_argument("--threads", type=int, default=2,
+                   help="CPU threads for the tower (default 2 of the box's 4: the server "
+                        "keeps answering)")
+    q.add_argument("--store")
     q = fsub.add_parser("export-photo-exclusions",
                         help="the photo decisions people made up to a time, as a TSV the paper "
                              "freezes by sha256 (feedback_export.py); reads a .backup COPY")

@@ -685,6 +685,16 @@ class Locked:
         with self._lock:
             return self._inner.encode(images)
 
+    def encode_with_base(self, images):
+        """The fine-tune's and its frozen base's vectors from one pass (the gate's and the
+        photo-type tagger's base), under the same lock; None when the model can't fork. Defined
+        here, not passed through __getattr__, so the fork never runs outside the lock."""
+        both = getattr(self._inner, "encode_with_base", None)
+        if both is None:
+            return None
+        with self._lock:
+            return both(images)
+
     def __getattr__(self, name):          # prepare, device: whatever the model has
         return getattr(self._inner, name)
 
@@ -775,11 +785,16 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
              fetch: Callable[[], tuple[list[dict], str]],
              backbones: dict[str, Callable[[], object]], settings: Settings | None = None,
              encode_lock: threading.Lock | None = None, accept_removals: bool = False,
-             steps: Steps | None = None, log=print) -> dict:
+             steps: Steps | None = None, photo_review=None, log=print) -> dict:
     """One night. `conn` is the layer's manifest (opened with manifest.connect);
     `fetch` reads mycomap.org (fetch_green); `backbones` maps each served backbone to a
     way to get its loaded model. Returns the report recorded in nightly_runs; never
-    raises for a refused answer or a failed step (the report says what happened)."""
+    raises for a refused answer or a failed step (the report says what happened).
+
+    `photo_review` (nightly_review.NightlyReview, MV_NIGHTLY_PHOTO_REVIEW=1): each photo
+    embedded tonight is tagged by the photo-type tagger from the same pass, and the non-specimen
+    ones go to the Human Feedback photo review ("photo_review" in the report). Its failure
+    never fails the night."""
     settings = settings or Settings()
     steps = steps or Steps()
     ensure_schema(conn)
@@ -842,9 +857,14 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
                 model = backbones[name]()
                 if encode_lock is not None:
                     model = Locked(model, encode_lock)
+                sink = None
+                if photo_review is not None:
+                    model, sink = photo_review.tap(conn, model, run_id, log=log)
                 stats = embed_photos(conn, store, model, todo, layer.embeddings / name,
-                                     batch_size=8, readers=2, log=log)
+                                     batch_size=8, readers=2, log=log, with_base=sink)
                 report["embedded"][name] = stats.embedded
+                if stats.base_errors:
+                    report.setdefault("base_vector_errors", {})[name] = stats.base_errors
                 if stats.skipped:
                     report.setdefault("unreadable", {})[name] = len(stats.skipped)
                 changed = changed or stats.embedded > 0
@@ -867,6 +887,10 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
                                      batch_size=8, readers=2, log=log)
                 report["crops_embedded"][name] = stats.embedded
                 changed = changed or stats.embedded > 0
+            if photo_review is not None:
+                # Tonight's tags, and earlier ones not queued yet, to the photo review.
+                report["photo_review"] = _step(lambda: photo_review.queue(conn, run_id, log=log),
+                                               "photo review", log)
             report["photos_deleted"] = drop_embedded_photos(conn, store, served)
             report["layer"] = layer_sizes(conn, settings.warn_share)
             for name, size in report["layer"].items():
@@ -1073,7 +1097,16 @@ def health(conn: sqlite3.Connection, settings: Settings, zone: tzinfo | None = N
                         "renamed": records.get("renamed", 0),
                         "embedded": sum((report.get("embedded") or {}).values()),
                         "predicted": (report.get("predictions") or {}).get("predicted", 0)})
+    review = report.get("photo_review")
+    if isinstance(review, dict):            # counts only: no error text in public health
+        out["photo_review"] = {k: review.get(k, 0) for k in PHOTO_REVIEW_COUNTS}
+        out["photo_review"]["failed"] = bool(review.get("error"))
     return out
+
+
+# The photo review's counts health shows (nightly_review.NightlyReview.queue).
+PHOTO_REVIEW_COUNTS = ("tagged", "queued", "already_queued", "already_decided", "refused_sealed",
+                       "refused_unknown")
 
 
 def status(conn: sqlite3.Connection, settings: Settings, now: datetime | None = None,
