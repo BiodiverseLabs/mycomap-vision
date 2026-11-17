@@ -123,11 +123,13 @@
   .light .close { position: absolute; top: 12px; right: 16px; background: none; color: #fff; border: 0; font-size: 14px; cursor: pointer; }
   .light .cap { position: absolute; bottom: 14px; left: 0; right: 0; text-align: center; color: #ffffffcc; font-size: 13px; }
 
-  .panel-back { position: fixed; inset: 0; background: #0000004d; z-index: 15; display: flex; align-items: flex-start; justify-content: center; padding: 64px 16px; }
-  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; max-width: 640px; width: 100%; box-shadow: 0 8px 24px #0000002e; }
-  .panel h2 { font-size: 17px; font-weight: 700; margin: 0 0 8px; }
-  .panel p, .panel li { margin: 6px 0; }
-  .panel ul { padding-left: 18px; list-style: disc; }
+  .panel-back { position: fixed; inset: 0; background: #0000004d; z-index: 15; display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 24px; max-width: 760px; width: 100%; max-height: calc(100vh - 80px); overflow-y: auto; box-shadow: 0 8px 24px #0000002e; }
+  .panel h2 { font-size: 18px; font-weight: 700; margin: 0 0 8px; }
+  .panel h3 { font-size: 15px; font-weight: 700; margin: 14px 0 4px; }
+  .panel p, .panel li { margin: 5px 0; }
+  .panel ul { padding-left: 20px; list-style: disc; margin: 4px 0; }
+  .panel ul ul { list-style: circle; margin: 2px 0; }
   .panel .close-row { text-align: right; margin-top: 10px; }
   .panel .close-row button { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
 }

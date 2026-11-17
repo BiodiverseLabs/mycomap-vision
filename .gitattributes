@@ -5,3 +5,5 @@
 *.conf text eol=lf
 # A copy of mycomap.org's file, kept byte for byte.
 tests/data/name-variants.json -text
+# The E17 page instructions, pinned by sha256 (web/src/e17/instructions.test.ts): kept byte for byte.
+web/src/e17/instructions.md -text

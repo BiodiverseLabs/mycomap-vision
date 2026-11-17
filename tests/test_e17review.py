@@ -207,6 +207,48 @@ def test_the_item_schema_is_applied_exactly(change, rule):
     assert rule in [r.rule for r in item_refusals(it)]
 
 
+# Schema v1.2: each sequence says whether each search is stored.
+@pytest.mark.parametrize("table", ["local", "genbank"])
+def test_a_search_marked_none_must_have_no_hits(table):
+    it = base_item()
+    it["sequences"][0][f"{table}_search"] = "none"
+    got = item_refusals(it)
+    assert [(r.path, r.rule) for r in got] == [(f"sequences[0].{table}",
+                                                "schema:hits-without-search")]
+    it["sequences"][0][table] = []
+    assert item_refusals(it) == []
+
+
+@pytest.mark.parametrize("value", ["maybe", "Stored", "", True, None, 1])
+def test_a_search_is_stored_or_none_and_nothing_else(value):
+    it = base_item()
+    it["sequences"][1]["genbank_search"] = value
+    assert "schema:value" in [r.rule for r in item_refusals(it)]
+
+
+@pytest.mark.parametrize("field", ["local_search", "genbank_search"])
+def test_both_search_fields_are_required(field):
+    it = base_item()
+    del it["sequences"][0][field]
+    assert [(r.path, r.rule) for r in item_refusals(it)] == [(f"sequences[0].{field}",
+                                                             "schema:missing")]
+
+
+def test_a_stored_search_may_have_found_no_hits():
+    it = base_item()
+    it["sequences"][0]["local"] = []
+    it["sequences"][0]["genbank"] = []
+    assert item_refusals(it) == []
+
+
+def test_the_synthetic_packet_has_a_missing_search_and_a_search_with_no_hits(tmp_path):
+    folder, sha = packet(tmp_path)
+    pk = E.check_packet(folder, sha)
+    seqs = [s for it in pk.items.values() for s in it["sequences"]]
+    assert any(s["genbank_search"] == "none" and s["genbank"] == [] for s in seqs)
+    assert any(s["local_search"] == "stored" and s["local"] == [] for s in seqs)
+
+
 def test_length_may_be_null_and_lists_may_be_empty():
     it = base_item()
     it["sequences"][0]["length"] = None

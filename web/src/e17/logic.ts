@@ -8,10 +8,13 @@ export type Hit = {
   coverage: number;
   accession?: string;
 };
+export type Search = "stored" | "none";
 export type Sequence = {
   n: number;
   withdrawn: boolean;
   length: number | null;
+  local_search: Search;
+  genbank_search: Search;
   local: Hit[];
   genbank: Hit[];
 };
@@ -134,8 +137,22 @@ export type Summary = {
   best: BestHit | null;
   local: Match;
   genbank: Match;
-  localEmpty: boolean;
-  genbankEmpty: boolean;
+  localState: TableState;
+  genbankState: TableState;
+};
+
+/** What a table holds: hits, a stored search that found none, or no stored search. */
+export type TableState = "hits" | "no-hits" | "no-search";
+
+export function tableState(seq: Sequence, table: Table): TableState {
+  const search = table === "local" ? seq.local_search : seq.genbank_search;
+  if (search === "none") return "no-search";
+  return (table === "local" ? seq.local : seq.genbank).length ? "hits" : "no-hits";
+}
+
+export const TABLE_STATE_TEXT: Record<Exclude<TableState, "hits">, string> = {
+  "no-hits": "No hits",
+  "no-search": "No stored search",
 };
 
 function firstMatch(hits: Hit[], reviewed: string): Match {
@@ -159,8 +176,8 @@ export function summarise(seq: Sequence, reviewed: string): Summary {
     best,
     local: firstMatch(seq.local, reviewed),
     genbank: firstMatch(seq.genbank, reviewed),
-    localEmpty: seq.local.length === 0,
-    genbankEmpty: seq.genbank.length === 0,
+    localState: tableState(seq, "local"),
+    genbankState: tableState(seq, "genbank"),
   };
 }
 
@@ -182,12 +199,16 @@ const TABLE_LABEL: Record<Table, string> = { local: "Local", genbank: "GenBank" 
 export function summaryLines(s: Summary): { best: string; reviewed: string } {
   const best = s.best
     ? `${s.best.name} · ${pct(s.best.identity)}% identity · ${coverageText(s.best.coverage)}% coverage (${s.best.table === "local" ? "local" : "GenBank"})`
-    : "no hits";
-  const part = (t: Table, m: Match, empty: boolean) =>
-    empty ? `${TABLE_LABEL[t]}: no hits` : m ? `${TABLE_LABEL[t]} rank ${m.rank} · ${pct(m.identity)}%` : `${TABLE_LABEL[t]}: no hit with this name`;
+    : s.localState === "no-search" && s.genbankState === "no-search"
+      ? TABLE_STATE_TEXT["no-search"]
+      : TABLE_STATE_TEXT["no-hits"];
+  const part = (t: Table, m: Match, state: TableState) =>
+    state !== "hits"
+      ? `${TABLE_LABEL[t]}: ${TABLE_STATE_TEXT[state]}`
+      : m ? `${TABLE_LABEL[t]} rank ${m.rank} · ${pct(m.identity)}%` : `${TABLE_LABEL[t]}: no hit with this name`;
   return {
     best,
-    reviewed: `${part("local", s.local, s.localEmpty)}  |  ${part("genbank", s.genbank, s.genbankEmpty)}`,
+    reviewed: `${part("local", s.local, s.localState)}  |  ${part("genbank", s.genbank, s.genbankState)}`,
   };
 }
 
@@ -371,4 +392,14 @@ export function savedText(iso: string | null | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   return `Saved ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// --- the instructions -----------------------------------------------------------------------
+
+/** Open the instructions by themselves on a first visit: once the list has loaded, nobody
+ * has answered any item yet, and they have not been opened by themselves already in this
+ * page session (closed once, they stay closed across item changes). */
+export function autoOpenInstructions(items: ListEntry[] | null, alreadyDecided: boolean): boolean {
+  if (alreadyDecided || items === null) return false;
+  return items.every((it) => !it.answered);
 }

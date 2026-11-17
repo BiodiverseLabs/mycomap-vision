@@ -2,14 +2,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  agreement, applyKey, autocompleteCandidates, chips, DEFAULT_SORT, EMPTY_ANSWER, goToIndex, isBareGenus,
-  keyAction, MARKER, nextSort, savedText, sortHits, speciesKey, stepIndex, summarise, summaryLines,
-  type Hit, type Item, type Sequence,
+  agreement, applyKey, autocompleteCandidates, autoOpenInstructions, chips, DEFAULT_SORT, EMPTY_ANSWER, goToIndex,
+  isBareGenus, keyAction, MARKER, nextSort, savedText, sortHits, speciesKey, stepIndex, summarise, summaryLines,
+  TABLE_STATE_TEXT, tableState,
+  type Hit, type Item, type Search, type Sequence,
 } from "./logic";
 
 const h = (hit_no: number, name: string, identity: number, coverage = 100, accession?: string): Hit =>
   accession ? { hit_no, name, identity, coverage, accession } : { hit_no, name, identity, coverage };
-const seq = (local: Hit[], genbank: Hit[], n = 1, withdrawn = false): Sequence => ({ n, withdrawn, length: 612, local, genbank });
+const seq = (local: Hit[], genbank: Hit[], n = 1, withdrawn = false, local_search: Search = "stored",
+  genbank_search: Search = "stored"): Sequence => ({ n, withdrawn, length: 612, local_search, genbank_search, local, genbank });
 const item = (name: string, sequences: Sequence[]): Item => ({
   schema: "e17-item/1", code: "K7Q2M", name_under_review: name, place: "Ontario", when: "September 2025",
   photos: [], sequences,
@@ -64,10 +66,27 @@ test("the summary gives the best hit and the reviewed name's rank and identity i
   assert.equal(lines.reviewed, "Local rank 3 · 97.9%  |  GenBank rank 1 · 98.0%");
 });
 
-test("a table without the reviewed name says so, and an empty table says it has no hits", () => {
+test("a table without the reviewed name says so; a stored search with no hits says No hits", () => {
   const s = summarise(seq([h(1, "Otherella quieta", 90)], []), "Fakeus exemplaris");
-  assert.equal(summaryLines(s).reviewed, "Local: no hit with this name  |  GenBank: no hits");
-  assert.equal(summaryLines(summarise(seq([], []), "Fakeus exemplaris")).best, "no hits");
+  assert.equal(summaryLines(s).reviewed, "Local: no hit with this name  |  GenBank: No hits");
+  assert.equal(summaryLines(summarise(seq([], []), "Fakeus exemplaris")).best, "No hits");
+});
+
+test("a sequence with no stored search says No stored search, apart from a stored search with no hits", () => {
+  const none = seq([h(1, "Fakeus exemplaris", 99)], [], 1, false, "stored", "none");
+  assert.equal(tableState(none, "local"), "hits");
+  assert.equal(tableState(none, "genbank"), "no-search");
+  assert.equal(summaryLines(summarise(none, "Fakeus exemplaris")).reviewed,
+    "Local rank 1 · 99.0%  |  GenBank: No stored search");
+  const empty = seq([], [h(1, "Fakeus exemplaris", 98, 99, "ZZ000001.1")], 1, false, "stored", "stored");
+  assert.equal(tableState(empty, "local"), "no-hits");
+  assert.equal(summaryLines(summarise(empty, "Fakeus exemplaris")).reviewed,
+    "Local: No hits  |  GenBank rank 1 · 98.0%");
+  assert.equal(TABLE_STATE_TEXT["no-search"], "No stored search");
+  assert.equal(TABLE_STATE_TEXT["no-hits"], "No hits");
+  // Neither search stored: the best-hit line says so; one stored and empty: No hits.
+  assert.equal(summaryLines(summarise(seq([], [], 1, false, "none", "none"), "X y")).best, "No stored search");
+  assert.equal(summaryLines(summarise(seq([], [], 1, false, "none", "stored"), "X y")).best, "No hits");
 });
 
 test("the best hit is the higher identity of the two tables' first rows; ties go to coverage, then local", () => {
@@ -266,4 +285,23 @@ test("saved time is hh:mm on the reviewer's clock, empty when unknown", () => {
   assert.match(savedText("2026-11-16T21:14:00.000Z"), /^Saved \d\d:\d\d$/);
   assert.equal(savedText(null), "");
   assert.equal(savedText("nonsense"), "");
+});
+
+// --- the instructions ---------------------------------------------------------------------------
+
+test("the instructions open by themselves on a first visit, when nobody has answered anything", () => {
+  const fresh = list.map((it) => ({ ...it, answered: false }));
+  assert.equal(autoOpenInstructions(fresh, false), true);
+  assert.equal(autoOpenInstructions([], false), true);
+});
+
+test("once anyone has answered, the instructions stay closed and one click away", () => {
+  assert.equal(autoOpenInstructions(list, false), false);
+  assert.equal(autoOpenInstructions([{ code: "K7Q2M", position: 1, answered: true }], false), false);
+});
+
+test("the instructions open by themselves at most once a session, and not before the list loads", () => {
+  const fresh = list.map((it) => ({ ...it, answered: false }));
+  assert.equal(autoOpenInstructions(fresh, true), false, "already opened (and closed) once");
+  assert.equal(autoOpenInstructions(null, false), false);
 });

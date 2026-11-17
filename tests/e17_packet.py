@@ -19,8 +19,10 @@ def hit(no, name, identity, coverage, accession=None):
     return h
 
 
-def seq(n, local=(), genbank=(), withdrawn=False, length=612):
+def seq(n, local=(), genbank=(), withdrawn=False, length=612, local_search="stored",
+        genbank_search="stored"):
     return {"n": n, "withdrawn": withdrawn, "length": length,
+            "local_search": local_search, "genbank_search": genbank_search,
             "local": [hit(i + 1, *h) for i, h in enumerate(local)],
             "genbank": [hit(i + 1, *h) for i, h in enumerate(genbank)]}
 
@@ -60,7 +62,10 @@ ITEMS = [
                         genbank=[("Phantomyces vagus", 91.0, 88, "ZZ000021.1")])]),
     item("PLM4T", "Fakeus sp. 'IN01'", place="Michigan", when="August 2023",
          photos=((800, 600), (600, 800), (800, 600), (800, 600)),
-         sequences=[seq(1, local=[("Fakeus sp. 'IN01'", 100, 100)], genbank=[]),
+         # Sequence 1 has no stored GenBank search; sequence 2's local search is stored and
+         # found no hits.
+         sequences=[seq(1, local=[("Fakeus sp. 'IN01'", 100, 100)], genbank=[],
+                        genbank_search="none"),
                     seq(2, local=[], genbank=[("Fakeus exemplaris", 95.5, 90, "ZZ000031.1")])]),
     item("ZQ8R1", "Testaria nullius", place="Indiana", when="June 2025", photos=(),
          sequences=[]),

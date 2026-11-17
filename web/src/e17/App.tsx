@@ -7,10 +7,12 @@ import { client, tokenFromPath, type ItemWithResponse } from "./api";
 import {
   agreement, answerFrom, applyKey, autocompleteCandidates, chips as chipsOf, coverageText, DEFAULT_SORT, EMPTY_ANSWER,
   genusOf, goToIndex, keyAction, lengthText, MARKER, nextSort, pct, savedText, sortHits, stepIndex, summarise,
-  summaryLines, whenText,
-  type Answer, type Hit, type Item, type ListEntry, type Sequence, type ShownBy, type Sort, type SortKey, type Verdict,
+  summaryLines, tableState, TABLE_STATE_TEXT, autoOpenInstructions, whenText,
+  type Answer, type Hit, type Item, type ListEntry, type Sequence, type ShownBy, type Sort, type SortKey, type TableState, type Verdict,
 } from "./logic";
+import { parseMarkdown, type Inline, type ListItem } from "./markdown";
 import { Saver, type SaveState } from "./saver";
+import instructionsText from "./instructions.md?raw";
 
 const token = tokenFromPath(window.location.pathname);
 const api = client(token);
@@ -62,6 +64,7 @@ export function App() {
   const [photo, setPhoto] = useState(0);
   const [lightbox, setLightbox] = useState(false);
   const [help, setHelp] = useState(false);
+  const autoOpened = useRef(false);
   const betterRef = useRef<HTMLInputElement>(null);
   const answerRef = useRef(answer);
   answerRef.current = answer;
@@ -79,6 +82,10 @@ export function App() {
   useEffect(() => {
     api.items().then((l) => {
       setList(l);
+      // A first visit (nobody has answered anything yet): the instructions open by
+      // themselves, once; after that they are one click away.
+      if (autoOpenInstructions(l.items, autoOpened.current)) setHelp(true);
+      autoOpened.current = true;
       const want = positionFromHash();
       const at = want !== null ? l.items.findIndex((it) => it.position === want) : -1;
       const first = l.items.findIndex((it) => !it.answered);
@@ -376,15 +383,15 @@ function SequenceBlock({ seq, reviewed }: { seq: Sequence; reviewed: string }) {
       </div>
       {open && (
         <div className="tables">
-          <HitTable title="Local database" hits={seq.local} reviewed={reviewed} withAccession={false} />
-          <HitTable title="GenBank" hits={seq.genbank} reviewed={reviewed} withAccession />
+          <HitTable title="Local database" hits={seq.local} state={tableState(seq, "local")} reviewed={reviewed} withAccession={false} />
+          <HitTable title="GenBank" hits={seq.genbank} state={tableState(seq, "genbank")} reviewed={reviewed} withAccession />
         </div>
       )}
     </div>
   );
 }
 
-function HitTable({ title, hits, reviewed, withAccession }: { title: string; hits: Hit[]; reviewed: string; withAccession: boolean }) {
+function HitTable({ title, hits, state, reviewed, withAccession }: { title: string; hits: Hit[]; state: TableState; reviewed: string; withAccession: boolean }) {
   const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
   const rows = sortHits(hits, sort);
   const head = (key: SortKey, label: string, num = false) => (
@@ -397,7 +404,7 @@ function HitTable({ title, hits, reviewed, withAccession }: { title: string; hit
   return (
     <div className="tbl">
       <h4>{title}</h4>
-      {hits.length === 0 ? <div className="empty">No hits.</div> : (
+      {state !== "hits" ? <div className="empty">{TABLE_STATE_TEXT[state]}</div> : (
         <table>
           <thead>
             <tr>
@@ -459,21 +466,34 @@ function Chips({ item, value, onPick }: { item: Item; value: string; onPick: (na
   );
 }
 
+const INSTRUCTIONS = parseMarkdown(instructionsText);
+
+/** Inline Markdown as React elements: text stays text, never HTML. */
+function InlineText({ content }: { content: Inline[] }) {
+  return <>{content.map((c, i) => c.kind === "bold" ? <b key={i}><InlineText content={c.children ?? []} /></b>
+    : c.kind === "italic" ? <i key={i}><InlineText content={c.children ?? []} /></i>
+      : <span key={i}>{c.text}</span>)}</>;
+}
+
+function MdList({ items }: { items: ListItem[] }) {
+  return (
+    <ul>
+      {items.map((it, i) => (
+        <li key={i}><InlineText content={it.content} />{it.children.length > 0 && <MdList items={it.children} />}</li>
+      ))}
+    </ul>
+  );
+}
+
+/** The pinned instructions (instructions.md), as written. */
 function Instructions({ onClose }: { onClose: () => void }) {
   return (
     <div className="panel-back" onClick={onClose}>
       <div className="panel" role="dialog" aria-label="Instructions" onClick={(e) => e.stopPropagation()}>
-        <h2>Instructions</h2>
-        <p>For each item, decide whether the name under review is supported by its DNA evidence and photographs.</p>
-        <ul>
-          <li><b>Supported</b> (1): the evidence supports the name.</li>
-          <li><b>Wrong</b> (2): the evidence points to another name; give it under Better name if you can.</li>
-          <li><b>Cannot tell</b> (3): the evidence is not enough to decide.</li>
-          <li><b>Shown by</b>: what the decision rests on: the sequences (S), the photographs (P), or both (B).</li>
-          <li><b>Recognised</b> (R): you recognised the find itself. <b>Looked up</b> (L): you looked something up elsewhere.</li>
-        </ul>
-        <p>Rows are green (=sp) for the same species as the name under review and amber (=gen) for the same genus. A withdrawn sequence is shown collapsed; its hits stay available.</p>
-        <p>Every change is saved automatically. You can't move to another item until the last change is saved.</p>
+        {INSTRUCTIONS.map((b, i) => b.kind === "heading"
+          ? (b.level === 2 ? <h2 key={i}><InlineText content={b.content} /></h2> : <h3 key={i}><InlineText content={b.content} /></h3>)
+          : b.kind === "paragraph" ? <p key={i}><InlineText content={b.content} /></p>
+            : <MdList key={i} items={b.items} />)}
         <div className="close-row"><button type="button" onClick={onClose}>Close (Esc)</button></div>
       </div>
     </div>

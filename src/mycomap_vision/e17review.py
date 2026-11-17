@@ -1,4 +1,4 @@
-"""E17: the blind review page (Steve, 2026-11-16; item schema v1.1).
+"""E17: the blind review page (Steve, 2026-11-16; item schema v1.2).
 
 A reviewer is shown, one item at a time, a name, its DNA evidence (BLAST hits against the
 local database and GenBank) and photos, and says whether the name is supported. Blindness
@@ -61,6 +61,7 @@ DIR_NAME = "e17-review"
 DB_FILE = "review.sqlite"
 PACKET_SCHEMA = "e17-packet/1"
 ITEM_SCHEMA = "e17-item/1"
+SEARCHES = ("stored", "none")          # v1.2: "none" = no stored search, its hits must be []
 MAX_PHOTO_BYTES = 8 * 1024 * 1024
 MAX_PHOTOS = 40
 MAX_HITS = 50
@@ -473,7 +474,8 @@ def check_item(item, code: str) -> list[Refusal]:
     if c.array(item["sequences"], "sequences", 1000):
         for i, seq in enumerate(item["sequences"]):
             p = f"sequences[{i}]"
-            if not c.obj(seq, p, ("n", "withdrawn", "length", "local", "genbank")):
+            if not c.obj(seq, p, ("n", "withdrawn", "length", "local_search", "genbank_search",
+                                  "local", "genbank")):
                 continue
             c.integer(seq["n"], f"{p}.n", lo=1)
             if seq["n"] != i + 1:
@@ -483,8 +485,13 @@ def check_item(item, code: str) -> list[Refusal]:
             c.integer(seq["length"], f"{p}.length", lo=1, hi=10_000_000, nullable=True)
             for table, extra in (("local", ()), ("genbank", ("accession",))):
                 tp = f"{p}.{table}"
+                search = seq[f"{table}_search"]
+                if search not in SEARCHES:
+                    c.no(f"{p}.{table}_search", "schema:value")
                 if not c.array(seq[table], tp, MAX_HITS):
                     continue
+                if search == "none" and seq[table]:
+                    c.no(tp, "schema:hits-without-search")
                 seen = set()
                 for j, hit in enumerate(seq[table]):
                     hp = f"{tp}[{j}]"
