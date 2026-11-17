@@ -1,4 +1,4 @@
-"""E17: the blind review page (Steve, 2026-11-16; item schema v1.2).
+"""E17: the blind review page (Steve, 2026-11-16; item schema v1.3).
 
 A reviewer is shown, one item at a time, a name, its DNA evidence (BLAST hits against the
 local database and GenBank) and photos, and says whether the name is supported. Blindness
@@ -11,18 +11,20 @@ checks the imports).
 Packet (what `mv e17 load` accepts; nothing else is loaded):
     manifest.json                {"schema": "e17-packet/1", "count", "items", "photos"}
     items/<code>.json            one per item (ITEM_FIELDS below)
-    photos/<code>/<n>.jpg        JPEG, no Exif/XMP (APP1), no IPTC (APP13), no comment
+    photos/<code>/<n>.jpg        JPEG; only JFIF, ICC and Adobe segments, no comment,
+                                 nothing after the end of image
 The pinned sha is sha256(manifest.json); every listed file's sha256 is checked, and an
 unlisted or missing file, an extra field anywhere, or a string that looks like an id, a
-link, a site or a full date (R1-R4) refuses the whole load. The loader prints the item
-code, the field path and the rule, never the value.
+link, a site, a full date or coordinates (R1-R5) refuses the whole load. The loader
+prints the item code, the field path and the rule, never the value.
 
 Where it lives: MV_E17_DIR, else <release root>/state/e17-review on the box (kept across
 releases), else beside the manifest. There: review.sqlite, manifest.json, items/, photos/.
 Never the Human Feedback store, which is keyed by record.
 
-Responses are insert-only (triggers refuse UPDATE and DELETE); the current answer for an
-item is its latest row. `mv e17 export` writes latest.csv and history.csv; the page has no
+Responses are insert-only (triggers refuse UPDATE and DELETE); a reviewer's current
+answer for an item is their own latest row, and nobody sees another reviewer's answers.
+`mv e17 export` writes latest.csv (per code and reviewer) and history.csv; the page has no
 download.
 
 Serving (registered in api.py), behind a path token and the mycomap.org session:
@@ -56,6 +58,8 @@ from pathlib import Path
 from typing import Callable
 
 from . import config
+
+log = logging.getLogger(__name__)
 
 DIR_NAME = "e17-review"
 DB_FILE = "review.sqlite"
@@ -96,13 +100,27 @@ ASSET_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}\.(js|css)$")
 
 # The loader's second line behind the builder's own scan: applied to every string value of
 # an item except "accession" and "code"; numbers are never scanned.
+_MONTH = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+          r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?")
 RULES = (
     ("R1", re.compile(r"\d{6,}")),
-    ("R2", re.compile(r"\b(inat|mo|mc|org|obs)\s*[:#/]\s*\d", re.IGNORECASE)),
-    ("R3", re.compile(r"inaturalist|mushroomobserver|mycomap|observation|https?://|www\.|@",
+    # A source prefix (a whole word) and a number: "inat:12", "obs #4567", and with no or
+    # any separator once the number has 4+ digits ("MO54321", "iNat 54321", "mc-12345").
+    ("R2", re.compile(r"\b(?:inat|mo|mc|org|obs)(?:\s*[:#/]\s*\d|[\s:#/-]*\d{4,})",
                       re.IGNORECASE)),
-    ("R4", re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}")),
+    ("R3", re.compile(r"inaturalist|mushroom\s*observer|\binat\b|mycomap|observation|https?://|"
+                      r"www\.|@", re.IGNORECASE)),
+    # A full date in any common writing: 2025-09-14, 9/14/2025, 15-03-2024, 15.03.2024,
+    # 2024.03.15, 2024/03/15, 15 March 2024, March 15, 2024.
+    ("R4", re.compile(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}"
+                      rf"|\b\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\s+\d{{4}}"
+                      rf"|\b{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?\b,?\s+\d{{4}}", re.IGNORECASE)),
+    # Coordinates: a degree sign, a degrees-minutes-seconds form, or a decimal with 3+ places.
+    ("R5", re.compile(r"[°º]|\d{1,3}\s*['′]\s*\d{1,2}(?:\.\d+)?\s*[\"″]"
+                      r"|\d{1,3}\.\d{3,}")),
 )
+# A place is a state or province name: letters, spaces and . , ' - ( ) only, no digits.
+PLACE_RE = re.compile(r"^(?:[^\W\d_]|[ .,'()\-])+$")
 UNSCANNED_KEYS = ("accession", "code")
 
 
@@ -233,22 +251,27 @@ class Store:
         path = self.root / "photos" / code / f"{n}.jpg"
         return path if path.is_file() else None
 
-    def latest(self, code: str) -> dict | None:
+    def latest(self, code: str, sub: str) -> dict | None:
+        """This reviewer's current answer for the item: their own latest row. Another
+        reviewer's answers are never shown to them."""
         conn = self.connect()
         try:
-            row = conn.execute("select * from responses where code = ? order by id desc limit 1",
-                               (code,)).fetchone()
+            row = conn.execute("select * from responses where code = ? and sub = ? "
+                               "order by id desc limit 1", (code, sub)).fetchone()
         finally:
             conn.close()
         return self._public(row) if row else None
 
-    def answered(self) -> set[str]:
-        """Codes whose latest response gives a verdict."""
+    def answered(self, sub: str | None) -> set[str]:
+        """Codes whose latest response by this reviewer gives a verdict (None: by anyone, for
+        `mv e17 status`)."""
         conn = self.connect()
         try:
             rows = conn.execute(
-                "select r.code, r.verdict from responses r join (select code, max(id) id "
-                "from responses group by code) m on m.id = r.id").fetchall()
+                "select r.code, r.verdict from responses r join (select code, sub, max(id) id "
+                "from responses group by code, sub) m on m.id = r.id"
+                + ("" if sub is None else " where r.sub = ?"),
+                () if sub is None else (sub,)).fetchall()
         finally:
             conn.close()
         return {r["code"] for r in rows if r["verdict"]}
@@ -460,7 +483,7 @@ def check_item(item, code: str) -> list[Refusal]:
     if item["code"] != code:
         c.no("code", "schema:file-name")
     c.string(item["name_under_review"], "name_under_review", 1, 200)
-    c.string(item["place"], "place", 1, 80)
+    c.string(item["place"], "place", 1, 80, PLACE_RE)
     c.string(item["when"], "when", 1, 40, WHEN_RE)
     if c.array(item["photos"], "photos", MAX_PHOTOS):
         for i, ph in enumerate(item["photos"]):
@@ -492,21 +515,20 @@ def check_item(item, code: str) -> list[Refusal]:
                     continue
                 if search == "none" and seq[table]:
                     c.no(tp, "schema:hits-without-search")
-                seen = set()
                 for j, hit in enumerate(seq[table]):
                     hp = f"{tp}[{j}]"
                     if not c.obj(hit, hp, ("hit_no", "name", "identity", "coverage", *extra)):
                         continue
                     c.integer(hit["hit_no"], f"{hp}.hit_no", lo=1)
-                    if hit["hit_no"] in seen:
-                        c.no(f"{hp}.hit_no", "schema:unique")
-                    if _is_int(hit["hit_no"]):
-                        seen.add(hit["hit_no"])
+                    if _is_int(hit["hit_no"]) and hit["hit_no"] != j + 1:
+                        c.no(f"{hp}.hit_no", "schema:hit-order")   # 1..n, the array order
                     c.string(hit["name"], f"{hp}.name", 1, 200)
                     c.number(hit["identity"], f"{hp}.identity", 0, 100)
                     c.number(hit["coverage"], f"{hp}.coverage", 0, 100)
                     if extra:
-                        c.string(hit["accession"], f"{hp}.accession", 1, 20, ACCESSION_RE)
+                        # v1.3: null is a community sequence (no accession, no link).
+                        if hit["accession"] is not None:
+                            c.string(hit["accession"], f"{hp}.accession", 1, 20, ACCESSION_RE)
     _scan(item, "", c)
     return c.out
 
@@ -527,52 +549,85 @@ def _scan(value, path: str, c: _Checker) -> None:
             c.no(path, rule)
 
 
+# The only application segments a photo may carry: JFIF (APP0), an ICC colour profile
+# (APP2) and Adobe's colour transform (APP14). Every other APPn (Exif, XMP, IPTC, MPF,
+# JUMBF/C2PA, ...) and every comment is refused, wherever it is.
+ALLOWED_APP = {0xE0: (b"JFIF\x00", b"JFXX\x00"), 0xE2: (b"ICC_PROFILE\x00",), 0xEE: (b"Adobe",)}
+APP_RULES = {0xE1: "photo:app1-exif-xmp", 0xED: "photo:app13-iptc"}
+# Markers with a length field that may stand between the start of the image and its end.
+_SEGMENTS = (set(range(0xC0, 0xD0)) | {0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF}
+             | set(range(0xE0, 0xF0)) | {0xFE})
+
+
 def jpeg_check(data: bytes) -> tuple[list[str], tuple[int, int] | None]:
     """Problems with a photo's bytes (rule names) and its (width, height) from the frame
-    header: JPEG only, no APP1 (Exif, XMP: where GPS lives), no APP13 (IPTC), no comment,
-    at most 8 MB."""
-    problems: list[str] = []
+    header. Every segment is read through to the end of image, the scans' coded data
+    skipped, so nothing hides between progressive scans; nothing may follow the end of
+    image (an appended Exif JPEG, a motion photo). At most 8 MB."""
+    problems: set[str] = set()
     if len(data) > MAX_PHOTO_BYTES:
-        problems.append("photo:bytes")
+        problems.add("photo:bytes")
     if data[:2] != b"\xff\xd8":
-        return problems + ["photo:jpeg"], None
+        return sorted(problems | {"photo:jpeg"}), None
     size = None
-    i = 2
     n = len(data)
+    i = 2
+    ended = False
     while i < n:
         if data[i] != 0xFF:
-            return problems + ["photo:jpeg"], size
+            problems.add("photo:jpeg")
+            break
         while i < n and data[i] == 0xFF:      # fill bytes
             i += 1
         if i >= n:
             break
         marker = data[i]
         i += 1
-        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
-            continue
-        if marker == 0xD9:                    # end of image before a scan
+        if marker == 0xD9:                    # end of image
+            ended = True
             break
-        if i + 2 > n:
-            return problems + ["photo:jpeg"], size
+        if 0xD0 <= marker <= 0xD7 or marker == 0x01:
+            continue
+        if marker not in _SEGMENTS or i + 2 > n:
+            problems.add("photo:jpeg")
+            break
         length = int.from_bytes(data[i:i + 2], "big")
         if length < 2 or i + length > n:
-            return problems + ["photo:jpeg"], size
-        if marker == 0xE1:
-            problems.append("photo:app1-exif-xmp")
-        elif marker == 0xED:
-            problems.append("photo:app13-iptc")
-        elif marker == 0xFE:
-            problems.append("photo:comment")
-        elif 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC) and length >= 7:
-            h = int.from_bytes(data[i + 3:i + 5], "big")
-            w = int.from_bytes(data[i + 5:i + 7], "big")
-            size = (w, h)
-        if marker == 0xDA:                    # start of scan: no more headers to read
+            problems.add("photo:jpeg")
             break
+        body = data[i + 2:i + length]
+        if 0xE0 <= marker <= 0xEF:
+            if marker not in ALLOWED_APP or not body.startswith(ALLOWED_APP[marker]):
+                problems.add(APP_RULES.get(marker, f"photo:app{marker - 0xE0}"))
+        elif marker == 0xFE:
+            problems.add("photo:comment")
+        elif 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC) and length >= 7:
+            size = (int.from_bytes(body[3:5], "big"), int.from_bytes(body[1:3], "big"))
         i += length
+        if marker == 0xDA:                    # the scan's coded data, up to the next marker
+            while True:
+                k = data.find(b"\xff", i)
+                if k < 0:
+                    i = n
+                    break
+                m = k + 1
+                while m < n and data[m] == 0xFF:
+                    m += 1
+                if m >= n:
+                    i = n
+                    break
+                if data[m] == 0x00 or 0xD0 <= data[m] <= 0xD7:
+                    i = m + 1                 # a stuffed byte or a restart marker
+                    continue
+                i = k
+                break
+    if not ended:
+        problems.add("photo:jpeg")
+    elif i < n:
+        problems.add("photo:trailing-data")
     if size is None:
-        problems.append("photo:jpeg")
-    return sorted(set(problems)), size
+        problems.add("photo:jpeg")
+    return sorted(problems), size
 
 
 def sha256_file(path: Path) -> str:
@@ -781,15 +836,23 @@ EXPORT_COLUMNS = ("code", "position", "sub", "verdict", "better_name", "shown_by
                   "recognised", "looked_up", "notes", "client_saved_at", "saved_at")
 
 
+def csv_safe(value) -> str:
+    """A cell a spreadsheet will not run: text starting = + - @, a tab or a CR gets a
+    leading single quote."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
 def export(root: Path, out_dir: Path) -> tuple[int, int]:
-    """latest.csv (one row per loaded code: its current answer, blank when none) and
-    history.csv (every response row, oldest first). Returns their row counts."""
+    """latest.csv (one row per code and reviewer: that reviewer's current answer; a code
+    nobody has answered gets one blank row) and history.csv (every response row, oldest
+    first). Returns their row counts."""
     store = Store(root)
     positions = store.positions()
     rows = store.history()
-    latest: dict[str, sqlite3.Row] = {}
+    latest: dict[tuple[str, str], sqlite3.Row] = {}
     for r in rows:
-        latest[r["code"]] = r
+        latest[(r["code"], r["sub"])] = r
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -800,36 +863,48 @@ def export(root: Path, out_dir: Path) -> tuple[int, int]:
                 r["better_name"] or "", r["shown_by"] or "", int(r["recognised"]),
                 int(r["looked_up"]), r["notes"] or "", r["client_saved_at"] or "", r["saved_at"]]
 
-    codes = sorted(set(positions) | set(latest), key=lambda c: (positions.get(c, 10**9), c))
+    answered_codes = {code for code, _ in latest}
+    keys = sorted(list(latest) + [(c, None) for c in set(positions) - answered_codes],
+                  key=lambda k: (positions.get(k[0], 10**9), k[0], k[1] or ""))
     with open(out_dir / "latest.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(EXPORT_COLUMNS)
-        for code in codes:
-            w.writerow(as_row(code, latest.get(code)))
+        for code, sub in keys:
+            w.writerow([csv_safe(v) for v in as_row(code, latest.get((code, sub)))])
     with open(out_dir / "history.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(("id",) + EXPORT_COLUMNS)
         for r in rows:
-            w.writerow([r["id"]] + as_row(r["code"], r))
-    return len(codes), len(rows)
+            w.writerow([csv_safe(v) for v in [r["id"]] + as_row(r["code"], r)])
+    return len(keys), len(rows)
 
 
 # --- serving ---------------------------------------------------------------------------
 
 def is_e17_path(path: str) -> bool:
+    path = "/" + path.lstrip("/")                 # "//review/..." too
     return path.startswith(PAGE_PREFIX) or path == PAGE_PREFIX.rstrip("/") \
         or path.startswith(API_PREFIX) or path == API_PREFIX.rstrip("/")
 
 
+# The token after /review/ or /api/e17/, however many slashes lead, and in its encoded form
+# in a sign-in link's returnTo (%2Freview%2F<token>).
+_TOKEN_IN_PATH = re.compile(r"(/+(?:review|api/+e17)/+)[^/?#&\s\"]+")
+_TOKEN_ENCODED = re.compile(r"((?:%2F)+(?:review|api(?:%2F)+e17)(?:%2F)+)[^%/?#&\s\"]+",
+                            re.IGNORECASE)
+
+
+def redact_token(text: str) -> str:
+    return _TOKEN_ENCODED.sub(r"\1(token)", _TOKEN_IN_PATH.sub(r"\1(token)", text))
+
+
 class TokenRedactor(logging.Filter):
     """Keeps the review link's token out of the server's access log."""
-    _re = re.compile(r"^(/review/|/api/e17/)[^/?]+")
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
-        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str) \
-                and self._re.match(args[2]):
-            record.args = (*args[:2], self._re.sub(r"\1(token)", args[2]), *args[3:])
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], redact_token(args[2]), *args[3:])
         return True
 
 
@@ -901,10 +976,15 @@ def register(app, *, settings: Settings, person: Callable, web_dist: Path | None
 
     @app.middleware("http")
     async def e17_headers(request: Request, call_next):
-        response = await call_next(request)
-        if is_e17_path(request.url.path):
-            for k, v in HEADERS.items():
-                response.headers[k] = v
+        if not is_e17_path(request.url.path):
+            return await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:  # noqa: BLE001 - a 500 still carries the e17 headers
+            log.exception("e17 request failed")
+            return PlainTextResponse("Internal error", status_code=500, headers=HEADERS)
+        for k, v in HEADERS.items():
+            response.headers[k] = v
         return response
 
     @app.get("/review/{token}", include_in_schema=False)
@@ -928,10 +1008,11 @@ def register(app, *, settings: Settings, person: Callable, web_dist: Path | None
 
     @app.get("/api/e17/{token}/items", include_in_schema=False)
     def e17_items(request: Request, token: str):
-        if reviewer(request, token) is None:
+        sub = reviewer(request, token)
+        if sub is None:
             return not_found()
         positions = store.positions()
-        answered = store.answered()
+        answered = store.answered(sub)
         items = [{"code": c, "position": p, "answered": c in answered}
                  for c, p in sorted(positions.items(), key=lambda kv: kv[1])]
         return JSONResponse({"count": store.manifest()["count"], "items": items},
@@ -939,12 +1020,13 @@ def register(app, *, settings: Settings, person: Callable, web_dist: Path | None
 
     @app.get("/api/e17/{token}/item/{code}", include_in_schema=False)
     def e17_item(request: Request, token: str, code: str):
-        if reviewer(request, token) is None:
+        sub = reviewer(request, token)
+        if sub is None:
             return not_found()
         item = store.item(code)
         if item is None:
             return not_found()
-        return JSONResponse({**item, "response": store.latest(code)}, headers=HEADERS)
+        return JSONResponse({**item, "response": store.latest(code, sub)}, headers=HEADERS)
 
     @app.get("/api/e17/{token}/photo/{code}/{n}", include_in_schema=False)
     def e17_photo(request: Request, token: str, code: str, n: str):
@@ -1033,7 +1115,7 @@ def run_cli(args, out=print, err=None) -> int:
             out(f"no packet loaded in {root}")
             return 0
         out(f"{root}: packet {store.packet_sha()[:12]}, {len(store.positions())} items, "
-            f"{len(store.answered())} answered, {len(store.history())} response rows")
+            f"{len(store.answered(None))} answered by someone, {len(store.history())} response rows")
         return 0
     if args.action == "new-token":
         token = secrets.token_urlsafe(32)

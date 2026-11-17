@@ -62,8 +62,10 @@ export class Saver {
     this.set({ status: savedAt ? "saved" : "idle", savedAt, failures: 0 });
   }
 
-  change(answer: Answer): void {
-    if (this.code === null) return;
+  /** An edit made on item `code`. Refused (false) unless that is the open item, so an edit
+   * can never be saved under another item's code. */
+  change(code: string, answer: Answer): boolean {
+    if (this.code === null || code !== this.code) return false;
     this.draft = answer;
     this.changes += 1;
     if (this.state.status !== "failed") this.set({ ...this.state, status: "pending" });
@@ -72,6 +74,7 @@ export class Saver {
       this.timer = null;
       this.flush();
     }, this.o.debounceMs);
+    return true;
   }
 
   /** Run `then` once everything is saved: at once if it is, else after the save lands

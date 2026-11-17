@@ -12,10 +12,12 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 
-def hit(no, name, identity, coverage, accession=None):
+def hit(no, name, identity, coverage, *accession):
+    """A local hit (no accession) or, with an accession (None: a community sequence, schema
+    v1.3), a GenBank hit."""
     h = {"hit_no": no, "name": name, "identity": identity, "coverage": coverage}
-    if accession is not None:
-        h["accession"] = accession
+    if accession:
+        h["accession"] = accession[0]
     return h
 
 
@@ -73,6 +75,7 @@ ITEMS = [
          photos=((800, 600),),
          sequences=[seq(1, local=[("Mockia fictiva", 98.4, 100), ("Mockia inventa", 98.4, 99)],
                         genbank=[("Mockia inventa", 99.0, 100, "ZZ000041.1"),
+                                 ("Mockia inventa", 98.7, 99, None),      # a community sequence
                                  ("Mockia", 97.0, 100, "ZZ000042.1")])]),
 ]
 # The builder's shuffle: display order is not the code order.

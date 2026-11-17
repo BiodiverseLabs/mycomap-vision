@@ -43,9 +43,9 @@ function rig() {
 test("changes are saved once, about 600 ms after the last one, with the latest answer", async () => {
   const r = rig();
   r.saver.start("K7Q2M", null);
-  r.saver.change({ ...EMPTY_ANSWER, verdict: "wrong" });
+  r.saver.change("K7Q2M", { ...EMPTY_ANSWER, verdict: "wrong" });
   await r.advance(400);
-  r.saver.change({ ...EMPTY_ANSWER, verdict: "wrong", shown_by: "both" });
+  r.saver.change("K7Q2M", { ...EMPTY_ANSWER, verdict: "wrong", shown_by: "both" });
   await r.advance(500);
   assert.equal(r.posts.length, 0, "still inside the pause");
   assert.equal(r.last().status, "pending");
@@ -62,7 +62,7 @@ test("changes are saved once, about 600 ms after the last one, with the latest a
 test("a failed save stays visible and is retried until it lands", async () => {
   const r = rig();
   r.saver.start("K7Q2M", null);
-  r.saver.change({ ...EMPTY_ANSWER, verdict: "supported" });
+  r.saver.change("K7Q2M", { ...EMPTY_ANSWER, verdict: "supported" });
   await r.advance(600);
   await r.settle(false);
   assert.equal(r.last().status, "failed");
@@ -84,7 +84,7 @@ test("a failed save stays visible and is retried until it lands", async () => {
 test("leaving waits for the save to land, and a failed save holds it", async () => {
   const r = rig();
   r.saver.start("K7Q2M", null);
-  r.saver.change({ ...EMPTY_ANSWER, notes: "x" });
+  r.saver.change("K7Q2M", { ...EMPTY_ANSWER, notes: "x" });
   let left = 0;
   r.saver.whenClean(() => left++);
   assert.equal(r.posts.length, 1, "saved at once, not after the pause");
@@ -102,9 +102,9 @@ test("a change made while a save is on its way is saved after it", async () => {
   const r = rig();
   r.saver.start("K7Q2M", "2026-11-16T20:00:00Z");
   assert.equal(r.last().status, "saved");
-  r.saver.change({ ...EMPTY_ANSWER, verdict: "wrong" });
+  r.saver.change("K7Q2M", { ...EMPTY_ANSWER, verdict: "wrong" });
   await r.advance(600);
-  r.saver.change({ ...EMPTY_ANSWER, verdict: "cannot_tell" });
+  r.saver.change("K7Q2M", { ...EMPTY_ANSWER, verdict: "cannot_tell" });
   await r.settle(true);
   assert.equal(r.saver.clean, false);
   assert.equal(r.posts.length, 2, "the newer answer goes at once");
@@ -120,4 +120,27 @@ test("leaving a clean item happens at once", () => {
   r.saver.whenClean(() => { left = true; });
   assert.ok(left);
   assert.equal(r.posts.length, 0);
+});
+
+test("an edit is saved only under the item it was made on, never the item opened since", async () => {
+  const r = rig();
+  r.saver.start("K7Q2M", null);
+  assert.equal(r.saver.change("K7Q2M", { ...EMPTY_ANSWER, notes: "about K7Q2M" }), true);
+  await r.advance(600);
+  await r.settle(true);
+  r.saver.start("PLM4T", null);
+  // A late edit from the page still showing K7Q2M's answer: refused, nothing posted.
+  assert.equal(r.saver.change("K7Q2M", { ...EMPTY_ANSWER, notes: "about K7Q2M", verdict: "wrong" }), false);
+  await r.advance(5000);
+  assert.equal(r.posts.length, 1);
+  assert.ok(r.saver.clean);
+  assert.equal(r.saver.change("PLM4T", { ...EMPTY_ANSWER, verdict: "supported" }), true);
+  await r.advance(600);
+  assert.deepEqual(r.posts.map((p) => [p.code, p.body.notes, p.body.verdict]),
+    [["K7Q2M", "about K7Q2M", null], ["PLM4T", "", "supported"]]);
+});
+
+test("nothing is saved before an item is open", () => {
+  const r = rig();
+  assert.equal(r.saver.change("K7Q2M", { ...EMPTY_ANSWER, verdict: "wrong" }), false);
 });

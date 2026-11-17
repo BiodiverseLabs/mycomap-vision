@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import struct
@@ -193,7 +194,14 @@ def test_an_extra_field_anywhere_in_the_manifest_is_refused(tmp_path, where):
     (lambda it: it.update(code="K7Q2N"), "schema:file-name"),
     (lambda it: it.update(code="k7q2m"), "schema:pattern"),
     (lambda it: it["sequences"][0]["genbank"][0].update(accession="ZZ1.1"), "schema:pattern"),
-    (lambda it: it["sequences"][0]["local"][1].update(hit_no=1), "schema:unique"),
+    (lambda it: it["sequences"][0]["local"][1].update(hit_no=1), "schema:hit-order"),
+    (lambda it: it["sequences"][0]["local"][0].update(hit_no=2), "schema:hit-order"),
+    (lambda it: it["sequences"][0]["genbank"][3].update(hit_no=7), "schema:hit-order"),
+    (lambda it: it.update(place="Ontario 2"), "schema:pattern"),
+    (lambda it: it.update(place="Zone 17T"), "schema:pattern"),
+    (lambda it: it["sequences"][0]["genbank"][0].update(accession=""), "schema:length"),
+    (lambda it: it["sequences"][0]["genbank"][0].update(accession=""), "schema:pattern"),
+    (lambda it: it["sequences"][0]["genbank"][0].update(accession=12345), "schema:type"),
     (lambda it: it.pop("place"), "schema:missing"),
     (lambda it: it["sequences"][0]["genbank"][0].pop("accession"), "schema:missing"),
     (lambda it: it.update(photos=[{"n": i + 1, "width": 10, "height": 10} for i in range(41)]),
@@ -424,10 +432,23 @@ def test_the_current_answer_is_the_latest_row(tmp_path):
     store.add("K7Q2M", REVIEWER, {"verdict": "wrong", "better_name": "Fakeus amoenus"})
     store.add("K7Q2M", REVIEWER, {"verdict": "supported"})
     store.add("00042", REVIEWER, {"notes": "first look"})
-    assert store.latest("K7Q2M")["verdict"] == "supported"
-    assert store.latest("K7Q2M")["better_name"] is None
-    assert store.answered() == {"K7Q2M"}               # notes alone are not an answer
-    assert store.latest("PLM4T") is None
+    assert store.latest("K7Q2M", REVIEWER)["verdict"] == "supported"
+    assert store.latest("K7Q2M", REVIEWER)["better_name"] is None
+    assert store.answered(REVIEWER) == {"K7Q2M"}       # notes alone are not an answer
+    assert store.latest("PLM4T", REVIEWER) is None
+
+
+def test_each_reviewer_has_their_own_current_answer(tmp_path):
+    store = loaded_store(tmp_path)
+    store.add("K7Q2M", REVIEWER, {"verdict": "wrong", "notes": "A's note"})
+    store.add("K7Q2M", OTHER, {"notes": "B, no verdict yet"})
+    store.add("PLM4T", OTHER, {"verdict": "supported"})
+    assert store.latest("K7Q2M", REVIEWER)["notes"] == "A's note"
+    assert store.latest("K7Q2M", OTHER)["notes"] == "B, no verdict yet"
+    assert store.answered(REVIEWER) == {"K7Q2M"}
+    assert store.answered(OTHER) == {"PLM4T"}
+    assert store.answered(None) == {"K7Q2M", "PLM4T"}
+    assert store.latest("PLM4T", REVIEWER) is None
 
 
 def test_export_writes_the_current_answer_per_code_and_every_row(tmp_path):
@@ -773,7 +794,9 @@ def test_the_module_imports_nothing_that_identifies_logs_or_keeps_answers():
                           "import sys, mycomap_vision.e17review; print(' '.join(sorted("
                           "m for m in sys.modules if m.startswith('mycomap_vision'))))"],
                          capture_output=True, text=True, check=True,
-                         cwd=Path(E.__file__).parents[2]).stdout.split()
+                         cwd=Path(E.__file__).parents[2],
+                         env={**os.environ, "PYTHONPATH": str(Path(E.__file__).parents[1])}
+                         ).stdout.split()
     assert out == ["mycomap_vision", "mycomap_vision.config", "mycomap_vision.e17review"]
 
 
@@ -806,3 +829,200 @@ def test_cli_export_and_status(tmp_path, monkeypatch, capsys):
     token = lines[0].rsplit(" ", 1)[1]
     assert lines[1] == f"MV_E17_TOKEN_SHA256={hashlib.sha256(token.encode()).hexdigest()}"
     assert E.TOKEN_RE.match(token)
+
+
+# --- review fixes (independent review of 46a8a35) ---------------------------------------------
+
+def test_a_second_reviewer_never_sees_or_copies_the_first_reviewers_answer(conn, tmp_path):
+    app = site(conn, tmp_path, reviewers=(REVIEWER, OTHER))
+    a, b = browser(app, REVIEWER), browser(app, OTHER)
+    assert a.post(f"/api/e17/{TOKEN}/response/K7Q2M",
+                  json={"verdict": "wrong", "notes": "A's note"}).status_code == 200
+    assert b.get(f"/api/e17/{TOKEN}/item/K7Q2M").json()["response"] is None
+    assert [i for i in b.get(f"/api/e17/{TOKEN}/items").json()["items"] if i["answered"]] == []
+    assert [i["code"] for i in a.get(f"/api/e17/{TOKEN}/items").json()["items"]
+            if i["answered"]] == ["K7Q2M"]
+    b.post(f"/api/e17/{TOKEN}/response/K7Q2M", json={"verdict": "supported"})
+    assert a.get(f"/api/e17/{TOKEN}/item/K7Q2M").json()["response"]["verdict"] == "wrong"
+    assert b.get(f"/api/e17/{TOKEN}/item/K7Q2M").json()["response"]["notes"] is None
+
+
+def test_latest_csv_has_one_row_per_code_and_reviewer(tmp_path):
+    import csv
+    store = loaded_store(tmp_path)
+    store.add("K7Q2M", REVIEWER, {"verdict": "wrong"})
+    store.add("K7Q2M", OTHER, {"verdict": "supported"})
+    store.add("K7Q2M", REVIEWER, {"verdict": "cannot_tell"})
+    n_latest, n_history = E.export(store.root, tmp_path / "out")
+    rows = list(csv.DictReader(open(tmp_path / "out" / "latest.csv", encoding="utf-8")))
+    k = sorted((r["sub"], r["verdict"]) for r in rows if r["code"] == "K7Q2M")
+    assert k == [(OTHER, "supported"), (REVIEWER, "cannot_tell")]
+    assert sum(1 for r in rows if r["code"] == "PLM4T") == 1       # unanswered: one blank row
+    assert (n_latest, n_history) == (7, 3)
+
+
+@pytest.mark.parametrize("text", ["=HYPERLINK(\"x\")", "+1", "-2+3", "@SUM(A1)", "\tx", "\rx"])
+def test_exported_cells_never_start_a_spreadsheet_formula(tmp_path, text):
+    import csv
+    store = loaded_store(tmp_path)
+    store.add("K7Q2M", REVIEWER, {"verdict": "wrong", "notes": text, "better_name": text})
+    E.export(store.root, tmp_path / "out")
+    for name in ("latest.csv", "history.csv"):
+        rows = list(csv.DictReader(open(tmp_path / "out" / name, encoding="utf-8", newline="")))
+        k = next(r for r in rows if r["code"] == "K7Q2M")
+        assert k["notes"] == "'" + text and k["better_name"] == "'" + text
+    assert E.csv_safe("Fakeus exemplaris") == "Fakeus exemplaris" and E.csv_safe(3) == "3"
+
+
+@pytest.mark.parametrize("value", ["MO54321", "MO 54321", "iNat 54321", "obs 12345", "mc-12345",
+                                   "from Mushroom Observer", "an iNat find",
+                                   "15 March 2024", "March 15, 2024", "15-03-2024", "15.03.2024",
+                                   "2024.03.15", "42.3601, -71.0589", "42\u00b021'N 71\u00b003'W",
+                                   "42 21' 30\""])
+def test_the_wider_rules_refuse_more_ids_sites_dates_and_coordinates(value):
+    assert E.scan_string(value) is not None
+    it = base_item()
+    it["sequences"][0]["local"][0]["name"] = value
+    assert item_refusals(it), value
+
+
+@pytest.mark.parametrize("value", ["ABCD123-45", "Inventia sp. 'ABCD123-45'", "McKnightia fakei",
+                                   "Mohavea fictiva", "Orgella 1234x", "Inatula vera",
+                                   "Cortinarius sp. 'IN01'", "September 2025", "unnamed local sequence"])
+def test_prefix_words_inside_names_do_not_trip_the_rules(value):
+    assert E.scan_string(value) is None
+
+
+def test_a_place_is_letters_and_a_little_punctuation(tmp_path):
+    for ok in ("Ontario", "Qu\u00e9bec", "Newfoundland and Labrador", "St. John's (N.L.)", "Baja California-Sur"):
+        it = base_item()
+        it["place"] = ok
+        assert item_refusals(it) == [], ok
+
+
+def test_a_community_sequence_has_a_null_accession(tmp_path):
+    it = base_item()
+    it["sequences"][0]["genbank"][1]["accession"] = None
+    assert item_refusals(it) == []
+    folder, sha = packet(tmp_path)
+    pk = E.check_packet(folder, sha)
+    assert any(h["accession"] is None for it in pk.items.values() for s in it["sequences"]
+               for h in s["genbank"])
+
+
+def _jpeg(**kw):
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (100, 50, 20)).save(buf, "JPEG", **kw)
+    return buf.getvalue()
+
+
+def test_bytes_after_the_end_of_image_are_refused():
+    clean = _jpeg()
+    assert E.jpeg_check(clean) == ([], (64, 48))
+    exif = Image.new("RGB", (8, 8))
+    ex = exif.getexif()
+    ex[0x010F] = "Phone"
+    buf = io.BytesIO()
+    exif.save(buf, "JPEG", exif=ex.tobytes())
+    problems, _ = E.jpeg_check(clean + buf.getvalue())      # an MPF / motion-photo trailer
+    assert "photo:trailing-data" in problems
+    assert "photo:trailing-data" in E.jpeg_check(clean + b"\x00")[0]
+
+
+def test_a_comment_between_progressive_scans_is_found():
+    prog = _jpeg(progressive=True)
+    first = prog.find(b"\xff\xda")
+    second = prog.find(b"\xff\xda", first + 2)
+    assert second > 0, "the test photo must have two scans"
+    com = _segment(0xFE, b"secret 2024-03-15")
+    assert "photo:comment" in E.jpeg_check(prog[:second] + com + prog[second:])[0]
+    assert E.jpeg_check(prog)[0] == []
+
+
+@pytest.mark.parametrize("marker,payload,rule", [
+    (0xEB, b"JP\x00\x00jumb", "photo:app11"),
+    (0xE3, b"x", "photo:app3"),
+    (0xEC, b"Ducky", "photo:app12"),
+    (0xE0, b"NOTJFIF\x00", "photo:app0"),
+    (0xE2, b"MPF\x00", "photo:app2"),
+])
+def test_only_jfif_icc_and_adobe_segments_are_allowed(marker, payload, rule):
+    clean = _jpeg()
+    assert rule in E.jpeg_check(clean[:2] + _segment(marker, payload) + clean[2:])[0]
+
+
+def test_an_icc_profile_and_an_adobe_segment_are_allowed():
+    clean = _jpeg()
+    data = clean[:2] + _segment(0xE2, b"ICC_PROFILE\x00\x01\x01" + b"\x00" * 16) \
+        + _segment(0xEE, b"Adobe\x00d\x00\x00\x00\x00\x01") + clean[2:]
+    assert E.jpeg_check(data) == ([], (64, 48))
+
+
+def test_a_cut_off_photo_is_refused():
+    clean = _jpeg()
+    assert "photo:jpeg" in E.jpeg_check(clean[:-2])[0]
+
+
+@pytest.mark.parametrize("path", [
+    f"/auth/signin?returnTo=%2Freview%2F{TOKEN}",
+    f"/auth/signin?returnTo=%2freview%2f{TOKEN}%2Fassets%2F{JS}",
+    f"/auth/signin?returnTo=%2Fapi%2Fe17%2F{TOKEN}%2Fitems",
+    f"//review/{TOKEN}",
+    f"///api/e17/{TOKEN}/items",
+    f"/review/{TOKEN}?x=1",
+])
+def test_the_token_stays_out_of_the_access_log_in_any_form(path):
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                            ("1.2.3.4:5", "GET", path, "1.1", 302), None)
+    E.TokenRedactor().filter(rec)
+    assert TOKEN not in rec.getMessage() and "(token)" in rec.getMessage()
+
+
+def _raw_get(app, path):
+    """A request whose path is sent as written, without the client normalising it."""
+    import asyncio
+    out = {}
+
+    async def run():
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "method": "GET", "scheme": "http", "path": path, "raw_path": path.encode(),
+                 "query_string": b"", "root_path": "", "headers": [(b"host", b"testserver")],
+                 "client": ("1.2.3.4", 1), "server": ("testserver", 80)}
+        body = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(msg):
+            if msg["type"] == "http.response.start":
+                out["status"] = msg["status"]
+            elif msg["type"] == "http.response.body":
+                body.append(msg.get("body", b""))
+        await app(scope, receive, send)
+        out["body"] = b"".join(body)
+    asyncio.run(run())
+    return out
+
+
+@pytest.mark.parametrize("path", [f"/./e17review/assets/{JS}", f"/assets/../e17review/assets/{JS}",
+                                  "/./e17review/.vite/manifest.json", f"//e17review/assets/{JS}",
+                                  f"/e17review/./assets/{JS}", "/e17review", "/./e17review"])
+def test_the_site_never_serves_the_bundle_however_the_path_is_written(conn, tmp_path, path):
+    r = _raw_get(site(conn, tmp_path), path)
+    assert r["status"] == 404, (path, r["status"], r["body"][:60])
+    assert b"console.log" not in r["body"] and b"isEntry" not in r["body"]
+
+
+def test_a_server_error_on_an_e17_path_still_carries_the_e17_headers(conn, tmp_path, monkeypatch):
+    app = site(conn, tmp_path)
+
+    def broken(self, code):
+        raise RuntimeError("disk gone")
+    monkeypatch.setattr(E.Store, "item", broken)
+    c = TestClient(app, follow_redirects=False, raise_server_exceptions=False)
+    signer = SigninConfig(mode="identify", origin=HERE, issuer=ISSUER, public_key=PUBLIC_KEY,
+                          secret=SECRET).sessions
+    c.cookies.set(SESSION_COOKIE, signer.sign({"sub": REVIEWER, "exp": time.time() + 3600}))
+    r = c.get(f"/api/e17/{TOKEN}/item/K7Q2M")
+    assert r.status_code == 500 and "disk gone" not in r.text
+    assert_e17_headers(r)

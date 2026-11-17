@@ -6,7 +6,8 @@ export type Hit = {
   name: string;
   identity: number;
   coverage: number;
-  accession?: string;
+  /** GenBank only: an accession, or null for a community sequence (schema v1.3). */
+  accession?: string | null;
 };
 export type Search = "stored" | "none";
 export type Sequence = {
@@ -402,4 +403,16 @@ export function savedText(iso: string | null | undefined): string {
 export function autoOpenInstructions(items: ListEntry[] | null, alreadyDecided: boolean): boolean {
   if (alreadyDecided || items === null) return false;
   return items.every((it) => !it.answered);
+}
+
+// --- the accession column ---------------------------------------------------------------------
+
+export type AccessionCell = { kind: "link"; text: string; href: string } | { kind: "text"; text: string };
+export const COMMUNITY_SEQUENCE = "community sequence";
+
+/** A GenBank row's accession: a link to NCBI, or "community sequence" (null, schema v1.3)
+ * with no link. */
+export function accessionCell(hit: Hit): AccessionCell {
+  if (!hit.accession) return { kind: "text", text: COMMUNITY_SEQUENCE };
+  return { kind: "link", text: hit.accession, href: `https://www.ncbi.nlm.nih.gov/nuccore/${encodeURIComponent(hit.accession)}` };
 }

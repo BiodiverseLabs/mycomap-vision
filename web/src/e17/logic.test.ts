@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   agreement, applyKey, autocompleteCandidates, autoOpenInstructions, chips, DEFAULT_SORT, EMPTY_ANSWER, goToIndex,
   isBareGenus, keyAction, MARKER, nextSort, savedText, sortHits, speciesKey, stepIndex, summarise, summaryLines,
-  TABLE_STATE_TEXT, tableState,
+  TABLE_STATE_TEXT, tableState, accessionCell, COMMUNITY_SEQUENCE,
   type Hit, type Item, type Search, type Sequence,
 } from "./logic";
 
@@ -304,4 +304,28 @@ test("the instructions open by themselves at most once a session, and not before
   const fresh = list.map((it) => ({ ...it, answered: false }));
   assert.equal(autoOpenInstructions(fresh, true), false, "already opened (and closed) once");
   assert.equal(autoOpenInstructions(null, false), false);
+});
+
+// --- community sequences (schema v1.3) ------------------------------------------------------
+
+test("a GenBank row with no accession is a community sequence, with no link", () => {
+  const community: Hit = { hit_no: 2, name: "Fakeus amoenus", identity: 97.1, coverage: 99, accession: null };
+  assert.deepEqual(accessionCell(community), { kind: "text", text: "community sequence" });
+  assert.equal(COMMUNITY_SEQUENCE, "community sequence");
+  assert.deepEqual(accessionCell(h(1, "Fakeus exemplaris", 98, 99, "ZZ000001.1")),
+    { kind: "link", text: "ZZ000001.1", href: "https://www.ncbi.nlm.nih.gov/nuccore/ZZ000001.1" });
+});
+
+test("community sequence rows sort and colour like any other", () => {
+  const rows: Hit[] = [
+    h(1, "Otherella quieta", 96, 90, "ZZ000001.1"),
+    { hit_no: 2, name: "Fakeus exemplaris", identity: 99.2, coverage: 100, accession: null },
+    { hit_no: 3, name: "Fakeus amoenus", identity: 97.5, coverage: 95, accession: null },
+  ];
+  assert.deepEqual(sortHits(rows, { key: "identity", dir: "desc" }).map((x) => x.rank), [2, 3, 1]);
+  assert.equal(agreement(rows[1].name, "Fakeus exemplaris"), "sp");
+  assert.equal(agreement(rows[2].name, "Fakeus exemplaris"), "gen");
+  const s = summarise(seq([], rows), "Fakeus exemplaris");
+  assert.deepEqual(s.genbank, { rank: 2, identity: 99.2 });
+  assert.equal(chips(item("Fakeus exemplaris", [seq([], rows)])).names[0].name, "Fakeus amoenus");
 });

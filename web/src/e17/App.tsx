@@ -7,7 +7,7 @@ import { client, tokenFromPath, type ItemWithResponse } from "./api";
 import {
   agreement, answerFrom, applyKey, autocompleteCandidates, chips as chipsOf, coverageText, DEFAULT_SORT, EMPTY_ANSWER,
   genusOf, goToIndex, keyAction, lengthText, MARKER, nextSort, pct, savedText, sortHits, stepIndex, summarise,
-  summaryLines, tableState, TABLE_STATE_TEXT, autoOpenInstructions, whenText,
+  summaryLines, accessionCell, tableState, TABLE_STATE_TEXT, autoOpenInstructions, whenText,
   type Answer, type Hit, type Item, type ListEntry, type Sequence, type ShownBy, type Sort, type SortKey, type TableState, type Verdict,
 } from "./logic";
 import { parseMarkdown, type Inline, type ListItem } from "./markdown";
@@ -55,7 +55,10 @@ export function App() {
   const [index, setIndex] = useState<number | null>(null);
   const [item, setItem] = useState<ItemWithResponse | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  const [answer, setAnswer] = useState<Answer>(EMPTY_ANSWER);
+  // The answer being edited and the item it belongs to, always set together: an edit is
+  // saved under the code it was made on, never another item's.
+  const [draft, setDraft] = useState<{ code: string | null; answer: Answer }>({ code: null, answer: EMPTY_ANSWER });
+  const answer = draft.answer;
   const [save, setSave] = useState<SaveState>({ status: "idle", savedAt: null, failures: 0 });
   const [held, setHeld] = useState(false);
   const [unansweredOnly, setUnansweredOnly] = useState(false);
@@ -66,8 +69,8 @@ export function App() {
   const [help, setHelp] = useState(false);
   const autoOpened = useRef(false);
   const betterRef = useRef<HTMLInputElement>(null);
-  const answerRef = useRef(answer);
-  answerRef.current = answer;
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
 
   const saver = useMemo(() => new Saver({
     post: api.respond,
@@ -104,9 +107,8 @@ export function App() {
     api.item(entry.code).then((it) => {
       if (!live) return;
       setItem(it);
-      const a = answerFrom(it.response);
-      setAnswer(a);
       saver.start(it.code, it.response?.saved_at ?? null);
+      setDraft({ code: it.code, answer: answerFrom(it.response) });
     }, () => live && setFailed("This item could not be loaded. Reload the page to try again."));
     if (window.location.hash !== `#${entry.position}`) {
       window.history.replaceState(null, "", `#${entry.position}`);
@@ -130,10 +132,13 @@ export function App() {
     return () => window.removeEventListener("beforeunload", warn);
   }, [saver]);
 
-  const change = useCallback((next: Answer) => {
-    setAnswer(next);
-    saver.change(next);
+  /** An edit to the answer of item `code`; the saver refuses it if that item is no longer
+   * the open one. */
+  const edit = useCallback((code: string | null, next: Answer) => {
+    if (code === null || !saver.change(code, next)) return;
+    setDraft({ code, answer: next });
   }, [saver]);
+  const change = (next: Answer) => edit(draft.code, next);
 
   /** Leave for another item only once this one's save has landed. */
   const go = useCallback((target: number | null) => {
@@ -172,13 +177,14 @@ export function App() {
       else if (action.type === "prev") step(-1);
       else if (action.type === "focusBetterName") betterRef.current?.focus();
       else if (item) {
-        const next = applyKey(answerRef.current, action);
-        if (next) change(next);
+        const d = draftRef.current;
+        const next = applyKey(d.answer, action);
+        if (next) edit(d.code, next);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [lightbox, help, item, step, movePhoto, change]);
+  }, [lightbox, help, item, step, movePhoto, edit]);
 
   const answered = list ? list.items.filter((it) => it.answered).length : 0;
   const count = list?.count ?? 0;
@@ -425,15 +431,7 @@ function HitTable({ title, hits, state, reviewed, withAccession }: { title: stri
                   <td className="nm">{h.name}</td>
                   <td className="num">{pct(h.identity)}</td>
                   <td className="num">{coverageText(h.coverage)}</td>
-                  {withAccession && (
-                    <td>
-                      {h.accession && (
-                        <a href={`https://www.ncbi.nlm.nih.gov/nuccore/${encodeURIComponent(h.accession)}`} target="_blank" rel="noreferrer noopener">
-                          {h.accession}
-                        </a>
-                      )}
-                    </td>
-                  )}
+                  {withAccession && <AccessionTd hit={h} />}
                   <td className="mk">{MARKER[a]}</td>
                 </tr>
               );
@@ -442,6 +440,17 @@ function HitTable({ title, hits, state, reviewed, withAccession }: { title: stri
         </table>
       )}
     </div>
+  );
+}
+
+function AccessionTd({ hit }: { hit: Hit }) {
+  const cell = accessionCell(hit);
+  return (
+    <td>
+      {cell.kind === "link"
+        ? <a href={cell.href} target="_blank" rel="noreferrer noopener">{cell.text}</a>
+        : <span className="community">{cell.text}</span>}
+    </td>
   );
 }
 

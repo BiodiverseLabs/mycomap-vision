@@ -221,6 +221,11 @@ sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
+`deploy.sh` never touches nginx. When either file changes in the repo, copy **both** again
+with the first three lines above, then `sudo nginx -t && sudo systemctl reload nginx`.
+They change together: the snippet holds no Referrer-Policy, and the site file sets it,
+`no-referrer` with no access log for the E17 review page's `/review/` and `/api/e17/`.
+
 ### 10. Verify
 
 ```bash

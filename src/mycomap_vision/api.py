@@ -4241,15 +4241,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     # non-API path gets index.html so client-side routes work on reload.
     if web_dist and (web_dist / "index.html").exists():
         root = web_dist.resolve()
+        bundle_root = (root / e17review.BUNDLE_DIR).resolve()
 
         @app.get("/{path:path}", include_in_schema=False)
         def site(request: Request, path: str):
             if path.startswith("api/"):
                 raise HTTPException(404, "no such API route")
-            # The review page's bundle is served only behind its token (e17review.py).
-            if path == e17review.BUNDLE_DIR or path.startswith(e17review.BUNDLE_DIR + "/"):
+            target = (root / path.lstrip("/")).resolve()
+            # The review page's bundle is served only behind its token (e17review.py): never
+            # here, however the path is written (./, ../, extra slashes).
+            if target == bundle_root or target.is_relative_to(bundle_root):
                 raise HTTPException(404, "not found")
-            target = (root / path).resolve()
             if path and target.is_file() and target.is_relative_to(root):
                 return FileResponse(target)
             # The site ships favicon.png; a browser's own /favicon.ico gets it too.
