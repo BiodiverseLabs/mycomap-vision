@@ -5,7 +5,8 @@ import animate from "tailwindcss-animate";
 // two sites look and feel like one.
 export default {
   darkMode: ["class"],
-  content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  // The E17 review page (src/e17/) has its own: tailwind.e17.config.ts.
+  content: ["./index.html", "./src/**/*.{ts,tsx}", "!./src/e17/**"],
   theme: {
     extend: {
       fontFamily: {

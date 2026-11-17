@@ -35,7 +35,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Redirec
                                Response)
 from PIL import Image
 
-from . import (answercache, apidocs, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, inat_suggest, linkcards, manifest, phototypes,
+from . import (answercache, apidocs, e17review, early_answers, apiv1, byobservation, config, confusions, evaluate, fastsearch, feedback, fungusgate, geocode, identifylog, inat, inat_suggest, linkcards, manifest, phototypes,
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                nightly_review,
                excluded_looked as xl, looked, modified_photos as mp, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
@@ -380,7 +380,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                inat_suggestions: "inat_suggest.Suggestions | None | bool" = True,
                where_looked: "Callable | None | bool" = True,
                excluded_looked: "Callable | None | bool" = True,
-               excluded_unsealed: bool | None = None) -> FastAPI:
+               excluded_unsealed: bool | None = None,
+               e17: "e17review.Settings | None | bool" = True) -> FastAPI:
     """`background` starts, when their settings are present, the photographers'-answers
     sync (MV_ORG_BASE_URL + MV_ORG_VISION_KEY, every MV_PERMISSIONS_SYNC_SECONDS,
     default 300) and the licence refresh (MV_LICENSE_REFRESH_HOURS, off by default).
@@ -449,7 +450,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     `confused_with`: mycomap.org's "misidentified as" table (confusions.py) behind the
     `confused_with` field on species candidates. True reads the cache beside the manifest
-    (the nightly fills it); a confusions.Served uses that one; None or False: no field."""
+    (the nightly fills it); a confusions.Served uses that one; None or False: no field.
+
+    `e17`: the E17 blind review page (e17review.py) under /review/<token> and /api/e17/.
+    True reads MV_E17_TOKEN_SHA256, MV_E17_REVIEWERS and MV_E17_DIR; tests pass Settings;
+    None or False: every e17 path is a 404, as it is whenever a setting is missing."""
     app = FastAPI(title="MycoMap Vision", version="0.1")
     # The image tower as int8 ONNX (onnxtower.py, MV_EMBED_ONNX=1), where the release ships
     # it for the served weights; torch otherwise.
@@ -4216,6 +4221,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 return Response(status_code=304, headers=headers)
             return Response(body, media_type="application/json", headers=headers)
 
+    # The E17 blind review page (e17review.py): its own page, bundle and store, behind a path
+    # token, the session and a reviewer list. Every /review/ and /api/e17/ path answers there
+    # (a plain 404 when off), so none reaches the site's shell below. It never identifies,
+    # logs an answer or reads a record.
+    if e17 is True:
+        e17 = e17review.Settings.from_settings(manifest_path)
+    e17review.register(app, settings=e17 or e17review.Settings(
+        None, frozenset(), e17review.default_dir(manifest_path)), person=person, web_dist=web_dist)
+
     # Any other /api/v1/ path, by any method (a part turned off, a typo): a v1 404, never
     # the site's catch-all below, which would answer a POST with 405.
     @app.api_route("/api/v1/{rest:path}", include_in_schema=False,
@@ -4232,6 +4246,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def site(request: Request, path: str):
             if path.startswith("api/"):
                 raise HTTPException(404, "no such API route")
+            # The review page's bundle is served only behind its token (e17review.py).
+            if path == e17review.BUNDLE_DIR or path.startswith(e17review.BUNDLE_DIR + "/"):
+                raise HTTPException(404, "not found")
             target = (root / path).resolve()
             if path and target.is_file() and target.is_relative_to(root):
                 return FileResponse(target)
@@ -4273,5 +4290,6 @@ def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     layer = nightly.prepare(config.RELEASE_ROOT, prune=True) if on else None
     app = create_app(layer.manifest, layer=layer) if layer else create_app()
     geocode.redact_access_log()       # place names typed into the map stay out of the log
+    e17review.redact_access_log()     # and the review page's path token
     uvicorn.run(app, host=host, port=port, proxy_headers=True,
                 forwarded_allow_ips=config.setting("MV_FORWARDED_ALLOW_IPS", "127.0.0.1"))

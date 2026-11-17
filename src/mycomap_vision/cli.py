@@ -3210,8 +3210,12 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--out", help="where to write the JSON")
     from . import occtune
     occtune.add_commands(sub)       # build-occurrence, tune-occurrence, ...
+    from . import e17review
+    e17review.add_commands(sub)     # e17 load / export / status / new-token
 
     args = parser.parse_args(argv)
+    if args.command == "e17":                 # its own store and packet only: no manifest
+        return e17review.run_cli(args)
     if args.command == "identify-log":        # its own store only: no manifest
         cmd_identify_log(args)
         return 0
