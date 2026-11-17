@@ -30,11 +30,78 @@ def test_nginx_the_service_and_deploy_agree_on_the_app_port():
     assert f'PORT="${{PORT:-{service_port}}}"' in read("deploy.sh")
 
 
+def locations(conf: str) -> dict[str, str]:
+    """The TLS server's location blocks: {'/': body, '^~ /review/': body, ...}."""
+    tls = conf[conf.index("listen 443"):]
+    return {m.group(1).strip(): m.group(2)
+            for m in re.finditer(r"location ([^{]+)\{(.*?)\n    \}", tls, re.S)}
+
+
+def directives(body: str) -> list[str]:
+    return [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
 def test_every_request_passes_the_sign_in_gate_in_the_app():
     conf = read("nginx-vision.conf.template")
     # nginx must not serve the built site itself, or pages would skip the gate.
     assert "try_files" not in conf and "root /var/www/mycomap-vision" not in conf
-    assert conf.count("proxy_pass ") == 1
+    assert "alias " not in conf
+    # Every location of the site proxies to the one app, and nothing else proxies: the
+    # site (/) and the E17 review page's two prefixes, which differ only in logging and
+    # headers (below).
+    locs = locations(conf)
+    assert set(locs) == {"/", "^~ /review/", "^~ /api/e17/"}
+    assert conf.count("proxy_pass ") == len(locs)
+    for name, body in locs.items():
+        assert directives(body).count("proxy_pass http://127.0.0.1:<PORT>;") == 1, name
+
+
+def test_the_review_page_locations_log_nothing_and_send_no_referrer():
+    conf = read("nginx-vision.conf.template")
+    locs = locations(conf)
+    site = [x for x in directives(locs["/"]) if x.startswith("proxy_")]
+    for name in ("^~ /review/", "^~ /api/e17/"):
+        d = directives(locs[name])
+        assert "access_log off;" in d
+        # Its own add_header drops the server's, so it includes the snippet again.
+        assert "include /etc/nginx/snippets/mycomap-vision-headers.conf;" in d
+        assert 'add_header Referrer-Policy "no-referrer" always;' in d
+        # The same proxying as the site's location, nothing more and nothing less.
+        assert [x for x in d if x.startswith("proxy_")] == site, name
+    assert "access_log off;" not in directives(locs["/"])
+    # The snippet no longer sets a Referrer-Policy; the server sets the site's.
+    snippet = read("nginx-vision-headers.conf").splitlines()
+    assert not [ln for ln in snippet if ln.startswith("add_header") and "Referrer-Policy" in ln]
+    tls = conf[conf.index("listen 443"):]
+    server = tls[:tls.index("location /")]
+    assert 'add_header Referrer-Policy "strict-origin-when-cross-origin" always;' in server
+
+
+def test_the_review_token_never_reaches_nginx_logs():
+    conf = read("nginx-vision.conf.template")
+    locs = locations(conf)
+    for name in ("^~ /review/", "^~ /api/e17/"):
+        # An upstream error (a restart while autosave retries) logs the request line.
+        assert "error_log /var/log/nginx/error.log crit;" in directives(locs[name]), name
+    tls = conf[conf.index("listen 443"):]
+    server = tls[:tls.index("location /")]
+    assert "access_log /var/log/nginx/access.log combined if=$mv_log_request;" in server
+    # The map nginx evaluates, tried here with Python's re (same syntax for these patterns):
+    # 0 = not logged. The sign-in redirect carries the token in returnTo.
+    block = re.search(r"map \$request_uri \$mv_log_request \{(.*?)\n\}", conf, re.S).group(1)
+    rules = [(m.group(1), m.group(2)) for m in re.finditer(r"~\*(\S+)\s+(\d);", block)]
+    assert rules and "default                 1;" in block
+
+    def logged(uri: str) -> bool:
+        return not any(re.search(rx, uri, re.I) for rx, v in rules if v == "0")
+    token = "A" * 40
+    for uri in (f"/review/{token}", f"/api/e17/{token}/items", f"//review/{token}",
+                f"/auth/signin?returnTo=%2Freview%2F{token}",
+                f"/auth/signin?returnTo=%2fapi%2fe17%2f{token}%2fitems"):
+        assert not logged(uri), uri
+    for uri in ("/", "/research/benchmarks", "/api/identify", "/r/abc123",
+                "/auth/signin?returnTo=%2Fabout"):
+        assert logged(uri), uri
 
 
 def test_nginx_accepts_the_largest_request_the_app_allows():

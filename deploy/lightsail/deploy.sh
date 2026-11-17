@@ -69,6 +69,9 @@ rm -rf web/dist-next
 # From inside web/: corepack reads the pnpm version pinned there ("packageManager");
 # run from the repo root it would fetch the newest pnpm, which refuses the pin.
 (cd web && pnpm install --frozen-lockfile && pnpm exec vite build --outDir dist-next --emptyOutDir)
+# The E17 review page's own bundle (vite.e17.config.ts), served only behind its token from
+# web/dist/e17review/ (e17review.py); it goes live with the site in the same swap.
+(cd web && pnpm exec vite build --config vite.e17.config.ts --outDir dist-next/e17review --emptyOutDir)
 rm -rf web/dist-prev
 [ -d web/dist ] && mv web/dist web/dist-prev
 mv web/dist-next web/dist

@@ -10,6 +10,18 @@
 #   (nginx keeps the method across the internal redirect: a failed POST looks like a 405);
 # - header buffers big enough for security headers (a 6 KB CSP once 502'd .org);
 # - a location with its own add_header loses the server's, so each includes the snippet.
+#
+# Install or update (docs/deploy.md, "nginx site"; deploy.sh does not touch nginx): copy
+# this file AND nginx-vision-headers.conf, fill in <PORT>, nginx -t, reload.
+
+# The E17 review token must never reach nginx's access log. The review locations below
+# log nothing; this also keeps the sign-in redirect a signed-out reviewer makes
+# (/auth/signin?returnTo=%2Freview%2F<token>) and any odd spelling of those paths out of it.
+map $request_uri $mv_log_request {
+    ~*(/|%2F)review(/|%2F)  0;
+    ~*(/|%2F)e17(/|%2F)     0;
+    default                 1;
+}
 
 server {
     listen 80;
@@ -41,9 +53,57 @@ server {
     proxy_buffers 8 16k;
     proxy_busy_buffers_size 32k;
 
+    access_log /var/log/nginx/access.log combined if=$mv_log_request;
+
     include /etc/nginx/snippets/mycomap-vision-headers.conf;
+    # Not in the snippet: the review page's locations below send no-referrer instead.
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     location / {
+        proxy_pass http://127.0.0.1:<PORT>;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Replaced, not appended: the app trusts this header from 127.0.0.1 only,
+        # and $remote_addr is already the real visitor (realip above).
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Identifying runs on the CPU: a few seconds a photo, longer on a cold start.
+        proxy_read_timeout 180s;
+        proxy_request_buffering on;
+        proxy_intercept_errors off;
+    }
+
+    location ^~ /review/ {
+        # The E17 review page (e17review.py): its path carries the review token, so it is
+        # never written to nginx's access log; it sends no Referer anywhere. Its own
+        # add_header drops the server's, so the snippet is included again here.
+        access_log off;
+        # Upstream errors would log the request line, token included (e.g. during a restart).
+        error_log /var/log/nginx/error.log crit;
+        include /etc/nginx/snippets/mycomap-vision-headers.conf;
+        add_header Referrer-Policy "no-referrer" always;
+        proxy_pass http://127.0.0.1:<PORT>;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        # Replaced, not appended: the app trusts this header from 127.0.0.1 only,
+        # and $remote_addr is already the real visitor (realip above).
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Identifying runs on the CPU: a few seconds a photo, longer on a cold start.
+        proxy_read_timeout 180s;
+        proxy_request_buffering on;
+        proxy_intercept_errors off;
+    }
+
+    location ^~ /api/e17/ {
+        # The E17 review page (e17review.py): its path carries the review token, so it is
+        # never written to nginx's access log; it sends no Referer anywhere. Its own
+        # add_header drops the server's, so the snippet is included again here.
+        access_log off;
+        # Upstream errors would log the request line, token included (e.g. during a restart).
+        error_log /var/log/nginx/error.log crit;
+        include /etc/nginx/snippets/mycomap-vision-headers.conf;
+        add_header Referrer-Policy "no-referrer" always;
         proxy_pass http://127.0.0.1:<PORT>;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
