@@ -77,6 +77,33 @@ def test_the_review_page_locations_log_nothing_and_send_no_referrer():
     assert 'add_header Referrer-Policy "strict-origin-when-cross-origin" always;' in server
 
 
+def test_the_review_token_never_reaches_nginx_logs():
+    conf = read("nginx-vision.conf.template")
+    locs = locations(conf)
+    for name in ("^~ /review/", "^~ /api/e17/"):
+        # An upstream error (a restart while autosave retries) logs the request line.
+        assert "error_log /var/log/nginx/error.log crit;" in directives(locs[name]), name
+    tls = conf[conf.index("listen 443"):]
+    server = tls[:tls.index("location /")]
+    assert "access_log /var/log/nginx/access.log combined if=$mv_log_request;" in server
+    # The map nginx evaluates, tried here with Python's re (same syntax for these patterns):
+    # 0 = not logged. The sign-in redirect carries the token in returnTo.
+    block = re.search(r"map \$request_uri \$mv_log_request \{(.*?)\n\}", conf, re.S).group(1)
+    rules = [(m.group(1), m.group(2)) for m in re.finditer(r"~\*(\S+)\s+(\d);", block)]
+    assert rules and "default                 1;" in block
+
+    def logged(uri: str) -> bool:
+        return not any(re.search(rx, uri, re.I) for rx, v in rules if v == "0")
+    token = "A" * 40
+    for uri in (f"/review/{token}", f"/api/e17/{token}/items", f"//review/{token}",
+                f"/auth/signin?returnTo=%2Freview%2F{token}",
+                f"/auth/signin?returnTo=%2fapi%2fe17%2f{token}%2fitems"):
+        assert not logged(uri), uri
+    for uri in ("/", "/research/benchmarks", "/api/identify", "/r/abc123",
+                "/auth/signin?returnTo=%2Fabout"):
+        assert logged(uri), uri
+
+
 def test_nginx_accepts_the_largest_request_the_app_allows():
     mb = int(re.search(r"client_max_body_size (\d+)m;", read("nginx-vision.conf.template")).group(1))
     assert mb * 2**20 >= guards.MAX_REQUEST_BYTES

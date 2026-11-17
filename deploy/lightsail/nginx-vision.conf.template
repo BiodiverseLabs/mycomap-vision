@@ -14,6 +14,15 @@
 # Install or update (docs/deploy.md, "nginx site"; deploy.sh does not touch nginx): copy
 # this file AND nginx-vision-headers.conf, fill in <PORT>, nginx -t, reload.
 
+# The E17 review token must never reach nginx's access log. The review locations below
+# log nothing; this also keeps the sign-in redirect a signed-out reviewer makes
+# (/auth/signin?returnTo=%2Freview%2F<token>) and any odd spelling of those paths out of it.
+map $request_uri $mv_log_request {
+    ~*(/|%2F)review(/|%2F)  0;
+    ~*(/|%2F)e17(/|%2F)     0;
+    default                 1;
+}
+
 server {
     listen 80;
     listen [::]:80;
@@ -44,6 +53,8 @@ server {
     proxy_buffers 8 16k;
     proxy_busy_buffers_size 32k;
 
+    access_log /var/log/nginx/access.log combined if=$mv_log_request;
+
     include /etc/nginx/snippets/mycomap-vision-headers.conf;
     # Not in the snippet: the review page's locations below send no-referrer instead.
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -67,6 +78,8 @@ server {
         # never written to nginx's access log; it sends no Referer anywhere. Its own
         # add_header drops the server's, so the snippet is included again here.
         access_log off;
+        # Upstream errors would log the request line, token included (e.g. during a restart).
+        error_log /var/log/nginx/error.log crit;
         include /etc/nginx/snippets/mycomap-vision-headers.conf;
         add_header Referrer-Policy "no-referrer" always;
         proxy_pass http://127.0.0.1:<PORT>;
@@ -87,6 +100,8 @@ server {
         # never written to nginx's access log; it sends no Referer anywhere. Its own
         # add_header drops the server's, so the snippet is included again here.
         access_log off;
+        # Upstream errors would log the request line, token included (e.g. during a restart).
+        error_log /var/log/nginx/error.log crit;
         include /etc/nginx/snippets/mycomap-vision-headers.conf;
         add_header Referrer-Policy "no-referrer" always;
         proxy_pass http://127.0.0.1:<PORT>;
