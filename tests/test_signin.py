@@ -302,3 +302,34 @@ def test_a_browsers_own_favicon_ico_is_served_never_a_second_sign_in(conn, tmp_p
     assert res.headers["content-type"].startswith("image/png")
     assert res.content == b"\x89PNG"
     assert "set-cookie" not in res.headers
+
+
+def test_the_sign_in_bridge_token_stays_out_of_the_access_log():
+    import logging
+
+    from mycomap_vision import signin as signin_module
+
+    fmt = '%s - "%s %s HTTP/%s" %d'
+
+    def logged(path: str) -> str:
+        rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, fmt,
+                                ("1.2.3.4:5", "GET", path, "1.1", 302), None)
+        signin_module.BridgeTokenRedactor().filter(rec)
+        return rec.getMessage()
+
+    secret = "eyJ2IjoxfQ.c2lnbmF0dXJl-_x"
+    for path in (f"/auth/dev-bridge/callback?token={secret}",
+                 f"//auth//dev-bridge/callback?token={secret}",
+                 f"/AUTH/Dev-Bridge/Callback?token={secret}",
+                 f"/auth/dev-bridge/callback?state=1&token={secret}&x=2"):
+        line = logged(path)
+        assert secret not in line, path
+        assert "token=(hidden)" in line, path
+    assert "&x=2" in logged(f"/auth/dev-bridge/callback?state=1&token={secret}&x=2")
+    # Other requests are untouched, a token= anywhere else included.
+    for path in ("/auth/signin?returnTo=%2Fabout", "/api/stats?token=abc", "/research/api"):
+        assert path in logged(path), path
+    signin_module.redact_access_log()
+    signin_module.redact_access_log()
+    assert sum(isinstance(f, signin_module.BridgeTokenRedactor)
+               for f in logging.getLogger("uvicorn.access").filters) == 1

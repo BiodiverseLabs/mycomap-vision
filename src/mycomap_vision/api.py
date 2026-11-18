@@ -4293,5 +4293,7 @@ def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     app = create_app(layer.manifest, layer=layer) if layer else create_app()
     geocode.redact_access_log()       # place names typed into the map stay out of the log
     e17review.redact_access_log()     # and the review page's path token
+    from . import signin as signin_module
+    signin_module.redact_access_log()  # and the sign-in bridge's token
     uvicorn.run(app, host=host, port=port, proxy_headers=True,
                 forwarded_allow_ips=config.setting("MV_FORWARDED_ALLOW_IPS", "127.0.0.1"))
