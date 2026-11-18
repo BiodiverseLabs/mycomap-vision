@@ -38,6 +38,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -339,3 +340,32 @@ class SigninConfig:
     def authorize_url(self, nonce: str) -> str:
         return (f"{self.issuer}/auth/dev-bridge/authorize?nonce={quote(nonce)}"
                 f"&aud={quote(self.origin or '', safe='')}")
+
+
+# The bridge's token arrives in the callback's query (/auth/dev-bridge/callback?token=...), and
+# uvicorn logs every request's path with its query. A token lives 60 s and is bound to the
+# nonce in the requesting browser's cookie, so a logged one signs nobody in; it is still a
+# credential and stays out of the journal (tracker review, 2026-11-17). Any spelling of the
+# path (extra slashes, other case), and the parameter wherever it sits in the query.
+_BRIDGE_TOKEN = re.compile(r"(/+auth/+dev-bridge/+callback/*\?(?:[^#\s\"]*?&)?token=)[^&#\s\"]*",
+                           re.IGNORECASE)
+
+
+def redact_bridge_token(text: str) -> str:
+    return _BRIDGE_TOKEN.sub(lambda m: m.group(1) + "(hidden)", text)
+
+
+class BridgeTokenRedactor(logging.Filter):
+    """Keeps the sign-in bridge's token out of the server's access log."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], redact_bridge_token(args[2]), *args[3:])
+        return True
+
+
+def redact_access_log() -> None:
+    log = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, BridgeTokenRedactor) for f in log.filters):
+        log.addFilter(BridgeTokenRedactor())
