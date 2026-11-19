@@ -74,7 +74,7 @@ CHIP_BANDS = (HIGH, MEDIUM)
 LABELS = {
     "micrograph": "Microscopy", "slip": "Label", "habitat": "Habitat", "uv": "UV",
     "chemical": "Chemical test", "spore_print": "Spore print", "dried": "Dried",
-    "people": "People", "tree": "Phylo tree", "drawing": "Drawing", "not_fungus": "Not a fungus",
+    "people": "People and animals", "tree": "Phylo tree", "drawing": "Drawing", "not_fungus": "Not a fungus",
 }
 # How a hint names a left-out kind.
 LOOKS = {"micrograph": "a micrograph", "slip": "a label or field slip"}

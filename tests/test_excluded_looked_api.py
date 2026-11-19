@@ -138,7 +138,7 @@ def test_people_photos_are_listed_only_to_human_feedback_reviewers(made):
     admin = person(app, "admin-1")
     body = admin.get(LIST).json()
     assert "inat:1004" in keys_of(body)
-    assert {"code": "people", "label": "People", "count": 1} in body["categories"]
+    assert {"code": "people", "label": "People and animals", "count": 1} in body["categories"]
 
 
 def test_categories_count_what_this_viewer_may_list_most_photos_first(made):

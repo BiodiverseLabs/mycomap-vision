@@ -389,7 +389,7 @@ test("viewer keys: ← / → step through the page, K / X flip, Esc closes", () 
 
 const SERVER_REASONS = [
   ["micrograph", "Micrograph or microscope"], ["slip", "Field slip or label"], ["habitat", "Habitat or scene"],
-  ["people", "People"], ["not_fungus", "Not a fungus"], ["dried", "Dried specimen"], ["spore_print", "Spore print"],
+  ["people", "People and animals"], ["not_fungus", "Not a fungus"], ["dried", "Dried specimen"], ["spore_print", "Spore print"],
   ["uv", "UV reaction"], ["chemical", "Chemical spot test"], ["other", "Other"],
 ].map(([code, label]) => ({ code, label }));
 

@@ -435,3 +435,17 @@ def test_a_past_drawing_decision_keeps_its_code_and_shows_as_drawing(conn, tmp_p
     assert len(fstore.changes(applies="vision")) == before
     assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {
         "inat:1000": old}
+
+
+def test_people_category_reads_people_and_animals_but_keeps_its_code():
+    """Steve, 2026-11-18: the People category is "People and animals". Only the words change:
+    the code stays "people", so decisions already saved, the paper's exclusion export and the
+    API's photo_type keep working."""
+    from mycomap_vision import excluded_looked as el
+    from mycomap_vision import phototypes as pt
+    assert dict(pr.TABS)["people"] == "People and animals"
+    assert dict(pr.REASONS)["people"] == "People and animals"
+    assert el.CATEGORY_LABELS["people"] == "People and animals"
+    assert pt.LABELS["people"] == "People and animals"
+    assert "people" in pr.TAB_CODES and "people" in el.REVIEWERS_ONLY
+    assert not any(label == "People" for _, label in pr.TABS + pr.REASONS)
