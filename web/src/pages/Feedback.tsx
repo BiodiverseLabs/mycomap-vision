@@ -10,7 +10,7 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
          type Top5 } from "@/lib/api";
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, groupBySection,
          historyOrgText, inatLinks, isNameItem, itemBadges, linkedItem, NO_PROPOSAL_TEXT, noProposal, openQueue,
-         orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, usableOptions,
+         orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, alreadyDoneText, decideOptions,
          queueParam, readLastQueue, recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
          statCardLines, valueBox, whenText, writeLastQueue, yes, type SectionGroup,
          type Verdict } from "@/lib/feedback";
@@ -634,7 +634,8 @@ function Outcome({ item }: { item: FeedbackItemDetail }) {
 
 function Decide({ item, type, wide = false }: { item: FeedbackItemDetail; type?: FeedbackType; wide?: boolean }) {
   const update = useItemUpdate(item.id);
-  const options = usableOptions(item, type?.options ?? []);
+  const options = decideOptions(item, type?.options ?? []);
+  const doneLine = alreadyDoneText(item.already_done);
   const [choice, setChoice] = useState<FeedbackOption | null>(null);
   const [value, setValue] = useState("");
   const [note, setNote] = useState("");
@@ -693,6 +694,10 @@ function Decide({ item, type, wide = false }: { item: FeedbackItemDetail; type?:
           iNaturalist names no current taxon for this name, so there is no name of theirs to use.
         </p>
       )}
+      {doneLine && options.length > 0 && (
+        <p className="rounded-md border border-myco-green/30 bg-myco-green/5 p-2 text-sm text-myco-green"
+           data-testid="feedback-already-done">{doneLine}</p>
+      )}
       {/* Options of one group sit under its heading (e.g. Duplicate observation: Use iNat,
           Use MO); `wide` (a record pair, decided under the photos) lays the blocks in a row. */}
       <div className={wide ? "grid gap-3 sm:grid-cols-[2fr_1fr]" : "flex flex-col gap-2"}>
@@ -706,10 +711,12 @@ function Decide({ item, type, wide = false }: { item: FeedbackItemDetail; type?:
                 return (
                   <button key={o.code} type="button" onClick={() => pick(o)} aria-pressed={on}
                           aria-label={o.short ? o.label : undefined}
+                          disabled={!!o.off} title={o.off ?? undefined}
                           className={`min-w-0 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
-                            on ? "border-myco-green bg-myco-green/10" : "border-[#A87146]/30 bg-white hover:bg-myco-green/5 dark:border-border dark:bg-card"}`}>
+                            o.off ? "cursor-not-allowed border-[#A87146]/20 bg-white opacity-50 dark:border-border dark:bg-card"
+                              : on ? "border-myco-green bg-myco-green/10" : "border-[#A87146]/30 bg-white hover:bg-myco-green/5 dark:border-border dark:bg-card"}`}>
                     <span className={`block break-words font-medium ${INK}`}>{o.short ?? o.label}</span>
-                    <span className="block break-words text-xs text-muted-foreground">{o.hint ?? appliesWords(o.applies)}</span>
+                    <span className="block break-words text-xs text-muted-foreground">{o.off ? "Nothing left to rename" : o.hint ?? appliesWords(o.applies)}</span>
                   </button>
                 );
               })}

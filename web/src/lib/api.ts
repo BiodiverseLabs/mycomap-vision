@@ -671,9 +671,20 @@ export interface LiveRecord {
   sequences?: LiveSequence[];
 }
 
+/** An open name item whose rename mycomap.org has already made: no record Vision serves
+ *  carries its old names (feedback_org.already_done). Null when it does not apply. */
+export interface AlreadyDone {
+  done: boolean;
+  old_names: string[];
+  new_name: string | null;
+  /** Records Vision serves under each name. */
+  records: Record<string, number | null>;
+}
+
 export interface FeedbackItemDetail extends FeedbackItem {
   decisions: FeedbackDecision[];
   refreshes: FeedbackRefresh[];
+  already_done?: AlreadyDone | null;
   live?: LiveRecord[];
   org_request?: OrgRequest | null;
   /** A record pair's photos, per record key (empty when Vision holds none of that record). */

@@ -371,3 +371,28 @@ def test_concurrent_requests_after_a_save_build_the_view_once():
     version[0] = 2                                                # a Save
     assert cache("summary", build) == {"built": 2} and builds == [1, 2]
     assert cache("other", build) == {"built": 3}                  # each key builds its own
+
+
+def test_a_name_already_renamed_in_the_served_records_is_offered_as_done_and_refused_otherwise(
+        site):
+    """Over the real served manifest (Steve, 2026-11-18): no served record is called "A gone"
+    any more (3 + 1 are under "A x"), while "B y" still has its 4."""
+    c, fstore, _ = site
+    fstore.seed([
+        {"item_type": "name_inactive_on_inat", "subject": "A gone", "rule": "R5",
+         "current": "A gone", "proposed": "A x", "records": 71, "projects": ["p1"]},
+        {"item_type": "name_retired", "subject": "B y", "rule": "R4", "current": "B y",
+         "proposed": "B z", "records": 4, "projects": ["p1"]},
+    ], "done-test")
+    gone, there = item_id(fstore, "name_inactive_on_inat"), item_id(fstore, "name_retired")
+    as_user(c, "admin-1")
+    assert c.get(f"/api/feedback/items/{gone}").json()["already_done"] == {
+        "done": True, "old_names": ["A gone"], "new_name": "A x",
+        "records": {"A gone": 0, "A x": 4}}
+    assert c.get(f"/api/feedback/items/{there}").json()["already_done"]["records"]["B y"] == 4
+    r = c.post(f"/api/feedback/items/{there}/decision", json={"decision": "done_at_source"})
+    assert r.status_code == 400 and "4 still under B y" in r.json()["detail"]
+    r = c.post(f"/api/feedback/items/{gone}/decision", json={"decision": "done_at_source"})
+    assert r.status_code == 200 and r.json()["decisions"][-1]["applies"] == "note"
+    r = c.post(f"/api/feedback/items/{there}/decision", json={"decision": "keep"})
+    assert r.status_code == 200 and r.json()["status"] == "decided"

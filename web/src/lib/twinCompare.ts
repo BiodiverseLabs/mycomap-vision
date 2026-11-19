@@ -65,8 +65,8 @@ export function distanceText(km: unknown): string {
 }
 
 /** The decision options in order, consecutive options of one group under one heading. */
-export function optionGroups(options: FeedbackOption[]): { group: string | null; options: FeedbackOption[] }[] {
-  const out: { group: string | null; options: FeedbackOption[] }[] = [];
+export function optionGroups<T extends FeedbackOption>(options: T[]): { group: string | null; options: T[] }[] {
+  const out: { group: string | null; options: T[] }[] = [];
   for (const o of options) {
     const g = o.group ?? null;
     const last = out[out.length - 1];

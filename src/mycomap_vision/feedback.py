@@ -65,6 +65,13 @@ class ItemType:
 
 KEEP = Option("keep", "Keep as it is", "note")
 RENAME = Option("rename", "Rename the record(s) to…", "org", needs_value=True)
+# A name item whose rename mycomap.org has already made (Steve, 2026-11-18: the Lanmaoa
+# pallidorosea item was seeded before .org renamed its 71 records). Offered only while no
+# record Vision serves still carries the old name (feedback_org.already_done; the API refuses
+# it otherwise); recorded only, so it sends nothing and opens no Name Update. The code is
+# kept for good once decisions use it.
+DONE_AT_SOURCE = Option("done_at_source", "Already done on mycomap.org", "note",
+                        hint="No record uses the old name now; nothing is sent")
 SEE = ("photos", "label now on mycomap.org", "Vision's top 5", "sequences with BLAST",
        "the rule that picked it")
 
@@ -75,19 +82,20 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
              "one writing.",
              ("every writing with its record count", "the proposed writing"),
              (Option("use_writing", "Use this writing for all", "org", needs_value=True),
-              Option("different", "These are different taxa", "note")),
+              Option("different", "These are different taxa", "note"), DONE_AT_SOURCE),
              granularity="name group"),
     ItemType("group_label", "Group or complex labels",
              "A label like 'Laccaria laccata group' names no single species, so no answer can "
              "be right. Rename it at source to a species or a provisional code.",
              ("records under the label", "photos", "sequences with BLAST", "Vision's top 5"),
              (RENAME, Option("keep_group", "Keep the group (no species decision possible)",
-                             "note")), granularity="name"),
+                             "note"), DONE_AT_SOURCE), granularity="name"),
     ItemType("name_retired", "Names retired on MycoMap's synonym list",
              "Records still use a name MycoMap's own synonym list retires.",
              ("the retired and accepted names", "each name on iNat, linked",
               "MycoMap's synonym list", "records under the retired name"),
-             (Option("accept", "Use the accepted name for all", "org"), KEEP, RENAME),
+             (Option("accept", "Use the accepted name for all", "org"), KEEP, RENAME,
+              DONE_AT_SOURCE),
              granularity="name"),
     ItemType("name_inactive_on_inat", "Names iNaturalist no longer uses",
              "iNaturalist has made the taxon inactive, usually pointing to a current name; a "
@@ -95,7 +103,8 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
              "the names.",
              ("each name on iNat, linked", "iNat's current name", "MycoMap's synonym list",
               "records under the name"),
-             (Option("accept", "Use iNat's current name for all", "org"), KEEP, RENAME),
+             (Option("accept", "Use iNat's current name for all", "org"), KEEP, RENAME,
+              DONE_AT_SOURCE),
              granularity="name"),
     ItemType("crosswalk", "Provisional code and formal name: one lineage?",
              "A provisional code and a formal (or group) name that may be the same lineage, or "

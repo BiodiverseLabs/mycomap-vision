@@ -359,6 +359,10 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             requests_.check_item(item_id)
         view = fo.request_view(requests_.for_item(item_id))
         item["org_request"] = fp.org_request(view) if ro else view
+        # An open name item .org has already renamed (feedback_org.already_done): the page
+        # offers "Already done on mycomap.org" first and greys out what would ask .org.
+        item["already_done"] = (fo.already_done(item, name_info)
+                                if item["status"] == "open" else None)
         out = fb.reviewer_view(item)
         if ro:
             return fp.read_only(out)                   # blind items stay blind: no reveal
@@ -437,6 +441,11 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         decision = str(payload.get("decision") or "")
         # A whole-name decision must make a Name Update before it is saved (feedback_org.py).
         opens = plan_or_400(item, decision, payload.get("value")) is not None
+        if decision == fb.DONE_AT_SOURCE.code:     # a false "already done" is never saved
+            try:
+                fo.refuse_done_at_source(item, name_info)
+            except fb.FeedbackError as e:
+                bad(e)
         try:
             done = store.decide(
                 item_id, decision, who, value=payload.get("value"),

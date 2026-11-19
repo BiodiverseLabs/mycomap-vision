@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
 import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
-         inatLinks, isNameItem, noProposal, roleText, usableOptions,
+         inatLinks, isNameItem, noProposal, roleText, usableOptions, alreadyDoneText, decideOptions, DONE_AT_SOURCE,
          historyOrgText, itemBadges, linkedItem, openQueue, orgChipClass, pageText, parsePhotoKeys, prefillValue,
          queueParam, QUEUE_STORAGE_KEY, readLastQueue, writeLastQueue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
@@ -334,4 +334,48 @@ test("a name item with no proposal offers no 'use iNat's name'; other items keep
   assert.deepEqual(usableOptions(proposed, opts).map((o) => o.code), ["accept", "keep", "rename"]);
   assert.equal(noProposal(item({ item_type: "group_label", proposed: "" })), false);
   assert.equal(isNameItem(item({ item_type: "name_retired" })), true);
+});
+
+// --- Already done on mycomap.org (Steve, 2026-11-18) ------------------------------------------
+
+const NAME_OPTS = [opt({ code: "accept", applies: "org" }), opt({ code: "keep", applies: "note" }),
+                   opt({ code: "rename", applies: "org", needs_value: true }),
+                   opt({ code: DONE_AT_SOURCE, label: "Already done on mycomap.org", applies: "note" })];
+const lanmaoa = (done: boolean) => ({
+  ...item({ item_type: "name_inactive_on_inat", current: "Lanmaoa pallidorosea", proposed: "Lanmaoa rubissima" }),
+  already_done: { done, old_names: ["Lanmaoa pallidorosea"], new_name: "Lanmaoa rubissima",
+                  records: { "Lanmaoa pallidorosea": done ? 0 : 71, "Lanmaoa rubissima": 85 } },
+});
+
+test("a name already renamed on mycomap.org offers Already done first and greys out what would ask .org", () => {
+  const shown = decideOptions(lanmaoa(true), NAME_OPTS);
+  assert.deepEqual(shown.map((o) => o.code), [DONE_AT_SOURCE, "accept", "keep", "rename"]);
+  assert.deepEqual(shown.map((o) => o.off !== null), [false, true, false, true]);
+  assert.match(shown[1].off!, /^Nothing left to rename: no record Vision holds uses Lanmaoa pallidorosea now/);
+  assert.equal(alreadyDoneText(lanmaoa(true).already_done),
+               "Already done on mycomap.org: no record Vision holds uses Lanmaoa pallidorosea now; 85 are under Lanmaoa rubissima.");
+});
+
+test("a name still on records never offers Already done, and every other choice stays as before", () => {
+  const plain: ReturnType<typeof lanmaoa> | (FeedbackItem & { already_done?: undefined }) =
+    item({ item_type: "name_inactive_on_inat", proposed: "A c" });
+  for (const it of [lanmaoa(false), { ...lanmaoa(false), already_done: null }, plain]) {
+    const shown = decideOptions(it, NAME_OPTS);
+    assert.deepEqual(shown.map((o) => o.code), ["accept", "keep", "rename"]);
+    assert.ok(shown.every((o) => o.off === null));
+    assert.equal(alreadyDoneText(it.already_done), null);
+  }
+});
+
+test("the already-done line names every old writing and leaves out a target with no records", () => {
+  assert.equal(alreadyDoneText({ done: true, old_names: ["A b", "A \"b\""], new_name: "A sp. 'b'",
+                                 records: { "A b": 0, "A \"b\"": 0, "A sp. 'b'": 1 } }),
+               "Already done on mycomap.org: no record Vision holds uses A b or A \"b\" now; 1 is under A sp. 'b'.");
+  assert.equal(alreadyDoneText({ done: true, old_names: ["L l group"], new_name: null, records: { "L l group": 0 } }),
+               "Already done on mycomap.org: no record Vision holds uses L l group now.");
+});
+
+test("a done name with no iNat successor still drops Use iNat's name and offers Already done first", () => {
+  const it = { ...lanmaoa(true), proposed: "" };
+  assert.deepEqual(decideOptions(it, NAME_OPTS).map((o) => o.code), [DONE_AT_SOURCE, "keep", "rename"]);
 });

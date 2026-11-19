@@ -6,7 +6,7 @@
 // those items must look exactly like the others until they are decided. Nothing here shows
 // which items they are.
 
-import type { BlastLink, FeedbackApplies, FeedbackDecisionBody, FeedbackItem, FeedbackOption,
+import type { AlreadyDone, BlastLink, FeedbackApplies, FeedbackDecisionBody, FeedbackItem, FeedbackItemDetail, FeedbackOption,
               FeedbackSummary, LiveSequence, Me, NameContextEntry, NameRole, OrgChip, OrgRequest, OrgStep,
               RefreshedRecord, Revealed, RevealedAnswer } from "./api";
 import { ApiError } from "./api";
@@ -424,4 +424,43 @@ export const NO_PROPOSAL_TEXT = "no current name on iNaturalist";
 export function usableOptions<T extends Pick<FeedbackOption, "code">>(
   item: Pick<FeedbackItem, "item_type" | "proposed">, options: T[]): T[] {
   return noProposal(item) ? options.filter((o) => o.code !== "accept") : options;
+}
+
+// --- Already done on mycomap.org (Steve, 2026-11-18) -----------------------------------------
+// A name item seeded before .org renamed its records: no record Vision serves carries the old
+// name now. "Already done on mycomap.org" is offered first and the choices that would ask .org
+// to rename are greyed out; on any other item that choice is not shown (it would be untrue).
+
+export const DONE_AT_SOURCE = "done_at_source";
+
+const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+
+/** "Already done on mycomap.org: no record Vision holds uses A now; 85 are under B." */
+export function alreadyDoneText(d: AlreadyDone | null | undefined): string | null {
+  if (!d?.done || !d.old_names.length) return null;
+  const old = d.old_names.join(" or ");
+  const n = d.new_name ? d.records[d.new_name] ?? 0 : 0;
+  const now = d.new_name && n > 0 ? `; ${n} ${plural(n, "is", "are")} under ${d.new_name}` : "";
+  return `Already done on mycomap.org: no record Vision holds uses ${old} now${now}.`;
+}
+
+/** Why an option that would ask mycomap.org to rename is greyed out on a done item. */
+export const nothingToRename = (d: AlreadyDone): string =>
+  `Nothing left to rename: no record Vision holds uses ${d.old_names.join(" or ")} now.`;
+
+export type DecideOption<T> = T & { off: string | null };
+
+/** The choices as the Decide box shows them, each with `off` (why it is greyed out, or null).
+ *  On a done item "Already done on mycomap.org" comes first and every "org" choice is off; on
+ *  any other item it is left out and the rest are as before. */
+export function decideOptions<T extends Pick<FeedbackOption, "code" | "applies">>(
+  item: Pick<FeedbackItemDetail, "item_type" | "proposed" | "already_done">, options: T[]): DecideOption<T>[] {
+  const usable = usableOptions(item, options);
+  const d = item.already_done;
+  if (!d?.done) {
+    return usable.filter((o) => o.code !== DONE_AT_SOURCE).map((o) => ({ ...o, off: null }));
+  }
+  const first = usable.filter((o) => o.code === DONE_AT_SOURCE);
+  const rest = usable.filter((o) => o.code !== DONE_AT_SOURCE);
+  return [...first, ...rest].map((o) => ({ ...o, off: o.applies === "org" ? nothingToRename(d) : null }));
 }

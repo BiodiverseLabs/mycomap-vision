@@ -167,6 +167,71 @@ def warnings(kind: str, old: list[str], new: str, name_info: NameInfo | None) ->
 
 
 # ---------------------------------------------------------------------------------------------
+# Already done on mycomap.org (Steve, 2026-11-18)
+#
+# A name item is a snapshot from when it was seeded; .org may have renamed the records since
+# (the Lanmaoa pallidorosea item: 71 records then, none now, all 85 under Lanmaoa rubissima).
+# Vision's served records follow .org every night (and name_changes.py between), so a name no
+# served record carries any more is done at source: the item's "org" options would ask .org
+# for nothing, and fb.DONE_AT_SOURCE ("Already done on mycomap.org") says so instead.
+#
+#   name_retired, name_inactive_on_inat, group_label   the item's name (current); its writings
+#                                                       counted together (names.variant_key)
+#   name_writing_split                                  every writing but the proposed one,
+#                                                       each counted exactly (its writings
+#                                                       share one variant key)
+#
+# Not species_rank_split, crosswalk or vision_names_same_taxon: which of their names is "old"
+# is the decision itself (or a judgment, as "nested"), so one name being gone is no answer.
+DONE_TYPES = ("name_retired", "name_inactive_on_inat", "group_label", "name_writing_split")
+
+
+def done_names(item: dict) -> tuple[list[str], str | None, str] | None:
+    """(the names a done item no longer has on any record, the name they went to or None, the
+    count to read: "records" or "exact"); None for an item this does not apply to."""
+    t = item["item_type"]
+    current, proposed = (item.get("current") or "").strip(), (item.get("proposed") or "").strip()
+    if t == "name_writing_split":
+        old = [w for w in writings(current) if w != proposed]
+        return (old, proposed, "exact") if proposed and old else None
+    if t in DONE_TYPES and current:
+        return [current], proposed or None, "records"
+    return None
+
+
+def already_done(item: dict, name_info: NameInfo | None) -> dict | None:
+    """{"done": no served record carries the item's old names, "old_names", "new_name", and
+    "records" per name}; None when it does not apply or cannot be told (no served records:
+    an empty manifest would make every name look done)."""
+    names_ = done_names(item)
+    if names_ is None or name_info is None:
+        return None
+    old, new, count = names_
+    wanted = old + ([new] if new and new not in old else [])
+    info = name_info(wanted) or {}
+    if any((info.get(n) or {}).get("served") == 0 for n in wanted):
+        return None
+    records = {n: (info.get(n) or {}).get(count) for n in wanted}
+    if any(records[o] is None for o in old):
+        return None
+    return {"done": all(records[o] == 0 for o in old), "old_names": old, "new_name": new,
+            "records": records}
+
+
+def refuse_done_at_source(item: dict, name_info: NameInfo | None) -> None:
+    """Raise FeedbackError unless the item is already done (fb.DONE_AT_SOURCE would be false)."""
+    state = already_done(item, name_info)
+    if state is None:
+        raise fb.FeedbackError("Vision cannot tell whether this name is still on a record, so "
+                               "it cannot be marked already done on mycomap.org")
+    if not state["done"]:
+        left = "; ".join(f"{state['records'][o]} still under {o}" for o in state["old_names"]
+                         if state["records"][o])
+        raise fb.FeedbackError("This is not done on mycomap.org yet: of the records Vision "
+                               f"holds, {left}. Choose another decision.")
+
+
+# ---------------------------------------------------------------------------------------------
 # The requests
 
 def request_view(row: dict | None) -> dict | None:
@@ -427,15 +492,21 @@ class Unwithdrawable(RuntimeError):
 
 def manifest_name_info(conn, genus_known: Callable[[str], bool | None] | None = None) -> NameInfo:
     """name -> {"records": records under the name in the served manifest (its writings
-    counted together, names.variant_key), "genus_known": whether iNat has its genus (the
-    taxonomy cache; None when not asked)}."""
+    counted together, names.variant_key), "exact": records written exactly so, "served":
+    records in the manifest, "genus_known": whether iNat has its genus (the taxonomy cache;
+    None when not asked)}."""
     from . import names
 
     def info(wanted: list[str]) -> dict[str, dict]:
         keys = {n: names.variant_key(n) for n in wanted}
         counts: dict[str, int] = {}
+        exact: dict[str, int] = {}
+        served = 0
         for name, n in conn.execute("select scientific_name, count(*) from records "
                                     "group by scientific_name"):
+            served += n
+            if name in keys:
+                exact[name] = n
             k = names.variant_key(name or "")
             if k in keys.values():
                 counts[k] = counts.get(k, 0) + n
@@ -443,7 +514,7 @@ def manifest_name_info(conn, genus_known: Callable[[str], bool | None] | None = 
         for n, k in keys.items():
             records = counts.get(k, 0)
             genus = (n.split() or [""])[0]
-            out[n] = {"records": records,
+            out[n] = {"records": records, "exact": exact.get(n, 0), "served": served,
                       "genus_known": genus_known(genus) if genus_known else None}
         return out
     return info
