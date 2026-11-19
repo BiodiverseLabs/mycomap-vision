@@ -396,3 +396,41 @@ def test_a_name_already_renamed_in_the_served_records_is_offered_as_done_and_ref
     assert r.status_code == 200 and r.json()["decisions"][-1]["applies"] == "note"
     r = c.post(f"/api/feedback/items/{there}/decision", json={"decision": "keep"})
     assert r.status_code == 200 and r.json()["status"] == "decided"
+
+
+def test_the_ten_minute_name_update_round_closes_format_writings_already_done(
+        conn, tmp_path, monkeypatch):
+    """Beside the Name Update check and the name-change log (api.follow_name_updates): a
+    "format only" writing split whose old writing no served record carries closes by itself,
+    as "mycomap.org"; a "needs a look" one in the same state does not."""
+    from mycomap_vision import api
+    from mycomap_vision.records import build_records, save_records
+    save_records(conn, build_records([
+        {"source": "iNaturalist", "observation_id": str(200 + i), "scientific_name": n,
+         "genus": n.split()[0], "family": "F", "continent": "North America",
+         "validation_status_1": "yes", "validation_date_1": "1/1/2026"}
+        for i, n in enumerate(["Mycena sp. 'IN10'"] * 3 + ["Russula sp. 'Woo18'"])], "t"))
+    conn.commit()
+    fstore = fb.Store(tmp_path / "state" / "human-feedback.sqlite")
+    fstore.seed([
+        {"item_type": "name_writing_split", "subject": "mycena", "rule": "R1",
+         "current": "Mycena sp. 'IN10' (456) | Mycena \"sp-IN10\" (1)",
+         "proposed": "Mycena sp. 'IN10'"},
+        {"item_type": "name_writing_split", "subject": "woo18", "rule": "R1",
+         "current": "Russula sp. 'Woo18' (30) | Russula sp. 'woo18' (1)",
+         "proposed": "Russula sp. 'Woo18'"},
+    ], "test")
+    jobs = {}
+    monkeypatch.setattr(api, "start_background",
+                        lambda name, every, work, note=None: jobs.setdefault(name, work))
+    create_app(tmp_path / "manifest.sqlite", tmp_path / "emb", backbone_loader=lambda n: Const(n),
+               limits=open_limits(), feedback_store=fstore, feedback_org=FakeOrg(),
+               note=lambda s: None)
+    mycena, woo = (next(i for i in fstore.items("name_writing_split")["items"]
+                        if i["subject"] == s)["id"] for s in ("mycena", "woo18"))
+    assert fstore.get(mycena)["status"] == "open"           # reading the queue closes nothing
+    jobs["feedback name updates"]()
+    d = fstore.get(mycena)["decisions"]
+    assert [(x["decision"], x["by_user"], x["applied"]) for x in d] == [
+        ("done_at_source", "mycomap.org", 1)]
+    assert fstore.get(woo)["status"] == "open" and fstore.get(woo)["decisions"] == []

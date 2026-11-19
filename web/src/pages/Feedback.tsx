@@ -7,10 +7,11 @@ import { ReadOnlyContext, ReadOnlyNote, useReadOnly } from "@/components/ReadOnl
 import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem, type FeedbackItemDetail,
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
          type LiveRecord, type NameContext, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
-         type Top5 } from "@/lib/api";
+         type Top5, type WritingList } from "@/lib/api";
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, groupBySection,
          historyOrgText, inatLinks, isNameItem, itemBadges, linkedItem, NO_PROPOSAL_TEXT, noProposal, openQueue,
          orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, alreadyDoneText, decideOptions,
+         FORMAT_PANEL_TEXT, formatRow, hasLists, listCount, listReasonText, seededNote, WRITING_LISTS,
          queueParam, readLastQueue, recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
          statCardLines, valueBox, whenText, writeLastQueue, yes, type SectionGroup,
          type Verdict } from "@/lib/feedback";
@@ -243,15 +244,18 @@ function TypeQueue({ summary, type, me, linked }: {
   const [offset, setOffset] = useState(0);
   const [openId, setOpenId] = useState<number | null>(linked?.id ?? null);
   const [showLinked, setShowLinked] = useState(!!linked);
-  const shown = useRef({ status, q });          // the linked item stays open until these change
+  // "One name, several writings" shows two lists; a linked item opens in its own.
+  const [part, setPart] = useState<WritingList | null>(
+    hasLists(summary.type) ? (linked?.list ?? "format") : null);
+  const shown = useRef({ status, q, part });    // the linked item stays open until these change
   useEffect(() => {
-    if (shown.current.status === status && shown.current.q === q) return;
-    shown.current = { status, q };
+    if (shown.current.status === status && shown.current.q === q && shown.current.part === part) return;
+    shown.current = { status, q, part };
     setOffset(0); setOpenId(null); setShowLinked(false);
-  }, [status, q]);
+  }, [status, q, part]);
   const list = useQuery({
-    queryKey: ["feedback", "items", summary.type, status, q, offset],
-    queryFn: () => feedbackApi.items({ type: summary.type, status, q, offset, limit: PAGE_SIZE }),
+    queryKey: ["feedback", "items", summary.type, status, q, offset, part],
+    queryFn: () => feedbackApi.items({ type: summary.type, status, q, offset, limit: PAGE_SIZE, ...(part ? { list: part } : {}) }),
     placeholderData: (prev) => prev,
   });
   const total = list.data?.total ?? 0;
@@ -264,14 +268,32 @@ function TypeQueue({ summary, type, me, linked }: {
         <h2 className={`font-display text-xl font-semibold ${INK}`}>{summary.title}</h2>
         <p className={`mt-1 max-w-3xl text-sm ${BODY}`}>{summary.about}</p>
       </div>
+      {part && (
+        <div className="inline-flex overflow-hidden rounded-md border border-[#A87146]/30 dark:border-border"
+             role="group" aria-label="List" data-testid="feedback-lists">
+          {WRITING_LISTS.map((l, i) => (
+            <button key={l.code} type="button" aria-pressed={part === l.code} onClick={() => setPart(l.code)}
+                    className={`${seg(part === l.code)} ${i > 0 ? "border-l border-[#A87146]/30 dark:border-border" : ""}`}>
+              {l.label} ({listCount(summary, l.code, "open").toLocaleString("en-US")})
+            </button>
+          ))}
+        </div>
+      )}
+      {part === "format" && (
+        <div className="space-y-1 rounded-md border border-[#A87146]/20 bg-[#faf9f7] p-3 text-sm dark:border-border dark:bg-muted/30"
+             data-testid="feedback-format-panel">
+          <p className={BODY}>{FORMAT_PANEL_TEXT}</p>
+          {list.data?.names_to_fix_url && <Ext href={list.data.names_to_fix_url}>Open Name Update on mycomap.org</Ext>}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3">
         <div className="inline-flex overflow-hidden rounded-md border border-[#A87146]/30 dark:border-border"
              role="group" aria-label="Status">
           <button type="button" className={seg(status === "open")} aria-pressed={status === "open"}
-                  onClick={() => setStatus("open")}>Open ({summary.open.toLocaleString("en-US")})</button>
+                  onClick={() => setStatus("open")}>Open ({listCount(summary, part, "open").toLocaleString("en-US")})</button>
           <button type="button" className={`${seg(status === "decided")} border-l border-[#A87146]/30 dark:border-border`}
                   aria-pressed={status === "decided"} onClick={() => setStatus("decided")}>
-            Decided ({summary.decided.toLocaleString("en-US")})
+            Decided ({listCount(summary, part, "decided").toLocaleString("en-US")})
           </button>
         </div>
         <input type="search" value={text} onChange={(e) => setText(e.target.value)}
@@ -285,7 +307,7 @@ function TypeQueue({ summary, type, me, linked }: {
           {q ? "Nothing matches that search." : status === "open" ? "Nothing open here." : "Nothing decided yet."}
         </p>
       )}
-      {showLinked && linked && (
+      {showLinked && linked && part !== "format" && (
         <div className="space-y-1">
           <p className="text-xs text-muted-foreground">Linked from mycomap.org's Name Update:</p>
           <ul>
@@ -294,12 +316,19 @@ function TypeQueue({ summary, type, me, linked }: {
           </ul>
         </div>
       )}
-      <ul className="space-y-2">
-        {items.filter((it) => !(showLinked && it.id === linked?.id)).map((it) => (
-          <ItemRow key={it.id} item={it} type={type} me={me} open={openId === it.id}
-                   onToggle={() => setOpenId(openId === it.id ? null : it.id)} />
-        ))}
-      </ul>
+      {part === "format" ? (
+        <ul className="divide-y divide-[#A87146]/15 rounded-lg border border-[#A87146]/20 dark:divide-border dark:border-border"
+            data-testid="feedback-format-list">
+          {items.map((it) => <FormatRow key={it.id} item={it} />)}
+        </ul>
+      ) : (
+        <ul className="space-y-2">
+          {items.filter((it) => !(showLinked && it.id === linked?.id)).map((it) => (
+            <ItemRow key={it.id} item={it} type={type} me={me} open={openId === it.id}
+                     onToggle={() => setOpenId(openId === it.id ? null : it.id)} />
+          ))}
+        </ul>
+      )}
       {total > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
           <span className="text-muted-foreground">{pageText(offset, items.length, total)}</span>
@@ -323,6 +352,26 @@ const sciLike = (s: string | null | undefined) => !!s && /^[A-Z][a-z]+(\s|$)/.te
 function Name({ s }: { s: string | null | undefined }) {
   if (!s) return <span className="text-muted-foreground">–</span>;
   return <span className={sciLike(s) ? "sci" : ""}>{s}</span>;
+}
+
+/** A "Format only" item, read only: each old writing and the one it becomes, with the records
+ *  Vision holds under each now. Decided on mycomap.org's Names to fix, never here. */
+function FormatRow({ item }: { item: FeedbackItem }) {
+  const row = formatRow(item);
+  const n = (c: number | null) => c == null ? null
+    : <span className="tabular-nums text-muted-foreground"> ({c.toLocaleString("en-US")})</span>;
+  return (
+    <li className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3 py-2 text-sm">
+      <span className={`min-w-0 break-words ${BODY}`}>
+        {row.old.map((o, i) => <span key={o.name}>{i > 0 && ", "}<Name s={o.name} />{n(o.count)}</span>)}
+      </span>
+      <span className="text-muted-foreground">→</span>
+      <span className={`min-w-0 break-words font-medium ${INK}`}><Name s={row.keep.name} />{n(row.keep.count)}</span>
+      {item.status === "decided" && (
+        <span className="rounded-full bg-myco-green/10 px-2 py-0.5 text-[11px] font-medium text-myco-green">done</span>
+      )}
+    </li>
+  );
 }
 
 function ItemRow({ item, type, me, open, onToggle }: {
@@ -430,6 +479,12 @@ function ItemDetail({ id, type, me }: { id: number; type?: FeedbackType; me: Fee
                 </div>
               ))}
             </dl>
+          )}
+          {(item.list === "look" && listReasonText(item.list_reason) || seededNote(item)) && (
+            <div className="space-y-0.5 text-sm text-muted-foreground" data-testid="feedback-list-reason">
+              {item.list === "look" && listReasonText(item.list_reason) && <p>{listReasonText(item.list_reason)}</p>}
+              {seededNote(item) && <p>{seededNote(item)}</p>}
+            </div>
           )}
           {isNameItem(item) && <NameContextPanel data={names.data} loading={names.isPending} failed={!!names.error} />}
           {item.links.length > 0 && (

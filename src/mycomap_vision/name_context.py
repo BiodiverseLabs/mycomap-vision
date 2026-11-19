@@ -35,7 +35,9 @@ FUNGI = 47170
 TTL = 24 * 3600.0
 NAME_BUDGET = 4             # names asked of iNat per request beyond the cached ones
 MAX_SYNONYM_ROWS = 40
-NAME_TYPES = ("name_retired", "name_inactive_on_inat")
+# "One name, several writings" too (Steve, 2026-11-18): the cards that need a look show
+# each writing with its iNat taxon.
+NAME_TYPES = ("name_retired", "name_inactive_on_inat", "name_writing_split")
 
 # iNat writes an infraspecific name without its marker ('Amanita muscaria guessowii').
 _MARKERS = re.compile(r"\s+(?:var\.|subsp\.|ssp\.|f\.|forma|subvar\.)\s+")
@@ -176,9 +178,13 @@ class InatNames:
 def item_names(item: dict) -> list[tuple[str, str]]:
     """(name, role) of a name item: the name on the records, then the proposed one(s)."""
     out: list[tuple[str, str]] = []
-    cur = (item.get("current") or item.get("subject") or "").strip()
-    if cur:
-        out.append((cur, "records"))
+    if item.get("item_type") == "name_writing_split":     # "A (17) | B (1)": each writing
+        from .writing_split import writings
+        out = [(n, "records") for n, _ in writings(item.get("current"))]
+    else:
+        cur = (item.get("current") or item.get("subject") or "").strip()
+        if cur:
+            out.append((cur, "records"))
     for p in (item.get("proposed") or "").split(";"):
         p = p.strip()
         if p and exact(p) not in {exact(n) for n, _ in out}:

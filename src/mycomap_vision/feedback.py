@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import research_public
+from . import research_public, writing_split
 
 
 @dataclass(frozen=True)
@@ -511,25 +511,42 @@ class Store:
     def summary(self, projects: set[str] | None = None) -> list[dict]:
         """Per item type: its title, description and open / decided counts (within
         `projects` when given: a leader or contributor sees their projects' items)."""
-        rows = self._visible("select item_type, status, projects from items", (), projects)
+        rows = self._visible("select item_type, status, projects, current, proposed from items",
+                             (), projects)
         counts: dict[str, dict] = {}
+        lists: dict[str, dict] = {}
         for r in rows:
             c = counts.setdefault(r["item_type"], {"open": 0, "decided": 0})
-            c["open" if r["status"] == "open" else "decided"] += 1
-        return [{"type": t.code, "title": t.title, "about": t.about,
-                 "granularity": t.granularity, "model_flagged": t.model_flagged,
-                 "section": SECTION_OF[t.code], "blind": t.code in BLIND_TYPES,
-                 **counts.get(t.code, {"open": 0, "decided": 0})} for t in TYPES.values()]
+            status = "open" if r["status"] == "open" else "decided"
+            c[status] += 1
+            if r["item_type"] == "name_writing_split":     # its two lists (writing_split.py)
+                kind = writing_split.classify(r["current"], r["proposed"]).kind
+                lists.setdefault(kind, {"open": 0, "decided": 0})[status] += 1
+        out = [{"type": t.code, "title": t.title, "about": t.about,
+                "granularity": t.granularity, "model_flagged": t.model_flagged,
+                "section": SECTION_OF[t.code], "blind": t.code in BLIND_TYPES,
+                **counts.get(t.code, {"open": 0, "decided": 0})} for t in TYPES.values()]
+        for t in out:
+            if t["type"] == "name_writing_split":
+                t["lists"] = {k: lists.get(k, {"open": 0, "decided": 0})
+                              for k in writing_split.LISTS}
+        return out
 
     def items(self, item_type: str, status: str = "open", offset: int = 0, limit: int = 25,
-              projects: set[str] | None = None, query: str = "") -> dict:
+              projects: set[str] | None = None, query: str = "", list_: str = "") -> dict:
+        """A page of a queue; `list_` one of a split queue's lists (writing_split.LISTS)."""
         if item_type not in TYPES:
             raise FeedbackError(f"unknown item type {item_type!r}")
+        if list_ and (item_type != "name_writing_split" or list_ not in writing_split.LISTS):
+            raise FeedbackError(f"{item_type} has no list {list_!r}")
         sql = ("select * from items where item_type = ? and status = ?"
                + (" and (subject like ? or current like ? or proposed like ?)" if query else "")
                + " order by records desc, id")
         params: tuple = (item_type, status) + ((f"%{query}%",) * 3 if query else ())
         rows = self._visible(sql, params, projects)
+        if list_:
+            rows = [r for r in rows
+                    if writing_split.classify(r["current"], r["proposed"]).kind == list_]
         if item_type in BLIND_TYPES:
             rows = sorted(rows, key=lambda r: blind_order(r["subject"]))
         return {"total": len(rows),
@@ -586,6 +603,28 @@ class Store:
                  person.get("name"), time.time(), int(seen is not None)))
             self.conn.execute("update items set status = 'decided' where id = ?", (item_id,))
         return self.get(item_id, projects)
+
+    def close_by_system(self, item_id: int, decision: str, by: str, applied_by: str,
+                        note: str | None = None) -> bool:
+        """Decide an open item for a system, never a person (feedback_org.close_done_formats:
+        "mycomap.org"), applied at once. Only an item nobody has decided: one a person decided
+        or reopened is theirs. False when it was not closed."""
+        with self._lock, self.conn:
+            r = self.conn.execute("select item_type, status from items where id = ?",
+                                  (item_id,)).fetchone()
+            if r is None or r["status"] != "open" or self.conn.execute(
+                    "select 1 from decisions where item_id = ? limit 1", (item_id,)).fetchone():
+                return False
+            opt = next((o for o in TYPES[r["item_type"]].options if o.code == decision), None)
+            if opt is None:
+                raise FeedbackError(f"{decision!r} is not a decision for {r['item_type']}")
+            now = time.time()
+            self.conn.execute(
+                "insert into decisions (item_id, decision, note, applies, by_user, by_name, at, "
+                "applied, applied_at, applied_by, seen_answer) values (?,?,?,?,?,?,?,1,?,?,0)",
+                (item_id, decision, note, opt.applies, by, by, now, now, applied_by))
+            self.conn.execute("update items set status = 'decided' where id = ?", (item_id,))
+        return True
 
     def reopen(self, item_id: int, projects: set[str] | None = None) -> dict:
         self.get(item_id, projects)
@@ -676,6 +715,14 @@ class Store:
             d[k] = json.loads(d[k] or "[]")
         d["evidence"] = json.loads(d["evidence"] or "{}")
         d["model_flagged"] = bool(d["model_flagged"])
+        split = writing_split.of_item(d)
+        if split is not None:
+            # Its list, and the proposal in MycoMap's current format, worked out on every read;
+            # the stored item keeps what the seed proposed (shown as proposed_seeded).
+            d["list"], d["list_reason"] = split.kind, split.reason
+            if split.proposal and split.proposal != (d.get("proposed") or ""):
+                d["proposed_seeded"] = d.get("proposed")
+                d["proposed"] = split.proposal
         d["blind"] = bool(d["blind"])
         if d["blind"]:
             d["hidden_until_decided"] = d["status"] == "open"

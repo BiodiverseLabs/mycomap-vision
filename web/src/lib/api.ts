@@ -521,6 +521,22 @@ export interface FeedbackSummary {
   /** Photo queues only: the observations their open / fully decided photos are in. */
   records_open?: number;
   records_decided?: number;
+  /** A queue shown as two lists (name_writing_split: "format" and "look"), each counted. */
+  lists?: Partial<Record<WritingList, { open: number; decided: number }>>;
+}
+
+/** "One name, several writings" in two lists (writing_split.py): "format" only an old way of
+ *  writing a code, fixed on mycomap.org's Names to fix; "look" needs a person. */
+export type WritingList = "format" | "look";
+
+/** One writing of a name_writing_split item: the seed's count and the records Vision serves
+ *  under it now, exactly as written (null when Vision cannot tell). */
+export interface WritingNow {
+  name: string;
+  seeded: number | null;
+  records: number | null;
+  /** The writing to keep (the item's proposal). */
+  keep: boolean;
 }
 
 export type FeedbackStatus = "open" | "decided";
@@ -555,6 +571,14 @@ export interface FeedbackItem {
   created_at: number | string;
   /** The row's chip for the latest decision's Name Update on mycomap.org (lists only). */
   org_chip?: OrgChip | null;
+  /** name_writing_split: its list, why (format, spacing, number, described, rank, name_or_code,
+   *  other), each writing now, and the proposal's records; `proposed` is in MycoMap's current
+   *  format, `proposed_seeded` what the seed proposed when that differs. */
+  list?: WritingList;
+  list_reason?: string;
+  writings?: WritingNow[];
+  proposed_records?: number | null;
+  proposed_seeded?: string | null;
 }
 
 /** A whole-name decision's Name Update on mycomap.org, as Vision last read it. */
@@ -1091,10 +1115,11 @@ export const feedbackApi = {
   me: () => getJson<FeedbackMe>("/api/feedback/me"),
   catalogue: () => getJson<FeedbackType[]>("/api/feedback/catalogue"),
   summary: () => getJson<FeedbackSummary[]>("/api/feedback/summary"),
-  items: (p: { type: string; status: FeedbackStatus; q?: string; offset?: number; limit?: number }) => {
+  items: (p: { type: string; status: FeedbackStatus; q?: string; offset?: number; limit?: number; list?: WritingList }) => {
     const qs = new URLSearchParams({ type: p.type, status: p.status, q: p.q ?? "",
-                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 25) });
-    return getJson<{ total: number; items: FeedbackItem[] }>(`/api/feedback/items?${qs}`);
+                                     offset: String(p.offset ?? 0), limit: String(p.limit ?? 25),
+                                     ...(p.list ? { list: p.list } : {}) });
+    return getJson<{ total: number; items: FeedbackItem[]; names_to_fix_url?: string }>(`/api/feedback/items?${qs}`);
   },
   item: (id: number) => getJson<FeedbackItemDetail>(fbItem(id)),
   places: (id: number) => getJson<{ places: Record<string, PairPlace> }>(`${fbItem(id)}/places`),

@@ -26,7 +26,7 @@ import time
 from typing import Callable
 
 import requests
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
@@ -35,6 +35,7 @@ from . import name_context as nc
 from . import photo_review as pr
 from . import photo_views as pv
 from . import recovered_labels as rl
+from . import writing_split as ws
 from .pair_places import PairPlaces
 
 ROLE_TTL = 300.0
@@ -83,7 +84,7 @@ class OrgClient:
                  session: requests.Session | None = None, timeout: float = 15.0):
         from .permissions import org_key
         self.base = (base_url or config.setting("MV_ORG_BASE_URL")
-                     or "https://www.mycomap.org").rstrip("/")
+                     or fo.ORG_SITE).rstrip("/")
         self.key = key if key is not None else org_key()
         self.http = session or requests.Session()
         self.timeout = timeout
@@ -311,19 +312,46 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             return out
         return cached(("summary", projkey(projects)), build)
 
+    def with_writings(items: list[dict]) -> None:
+        """Each writing of a name_writing_split item with its records now (Vision's served
+        records, exactly as written; null without them) beside the seed's count, and the
+        proposal's: one read of the served records for the page."""
+        split = [i for i in items if i["item_type"] == "name_writing_split"]
+        if not split:
+            return
+        wanted = sorted({n for i in split for n, _ in ws.writings(i["current"])}
+                        | {i["proposed"] for i in split if i.get("proposed")})
+        info = name_info(wanted) if name_info else {}
+
+        def now(n):
+            return (info.get(n) or {}).get("exact")
+        for i in split:
+            i["writings"] = [{"name": n, "seeded": c, "records": now(n),
+                              "keep": n == i.get("proposed")}
+                             for n, c in ws.writings(i["current"])]
+            i["proposed_records"] = now(i["proposed"]) if i.get("proposed") else None
+
+    # .org's Names to fix, where the "format" writings are accepted (Name Update's page).
+    names_to_fix_url = f"{getattr(org, 'base', None) or fo.ORG_SITE}/admin/name-update"
+
     @app.get("/api/feedback/items")
     def fb_items(request: Request, type: str, status: str = "open", q: str = "",
-                 offset: int = 0, limit: int = 25):
+                 offset: int = 0, limit: int = 25, list_: str = Query("", alias="list")):
+        """A page of a queue; `list` one of a split queue's lists (name_writing_split:
+        "format" or "look", writing_split.py)."""
         _, projects, _, ro = viewer(request)
         if status not in ("open", "decided"):
             bad(ValueError("status is open or decided"))
         try:
             out = store.items(type, status, max(0, offset), min(max(1, limit), 100),
-                              projects, q.strip())
+                              projects, q.strip(), list_=list_.strip())
             out["items"] = [fb.reviewer_view(i) for i in out["items"]]
             chips = requests_.chips([i["id"] for i in out["items"]])
             for i in out["items"]:
                 i["org_chip"] = chips.get(i["id"])
+            with_writings(out["items"])
+            if type == "name_writing_split":
+                out["names_to_fix_url"] = names_to_fix_url
             return fp.read_only(out) if ro else out
         except fb.FeedbackError as e:
             bad(e)
@@ -359,6 +387,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             requests_.check_item(item_id)
         view = fo.request_view(requests_.for_item(item_id))
         item["org_request"] = fp.org_request(view) if ro else view
+        with_writings([item])
         # An open name item .org has already renamed (feedback_org.already_done): the page
         # offers "Already done on mycomap.org" first and greys out what would ask .org.
         item["already_done"] = (fo.already_done(item, name_info)
@@ -415,9 +444,11 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         p = plan_or_400(item, str(payload.get("decision") or ""), payload.get("value"))
         if p is None:
             return {"opens": False}
-        info = name_info(p.old_names + [p.new_name]) if name_info else {}
+        wanted = p.old_names + [p.new_name]
+        info = name_info(wanted) if name_info else {}
         return {"opens": True, **p.body(), "warnings": p.warnings,
-                "records": {n: (info.get(n) or {}).get("records") for n in info}}
+                "records": {n: c for n, c in fo.preview_counts(wanted, info).items()
+                            if n in info}}
 
     @app.post("/api/feedback/items/{item_id}/org-request")
     def fb_org_send_again(request: Request, item_id: int):

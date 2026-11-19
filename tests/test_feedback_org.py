@@ -910,3 +910,103 @@ def test_the_other_choices_still_save_on_a_name_already_done(tmp_path):
     # not refused: .org may hold records of the name that Vision does not serve
     r = decide(c, i, "accept")
     assert r.status_code == 200 and r.json()["org_request"]["status"] == "searching"
+
+
+
+# --- One name, several writings: format-only items close by themselves (Steve, 2026-11-18) ----
+
+MYCENA = "Mycena sp. 'IN10'"
+OLD_MYCENA = 'Mycena "sp-IN10"'
+
+
+def writings_site(tmp_path, exact):
+    """The seed's Mycena writing split (format only) and a spacing-only one (needs a look),
+    over served records with these exact counts (writings of one name counted together)."""
+    folded = {MYCENA: sum(v for k, v in exact.items() if "IN10" in k),
+              OLD_MYCENA: sum(v for k, v in exact.items() if "IN10" in k)}
+    folded |= {k: v for k, v in exact.items() if "IN10" not in k}
+    c, store, org, _, _ = make(tmp_path, name_info=served(folded, exact=exact))
+    store.seed([{"item_type": "name_writing_split", "subject": "woo18", "rule": "R1",
+                 "current": "Russula sp. 'Woo18' (30) | Russula sp. 'woo18' (1)",
+                 "proposed": "Russula sp. 'Woo18'", "projects": ["p1"]}], "test2")
+    return c, store, org, served(folded, exact=exact)
+
+
+def test_a_format_only_writing_no_served_record_still_uses_closes_by_itself(tmp_path):
+    c, store, org, info = writings_site(tmp_path, {MYCENA: 457})
+    i = iid(store, "name_writing_split", "Mycena sp. 'IN10'; Mycena \"sp-IN10\"")
+    assert fo.close_done_formats(store, info) == [i]
+    item = store.get(i)
+    d = item["decisions"][-1]
+    assert item["status"] == "decided"
+    assert (d["decision"], d["applies"], d["by_user"], d["applied"], d["applied_by"]) == (
+        "done_at_source", "note", "mycomap.org", 1, "mycomap.org name change log")
+    assert "no record Vision holds uses Mycena \"sp-IN10\" now; 457 are under" in d["note"]
+    assert not org.calls                                    # nothing asked of .org
+    assert fo.close_done_formats(store, info) == []         # once
+
+
+def test_a_needs_a_look_item_never_closes_by_itself_even_when_done(tmp_path):
+    c, store, _, info = writings_site(tmp_path, {MYCENA: 457, "Russula sp. 'Woo18'": 31})
+    look = iid(store, "name_writing_split", "woo18")
+    assert store.get(look)["list"] == "look"
+    assert fo.already_done(store.get(look), info)["done"] is True     # its old writing is gone
+    assert look not in fo.close_done_formats(store, info)
+    assert store.get(look)["status"] == "open"
+    # a person may still say so
+    assert decide(c, look, "done_at_source").status_code == 200
+
+
+def test_a_format_item_closes_only_when_done_untouched_and_its_writing_has_records(tmp_path):
+    i_subject = "Mycena sp. 'IN10'; Mycena \"sp-IN10\""
+    c, store, _, info = writings_site(tmp_path, {MYCENA: 456, OLD_MYCENA: 1})
+    assert fo.close_done_formats(store, info) == []        # an old writing is still on a record
+    _, store, _, info = writings_site(tmp_path / "gone", {})
+    assert fo.close_done_formats(store, info) == []        # the records left Vision: not renamed
+    c, store, _, info = writings_site(tmp_path / "reopened", {MYCENA: 457})
+    i = iid(store, "name_writing_split", i_subject)
+    decide(c, i, "different")
+    c.post(f"/api/feedback/items/{i}/reopen", headers=ADMIN)
+    assert fo.close_done_formats(store, info) == []        # a person's item stays theirs
+    assert fo.close_done_formats(store, None) == []
+
+
+def test_the_preview_counts_each_writing_on_its_own(tmp_path):
+    c, store, _, _ = writings_site(tmp_path, {MYCENA: 456, OLD_MYCENA: 1})
+    i = iid(store, "name_writing_split", "Mycena sp. 'IN10'; Mycena \"sp-IN10\"")
+    r = c.post(f"/api/feedback/items/{i}/org-preview", json={"decision": "use_writing",
+                                                              "value": MYCENA}, headers=ADMIN)
+    assert r.json()["records"] == {OLD_MYCENA: 1, MYCENA: 456}     # not 457 and 457
+
+
+def test_preview_counts_fold_writings_only_for_names_that_are_not_writings_of_each_other():
+    info = {"A old": {"records": 5, "exact": 4}, "A new": {"records": 9, "exact": 9}}
+    assert fo.preview_counts(["A old", "A new"], info) == {"A old": 5, "A new": 9}
+
+
+def test_the_lists_come_with_each_writings_records_now_and_the_names_to_fix_link(tmp_path):
+    c, store, _, _ = writings_site(tmp_path, {MYCENA: 456, OLD_MYCENA: 1})
+    fmt = c.get("/api/feedback/items", params={"type": "name_writing_split", "list": "format"},
+                headers=ADMIN).json()
+    assert [i["subject"] for i in fmt["items"]] == ["Mycena sp. 'IN10'; Mycena \"sp-IN10\""]
+    assert fmt["items"][0]["writings"] == [
+        {"name": MYCENA, "seeded": 456, "records": 456, "keep": True},
+        {"name": OLD_MYCENA, "seeded": 1, "records": 1, "keep": False}]
+    assert fmt["names_to_fix_url"] == "https://www.mycomap.org/admin/name-update"
+    look = c.get("/api/feedback/items", params={"type": "name_writing_split", "list": "look"},
+                 headers=ADMIN).json()
+    assert [i["subject"] for i in look["items"]] == ["woo18"]
+    assert c.get("/api/feedback/items", params={"type": "name_retired", "list": "format"},
+                 headers=ADMIN).status_code == 400
+
+
+def test_the_names_to_fix_link_follows_the_org_setting(tmp_path):
+    store = fb.Store(tmp_path / "f.sqlite")
+    seed(store)
+    org = FakeNameUpdates()
+    org.base = "https://dev.mycomap.org"
+    app = FastAPI()
+    feedback_api.add_routes(app, person=lambda r: {"sub": "admin-1", "name": "A"}, store=store,
+                            org=org, note=lambda s: None)
+    out = TestClient(app).get("/api/feedback/items", params={"type": "name_writing_split"}).json()
+    assert out["names_to_fix_url"] == "https://dev.mycomap.org/admin/name-update"

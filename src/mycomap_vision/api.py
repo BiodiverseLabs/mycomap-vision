@@ -3094,6 +3094,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def follow_name_updates():
             feedback_requests.poll_once()
             read_name_changes()
+            # Then the "format" writings the log (or the night) has renamed close by themselves
+            # (feedback_org.close_done_formats), read from the records just served.
+            feedback_org_rules.close_done_formats(feedback_store, name_info, note=note)
         start_background("feedback name updates", feedback_org_rules.POLL_SECONDS,
                          follow_name_updates, note)
 

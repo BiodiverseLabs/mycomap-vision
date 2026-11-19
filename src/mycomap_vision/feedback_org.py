@@ -19,8 +19,11 @@ changes nothing outside .org: .org searches every record of each old name into a
 Name Update, and a person with Name Update rights there presses Fix (or declines, with a
 reason shown here). Vision reads the request when the item opens and every 10 minutes while
 it is unfinished; when .org says done, the decision is applied ("mycomap.org Name Update
-<id>"), the only automatic way to applied. Reopening an item whose request nobody has run
-yet withdraws it (DELETE); one a person has started cannot be reopened from here.
+<id>"). The one other automatic way to applied (Steve, 2026-11-18): a "format only" writing
+split nobody has decided, once no served record carries its old writings, closes as
+"Already done on mycomap.org" by "mycomap.org" (close_done_formats). Reopening an item whose
+request nobody has run yet withdraws it (DELETE); one a person has started cannot be
+reopened from here.
 
 What a person can type is checked before saving: the new name is shown, editable, and a name
 Vision does not know (no live label, a genus iNat does not have) is flagged, because proposed
@@ -229,6 +232,62 @@ def refuse_done_at_source(item: dict, name_info: NameInfo | None) -> None:
                          if state["records"][o])
         raise fb.FeedbackError("This is not done on mycomap.org yet: of the records Vision "
                                f"holds, {left}. Choose another decision.")
+
+
+# A "format" writing split (writing_split.py) closes by itself once it is done at source:
+# .org's Names to fix carries these, a person there accepts them, and its name-change log
+# renames the records into the served layer (name_changes.py). Run beside that log's read,
+# every POLL_SECONDS (api.follow_name_updates), never on a read: a page view writes nothing.
+AUTO_BY = "mycomap.org"
+# mycomap.org itself, when MV_ORG_BASE_URL does not say (feedback_api.OrgClient's default).
+ORG_SITE = "https://www.mycomap.org"
+AUTO_APPLIED_BY = "mycomap.org name change log"
+
+
+def close_done_formats(store: fb.Store, name_info: NameInfo | None,
+                       note: Callable[[str], None] = lambda s: None) -> list[int]:
+    """Close every open "format" name_writing_split item nobody has decided whose old
+    writings no served record carries, while its proposed writing has records (so records
+    that left Vision, not renamed ones, close nothing). Never a "look" item. Returns the ids."""
+    from . import writing_split
+    if name_info is None:
+        return []
+    items = [i for i in store.items_of("name_writing_split")
+             if i["status"] == "open" and i["last_decision"] is None
+             and i.get("list") == writing_split.FORMAT and done_names(i)]
+    if not items:
+        return []
+    wanted = sorted({n for i in items for n in done_names(i)[0] + [done_names(i)[1]]})
+    info = name_info(wanted)                   # one read of the served records for them all
+    closed = []
+    for i in items:
+        state = already_done(i, lambda names: {n: info[n] for n in names if n in info})
+        if not (state and state["done"] and (state["records"].get(state["new_name"]) or 0) > 0):
+            continue
+        gone = ", ".join(state["old_names"])
+        if store.close_by_system(i["id"], fb.DONE_AT_SOURCE.code, AUTO_BY, AUTO_APPLIED_BY,
+                                 note=f"Closed by itself: no record Vision holds uses {gone} now; "
+                                      f"{state['records'][state['new_name']]} are under "
+                                      f"{state['new_name']}."):
+            closed.append(i["id"])
+    if closed:
+        note(f"[feedback] {len(closed)} format writing(s) done on mycomap.org, closed: {closed}")
+    return closed
+
+
+def preview_counts(wanted: list[str], info: dict[str, dict]) -> dict[str, int | None]:
+    """The record count shown beside each name of a preview: a name written another way
+    beside it (a respelling: Mycena "sp-IN10" and Mycena sp. 'IN10') shows its own exact
+    count, since its writings counted together would be the same number for both; any
+    other name its writings together."""
+    from . import names
+    keys = [names.variant_key(n) for n in wanted]
+    out: dict[str, int | None] = {}
+    for n, k in zip(wanted, keys):
+        got = info.get(n) or {}
+        shared = keys.count(k) > 1
+        out[n] = got.get("exact") if shared else got.get("records")
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
