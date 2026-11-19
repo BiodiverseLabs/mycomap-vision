@@ -748,8 +748,10 @@ def test_the_catalogue_says_which_options_open_a_name_update(site):
     c, _, _, _, _ = site
     cat = {t["type"]: {o["code"]: o["name_update"] for o in t["options"]}
            for t in c.get("/api/feedback/catalogue", headers=ADMIN).json()}
-    assert cat["name_writing_split"] == {"use_writing": "respelling", "different": None}
-    assert cat["name_retired"] == {"accept": "accepted_name", "keep": None, "rename": "rename"}
+    assert cat["name_writing_split"] == {"use_writing": "respelling", "different": None,
+                                         "done_at_source": None}
+    assert cat["name_retired"] == {"accept": "accepted_name", "keep": None, "rename": "rename",
+                                   "done_at_source": None}
     assert cat["crosswalk"]["same"] == "same_taxon" and cat["crosswalk"]["nested"] is None
     assert cat["vision_names_same_taxon"]["same"] == "same_taxon"
     assert set(cat["group_label"].values()) == {None}
@@ -780,8 +782,231 @@ def test_names_vision_holds_are_counted_with_their_writings(conn):
     save_records(conn, build_records(rows, "t"))
     info = fo.manifest_name_info(conn, lambda g: g in ("Mycena", "Amanita"))
     out = info(["Mycena sp. 'IN10'", "Amanita acepted", "Zzyzx y"])
-    assert out["Mycena sp. 'IN10'"] == {"records": 2, "genus_known": True}
-    assert out["Amanita acepted"] == {"records": 0, "genus_known": True}
-    assert out["Zzyzx y"] == {"records": 0, "genus_known": False}
-    assert fo.manifest_name_info(conn)(["Amanita x"])["Amanita x"] == {"records": 1,
-                                                                        "genus_known": None}
+    assert out["Mycena sp. 'IN10'"] == {"records": 2, "exact": 1, "served": 3,
+                                        "genus_known": True}
+    assert out["Amanita acepted"] == {"records": 0, "exact": 0, "served": 3, "genus_known": True}
+    assert out["Zzyzx y"] == {"records": 0, "exact": 0, "served": 3, "genus_known": False}
+    assert fo.manifest_name_info(conn)(["Amanita x"])["Amanita x"] == {
+        "records": 1, "exact": 1, "served": 3, "genus_known": None}
+
+
+# --- Already done on mycomap.org (Steve, 2026-11-18) -------------------------------------------
+# A name item seeded before .org renamed its records (Lanmaoa pallidorosea: 71 then, 0 now, 85
+# under Lanmaoa rubissima). No served record carries the old name: "Already done on
+# mycomap.org" is offered, and the API refuses it anywhere else.
+
+def served(counts, exact=None, total=None):
+    """A NameInfo over a served manifest holding `counts` (writings together) and `exact`."""
+    exact = counts if exact is None else exact
+    total = sum(counts.values()) + 100 if total is None else total
+    return lambda names: {n: {"records": counts.get(n, 0), "exact": exact.get(n, 0),
+                              "served": total, "genus_known": True} for n in names}
+
+
+def test_a_name_no_served_record_carries_is_already_done_and_one_with_records_is_not():
+    it = item("name_inactive_on_inat", "Lanmaoa pallidorosea", "Lanmaoa rubissima")
+    done = fo.already_done(it, served({"Lanmaoa rubissima": 85}))
+    assert done == {"done": True, "old_names": ["Lanmaoa pallidorosea"],
+                    "new_name": "Lanmaoa rubissima",
+                    "records": {"Lanmaoa pallidorosea": 0, "Lanmaoa rubissima": 85}}
+    assert fo.already_done(it, served({"Lanmaoa pallidorosea": 71}))["done"] is False
+    for t in ("name_retired", "group_label"):
+        assert fo.already_done(item(t, "A old", "A new"), served({}))["done"] is True
+        assert fo.already_done(item(t, "A old"), served({"A old": 1}))["done"] is False
+    assert fo.already_done(item("group_label", "L l group"), served({}))["new_name"] is None
+
+
+def test_a_writing_split_is_done_only_when_no_record_uses_another_writing_than_the_proposed():
+    it = item("name_writing_split", "M sp. 'IN10' (456) | M \"sp-IN10\" (1)", "M sp. 'IN10'")
+    # the writings share one variant key, so only the exact counts tell them apart
+    both = {"M sp. 'IN10'": 457, 'M "sp-IN10"': 457}
+    done = fo.already_done(it, served(both, exact={"M sp. 'IN10'": 457}))
+    assert done["done"] is True and done["old_names"] == ['M "sp-IN10"']
+    assert fo.already_done(it, served(both, exact={"M sp. 'IN10'": 456,
+                                                   'M "sp-IN10"': 1}))["done"] is False
+    # a name_info without exact counts tells nothing, never "done"
+    assert fo.already_done(it, lambda names: {n: {"records": 0} for n in names}) is None
+
+
+def test_already_done_is_not_told_without_served_records_or_for_other_queues():
+    it = item("name_retired", "A old", "A new")
+    assert fo.already_done(it, None) is None
+    assert fo.already_done(it, served({}, total=0)) is None     # an empty manifest: unknown
+    for t in ("crosswalk", "species_rank_split", "vision_names_same_taxon", "label_vs_own_dna"):
+        assert fo.already_done(item(t, "A old", "A new"), served({})) is None
+
+
+def test_done_at_source_is_a_note_on_the_name_queues_and_nowhere_else():
+    for t in fo.DONE_TYPES:
+        o = next(o for o in fb.TYPES[t].options if o.code == "done_at_source")
+        assert (o.label, o.applies, o.needs_value) == ("Already done on mycomap.org", "note",
+                                                        False)
+        assert (t, o.code) not in fo.KINDS                      # opens no Name Update
+    having = {t for t, ty in fb.TYPES.items() if any(o.code == "done_at_source"
+                                                     for o in ty.options)}
+    assert having == set(fo.DONE_TYPES)
+
+
+def done_site(tmp_path, counts):
+    c, store, org, _, _ = make(tmp_path, name_info=served(counts))
+    return c, store, org
+
+
+def test_the_item_says_whether_its_name_is_already_done(tmp_path):
+    c, store, _ = done_site(tmp_path, {"Amanita accepted": 5, "Boletus other": 3})
+    gone = c.get(f"/api/feedback/items/{iid(store, 'name_retired', 'Amanita retired')}",
+                 headers=ADMIN).json()
+    assert gone["already_done"] == {"done": True, "old_names": ["Amanita retired"],
+                                    "new_name": "Amanita accepted",
+                                    "records": {"Amanita retired": 0, "Amanita accepted": 5}}
+    there = c.get(f"/api/feedback/items/{iid(store, 'name_retired', 'Boletus other')}",
+                  headers=ADMIN).json()
+    assert there["already_done"]["done"] is False
+    assert c.get(f"/api/feedback/items/{iid(store, 'crosswalk')}",
+                 headers=ADMIN).json()["already_done"] is None
+    cat = {t["type"]: [o["code"] for o in t["options"]]
+           for t in c.get("/api/feedback/catalogue", headers=ADMIN).json()}
+    assert cat["name_inactive_on_inat"] == ["accept", "keep", "rename", "done_at_source"]
+
+
+def test_saving_already_done_records_a_note_and_sends_nothing_to_org(tmp_path):
+    c, store, org = done_site(tmp_path, {"Amanita accepted": 5})
+    i = iid(store, "name_retired", "Amanita retired")
+    r = decide(c, i, "done_at_source")
+    assert r.status_code == 200, r.text
+    d = r.json()["decisions"][-1]
+    assert (d["decision"], d["applies"]) == ("done_at_source", "note")
+    assert r.json()["status"] == "decided" and r.json()["org_request"] is None
+    assert not [x for x in org.calls if x[0] == "POST"]          # no Name Update
+    assert store.changes(applies="org") == []
+    assert c.get(f"/api/feedback/items/{i}", headers=ADMIN).json()["already_done"] is None
+
+
+def test_already_done_is_refused_while_records_still_carry_the_name(tmp_path):
+    c, store, org = done_site(tmp_path, {"Boletus other": 3, "Amanita accepted": 5})
+    i = iid(store, "name_retired", "Boletus other")
+    r = decide(c, i, "done_at_source")
+    assert r.status_code == 400
+    assert r.json()["detail"] == ("This is not done on mycomap.org yet: of the records Vision "
+                                  "holds, 3 still under Boletus other. Choose another decision.")
+    assert store.get(i)["status"] == "open" and store.get(i)["decisions"] == []
+    # nor on a queue it does not belong to
+    assert decide(c, iid(store, "crosswalk"), "done_at_source").status_code == 400
+
+
+def test_already_done_is_refused_when_vision_cannot_tell(site):
+    c, store, _, _, _ = site                                     # no served records at all
+    i = iid(store, "name_retired", "Amanita retired")
+    r = decide(c, i, "done_at_source")
+    assert r.status_code == 400 and "cannot tell" in r.json()["detail"]
+    assert store.get(i)["status"] == "open"
+
+
+def test_the_other_choices_still_save_on_a_name_already_done(tmp_path):
+    c, store, org = done_site(tmp_path, {"Amanita accepted": 5})
+    i = iid(store, "name_retired", "Amanita retired")
+    assert decide(c, i, "keep").status_code == 200
+    assert c.post(f"/api/feedback/items/{i}/reopen", headers=ADMIN).status_code == 200
+    # not refused: .org may hold records of the name that Vision does not serve
+    r = decide(c, i, "accept")
+    assert r.status_code == 200 and r.json()["org_request"]["status"] == "searching"
+
+
+
+# --- One name, several writings: format-only items close by themselves (Steve, 2026-11-18) ----
+
+MYCENA = "Mycena sp. 'IN10'"
+OLD_MYCENA = 'Mycena "sp-IN10"'
+
+
+def writings_site(tmp_path, exact):
+    """The seed's Mycena writing split (format only) and a spacing-only one (needs a look),
+    over served records with these exact counts (writings of one name counted together)."""
+    folded = {MYCENA: sum(v for k, v in exact.items() if "IN10" in k),
+              OLD_MYCENA: sum(v for k, v in exact.items() if "IN10" in k)}
+    folded |= {k: v for k, v in exact.items() if "IN10" not in k}
+    c, store, org, _, _ = make(tmp_path, name_info=served(folded, exact=exact))
+    store.seed([{"item_type": "name_writing_split", "subject": "woo18", "rule": "R1",
+                 "current": "Russula sp. 'Woo18' (30) | Russula sp. 'woo18' (1)",
+                 "proposed": "Russula sp. 'Woo18'", "projects": ["p1"]}], "test2")
+    return c, store, org, served(folded, exact=exact)
+
+
+def test_a_format_only_writing_no_served_record_still_uses_closes_by_itself(tmp_path):
+    c, store, org, info = writings_site(tmp_path, {MYCENA: 457})
+    i = iid(store, "name_writing_split", "Mycena sp. 'IN10'; Mycena \"sp-IN10\"")
+    assert fo.close_done_formats(store, info) == [i]
+    item = store.get(i)
+    d = item["decisions"][-1]
+    assert item["status"] == "decided"
+    assert (d["decision"], d["applies"], d["by_user"], d["applied"], d["applied_by"]) == (
+        "done_at_source", "note", "mycomap.org", 1, "mycomap.org name change log")
+    assert "no record Vision holds uses Mycena \"sp-IN10\" now; 457 are under" in d["note"]
+    assert not org.calls                                    # nothing asked of .org
+    assert fo.close_done_formats(store, info) == []         # once
+
+
+def test_a_needs_a_look_item_never_closes_by_itself_even_when_done(tmp_path):
+    c, store, _, info = writings_site(tmp_path, {MYCENA: 457, "Russula sp. 'Woo18'": 31})
+    look = iid(store, "name_writing_split", "woo18")
+    assert store.get(look)["list"] == "look"
+    assert fo.already_done(store.get(look), info)["done"] is True     # its old writing is gone
+    assert look not in fo.close_done_formats(store, info)
+    assert store.get(look)["status"] == "open"
+    # a person may still say so
+    assert decide(c, look, "done_at_source").status_code == 200
+
+
+def test_a_format_item_closes_only_when_done_untouched_and_its_writing_has_records(tmp_path):
+    i_subject = "Mycena sp. 'IN10'; Mycena \"sp-IN10\""
+    c, store, _, info = writings_site(tmp_path, {MYCENA: 456, OLD_MYCENA: 1})
+    assert fo.close_done_formats(store, info) == []        # an old writing is still on a record
+    _, store, _, info = writings_site(tmp_path / "gone", {})
+    assert fo.close_done_formats(store, info) == []        # the records left Vision: not renamed
+    c, store, _, info = writings_site(tmp_path / "reopened", {MYCENA: 457})
+    i = iid(store, "name_writing_split", i_subject)
+    decide(c, i, "different")
+    c.post(f"/api/feedback/items/{i}/reopen", headers=ADMIN)
+    assert fo.close_done_formats(store, info) == []        # a person's item stays theirs
+    assert fo.close_done_formats(store, None) == []
+
+
+def test_the_preview_counts_each_writing_on_its_own(tmp_path):
+    c, store, _, _ = writings_site(tmp_path, {MYCENA: 456, OLD_MYCENA: 1})
+    i = iid(store, "name_writing_split", "Mycena sp. 'IN10'; Mycena \"sp-IN10\"")
+    r = c.post(f"/api/feedback/items/{i}/org-preview", json={"decision": "use_writing",
+                                                              "value": MYCENA}, headers=ADMIN)
+    assert r.json()["records"] == {OLD_MYCENA: 1, MYCENA: 456}     # not 457 and 457
+
+
+def test_preview_counts_fold_writings_only_for_names_that_are_not_writings_of_each_other():
+    info = {"A old": {"records": 5, "exact": 4}, "A new": {"records": 9, "exact": 9}}
+    assert fo.preview_counts(["A old", "A new"], info) == {"A old": 5, "A new": 9}
+
+
+def test_the_lists_come_with_each_writings_records_now_and_the_names_to_fix_link(tmp_path):
+    c, store, _, _ = writings_site(tmp_path, {MYCENA: 456, OLD_MYCENA: 1})
+    fmt = c.get("/api/feedback/items", params={"type": "name_writing_split", "list": "format"},
+                headers=ADMIN).json()
+    assert [i["subject"] for i in fmt["items"]] == ["Mycena sp. 'IN10'; Mycena \"sp-IN10\""]
+    assert fmt["items"][0]["writings"] == [
+        {"name": MYCENA, "seeded": 456, "records": 456, "keep": True},
+        {"name": OLD_MYCENA, "seeded": 1, "records": 1, "keep": False}]
+    assert fmt["names_to_fix_url"] == "https://www.mycomap.org/admin/name-update"
+    look = c.get("/api/feedback/items", params={"type": "name_writing_split", "list": "look"},
+                 headers=ADMIN).json()
+    assert [i["subject"] for i in look["items"]] == ["woo18"]
+    assert c.get("/api/feedback/items", params={"type": "name_retired", "list": "format"},
+                 headers=ADMIN).status_code == 400
+
+
+def test_the_names_to_fix_link_follows_the_org_setting(tmp_path):
+    store = fb.Store(tmp_path / "f.sqlite")
+    seed(store)
+    org = FakeNameUpdates()
+    org.base = "https://dev.mycomap.org"
+    app = FastAPI()
+    feedback_api.add_routes(app, person=lambda r: {"sub": "admin-1", "name": "A"}, store=store,
+                            org=org, note=lambda s: None)
+    out = TestClient(app).get("/api/feedback/items", params={"type": "name_writing_split"}).json()
+    assert out["names_to_fix_url"] == "https://dev.mycomap.org/admin/name-update"

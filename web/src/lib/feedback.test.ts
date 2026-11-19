@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
 import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
-         inatLinks, isNameItem, noProposal, roleText, usableOptions,
+         inatLinks, isNameItem, noProposal, roleText, usableOptions, alreadyDoneText, decideOptions, DONE_AT_SOURCE,
+         FORMAT_PANEL_TEXT, formatRow, hasLists, listCount, listReasonText, seededNote, WRITING_LISTS,
          historyOrgText, itemBadges, linkedItem, openQueue, orgChipClass, pageText, parsePhotoKeys, prefillValue,
          queueParam, QUEUE_STORAGE_KEY, readLastQueue, writeLastQueue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
@@ -334,4 +335,88 @@ test("a name item with no proposal offers no 'use iNat's name'; other items keep
   assert.deepEqual(usableOptions(proposed, opts).map((o) => o.code), ["accept", "keep", "rename"]);
   assert.equal(noProposal(item({ item_type: "group_label", proposed: "" })), false);
   assert.equal(isNameItem(item({ item_type: "name_retired" })), true);
+});
+
+// --- Already done on mycomap.org (Steve, 2026-11-18) ------------------------------------------
+
+const NAME_OPTS = [opt({ code: "accept", applies: "org" }), opt({ code: "keep", applies: "note" }),
+                   opt({ code: "rename", applies: "org", needs_value: true }),
+                   opt({ code: DONE_AT_SOURCE, label: "Already done on mycomap.org", applies: "note" })];
+const lanmaoa = (done: boolean) => ({
+  ...item({ item_type: "name_inactive_on_inat", current: "Lanmaoa pallidorosea", proposed: "Lanmaoa rubissima" }),
+  already_done: { done, old_names: ["Lanmaoa pallidorosea"], new_name: "Lanmaoa rubissima",
+                  records: { "Lanmaoa pallidorosea": done ? 0 : 71, "Lanmaoa rubissima": 85 } },
+});
+
+test("a name already renamed on mycomap.org offers Already done first and greys out what would ask .org", () => {
+  const shown = decideOptions(lanmaoa(true), NAME_OPTS);
+  assert.deepEqual(shown.map((o) => o.code), [DONE_AT_SOURCE, "accept", "keep", "rename"]);
+  assert.deepEqual(shown.map((o) => o.off !== null), [false, true, false, true]);
+  assert.match(shown[1].off!, /^Nothing left to rename: no record Vision holds uses Lanmaoa pallidorosea now/);
+  assert.equal(alreadyDoneText(lanmaoa(true).already_done),
+               "Already done on mycomap.org: no record Vision holds uses Lanmaoa pallidorosea now; 85 are under Lanmaoa rubissima.");
+});
+
+test("a name still on records never offers Already done, and every other choice stays as before", () => {
+  const plain: ReturnType<typeof lanmaoa> | (FeedbackItem & { already_done?: undefined }) =
+    item({ item_type: "name_inactive_on_inat", proposed: "A c" });
+  for (const it of [lanmaoa(false), { ...lanmaoa(false), already_done: null }, plain]) {
+    const shown = decideOptions(it, NAME_OPTS);
+    assert.deepEqual(shown.map((o) => o.code), ["accept", "keep", "rename"]);
+    assert.ok(shown.every((o) => o.off === null));
+    assert.equal(alreadyDoneText(it.already_done), null);
+  }
+});
+
+test("the already-done line names every old writing and leaves out a target with no records", () => {
+  assert.equal(alreadyDoneText({ done: true, old_names: ["A b", "A \"b\""], new_name: "A sp. 'b'",
+                                 records: { "A b": 0, "A \"b\"": 0, "A sp. 'b'": 1 } }),
+               "Already done on mycomap.org: no record Vision holds uses A b or A \"b\" now; 1 is under A sp. 'b'.");
+  assert.equal(alreadyDoneText({ done: true, old_names: ["L l group"], new_name: null, records: { "L l group": 0 } }),
+               "Already done on mycomap.org: no record Vision holds uses L l group now.");
+});
+
+test("a done name with no iNat successor still drops Use iNat's name and offers Already done first", () => {
+  const it = { ...lanmaoa(true), proposed: "" };
+  assert.deepEqual(decideOptions(it, NAME_OPTS).map((o) => o.code), [DONE_AT_SOURCE, "keep", "rename"]);
+});
+
+// --- One name, several writings in two lists (Steve, 2026-11-18) -------------------------------
+
+test("only One name, several writings is shown as two lists, Format only first", () => {
+  assert.equal(hasLists("name_writing_split"), true);
+  assert.equal(hasLists("name_retired"), false);
+  assert.deepEqual(WRITING_LISTS.map((l) => l.label), ["Format only", "Needs a look"]);
+  assert.match(FORMAT_PANEL_TEXT, /^These are on mycomap.org's Names to fix\. On mycomap.org: Name Update > Names to fix, filter Format, Accept all, then run the queue\./);
+});
+
+test("the status buttons count the list shown, or the whole queue without lists", () => {
+  const s = { open: 376, decided: 0, lists: { format: { open: 305, decided: 0 }, look: { open: 71, decided: 0 } } };
+  assert.equal(listCount(s, "format", "open"), 305);
+  assert.equal(listCount(s, "look", "open"), 71);
+  assert.equal(listCount(s, null, "open"), 376);
+  assert.equal(listCount({ open: 3, decided: 1 }, "format", "decided"), 1);
+});
+
+test("a format row shows each old writing and the one it becomes, with the records now", () => {
+  const row = formatRow({
+    proposed: "Mycena sp. 'IN10'", proposed_records: 456,
+    writings: [{ name: "Mycena sp. 'IN10'", seeded: 456, records: 456, keep: true },
+               { name: 'Mycena "sp-IN10"', seeded: 1, records: null, keep: false }],
+  });
+  assert.deepEqual(row, { old: [{ name: 'Mycena "sp-IN10"', count: 1 }], keep: { name: "Mycena sp. 'IN10'", count: 456 } });
+  // a writing nobody uses yet: its count is the proposal's
+  const fresh = formatRow({ proposed: "Cortinarius sp. 'Harrower58'", proposed_records: 0,
+                            writings: [{ name: "Cortinarius Harrower58", seeded: 30, records: 30, keep: false }] });
+  assert.deepEqual(fresh.keep, { name: "Cortinarius sp. 'Harrower58'", count: 0 });
+});
+
+test("a needs-a-look card says why, and when the proposal is not the most used writing", () => {
+  assert.match(listReasonText("number")!, /IN5 and IN05/);
+  assert.equal(listReasonText("format"), null);
+  assert.equal(listReasonText(undefined), null);
+  assert.equal(seededNote({ proposed: "Lactarius sp. 'acrid-orange'", proposed_seeded: 'Lactarius "acrid orange"' }),
+               "Proposed in MycoMap's current format; the most used writing was Lactarius \"acrid orange\".");
+  assert.equal(seededNote({ proposed: "A sp. 'X1'", proposed_seeded: null }), null);
+  assert.equal(isNameItem(item({ item_type: "name_writing_split" })), true);   // gets the names panel
 });

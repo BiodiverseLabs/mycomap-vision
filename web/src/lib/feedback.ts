@@ -6,7 +6,7 @@
 // those items must look exactly like the others until they are decided. Nothing here shows
 // which items they are.
 
-import type { BlastLink, FeedbackApplies, FeedbackDecisionBody, FeedbackItem, FeedbackOption,
+import type { AlreadyDone, BlastLink, WritingList, WritingNow, FeedbackApplies, FeedbackDecisionBody, FeedbackItem, FeedbackItemDetail, FeedbackOption,
               FeedbackSummary, LiveSequence, Me, NameContextEntry, NameRole, OrgChip, OrgRequest, OrgStep,
               RefreshedRecord, Revealed, RevealedAnswer } from "./api";
 import { ApiError } from "./api";
@@ -383,7 +383,8 @@ export function openQueue(o: {
 // "Names iNaturalist no longer uses" and "Names retired on MycoMap's synonym list" show each
 // name with its iNat taxon, linked, and MycoMap's synonym list around it (name_context.py).
 
-export const NAME_ITEM_TYPES = ["name_retired", "name_inactive_on_inat"];
+// "One name, several writings" too (Steve, 2026-11-18): its cards that need a look.
+export const NAME_ITEM_TYPES = ["name_retired", "name_inactive_on_inat", "name_writing_split"];
 
 export const isNameItem = (item: Pick<FeedbackItem, "item_type">): boolean =>
   NAME_ITEM_TYPES.includes(item.item_type);
@@ -425,3 +426,100 @@ export function usableOptions<T extends Pick<FeedbackOption, "code">>(
   item: Pick<FeedbackItem, "item_type" | "proposed">, options: T[]): T[] {
   return noProposal(item) ? options.filter((o) => o.code !== "accept") : options;
 }
+
+// --- Already done on mycomap.org (Steve, 2026-11-18) -----------------------------------------
+// A name item seeded before .org renamed its records: no record Vision serves carries the old
+// name now. "Already done on mycomap.org" is offered first and the choices that would ask .org
+// to rename are greyed out; on any other item that choice is not shown (it would be untrue).
+
+export const DONE_AT_SOURCE = "done_at_source";
+
+const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+
+/** "Already done on mycomap.org: no record Vision holds uses A now; 85 are under B." */
+export function alreadyDoneText(d: AlreadyDone | null | undefined): string | null {
+  if (!d?.done || !d.old_names.length) return null;
+  const old = d.old_names.join(" or ");
+  const n = d.new_name ? d.records[d.new_name] ?? 0 : 0;
+  const now = d.new_name && n > 0 ? `; ${n} ${plural(n, "is", "are")} under ${d.new_name}` : "";
+  return `Already done on mycomap.org: no record Vision holds uses ${old} now${now}.`;
+}
+
+/** Why an option that would ask mycomap.org to rename is greyed out on a done item. */
+export const nothingToRename = (d: AlreadyDone): string =>
+  `Nothing left to rename: no record Vision holds uses ${d.old_names.join(" or ")} now.`;
+
+export type DecideOption<T> = T & { off: string | null };
+
+/** The choices as the Decide box shows them, each with `off` (why it is greyed out, or null).
+ *  On a done item "Already done on mycomap.org" comes first and every "org" choice is off; on
+ *  any other item it is left out and the rest are as before. */
+export function decideOptions<T extends Pick<FeedbackOption, "code" | "applies">>(
+  item: Pick<FeedbackItemDetail, "item_type" | "proposed" | "already_done">, options: T[]): DecideOption<T>[] {
+  const usable = usableOptions(item, options);
+  const d = item.already_done;
+  if (!d?.done) {
+    return usable.filter((o) => o.code !== DONE_AT_SOURCE).map((o) => ({ ...o, off: null }));
+  }
+  const first = usable.filter((o) => o.code === DONE_AT_SOURCE);
+  const rest = usable.filter((o) => o.code !== DONE_AT_SOURCE);
+  return [...first, ...rest].map((o) => ({ ...o, off: o.applies === "org" ? nothingToRename(d) : null }));
+}
+
+
+// --- One name, several writings, in two lists (Steve, 2026-11-18) ------------------------------
+// "Format only": an old way of writing a temporary code beside today's, as mycomap.org's own
+// Names to fix lists it ("Old format"): no decision per item, one panel says where it is fixed,
+// and each closes by itself once Vision's records show it done. "Needs a look": the rest.
+
+export const WRITING_SPLIT_TYPE = "name_writing_split";
+export const hasLists = (type: string): boolean => type === WRITING_SPLIT_TYPE;
+
+export const WRITING_LISTS: { code: WritingList; label: string }[] = [
+  { code: "format", label: "Format only" },
+  { code: "look", label: "Needs a look" },
+];
+
+export const FORMAT_PANEL_TEXT =
+  "These are on mycomap.org's Names to fix. On mycomap.org: Name Update > Names to fix, filter Format, "
+  + "Accept all, then run the queue. Each closes here when mycomap.org's name change log shows it done.";
+
+/** A list's count on the status buttons: the list's own when the summary has it. */
+export function listCount(s: Pick<FeedbackSummary, "open" | "decided" | "lists">,
+                          list: WritingList | null, status: "open" | "decided"): number {
+  return list && s.lists?.[list] ? s.lists[list]![status] : s[status];
+}
+
+const LIST_REASON: Record<string, string> = {
+  spacing: "Only a space, hyphen, capital or odd character differs (Spacing on mycomap.org's Names to fix).",
+  number: "A number written two ways (IN5 and IN05): mycomap.org counts current-format ones as two names.",
+  described: "A described code ('acrid orange'): its spaces may be meant.",
+  rank: "The writings differ in a rank word (var., subsp., f.).",
+  name_or_code: "A temporary code beside a plain name.",
+  other: "The writings differ in more than their format.",
+};
+
+/** Why a "Needs a look" item is not format only, in a line. */
+export const listReasonText = (reason: string | null | undefined): string | null =>
+  (reason && LIST_REASON[reason]) || null;
+
+/** The count shown for a writing: the records Vision serves under it now, else the seed's. */
+export const writingCount = (w: Pick<WritingNow, "records" | "seeded">): number | null =>
+  w.records ?? w.seeded;
+
+/** A "Format only" row: the old writings with their counts, and the writing they become. */
+export function formatRow(item: Pick<FeedbackItem, "writings" | "proposed" | "proposed_records">):
+  { old: { name: string; count: number | null }[]; keep: { name: string; count: number | null } } {
+  const ws = item.writings ?? [];
+  const keepName = item.proposed ?? ws.find((w) => w.keep)?.name ?? "";
+  const kept = ws.find((w) => w.name === keepName);
+  return {
+    old: ws.filter((w) => w.name !== keepName).map((w) => ({ name: w.name, count: writingCount(w) })),
+    keep: { name: keepName, count: kept ? writingCount(kept) : item.proposed_records ?? null },
+  };
+}
+
+/** "a proposal of the seed's, now in MycoMap's format" note, or null. */
+export const seededNote = (item: Pick<FeedbackItem, "proposed_seeded" | "proposed">): string | null =>
+  item.proposed_seeded && item.proposed_seeded !== item.proposed
+    ? `Proposed in MycoMap's current format; the most used writing was ${item.proposed_seeded}.` : null;

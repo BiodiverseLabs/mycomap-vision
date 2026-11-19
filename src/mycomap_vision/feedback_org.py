@@ -19,8 +19,11 @@ changes nothing outside .org: .org searches every record of each old name into a
 Name Update, and a person with Name Update rights there presses Fix (or declines, with a
 reason shown here). Vision reads the request when the item opens and every 10 minutes while
 it is unfinished; when .org says done, the decision is applied ("mycomap.org Name Update
-<id>"), the only automatic way to applied. Reopening an item whose request nobody has run
-yet withdraws it (DELETE); one a person has started cannot be reopened from here.
+<id>"). The one other automatic way to applied (Steve, 2026-11-18): a "format only" writing
+split nobody has decided, once no served record carries its old writings, closes as
+"Already done on mycomap.org" by "mycomap.org" (close_done_formats). Reopening an item whose
+request nobody has run yet withdraws it (DELETE); one a person has started cannot be
+reopened from here.
 
 What a person can type is checked before saving: the new name is shown, editable, and a name
 Vision does not know (no live label, a genus iNat does not have) is flagged, because proposed
@@ -163,6 +166,127 @@ def warnings(kind: str, old: list[str], new: str, name_info: NameInfo | None) ->
                            "usually a crosswalk question, decided at source")
             if is_infraspecific(o) != is_infraspecific(new):
                 out.append(f"{o} and {new} are at different ranks (one is infraspecific)")
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Already done on mycomap.org (Steve, 2026-11-18)
+#
+# A name item is a snapshot from when it was seeded; .org may have renamed the records since
+# (the Lanmaoa pallidorosea item: 71 records then, none now, all 85 under Lanmaoa rubissima).
+# Vision's served records follow .org every night (and name_changes.py between), so a name no
+# served record carries any more is done at source: the item's "org" options would ask .org
+# for nothing, and fb.DONE_AT_SOURCE ("Already done on mycomap.org") says so instead.
+#
+#   name_retired, name_inactive_on_inat, group_label   the item's name (current); its writings
+#                                                       counted together (names.variant_key)
+#   name_writing_split                                  every writing but the proposed one,
+#                                                       each counted exactly (its writings
+#                                                       share one variant key)
+#
+# Not species_rank_split, crosswalk or vision_names_same_taxon: which of their names is "old"
+# is the decision itself (or a judgment, as "nested"), so one name being gone is no answer.
+DONE_TYPES = ("name_retired", "name_inactive_on_inat", "group_label", "name_writing_split")
+
+
+def done_names(item: dict) -> tuple[list[str], str | None, str] | None:
+    """(the names a done item no longer has on any record, the name they went to or None, the
+    count to read: "records" or "exact"); None for an item this does not apply to."""
+    t = item["item_type"]
+    current, proposed = (item.get("current") or "").strip(), (item.get("proposed") or "").strip()
+    if t == "name_writing_split":
+        old = [w for w in writings(current) if w != proposed]
+        return (old, proposed, "exact") if proposed and old else None
+    if t in DONE_TYPES and current:
+        return [current], proposed or None, "records"
+    return None
+
+
+def already_done(item: dict, name_info: NameInfo | None) -> dict | None:
+    """{"done": no served record carries the item's old names, "old_names", "new_name", and
+    "records" per name}; None when it does not apply or cannot be told (no served records:
+    an empty manifest would make every name look done)."""
+    names_ = done_names(item)
+    if names_ is None or name_info is None:
+        return None
+    old, new, count = names_
+    wanted = old + ([new] if new and new not in old else [])
+    info = name_info(wanted) or {}
+    if any((info.get(n) or {}).get("served") == 0 for n in wanted):
+        return None
+    records = {n: (info.get(n) or {}).get(count) for n in wanted}
+    if any(records[o] is None for o in old):
+        return None
+    return {"done": all(records[o] == 0 for o in old), "old_names": old, "new_name": new,
+            "records": records}
+
+
+def refuse_done_at_source(item: dict, name_info: NameInfo | None) -> None:
+    """Raise FeedbackError unless the item is already done (fb.DONE_AT_SOURCE would be false)."""
+    state = already_done(item, name_info)
+    if state is None:
+        raise fb.FeedbackError("Vision cannot tell whether this name is still on a record, so "
+                               "it cannot be marked already done on mycomap.org")
+    if not state["done"]:
+        left = "; ".join(f"{state['records'][o]} still under {o}" for o in state["old_names"]
+                         if state["records"][o])
+        raise fb.FeedbackError("This is not done on mycomap.org yet: of the records Vision "
+                               f"holds, {left}. Choose another decision.")
+
+
+# A "format" writing split (writing_split.py) closes by itself once it is done at source:
+# .org's Names to fix carries these, a person there accepts them, and its name-change log
+# renames the records into the served layer (name_changes.py). Run beside that log's read,
+# every POLL_SECONDS (api.follow_name_updates), never on a read: a page view writes nothing.
+AUTO_BY = "mycomap.org"
+# mycomap.org itself, when MV_ORG_BASE_URL does not say (feedback_api.OrgClient's default).
+ORG_SITE = "https://www.mycomap.org"
+AUTO_APPLIED_BY = "mycomap.org name change log"
+
+
+def close_done_formats(store: fb.Store, name_info: NameInfo | None,
+                       note: Callable[[str], None] = lambda s: None) -> list[int]:
+    """Close every open "format" name_writing_split item nobody has decided whose old
+    writings no served record carries, while its proposed writing has records (so records
+    that left Vision, not renamed ones, close nothing). Never a "look" item. Returns the ids."""
+    from . import writing_split
+    if name_info is None:
+        return []
+    items = [i for i in store.items_of("name_writing_split")
+             if i["status"] == "open" and i["last_decision"] is None
+             and i.get("list") == writing_split.FORMAT and done_names(i)]
+    if not items:
+        return []
+    wanted = sorted({n for i in items for n in done_names(i)[0] + [done_names(i)[1]]})
+    info = name_info(wanted)                   # one read of the served records for them all
+    closed = []
+    for i in items:
+        state = already_done(i, lambda names: {n: info[n] for n in names if n in info})
+        if not (state and state["done"] and (state["records"].get(state["new_name"]) or 0) > 0):
+            continue
+        gone = ", ".join(state["old_names"])
+        if store.close_by_system(i["id"], fb.DONE_AT_SOURCE.code, AUTO_BY, AUTO_APPLIED_BY,
+                                 note=f"Closed by itself: no record Vision holds uses {gone} now; "
+                                      f"{state['records'][state['new_name']]} are under "
+                                      f"{state['new_name']}."):
+            closed.append(i["id"])
+    if closed:
+        note(f"[feedback] {len(closed)} format writing(s) done on mycomap.org, closed: {closed}")
+    return closed
+
+
+def preview_counts(wanted: list[str], info: dict[str, dict]) -> dict[str, int | None]:
+    """The record count shown beside each name of a preview: a name written another way
+    beside it (a respelling: Mycena "sp-IN10" and Mycena sp. 'IN10') shows its own exact
+    count, since its writings counted together would be the same number for both; any
+    other name its writings together."""
+    from . import names
+    keys = [names.variant_key(n) for n in wanted]
+    out: dict[str, int | None] = {}
+    for n, k in zip(wanted, keys):
+        got = info.get(n) or {}
+        shared = keys.count(k) > 1
+        out[n] = got.get("exact") if shared else got.get("records")
     return out
 
 
@@ -427,15 +551,21 @@ class Unwithdrawable(RuntimeError):
 
 def manifest_name_info(conn, genus_known: Callable[[str], bool | None] | None = None) -> NameInfo:
     """name -> {"records": records under the name in the served manifest (its writings
-    counted together, names.variant_key), "genus_known": whether iNat has its genus (the
-    taxonomy cache; None when not asked)}."""
+    counted together, names.variant_key), "exact": records written exactly so, "served":
+    records in the manifest, "genus_known": whether iNat has its genus (the taxonomy cache;
+    None when not asked)}."""
     from . import names
 
     def info(wanted: list[str]) -> dict[str, dict]:
         keys = {n: names.variant_key(n) for n in wanted}
         counts: dict[str, int] = {}
+        exact: dict[str, int] = {}
+        served = 0
         for name, n in conn.execute("select scientific_name, count(*) from records "
                                     "group by scientific_name"):
+            served += n
+            if name in keys:
+                exact[name] = n
             k = names.variant_key(name or "")
             if k in keys.values():
                 counts[k] = counts.get(k, 0) + n
@@ -443,7 +573,7 @@ def manifest_name_info(conn, genus_known: Callable[[str], bool | None] | None = 
         for n, k in keys.items():
             records = counts.get(k, 0)
             genus = (n.split() or [""])[0]
-            out[n] = {"records": records,
+            out[n] = {"records": records, "exact": exact.get(n, 0), "served": served,
                       "genus_known": genus_known(genus) if genus_known else None}
         return out
     return info
