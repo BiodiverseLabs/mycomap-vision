@@ -91,7 +91,7 @@ MODEL = "v1"
 REVIEWERS_ONLY = frozenset({"people"})
 CATEGORY_LABELS = {
     "micrograph": "Micrographs", "slip": "Field slips and labels",
-    "habitat": "Habitat and scenes", "people": "People", "not_fungus": "Not a fungus",
+    "habitat": "Habitat and scenes", "people": "People and animals", "not_fungus": "Not a fungus",
     "dried": "Dried specimens", "spore_print": "Spore prints", "uv": "UV reactions",
     "chemical": "Chemical spot tests", "phylo_tree": "Phylogenetic trees / BLAST",
     "drawing": "Drawings",

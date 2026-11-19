@@ -15,7 +15,7 @@ export const CATEGORIES: { code: string; label: string }[] = [
   { code: "chemical", label: "Chemical spot tests" },
   { code: "drawing", label: "Drawings" },
   { code: "phylo_tree", label: "Phylogenetic trees / BLAST" },
-  { code: "people", label: "People" },
+  { code: "people", label: "People and animals" },
   { code: "other", label: "Other" },
   { code: "blurry", label: "Blurry or badly exposed" },
   { code: "not_fungus", label: "Not a fungus" },

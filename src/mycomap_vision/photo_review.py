@@ -39,7 +39,7 @@ TABS: tuple[tuple[str, str], ...] = (
     ("micrograph", "Micrographs and microscope set-ups"),
     ("slip", "Field slips and labels"),
     ("habitat", "Habitat and scenes"),
-    ("people", "People"),
+    ("people", "People and animals"),
     ("gate", "Not a fungus (gate)"),
     # The photo-type tagger's tabs (Steve, 2026-10-21; probes checked >= 90% by eye on photos
     # they never trained on: the research repo's experiments/photo-type-tagger).
@@ -68,7 +68,7 @@ REASONS: tuple[tuple[str, str], ...] = (
     ("micrograph", "Micrograph or microscope"),
     ("slip", "Field slip or label"),
     ("habitat", "Habitat or scene"),
-    ("people", "People"),
+    ("people", "People and animals"),
     ("not_fungus", "Not a fungus"),
     ("dried", "Dried specimen"),
     ("spore_print", "Spore print"),
