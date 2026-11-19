@@ -148,6 +148,19 @@ def test_the_queued_photo_carries_its_records_green_projects(layer, tmp_path):
     assert json.loads(items(store)["inat:3000"]["projects"]) == ["CA FunDiS", "Run151"]
 
 
+def test_the_queued_photo_carries_its_records_name_so_the_review_never_shows_no_name(
+        layer, tmp_path):
+    # Steve, 2026-11-18: the "Not a fungus" tab said "(no name)" for records with a DNA name;
+    # every nightly-queued photo had been queued without one.
+    store = make_store(tmp_path, layer)
+    night(layer, seed_rows() + [row(300, "Leccinum scabrum")], FakeOutside({300: MICRO_HIGH}),
+          review(store))
+    got = store.conn.execute("select current from items where subject = 'inat:3000'").fetchone()
+    assert got[0] == "Leccinum scabrum"
+    tiles = pr.flagged_tiles(store.items_of(pr.ITEM_TYPE, None))
+    assert [t["label"] for t in tiles] == ["Leccinum scabrum"]
+
+
 def test_the_photo_review_places_a_nightly_flag_in_its_tab_and_band():
     flags = pr.parse_flags("nightly v2.1-336 micrograph p=0.909 (high)")
     assert flags == [{"tab": "micrograph", "kind": "v2 micrograph", "p": 0.909,

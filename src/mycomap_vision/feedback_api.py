@@ -271,8 +271,12 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     cached = ViewCache(version)
 
     def items_cached(item_type: str, projects):
-        return cached(("items", item_type, projkey(projects)),
-                      lambda: store.items_of(item_type, projects))
+        def load():
+            items = store.items_of(item_type, projects)
+            if photos is not None and item_type in pr.NAMED_PHOTO_QUEUES:
+                items = pr.fill_names(items, photos.names_of)
+            return items
+        return cached(("items", item_type, projkey(projects)), load)
 
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
@@ -672,7 +676,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             raise HTTPException(404, "no such record in the photo review") from None
         except fb.FeedbackError as e:
             bad(e)
-        rec = next((r for r in pr.cards(store.items_of(pr.ITEM_TYPE, projects), "all",
+        rec = next((r for r in pr.cards(items_cached(pr.ITEM_TYPE, projects), "all",
                                         "any")["records"] if r["record_key"] == record_key), None)
         return {**done, "record": card(rec, projects is None) if rec else None}
 

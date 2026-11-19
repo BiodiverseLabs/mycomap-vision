@@ -140,6 +140,42 @@ def photo_of(card, key):
     return next(p for p in card["photos"] if p["photo_key"] == key)
 
 
+# --- the record's name on every tile (Steve, 2026-11-18: "(no name)" when there is one) -------
+
+def test_an_item_queued_without_a_name_shows_its_records_name_and_a_named_one_keeps_its_own():
+    items = [{"id": 1, "subject": "inat:1", "links": [INAT + "10"], "current": None},
+             {"id": 2, "subject": "inat:2", "links": [INAT + "11"], "current": "Kept name"},
+             {"id": 3, "subject": "inat:3", "links": [INAT + "12"], "current": ""}]
+    asked = []
+
+    def names_of(keys):
+        asked.append(keys)
+        return {"10": "Leccinum scabrum", "11": "Other name"}    # 12 has no name
+
+    out = pr.fill_names(items, names_of)
+    assert [i["current"] for i in out] == ["Leccinum scabrum", "Kept name", ""]
+    assert asked == [["10", "12"]]                                # only the blank ones
+    assert items[0]["current"] is None                            # the stored items untouched
+    assert pr.fill_names(out[1:2], names_of) == out[1:2] and len(asked) == 1   # nothing to ask
+
+
+def test_the_review_shows_the_records_name_for_photos_queued_without_one(conn, tmp_path):
+    c, fstore, _ = make_site(conn, tmp_path)
+    name = conn.execute("select scientific_name from records where observation_id = '100'"
+                        ).fetchone()[0]
+    assert name
+    fstore.seed([photo_item("inat:1000", "100", "nightly v2.1-336 not_fungus p=0.429 (low)",
+                            label="")], "nightly-photo-review-catch-up")
+    as_user(c, "admin-1")
+    tiles = c.get("/api/feedback/photo-review/flagged").json()["tiles"]
+    assert [t["label"] for t in tiles] == [name]
+    cards = c.get("/api/feedback/photo-review").json()["records"]
+    assert [r["label"] for r in cards] == [name]
+    # The search box finds it by that name too.
+    assert c.get("/api/feedback/photo-review/flagged",
+                 params={"q": name.split()[0].lower()}).json()["total"] == 1
+
+
 def test_admins_get_cards_and_see_all_rights_reserved_photos_privately(conn, tmp_path):
     c, _ = site_with_photos(conn, tmp_path)
     as_user(c, "admin-1")

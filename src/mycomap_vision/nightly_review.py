@@ -207,15 +207,15 @@ def rule_of(tag: dict) -> str:
 def _photo_records(conn: sqlite3.Connection, photo_ids: list[int]) -> dict[int, dict]:
     """Per photo: its key and the record it is reviewed under, the one of its records first
     green last (no date first), so the seal judges the strictest; with that record's green
-    projects."""
+    projects and its DNA name."""
     from .photo_review import photo_key_of
     out: dict[int, dict] = {}
     for i in range(0, len(photo_ids), 500):
         chunk = photo_ids[i:i + 500]
         marks = ",".join("?" * len(chunk))
-        for pid, source, spid, key, green, day in conn.execute(
+        for pid, source, spid, key, green, day, name in conn.execute(
                 f"select p.photo_id, p.source, p.source_photo_id, r.observation_id, "
-                f"r.green_projects, r.validated_on from photos p "
+                f"r.green_projects, r.validated_on, r.scientific_name from photos p "
                 f"join observation_photos op on op.photo_id = p.photo_id "
                 f"join records r on r.observation_id = op.observation_id and r.source = p.source "
                 f"where p.photo_id in ({marks}) "
@@ -224,15 +224,18 @@ def _photo_records(conn: sqlite3.Connection, photo_ids: list[int]) -> dict[int, 
             if pid in out:
                 continue
             out[pid] = {"photo_key": photo_key_of(int(pid), source, spid), "record": key,
-                        "projects": sorted(set(json.loads(green or "[]")))}
+                        "projects": sorted(set(json.loads(green or "[]"))),
+                        "name": name or ""}
     return out
 
 
 def queue_row(tag: dict, where: dict, run_label: str) -> dict:
     """One non_specimen_photo item, shaped like the past photo seeds: the photo key as subject,
-    the record's link, the tagger's rule and evidence, the record's green projects."""
+    the record's name (as `current`, which the review shows on every tile) and link, the
+    tagger's rule and evidence, the record's green projects."""
     return {"item_type": ITEM_TYPE, "subject": where["photo_key"], "granularity": "photo",
             "rule": rule_of(tag), "model_flagged": False, "record_keys": [],
+            "current": where.get("name") or "",
             "links": [fb.link(where["record"])],
             "evidence": {"evidence": (
                 f"Photo-type tagger {tag['version']} ({tag['fingerprint']}) on the frozen "
