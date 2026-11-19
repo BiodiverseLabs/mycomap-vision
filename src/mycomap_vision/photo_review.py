@@ -308,6 +308,27 @@ def record_of_item(item: dict) -> str | None:
     return None
 
 
+# The photo queues whose tiles and cards show the record's name from the item's `current`.
+NAMED_PHOTO_QUEUES = ("non_specimen_photo", "photo_view", "recovered_label")
+
+
+def fill_names(items: list[dict], names_of: Callable[[list[str]], dict[str, str]]) -> list[dict]:
+    """The items with a blank `current` given their record's name, as copies (the stored items
+    are untouched). The nightly photo review queued 3,266 photos without one before 18 Nov
+    2026, so the review showed "(no name)" for records that have a DNA name; `names_of` maps
+    record keys to names (ReviewPhotos.names_of). An item whose record has no name stays blank."""
+    need = {k for it in items if not (it.get("current") or "").strip()
+            if (k := record_of_item(it))}
+    if not need:
+        return items
+    names = names_of(sorted(need))
+    out = []
+    for it in items:
+        name = None if (it.get("current") or "").strip() else names.get(record_of_item(it) or "")
+        out.append({**it, "current": name} if name else it)
+    return out
+
+
 def record_counts(items: list[dict]) -> dict[str, int]:
     """Observations behind the queue's photos: "open" has at least one flagged photo still
     open, "decided" has every flagged photo decided (Steve, 2026-10-18: photo and observation
@@ -475,6 +496,16 @@ class ReviewPhotos:
         """The records (observation ids) the photo belongs to."""
         return {r[0] for r in self.query("select observation_id from observation_photos "
                                          "where photo_id = ?", (row.photo_id,))}
+
+    def names_of(self, record_keys: list[str]) -> dict[str, str]:
+        """Record key -> its DNA name (records.scientific_name), for the records that have one."""
+        out: dict[str, str] = {}
+        for i in range(0, len(record_keys), 500):
+            chunk = list(record_keys[i:i + 500])
+            out.update({k: n for k, n in self.query(
+                "select observation_id, scientific_name from records where observation_id in "
+                f"({','.join('?' * len(chunk))})", tuple(chunk)) if n})
+        return out
 
     def of_record(self, record_key: str) -> list[PhotoRow]:
         return [_row(r) for r in self.query(PHOTOS_SQL + " where op.observation_id = ? "
