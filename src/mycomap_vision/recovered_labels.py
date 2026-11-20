@@ -498,6 +498,7 @@ def seed_priority(store: fb.Store, path) -> dict:
              for r, _ in marks])
         store.conn.execute("insert or replace into seeds values (?,?,?,?,?)",
                            (name, sha, len(rows), len(marks), now))
+    store.notify("seed")                   # a seed row: the kept lists are read whole again
     marked_records = {r["record_key"] for r, _ in marks}
     out = {"seed": name, "sha256": sha, "rows": len(rows),
            "records": len({r["record_key"] for r in rows}),

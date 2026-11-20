@@ -431,6 +431,17 @@ class Store:
     # The paper's seal on the queues (SealGate): set where the store is opened on the box and
     # by seed_files; None only in tests that seed records with no dates on purpose.
     gate: "SealGate | None" = field(default=None, repr=False)
+    # Told after a write that the kept item lists cannot simply patch (a seed), or that is
+    # worth bringing them up to date for before a person asks (a reopen, a system close):
+    # feedback_lists.Warmer. Each is called with the event's name and must not block.
+    listeners: list = field(default_factory=list, repr=False)
+
+    def notify(self, event: str) -> None:
+        for listen in list(self.listeners):
+            try:
+                listen(event)
+            except Exception:  # noqa: BLE001 - a listener never fails the write
+                pass
 
     def __post_init__(self):
         self.path = Path(self.path)
@@ -497,6 +508,7 @@ class Store:
                     flags_added += 1
             self.conn.execute("insert or replace into seeds values (?,?,?,?,?)",
                               (name, file_sha256, len(rows), added, now))
+        self.notify("seed")
         out = {"seed": name, "rows": len(rows), "added": added}
         if any(TYPES.get(r["item_type"]) and r["item_type"] in FLAG_MERGE_TYPES for r in rows):
             out.update(flags_added=flags_added, already_decided=already_decided)
@@ -588,28 +600,62 @@ class Store:
             out += self._with_latest(where, params)
         return out
 
-    def _with_latest(self, where: str, params: tuple) -> list[dict]:
-        sql = ("select i.*, d.* from items i left join decisions d on d.id = "
-               "(select max(x.id) from decisions x where x.item_id = i.id) "
-               f"where {where} order by i.id")
+    LATEST_SQL = ("select i.*, d.* from items i left join decisions d on d.id = "
+                  "(select max(x.id) from decisions x where x.item_id = i.id) ")
+
+    def _rows(self, sql: str, params: tuple) -> tuple["RowShape", list[tuple]]:
+        """LATEST_SQL rows as plain tuples (no sqlite3.Row per row), with their shape."""
         with self._lock:
             cur = self.conn._conn.cursor()
             try:
-                cur.row_factory = None                 # tuples: no sqlite3.Row per row
+                cur.row_factory = None
                 n = len(cur.execute("select * from items limit 0").description)
                 cur.execute(sql, params)
-                cols = [c[0] for c in cur.description]
+                shape = RowShape(n, [c[0] for c in cur.description])
                 rows = cur.fetchall()
             finally:
                 cur.close()
-        icols, dcols = cols[:n], cols[n:]
+        return shape, rows
+
+    def _with_latest(self, where: str, params: tuple) -> list[dict]:
+        shape, rows = self._rows(self.LATEST_SQL + f"where {where} order by i.id", params)
         memo: dict = {}
-        out = []
-        for r in rows:
-            d = self._finish(dict(zip(icols, r[:n])), memo)
-            d["last_decision"] = dict(zip(dcols, r[n:])) if r[n] is not None else None
-            out.append(d)
-        return out
+        return [shape.item(r, memo) for r in rows]
+
+    def latest_rows(self, item_types, step: int = 20_000, pause: float = 0.0
+                    ) -> tuple["RowShape | None", dict[str, list[tuple]]]:
+        """Every item of these types with its latest decision, as LATEST_SQL rows by type in
+        id order, read in one pass over the table by id range: the store's lock is held for
+        one range at a time (`step` ids), never the whole read, so saves go on between them,
+        and `pause` seconds are left between ranges (feedback_lists.Warmer)."""
+        types = tuple(item_types)
+        out: dict[str, list[tuple]] = {t: [] for t in types}
+        top = self.conn.execute("select max(id) from items").fetchone()[0] or 0
+        marks = ",".join("?" * len(types))
+        # `+i.item_type`: the id range is the index here, not (item_type, status).
+        sql = (self.LATEST_SQL + f"where i.id > ? and i.id <= ? and +i.item_type in ({marks}) "
+               "order by i.id")
+        shape = None
+        type_at = None
+        lo = 0
+        while lo < top:
+            shape, rows = self._rows(sql, (lo, lo + step, *types))
+            if type_at is None:
+                type_at = shape.cols.index("item_type")
+            for r in rows:
+                out[r[type_at]].append(r)
+            lo += step
+            if pause and lo < top:
+                time.sleep(pause)
+        return shape, out
+
+    def quick_mark(self) -> tuple:
+        """The part of change_mark that says a list must be read whole (items added or
+        removed, a seed, another connection's commit), cheap enough to ask every few seconds."""
+        return tuple(self.conn.execute(
+            "select (select count(*) from items), (select max(id) from items), "
+            "(select count(*) from seeds), (select total(at) from seeds), "
+            "(select data_version from pragma_data_version())").fetchone())
 
     # --- what changed (feedback_lists.ItemLists keeps the queues' item lists across saves) ---
     def change_mark(self) -> dict:
@@ -732,12 +778,14 @@ class Store:
                 "applied, applied_at, applied_by, seen_answer) values (?,?,?,?,?,?,?,1,?,?,0)",
                 (item_id, decision, note, opt.applies, by, by, now, now, applied_by))
             self.conn.execute("update items set status = 'decided' where id = ?", (item_id,))
+        self.notify("system close")
         return True
 
     def reopen(self, item_id: int, projects: set[str] | None = None) -> dict:
         self.get(item_id, projects)
         with self._lock, self.conn:
             self.conn.execute("update items set status = 'open' where id = ?", (item_id,))
+        self.notify("reopen")
         return self.get(item_id, projects)
 
     def record_refresh(self, item_id: int, person: dict, name_now: str | None,
@@ -842,6 +890,20 @@ class Store:
         d["blind"] = bool(d["blind"])
         if d["blind"]:
             d["hidden_until_decided"] = d["status"] == "open"
+        return d
+
+
+@dataclass(frozen=True)
+class RowShape:
+    """Where an item's columns end and its latest decision's begin in a LATEST_SQL row."""
+    n: int
+    cols: list
+
+    def item(self, r: tuple, memo: dict | None = None) -> dict:
+        """The row as Store.items_of gives an item."""
+        n = self.n
+        d = Store._finish(dict(zip(self.cols[:n], r[:n])), memo)
+        d["last_decision"] = dict(zip(self.cols[n:], r[n:])) if r[n] is not None else None
         return d
 
 

@@ -245,6 +245,10 @@ class Cached:
                 self._refreshing = False
 
 
+# The longest the Human Feedback lists' warm-up waits for the preload before it reads anyway.
+PRELOAD_WAIT = 900.0
+
+
 def preload_specs(value: str | None) -> list[str]:
     """MV_PRELOAD: comma list of backbone/method to load at startup; "default" is the
     model an identification uses when none is named. Unset or "off": none."""
@@ -371,6 +375,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                feedback_org: "feedback_api.OrgClient | None" = None,
                feedback_places: "pair_places.PairPlaces | None" = None,
                feedback_inat_names: "name_context.InatNames | None" = None,
+               feedback_warm: bool = False,
                answer_cache: "answercache.AnswerCache | None" = None,
                linked_accounts: "yours.LinkedCache | None | bool" = True,
                run_store: "run_links.RunStore | None" = None,
@@ -397,7 +402,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     `preload` (default: MV_PRELOAD) names models to load and index on a background
     thread at startup, so the first person to identify doesn't wait for it (about
     30-45 s on the server box). The server answers meanwhile; an identification that
-    arrives first waits for the load and then uses it.
+    arrives first waits for the load and then uses it. `feedback_warm` reads Human
+    Feedback's photo queues in the background once the preload is done and after every
+    seed (feedback_lists.Warmer); `serve` turns it on, tests leave it off unless they ask.
 
     The public API v1 (apiv1.py, docs/api.md) lives under /api/v1/ and answers only a
     credential. `server_key` is mycomap.org's key (default: MV_ORG_VISION_KEY(_FILE));
@@ -2252,6 +2259,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             models.release_memory()
         return backbones[backbone]
 
+    # Set once the preload is done (or failed, or there is none): the Human Feedback lists'
+    # warm-up waits for it, so a restart's model load and index build go first.
+    preload_settled = threading.Event()
+
     def run_preload(specs: list[str]) -> None:
         start = time.monotonic()
         try:
@@ -2279,11 +2290,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         except Exception as e:  # noqa: BLE001 - the server keeps answering; loads on demand
             warm.state, warm.error = "failed", f"{type(e).__name__}: {e}"
             note(f"[preload] {warm.error}")
+        finally:
+            preload_settled.set()
 
     specs = preload_specs(config.setting("MV_PRELOAD")) if preload is None else preload
     if specs:
         warm.state = "loading"
         threading.Thread(target=run_preload, args=(specs,), name="preload", daemon=True).start()
+    else:
+        preload_settled.set()
 
     # Background: keep photographers' answers and photo licences current.
     if background:
@@ -2585,6 +2600,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             cached_mo_place), inat_names=feedback_inat_names or name_context.InatNames(),
         note=note)
     app.state.feedback_requests = feedback_requests
+    if feedback_warm:
+        # The photo queues read in the background (feedback_lists.Warmer): at startup once the
+        # preload is done, after a seed, a reopen or a system close, and after another
+        # process's write, so no person waits the 11 s of a whole read (2026-11-20).
+        from . import feedback_lists
+        warmer = feedback_lists.Warmer(app.state.feedback_lists,
+                                       after=lambda: preload_settled.wait(PRELOAD_WAIT),
+                                       note=note)
+        feedback_store.listeners.append(warmer.trigger)
+        app.state.feedback_warmer = warmer.start()
 
     # Research > Excluded photos (excluded_looked.py; Steve, 2026-10-26): the photos people left
     # out in Human Feedback, as a read-only viewer sees them there, and "where Vision looked" on
@@ -4293,7 +4318,8 @@ def serve(host: str = "127.0.0.1", port: int = 8010) -> None:
     # gets a fresh layer here, and the old release's layer is deleted.
     on = nightly.enabled() and config.RELEASE_ROOT
     layer = nightly.prepare(config.RELEASE_ROOT, prune=True) if on else None
-    app = create_app(layer.manifest, layer=layer) if layer else create_app()
+    app = (create_app(layer.manifest, layer=layer, feedback_warm=True) if layer
+           else create_app(feedback_warm=True))
     geocode.redact_access_log()       # place names typed into the map stay out of the log
     e17review.redact_access_log()     # and the review page's path token
     from . import signin as signin_module
