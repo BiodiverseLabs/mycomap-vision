@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import functools
 import json
 import sqlite3
 import sys
@@ -1338,8 +1339,16 @@ def cmd_feedback(conn, args) -> None:
     if args.action in ("export-photo-exclusions", "export-photo-crops"):   # a copy; no Store
         from . import feedback_export
         key = Path(args.key_file).read_bytes().strip()
-        run = (feedback_export.export if args.action == "export-photo-exclusions"
-               else feedback_export.export_crops)
+        run = feedback_export.export_crops
+        if args.action == "export-photo-exclusions":
+            # The mode has no default (the paper coordinator's ruling of 15 Nov 2026); the
+            # held records' list is the seal gate's (MV_FEEDBACK_HOLD_KEYS) unless named.
+            run = functools.partial(
+                feedback_export.export, mode=args.mode,
+                v1_test_release=Path(args.v1_test_release),
+                hold_keys=args.hold_keys or config.setting("MV_FEEDBACK_HOLD_KEYS"),
+                hold_sha256=args.hold_sha256 or config.setting("MV_FEEDBACK_HOLD_SHA256"),
+                expect_v1_test_sha256=args.expect_v1_test_sha256)
         try:
             data, summary = run(Path(args.store_copy), Path(args.release), args.as_of, key,
                                 feedback.default_path(), args.expect_key_fingerprint)
@@ -2920,6 +2929,23 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--out", required=True, help="the TSV to write (and <out>.summary.json)")
     q.add_argument("--expect-key-fingerprint",
                    help="refuse unless HMAC(key, 'mycomap-e34') is this (the paper's pinned value)")
+    q.add_argument("--mode", required=True, choices=("paper", "serving"),
+                   help="required, no default (the paper coordinator's ruling of 15 Nov 2026): "
+                        "'paper' for a v1 paper row refuses any decided photo on a v1-test "
+                        "record; 'serving' for a served or later model (v2.1, v2.2) includes "
+                        "them as v1_split test, counted in the summary")
+    q.add_argument("--v1-test-release", required=True,
+                   help="research-releases/v1-test/release.sqlite (only its keys are read); "
+                        "refused unless it is the test release of --release")
+    q.add_argument("--expect-v1-test-sha256",
+                   help="refuse unless the v1-test release file has this sha256")
+    q.add_argument("--hold-keys", help="the records held out of every queue (default "
+                                       "MV_FEEDBACK_HOLD_KEYS); needed in both modes (an empty "
+                                       "list, pinned, once none is held); a decided photo on "
+                                       "one refuses the export")
+    q.add_argument("--hold-sha256", help="the hold list's sha256 (default "
+                                         "MV_FEEDBACK_HOLD_SHA256); needed; a mismatch refuses "
+                                         "the export")
     q = fsub.add_parser("export-photo-crops",
                         help="the specimen crops Recovered labels kept up to a time, as a TSV a "
                              "declared crop arm pins by sha256 (feedback_export.export_crops); "

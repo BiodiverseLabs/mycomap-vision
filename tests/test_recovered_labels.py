@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from PIL import Image
 from test_feedback_api import as_user
+from test_feedback_export import export_paper
 from test_models_and_scoreboard import Const, seed_two_species
 from test_photo_review import site_with_photos
 
@@ -356,7 +357,7 @@ def paper_site(tmp_path, conn):
 
 def test_the_exclusion_export_is_byte_identical_with_crops_and_the_crop_export_is_its_own(tmp_path, conn):
     s, live, rel = paper_site(tmp_path, conn)
-    before, _ = fx.export(backup(live, tmp_path / "a.sqlite"), rel, CUT, KEY, live)
+    before, _ = export_paper(backup(live, tmp_path / "a.sqlite"), rel, CUT, KEY, live)
     seed = write_seed(tmp_path / "crops.tsv", [
         seed_line("inat:1", "10", 0.8, [[100, 100, 300, 300], [500, 400, 900, 800]]),
         seed_line("inat:2", "11", 0.8, [[0, 0, 400, 400]]),
@@ -369,7 +370,7 @@ def test_the_exclusion_export_is_byte_identical_with_crops_and_the_crop_export_i
     at(s, T0 + 3)
     rl.batch_decide(s, [{"item_id": item_of(s, "inat:2")["id"], "include": []}], ME)
     at(s, T0 + 5000)                                   # after the cut: not in the file
-    after, _ = fx.export(backup(live, tmp_path / "b.sqlite"), rel, CUT, KEY, live)
+    after, _ = export_paper(backup(live, tmp_path / "b.sqlite"), rel, CUT, KEY, live)
     assert after == before                             # crops never change E34/E35's list
     data, summary = fx.export_crops(backup(live, tmp_path / "c.sqlite"), rel, CUT, KEY, live)
     lines = data.decode().splitlines()
@@ -991,12 +992,12 @@ def test_the_paper_exports_are_byte_identical_with_a_priority_list(tmp_path, con
         seed_line("inat:2", "11", 0.8, [[0, 0, 100, 100]])]))
     s.conn.execute("update items set created_at = ? where item_type = ?", (T0 + 2, rl.ITEM_TYPE))
     s.conn.commit()
-    excl, _ = fx.export(backup(live, tmp_path / "a.sqlite"), rel, CUT, KEY, live)
+    excl, _ = export_paper(backup(live, tmp_path / "a.sqlite"), rel, CUT, KEY, live)
     crops, _ = fx.export_crops(backup(live, tmp_path / "b.sqlite"), rel, CUT, KEY, live)
     rl.seed_priority(s, write_prio(tmp_path / "prio.tsv", [prio_line(1, "inat:2", "11"),
                                                            prio_line(2, "inat:1", "10")]))
     assert len(rl.priorities(s)) == 2
-    assert fx.export(backup(live, tmp_path / "c.sqlite"), rel, CUT, KEY, live)[0] == excl
+    assert export_paper(backup(live, tmp_path / "c.sqlite"), rel, CUT, KEY, live)[0] == excl
     assert fx.export_crops(backup(live, tmp_path / "d.sqlite"), rel, CUT, KEY, live)[0] == crops
 
 

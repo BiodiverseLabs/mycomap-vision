@@ -1,11 +1,13 @@
 """The photo-exclusion export the paper freezes by sha256 (feedback_export.py; E34, the paper
 coordinator, 2026-10-21): a decision after the cut-off leaves the bytes unchanged, two runs give
-the same sha, reviewers appear only as an HMAC pseudonym, a v1-test photo is refused, and it
-reads a .backup copy, never the live store, writing nothing to it."""
+the same sha, reviewers appear only as an HMAC pseudonym, a v1-test photo is refused (paper
+mode), and it reads a .backup copy, never the live store, writing nothing to it."""
 
 import hashlib
 import hmac
+import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +18,61 @@ INAT = "https://www.inaturalist.org/observations/"
 KEY = b"test-key"
 T0 = 1_790_000_000.0                       # 2026-09-21; the cut-off below is T0 + 1000
 CUT = "2026-09-21T14:30:00Z"
+
+
+V1_HASH = "a1" * 32                       # a synthetic release v1's release_hash
+
+
+def pin_v1(rel, release_hash=V1_HASH):
+    """The MANIFEST.json write_release leaves beside a release (here only what the exporter
+    reads: the release_hash and the release file's sha256), for a synthetic release v1, written
+    again on each call so it matches the file as it is now."""
+    rel = Path(rel)
+    (rel.parent / "MANIFEST.json").write_text(json.dumps({
+        "dataset_release": "v1", "hashes": {"release": release_hash},
+        "files": [{"path": rel.name, "sha256": hashlib.sha256(rel.read_bytes()).hexdigest()}]}),
+        encoding="utf-8")
+    return rel
+
+
+def make_v1_test(path, records, photos, test_for="v1", for_hash=V1_HASH):
+    """A synthetic v1-test release: its info (as write_release stores it, JSON values),
+    records and photos."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    r = sqlite3.connect(path)
+    r.executescript("create table info (key text primary key, value text not null);"
+                    "create table records (record_key text, split text);"
+                    "create table photos (photo_key text, record_key text);")
+    info = {"id": "v1-test", "test_for": test_for, "test_for_release_hash": for_hash}
+    r.executemany("insert into info values (?,?)",
+                  [(k, json.dumps(v)) for k, v in info.items() if v is not None])
+    r.executemany("insert into records values (?,?)", records)
+    r.executemany("insert into photos values (?,?)", photos)
+    r.commit()
+    r.close()
+    return path
+
+
+def hold_file(path, keys):
+    """A hold list and its sha256 (an empty one holds no record)."""
+    path = Path(path)
+    path.write_bytes("".join(k + "\n" for k in keys).encode("utf-8"))
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def export_paper(copy, rel, *a, v1_test=None, **kw):
+    """The exclusion export in paper mode (its mode has no default since the ruling of
+    15 Nov 2026), with release v1 pinned, a v1-test release (by default one record, 99, and
+    photo inat:99) and, unless given, an empty pinned hold list."""
+    rel = pin_v1(rel)
+    if v1_test is None:
+        v1_test = rel.parent / "v1-test" / "release.sqlite"
+        if not v1_test.exists():
+            make_v1_test(v1_test, [("99", "test")], [("inat:99", "99")])
+    if "hold_keys" not in kw and "hold_sha256" not in kw:
+        kw["hold_keys"], kw["hold_sha256"] = hold_file(rel.parent / "hold-empty.txt", [])
+    return fx.export(copy, rel, *a, mode="paper", v1_test_release=v1_test, **kw)
 
 
 def item(key, record, rule):
@@ -36,11 +93,10 @@ def site(tmp_path):
     r = sqlite3.connect(rel)
     r.executescript("create table records (record_key text, split text);"
                     "create table photos (photo_key text, record_key text);")
-    r.executemany("insert into records values (?,?)", [("10", "train"), ("11", "val"),
-                                                       ("12", "test")])
+    r.executemany("insert into records values (?,?)", [("10", "train"), ("11", "val")])
     r.executemany("insert into photos values (?,?)", [("inat:1", "10"), ("inat:2", "10"),
                                                       ("inat:3", "11"), ("inat:4", "11"),
-                                                      ("inat:5", "11"), ("inat:9", "12")])
+                                                      ("inat:5", "11")])
     r.commit()
     r.close()
     return s, live, rel, tmp_path
@@ -71,7 +127,7 @@ def decided(s):
 def test_the_columns_say_how_each_exclusion_was_confirmed_and_what_flagged_it(site):
     s, live, rel, tmp = site
     decided(s)
-    data, summary = fx.export(backup(live, tmp / "copy.sqlite"), rel, CUT, KEY, live)
+    data, summary = export_paper(backup(live, tmp / "copy.sqlite"), rel, CUT, KEY, live)
     lines = data.decode().split("\n")
     assert lines[0].split("\t") == list(fx.COLUMNS) and data.endswith(b"\n")
     rows = {l.split("\t")[0]: dict(zip(fx.COLUMNS, l.split("\t"))) for l in lines[1:] if l}
@@ -91,12 +147,12 @@ def test_the_columns_say_how_each_exclusion_was_confirmed_and_what_flagged_it(si
 def test_a_decision_after_the_cut_off_leaves_the_bytes_unchanged(site):
     s, live, rel, tmp = site
     decided(s)
-    before, _ = fx.export(backup(live, tmp / "a.sqlite"), rel, CUT, KEY, live)
+    before, _ = export_paper(backup(live, tmp / "a.sqlite"), rel, CUT, KEY, live)
     decide(s, "inat:1", "keep_photo", T0 + 5000, None, "summary: flipped")       # after the cut
     decide(s, "inat:4", "exclude_photo", T0 + 6000, "slip", "summary: shown")    # after the cut
-    after, _ = fx.export(backup(live, tmp / "b.sqlite"), rel, CUT, KEY, live)
+    after, _ = export_paper(backup(live, tmp / "b.sqlite"), rel, CUT, KEY, live)
     assert after == before
-    later, _ = fx.export(tmp / "b.sqlite", rel, "2026-09-22T00:00:00Z", KEY, live)
+    later, _ = export_paper(tmp / "b.sqlite", rel, "2026-09-22T00:00:00Z", KEY, live)
     assert later != before and b"inat:4" in later                   # the later cut sees them
 
 
@@ -104,8 +160,8 @@ def test_two_runs_give_the_same_sha(site):
     s, live, rel, tmp = site
     decided(s)
     copy = backup(live, tmp / "copy.sqlite")
-    one = fx.export(copy, rel, CUT, KEY, live)[1]["sha256"]
-    two = fx.export(backup(live, tmp / "copy2.sqlite"), rel, CUT, KEY, live)[1]["sha256"]
+    one = export_paper(copy, rel, CUT, KEY, live)[1]["sha256"]
+    two = export_paper(backup(live, tmp / "copy2.sqlite"), rel, CUT, KEY, live)[1]["sha256"]
     assert one == two
 
 
@@ -113,35 +169,40 @@ def test_reviewers_appear_only_as_an_hmac_pseudonym(site):
     s, live, rel, tmp = site
     decided(s)
     copy = backup(live, tmp / "copy.sqlite")
-    data, _ = fx.export(copy, rel, CUT, KEY, live)
+    data, _ = export_paper(copy, rel, CUT, KEY, live)
     for leak in (b"steve-123", b"Steve R", b"ana-9", b"Ana"):
         assert leak not in data
     want = hmac.new(KEY, b"steve-123", hashlib.sha256).hexdigest()[:16]
     assert want.encode() in data
-    other, _ = fx.export(copy, rel, CUT, b"another-key", live)
+    other, _ = export_paper(copy, rel, CUT, b"another-key", live)
     assert want.encode() not in other
     with pytest.raises(fx.ExportError, match="HMAC key"):
-        fx.export(copy, rel, CUT, b"", live)
+        export_paper(copy, rel, CUT, b"", live)
 
 
-def test_a_v1_test_photo_is_refused(site):
+def test_a_decided_photo_on_a_record_the_v1_test_release_lists_is_refused(site):
+    """The real path: v1-test is its own release (release v1 has no test split), so the
+    refusal reads the v1-test release's records."""
     s, live, rel, tmp = site
-    s.seed([item("inat:9", "12", "R7 uv probe p=0.99")], "slipped-past-the-seal")
-    decide(s, "inat:9", "exclude_photo", T0 + 1, "uv", "summary: shown")
-    with pytest.raises(fx.ExportError, match="v1-test"):
-        fx.export(backup(live, tmp / "copy.sqlite"), rel, CUT, KEY, live)
+    decided(s)
+    v1_test = make_v1_test(tmp / "t" / "release.sqlite", [("12", "test")], [("inat:9", "12")])
+    assert export_paper(backup(live, tmp / "a.sqlite"), rel, CUT, KEY, live, v1_test=v1_test)
+    s.seed([item("inat:9", "12", "R7 uv probe p=0.99")], "after-the-queues-reopened")
+    decide(s, "inat:9", "exclude_photo", T0 + 7, "uv", "summary: shown")
+    with pytest.raises(fx.ExportError, match="1 decided photo.*v1-test.*inat:9"):
+        export_paper(backup(live, tmp / "b.sqlite"), rel, CUT, KEY, live, v1_test=v1_test)
 
 
 def test_it_reads_a_backup_copy_and_never_the_live_store(site):
     s, live, rel, tmp = site
     decided(s)
     with pytest.raises(fx.ExportError, match="live store"):
-        fx.export(live, rel, CUT, KEY, live)
+        export_paper(live, rel, CUT, KEY, live)
     with pytest.raises(fx.ExportError, match="-wal"):               # a live database elsewhere
-        fx.export(live, rel, CUT, KEY, None)
+        export_paper(live, rel, CUT, KEY, None)
     copy = backup(live, tmp / "copy.sqlite")
     sha = hashlib.sha256(copy.read_bytes()).hexdigest()
-    fx.export(copy, rel, CUT, KEY, live)
+    export_paper(copy, rel, CUT, KEY, live)
     assert hashlib.sha256(copy.read_bytes()).hexdigest() == sha      # nothing written
     assert not (tmp / "copy.sqlite-wal").exists()
 
@@ -151,10 +212,10 @@ def test_the_summary_names_the_keys_fingerprint_and_a_run_refuses_another_key(si
     decided(s)
     copy = backup(live, tmp / "copy.sqlite")
     fp = hmac.new(KEY, b"mycomap-e34", hashlib.sha256).hexdigest()
-    data, summary = fx.export(copy, rel, CUT, KEY, live, expect_fingerprint=fp)
+    data, summary = export_paper(copy, rel, CUT, KEY, live, expect_fingerprint=fp)
     assert summary["key_fingerprint"] == fp and KEY not in data
     with pytest.raises(fx.ExportError, match="fingerprint"):
-        fx.export(copy, rel, CUT, b"another-key", live, expect_fingerprint=fp)
+        export_paper(copy, rel, CUT, b"another-key", live, expect_fingerprint=fp)
 
 
 def test_a_default_saved_by_the_reviewers_save_is_its_own_confirmation():
@@ -172,12 +233,12 @@ def test_past_drawing_decisions_export_their_own_codes_and_a_new_one_exports_dra
     s, live, rel, tmp = site
     decided(s)
     decide(s, "inat:4", "exclude_photo", T0 + 5, "drawing_micro", None)
-    data, summary = fx.export(backup(live, tmp / "a.sqlite"), rel, CUT, KEY, live)
+    data, summary = export_paper(backup(live, tmp / "a.sqlite"), rel, CUT, KEY, live)
     rows = {l.split("\t")[0]: dict(zip(fx.COLUMNS, l.split("\t")))
             for l in data.decode().split("\n")[1:] if l}
     assert rows["inat:4"]["reason"] == "drawing_micro"
     assert summary["exclusions_by_reason"]["drawing_micro"] == 1
     assert [k for k, r in rows.items() if r["reason"] == "micrograph"] == ["inat:1"]
     decide(s, "inat:4", "exclude_photo", T0 + 6, "drawing_specimen", None)
-    again = fx.export(backup(live, tmp / "b.sqlite"), rel, CUT, KEY, live)[0]
+    again = export_paper(backup(live, tmp / "b.sqlite"), rel, CUT, KEY, live)[0]
     assert "\tdrawing_specimen\t" in again.decode() and "\tdrawing\t" not in again.decode()
