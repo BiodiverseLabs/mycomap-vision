@@ -149,7 +149,7 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
                    Option("exclude_record", "Leave it out of Vision's reference until fixed",
                           "vision")),
              model_flagged=True),
-    ItemType("non_specimen_photo", "Photos that show no specimen",
+    ItemType("non_specimen_photo", "Photo Tag Review",
              "Micrographs, microscope set-ups, field slips, habitat scenes, or photos the "
              "not-a-fungus gate turns away. Useful on the record, but not for matching photos.",
              ("the photo", "why it was flagged"),
@@ -190,7 +190,7 @@ TYPES: dict[str, ItemType] = {t.code: t for t in (
              "What each photo shows: cap top, gills, stem and base, growing in place, several "
              "specimens… The photo-type tagger suggests tags; confirm them, add or remove any, "
              "and save. Nothing here leaves a photo out of Vision: a photo that shows no "
-             "specimen goes to \"Photos that show no specimen\".",
+             "specimen goes to \"Photo Tag Review\".",
              ("the photo", "the suggested views"),
              (Option("confirm_views", "Views confirmed", "note", needs_value=True),
               Option("no_specimen", "Shows no specimen: send to the exclusion review", "note")),
