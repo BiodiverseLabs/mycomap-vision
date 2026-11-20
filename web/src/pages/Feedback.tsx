@@ -8,7 +8,8 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
          type LiveRecord, type NameContext, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
          type Top5, type WritingList } from "@/lib/api";
-import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess, groupBySection,
+import { FEEDBACK_TABS, openTab, QUEUE_BLURBS, tabOf, tabOpen, tabParam, tabSections, type FeedbackTab } from "@/lib/feedback";
+import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess,
          historyOrgText, inatLinks, isNameItem, itemBadges, linkedItem, NO_PROPOSAL_TEXT, noProposal, openQueue,
          orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, alreadyDoneText, decideOptions,
          FORMAT_PANEL_TEXT, formatRow, hasLists, listCount, listReasonText, seededNote, WRITING_LISTS,
@@ -96,25 +97,44 @@ function FeedbackBody() {
   const [stored] = useState(() => readLastQueue(browserStorage));
   const linked = useQuery({ queryKey: ["feedback", "item", linkedId], enabled: ok && linkedId != null,
                             queryFn: () => feedbackApi.item(linkedId!), retry: false });
-  const pick = (type: string) => {
-    // The photo review with Auto-save off may hold unsaved changes: ask before closing it.
-    if (type !== selected && !confirmLeave(reviewUnsaved.total(), (m) => window.confirm(m))) return;
-    setPicked(type);
-    writeLastQueue(browserStorage, type);
-  };
+  // Photos | Taxonomy (Steve, 2026-11-20): the page opens on Photos unless a link says otherwise.
+  const [pickedTab, setPickedTab] = useState<FeedbackTab | null>(null);
+  const [tabLink] = useState(() => tabParam(location.search));
   const types = summary.data ?? [];
-  const sections = groupBySection(types);
-  const selected = openQueue({ picked, param, stored, types: types.map((t) => t.type),
+  const tab = openTab({ picked: pickedTab, param: tabLink,
+                        linkQueue: (param && types.some((t) => t.type === param) ? param : null)
+                                   ?? linked.data?.item_type ?? null });
+  const inTab = types.filter((t) => tabOf(t.type) === tab);
+  const sections = tabSections(types, tab);
+  const selected = openQueue({ picked, param, stored, types: inTab.map((t) => t.type),
                                linkedPending: linkedId != null && linked.isPending,
                                linkedType: linked.data?.item_type ?? null });
   const sel = types.find((t) => t.type === selected);
   const selSection = sections.find((g) => g.types.some((t) => t.type === selected));
   const catalogueType = catalogue.data?.find((t) => t.type === selected);
+  // The photo review with Auto-save off may hold unsaved changes: ask before closing it.
+  const mayLeave = () => confirmLeave(reviewUnsaved.total(), (m) => window.confirm(m));
+  const pick = (type: string) => {
+    if (type !== selected && !mayLeave()) return;
+    setPicked(type);
+    writeLastQueue(browserStorage, type);
+  };
+  const pickTab = (next: FeedbackTab) => {
+    if (next === tab || (selected && !mayLeave())) return;
+    setPickedTab(next);
+    // The address says which tab is open, so it can be shared or bookmarked.
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", next);
+    url.searchParams.delete("queue");
+    url.searchParams.delete("item");
+    window.history.replaceState(null, "", url.toString());
+  };
+  const tabInfo = FEEDBACK_TABS.find((t) => t.code === tab)!;
   return (
     <>
       <PageHeader title="Human Feedback">
-        Two kinds of work on the records Vision learns from: data cleanup, fixing what a rule
-        found, and data validation, checking whether a record's label is right.
+        Help check the records Vision learns from. Photos: say what each photo shows and which
+        ones belong in Vision. Taxonomy: tidy names and check whether a record's label is right.
       </PageHeader>
       <div className="container mx-auto px-4 sm:px-6 lg:px-8 py-8 max-w-6xl space-y-6">
         {me.isPending && <p className="text-sm text-muted-foreground">Loading…</p>}
@@ -123,20 +143,30 @@ function FeedbackBody() {
         {me.data && (
           <>
             {me.data.admin && <AdminDownloads />}
-            {summary.isPending && <p className="text-sm text-muted-foreground">Loading the queues…</p>}
-            {summary.error && <p className={BODY}>The queues could not be loaded.</p>}
-            {sections.map((g) => (
-              <SectionCards key={g.code} group={g} selected={selected} onPick={pick} />
-            ))}
-            {summary.data && types.length > 0 && !sel && !(linkedId != null && linked.isPending) && (
-              <p className="text-sm text-muted-foreground" data-testid="feedback-pick-queue">Pick a queue above.</p>
-            )}
+            <MainTabs tab={tab} onPick={pickTab} counts={summary.data ? types : null} />
+            <div role="tabpanel" id={`feedback-tabpanel-${tab}`} aria-labelledby={`feedback-tab-${tab}`}
+                 className="min-w-0 space-y-6" data-testid={`feedback-tabpanel-${tab}`}>
+              <p className={`max-w-3xl text-sm ${BODY}`}>{tabInfo.intro}</p>
+              {summary.isPending && <p className="text-sm text-muted-foreground">Loading the queues…</p>}
+              {summary.error && <p className={BODY}>The queues could not be loaded.</p>}
+              {summary.data && !inTab.length && (
+                <p className="text-sm text-muted-foreground">Nothing to review here right now.</p>
+              )}
+              {sections.map((g) => (
+                <SectionCards key={g.code} group={g} selected={selected} onPick={pick} heading={tab !== "photos"} />
+              ))}
+              {summary.data && inTab.length > 0 && !sel && !(linkedId != null && linked.isPending) && (
+                <p className="text-sm text-muted-foreground" data-testid="feedback-pick-queue">
+                  {tab === "photos" ? "Pick one of the reviews above." : "Pick a queue above."}
+                </p>
+              )}
+            </div>
             {sel && (
               <div className="min-w-0 space-y-1 border-t border-[#A87146]/20 pt-6 dark:border-border">
-                {selSection && (
-                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
-                     data-testid="feedback-queue-section">{selSection.title}</p>
-                )}
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                   data-testid="feedback-queue-section">
+                  {tabInfo.label}{selSection && tab !== "photos" ? ` · ${selSection.title}` : ""}
+                </p>
                 {sel.type === PHOTO_REVIEW_TYPE
                   ? <PhotoReview key={sel.type} summary={sel} />
                   : sel.type === PHOTO_VIEW_TYPE
@@ -173,33 +203,77 @@ function AdminDownloads() {
   );
 }
 
-/** One section of the page: its name, open count and intro, then its queues' stat cards. */
-function SectionCards({ group, selected, onPick }: {
-  group: SectionGroup<FeedbackSummary>; selected: string | null; onPick: (t: string) => void;
+/** Photos | Taxonomy, with each tab's open count once the summary is in. */
+function MainTabs({ tab, onPick, counts }: {
+  tab: FeedbackTab; onPick: (t: FeedbackTab) => void; counts: FeedbackSummary[] | null;
+}) {
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  // Arrow keys move between the tabs (the usual tablist keys).
+  const onKey = (e: React.KeyboardEvent, i: number) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const j = (i + step + FEEDBACK_TABS.length) % FEEDBACK_TABS.length;
+    onPick(FEEDBACK_TABS[j].code);
+    refs.current[j]?.focus();
+  };
+  return (
+    <div role="tablist" aria-label="Kind of review"
+         className="flex gap-1 border-b border-[#A87146]/25 dark:border-border" data-testid="feedback-tabs">
+      {FEEDBACK_TABS.map((t, i) => {
+        const on = t.code === tab;
+        return (
+          <button key={t.code} ref={(el) => { refs.current[i] = el; }} type="button" role="tab"
+                  id={`feedback-tab-${t.code}`} aria-selected={on} aria-controls={`feedback-tabpanel-${t.code}`}
+                  tabIndex={on ? 0 : -1} onClick={() => onPick(t.code)} onKeyDown={(e) => onKey(e, i)}
+                  className={`-mb-px inline-flex items-baseline gap-2 border-b-2 px-4 py-2.5 font-display text-lg font-semibold transition-colors ${
+                    on ? `border-myco-green ${INK}` : "border-transparent text-muted-foreground hover:text-[#4a3728] dark:hover:text-foreground"}`}
+                  data-testid={`feedback-tab-${t.code}`}>
+            {t.label}
+            {counts && (
+              <span className="text-sm font-normal tabular-nums text-muted-foreground">
+                {tabOpen(counts, t.code).toLocaleString("en-US")} open
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** One section of the page: its name, open count and intro, then its queues' stat cards. The
+ *  Photos tab is a single group whose heading is the tab itself. */
+function SectionCards({ group, selected, onPick, heading = true }: {
+  group: SectionGroup<FeedbackSummary>; selected: string | null; onPick: (t: string) => void; heading?: boolean;
 }) {
   const id = `feedback-section-${group.code}`;
   return (
-    <section className="min-w-0 space-y-3" aria-labelledby={id} data-testid={id}>
-      <div className="min-w-0">
-        <h2 id={id} className={`flex flex-wrap items-baseline gap-x-3 font-display text-xl font-semibold ${INK}`}>
-          {group.title}
-          <span className="text-sm font-normal text-muted-foreground tabular-nums">
-            {group.open.toLocaleString("en-US")} open
-          </span>
-        </h2>
-        {group.intro && <p className={`mt-1 max-w-3xl text-sm ${BODY}`}>{group.intro}</p>}
-      </div>
-      <StatCards types={group.types} selected={selected} onPick={onPick} label={group.title} />
+    <section className="min-w-0 space-y-3" aria-labelledby={heading ? id : undefined}
+             aria-label={heading ? undefined : group.title} data-testid={id}>
+      {heading && (
+        <div className="min-w-0">
+          <h2 id={id} className={`flex flex-wrap items-baseline gap-x-3 font-display text-xl font-semibold ${INK}`}>
+            {group.title}
+            <span className="text-sm font-normal text-muted-foreground tabular-nums">
+              {group.open.toLocaleString("en-US")} open
+            </span>
+          </h2>
+          {group.intro && <p className={`mt-1 max-w-3xl text-sm ${BODY}`}>{group.intro}</p>}
+        </div>
+      )}
+      <StatCards types={group.types} selected={selected} onPick={onPick} label={group.title}
+                 wide={!heading} />
     </section>
   );
 }
 
-function StatCards({ types, selected, onPick, label }: {
-  types: FeedbackSummary[]; selected: string | null; onPick: (t: string) => void; label: string;
+function StatCards({ types, selected, onPick, label, wide = false }: {
+  types: FeedbackSummary[]; selected: string | null; onPick: (t: string) => void; label: string; wide?: boolean;
 }) {
   if (!types.length) return null;
   return (
-    <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
+    <div className={`grid grid-cols-1 gap-3 ${wide ? "md:grid-cols-3" : "min-[420px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"}`}
          role="group" aria-label={`${label} queues`}>
       {types.map((t) => {
         const on = t.type === selected;
@@ -208,7 +282,11 @@ function StatCards({ types, selected, onPick, label }: {
                   className={`${CARD} min-w-0 p-4 text-left transition-colors hover:border-myco-green/50 ${
                     on ? "ring-2 ring-myco-green border-myco-green/50" : ""}`}
                   data-testid={`feedback-card-${t.type}`}>
-            <span className="block text-sm font-medium leading-snug text-muted-foreground">{t.title}</span>
+            <span className={wide ? `block text-base font-semibold leading-snug ${INK}`
+                                  : "block text-sm font-medium leading-snug text-muted-foreground"}>{t.title}</span>
+            {wide && QUEUE_BLURBS[t.type] && (
+              <span className={`mt-1 block text-sm leading-snug ${BODY}`}>{QUEUE_BLURBS[t.type]}</span>
+            )}
             {(() => {
               const line = statCardLines(t);
               return (<>
@@ -219,6 +297,11 @@ function StatCards({ types, selected, onPick, label }: {
                 <span className="block text-xs text-muted-foreground">{line.sub}</span>
               </>);
             })()}
+            {wide && (
+              <span className="mt-3 block text-sm font-medium text-myco-green">
+                {on ? "Open below ↓" : "Start reviewing →"}
+              </span>
+            )}
           </button>
         );
       })}

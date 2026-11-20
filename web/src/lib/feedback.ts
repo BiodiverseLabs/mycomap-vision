@@ -236,11 +236,12 @@ export function historyOrgText(org: Pick<OrgRequest, "request_id" | "chip"> | nu
 // --- the page's two sections ------------------------------------------------------------------
 
 /** The page's sections, in order (Steve, 2026-10-18): mechanical fixes a rule found, what each
- *  photo shows (Steve, 2026-10-21), then whether a record's label is right. */
+ *  photo shows (Steve, 2026-10-21), then whether a record's label is right. The photo queues
+ *  have a tab of their own (FEEDBACK_TABS), so the cleanup intro names only what is left. */
 export const SECTIONS: { code: string; title: string; intro: string }[] = [
   { code: "cleanup", title: "Data cleanup",
-    intro: "Fix what a rule found: photos that show no specimen, one name written several ways, "
-      + "retired or inactive names, one find posted twice or placed in two places." },
+    intro: "Fix what a rule found: one name written several ways, retired or inactive names, a "
+      + "species and its own varieties, one find posted twice or placed in two places." },
   { code: "views", title: "Photo views",
     intro: "Say what each photo shows (cap top, gills, stem and base, in situ, …): confirm or "
       + "correct the suggested tags." },
@@ -275,6 +276,69 @@ export function groupBySection<T extends Pick<FeedbackSummary, "type" | "open"> 
   return groups
     .filter((g) => g.types.length > 0)
     .map((g) => ({ ...g, open: g.types.reduce((n, t) => n + (t.open || 0), 0) }));
+}
+
+// --- the page's two main tabs (Steve, 2026-11-20) ---------------------------------------------
+// The page is opening up to more people, and "Data cleanup" mixed photo work with name work.
+// Photos comes first and is where the page opens; Taxonomy holds names, duplicates and label
+// validation. Which tab a queue is on is decided here, so a queue the page doesn't know yet
+// lands on Taxonomy (under its section, or "Other") rather than disappearing.
+
+export type FeedbackTab = "photos" | "taxonomy";
+
+/** The photo queues, in the order the Photos tab shows them. */
+export const PHOTO_TAB_TYPES = ["non_specimen_photo", "recovered_label", "photo_view"] as const;
+
+export const FEEDBACK_TABS: { code: FeedbackTab; label: string; intro: string }[] = [
+  { code: "photos", label: "Photos",
+    intro: "Check the photos Vision learns from. Pick one of the reviews below to start." },
+  { code: "taxonomy", label: "Taxonomy",
+    intro: "Check the names on the records: names to tidy, duplicate finds, and whether a "
+      + "record's label is right. Pick a queue below to start." },
+];
+
+export const DEFAULT_TAB: FeedbackTab = "photos";
+
+/** Which tab a queue is on. */
+export const tabOf = (type: string): FeedbackTab =>
+  (PHOTO_TAB_TYPES as readonly string[]).includes(type) ? "photos" : "taxonomy";
+
+/** A ?tab= link's tab, or null. */
+export function tabParam(search: string): FeedbackTab | null {
+  const v = new URLSearchParams(search).get("tab");
+  return v === "photos" || v === "taxonomy" ? v : null;
+}
+
+/** The tab the page shows: the one the viewer picked here, else a ?tab= link, else the tab of the
+ *  queue a ?queue= or ?item= link opens, else Photos. A remembered queue never moves the page off
+ *  Photos: the page always opens on Photos unless a link says otherwise. */
+export function openTab(o: { picked: FeedbackTab | null; param: FeedbackTab | null;
+                             linkQueue: string | null }): FeedbackTab {
+  return o.picked ?? o.param ?? (o.linkQueue ? tabOf(o.linkQueue) : DEFAULT_TAB);
+}
+
+/** One line on each photo card saying what the review asks for, in plain words. */
+export const QUEUE_BLURBS: Record<string, string> = {
+  non_specimen_photo: "Micrographs, field slips, habitat shots and the like: leave them out of "
+    + "Vision or keep them.",
+  recovered_label: "Field-slip photos where the specimen was found on the slip: use or reject "
+    + "each crop.",
+  photo_view: "Tag what each photo shows: cap top, gills, stem and base, in place, and so on.",
+};
+
+/** The open count of a tab, for its label. */
+export const tabOpen = (summary: Pick<FeedbackSummary, "type" | "open">[], tab: FeedbackTab): number =>
+  summary.reduce((n, t) => n + (tabOf(t.type) === tab ? t.open || 0 : 0), 0);
+
+/** The groups of stat cards one tab shows. Photos: one group, its queues in PHOTO_TAB_TYPES order
+ *  (no heading of its own; the tab is the heading). Taxonomy: every other queue, by section. */
+export function tabSections<T extends Pick<FeedbackSummary, "type" | "open"> & { section?: string | null }>(
+    summary: T[], tab: FeedbackTab): SectionGroup<T>[] {
+  if (tab === "taxonomy") return groupBySection(summary.filter((t) => tabOf(t.type) === "taxonomy"));
+  const types = PHOTO_TAB_TYPES.flatMap((code) => summary.filter((t) => t.type === code));
+  if (!types.length) return [];
+  return [{ code: "photos", title: "Photos", intro: "", types,
+            open: types.reduce((n, t) => n + (t.open || 0), 0) }];
 }
 
 // --- "Show Vision's answer" on a blind item ----------------------------------------------------

@@ -7,7 +7,8 @@ import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, f
          historyOrgText, itemBadges, linkedItem, openQueue, orgChipClass, pageText, parsePhotoKeys, prefillValue,
          queueParam, QUEUE_STORAGE_KEY, readLastQueue, writeLastQueue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
-         shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText } from "./feedback";
+         shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText,
+         FEEDBACK_TABS, openTab, PHOTO_TAB_TYPES, QUEUE_BLURBS, tabOpen, tabParam, tabSections } from "./feedback";
 
 const item = (over: Partial<FeedbackItem> = {}): FeedbackItem => ({
   id: 1, item_type: "photos_unlike_label", subject: "123", granularity: "record",
@@ -197,7 +198,8 @@ test("the queues are shown in two sections, cleanup first, each in the summary's
     ["cleanup", "Data cleanup", 12, ["non_specimen_photo", "name_retired"]],
     ["validation", "Data validation", 5, ["photos_unlike_label", "group_label"]],
   ]);
-  assert.match(groups[0].intro, /^Fix what a rule found: photos that show no specimen/);
+  assert.match(groups[0].intro, /^Fix what a rule found: one name written several ways/);
+  assert.doesNotMatch(groups[0].intro, /photo/, "photo work has its own tab now");
   assert.match(groups[1].intro, /reviewed blind: Vision's answer stays hidden unless you choose to see it\.$/);
 });
 
@@ -209,6 +211,58 @@ test("a queue in a section the page doesn't know (or none) is kept, last, under 
     ["other", "Other", 7, ["new_kind", "unsorted"]],
   ]);
   assert.deepEqual(groupBySection([]), []);
+});
+
+// --- the Photos | Taxonomy tabs ------------------------------------------------------------------
+
+const allQueues = () => [
+  queue("photos_unlike_label", "validation", 5), queue("photo_view", "views", 7),
+  queue("name_retired", "cleanup", 2), queue("recovered_label", "cleanup", 3),
+  queue("crosspost_twin", "cleanup", 1), queue("non_specimen_photo", "cleanup", 10),
+  queue("new_kind", "triage", 4),
+];
+
+test("Photos is the first tab and holds exactly the three photo reviews, in a fixed order", () => {
+  assert.deepEqual(FEEDBACK_TABS.map((t) => t.code), ["photos", "taxonomy"]);
+  const groups = tabSections(allQueues(), "photos");
+  assert.equal(groups.length, 1);
+  assert.deepEqual(groups[0].types.map((t) => t.type), ["non_specimen_photo", "recovered_label", "photo_view"]);
+  assert.equal(groups[0].open, 20);
+  for (const t of PHOTO_TAB_TYPES) assert.ok(QUEUE_BLURBS[t], `${t} has a plain-words line on its card`);
+});
+
+test("Taxonomy holds every other queue by section, an unknown one under Other, and no photo review", () => {
+  const groups = tabSections(allQueues(), "taxonomy");
+  assert.deepEqual(groups.map((g) => [g.code, g.types.map((t) => t.type)]), [
+    ["cleanup", ["name_retired", "crosspost_twin"]],
+    ["validation", ["photos_unlike_label"]],
+    ["other", ["new_kind"]],
+  ]);
+  const shown = groups.flatMap((g) => g.types.map((t) => t.type));
+  for (const t of PHOTO_TAB_TYPES) assert.ok(!shown.includes(t), `${t} is not on Taxonomy`);
+});
+
+test("every queue is on exactly one tab, and the tab counts add up to the whole page", () => {
+  const qs = allQueues();
+  assert.equal(tabOpen(qs, "photos"), 20);
+  assert.equal(tabOpen(qs, "taxonomy"), 12);
+  const onTabs = (["photos", "taxonomy"] as const).flatMap((tab) => tabSections(qs, tab).flatMap((g) => g.types));
+  assert.deepEqual(onTabs.map((t) => t.type).sort(), qs.map((t) => t.type).sort());
+  assert.deepEqual(tabSections([], "photos"), []);
+});
+
+test("the page opens on Photos unless the viewer picks a tab or a link points elsewhere", () => {
+  const none = { picked: null, param: null, linkQueue: null };
+  assert.equal(openTab(none), "photos");
+  assert.equal(openTab({ ...none, linkQueue: "name_retired" }), "taxonomy", "a ?queue= or ?item= link to a name queue");
+  assert.equal(openTab({ ...none, linkQueue: "photo_view" }), "photos");
+  assert.equal(openTab({ ...none, param: "taxonomy" }), "taxonomy", "a ?tab= link");
+  assert.equal(openTab({ ...none, param: "photos", linkQueue: "name_retired" }), "photos", "?tab= wins over the queue's tab");
+  assert.equal(openTab({ picked: "photos", param: "taxonomy", linkQueue: "name_retired" }), "photos", "the viewer's pick wins");
+  assert.equal(tabParam("?tab=taxonomy"), "taxonomy");
+  assert.equal(tabParam("?tab=Taxonomy"), null);
+  assert.equal(tabParam("?tab=<x>"), null);
+  assert.equal(tabParam(""), null);
 });
 
 // --- "Show Vision's answer" ----------------------------------------------------------------
