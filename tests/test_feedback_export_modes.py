@@ -1,9 +1,11 @@
 """The exclusion export's mode (the paper coordinator's ruling of 15 Nov 2026, research
-f02ad4a): an export for a v1 paper row refuses any decided photo on a v1-test record, as the
-frozen E34 (c5fc1d13...) and E35 (2321d187...) exports did; an export for a served or later
-model (v2.1, v2.2) includes them, counted in its summary. The choice is an explicit argument:
-there is no default. A record held out of every queue (MV_FEEDBACK_HOLD_KEYS, the E17 blind
-check) refuses the export in either mode, without naming it. All stores here are synthetic."""
+f02ad4a): an export for a v1 paper row refuses any decided photo on a v1-test record (the
+exporter of the frozen E34 and E35 files meant to, but read only release v1, which has no test
+split, so it never could); an export for a served or later model (v2.1, v2.2) includes them,
+counted in its summary. The choice is an explicit argument: there is no default. Both modes
+need a verified hold list (MV_FEEDBACK_HOLD_KEYS, the E17 blind check's records; an empty one,
+pinned, once none is held), and a held record refuses the export in either mode without being
+named. All stores and releases here are synthetic."""
 
 import argparse
 import hashlib
@@ -11,6 +13,8 @@ import json
 import sqlite3
 
 import pytest
+
+from test_feedback_export import V1_HASH, hold_file, make_v1_test, pin_v1
 
 from mycomap_vision import cli
 from mycomap_vision import feedback as fb
@@ -54,11 +58,6 @@ def release(path, records, photos):
     return path
 
 
-def hold_file(path, keys):
-    path.write_bytes("".join(k + "\n" for k in keys).encode("utf-8"))
-    return path, hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def build_site(tmp_path):
     """A store shaped like the paper-era one: v1 train and val photos decided (every
     confirmation, several reasons, a re-decision, a decision after the cut), an MO photo, a
@@ -88,9 +87,9 @@ def build_site(tmp_path):
                   [("10", "train"), ("11", "val"), ("mo:12", "train"), ("13", None)],
                   [("inat:1", "10"), ("inat:2", "10"), ("inat:3", "11"), ("inat:4", "11"),
                    ("inat:5", "11"), ("mo:6", "mo:12"), ("inat:7", "13"), ("inat:8", "11")])
-    test = release(tmp_path / "v1-test.sqlite",
-                   [("20", "test"), ("mo:21", "test"), ("22", "test"), ("23", None)],
-                   [("inat:30", "20"), ("mo:31", "mo:21"), ("inat:32", "22")])
+    test = make_v1_test(tmp_path / "v1-test.sqlite",
+                        [("20", "test"), ("mo:21", "test"), ("22", "test"), ("23", None)],
+                        [("inat:30", "20"), ("mo:31", "mo:21"), ("inat:32", "22")])
     return s, live, rel, test, tmp_path
 
 
@@ -109,8 +108,14 @@ def reopen(s):
 
 
 def run(site, name, mode, **kw):
+    """The export of a fresh copy, release v1 pinned as it now is, and (unless the test names
+    one) an empty pinned hold list: none held."""
     s, live, rel, test, tmp = site
-    return fx.export(backup(live, tmp / name), rel, CUT, KEY, live, mode=mode,
+    if "hold_keys" not in kw and "hold_sha256" not in kw:
+        kw["hold_keys"], kw["hold_sha256"] = hold_file(tmp / "hold-empty.txt", [])
+    kw.setdefault("hold_keys", None)
+    kw.setdefault("hold_sha256", None)
+    return fx.export(backup(live, tmp / name), pin_v1(rel), CUT, KEY, live, mode=mode,
                      v1_test_release=test, **kw)
 
 
@@ -272,9 +277,51 @@ def test_a_held_record_outside_v1_test_refuses_the_serving_export_too(site):
         run(site, "copy.sqlite", "serving", hold_keys=path, hold_sha256=sha)
 
 
-def test_serving_mode_refuses_to_run_without_the_hold_list(site):
-    with pytest.raises(fx.ExportError, match="serving mode needs the hold list"):
-        run(site, "copy.sqlite", "serving")
+@pytest.mark.parametrize("mode", ["paper", "serving"])
+def test_either_mode_refuses_to_run_without_a_hold_list(site, mode):
+    """Review finding 1: paper mode once skipped the hold check with no list named."""
+    reopen(site[0])
+    with pytest.raises(fx.ExportError, match="name the hold list") as e:
+        run(site, "copy.sqlite", mode, hold_keys=None, hold_sha256=None)
+    assert "inat:30" not in str(e.value) and "mo:31" not in str(e.value)
+
+
+@pytest.mark.parametrize("mode", ["paper", "serving"])
+def test_an_empty_pinned_hold_list_says_none_is_held(site, mode):
+    s, live, rel, test, tmp = site
+    path, sha = hold_file(tmp / "none.txt", [])
+    data, summary = run(site, "copy.sqlite", mode, hold_keys=path, hold_sha256=sha)
+    assert data == GOLDEN.encode("utf-8")
+    assert summary["hold"] == {"checked": True, "held_keys": 0}
+
+
+def test_paper_mode_names_no_photo_of_a_held_record_in_its_v1_test_refusal(site):
+    """Review finding 1: the v1-test refusal lists photo keys, never a held record's."""
+    s, live, rel, test, tmp = site
+    reopen(s)
+    s.seed([item("inat:33", INAT + "22", "R7 uv probe p=0.99")], "nightly")
+    decide(s, "inat:33", "exclude_photo", T0 + 22, "uv", "summary: shown")
+    path, sha = hold_file(tmp / "hold.txt", ["mo:21"])
+    with pytest.raises(fx.ExportError) as e:
+        run(site, "copy.sqlite", "paper", hold_keys=path, hold_sha256=sha)
+    assert "held out of every queue" in str(e.value) and "mo:31" not in str(e.value)
+    path, sha = hold_file(tmp / "hold2.txt", ["99"])
+    with pytest.raises(fx.ExportError, match="3 decided photo.*v1-test") as e:
+        run(site, "copy2.sqlite", "paper", hold_keys=path, hold_sha256=sha)
+    assert all(k in str(e.value) for k in ("inat:30", "mo:31", "inat:33"))
+
+
+def test_a_photo_the_v1_test_release_files_under_a_held_record_refuses(site):
+    """The held check also takes the record a release files the photo under, when the item's
+    own link names another (here inat:32, filed under v1-test record 22)."""
+    s, live, rel, test, tmp = site
+    s.seed([item("inat:32", INAT + "77", "R6 view habitat p=0.5")], "nightly")
+    decide(s, "inat:32", "exclude_photo", T0 + 31, "habitat", "summary: shown")
+    path, sha = hold_file(tmp / "hold.txt", ["22"])
+    for mode in ("paper", "serving"):
+        with pytest.raises(fx.ExportError, match="held out of every queue") as e:
+            run(site, f"{mode}.sqlite", mode, hold_keys=path, hold_sha256=sha)
+        assert "inat:32" not in str(e.value)
 
 
 @pytest.mark.parametrize("mode", ["paper", "serving"])
@@ -294,24 +341,28 @@ def test_a_hold_list_that_cant_be_trusted_refuses_either_mode(site, mode):
 def test_an_export_without_a_mode_is_refused(site):
     s, live, rel, test, tmp = site
     copy = backup(live, tmp / "copy.sqlite")
+    hold = dict(zip(("hold_keys", "hold_sha256"), hold_file(tmp / "h.txt", [])))
     with pytest.raises(TypeError, match="mode"):
-        fx.export(copy, rel, CUT, KEY, live, v1_test_release=test)
+        fx.export(copy, pin_v1(rel), CUT, KEY, live, v1_test_release=test, **hold)
     for bad in (None, "", "both", "Paper"):
         with pytest.raises(fx.ExportError, match="name the export's mode"):
-            fx.export(copy, rel, CUT, KEY, live, mode=bad, v1_test_release=test)
+            fx.export(copy, rel, CUT, KEY, live, mode=bad, v1_test_release=test, **hold)
 
 
 def test_an_export_without_the_v1_test_release_is_refused(site):
     s, live, rel, test, tmp = site
     copy = backup(live, tmp / "copy.sqlite")
+    hold = dict(zip(("hold_keys", "hold_sha256"), hold_file(tmp / "h.txt", [])))
+    pin_v1(rel)
     with pytest.raises(TypeError, match="v1_test_release"):
-        fx.export(copy, rel, CUT, KEY, live, mode="paper")
+        fx.export(copy, rel, CUT, KEY, live, mode="paper", **hold)
     with pytest.raises(fx.ExportError, match="name the v1-test release"):
-        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=None)
+        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=None, **hold)
     with pytest.raises(fx.ExportError, match="no v1-test release"):
-        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=tmp / "nope.sqlite")
+        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=tmp / "nope.sqlite",
+                  **hold)
     with pytest.raises(fx.ExportError, match="not the v1-test release"):    # v1 given twice
-        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=rel)
+        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=rel, **hold)
 
 
 ARGS = ["feedback", "export-photo-exclusions", "--store-copy", "c.sqlite", "--release",
@@ -341,7 +392,8 @@ def test_the_command_writes_the_tsv_and_a_summary_that_records_the_mode(site, mo
         action="export-photo-exclusions", key_file=str(tmp / "key"),
         store_copy=str(backup(live, tmp / "copy.sqlite")), release=str(rel), as_of=CUT,
         out=str(out), expect_key_fingerprint=None, mode="serving",
-        v1_test_release=str(test), hold_keys=None, hold_sha256=None)
+        v1_test_release=str(pin_v1(rel) and test), hold_keys=None, hold_sha256=None,
+        expect_v1_test_sha256=hashlib.sha256(test.read_bytes()).hexdigest())
     cli.cmd_feedback(None, args)
     summary = json.loads(out.with_suffix(".summary.json").read_text(encoding="utf-8"))
     assert summary["mode"] == "serving" and summary["v1_test_photos"] == 2
@@ -351,3 +403,100 @@ def test_the_command_writes_the_tsv_and_a_summary_that_records_the_mode(site, mo
     with pytest.raises(SystemExit, match="export refused: .*v1-test"):
         cli.cmd_feedback(None, args)
     assert not (tmp / "paper.tsv").exists()
+
+
+# --- which photos are v1-test: by record first (review findings 2 and 6) -----------------------
+
+def test_a_v1_photo_whose_key_v1_test_also_lists_keeps_its_split_and_is_counted(tmp_path):
+    """Review finding 2 (the reviewer's repro): one image on v1 train record 10 and on v1-test
+    record 20, where the test copy was dropped as copy_in_base but its key stays in v1-test's
+    photos table. The item names record 10, so the photo is v1's: paper mode does not refuse
+    it, serving mode does not mark it test, and both count it in shared_with_v1_test."""
+    live = tmp_path / "state" / "hf.sqlite"
+    s = fb.Store(live)
+    s.seed([item("inat:5", INAT + "10", "R7 uv probe p=0.99")], "seed")
+    decide(s, "inat:5", "exclude_photo", T0 + 1, "uv", "summary: shown")
+    rel = release(tmp_path / "v1.sqlite", [("10", "train")], [("inat:5", "10")])
+    test = make_v1_test(tmp_path / "t.sqlite", [("20", "test")], [("inat:5", "20")])
+    path, sha = hold_file(tmp_path / "h.txt", [])
+    for mode in ("paper", "serving"):
+        data, summary = fx.export(backup(live, tmp_path / f"{mode}.sqlite"), pin_v1(rel), CUT,
+                                  KEY, live, mode=mode, v1_test_release=test, hold_keys=path,
+                                  hold_sha256=sha)
+        row = rows_of(data)["inat:5"]
+        assert (row["v1_split"], row["record_key"]) == ("train", "10")
+        assert summary["shared_with_v1_test"] == 1 and summary["v1_test_photos"] == 0
+    # its record being v1-test's is what decides: the same photo on an item naming record 20
+    s.seed([item("inat:6", INAT + "20", "R7 uv probe p=0.99")], "nightly")
+    decide(s, "inat:6", "exclude_photo", T0 + 2, "uv", "summary: shown")
+    with pytest.raises(fx.ExportError, match="1 decided photo.*inat:6"):
+        fx.export(backup(live, tmp_path / "c.sqlite"), pin_v1(rel), CUT, KEY, live,
+                  mode="paper", v1_test_release=test, hold_keys=path, hold_sha256=sha)
+
+
+@pytest.mark.parametrize("record_keys, link", [(["10", "20"], "10"),    # 2nd of its records
+                                               (["10"], "20")])          # its link only
+def test_every_record_an_item_names_counts_not_only_its_first(site, record_keys, link):
+    """Review finding 6: an item whose record_keys and link differ is v1-test when any record
+    it names is (record_of_item alone would see only "10", a v1 train record)."""
+    s, live, rel, test, tmp = site
+    it = item("inat:50", INAT + link, "R7 uv probe p=0.99")
+    it["record_keys"] = record_keys
+    s.seed([it], "nightly")
+    decide(s, "inat:50", "exclude_photo", T0 + 40, "uv", "summary: shown")
+    with pytest.raises(fx.ExportError, match="1 decided photo.*inat:50"):
+        run(site, "paper.sqlite", "paper")
+    data, summary = run(site, "serving.sqlite", "serving")
+    row = rows_of(data)["inat:50"]
+    assert (row["v1_split"], row["record_key"]) == ("test", "10")
+    assert summary["v1_test_photos"] == 1
+
+
+# --- the v1-test release must be v1's (review finding 3) ---------------------------------------
+
+def test_the_v1_test_release_must_name_this_v1_and_may_be_pinned_by_sha256(site):
+    s, live, rel, test, tmp = site
+    for name, kw, why in [
+            ("v2.sqlite", {"test_for": "v2"}, "does not say it is v1's test release"),
+            ("none.sqlite", {"test_for": None}, "does not say it is v1's test release"),
+            ("other.sqlite", {"for_hash": "b2" * 32}, "test release of another v1")]:
+        other = make_v1_test(tmp / name, [("20", "test")], [("inat:30", "20")], **kw)
+        with pytest.raises(fx.ExportError, match=why):
+            s_, live_, rel_, _, tmp_ = site
+            run((s_, live_, rel_, other, tmp_), "copy.sqlite", "paper")
+    sha = hashlib.sha256(test.read_bytes()).hexdigest()
+    data, summary = run(site, "a.sqlite", "paper", expect_v1_test_sha256=sha.upper())
+    assert data == GOLDEN.encode("utf-8")
+    assert (summary["v1_release_hash"], summary["v1_test_release_sha256"]) == (V1_HASH, sha)
+    with pytest.raises(fx.ExportError, match="not the expected"):
+        run(site, "b.sqlite", "paper", expect_v1_test_sha256="0" * 64)
+
+
+def test_release_v1_must_be_the_file_its_manifest_lists(site):
+    s, live, rel, test, tmp = site
+    hold = dict(zip(("hold_keys", "hold_sha256"), hold_file(tmp / "h.txt", [])))
+    copy = backup(live, tmp / "copy.sqlite")
+    with pytest.raises(fx.ExportError, match="no readable MANIFEST.json"):
+        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=test, **hold)
+    pin_v1(rel)
+    r = sqlite3.connect(rel)
+    r.execute("insert into records values ('15', 'train')")        # changed after pinning
+    r.commit()
+    r.close()
+    with pytest.raises(fx.ExportError, match="not the file its MANIFEST.json lists"):
+        fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=test, **hold)
+
+
+def test_the_command_line_passes_the_v1_test_pin(site, monkeypatch):
+    s, live, rel, test, tmp = site
+    path, sha = hold_file(tmp / "hold.txt", [])
+    (tmp / "key").write_bytes(KEY)
+    args = argparse.Namespace(
+        action="export-photo-exclusions", key_file=str(tmp / "key"),
+        store_copy=str(backup(live, tmp / "copy.sqlite")), release=str(pin_v1(rel)), as_of=CUT,
+        out=str(tmp / "x.tsv"), expect_key_fingerprint=None, mode="paper",
+        v1_test_release=str(test), hold_keys=str(path), hold_sha256=sha,
+        expect_v1_test_sha256="0" * 64)
+    with pytest.raises(SystemExit, match="export refused: .*not the expected"):
+        cli.cmd_feedback(None, args)
+    assert not (tmp / "x.tsv").exists()

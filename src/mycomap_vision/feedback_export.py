@@ -13,21 +13,31 @@ HMAC(key, "mycomap-e34"), and a run given --expect-key-fingerprint refuses any o
 Every run names its mode; there is no default (the paper coordinator's ruling of 15 Nov 2026,
 research f02ad4a: "the choice is an explicit argument with refusal as the default"):
   paper    for a v1 paper row. Refuses the whole export if any decided photo is on a v1-test
-           record, as the frozen E34 (c5fc1d13...) and E35 (2321d187...) exports did while the
-           seal held. With no such photo its bytes are the pre-mode exporter's, so a frozen
-           export is reproduced byte for byte. (Those files are never regenerated: every paper
-           config takes its exclusion file by pinned sha256.)
+           record. (The exporter that wrote the frozen E34 (c5fc1d13...) and E35 (2321d187...)
+           files meant to refuse these, but it read only release v1, which has no test split,
+           so its refusal could never fire; this one reads the v1-test release.) With no such
+           photo its bytes are that exporter's, byte for byte. The frozen files are never
+           regenerated: every paper config takes its exclusion file by pinned sha256.
   serving  for a served or later model (v2.1, v2.2), which trains on every record and is
            never scored on v1-test. Includes the decided photos on v1-test records, with
-           v1_split "test", counted in the summary (v1_test_photos, v1_test_records). Needs
-           the hold list.
-In both modes v1 train and val photos come out as "train" and "val", and a photo of a record
-neither release v1 includes nor v1-test lists as "none". v1-test is every record the v1-test
-release lists (included or not) and every photo it lists; only their keys are read.
-A decided photo on a record held out of every queue (MV_FEEDBACK_HOLD_KEYS, pinned by
-MV_FEEDBACK_HOLD_SHA256: the E17 blind check's records) refuses the export in either mode, and
-the refusal names no held key; a hold list that can't be trusted (feedback.read_hold_keys)
-refuses it too. The summary records the mode, its rule and the v1-test release's sha256.
+           v1_split "test", counted in the summary (v1_test_photos, v1_test_records).
+Which photos are v1-test, decided by record first: a photo whose item names a record the
+v1-test release lists (included or not; its record keys and links both count) is v1-test;
+else a photo release v1 puts in train or val keeps that split (when the v1-test release also
+lists its key, a copy dropped there as copy_in_base, it is counted in shared_with_v1_test);
+else a photo the v1-test release lists, or one of release v1's own test split, is v1-test.
+Every other photo comes out as "none". Only keys and splits of the releases are read. The
+v1-test release must say it is the test release of this release v1 (info test_for "v1" and
+test_for_release_hash equal to the release_hash in the MANIFEST.json beside --release, whose
+listed sha256 for the release file must match it), and with --expect-v1-test-sha256 be that
+file.
+Both modes need a verified hold list (MV_FEEDBACK_HOLD_KEYS, pinned by MV_FEEDBACK_HOLD_SHA256:
+the records held out of every queue, the E17 blind check's); after the check closes, an empty
+list pinned by its sha256 is the way to say none is held, never a missing one. A decided photo
+on a held record (the item's records, or the record either release files the photo under)
+refuses the export in either mode, and no refusal names a held record's photo; a hold list
+that is missing or can't be trusted (feedback.read_hold_keys) refuses it too. The summary
+records the mode, its rule, the v1 release_hash and the v1-test release's sha256.
 
 Columns (fixed, pinned by the paper coordinator in curation_v1_1):
   photo_key, manifest_photo_id, record_key, v1_split, decision, reason, decision_id,
@@ -137,10 +147,41 @@ def _splits(release: Path) -> dict[str, str]:
         "select photo_key, record_key from photos")}
 
 
-def _v1_test(path: Path | None) -> tuple[frozenset, frozenset, str]:
-    """(record keys, photo keys, sha256 of the file) of the v1-test release, opened read-only:
-    only its keys and splits are read, never a label, prediction or score. Refused unless it
-    is a test release (no train or val record)."""
+def _photo_records(release: Path) -> dict[str, str]:
+    """photo_key -> the record release v1 files it under."""
+    rel = sqlite3.connect(f"file:{Path(release).as_posix()}?mode=ro", uri=True)
+    try:
+        return dict(rel.execute("select photo_key, record_key from photos"))
+    finally:
+        rel.close()
+
+
+def _release_hash(release: Path) -> str:
+    """Release v1's release_hash, from the MANIFEST.json beside it (dataset_release.
+    write_release), refused unless that manifest lists the release file with its sha256."""
+    release = Path(release)
+    man = release.parent / "MANIFEST.json"
+    try:
+        manifest = json.loads(man.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ExportError(f"no readable MANIFEST.json beside {release.name} ({type(e).__name__}): "
+                          "its release_hash pins which v1 the v1-test release is for") from None
+    listed = {f.get("path"): f.get("sha256") for f in manifest.get("files") or []}
+    if listed.get(release.name) != hashlib.sha256(release.read_bytes()).hexdigest():
+        raise ExportError(f"{release.name} is not the file its MANIFEST.json lists (sha256)")
+    rh = (manifest.get("hashes") or {}).get("release") or manifest.get("release_hash")
+    if not rh:
+        raise ExportError(f"the MANIFEST.json beside {release.name} gives no release_hash")
+    return rh
+
+
+def _v1_test(path: Path | None, v1_hash: str,
+             expect_sha256: str | None = None) -> tuple[frozenset, dict, str]:
+    """(record keys, {photo key: its record}, sha256 of the file) of the v1-test release,
+    opened read-only: only its keys, splits and info are read, never a label, prediction or
+    score. Refused unless it is the test release of the release v1 whose release_hash is
+    `v1_hash` (info test_for "v1", test_for_release_hash), and, with `expect_sha256`, that
+    file."""
     if path is None:
         raise ExportError("name the v1-test release (research-releases/v1-test/release.sqlite): "
                           "without it a v1-test photo can be neither refused nor counted")
@@ -148,12 +189,26 @@ def _v1_test(path: Path | None) -> tuple[frozenset, frozenset, str]:
     if not path.exists():
         raise ExportError(f"no v1-test release at {path}")
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if expect_sha256 is not None and sha != expect_sha256.strip().lower():
+        raise ExportError(f"{path.name}: sha256 {sha[:12]}, not the expected "
+                          f"{expect_sha256.strip()[:12]}: not the v1-test release named")
     rel = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
     try:
+        try:
+            info = {k: json.loads(v) for k, v in rel.execute("select key, value from info")}
+        except (sqlite3.Error, ValueError):
+            info = {}
         records = list(rel.execute("select record_key, split from records"))
-        photos = frozenset(k for (k,) in rel.execute("select photo_key from photos"))
+        photos = dict(rel.execute("select photo_key, record_key from photos"))
     finally:
         rel.close()
+    if info.get("test_for") != "v1":
+        raise ExportError(f"{path.name} does not say it is v1's test release (info test_for "
+                          f"{info.get('test_for')!r}): not the v1-test release")
+    if info.get("test_for_release_hash") != v1_hash:
+        raise ExportError(f"{path.name} is the test release of another v1 (test_for_release_hash "
+                          f"{str(info.get('test_for_release_hash'))[:12]}, --release has "
+                          f"{v1_hash[:12]}): not the v1-test release")
     if any(sp in ("train", "val") for _, sp in records):
         raise ExportError(f"{path.name} has train or val records: it is not the v1-test release")
     if not records:
@@ -164,24 +219,28 @@ def _v1_test(path: Path | None) -> tuple[frozenset, frozenset, str]:
 def export(store_copy: Path, release: Path, as_of: str, key: bytes,
            live: Path | None = None, expect_fingerprint: str | None = None, *,
            mode: str, v1_test_release: Path | None,
-           hold_keys: str | Path | None = None, hold_sha256: str | None = None
+           hold_keys: str | Path | None, hold_sha256: str | None,
+           expect_v1_test_sha256: str | None = None
            ) -> tuple[bytes, dict]:
     """The export's bytes (UTF-8, LF, a header row, rows sorted by photo_key) and a summary
     with its sha256, its mode and counts by decision, reason, confirmation and v1 split.
     `mode` ("paper" or "serving", MODES) has no default; see the module's docstring.
-    `hold_keys`/`hold_sha256`: the held records' list and its pin (feedback.read_hold_keys);
-    serving mode refuses to run without them."""
+    `hold_keys`/`hold_sha256`: the held records' list and its pin (feedback.read_hold_keys),
+    required in both modes (an empty list, pinned, holds none)."""
     if mode not in MODES:
         raise ExportError(f"name the export's mode, one of {', '.join(MODES)} (no default: "
                           "the paper coordinator's ruling of 15 Nov 2026)")
+    if not hold_keys or not hold_sha256:
+        raise ExportError("name the hold list and its sha256 (--hold-keys and --hold-sha256, or "
+                          "MV_FEEDBACK_HOLD_KEYS and MV_FEEDBACK_HOLD_SHA256): every export "
+                          "checks that no decided photo is a held record's; once none is held, "
+                          "pin an empty list")
     held, hold_all, problem = fb.read_hold_keys(hold_keys, hold_sha256)
     if hold_all:
         raise ExportError(f"the hold list can't be trusted, so every record is held: {problem}")
-    if mode == "serving" and not hold_keys:
-        raise ExportError("serving mode needs the hold list (--hold-keys and --hold-sha256, or "
-                          "MV_FEEDBACK_HOLD_KEYS and MV_FEEDBACK_HOLD_SHA256): it includes "
-                          "v1-test photos, so it must check that none is a held record's")
-    test_records, test_photos, test_sha = _v1_test(v1_test_release)
+    v1_hash = _release_hash(release)
+    test_records, test_photos, test_sha = _v1_test(v1_test_release, v1_hash,
+                                                   expect_v1_test_sha256)
     if not key:
         raise ExportError("no HMAC key: reviewers are exported only as pseudonyms")
     if expect_fingerprint is not None and key_fingerprint(key) != expect_fingerprint.strip():
@@ -190,6 +249,7 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
     cut = parse_as_of(as_of)
     conn = _open_copy(store_copy, live)
     split_of = _splits(release)
+    v1_record_of = _photo_records(release)
     items = {r["id"]: dict(r) for r in conn.execute(
         "select id, subject, rule, record_keys, links from items where item_type = ?",
         (pr.ITEM_TYPE,))}
@@ -197,7 +257,7 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
     for d in conn.execute("select * from decisions where at <= ? order by at, id", (cut,)):
         if d["item_id"] in items:
             latest[d["item_id"]] = d                       # the last one on or before the cut
-    rows, test, n_held = [], [], 0
+    rows, test, n_held, shared = [], [], 0, 0
     for item_id, d in latest.items():
         it = items[item_id]
         key_ = it["subject"]
@@ -205,11 +265,20 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
         where = {"record_keys": json.loads(it["record_keys"] or "[]"),
                  "links": json.loads(it["links"] or "[]")}
         rk = pr.record_of_item(where) or ""
-        records = set(fb.row_records(where)) | {rk}
-        if records & held:
+        records = ({rk} | set(fb.row_records(where))
+                   | {r for link in where["links"] if (r := fb.record_of_link(link))}) - {""}
+        filed = {r for r in (v1_record_of.get(key_), test_photos.get(key_)) if r}
+        if (records | filed) & held:
             n_held += 1                                    # never named: the list is private
             continue
-        if sp == "test" or key_ in test_photos or records & test_records:
+        if records & test_records:                         # by record first
+            is_test = True
+        elif sp in ("train", "val"):                       # v1's own photo keeps its split
+            is_test = False
+            shared += key_ in test_photos                  # its copy_in_base twin in v1-test
+        else:
+            is_test = key_ in test_photos or sp == "test"
+        if is_test:
             if mode == "paper":
                 test.append(key_)
                 continue
@@ -229,7 +298,7 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
         raise ExportError(f"{n_held} decided photo(s) belong to records held out of every queue "
                           "(MV_FEEDBACK_HOLD_KEYS; their keys are private): no export may "
                           "carry them; run mv feedback seal-check")
-    if test:
+    if test:                       # the hold check ran and none of these is a held record's
         raise ExportError(f"{len(test)} decided photo(s) belong to v1-test records, which a "
                           "paper-mode export refuses (it is for a v1 paper row; a served "
                           f"model's export is --mode serving): {sorted(test)[:20]}")
@@ -256,8 +325,10 @@ def export(store_copy: Path, release: Path, as_of: str, key: bytes,
                                          and r["decision"] == "exclude_photo" for r in rows),
                "v1_test_records": len({r["record_key"] for r in rows
                                        if r["v1_split"] == "test"}),
+               "shared_with_v1_test": shared,
+               "v1_release_hash": v1_hash,
                "v1_test_release_sha256": test_sha,
-               "hold": {"checked": bool(hold_keys), "held_keys": len(held)}}
+               "hold": {"checked": True, "held_keys": len(held)}}
     return data, summary
 
 

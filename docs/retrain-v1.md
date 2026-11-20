@@ -276,9 +276,13 @@ counts are in `dataset_release.photo_exclusions` and `train_photos.photo_exclusi
 export names its mode, with no default (the paper coordinator's ruling of 15 Nov 2026,
 research f02ad4a): `--mode paper` for a v1 paper row refuses any decided photo on a `v1-test`
 record and, with none, gives the frozen E34/E35 exporter's bytes; `--mode serving` for a served
-or later model (v2.1, v2.2) includes them as `v1_split` `test`, counted in its summary, and
-needs the hold list (`--hold-keys`/`--hold-sha256` or `MV_FEEDBACK_HOLD_KEYS`). Both take
-`--v1-test-release`, and a decided photo on a held record refuses either. It is not
+or later model (v2.1, v2.2) includes them as `v1_split` `test`, counted in its summary. A
+photo is `v1-test` when its item names a `v1-test` record; a v1 train or val photo whose key
+`v1-test` also lists keeps its split (`shared_with_v1_test`). Both modes need
+`--v1-test-release` (refused unless it is the test release of `--release`; optionally pinned by
+`--expect-v1-test-sha256`) and a verified hold list (`--hold-keys`/`--hold-sha256` or
+`MV_FEEDBACK_HOLD_KEYS`/`MV_FEEDBACK_HOLD_SHA256`; an empty pinned list once none is held), and
+a decided photo on a held record refuses either. It is not
 an erratum (no record or label changes), and a run that uses it can't be resumed yet. On the
 2026-10-26 export (sha256 `b71caa99…`), all reasons: 65,217 of v1's 624,785 train photos out
 (860 records), and 5,659 val photos out of a train + val reference (53 records); slips only:

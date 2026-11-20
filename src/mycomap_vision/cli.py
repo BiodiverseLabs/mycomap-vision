@@ -1347,7 +1347,8 @@ def cmd_feedback(conn, args) -> None:
                 feedback_export.export, mode=args.mode,
                 v1_test_release=Path(args.v1_test_release),
                 hold_keys=args.hold_keys or config.setting("MV_FEEDBACK_HOLD_KEYS"),
-                hold_sha256=args.hold_sha256 or config.setting("MV_FEEDBACK_HOLD_SHA256"))
+                hold_sha256=args.hold_sha256 or config.setting("MV_FEEDBACK_HOLD_SHA256"),
+                expect_v1_test_sha256=args.expect_v1_test_sha256)
         try:
             data, summary = run(Path(args.store_copy), Path(args.release), args.as_of, key,
                                 feedback.default_path(), args.expect_key_fingerprint)
@@ -2934,12 +2935,17 @@ def main(argv: list[str] | None = None) -> int:
                         "record; 'serving' for a served or later model (v2.1, v2.2) includes "
                         "them as v1_split test, counted in the summary")
     q.add_argument("--v1-test-release", required=True,
-                   help="research-releases/v1-test/release.sqlite (only its keys are read)")
+                   help="research-releases/v1-test/release.sqlite (only its keys are read); "
+                        "refused unless it is the test release of --release")
+    q.add_argument("--expect-v1-test-sha256",
+                   help="refuse unless the v1-test release file has this sha256")
     q.add_argument("--hold-keys", help="the records held out of every queue (default "
-                                       "MV_FEEDBACK_HOLD_KEYS); a decided photo on one refuses "
-                                       "the export; --mode serving needs it")
+                                       "MV_FEEDBACK_HOLD_KEYS); needed in both modes (an empty "
+                                       "list, pinned, once none is held); a decided photo on "
+                                       "one refuses the export")
     q.add_argument("--hold-sha256", help="the hold list's sha256 (default "
-                                         "MV_FEEDBACK_HOLD_SHA256); a mismatch refuses the export")
+                                         "MV_FEEDBACK_HOLD_SHA256); needed; a mismatch refuses "
+                                         "the export")
     q = fsub.add_parser("export-photo-crops",
                         help="the specimen crops Recovered labels kept up to a time, as a TSV a "
                              "declared crop arm pins by sha256 (feedback_export.export_crops); "
