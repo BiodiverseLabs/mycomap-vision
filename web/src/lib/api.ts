@@ -785,12 +785,16 @@ export type PhotoReviewTab = "micrograph" | "slip" | "habitat" | "people" | "gat
  *  the bottom band very_low below low (Steve, 2026-11-01): a tagger's least likely photos. */
 export type PhotoBand = "high" | "medium" | "low" | "very_low";
 export type PhotoBandFilter = PhotoBand | "all";
-export type PhotoReviewSort = "p" | "p_asc" | "flagged";
+/** "disagreement": the rescoring audit's sort, on a tab's Decided Summary only (lib/photoAudit.ts). */
+export type PhotoReviewSort = "p" | "p_asc" | "flagged" | "disagreement";
 /** What became of a decided photo's flag in the tab (Steve, 2026-10-30; photo_review.outcome_of):
  *  left out for the tab's reason, kept, left out for another reason, or in the tab only by the
  *  reason a person gave (never flagged for it). */
 export type PhotoOutcome = "as_flagged" | "included" | "moved" | "not_flagged";
-export type PhotoOutcomeFilter = PhotoOutcome | "all";
+/** The Outcome filter's codes: the outcomes, and the rescoring audit's "high_not_in_tab" (decided
+ *  photos not in the tab that the audit scores high for it; lib/photoAudit.ts). */
+export type PhotoOutcomeCode = PhotoOutcome | "high_not_in_tab";
+export type PhotoOutcomeFilter = PhotoOutcomeCode | "all";
 
 /** Why a rule flagged a photo: its tab, the probe or view, its p, and how strongly it counts. */
 export interface PhotoFlag {
@@ -892,6 +896,10 @@ export interface FlaggedTile {
   /** What became of its flag in the tab shown; null while open. Absent from older servers. */
   outcome?: PhotoOutcome | null;
   decision: { decision: string; reason: string | null } | null;
+  /** The rescoring audit's score for the tab shown (decided photos, when a run is loaded). */
+  audit?: PhotoAudit | null;
+  /** Listed by "High score, not in this tab": never flagged for the tab nor left out for it. */
+  not_in_tab?: boolean;
   shown: "public" | "private" | "hidden";
   thumb?: string;
   full?: string;
@@ -903,11 +911,31 @@ export interface FlaggedTile {
   record_photos: number | null;
 }
 
+/** A decided photo's score from the rescoring audit (photo_audit.py): `p` from a model that never
+ *  trained on the photo, `p_image` the image alone (the tabs that also weigh who took the photo),
+ *  the served tagger's `comparator_p`, and how strongly `p` disagrees with the decision. */
+export interface PhotoAudit {
+  tab: string;
+  p: number;
+  p_image: number | null;
+  comparator: string | null;
+  comparator_p: number | null;
+  disagreement: number;
+  high: number;
+}
+
+/** The rescoring audit loaded now: its run and the tabs it scored. */
+export interface PhotoAuditInfo {
+  run: { run_id: string; loaded_at: number; rows: number; items: number } | null;
+  tabs: { code: string; high: number; comparator: string | null }[];
+}
+
 export interface FlaggedPage {
   total: number;
   offset: number;
-  /** The photos each outcome would keep, every other filter as asked. Absent from older servers. */
-  outcomes?: Record<PhotoOutcome, number>;
+  /** The photos each outcome would keep, every other filter as asked. Absent from older servers.
+   *  "high_not_in_tab" only with an audit for the tab. */
+  outcomes?: Record<PhotoOutcome, number> & { high_not_in_tab?: number };
   reasons: { code: string; label: string }[];
   tiles: FlaggedTile[];
 }
@@ -1143,6 +1171,8 @@ export const feedbackApi = {
   /** The Summary view's page of flagged photos (at most 200). */
   photoReviewFlagged: (p: PhotoReviewQuery) =>
     getJson<FlaggedPage>(`/api/feedback/photo-review/flagged?${photoFlaggedQuery(p)}`),
+  /** The rescoring audit loaded now (lib/photoAudit.ts). */
+  photoReviewAudit: () => getJson<PhotoAuditInfo>("/api/feedback/photo-review/audit"),
   /** Keep / exclude decisions on photo items, written whole or not at all (a 400 says why).
    *  `keepalive`: sent as the page is hidden or left. */
   photoReviewBatch: (body: PhotoBatchBody, opts: { keepalive?: boolean } = {}) =>

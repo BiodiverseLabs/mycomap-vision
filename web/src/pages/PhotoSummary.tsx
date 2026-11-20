@@ -4,6 +4,7 @@ import { Check, ChevronLeft, ChevronRight, Lock, RotateCcw, X } from "lucide-rea
 import { BODY, BTN, Ext, FIELD, INK, Placeholder, QuickReasons } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoBandFilter,
          type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewSort, type PhotoReviewTab } from "@/lib/api";
+import { auditLabel, auditTitle } from "@/lib/photoAudit";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { QUICK_REASONS, quickReasons, tileImage, type Choice } from "@/lib/photoReview";
 import { AUTOSAVE_MS, autoDue, batchBody, beginSend, decidedText, discardChanges, freshPage, gridColumns, gridKey,
@@ -531,6 +532,8 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onF
       </div>
       <p className={`truncate text-xs italic ${INK}`} title={tile.label}>{tile.label || "(no name)"}</p>
       <p className="truncate text-xs"><Ext href={tile.link}>{recordLabel(tile.record_key)}</Ext></p>
+      {tile.audit && <p className="truncate text-xs text-muted-foreground" title={auditTitle(tile.audit)}
+                        data-testid="photo-audit-score">{auditLabel(tile.audit)}</p>}
     </li>
   );
 }
