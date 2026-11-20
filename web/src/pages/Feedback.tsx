@@ -204,11 +204,11 @@ function AdminDownloads() {
   );
 }
 
-/** The basic steps at the top of a photo review, open by default, folded away with a click. */
+/** The basic steps at the top of a photo review, folded away by default (Steve, 2026-11-20), opened with a click. */
 function ReviewSteps({ type, title }: { type: string; title: string }) {
   const s = REVIEW_STEPS[type];
   return (
-    <details open className="mb-4 rounded-lg border border-myco-green/30 bg-myco-green/5 p-4 dark:bg-myco-green/10"
+    <details className="mb-4 rounded-lg border border-myco-green/30 bg-myco-green/5 p-4 dark:bg-myco-green/10"
              data-testid={`feedback-steps-${type}`}>
       <summary className={`cursor-pointer font-semibold ${INK}`}>How to review {title}</summary>
       <p className={`mt-2 max-w-3xl text-sm ${BODY}`}>{s.lead}</p>

@@ -325,3 +325,10 @@ def test_a_write_inside_the_store_lock_still_commits_and_rolls_back(tmp_path):
             store.conn.execute("insert into seeds values ('b', null, 0, 0, 2.0)")
             raise RuntimeError("abandoned")
     assert [r[0] for r in store.conn.execute("select name from seeds")] == ["a"]
+
+
+def test_the_photo_review_is_called_photo_tag_review():
+    """Steve, 2026-11-20: the "Photos that show no specimen" review is called "Photo Tag Review";
+    only the title changes, the queue's code stays non_specimen_photo."""
+    from mycomap_vision import feedback as fb_mod
+    assert fb_mod.TYPES["non_specimen_photo"].title == "Photo Tag Review"

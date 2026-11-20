@@ -61,6 +61,13 @@ test("an open photo review starts with its steps; a name queue has none", () => 
   assert.doesNotMatch(render("?queue=name_retired"), /feedback-steps-/);
 });
 
+test("the How to review box starts folded (Steve, 2026-11-20)", () => {
+  const html = render("?queue=non_specimen_photo");
+  const box = html.match(/<details[^>]*data-testid="feedback-steps-non_specimen_photo"[^>]*>/);
+  assert.ok(box, "the steps box is there");
+  assert.doesNotMatch(box[0], /\sopen(=|\s|>)/, "the steps box is not open on arrival");
+});
+
 test("a ?queue= link to a name queue opens it on the Taxonomy tab", () => {
   const html = render("?queue=name_retired");
   assert.equal(selectedTab(html), "taxonomy");
