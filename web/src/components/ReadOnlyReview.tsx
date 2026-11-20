@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { feedbackApi, signInUrl, type FeedbackMe, type FeedbackStatus, type FeedbackSummary,
-         type PhotoBandFilter, type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewSort,
+         type PhotoBandFilter, type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewSort, type PhotoShow, type PhotoShowFilter,
          type PhotoReviewTab } from "@/lib/api";
 import { BODY, FIELD, StatusToggle } from "@/components/ReviewPhotos";
 import { photoLines, readOnlyNote } from "@/lib/feedbackReadOnly";
@@ -83,26 +83,30 @@ const reasonOf = (reasons: { code: string; label: string }[] | undefined) =>
   (code: string) => reasons?.find((r) => r.code === code)?.label ?? code;
 
 /** The photo review read-only: Summary (one tile per flagged photo) or Full (by record). */
-export function ReadOnlyPhotoReview({ view, tab, status, sort, q, band, outcome = "all", pageSize, onOutcomes }: {
+export function ReadOnlyPhotoReview({ view, tab, status, sort, q, band, outcome = "all", show = "all", pageSize, onOutcomes, onShows }: {
   view: "summary" | "full"; tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string;
-  band: PhotoBandFilter; outcome?: PhotoOutcomeFilter; pageSize: number;
+  band: PhotoBandFilter; outcome?: PhotoOutcomeFilter; show?: PhotoShowFilter; pageSize: number;
+  /** What each Category choice would show. */
+  onShows?: (c: Record<PhotoShow, number> | null) => void;
   /** What each outcome would show, for the Outcome filter's counts. */
   onOutcomes?: (c: Record<PhotoOutcome, number> | null) => void;
 }) {
   const [offset, setOffset] = useState(0);
   const size = view === "summary" ? pageSize : 10;
   const flagged = useQuery({
-    queryKey: ["feedback", "read-only", "flagged", tab, status, sort, q, band, outcome, offset, size],
-    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, outcome, offset, limit: size }),
+    queryKey: ["feedback", "read-only", "flagged", tab, status, sort, q, band, outcome, show, offset, size],
+    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, outcome, show, offset, limit: size }),
     enabled: view === "summary",
   });
   const records = useQuery({
-    queryKey: ["feedback", "read-only", "records", tab, status, sort, q, band, outcome, offset],
-    queryFn: () => feedbackApi.photoReview({ tab, status, sort, q, band, outcome, offset, limit: size }),
+    queryKey: ["feedback", "read-only", "records", tab, status, sort, q, band, outcome, show, offset],
+    queryFn: () => feedbackApi.photoReview({ tab, status, sort, q, band, outcome, show, offset, limit: size }),
     enabled: view === "full",
   });
   const counts = (view === "summary" ? flagged.data?.outcomes : records.data?.outcomes) ?? null;
   useEffect(() => { onOutcomes?.(counts); }, [counts, onOutcomes]);
+  const showCounts = (view === "summary" ? flagged.data?.shows : records.data?.shows) ?? null;
+  useEffect(() => { onShows?.(showCounts); }, [showCounts, onShows]);
   if (view === "summary") {
     const d = flagged.data;
     if (!d) return <p className="text-sm text-muted-foreground">{flagged.error ? "The photos could not be loaded." : "Loading…"}</p>;

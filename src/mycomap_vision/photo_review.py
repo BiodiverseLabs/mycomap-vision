@@ -304,6 +304,31 @@ def check_outcome(outcome: str) -> None:
         raise fb.FeedbackError(f"outcome is all or one of {', '.join(OUTCOME_CODES)}")
 
 
+# --- stayed in the category, or moved out (Steve, 2026-11-20) ---------------------------------
+# The Decided view's Show box, a plainer cut than Outcome, combined with it: "stayed" is a photo
+# left out for this tab's reason (kept as flagged, or put here by a person's reason); "left" is
+# one that moved out of the bucket, to another reason or to included (Steve: a kept photo has
+# left too). Photos listed only as ones the tab may have missed (HIGH_NOT_IN_TAB) are neither.
+SHOWS: tuple[tuple[str, str], ...] = (
+    ("stayed", "Still in this category"),
+    ("left", "Moved to other categories"),
+)
+SHOW_CODES = tuple(c for c, _ in SHOWS)
+SHOW_OF_OUTCOME = {"as_flagged": "stayed", "not_flagged": "stayed",
+                   "included": "left", "moved": "left"}
+assert set(SHOW_OF_OUTCOME) == set(OUTCOME_CODES)
+
+
+def check_show(show: str) -> None:
+    if show != "all" and show not in SHOW_CODES:
+        raise fb.FeedbackError(f"show is all or one of {', '.join(SHOW_CODES)}")
+
+
+def shows_as(outcome: str | None, show: str) -> bool:
+    """Whether a photo of this outcome is listed under the Show pick ('all': every photo)."""
+    return show == "all" or SHOW_OF_OUTCOME.get(outcome or "") == show
+
+
 # --- the rescoring audit (Steve, 2026-11-20; photo_audit.py) ----------------------------------------
 # The Summary's Decided list of a tab can sort by how strongly the tagger's out-of-fold audit
 # score disagrees with each decision, and show the decided photos the tab may have missed.
@@ -392,7 +417,8 @@ def record_counts(items: list[dict]) -> dict[str, int]:
 
 
 def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
-          min_flagged: int = 1, query: str = "", band: str = "all", outcome: str = "all") -> dict:
+          min_flagged: int = 1, query: str = "", band: str = "all", outcome: str = "all",
+          show: str = "all") -> dict:
     """Group the queue's photo items by record. `tab` is one of TAB_CODES or 'all'; a record is
     in a tab when one of its photos is flagged for it, and `status` 'open' keeps records with an
     open photo in the tab ('decided': every photo in the tab decided; 'any': both). Sorted by the strongest
@@ -400,8 +426,11 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
     photos first). `query` keeps records whose key or label contains it (the tab counts stay
     the queue's). `outcome` (one of OUTCOME_CODES, or 'all') keeps records with a photo in the
     tab that came to that outcome (outcome_of). Gives {"tabs": [{code, title, open, decided}],
-    "total", "records", "outcomes"}: "outcomes" counts the records each outcome would keep with
-    every other filter as given (what the list's total becomes when it is picked)."""
+    "total", "records", "outcomes", "shows"}: "outcomes" counts the records each outcome would
+    keep with every other filter as given (what the list's total becomes when it is picked).
+    `show` (one of SHOW_CODES, or 'all') keeps records with a photo in the tab that stayed in its
+    category or left it, and with `outcome` the same photo must match both; "shows" counts the
+    records each would keep."""
     if tab != "all" and tab not in TAB_CODES:
         raise fb.FeedbackError(f"unknown tab {tab!r} ({', '.join(TAB_CODES)} or all)")
     if status not in ("open", "decided", "any"):
@@ -411,6 +440,7 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
     if band != "all" and band not in BANDS:
         raise fb.FeedbackError(f"band is all or one of {', '.join(BANDS)}")
     check_outcome(outcome)
+    check_show(show)
     records: dict[str, dict] = {}
     for it in items:
         key = record_of_item(it)
@@ -452,6 +482,7 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
         tabs.append({"code": code, "title": title, **c, "bands": bands})
     chosen = []
     outcomes = dict.fromkeys(OUTCOME_CODES, 0)
+    shows = dict.fromkeys(SHOW_CODES, 0)
     query = (query or "").strip().lower()
     for rec in records.values():
         if query and query not in rec["record_key"].lower() and query not in rec["label"].lower():
@@ -462,10 +493,15 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
         mine = [p for p in rec["flagged"] if in_tab(p, tab, band)]
         if len(mine) < max(1, int(min_flagged or 1)):
             continue
-        came_to = {p["outcome"] for p in mine} - {None}
+        came_to = {p["outcome"] for p in mine if shows_as(p["outcome"], show)} - {None}
         for o in came_to:
             outcomes[o] += 1
+        for s in {SHOW_OF_OUTCOME[p["outcome"]] for p in mine
+                  if p["outcome"] and (outcome == "all" or p["outcome"] == outcome)}:
+            shows[s] += 1
         if outcome != "all" and outcome not in came_to:
+            continue
+        if show != "all" and not came_to:
             continue
         strongest = max((f["strength"] for p in mine for f in p["flags"]
                          if tab == "all" or f["tab"] == tab), default=0.0)
@@ -476,7 +512,8 @@ def cards(items: list[dict], tab: str = "all", status: str = "open", sort: str =
     else:
         sign = -1 if sort == "p" else 1
         chosen.sort(key=lambda r: (sign * r["strongest"], r["record_key"]))
-    return {"tabs": tabs, "total": len(chosen), "records": chosen, "outcomes": outcomes}
+    return {"tabs": tabs, "total": len(chosen), "records": chosen, "outcomes": outcomes,
+            "shows": shows}
 
 
 # --- the record's photos, and the admin-only copy -------------------------------------------------
@@ -849,7 +886,8 @@ def decide_record(store: fb.Store, record_key: str, photos: list[dict], person: 
 
 def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
                   query: str = "", band: str = "all", outcome: str = "all",
-                  counts: dict | None = None, audit: Audit | None = None) -> list[dict]:
+                  counts: dict | None = None, audit: Audit | None = None, show: str = "all",
+                  show_counts: dict | None = None) -> list[dict]:
     """The queue's flagged photos in `tab`, one tile each (not grouped by record), sorted like the
     record view: by the strongest flag in the tab (p: highest first, p_asc: lowest first), or
     'flagged': the records with most flagged photos first, their photos together. `outcome` (one
@@ -862,7 +900,11 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
     high}); sort 'disagreement' puts the strongest disagreement first (tiles with no score last);
     and the outcome HIGH_NOT_IN_TAB lists, instead of the tab's own photos, the decided photos
     with no flag for the tab and not left out for its reason whose score reaches the run's High
-    cut (counted in `counts` too). Neither is offered without an audit for the tab."""
+    cut (counted in `counts` too). Neither is offered without an audit for the tab.
+
+    `show` (one of SHOW_CODES, or 'all') keeps the photos that stayed in the tab's category or
+    left it (SHOW_OF_OUTCOME), with `outcome` too; a `show_counts` dict is filled with the photos
+    each would keep, every other filter as given. Photos the tab may have missed are in neither."""
     if tab != "all" and tab not in TAB_CODES:
         raise fb.FeedbackError(f"unknown tab {tab!r} ({', '.join(TAB_CODES)} or all)")
     if status not in ("open", "decided"):
@@ -879,6 +921,9 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
                                "loaded audit run")
     if outcome != HIGH_NOT_IN_TAB:
         check_outcome(outcome)
+    check_show(show)
+    if show_counts is not None:
+        show_counts.update(dict.fromkeys(SHOW_CODES, 0))
     if counts is not None:
         counts.update(dict.fromkeys(OUTCOME_CODES, 0))
         if audit is not None:
@@ -901,9 +946,9 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
             a = _audit_of(audit, it)
             if a is None or a["p"] < audit.high or band != "all":
                 continue
-            if counts is not None:
+            if counts is not None and show == "all":
                 counts[HIGH_NOT_IN_TAB] += 1
-            if outcome != HIGH_NOT_IN_TAB:
+            if outcome != HIGH_NOT_IN_TAB or show != "all":
                 continue
             tiles.append(_tile(it, key, label, flags, flags, tab, None, a)
                          | {"not_in_tab": True, "suggested_reason": REASON_OF_TAB.get(tab)})
@@ -912,9 +957,14 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
         if band != "all" and band_of(mine) != band:
             continue
         came_to = item_outcome(it, tab)
-        if counts is not None and came_to is not None:
+        if counts is not None and came_to is not None and shows_as(came_to, show):
             counts[came_to] += 1
+        if (show_counts is not None and came_to is not None and outcome != HIGH_NOT_IN_TAB
+                and (outcome == "all" or came_to == outcome)):
+            show_counts[SHOW_OF_OUTCOME[came_to]] += 1
         if outcome == HIGH_NOT_IN_TAB or (outcome != "all" and came_to != outcome):
+            continue
+        if not shows_as(came_to, show):
             continue
         tiles.append(_tile(it, key, label, flags, mine, tab, came_to, _audit_of(audit, it)))
         per_record[key] = per_record.get(key, 0) + 1

@@ -5,7 +5,7 @@ import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox
          StatusToggle, useDebounced } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type PhotoReviewDecisionBody,
          type PhotoBandFilter, type PhotoOutcomeCode, type PhotoOutcomeFilter, type PhotoReviewPage, type PhotoReviewSort,
-         type PhotoReviewTab, type ReviewPhoto,
+         type PhotoReviewTab, type PhotoShow, type PhotoShowFilter, type ReviewPhoto,
          type ReviewRecord } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReason, decisionsOf, initialChoices,
@@ -14,7 +14,7 @@ import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReas
          REVIEW_PAGE_SIZE, saveBody, savedLine,
          setReason, SORTS, BAND_FILTERS, bandCount, OUTCOME_FILTERS, outcomeCount, outcomeInUse, sortedPhotos, step, suggestedCount, withMode, writePreselectMode, type Choice,
          type KeyAction, type PhotoChoice, type PhotoChoices, type PickedReasons,
-         type PreselectMode } from "@/lib/photoReview";
+         type PreselectMode, SHOW_FILTERS, showCount, showInUse, showsCategoryBox } from "@/lib/photoReview";
 import { PAGE_SIZES, readPageSize, readTileSize, readView, SUMMARY_KEY_HELP, SUMMARY_TABS, TILE_SIZES, writePageSize,
          writeTileSize, writeView, type PageSize, type ReviewView, type TileSize } from "@/lib/photoSummary";
 import { autosaveOnText, changedPhotos, pageSaves, readAutosave, writeAutosave } from "@/lib/reviewSave";
@@ -57,6 +57,9 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   // The Outcome filter (Steve, 2026-10-30): what became of a decided photo's flag. Asked for in
   // Decided only (outcomeInUse); the pick is kept while Open is shown.
   const [outcomePick, setOutcomeNow] = useState<PhotoOutcomeFilter>("all");
+  // The Category box (Steve, 2026-11-20): still in this category, or moved to others. Decided,
+  // one tab only (showInUse); the pick is kept while it is not shown.
+  const [showPick, setShowNow] = useState<PhotoShowFilter>("all");
   const [text, setTextNow] = useState("");
   const q = useDebounced(text.trim());
   const [autosave, setAutosave] = useState(() => readAutosave(browserStorage));
@@ -79,6 +82,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const setMinFlagged = leaving(setMinFlaggedNow);
   const setBand = leaving(setBandNow);
   const setOutcome = leaving(setOutcomeNow);
+  const setShow = leaving(setShowNow);
   const setText = leaving(setTextNow);
   const pickAutosave = (on: boolean) => {
     if (on && unsaved > 0 && view === "summary" && !window.confirm(autosaveOnText(unsaved))) return;
@@ -104,6 +108,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const audited = auditAvailable(audit.data, view === "full" ? "full" : "summary", status, tab);
   const sort = sortInUse(sortPick, audited);
   const outcome = auditOutcomeInUse(outcomeInUse(status, outcomePick), audited);
+  const show = showInUse(status, tab, outcome, showPick);
   const [tileSize, setTileSize] = useState<TileSize>(() => readTileSize(browserStorage));
   // The Summary's photos per page, remembered per viewer (Steve, 2026-10-21). A change loads
   // the first page again, so unsaved changes are asked about first.
@@ -119,6 +124,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const [summaryTotal, setSummaryTotal] = useState<number | null>(null);
   // The Outcome filter's counts from the Summary (or the read-only view); Full's come with its page.
   const [viewOutcomes, setViewOutcomes] = useState<Partial<Record<PhotoOutcomeCode, number>> | null>(null);
+  const [viewShows, setViewShows] = useState<Partial<Record<PhotoShow, number>> | null>(null);
   // A read-only viewer (Steve, 2026-10-22): the same filters, no Auto-save, no choices.
   const readOnly = useReadOnly();
   // The reasons this reviewer picked, by photo: kept across tabs and pages (Board remounts).
@@ -128,10 +134,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
     setMode(next);
     writePreselectMode(browserStorage, next);
   };
-  useEffect(() => { setOffset(0); }, [tab, status, sort, minFlagged, q, band, outcome]);
+  useEffect(() => { setOffset(0); }, [tab, status, sort, minFlagged, q, band, outcome, show]);
   const list = useQuery({
-    queryKey: ["feedback", "photo-review", tab, status, sort, minFlagged, q, band, outcome, offset, gen],
-    queryFn: () => feedbackApi.photoReview({ tab, status, sort, min_flagged: minFlagged, q, band, outcome, offset,
+    queryKey: ["feedback", "photo-review", tab, status, sort, minFlagged, q, band, outcome, show, offset, gen],
+    queryFn: () => feedbackApi.photoReview({ tab, status, sort, min_flagged: minFlagged, q, band, outcome, show, offset,
                                              limit: REVIEW_PAGE_SIZE }),
     placeholderData: (prev) => prev,
     // A reload under the reviewer would move the cards they are working through.
@@ -141,6 +147,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const data = list.data;
   const total = data?.total ?? 0;
   const outcomeCounts = full ? data?.outcomes : viewOutcomes;
+  const showCounts = full ? data?.shows : viewShows;
   const reload = (nextOffset: number) => {
     setOffset(nextOffset);
     setGen((g) => g + 1);
@@ -179,6 +186,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
             ))}
           </select>
         </label>
+        {showsCategoryBox(status, tab) && (
+          <CategorySelect show={show} counts={showCounts} onChange={setShow}
+                          off={outcome === "high_not_in_tab"} />
+        )}
         <OutcomeSelect status={status} outcome={outcome} counts={outcomeCounts} onChange={setOutcome}
                        options={outcomeOptions(OUTCOME_FILTERS, audited)} />
         {full && <label className="flex min-w-0 items-center gap-2 text-sm">
@@ -211,12 +222,12 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       </div>
       {help && !readOnly && <KeyHelp rows={full ? KEY_HELP : SUMMARY_KEY_HELP} />}
       {readOnly && (
-        <ReadOnlyPhotoReview key={`${view}|${tab}|${status}|${sort}|${q}|${band}|${outcome}|${pageSize}`} view={view === "full" ? "full" : "summary"}
-                             tab={tab} status={status} sort={sort} q={q} band={band} outcome={outcome} pageSize={pageSize}
-                             onOutcomes={setViewOutcomes} />
+        <ReadOnlyPhotoReview key={`${view}|${tab}|${status}|${sort}|${q}|${band}|${outcome}|${show}|${pageSize}`} view={view === "full" ? "full" : "summary"}
+                             tab={tab} status={status} sort={sort} q={q} band={band} outcome={outcome} show={show} pageSize={pageSize}
+                             onOutcomes={setViewOutcomes} onShows={setViewShows} />
       )}
       {!full && !readOnly && (
-        <PhotoSummary tab={tab} status={status} sort={sort} q={q} band={band} outcome={outcome} onOutcomes={setViewOutcomes} help={help} onHelp={() => setHelp((h) => !h)}
+        <PhotoSummary tab={tab} status={status} sort={sort} q={q} band={band} outcome={outcome} show={show} onShows={setViewShows} onOutcomes={setViewOutcomes} help={help} onHelp={() => setHelp((h) => !h)}
                       tileSize={tileSize} pageSize={pageSize} onTotal={setSummaryTotal} autosave={autosave} onPending={setUnsaved}
                       canLeave={canLeave} discard={discard} />
       )}
@@ -225,7 +236,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       )}
       {full && !readOnly && data && list.isPlaceholderData && <p className="text-sm text-muted-foreground">Loading the next records…</p>}
       {full && !readOnly && data && !list.isPlaceholderData && (
-        <Board key={`${tab}|${status}|${sort}|${minFlagged}|${q}|${band}|${outcome}|${offset}|${gen}`} data={data} tab={tab}
+        <Board key={`${tab}|${status}|${sort}|${minFlagged}|${q}|${band}|${outcome}|${show}|${offset}|${gen}`} data={data} tab={tab}
                status={status} searching={!!q} offset={offset} help={help} onHelp={() => setHelp((h) => !h)}
                mode={mode} picked={picked} onPick={(photoKey, r) => setPicked((x) => ({ ...x, [photoKey]: r }))}
                onPageDone={() => reload(offsetWhenPageDone(status, offset, REVIEW_PAGE_SIZE, total))}
@@ -265,6 +276,27 @@ export function OutcomeSelect({ status, outcome, counts, onChange, options = OUT
           <option key={o.code} value={o.code} title={o.title}>
             {o.label}{decided ? outcomeCount(counts, o.code) : ""}
           </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/** The Category box, in Decided on one tab (Steve, 2026-11-20): the photos still in this tab's
+ *  category, or those moved to other categories. Each choice carries how many the list would
+ *  show with it picked. With "High score, not in this tab" it rests at All decided. */
+export function CategorySelect({ show, counts, onChange, off = false }: {
+  show: PhotoShowFilter; counts: Partial<Record<PhotoShow, number>> | null | undefined;
+  onChange: (s: PhotoShowFilter) => void; off?: boolean;
+}) {
+  return (
+    <label className="flex min-w-0 items-center gap-2 text-sm"
+           title="Still in this category: left out for this tab's reason. Moved to other categories: left out for another reason, or kept.">
+      <span className="text-muted-foreground">Category</span>
+      <select className={FIELD} value={off ? "all" : show} disabled={off}
+              onChange={(e) => onChange(e.target.value as PhotoShowFilter)} data-testid="photo-review-category">
+        {SHOW_FILTERS.map((o) => (
+          <option key={o.code} value={o.code} title={o.title}>{o.label}{showCount(counts, o.code)}</option>
         ))}
       </select>
     </label>
