@@ -80,6 +80,8 @@ REASONS: tuple[tuple[str, str], ...] = (
     # Steve, 2026-11-20: a photo of more than one species, so it can't teach one name. A reason
     # (a bucket) only for now: no flag or tab finds them; a classifier may come later.
     ("multiple_species", "Multiple species"),
+    # Steve, 2026-11-20: mushrooms being cooked or served as food. A reason only, as above.
+    ("food", "Cooking or food"),
     # Steve, 2026-10-21: a reason even while no flag finds these reliably.
     ("blurry", "Blurry or badly exposed"),
     ("other", "Other"),
