@@ -107,16 +107,17 @@ def test_outcomes_are_checked_and_a_decided_card_shows_what_vision_said(conn, tm
 
 def test_who_may_review_and_which_items_are_cards(conn, tmp_path):
     c, fstore = site_with_queue(conn, tmp_path)
-    c.cookies.clear()                     # read-only: the queue's items all belong to a project
-    assert c.get("/api/feedback/label-review").json()["records"] == []
+    c.cookies.clear()                     # a Taxonomy queue: Contributors and up only
+    assert c.get("/api/feedback/label-review").status_code == 403
     item = next(i for i in fstore.items_of("photos_unlike_label") if i["subject"] == "102")
     assert c.post(f"/api/feedback/label-review/{item['id']}/decision",
                   json={"outcome": "hard_example"}).status_code == 401
-    as_user(c, "member-1")                                    # another project's contributor
-    assert c.get("/api/feedback/label-review").json()["records"] == []
-    item = next(i for i in fstore.items_of("photos_unlike_label") if i["subject"] == "102")
+    as_user(c, "member-1")                                    # below Contributor
+    assert c.get("/api/feedback/label-review").status_code == 403
     assert c.post(f"/api/feedback/label-review/{item['id']}/decision",
-                  json={"outcome": "hard_example"}).status_code == 404
+                  json={"outcome": "hard_example"}).status_code == 403
+    as_user(c, "leader-1")                                    # a Contributor: every project
+    assert {x["record_key"] for x in c.get("/api/feedback/label-review").json()["records"]}
     as_user(c, "admin-1")
     group = fstore.items("group_label")["items"][0]["id"]
     assert c.post(f"/api/feedback/label-review/{group}/decision",

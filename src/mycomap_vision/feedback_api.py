@@ -1,12 +1,22 @@
 """The Human Feedback page's API (feedback.py): /api/feedback/...
 
-Who may use it: a signed-in mycomap.org admin (every item), project leader or contributor (the
-items of their projects). Anyone else, signed in or not, may browse it read-only (Steve,
-2026-10-22): every photo item, and the other items of no project (feedback.PUBLIC_ITEMS), cut
-by feedback_public.py, and every write refuses them
-(401 signed out, 403 signed in). Roles come from mycomap.org (GET /api/vision/feedback/roles, behind
-the Vision key), cached a few minutes; until .org answers it, MV_FEEDBACK_ADMINS (comma-
-separated mycomap.org user ids) names the admins and nobody else gets in.
+Who may use it goes by the mycomap.org site role alone, not project seats (Steve, 2026-11-20:
+"any .org member should be able to work with photos. Only contributors or higher should see
+and be able to alter things on the taxonomy tab"; "members dont matter. role does.
+contributor, lab contributor, project manager, admin"):
+
+- a Contributor (project_assistant), Lab Contributor, Project Leader or Admin (.org's staff
+  flag, or its admin flag) sees and decides every item of both tabs;
+- any other signed-in mycomap.org account decides the Photos tab's items (feedback.PUBLIC_ITEMS)
+  and sees no Taxonomy item (403). It sees the photos as feedback_public.py cuts them: only
+  photos anyone may see, and the photos it may not see are left out of its lists and refused
+  in its writes (ShownPhotos), so a Save page never marks a photo it could not look at;
+- a signed-out visitor browses the Photos tab read-only, cut the same way (401 on writes).
+
+Roles come from mycomap.org (GET /api/vision/feedback/roles, behind the Vision key), cached a
+few minutes; MV_FEEDBACK_ADMINS (comma-separated mycomap.org user ids) names admins even
+while .org does not answer. The admin downloads (changes.tsv, marking a decision applied) stay
+with .org's admin flag (Admin and Project Leader).
 
 What a reviewer sees beyond the queued item comes live from mycomap.org
 (GET /api/vision/feedback/record?observation=inat:123): the record's name today, its projects,
@@ -41,6 +51,71 @@ from . import writing_split as ws
 from .pair_places import PairPlaces
 
 ROLE_TTL = 300.0
+
+# The refusals of the role rule (module docstring), in words a person can act on.
+TAXONOMY_ONLY = ("The Taxonomy queues are for mycomap.org Contributors, Lab Contributors, "
+                 "Project Leaders and admins")
+PHOTO_NOT_SHOWN = ("This photo is not shown publicly: it is reviewed by mycomap.org "
+                   "Contributors, Lab Contributors, Project Leaders and admins")
+
+
+# Licences shown as they are (permissions.PermissionView.may_show).
+CC_CLASSES = ("open", "nc")
+
+
+class ShownPhotos:
+    """Which photos a viewer below Contributor may see (feedback_public.py): the photo rule's
+    may_show on the photo's licence and owner now (photo_review.ReviewPhotos.for_viewer's
+    "public"). Licence and owner are read from the manifest once per photo and kept for
+    `ttl` seconds (a new release may change them); the permissions are read on every ask,
+    so a grant shows at once. A photo the manifest no longer has is not shown."""
+
+    CHUNK = 900
+
+    def __init__(self, query: Callable[[str, tuple], list], permission_view: Callable,
+                 ttl: float = 3600.0, clock: Callable[[], float] = time.monotonic):
+        self.query = query
+        self.permission_view = permission_view
+        self.ttl = ttl
+        self.clock = clock
+        # photo id -> True (Creative Commons: always shown), its owner's iNat id (shown with
+        # their grant), 0 (no owner: never), None (not in the manifest): one small value each,
+        # since the photo queue holds 150,000 photos.
+        self.info: dict[int, bool | int | None] = {}
+        self.read_at = clock()
+        self.generation = 0
+        self.lock = threading.Lock()
+
+    def _known(self, pids: set[int]) -> None:
+        with self.lock:
+            if self.clock() - self.read_at > self.ttl:
+                self.info = {}
+                self.read_at = self.clock()
+                self.generation += 1
+            need = sorted(p for p in pids if p not in self.info)
+            for i in range(0, len(need), self.CHUNK):
+                chunk = need[i:i + self.CHUNK]
+                got = {int(r[0]): (True if r[1] in CC_CLASSES else int(r[2] or 0))
+                       for r in self.query(
+                    "select photo_id, license_class, owner_user_id from photos where photo_id in "
+                    f"({','.join('?' * len(chunk))})", tuple(chunk))}
+                for p in chunk:
+                    self.info[p] = got.get(p)
+
+    def mark(self) -> tuple:
+        """Changes when what is shown may have: the permissions, or a fresh manifest read."""
+        view = self.permission_view()
+        return (self.generation, hash(view.granted), view.fresh())
+
+    def shown(self, photo_keys) -> set[str]:
+        """The keys of `photo_keys` this viewer may see."""
+        pids = {k: fb.photo_id_of(k) for k in photo_keys}
+        self._known({p for p in pids.values() if p is not None})
+        view = self.permission_view()
+        fresh = view.fresh()
+        return {k for k, p in pids.items()
+                if p is not None and ((i := self.info.get(p)) is True
+                                      or (i and fresh and i in view.granted))}
 
 
 class ViewCache:
@@ -193,16 +268,9 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     allow = {x.strip() for x in (config.setting("MV_FEEDBACK_ADMINS") or "").split(",")
              if x.strip()}
 
-    def access(request: Request) -> tuple[dict, set[str] | None]:
-        """(person, projects): projects None for an admin (every item)."""
-        who, projects, _ = access_roles(request)
-        return who, projects
-
-    def access_roles(request: Request) -> tuple[dict, set[str] | None, dict]:
-        """(person, projects, roles); roles["staff"] is .org's staff flag (blastHrefFor)."""
-        who = person(request)
-        if not who:
-            raise HTTPException(401, "sign in with your mycomap.org account")
+    def roles_of(who: dict) -> dict:
+        """.org's roles for a signed-in person (cached ROLE_TTL); {"admin": False} when .org
+        does not answer. MV_FEEDBACK_ADMINS are admins whatever .org says."""
         sub = str(who["sub"])
         with lock:
             hit = cache.get(sub)
@@ -213,44 +281,74 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
                 roles = org.roles(sub)
             except requests.RequestException:
                 roles = None
-            roles = roles or {"admin": False, "projects": []}
+            roles = roles or {"admin": False, "staff": False, "projects": []}
             with lock:
                 cache[sub] = (time.monotonic(), roles)
         if sub in allow:
             roles = {**roles, "admin": True, "staff": True}
-        if roles.get("admin"):
-            return who, None, roles
-        # Records name their projects (green_projects: .org's validation_project_N), so the
-        # project's name is the key; its id only when .org gives no name.
-        projects = {str(p.get("name") or p["id"]) for p in roles.get("projects") or []
-                    if p.get("role") in ("leader", "contributor")}
-        if not projects:
-            raise HTTPException(403, "Human Feedback is for mycomap.org admins, project "
-                                     "leaders and contributors")
-        return who, projects, roles
+        return roles
 
     def viewer(request: Request) -> tuple[dict | None, set[str] | None, dict, bool]:
-        """(person, projects, roles, read_only) for a page that only reads. A reviewer as
-        access_roles has them; anyone else read-only, seeing every photo item and the other
-        items of no project (fb.PUBLIC_ITEMS). Writes keep access(), which refuses a read-only viewer."""
-        if not person(request):
+        """(person, projects, roles, cut) by the site role (module docstring). A Contributor or
+        higher: projects None (every item of both tabs), cut False. Anyone else, signed in or
+        not: fb.PUBLIC_ITEMS (the Photos tab's items) and cut True, seeing what
+        feedback_public.py leaves. Who may write is writer()'s and staff_only()'s."""
+        who = person(request)
+        if not who:
             return None, fb.PUBLIC_ITEMS, {}, True
-        try:
-            who, projects, roles = access_roles(request)
-        except HTTPException as e:
-            if e.status_code != 403:
-                raise
-            return person(request), fb.PUBLIC_ITEMS, {}, True
-        return who, projects, roles, False
+        roles = roles_of(who)
+        if roles.get("admin") or roles.get("staff"):
+            return who, None, roles, False
+        return who, fb.PUBLIC_ITEMS, roles, True
 
-    # Research > Excluded photos lists People photos only to reviewers (excluded_looked.py).
+    # Research > Excluded photos lists People photos only to reviewers (excluded_looked.py):
+    # Contributors and up, whose [3] (cut) is False.
     app.state.feedback_viewer = viewer
 
+    def writer(request: Request) -> tuple[dict, set[str] | None, bool]:
+        """(person, projects, cut) of a signed-in person: any account writes the Photos tab."""
+        who, projects, _, cut = viewer(request)
+        if not who:
+            raise HTTPException(401, "sign in with your mycomap.org account")
+        return who, projects, cut
+
+    def staff_only(request: Request) -> tuple[dict, None]:
+        """A write on the Taxonomy tab: Contributors and up only."""
+        who, projects, cut = writer(request)
+        if cut:
+            raise HTTPException(403, TAXONOMY_ONLY)
+        return who, projects
+
     def admin_only(request: Request) -> dict:
-        who, projects = access(request)
-        if projects is not None:
+        who, _, _ = writer(request)
+        if not roles_of(who).get("admin"):
             raise HTTPException(403, "admins only")
         return who
+
+    shown_photos = (ShownPhotos(photos.query, photos.permission_view)
+                    if photos is not None else None)
+    app.state.feedback_shown_photos = shown_photos
+
+    def check_photo_writes(cut: bool, item_ids=(), photo_keys=()) -> None:
+        """Refuse a cut viewer's write that touches a Taxonomy item or a photo it may not see
+        (403); unknown items are left to the write itself to refuse."""
+        if not cut:
+            return
+        ids = sorted({int(i) for i in item_ids if isinstance(i, int) or str(i).isdigit()})
+        keys = {str(k) for k in photo_keys if k}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            for t, subject in store.conn.execute(
+                    "select item_type, subject from items where id in "
+                    f"({','.join('?' * len(chunk))})", tuple(chunk)):
+                if t not in fb.PUBLIC_PHOTO_TYPES:
+                    raise HTTPException(403, TAXONOMY_ONLY)
+                keys.add(subject)
+        if keys and shown_photos is not None and shown_photos.shown(keys) != keys:
+            raise HTTPException(403, PHOTO_NOT_SHOWN)
+
+    def batch_ids(payload: dict) -> list:
+        return [d.get("item_id") for d in payload.get("decisions") or [] if isinstance(d, dict)]
 
     def bad(e: Exception):
         raise HTTPException(400, str(e)) from e
@@ -265,8 +363,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         ).fetchone())
 
     def projkey(projects):
-        if isinstance(projects, fb.PublicItems):
-            return "read-only"
+        if isinstance(projects, fb.PublicItems):        # the photos it may see change apart
+            return ("photos-shown", shown_photos.mark() if shown_photos else None)
         return None if projects is None else tuple(sorted(projects))
 
     # Counts and item lists cached until the store changes (any item or decision added):
@@ -285,8 +383,15 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     app.state.feedback_lists = lists
 
     def items_cached(item_type: str, projects):
-        return cached(("items", item_type, projkey(projects)),
-                      lambda: lists.of(item_type, projects))
+        """The queue's items this viewer may see: for fb.PUBLIC_ITEMS only the photos it may
+        look at (ShownPhotos), so its lists, counts and Save page hold no hidden photo."""
+        def build():
+            items = lists.of(item_type, projects)
+            if isinstance(projects, fb.PublicItems) and shown_photos is not None:
+                ok = shown_photos.shown({i["subject"] for i in items})
+                items = [i for i in items if i["subject"] in ok]
+            return items
+        return cached(("items", item_type, projkey(projects)), build)
 
     # The rescoring audit's scores (photo_audit.py), read apart from the queue's items: p only,
     # for a few tabs at a time, all of the run loaded now (photo_audit.ScoreCache); a page's
@@ -315,10 +420,13 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
-        who, projects, roles, ro = viewer(request)
+        """Who this viewer is here: read_only signed out; taxonomy for Contributors and up;
+        all_photos when every photo is shown to them (the others see only public ones)."""
+        who, projects, roles, cut = viewer(request)
         return {"user": who and {"id": who["sub"], "name": who.get("name")},
-                "admin": projects is None, "staff": bool(roles.get("staff")),
-                "projects": [] if ro else sorted(projects or []), "read_only": ro}
+                "admin": bool(roles.get("admin")), "staff": bool(roles.get("staff")),
+                "projects": [], "read_only": who is None, "taxonomy": not cut,
+                "all_photos": not cut}
 
     @app.get("/api/feedback/catalogue")
     def fb_catalogue(request: Request):
@@ -338,7 +446,15 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         _, projects, _, _ = viewer(request)
 
         def build():
-            out = store.summary(projects)
+            if isinstance(projects, fb.PublicItems):
+                # The Photos tab only, counted from the photos this viewer may see.
+                out = [t for t in store.summary(None) if t["type"] in fb.PUBLIC_PHOTO_TYPES]
+                for t in out:
+                    items = items_cached(t["type"], projects)
+                    t["open"] = sum(1 for i in items if i["status"] == "open")
+                    t["decided"] = len(items) - t["open"]
+            else:
+                out = store.summary(projects)
             for t in out:
                 if t["granularity"] == "photo":
                     c = pr.record_counts(items_cached(t["type"], projects))
@@ -374,6 +490,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         """A page of a queue; `list` one of a split queue's lists (name_writing_split:
         "format" or "look", writing_split.py)."""
         _, projects, _, ro = viewer(request)
+        if ro and type not in fb.PUBLIC_PHOTO_TYPES:
+            raise HTTPException(403, TAXONOMY_ONLY)
         if status not in ("open", "decided"):
             bad(ValueError("status is open or decided"))
         try:
@@ -394,6 +512,11 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         try:
             return store.get(item_id, projects)
         except KeyError:
+            if isinstance(projects, fb.PublicItems):
+                row = store.conn.execute("select item_type from items where id = ?",
+                                         (item_id,)).fetchone()
+                if row is not None and row[0] not in fb.PUBLIC_PHOTO_TYPES:
+                    raise HTTPException(403, TAXONOMY_ONLY) from None
             raise HTTPException(404, "no such item") from None
 
     @app.get("/api/feedback/items/{item_id}")
@@ -473,7 +596,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         """What saving this decision would ask mycomap.org for, before it is saved: the old
         names, the new name and anything to check ({"opens": false} for a decision that opens
         no Name Update)."""
-        _, projects = access(request)
+        _, projects = staff_only(request)
         item = item_or_404(item_id, projects)
         p = plan_or_400(item, str(payload.get("decision") or ""), payload.get("value"))
         if p is None:
@@ -487,7 +610,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.post("/api/feedback/items/{item_id}/org-request")
     def fb_org_send_again(request: Request, item_id: int):
         """Send the latest decision's Name Update again (not sent yet, not taken, refused)."""
-        _, projects = access(request)
+        _, projects = staff_only(request)
         item = item_or_404(item_id, projects)
         d = requests_.latest_decision(item_id)
         if d is None or item["status"] != "decided":
@@ -501,8 +624,9 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.post("/api/feedback/items/{item_id}/decision")
     def fb_decide(request: Request, item_id: int, payload: dict = Body(...)):
-        who, projects = access(request)
+        who, projects, cut = writer(request)
         item = item_or_404(item_id, projects)
+        check_photo_writes(cut, [item_id])
         decision = str(payload.get("decision") or "")
         # A whole-name decision must make a Name Update before it is saved (feedback_org.py).
         opens = plan_or_400(item, decision, payload.get("value")) is not None
@@ -520,17 +644,20 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             bad(e)
         if opens:                    # saved either way; .org down leaves "not sent yet"
             requests_.send(done["decisions"][-1]["id"], name_info=name_info)
-        return with_request(fb.reviewer_view(store.get(item_id, projects)))
+        out = with_request(fb.reviewer_view(store.get(item_id, projects)))
+        return fp.read_only(out) if cut else out
 
     @app.post("/api/feedback/items/{item_id}/reopen")
     def fb_reopen(request: Request, item_id: int):
-        _, projects = access(request)
+        _, projects, cut = writer(request)
         item_or_404(item_id, projects)
+        check_photo_writes(cut, [item_id])
         try:                         # a Name Update nobody has run is withdrawn first
             requests_.withdraw_for_reopen(item_id)
         except fo.Unwithdrawable as e:
             raise HTTPException(409, str(e)) from None
-        return with_request(fb.reviewer_view(store.reopen(item_id, projects)))
+        out = with_request(fb.reviewer_view(store.reopen(item_id, projects)))
+        return fp.read_only(out) if cut else out
 
     @app.post("/api/feedback/items/{item_id}/reveal")
     def fb_reveal(request: Request, item_id: int):
@@ -539,7 +666,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         same way for every item of the queue, so it never tells a check-sample item from a
         flagged one: no rule, evidence or outcome. The reveal is recorded, and a decision made
         after it is marked seen_answer and kept out of the blind measure."""
-        who, projects = access(request)
+        who, projects = staff_only(request)
         item = item_or_404(item_id, projects)
         if not fb.reviewer_view(item)["masked"]:
             raise HTTPException(409, "nothing is hidden on this item")
@@ -552,7 +679,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     @app.post("/api/feedback/items/{item_id}/refresh")
     def fb_refresh(request: Request, item_id: int):
         """Re-read each record from .org and re-ask Vision: do they still disagree?"""
-        who, projects = access(request)
+        who, projects = staff_only(request)
         item = item_or_404(item_id, projects)
         if fb.reviewer_view(item)["masked"]:
             raise HTTPException(409, "decide first: this queue is reviewed without Vision's "
@@ -683,7 +810,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def fb_photo_views_batch(request: Request, payload: dict = Body(...)):
         """Save a page of Photo views: [{item_id, views: [...]}, or {item_id, no_specimen:
         true}], written whole or not at all (photo_views.batch_decide)."""
-        who, projects = access(request)
+        who, projects, cut = writer(request)
+        check_photo_writes(cut, batch_ids(payload))
         try:
             return pv.batch_decide(store, list(payload.get("decisions") or []), who,
                                    projects=projects)
@@ -723,7 +851,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def fb_recovered_labels_batch(request: Request, payload: dict = Body(...)):
         """Save a page of Recovered labels: [{item_id, include: [crop numbers kept], boxes?:
         {n: [l, t, r, b]}, reason?}], written whole or not at all (recovered_labels.batch_decide)."""
-        who, projects = access(request)
+        who, projects, cut = writer(request)
+        check_photo_writes(cut, batch_ids(payload))
         try:
             return rl.batch_decide(store, list(payload.get("decisions") or []), who,
                                    projects=projects)
@@ -734,7 +863,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def fb_photo_review_batch(request: Request, payload: dict = Body(...)):
         """The Summary's one commit: [{item_id, decision: exclude|keep, reason}], written whole
         or not at all (photo_review.batch_decide)."""
-        who, projects = access(request)
+        who, projects, cut = writer(request)
+        check_photo_writes(cut, batch_ids(payload))
         try:
             return pr.batch_decide(store, list(payload.get("decisions") or []), who,
                                    note=payload.get("note"), projects=projects)
@@ -760,8 +890,10 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.post("/api/feedback/photo-review/{record_key}/decision")
     def fb_photo_review_decide(request: Request, record_key: str, payload: dict = Body(...)):
-        who, projects = access(request)
+        who, projects, cut = writer(request)
         keys = {r.key for r in need_photos().of_record(record_key)}
+        check_photo_writes(cut, photo_keys=[p.get("photo_key") for p in payload.get("photos") or []
+                                            if isinstance(p, dict)])
         try:
             done = pr.decide_record(store, record_key, list(payload.get("photos") or []), who,
                                     keys, note=payload.get("note"), projects=projects)
@@ -771,7 +903,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
             bad(e)
         rec = next((r for r in pr.cards(items_cached(pr.ITEM_TYPE, projects), "all",
                                         "any")["records"] if r["record_key"] == record_key), None)
-        return {**done, "record": card(rec, projects is None) if rec else None}
+        return {**done, "record": card(rec, projects is None, cut) if rec else None}
 
     # --- the label review: the blind "Photos unlike the label" queue as cards (label_review) --
     def label_card(c: dict, admin: bool, ro: bool = False) -> dict:
@@ -786,6 +918,8 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def fb_label_review(request: Request, status: str = "open", q: str = "", offset: int = 0,
                         limit: int = 10):
         who, projects, _, ro = viewer(request)
+        if ro:
+            raise HTTPException(403, TAXONOMY_ONLY)
         try:
             out = lr.cards(store.items_of(lr.ITEM_TYPE, projects), status, q)
         except fb.FeedbackError as e:
@@ -803,7 +937,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
 
     @app.post("/api/feedback/label-review/{item_id}/decision")
     def fb_label_review_decide(request: Request, item_id: int, payload: dict = Body(...)):
-        who, projects = access(request)
+        who, projects = staff_only(request)
         try:
             item = store.get(item_id, projects)
         except KeyError:

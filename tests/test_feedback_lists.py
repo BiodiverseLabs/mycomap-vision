@@ -336,11 +336,18 @@ def test_the_summary_after_save_page_reads_only_the_saved_photos_and_shows_them_
                  params={"tab": "micrograph", "status": "decided"}).json()["tiles"]
     assert [(t["item_id"], t["decision"]) for t in done] == [
         (tiles[0]["item_id"], {"decision": "exclude_photo", "reason": "micrograph"})]
-    as_user(c, "member-1")                                      # another project's: none of it
-    assert c.get("/api/feedback/photo-review/flagged").json()["total"] == 0
-    c.cookies.clear()                                           # read-only: every photo item
-    ro = c.get("/api/feedback/photo-review/flagged", params={"tab": "micrograph"}).json()
-    assert [t["item_id"] for t in ro["tiles"]] == [tiles[1]["item_id"]]
+    # Below Contributor, and signed out: the photos they may see. The one left open (inat:1001)
+    # is all-rights-reserved, so theirs holds only the saved CC photo.
+    for who in ("member-1", None):
+        if who:
+            as_user(c, who)
+        else:
+            c.cookies.clear()
+        open_ = c.get("/api/feedback/photo-review/flagged", params={"tab": "micrograph"}).json()
+        assert open_["tiles"] == [], who
+        got = c.get("/api/feedback/photo-review/flagged",
+                    params={"tab": "micrograph", "status": "decided"}).json()["tiles"]
+        assert [t["item_id"] for t in got] == [tiles[0]["item_id"]], who
     as_user(c, "admin-1")                                       # a reopen brings it back
     assert c.post(f"/api/feedback/items/{tiles[0]['item_id']}/reopen").status_code == 200
     back = c.get("/api/feedback/photo-review/flagged", params={"tab": "micrograph"}).json()
@@ -358,10 +365,11 @@ def test_a_reviewer_refused_a_save_leaves_the_kept_list_as_it_was(conn, tmp_path
     r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
         {"item_id": first["tiles"][0]["item_id"], "decision": "exclude", "reason": "micrograph"}]})
     assert r.status_code == 401
+    hidden = next(t["item_id"] for t in first["tiles"] if t["photo_key"] == "inat:1001")
     as_user(c, "member-1")
     assert c.post("/api/feedback/photo-review/batch", json={"decisions": [
-        {"item_id": first["tiles"][0]["item_id"], "decision": "exclude",
-         "reason": "micrograph"}]}).status_code == 400              # not one they review
+        {"item_id": hidden, "decision": "exclude",
+         "reason": "micrograph"}]}).status_code == 403              # a photo it may not see
     as_user(c, "admin-1")
     assert c.get("/api/feedback/photo-review/flagged").json() == first
 

@@ -122,7 +122,9 @@ def test_the_api_pages_tiles_and_saves_a_page_for_reviewers_with_access(conn, tm
     assert bad.status_code == 400
     done = c.get("/api/feedback/photo-views", params={"tab": "stem_base", "status": "decided"}).json()
     assert [t["confirmed"] for t in done["tiles"]] == [["gills", "stem_base"]]
-    as_user(c, "member-1")                                     # another project's contributor
+    as_user(c, "member-1")             # below Contributor: the CC photo only, whatever project
+    assert [t["photo_key"] for t in c.get("/api/feedback/photo-views", params={
+        "status": "decided"}).json()["tiles"]] == ["inat:1000"]
     assert c.get("/api/feedback/photo-views").json()["total"] == 0
     assert c.post("/api/feedback/photo-views/batch", json={"decisions": [
-        {"item_id": ids_["inat:1100"], "views": []}]}).status_code == 400
+        {"item_id": ids_["inat:1100"], "views": ["gills"]}]}).status_code == 403

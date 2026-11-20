@@ -8,7 +8,8 @@ import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, f
          queueParam, QUEUE_STORAGE_KEY, readLastQueue, writeLastQueue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
          shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText,
-         FEEDBACK_TABS, openTab, PHOTO_TAB_TYPES, QUEUE_BLURBS, REVIEW_STEPS, tabOpen, tabParam, tabSections } from "./feedback";
+         FEEDBACK_TABS, openTab, PHOTO_TAB_TYPES, QUEUE_BLURBS, REVIEW_STEPS, tabOpen, tabParam, tabSections,
+         tabsFor } from "./feedback";
 
 const item = (over: Partial<FeedbackItem> = {}): FeedbackItem => ({
   id: 1, item_type: "photos_unlike_label", subject: "123", granularity: "record",
@@ -269,6 +270,14 @@ test("the page opens on Photos unless the viewer picks a tab or a link points el
   assert.equal(openTab({ ...none, param: "taxonomy" }), "taxonomy", "a ?tab= link");
   assert.equal(openTab({ ...none, param: "photos", linkQueue: "name_retired" }), "photos", "?tab= wins over the queue's tab");
   assert.equal(openTab({ picked: "photos", param: "taxonomy", linkQueue: "name_retired" }), "photos", "the viewer's pick wins");
+  // Taxonomy only for Contributors and up (Steve, 2026-11-20): any link to it lands on Photos.
+  const photosOnly = tabsFor({ taxonomy: false });
+  assert.deepEqual(photosOnly, ["photos"]);
+  assert.deepEqual(tabsFor({ taxonomy: true }), ["photos", "taxonomy"]);
+  assert.deepEqual(tabsFor(undefined), ["photos", "taxonomy"], "a server that does not say keeps both");
+  assert.equal(openTab({ ...none, param: "taxonomy", tabs: photosOnly }), "photos");
+  assert.equal(openTab({ ...none, linkQueue: "name_retired", tabs: photosOnly }), "photos");
+  assert.equal(openTab({ picked: "taxonomy", param: null, linkQueue: null, tabs: photosOnly }), "photos");
   assert.equal(tabParam("?tab=taxonomy"), "taxonomy");
   assert.equal(tabParam("?tab=Taxonomy"), null);
   assert.equal(tabParam("?tab=<x>"), null);

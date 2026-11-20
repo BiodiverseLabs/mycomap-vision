@@ -2,12 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { photoLines, readOnlyNote } from "./feedbackReadOnly";
 
-test("a read-only viewer is told so, and asked to sign in only when signed out", () => {
-  assert.equal(readOnlyNote({ user: { id: "1", name: "A" }, read_only: false }), null);
+test("a visitor is asked to sign in to tag photos; an account below Contributor is told what is not theirs", () => {
+  // Steve, 2026-11-20: any account works with photos; Taxonomy is for Contributors and up.
+  assert.equal(readOnlyNote({ user: { id: "1", name: "A" }, read_only: false, taxonomy: true }), null);
+  assert.equal(readOnlyNote({ user: { id: "1", name: "A" }, read_only: false }), null, "an older server");
   assert.equal(readOnlyNote(undefined), null);
   assert.deepEqual(readOnlyNote({ user: null, read_only: true }), {
-    text: "Read-only: mycomap.org admins, project leaders and contributors sign in to review.", signIn: true });
-  assert.equal(readOnlyNote({ user: { id: "9", name: null }, read_only: true })?.signIn, false);
+    text: "Read-only: sign in with your mycomap.org account to tag photos.", signIn: true });
+  const member = readOnlyNote({ user: { id: "9", name: null }, read_only: false, taxonomy: false });
+  assert.equal(member?.signIn, false);
+  assert.match(member!.text, /tag the photos anyone may see/);
+  assert.match(member!.text, /Taxonomy queues are for mycomap\.org Contributors, Lab Contributors, Project Leaders and admins/);
 });
 
 test("a photo reads as its flags and its outcome, never who decided", () => {

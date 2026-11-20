@@ -632,13 +632,14 @@ def test_who_may_preview_decide_send_and_reopen(site):
     for method, url, body in routes:
         assert getattr(c, method)(url, json=body).status_code == 401, url
         assert getattr(c, method)(url, json=body, headers=as_("nobody-1")).status_code == 403
-        assert getattr(c, method)(url, json=body, headers=as_("member-2")).status_code == 404
+        # A project seat (member-2 sits on p2) opens no Taxonomy item: the role does.
+        assert getattr(c, method)(url, json=body, headers=as_("member-2")).status_code == 403
     assert not org.calls
     r = decide(c, i, "accept", who=as_("leader-1"))                 # a leader of p1
     assert r.status_code == 200 and r.json()["org_request"]["status"] == "searching"
     assert org.calls[-1][1]["decided_by"] == {"org_user_id": "leader-1",
                                               "name": "Name of leader-1"}
-    r = decide(c, p2, "accept", who=as_("member-2"))                # a contributor of p2
+    r = decide(c, p2, "accept", who=as_("leader-1"))      # a Contributor: p2 too, unseated
     assert r.status_code == 200 and r.json()["org_request"]["request_id"] == 8
 
 

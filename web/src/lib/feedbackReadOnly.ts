@@ -1,20 +1,29 @@
-// Human Feedback read-only (Steve, 2026-10-22): anyone signed out, and signed-in people who are
-// not mycomap.org admins, project leaders or contributors, browse the queues and decide nothing.
-// The server decides who that is (/api/feedback/me's read_only) and cuts what they see
-// (feedback_public.py); the page shows no decision control, Auto-save or batch action to them.
+// Who may do what on Human Feedback goes by the mycomap.org site role (Steve, 2026-11-20): anyone
+// signed out browses the Photos tab and decides nothing; any signed-in account tags its photos
+// (those anyone may see); Contributors, Lab Contributors, Project Leaders and admins also see
+// all-rights-reserved photos and the Taxonomy tab. The server decides who is which
+// (/api/feedback/me's read_only and taxonomy) and cuts what they see (feedback_public.py); the
+// page shows no decision control, Auto-save or batch action to a read-only viewer.
 
 import type { FeedbackMe, PhotoFlag } from "./api";
 
-/** The line above the queues for a read-only viewer, and whether signing in may help; null
- *  for a reviewer. */
-export function readOnlyNote(me: Pick<FeedbackMe, "user" | "read_only"> | undefined):
+export const TAXONOMY_WHO = "mycomap.org Contributors, Lab Contributors, Project Leaders and admins";
+
+/** The line above the queues for anyone who does not review everything, and whether signing in
+ *  may help; null for a Contributor or higher. */
+export function readOnlyNote(me: Pick<FeedbackMe, "user" | "read_only" | "taxonomy"> | undefined):
     { text: string; signIn: boolean } | null {
-  if (!me?.read_only) return null;
-  return me.user
-    ? { text: "Read-only: reviewing is for mycomap.org admins, project leaders and contributors.",
-        signIn: false }
-    : { text: "Read-only: mycomap.org admins, project leaders and contributors sign in to review.",
-        signIn: true };
+  if (!me) return null;
+  if (me.read_only) {
+    return me.user
+      ? { text: "Read-only: this account can't decide here.", signIn: false }
+      : { text: "Read-only: sign in with your mycomap.org account to tag photos.", signIn: true };
+  }
+  if (me.taxonomy === false) {
+    return { text: "You can tag the photos anyone may see. All-rights-reserved photos and the "
+              + `Taxonomy queues are for ${TAXONOMY_WHO}.`, signIn: false };
+  }
+  return null;
 }
 
 /** A photo's place in its queue, in words: its flags, then the outcome when decided. */

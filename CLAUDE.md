@@ -34,10 +34,11 @@ Deployment-specific notes live in `CLAUDE.local.md` (git-ignored) when present.
   mycomap.org, and leave out the photos of anyone who declined or withdrew
   (`identify.pick_shown` + `permissions.py`; the rule for use is in
   `evaluate.load_records`). New code that shows or uses photos must go through them.
-  One narrow exception (Steve, 2026-10-18): Human Feedback reviewers with access to the
-  item (mycomap.org admins, and project leaders and contributors for their projects'
-  items) may see all-rights-reserved photos on the signed-in Human Feedback review
-  pages, and nowhere else. They are served only by the authenticated
+  One narrow exception (Steve, 2026-10-18): Human Feedback reviewers (by the
+  mycomap.org site role since 2026-11-20: Contributors, Lab Contributors, Project
+  Leaders and admins; any other signed-in account tags only the photos anyone may see)
+  may see all-rights-reserved photos on the signed-in Human Feedback review pages, and
+  nowhere else. They are served only by the authenticated
   `/api/feedback/photo/` endpoint, which checks the reviewer's access to a queued record
   of the photo, from Vision's own copy or fetched from the photo's source (iNat, MO;
   paced and budgeted, `photo_review.SourceFetcher`), with
