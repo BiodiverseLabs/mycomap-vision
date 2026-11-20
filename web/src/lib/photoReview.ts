@@ -7,7 +7,7 @@
 // "private" photo is only ever Vision's own same-origin copy, shown by a plain <img>.
 
 import type { FeedbackStatus, PhotoFlag, PhotoOutcomeCode, PhotoOutcomeFilter, PhotoReviewDecisionBody, PhotoBand, PhotoBandFilter,
-              PhotoReviewSort, PhotoReviewTab, ReviewPhoto, ReviewRecord } from "./api";
+              PhotoReviewSort, PhotoReviewTab, PhotoShow, PhotoShowFilter, ReviewPhoto, ReviewRecord } from "./api";
 
 export const PHOTO_REVIEW_TYPE = "non_specimen_photo";
 export const REVIEW_PAGE_SIZE = 10;
@@ -60,6 +60,35 @@ export const outcomeInUse = (status: FeedbackStatus, outcome: PhotoOutcomeFilter
  *  Summary, records in Full), when the counts are loaded; nothing for "All outcomes". */
 export function outcomeCount(counts: Partial<Record<PhotoOutcomeCode, number>> | null | undefined,
                              code: PhotoOutcomeFilter): string {
+  if (code === "all" || !counts) return "";
+  const n = counts[code];
+  return n == null ? "" : ` (${n.toLocaleString("en-US")})`;
+}
+
+/** The Category box (Steve, 2026-11-20: "Show only this category / other categories"): a plainer
+ *  cut of the decided photos than Outcome, and combined with it (photo_review.SHOWS). */
+export const SHOW_FILTERS: { code: PhotoShowFilter; label: string; title: string }[] = [
+  { code: "all", label: "All decided", title: "Every decided photo in this tab" },
+  { code: "stayed", label: "Still in this category",
+    title: "Left out for this tab's reason: the photos that remain in this bucket" },
+  { code: "left", label: "Moved to other categories",
+    title: "Flagged for this tab, but left out for another reason or kept: moved elsewhere" },
+];
+
+/** Whether the Category box is shown: in Decided, on one tab (not All, where "this category"
+ *  names none). */
+export const showsCategoryBox = (status: FeedbackStatus, tab: PhotoReviewTab): boolean =>
+  status === "decided" && tab !== "all";
+
+/** The Category pick the lists are asked for: the one picked where the box is shown, else "all".
+ *  Not with "High score, not in this tab" (those photos were never in the bucket). */
+export const showInUse = (status: FeedbackStatus, tab: PhotoReviewTab, outcome: PhotoOutcomeFilter,
+                          show: PhotoShowFilter): PhotoShowFilter =>
+  showsCategoryBox(status, tab) && outcome !== "high_not_in_tab" ? show : "all";
+
+/** " (n)" after a Category choice: how many the list would show with it picked, once loaded. */
+export function showCount(counts: Partial<Record<PhotoShow, number>> | null | undefined,
+                          code: PhotoShowFilter): string {
   if (code === "all" || !counts) return "";
   const n = counts[code];
   return n == null ? "" : ` (${n.toLocaleString("en-US")})`;

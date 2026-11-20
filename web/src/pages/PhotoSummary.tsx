@@ -3,7 +3,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronLeft, ChevronRight, Lock, RotateCcw, X } from "lucide-react";
 import { BODY, BTN, Ext, FIELD, INK, Placeholder, QuickReasons } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoBandFilter,
-         type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewSort, type PhotoReviewTab } from "@/lib/api";
+         type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewSort, type PhotoReviewTab,
+         type PhotoShow, type PhotoShowFilter } from "@/lib/api";
 import { auditLabel, auditTitle } from "@/lib/photoAudit";
 import { pageText, recordLabel } from "@/lib/feedback";
 import { QUICK_REASONS, quickReasons, tileImage, type Choice } from "@/lib/photoReview";
@@ -30,11 +31,14 @@ import { SaveBar } from "@/components/ReviewSave";
 
 type Reasons = FlaggedPage["reasons"];
 
-export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "all", help, onHelp, tileSize, pageSize = SUMMARY_PAGE_SIZE, onTotal,
+export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "all", show = "all", onShows, help, onHelp, tileSize, pageSize = SUMMARY_PAGE_SIZE, onTotal,
                               onOutcomes, autosave, onPending, canLeave, discard }: {
   tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; band?: PhotoBandFilter;
   /** The Outcome filter (lib/photoReview.ts OUTCOME_FILTERS). */
   outcome?: PhotoOutcomeFilter; help: boolean;
+  /** The Category box (lib/photoReview.ts SHOW_FILTERS), and what each choice would show. */
+  show?: PhotoShowFilter;
+  onShows?: (c: Record<PhotoShow, number> | null) => void;
   onHelp: () => void; tileSize: TileSize; pageSize?: number; onTotal: (n: number | null) => void;
   /** The photos each outcome would show, for the Outcome filter's counts. */
   onOutcomes?: (c: Record<PhotoOutcome, number> | null) => void;
@@ -54,7 +58,7 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
   // (saved tiles drop out of Open) while the page shown never reloads under the reviewer. A filter
   // change resets them in the same render (lib/photoSummary.ts pagePosition), so the new tab is
   // asked for once, not once before the reset and again after it.
-  const filterKey = JSON.stringify([tab, status, sort, q, band, outcome, pageSize]);
+  const filterKey = JSON.stringify([tab, status, sort, q, band, outcome, show, pageSize]);
   const [posState, setPos] = useState<PagePosition>(() => ({ filters: filterKey, offset: 0, gen: 0 }));
   const pos = pagePosition(posState, filterKey);
   const { offset, gen } = pos;
@@ -75,8 +79,8 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
   }, []);
 
   const list = useQuery({
-    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, outcome, pageSize, offset, gen],
-    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, outcome, offset, limit: pageSize }),
+    queryKey: ["feedback", "photo-summary", tab, status, sort, q, band, outcome, show, pageSize, offset, gen],
+    queryFn: () => feedbackApi.photoReviewFlagged({ tab, status, sort, q, band, outcome, show, offset, limit: pageSize }),
     placeholderData: (prev) => prev,
     refetchOnWindowFocus: false,
     staleTime: Infinity,
@@ -90,9 +94,11 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
     updateStates((s) => freshPage(s, fresh.tiles.map((t) => t.item_id)));
     onTotal(fresh.total);
     onOutcomes?.(fresh.outcomes ?? null);
-  }, [fresh, onTotal, onOutcomes, updateStates]);
+    onShows?.(fresh.shows ?? null);
+  }, [fresh, onTotal, onOutcomes, onShows, updateStates]);
   useEffect(() => () => onTotal(null), [onTotal]);
   useEffect(() => () => onOutcomes?.(null), [onOutcomes]);
+  useEffect(() => () => onShows?.(null), [onShows]);
 
   // --- saving ---------------------------------------------------------------------------------
   const sendRef = useRef<(due: PhotoBatchDecision[], o?: { keepalive?: boolean }) => void>(() => {});

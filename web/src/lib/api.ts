@@ -795,6 +795,10 @@ export type PhotoOutcome = "as_flagged" | "included" | "moved" | "not_flagged";
  *  photos not in the tab that the audit scores high for it; lib/photoAudit.ts). */
 export type PhotoOutcomeCode = PhotoOutcome | "high_not_in_tab";
 export type PhotoOutcomeFilter = PhotoOutcomeCode | "all";
+/** The Decided view's Category box (Steve, 2026-11-20; photo_review.SHOWS): photos still in the
+ *  tab's category (left out for its reason), or moved to other categories (another reason, or kept). */
+export type PhotoShow = "stayed" | "left";
+export type PhotoShowFilter = PhotoShow | "all";
 
 /** Why a rule flagged a photo: its tab, the probe or view, its p, and how strongly it counts. */
 export interface PhotoFlag {
@@ -858,6 +862,8 @@ export interface PhotoReviewPage {
   total: number;
   /** The records each outcome would keep, every other filter as asked. Absent from older servers. */
   outcomes?: Record<PhotoOutcome, number>;
+  /** The records each Category choice would keep. Absent from older servers. */
+  shows?: Record<PhotoShow, number>;
   reasons: { code: string; label: string }[];
   records: ReviewRecord[];
 }
@@ -936,6 +942,8 @@ export interface FlaggedPage {
   /** The photos each outcome would keep, every other filter as asked. Absent from older servers.
    *  "high_not_in_tab" only with an audit for the tab. */
   outcomes?: Record<PhotoOutcome, number> & { high_not_in_tab?: number };
+  /** The photos each Category choice would keep. Absent from older servers. */
+  shows?: Record<PhotoShow, number>;
   reasons: { code: string; label: string }[];
   tiles: FlaggedTile[];
 }
@@ -1115,7 +1123,7 @@ export const feedbackChangesUrl = (applies: "org" | "vision", all = false) =>
 /** The photo review's filters, as both of its lists take them. */
 export interface PhotoReviewQuery {
   tab: PhotoReviewTab; status: FeedbackStatus; sort?: PhotoReviewSort; q?: string; offset?: number;
-  limit?: number; band?: PhotoBandFilter; outcome?: PhotoOutcomeFilter;
+  limit?: number; band?: PhotoBandFilter; outcome?: PhotoOutcomeFilter; show?: PhotoShowFilter;
 }
 
 /** The record view's query string (GET /api/feedback/photo-review). `outcome` is sent only when
@@ -1125,6 +1133,7 @@ export function photoReviewQuery(p: PhotoReviewQuery & { min_flagged?: number })
                                    min_flagged: String(p.min_flagged ?? 1), band: p.band ?? "all",
                                    offset: String(p.offset ?? 0), limit: String(p.limit ?? 10) });
   if (p.outcome && p.outcome !== "all") qs.set("outcome", p.outcome);
+  if (p.show && p.show !== "all") qs.set("show", p.show);
   return qs.toString();
 }
 
@@ -1134,6 +1143,7 @@ export function photoFlaggedQuery(p: PhotoReviewQuery): string {
                                    band: p.band ?? "all",
                                    offset: String(p.offset ?? 0), limit: String(p.limit ?? 150) });
   if (p.outcome && p.outcome !== "all") qs.set("outcome", p.outcome);
+  if (p.show && p.show !== "all") qs.set("show", p.show);
   return qs.toString();
 }
 
