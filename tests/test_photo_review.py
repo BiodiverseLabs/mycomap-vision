@@ -207,10 +207,13 @@ def test_any_reviewer_with_access_to_the_record_sees_its_photos_and_nobody_else(
     assert arr["shown"] == "private" and arr["thumb"] == "/api/feedback/photo/inat:1100?size=grid"
     img = c.get(arr["thumb"])
     assert img.status_code == 200 and img.headers["cache-control"] == "private, no-store"
-    as_user(c, "member-1")                                    # another project's contributor
-    assert c.get("/api/feedback/photo-review").json()["records"] == []
+    as_user(c, "member-1")             # below Contributor (a seat on p2): the photo stays hidden
+    card = next(x for x in c.get("/api/feedback/photo-review").json()["records"]
+                if x["record_key"] == "100")
+    arr = photo_of(card, "inat:1100")
+    assert arr["shown"] == "hidden" and arr["item_id"] is None and "thumb" not in arr
     r = c.get("/api/feedback/photo/inat:1100")
-    assert r.status_code == 403 and "not on a record you review" in r.json()["detail"]
+    assert r.status_code == 403 and "reviewers" in r.json()["detail"]
     as_user(c, "admin-1")                                     # a photo on no queued record
     assert c.get("/api/feedback/photo/inat:1003").status_code == 403
 
@@ -242,9 +245,10 @@ def test_saving_a_record_decides_each_photo_and_feeds_the_nightly_exclusions(con
     assert fstore.excluded_photos() == {"inat:1000"}
     left = c.get("/api/feedback/photo-review").json()
     assert [x["record_key"] for x in left["records"]] == ["101"]
-    as_user(c, "member-1")
-    assert c.post(url, json={"photos": [{"photo_key": "inat:1000", "decision": "keep"}]}
-                  ).status_code == 404
+    as_user(c, "member-1")             # below Contributor: not a photo it may not see
+    assert c.post(url, json={"photos": [{"photo_key": "inat:1100", "decision": "exclude",
+                                         "reason": "habitat"}]}).status_code == 403
+    assert fstore.excluded_photos() == {"inat:1000"}
 
 
 # --- one reason per photo, starting at its flag (Steve, 2026-10-18) ---------------------------

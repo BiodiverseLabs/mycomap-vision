@@ -1,5 +1,6 @@
-"""The Human Feedback page's API over the real app: who gets in (mycomap.org admins every
-item, project leaders and contributors their projects' items, everyone else nothing), the live
+"""The Human Feedback page's API over the real app: who gets in (by the mycomap.org site role:
+Contributors and up every item of both tabs, any other account the Photos tab only, whatever
+project seats they hold; Steve, 2026-11-20), the live
 record from mycomap.org with each sequence's BLAST link chosen by .org's staff rule (staff:
 the admin BLAST results form; others: the public job page; opened in a new window by the page),
 decisions, refresh (re-read from .org, Vision re-asked with the record left out), and the
@@ -27,11 +28,15 @@ class FakeOrg:
 
     def __init__(self):
         self.roles_by_user = {
-            "admin-1": {"admin": True, "staff": True, "projects": []},
-            "leader-1": {"admin": False, "staff": True, "projects": [{"id": "1", "name": "p1", "role": "leader"}]},
-            "member-1": {"admin": False, "staff": False,
+            # .org's admin flag: Admin and Project Leader; staff: they and Contributors and
+            # Lab Contributors. leader-1 is a Contributor with a seat on p1 only.
+            "admin-1": {"admin": True, "staff": True, "role": "admin", "projects": []},
+            "leader-1": {"admin": False, "staff": True, "role": "project_assistant",
+                         "projects": [{"id": "1", "name": "p1", "role": "leader"}]},
+            # A Member who holds a project seat: the seat no longer opens anything.
+            "member-1": {"admin": False, "staff": False, "role": "member",
                          "projects": [{"id": "2", "name": "p2", "role": "contributor"}]},
-            "nobody-1": {"admin": False, "staff": False, "projects": []},
+            "nobody-1": {"admin": False, "staff": False, "role": "user", "projects": []},
         }
         self.names = {"100": "A x", "104": "B y"}
         self.calls = []
@@ -99,32 +104,46 @@ def item_id(fstore, item_type):
     return fstore.items(item_type)["items"][0]["id"]
 
 
-def test_signed_out_and_people_without_a_role_only_read_and_see_no_project_items(site):
-    # Read-only for them (Steve, 2026-10-22; test_feedback_read_only.py): both seeded items
-    # belong to a project, so they see neither, and they decide nothing.
+def test_signed_out_and_accounts_below_contributor_see_and_decide_no_taxonomy_item(site):
+    # Steve, 2026-11-20: "Only contributors or higher should see and be able to alter things on
+    # the taxonomy tab"; "members dont matter. role does." A project seat (member-1 sits on p2,
+    # group_label's project) opens nothing.
     c, fstore, _ = site
-    for who, refused in ((None, 401), ("nobody-1", 403)):
+    gid = item_id(fstore, "group_label")
+    for who, refused in ((None, 401), ("nobody-1", 403), ("member-1", 403)):
         if who:
             as_user(c, who)
-        assert all(s["open"] == 0 for s in c.get("/api/feedback/summary").json()), who
-        r = c.post(f"/api/feedback/items/{item_id(fstore, 'group_label')}/decision",
-                   json={"decision": "keep"})
+        types = {s["type"] for s in c.get("/api/feedback/summary").json()}
+        assert types == fb.PUBLIC_PHOTO_TYPES, who
+        r = c.post(f"/api/feedback/items/{gid}/decision", json={"decision": "keep"})
         assert r.status_code == refused, who
-    r = c.post(f"/api/feedback/items/{item_id(fstore, 'group_label')}/reopen")
-    assert r.status_code == 403 and "admins, project leaders and contributors" in r.json()["detail"]
+        r = c.get(f"/api/feedback/items/{gid}")
+        assert r.status_code == 403 and "Contributors" in r.json()["detail"], who
+        assert c.get("/api/feedback/items", params={"type": "group_label"}).status_code == 403
+        assert c.get("/api/feedback/label-review").status_code == 403
+    r = c.post(f"/api/feedback/items/{gid}/reopen")
+    assert r.status_code == 403 and r.json()["detail"] == feedback_api.TAXONOMY_ONLY
+    me = c.get("/api/feedback/me").json()
+    assert me["read_only"] is False and me["taxonomy"] is False and me["all_photos"] is False
+    assert fstore.get(gid)["status"] == "open"
 
 
-def test_admins_see_every_item_and_others_only_their_projects(site):
+def test_contributors_and_up_see_every_taxonomy_item_whatever_their_projects(site):
     c, fstore, _ = site
     as_user(c, "admin-1")
     me = c.get("/api/feedback/me").json()
-    assert me["admin"] is True and me["staff"] is True
+    assert me["admin"] is True and me["staff"] is True and me["taxonomy"] is True
     by_type = {s["type"]: s["open"] for s in c.get("/api/feedback/summary").json()}
     assert by_type["photos_unlike_label"] == 1 and by_type["group_label"] == 1
-    as_user(c, "member-1")
+    as_user(c, "leader-1")                 # a Contributor, seated on p1 only: p2's item too
+    me = c.get("/api/feedback/me").json()
+    assert me["admin"] is False and me["taxonomy"] is True and me["read_only"] is False
     by_type = {s["type"]: s["open"] for s in c.get("/api/feedback/summary").json()}
-    assert by_type["photos_unlike_label"] == 0 and by_type["group_label"] == 1
-    assert c.get(f"/api/feedback/items/{item_id(fstore, 'photos_unlike_label')}").status_code == 404
+    assert by_type["photos_unlike_label"] == 1 and by_type["group_label"] == 1
+    gid = item_id(fstore, "group_label")
+    r = c.post(f"/api/feedback/items/{gid}/decision",
+               json={"decision": "rename", "value": "Laccaria sp. 'laccata-PNW01'"})
+    assert r.status_code == 200 and r.json()["status"] == "decided"
 
 
 def test_an_allowlisted_admin_gets_in_before_org_answers_roles(conn, tmp_path, monkeypatch):
@@ -134,8 +153,9 @@ def test_an_allowlisted_admin_gets_in_before_org_answers_roles(conn, tmp_path, m
     as_user(c, "ghost-9")
     me = c.get("/api/feedback/me").json()
     assert me["admin"] is True and me["staff"] is True
-    as_user(c, "stranger-5")
-    assert c.get("/api/feedback/me").json()["read_only"] is True
+    as_user(c, "stranger-5")                      # signed in, no role: the Photos tab only
+    me = c.get("/api/feedback/me").json()
+    assert me["read_only"] is False and me["taxonomy"] is False and me["admin"] is False
 
 
 def test_the_blast_link_follows_orgs_staff_rule_admin_form_or_public_job(site):
@@ -145,10 +165,11 @@ def test_the_blast_link_follows_orgs_staff_rule_admin_form_or_public_job(site):
     seqs = c.get(f"/api/feedback/items/{iid}").json()["live"][0]["sequences"]
     assert seqs[0]["blast_link"] == {"href": f"{ORG}/admin/blast-results/100/77", "kind": "admin"}
     assert seqs[1]["blast_link"] == {"href": f"{ORG}/admin/blast-results/100/78", "kind": "admin"}
-    fstore.conn.execute("update items set projects = '[\"p1\",\"p2\"]'")
-    fstore.conn.commit()
-    as_user(c, "member-1")                                     # not staff
-    seqs = c.get(f"/api/feedback/items/{iid}").json()["live"][0]["sequences"]
+    fstore.seed([{"item_type": "non_specimen_photo", "subject": "inat:1000", "rule": "P",
+                  "granularity": "photo", "record_keys": ["100"], "projects": ["p1"]}], "photos")
+    pid = item_id(fstore, "non_specimen_photo")
+    as_user(c, "member-1")                                     # not staff: a photo item
+    seqs = c.get(f"/api/feedback/items/{pid}").json()["live"][0]["sequences"]
     assert seqs[0]["blast_link"] == {"href": f"{ORG}/mycoblast/9", "kind": "public"}
     assert seqs[1]["blast_link"] is None                       # no job, no admin form
     assert "admin" not in str([s["blast_link"] for s in seqs])
@@ -194,10 +215,11 @@ def test_refresh_rereads_org_and_reasks_vision_with_the_record_left_out(site):
 def test_the_change_list_is_for_admins_and_marks_applied(site):
     c, fstore, _ = site
     gid = item_id(fstore, "group_label")
-    as_user(c, "member-1")
+    as_user(c, "leader-1")                 # a Contributor decides; the downloads are admins'
     c.post(f"/api/feedback/items/{gid}/decision",
            json={"decision": "rename", "value": "Laccaria sp. 'laccata-PNW01'"})
     assert c.get("/api/feedback/changes.tsv").status_code == 403
+    assert c.post("/api/feedback/decisions/1/applied").status_code == 403
     as_user(c, "admin-1")
     tsv = c.get("/api/feedback/changes.tsv").text.splitlines()
     assert tsv[0].startswith("decision_id\titem_type") and len(tsv) == 2
@@ -277,10 +299,10 @@ def test_a_record_pair_lists_each_copys_place_as_its_site_does_and_no_coordinate
                   "granularity": "record pair", "rule": "twins", "record_keys": ["mo:999", "101"],
                   "records": 2, "projects": ["p1"]}], "twins")
     pair = item_id(fstore, "twin_location_conflict")
-    # Signed out it is read-only, and a project's item is not among what that shows.
-    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 404
-    as_user(c, "member-1")                                     # p2 only
-    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 404
+    # A Taxonomy item: refused signed out and below Contributor (member-1 has a seat on p2).
+    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 403
+    as_user(c, "member-1")
+    assert c.get(f"/api/feedback/items/{pair}/places").status_code == 403
     assert asked == []
     as_user(c, "leader-1")
     got = c.get(f"/api/feedback/items/{pair}/places").json()["places"]
@@ -320,9 +342,9 @@ def test_a_name_item_lists_its_names_with_inats_taxa_and_mycomaps_synonyms(conn,
                   "granularity": "name", "rule": "R4", "current": "Callistosporium luteoolivaceum",
                   "proposed": "", "records": 110, "projects": ["p1"]}], "r4")
     nid = item_id(fstore, "name_inactive_on_inat")
-    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 404     # read-only: no p1
-    as_user(c, "member-1")                                     # p2 only
-    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 404
+    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 403     # a Taxonomy item
+    as_user(c, "member-1")                                     # below Contributor
+    assert c.get(f"/api/feedback/items/{nid}/names").status_code == 403
     assert asked == []
     as_user(c, "leader-1")
     got = c.get(f"/api/feedback/items/{nid}/names").json()

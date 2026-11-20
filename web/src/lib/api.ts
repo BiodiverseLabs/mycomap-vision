@@ -460,12 +460,18 @@ export interface Me {
 
 // --- Human Feedback (/feedback): places where Vision and the reference data disagree ---------
 
-/** Who may review, and where: admins see every item, others their projects' items. */
+/** Who may review, by the mycomap.org site role (Steve, 2026-11-20): Contributors and up every
+ *  item of both tabs; any other signed-in account the Photos tab, its photos anyone may see. */
 export interface FeedbackMe {
   /** null for a signed-out visitor (read-only). */
   user: { id: string; name: string | null } | null;
-  /** Not a reviewer: browses, decides nothing (Steve, 2026-10-22; feedback_public.py). */
+  /** Signed out: browses the Photos tab, decides nothing (feedback_public.py). */
   read_only?: boolean;
+  /** Contributor, Lab Contributor, Project Leader or admin: the Taxonomy tab is theirs. False
+   *  for everyone else; absent from a server older than the rule (then shown as before). */
+  taxonomy?: boolean;
+  /** Every photo is shown to them, all-rights-reserved ones included (Contributors and up). */
+  all_photos?: boolean;
   admin: boolean;
   /** mycomap.org's staff flag: BLAST links open the admin results form. */
   staff?: boolean;

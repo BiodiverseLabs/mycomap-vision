@@ -98,6 +98,7 @@ def test_the_api_shows_what_stayed_and_what_moved_after_real_decisions(conn, tmp
     assert rec["shows"] == {"stayed": 1, "left": 2}
     for path in ("/api/feedback/photo-review/flagged", "/api/feedback/photo-review"):
         assert c.get(path, params={"show": "nope"}).status_code == 400
-    # A read-only visitor gets the same filter.
-    c.cookies.clear()
+    # A Contributor gets the same filter (these photos are not in the manifest, so a viewer
+    # below Contributor sees none of them: test_feedback_read_only.py).
+    as_user(c, "leader-1")
     assert [t["photo_key"] for t in flagged(show="stayed")["tiles"]] == ["inat:2000"]

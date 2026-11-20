@@ -302,14 +302,16 @@ def test_the_api_pages_tiles_and_saves_for_reviewers_and_read_only_viewers_only_
         {"item_id": cc["item_id"], "include": [7]}]}).status_code == 400
     summary = {t["type"]: t for t in c.get("/api/feedback/summary").json()}
     assert summary[rl.ITEM_TYPE]["decided"] == 2 and summary[rl.ITEM_TYPE]["records_decided"] == 1
-    as_user(c, "member-1")                                     # another project's contributor
-    assert c.get("/api/feedback/recovered-labels").json()["total"] == 0
+    as_user(c, "member-1")             # below Contributor: the CC photo only, whatever project
+    got = c.get("/api/feedback/recovered-labels", params={"status": "decided"}).json()
+    assert [t["photo_key"] for t in got["tiles"]] == ["inat:1000"]
     assert c.post("/api/feedback/recovered-labels/batch", json={"decisions": [
-        {"item_id": cc["item_id"], "include": []}]}).status_code == 400
-    c.cookies.clear()                                          # read-only: every photo item
+        {"item_id": arr["item_id"], "include": []}]}).status_code == 403
+    assert c.post("/api/feedback/recovered-labels/batch", json={"decisions": [
+        {"item_id": cc["item_id"], "include": [1]}]}).status_code == 200
+    c.cookies.clear()                                          # read-only: the photos shown
     ro = c.get("/api/feedback/recovered-labels", params={"status": "decided"}).json()
-    assert [t["shown"] for t in ro["tiles"]] == ["public", "hidden"]
-    assert "owner_login" not in ro["tiles"][1] and "full" not in ro["tiles"][1]
+    assert [(t["photo_key"], t["shown"]) for t in ro["tiles"]] == [("inat:1000", "public")]
     assert c.post("/api/feedback/recovered-labels/batch", json={"decisions": [
         {"item_id": cc["item_id"], "include": []}]}).status_code == 401
 
@@ -1023,9 +1025,9 @@ def test_the_api_shows_the_priority_tranche_in_its_order_with_its_counts(conn, t
         "high": 1, "medium": 1, "low": 0, "rule": 0}                    # the bands as before
     every = c.get("/api/feedback/recovered-labels", params={"sort": "priority"}).json()
     assert [t["photo_key"] for t in every["tiles"]] == ["inat:1100", "inat:1000"]
-    c.cookies.clear()                                                   # read-only sees it too
+    c.cookies.clear()                  # read-only: its photo is all-rights-reserved, left out
     ro = c.get("/api/feedback/recovered-labels", params={"tranche": "priority"}).json()
-    assert ro["total"] == 1 and ro["tiles"][0]["priority"]["lost"] is True
+    assert ro["total"] == 0 and ro["priority"] == {"open": 0, "decided": 0}
 
 
 def test_a_held_record_is_kept_out_of_the_priority_tranche_with_the_seal_off_and_never_named(

@@ -8,7 +8,7 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
          type LiveRecord, type NameContext, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
          type Top5, type WritingList } from "@/lib/api";
-import { FEEDBACK_TABS, openTab, QUEUE_BLURBS, REVIEW_STEPS, tabOf, tabOpen, tabParam, tabSections, type FeedbackTab } from "@/lib/feedback";
+import { FEEDBACK_TABS, openTab, QUEUE_BLURBS, REVIEW_STEPS, tabOf, tabOpen, tabParam, tabSections, tabsFor, type FeedbackTab } from "@/lib/feedback";
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess,
          historyOrgText, inatLinks, isNameItem, itemBadges, linkedItem, NO_PROPOSAL_TEXT, noProposal, openQueue,
          orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, alreadyDoneText, decideOptions,
@@ -29,7 +29,8 @@ import { RECOVERED_TYPE } from "@/lib/recoveredLabels";
 import { PHOTO_VIEW_TYPE } from "@/lib/photoViews";
 
 // Human Feedback (Steve, 2026-10-18): a review queue of places where Vision and the reference
-// data disagree, for mycomap.org admins, project leaders and contributors, laid out like
+// data disagree (Photos for any signed-in mycomap.org account, Taxonomy for Contributors, Lab
+// Contributors, Project Leaders and admins; Steve, 2026-11-20), laid out like
 // mycomap.org's Validator dashboards: stat cards above the list, in two sections (data cleanup,
 // then data validation; groupBySection). Each item opens the records, their sequences and BLAST
 // results in new tabs, and can be re-checked once the records are updated.
@@ -57,16 +58,15 @@ function AccessNote({ error }: { error: unknown }) {
   if (why === "signin") {
     return (
       <p className={BODY}>
-        Human Feedback is for mycomap.org admins, project leaders and contributors.{" "}
-        <a href={signInUrl()} className="text-myco-green underline">Sign in</a> to review.
+        <a href={signInUrl()} className="text-myco-green underline">Sign in</a> with your
+        mycomap.org account to tag photos.
       </p>
     );
   }
   if (why === "forbidden") {
     return (
       <p className={BODY} data-testid="feedback-forbidden">
-        This page is for mycomap.org admins, project leaders and contributors. Your account
-        isn't one of those yet.
+        Your account can't open this page.
       </p>
     );
   }
@@ -101,7 +101,9 @@ function FeedbackBody() {
   const [pickedTab, setPickedTab] = useState<FeedbackTab | null>(null);
   const [tabLink] = useState(() => tabParam(location.search));
   const types = summary.data ?? [];
-  const tab = openTab({ picked: pickedTab, param: tabLink,
+  // Taxonomy is for Contributors and up (Steve, 2026-11-20): nobody else gets its tab or a link to it.
+  const tabs = tabsFor(me.data);
+  const tab = openTab({ picked: pickedTab, param: tabLink, tabs,
                         linkQueue: (param && types.some((t) => t.type === param) ? param : null)
                                    ?? linked.data?.item_type ?? null });
   const inTab = types.filter((t) => tabOf(t.type) === tab);
@@ -143,7 +145,7 @@ function FeedbackBody() {
         {me.data && (
           <>
             {me.data.admin && <AdminDownloads />}
-            <MainTabs tab={tab} onPick={pickTab} counts={summary.data ? types : null} />
+            <MainTabs tabs={tabs} tab={tab} onPick={pickTab} counts={summary.data ? types : null} />
             <div role="tabpanel" id={`feedback-tabpanel-${tab}`} aria-labelledby={`feedback-tab-${tab}`}
                  className="min-w-0 space-y-6" data-testid={`feedback-tabpanel-${tab}`}>
               <p className={`max-w-3xl text-sm ${BODY}`}>{tabInfo.intro}</p>
@@ -223,23 +225,24 @@ function ReviewSteps({ type, title }: { type: string; title: string }) {
 }
 
 /** Photos | Taxonomy, with each tab's open count once the summary is in. */
-function MainTabs({ tab, onPick, counts }: {
-  tab: FeedbackTab; onPick: (t: FeedbackTab) => void; counts: FeedbackSummary[] | null;
+function MainTabs({ tabs, tab, onPick, counts }: {
+  tabs: FeedbackTab[]; tab: FeedbackTab; onPick: (t: FeedbackTab) => void; counts: FeedbackSummary[] | null;
 }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const shown = FEEDBACK_TABS.filter((t) => tabs.includes(t.code));
   // Arrow keys move between the tabs (the usual tablist keys).
   const onKey = (e: React.KeyboardEvent, i: number) => {
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
     if (!step) return;
     e.preventDefault();
-    const j = (i + step + FEEDBACK_TABS.length) % FEEDBACK_TABS.length;
-    onPick(FEEDBACK_TABS[j].code);
+    const j = (i + step + shown.length) % shown.length;
+    onPick(shown[j].code);
     refs.current[j]?.focus();
   };
   return (
     <div role="tablist" aria-label="Kind of review"
          className="flex gap-1 border-b border-[#A87146]/25 dark:border-border" data-testid="feedback-tabs">
-      {FEEDBACK_TABS.map((t, i) => {
+      {shown.map((t, i) => {
         const on = t.code === tab;
         return (
           <button key={t.code} ref={(el) => { refs.current[i] = el; }} type="button" role="tab"

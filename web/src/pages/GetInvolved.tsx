@@ -453,11 +453,12 @@ function Review({ feedback, loading }: { feedback?: FeedbackSummary[]; loading?:
       </Sub>
       <div className="grid gap-3 md:grid-cols-2">
         <WhoCard icon={<Eye className="h-[18px] w-[18px]" />} title="Browse: anyone"
-                 items={["Every section, queue and the Summary", "Each item's photos, record and outcome",
+                 items={["The photo reviews and their Summary", "Each photo, its record and outcome",
                          "Read-only: look as much as you like"]} />
-        <WhoCard brown icon={<PenLine className="h-[18px] w-[18px]" />} title="Decide: reviewers"
-                 items={["mycomap.org admins, project leaders and contributors",
-                         "Contributors review their own projects' items", "Every decision is recorded with its date"]} />
+        <WhoCard brown icon={<PenLine className="h-[18px] w-[18px]" />} title="Decide: signed in"
+                 items={["Photos: anyone signed in with a mycomap.org account",
+                         "Taxonomy: mycomap.org Contributors, Lab Contributors, Project Leaders and admins",
+                         "Every decision is recorded with its date"]} />
       </div>
       {groups ? (
         <div className="mt-3.5 grid gap-3 md:grid-cols-3" data-testid="review-queues">

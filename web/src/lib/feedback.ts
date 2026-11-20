@@ -1,5 +1,6 @@
 // Human Feedback (/feedback): the review queue of places where Vision and the reference data
-// disagree, for mycomap.org admins, project leaders and contributors. The page's rules live
+// disagree. Photos are for any signed-in mycomap.org account, Taxonomy for Contributors and up
+// (feedbackReadOnly.ts). The page's rules live
 // here as plain functions so they can be tested (feedback.test.ts).
 //
 // Fairness: model-flagged queues are mixed with a sample of finds Vision answered right, and
@@ -299,6 +300,12 @@ export const FEEDBACK_TABS: { code: FeedbackTab; label: string; intro: string }[
 
 export const DEFAULT_TAB: FeedbackTab = "photos";
 
+/** The tabs this viewer has: Taxonomy only for Contributors and up (/api/feedback/me's
+ *  taxonomy; a server that does not say keeps both). */
+export function tabsFor(me: { taxonomy?: boolean } | undefined): FeedbackTab[] {
+  return FEEDBACK_TABS.map((t) => t.code).filter((c) => c !== "taxonomy" || me?.taxonomy !== false);
+}
+
 /** Which tab a queue is on. */
 export const tabOf = (type: string): FeedbackTab =>
   (PHOTO_TAB_TYPES as readonly string[]).includes(type) ? "photos" : "taxonomy";
@@ -313,8 +320,9 @@ export function tabParam(search: string): FeedbackTab | null {
  *  queue a ?queue= or ?item= link opens, else Photos. A remembered queue never moves the page off
  *  Photos: the page always opens on Photos unless a link says otherwise. */
 export function openTab(o: { picked: FeedbackTab | null; param: FeedbackTab | null;
-                             linkQueue: string | null }): FeedbackTab {
-  return o.picked ?? o.param ?? (o.linkQueue ? tabOf(o.linkQueue) : DEFAULT_TAB);
+                             linkQueue: string | null; tabs?: FeedbackTab[] }): FeedbackTab {
+  const tab = o.picked ?? o.param ?? (o.linkQueue ? tabOf(o.linkQueue) : DEFAULT_TAB);
+  return !o.tabs || o.tabs.includes(tab) ? tab : DEFAULT_TAB;   // a tab they don't have: Photos
 }
 
 /** One line on each photo card saying what the review asks for, in plain words. */

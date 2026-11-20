@@ -19,11 +19,13 @@ const SUMMARY: FeedbackSummary[] = [
   fq("photos_unlike_label", "validation", 7, "Photos unlike their label"),
 ];
 const ME: FeedbackMe = { user: { id: "1", name: "R" }, read_only: false, admin: false, projects: [] };
+// An account below Contributor (Steve, 2026-11-20): the Photos tab only.
+const MEMBER: FeedbackMe = { ...ME, taxonomy: false, all_photos: false };
 
-function render(search = ""): string {
+function render(search = "", me: FeedbackMe = ME): string {
   (globalThis as { location?: unknown }).location = { search };
   const client = new QueryClient();
-  client.setQueryData(["feedback", "me"], ME);
+  client.setQueryData(["feedback", "me"], me);
   client.setQueryData(["feedback", "summary"], SUMMARY);
   client.setQueryData(["feedback", "catalogue"], []);
   return renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(FeedbackPage)));
@@ -67,6 +69,17 @@ test("the How to review box starts folded (Steve, 2026-11-20)", () => {
   const box = html.match(/<details[^>]*data-testid="feedback-steps-non_specimen_photo"[^>]*>/);
   assert.ok(box, "the steps box is there");
   assert.doesNotMatch(box[0], /\sopen(=|\s|>)/, "the steps box is not open on arrival");
+});
+
+test("an account below Contributor gets no Taxonomy tab, even from a Taxonomy link, and is told why", () => {
+  for (const search of ["", "?tab=taxonomy", "?queue=name_retired"]) {
+    const html = render(search, MEMBER);
+    assert.doesNotMatch(html, /data-testid="feedback-tab-taxonomy"/, search);
+    assert.equal(selectedTab(html), "photos", search);
+    assert.doesNotMatch(html, /data-testid="feedback-card-name_retired"/, search);
+    assert.match(html, /Taxonomy queues are for mycomap\.org Contributors, Lab Contributors, Project Leaders and admins/);
+  }
+  assert.match(render("", { ...ME, taxonomy: true }), /data-testid="feedback-tab-taxonomy"/);
 });
 
 test("a ?queue= link to a name queue opens it on the Taxonomy tab", () => {

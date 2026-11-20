@@ -331,17 +331,18 @@ class FeedbackError(ValueError):
 
 
 class PublicItems(frozenset):
-    """The items a read-only viewer may browse (Steve, 2026-10-22: anyone signed out, and
-    signed-in people who review nothing): every photo item (PUBLIC_PHOTO_TYPES), whatever its
-    project, each photo still shown only as the photo rule allows (feedback_public.py); of
-    the record and name items, only those that belong to no project. Passed where a
-    reviewer's projects go; never a reviewer's own (a contributor sees their projects' items,
-    and an item with no project is not one of them)."""
+    """The items of the Photos tab, for everyone who is not a mycomap.org Contributor or higher
+    (Steve, 2026-11-20: "any .org member should be able to work with photos. Only contributors
+    or higher should see and be able to alter things on the taxonomy tab"): every photo item
+    (PUBLIC_PHOTO_TYPES), whatever its project, and no record or name item. A signed-out
+    visitor browses them read-only; a signed-in account decides them (feedback_api.viewer).
+    Each photo is still shown only as the photo rule allows (feedback_public.py), and the
+    photos it does not show are left out of these lists (feedback_api.ShownPhotos). Passed
+    where a reviewer's projects go; a Contributor or higher passes None (every item)."""
 
 
 PUBLIC_ITEMS = PublicItems()
-# The photo queues (one photo per item: the photo review's tabs and Photo views), open to
-# read-only viewers in every project.
+# The photo queues (one photo per item: the Photos tab), open to everyone in every project.
 PUBLIC_PHOTO_TYPES = frozenset(t.code for t in TYPES.values() if t.granularity == "photo")
 
 
@@ -708,7 +709,7 @@ class Store:
             return True
         mine = item["projects"]
         if isinstance(projects, PublicItems):
-            return not mine or item["item_type"] in PUBLIC_PHOTO_TYPES
+            return item["item_type"] in PUBLIC_PHOTO_TYPES
         return not projects.isdisjoint(mine)
 
     def get(self, item_id: int, projects: set[str] | None = None) -> dict:
@@ -852,9 +853,9 @@ class Store:
 
     @staticmethod
     def _in(row, projects: set[str]) -> bool:
-        mine = set(json.loads(row["projects"] or "[]"))
         if isinstance(projects, PublicItems):
-            return not mine or row["item_type"] in PUBLIC_PHOTO_TYPES
+            return row["item_type"] in PUBLIC_PHOTO_TYPES
+        mine = set(json.loads(row["projects"] or "[]"))
         return bool(mine & projects)
 
     @staticmethod
