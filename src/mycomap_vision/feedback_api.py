@@ -30,6 +30,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
+from . import feedback_lists
 from . import feedback_public as fp
 from . import name_context as nc
 from . import photo_review as pr
@@ -271,13 +272,20 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     # the page's first load reads 16,000+ photo items for its counts and lists.
     cached = ViewCache(version)
 
+    def fill(item_type: str, items: list[dict]) -> list[dict]:
+        if photos is not None and item_type in pr.NAMED_PHOTO_QUEUES:
+            return pr.fill_names(items, photos.names_of)
+        return items
+
+    # Each queue read whole once, then kept across saves: a decision or a batch reads again
+    # only the items it changed (feedback_lists.py). 150,024 photo items took 12-14 s to read
+    # after every Save page (2026-11-20).
+    lists = feedback_lists.ItemLists(store, fill)
+    app.state.feedback_lists = lists
+
     def items_cached(item_type: str, projects):
-        def load():
-            items = store.items_of(item_type, projects)
-            if photos is not None and item_type in pr.NAMED_PHOTO_QUEUES:
-                items = pr.fill_names(items, photos.names_of)
-            return items
-        return cached(("items", item_type, projkey(projects)), load)
+        return cached(("items", item_type, projkey(projects)),
+                      lambda: lists.of(item_type, projects))
 
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
