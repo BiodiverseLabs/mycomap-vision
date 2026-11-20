@@ -288,20 +288,30 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         return cached(("items", item_type, projkey(projects)),
                       lambda: lists.of(item_type, projects))
 
-    # The rescoring audit's scores (photo_audit.py), read apart from the queue's items and kept
-    # until another run is loaded: they never change an item, so the item lists and their cache
-    # are not touched by them.
-    audit_cache = ViewCache(lambda: (photo_audit.latest_run_id(store.conn),), limit=32)
+    # The rescoring audit's scores (photo_audit.py), read apart from the queue's items: p only,
+    # for a few tabs at a time, all of the run loaded now (photo_audit.ScoreCache); a page's
+    # image-only and comparator scores are read for its tiles alone. They never change an item,
+    # so the item lists and their cache are not touched by them.
+    audit_scores = photo_audit.ScoreCache(store.conn)
+    app.state.photo_audit_scores = audit_scores
 
     def audit_for(tab: str) -> "pr.Audit | None":
-        def build():
-            run = photo_audit.latest_run(store.conn)
-            if run is None or tab not in run["tabs"]:
-                return None
-            return pr.Audit(tab, photo_audit.scores(store.conn, run["id"], tab),
-                            float(run["high"].get(tab, photo_audit.HIGH_FALLBACK)),
-                            run["comparators"].get(tab), run["run_id"])
-        return audit_cache(("audit", tab), build) if tab in pr.TAB_CODES else None
+        return audit_scores.get(tab)
+
+    def with_audit_details(page: list[dict], audit: "pr.Audit | None") -> list[dict]:
+        if audit is None:
+            return page
+        got = photo_audit.details(store.conn, audit.run, audit.tab,
+                                  [t["item_id"] for t in page if t.get("audit")])
+        out = []
+        for t in page:
+            if t.get("audit"):
+                pi, cp = got.get(t["item_id"], (None, None))
+                t = {**t, "audit": {**t["audit"],
+                                    "p_image": None if pi is None else round(pi, 4),
+                                    "comparator_p": None if cp is None else round(cp, 4)}}
+            out.append(t)
+        return out
 
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
@@ -610,7 +620,7 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         except fb.FeedbackError as e:
             bad(e)
         start = max(0, offset)
-        page = tiles[start:start + min(max(1, limit), SUMMARY_MAX_PAGE)]
+        page = with_audit_details(tiles[start:start + min(max(1, limit), SUMMARY_MAX_PAGE)], audit)
         out = photo_tiles(page, ro)
         return {"total": len(tiles), "offset": start, "tiles": out, "outcomes": counts,
                 "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}

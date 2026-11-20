@@ -315,13 +315,15 @@ HIGH_NOT_IN_TAB = "high_not_in_tab"
 
 @dataclass(frozen=True)
 class Audit:
-    """One tab's audit scores, read apart from the queue (photo_audit.scores): item id ->
-    (p, p_image, comparator_p), the run's High cut for the tab, its comparator's name and run."""
+    """One tab's audit scores, read apart from the queue (photo_audit.ScoreCache): item id -> p
+    (only p: kept in memory per tab), the run's High cut for the tab, its comparator's name and
+    the run's row id. A page's image-only and comparator scores are read for its tiles alone
+    (photo_audit.details)."""
     tab: str
     scores: dict
     high: float
     comparator: str | None = None
-    run: str | None = None
+    run: int | None = None
 
 
 def audit_disagreement(last: dict | None, tab: str, p: float) -> float:
@@ -336,15 +338,11 @@ def audit_disagreement(last: dict | None, tab: str, p: float) -> float:
 def _audit_of(audit: "Audit | None", item: dict) -> dict | None:
     if audit is None or item.get("status") != "decided":
         return None
-    hit = audit.scores.get(item["id"])
-    if hit is None:
+    p = audit.scores.get(item["id"])
+    if p is None:
         return None
-    p, p_image, comparator_p = hit
-    return {"tab": audit.tab, "p": round(p, 4),
-            "p_image": None if p_image is None else round(p_image, 4),
-            "comparator": audit.comparator,
-            "comparator_p": None if comparator_p is None else round(comparator_p, 4),
-            "disagreement": audit_disagreement(item.get("last_decision"), audit.tab, p),
+    return {"tab": audit.tab, "p": round(float(p), 4), "comparator": audit.comparator,
+            "disagreement": audit_disagreement(item.get("last_decision"), audit.tab, float(p)),
             "high": audit.high}
 
 
@@ -926,6 +924,10 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
         tiles.sort(key=lambda t: (t.get("audit") is None,
                                   -(t["audit"]["disagreement"] if t.get("audit") else 0.0),
                                   t["record_key"], t["photo_key"]))
+    elif outcome == HIGH_NOT_IN_TAB:
+        # these photos have no flag in the tab: "strongest" is their audit score for it
+        sign = -1 if sort == "p" else 1
+        tiles.sort(key=lambda t: (sign * t["audit"]["p"], t["record_key"], t["photo_key"]))
     else:
         sign = -1 if sort == "p" else 1
         tiles.sort(key=lambda t: (sign * t["strength"], t["record_key"], t["photo_key"]))

@@ -23,13 +23,18 @@ photos flagged for it plus those left out for its reason; the photos most likely
 tab" (HIGH_NOT_IN_TAB), cut at the run's own High point for T: where the out-of-fold precision
 first reaches 85% (r12_audit's cut_points), else HIGH_FALLBACK.
 
+While loading, the write lock is held only to insert one chunk (CHUNK rows), with a pause
+after each, so the review keeps saving. A chunk's write must change exactly its own rows (the
+connection's change count), else it is undone and the load refused. A load of the same TSV that
+never finished (status 'loading') is replaced by the next one.
+
 What load refuses (nothing is written): a TSV whose sha256 is not the one given, or not the
 manifest's; a manifest of another format; a TSV already loaded; a bad header, value, tab or
 order (rows sorted by item id, then tab: no row twice); an item the store does not have, or whose
 photo is not the row's; a failing `mv feedback seal-check`; an item on a held record (the E17
-hold list, by the seal gate: never named); an item on a v1-test record (a pinned key list); and,
-with no v1-test list, any item whose record is not a v1 train/val record (--only-v1 skips those
-instead).
+hold list, by the seal gate: never named); an item on a v1-test record (a pinned key list); no
+v1 record keys at all; with no v1-test list, any item whose record is not a v1 train/val record
+(--only-v1 skips those instead); and a load that would add no row.
 """
 
 from __future__ import annotations
@@ -38,7 +43,9 @@ import csv
 import hashlib
 import json
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
@@ -52,8 +59,13 @@ FIELDS = ("item_id", "photo_key", "record_key", "group", "tab", "label", "p", "p
 HIGH_NOT_IN_TAB = pr.HIGH_NOT_IN_TAB
 # The High cut when a run gives none for a tab.
 HIGH_FALLBACK = 0.5
-# Rows written per transaction: short writes, so the review keeps saving during a load.
-CHUNK = 50_000
+# Rows written per transaction, and the pause after each: the write lock is held only to insert
+# one small chunk, and the review's saves get the store between chunks (2026-11-21 review: 50k
+# chunks with full-table checks inside the lock held it ~0.9 s at a time, back to back).
+CHUNK = 10_000
+PAUSE = 0.5
+# Tabs whose scores the server keeps in memory at once (ScoreCache): ~150k floats each.
+CACHE_TABS = 3
 
 SCHEMA = """
 create table if not exists photo_audit_runs (
@@ -104,11 +116,56 @@ def latest_run_id(conn) -> int | None:
     return conn.execute("select max(id) from photo_audit_runs where status = 'complete'").fetchone()[0]
 
 
-def scores(conn, run: int, tab: str) -> dict[int, tuple[float, float | None, float | None]]:
-    """item id -> (p, p_image, comparator_p) of `tab` in run `run`."""
-    return {int(i): (float(p), pi, cp) for i, p, pi, cp in conn.execute(
-        "select item_id, p, p_image, comparator_p from photo_audit_scores where run = ? and tab = ?",
-        (run, tab))}
+def scores(conn, run: int, tab: str) -> dict[int, float]:
+    """item id -> p of `tab` in run `run` (what sorting and filtering need)."""
+    return {int(i): float(p) for i, p in conn.execute(
+        "select item_id, p from photo_audit_scores where run = ? and tab = ?", (run, tab))}
+
+
+def details(conn, run: int, tab: str, item_ids) -> dict[int, tuple[float | None, float | None]]:
+    """item id -> (p_image, comparator_p) for these items only: a page's tiles."""
+    ids = sorted({int(i) for i in item_ids})
+    out: dict[int, tuple] = {}
+    for k in range(0, len(ids), 500):
+        part = ids[k:k + 500]
+        out.update({int(i): (pi, cp) for i, pi, cp in conn.execute(
+            "select item_id, p_image, comparator_p from photo_audit_scores where run = ? and "
+            f"tab = ? and item_id in ({','.join('?' * len(part))})", (run, tab, *part))})
+    return out
+
+
+class ScoreCache:
+    """The latest run's p per tab, for the Summary (photo_review.Audit), kept for at most
+    `limit` tabs (least recently used goes first). Every entry belongs to the run loaded now: a
+    newer run drops all the older run's entries the first time it is seen."""
+
+    def __init__(self, conn, limit: int = CACHE_TABS):
+        self.conn, self.limit = conn, limit
+        self.entries: OrderedDict = OrderedDict()      # tab -> Audit | None
+        self.run_id: int | None = None
+        self.lock = threading.Lock()
+
+    def get(self, tab: str) -> "pr.Audit | None":
+        if tab not in pr.TAB_CODES:
+            return None
+        rid = latest_run_id(self.conn)
+        with self.lock:
+            if rid != self.run_id:
+                self.entries.clear()
+                self.run_id = rid
+            if tab in self.entries:
+                self.entries.move_to_end(tab)
+                return self.entries[tab]
+            run = latest_run(self.conn) if rid is not None else None
+            audit = None
+            if run is not None and run["id"] == rid and tab in run["tabs"]:
+                audit = pr.Audit(tab, scores(self.conn, rid, tab),
+                                 float(run["high"].get(tab, HIGH_FALLBACK)),
+                                 run["comparators"].get(tab), rid)
+            self.entries[tab] = audit
+            while len(self.entries) > self.limit:
+                self.entries.popitem(last=False)
+            return audit
 
 
 # --- loading ----------------------------------------------------------------------------------------
@@ -211,11 +268,15 @@ def load(store: fb.Store, tsv: str | Path, expect_sha256: str, gate: fb.SealGate
         raise LoadRefused(f"the manifest's format is not {FORMAT!r}")
     if man.get("tsv_sha256") != got:
         raise LoadRefused("the manifest names another TSV (its tsv_sha256 differs)")
+    stale = None
     if _has_tables(store.conn):
         old = store.conn.execute("select id, status from photo_audit_runs where tsv_sha256 = ?",
                                  (got,)).fetchone()
-        if old is not None:
-            raise LoadRefused(f"this TSV is already loaded (run {old[0]}, {old[1]})")
+        if old is not None and old[1] == "complete":
+            raise LoadRefused(f"this TSV is already loaded (run {old[0]})")
+        stale = old and old[0]            # a load of this file that never finished: replaced
+    if not gate.v1_keys:
+        raise LoadRefused("no v1 record keys: name them (--v1-keys or MV_FEEDBACK_V1_KEYS)")
 
     # pass 1: the file
     photo_of: dict[int, str] = {}
@@ -286,12 +347,20 @@ def load(store: fb.Store, tsv: str | Path, expect_sha256: str, gate: fb.SealGate
               "open_now": sum(1 for i in photo_of if items[i]["status"] == "open"),
               "decision_changed_since_scored": changed, "dry_run": dry_run,
               "seal_check_ok": True}
+    if not report["rows_loaded"]:
+        raise LoadRefused("no row would load (every item left out)")
     if dry_run:
         return report
 
-    # pass 2: the writes
+    # pass 2: the writes. The queue's fingerprint is read once before and once after, outside
+    # the write lock; inside each chunk's write, the connection's own change count must grow by
+    # exactly the rows inserted, so the load itself can change nothing else.
     ensure_schema(store.conn)
+    before = fingerprint(store.conn)
     with store.conn:
+        if stale is not None:
+            store.conn.execute("delete from photo_audit_scores where run = ?", (stale,))
+            store.conn.execute("delete from photo_audit_runs where id = ?", (stale,))
         run = store.conn.execute(
             "insert into photo_audit_runs (run_id, tsv_sha256, manifest_sha256, manifest, tabs, "
             "high, comparators, loaded_at, loaded_by) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -301,14 +370,14 @@ def load(store: fb.Store, tsv: str | Path, expect_sha256: str, gate: fb.SealGate
     def write(chunk: list[tuple]) -> None:
         with store.conn:
             store.conn.execute("begin immediate")
-            before = fingerprint(store.conn)
+            n0 = store.conn.total_changes
             store.conn.executemany(
                 "insert into photo_audit_scores (run, tab, item_id, p, p_image, comparator_p) "
                 "values (?, ?, ?, ?, ?, ?)", chunk)
             if _in_write is not None:
                 _in_write(store.conn)
-            if fingerprint(store.conn) != before:
-                raise LoadRefused("a write changed the queue's items, decisions or seeds: undone")
+            if store.conn.total_changes - n0 != len(chunk):
+                raise LoadRefused("a write changed more than the audit's own rows: undone")
 
     try:
         chunk = []
@@ -319,6 +388,7 @@ def load(store: fb.Store, tsv: str | Path, expect_sha256: str, gate: fb.SealGate
             if len(chunk) >= CHUNK:
                 write(chunk)
                 chunk = []
+                time.sleep(PAUSE)
         if chunk:
             write(chunk)
     except BaseException:
@@ -329,7 +399,10 @@ def load(store: fb.Store, tsv: str | Path, expect_sha256: str, gate: fb.SealGate
     with store.conn:
         store.conn.execute("update photo_audit_runs set status = 'complete', rows = ?, items = ? "
                            "where id = ?", (report["rows_loaded"], len(photo_of) - len(skip), run))
-    return {**report, "run": run}
+    after = fingerprint(store.conn)
+    # Reviews saved during the load change this (they are welcome to): reported, not refused.
+    return {**report, "run": run, "replaced_unfinished_run": stale,
+            "queue_written_by_others_during_load": after != before}
 
 
 def _label(last: dict | None) -> str:

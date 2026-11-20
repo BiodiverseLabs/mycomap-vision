@@ -11,6 +11,8 @@ import csv
 import hashlib
 import json
 import random
+import threading
+import time
 
 import pytest
 from test_feedback_api import as_user
@@ -23,6 +25,11 @@ from mycomap_vision import photo_audit as pa
 from mycomap_vision import photo_review as pr
 
 INAT = "https://www.inaturalist.org/observations/"
+
+
+@pytest.fixture(autouse=True)
+def no_pause(monkeypatch):
+    monkeypatch.setattr(pa, "PAUSE", 0.0)          # the load's pause between chunks, off in tests
 
 
 def item(i, record, rule, status="decided", decision=None, reason=None):
@@ -51,10 +58,8 @@ def queue():
     ]
 
 
-SCORES = {1: (0.97, 0.9, 0.95), 2: (0.03, 0.1, 0.40), 3: (0.88, None, 0.70),
-          4: (0.40, None, 0.20), 5: (0.99, None, 0.99), 6: (0.91, None, 0.10),
-          7: (0.20, None, 0.05), 8: (0.65, None, 0.30)}            # 9 has no score
-AUDIT = pr.Audit("uv", SCORES, 0.85, "R11.1", "r12-audit-test")
+SCORES = {1: 0.97, 2: 0.03, 3: 0.88, 4: 0.40, 5: 0.99, 6: 0.91, 7: 0.20, 8: 0.65}   # 9: none
+AUDIT = pr.Audit("uv", SCORES, 0.85, "R11.1", 1)
 
 
 def keys(tiles):
@@ -84,8 +89,8 @@ def test_strongest_disagreement_first_on_the_decided_list():
     d = [t["audit"]["disagreement"] for t in tiles]
     assert d == sorted(d, reverse=True)
     two = tiles[0]["audit"]
-    assert two == {"tab": "uv", "p": 0.03, "p_image": 0.1, "comparator": "R11.1",
-                   "comparator_p": 0.4, "disagreement": 0.97, "high": 0.85}
+    assert two == {"tab": "uv", "p": 0.03, "comparator": "R11.1", "disagreement": 0.97,
+                   "high": 0.85}
 
 
 def test_a_decided_tile_with_no_score_goes_last_and_the_outcome_filter_still_applies():
@@ -205,7 +210,7 @@ def test_a_load_adds_the_scores_and_changes_nothing_in_the_queue(tmp_path):
     assert run["high"] == {"slip": 0.7, "uv": 0.7}
     assert run["comparators"] == {"slip": "v2.1-336", "uv": "R11.1"}
     got = pa.scores(s.conn, run["id"], "uv")
-    want = {int(r["item_id"]): (float(r["p"]), float(r["p_image"]), float(r["comparator_p"]))
+    want = {int(r["item_id"]): float(r["p"])
             for r in rows if r["tab"] == "uv"}
     assert got == want
     with pytest.raises(pa.LoadRefused, match="already loaded"):
@@ -242,7 +247,7 @@ def test_a_write_that_would_change_the_queue_is_undone_and_refused(tmp_path):
 
     def sneak(conn):                                            # a bug that closes an item
         conn.execute("update items set status = 'decided' where id = ?", (target,))
-    with pytest.raises(pa.LoadRefused, match="changed the queue"):
+    with pytest.raises(pa.LoadRefused, match="more than the audit"):
         pa.load(s, tmp_path / "run" / "scores.tsv", sha, gate_for(s), _in_write=sneak)
     assert queue_state(s) == before
     assert s.conn.execute("select count(*) from photo_audit_scores").fetchone()[0] == 0
@@ -252,7 +257,7 @@ def test_a_write_that_would_change_the_queue_is_undone_and_refused(tmp_path):
     def decide(conn):                                           # or writes a decision
         conn.execute("insert into decisions (item_id, decision, applies, by_user, at) "
                      "values (?, 'keep_photo', 'vision', 'x', 1)", (target,))
-    with pytest.raises(pa.LoadRefused, match="changed the queue"):
+    with pytest.raises(pa.LoadRefused, match="more than the audit"):
         pa.load(s, tmp_path / "run" / "scores.tsv", sha, gate_for(s), _in_write=decide)
     assert queue_state(s) == before
     # and with nothing sneaked in, the same file loads
@@ -326,7 +331,7 @@ def test_the_loader_refuses_held_v1_test_and_unsealed_items(tmp_path):
     # a held record (the E17 hold list): the seal-check itself fails on it
     refused(tmp_path, s, "seal-check", gate=gate_for(s, held=frozenset({rec})))
     # a seal-check that fails for any reason refuses the load: here a record past the seal
-    strict = fb.SealGate(lambda k: "2026-11-01" if k == rec else "2020-01-01", frozenset(),
+    strict = fb.SealGate(lambda k: "2026-11-01" if k == rec else "2020-01-01", frozenset({"x"}),
                          "2026-10-12T13:17:51+00:00")
     refused(tmp_path, s, "seal-check", gate=strict)
     # a v1-test record
@@ -417,6 +422,10 @@ def test_the_api_sorts_by_disagreement_filters_not_in_tab_and_keeps_its_cache_ri
     # 2001 kept at 0.95 -> 0.95; 2000 out as UV at 0.10 -> 0.90
     assert [t["photo_key"] for t in body["tiles"]] == ["inat:2001", "inat:2000"]
     assert body["tiles"][0]["audit"]["p"] == 0.95 and body["tiles"][1]["audit"]["disagreement"] == 0.9
+    for t in body["tiles"]:                         # read for the page's tiles only
+        row = other.conn.execute("select p_image, comparator_p from photo_audit_scores "
+                                 "where tab = 'uv' and item_id = ?", (t["item_id"],)).fetchone()
+        assert (t["audit"]["p_image"], t["audit"]["comparator_p"]) == (round(row[0], 4), round(row[1], 4))
     assert body["outcomes"]["high_not_in_tab"] == 1
     missed = flagged(sort="disagreement", outcome="high_not_in_tab").json()
     assert [t["photo_key"] for t in missed["tiles"]] == ["inat:2002"]   # a slip at UV 0.92
@@ -474,3 +483,158 @@ def test_mv_feedback_load_audit_scores_dry_run_load_and_refusal(conn, tmp_path, 
         run()
     with pytest.raises(SystemExit, match="load refused: the TSV's sha256"):
         run(expect_sha256="0" * 64)
+
+
+# --- review fixes (2026-11-21) ----------------------------------------------------------------
+def test_saves_on_another_connection_go_through_quickly_while_a_load_runs(tmp_path, monkeypatch):
+    """Fix 1: the queue's whole-table checks run outside the write lock, each chunk is small and
+    followed by a pause, so a reviewer's save never waits behind them. The checks are made slow
+    here (a big store's), and every save must still finish well inside that time."""
+    s = make_queue(tmp_path)
+    sha, rows = write_run(tmp_path / "run" / "scores.tsv", s)
+    plain = pa.fingerprint
+
+    def big_store_fingerprint(conn):
+        time.sleep(0.4)
+        return plain(conn)
+    monkeypatch.setattr(pa, "fingerprint", big_store_fingerprint)
+    monkeypatch.setattr(pa, "CHUNK", 20)
+    monkeypatch.setattr(pa, "PAUSE", 0.05)
+    server = fb.Store(s.path)                                  # the site's own connection
+    targets = [i["id"] for i in server.items_of(pr.ITEM_TYPE) if i["status"] == "open"]
+    done, waits, errors = threading.Event(), [], []
+
+    def reviewer():
+        k = 0
+        while not done.is_set():
+            t0 = time.perf_counter()
+            try:
+                server.decide(targets[k % len(targets)], "exclude_photo" if k % 2 else "keep_photo",
+                              STEVE, value="slip" if k % 2 else None)
+            except Exception as e:                              # noqa: BLE001
+                errors.append(repr(e))
+            waits.append(time.perf_counter() - t0)
+            k += 1
+            time.sleep(0.01)
+    th = threading.Thread(target=reviewer)
+    th.start()
+    try:
+        out = pa.load(s, tmp_path / "run" / "scores.tsv", sha, gate_for(s))
+    finally:
+        done.set()
+        th.join()
+    assert not errors
+    assert len(waits) >= 10
+    assert max(waits) < 0.3, sorted(waits)[-5:]
+    assert out["rows_loaded"] == len(rows) and out["queue_written_by_others_during_load"]
+    assert s.conn.execute("select count(*) from photo_audit_scores").fetchone()[0] == len(rows)
+
+
+def _two_runs(tmp_path):
+    s = make_queue(tmp_path)
+    sha1, rows1 = write_run(tmp_path / "r1" / "scores.tsv", s,
+                            tabs=("micrograph", "slip", "uv", "dried"))
+    pa.load(s, tmp_path / "r1" / "scores.tsv", sha1, gate_for(s))
+    return s, rows1
+
+
+def test_the_servers_score_cache_keeps_p_only_for_a_few_tabs(tmp_path):
+    """Fix 2: per tab only item id -> p is kept, for at most CACHE_TABS tabs."""
+    s, rows = _two_runs(tmp_path)
+    cache = pa.ScoreCache(s.conn)
+    for tab in ("micrograph", "slip", "uv", "dried"):
+        a = cache.get(tab)
+        assert a is not None and a.tab == tab
+        assert all(type(k) is int and type(v) is float for k, v in a.scores.items())
+        assert a.scores == {int(r["item_id"]): float(r["p"]) for r in rows if r["tab"] == tab}
+    assert pa.CACHE_TABS == 3 and len(cache.entries) <= 3
+    assert list(cache.entries) == ["slip", "uv", "dried"]       # the least recent went first
+    assert cache.get("habitat") is None                         # not scored by the run
+    some = [int(r["item_id"]) for r in rows if r["tab"] == "uv"][:3]
+    det = pa.details(s.conn, cache.get("uv").run, "uv", some)
+    assert set(det) == set(some)
+    for r in rows:
+        if r["tab"] == "uv" and int(r["item_id"]) in det:
+            assert det[int(r["item_id"])] == (float(r["p_image"]), float(r["comparator_p"]))
+
+
+def test_a_new_run_replaces_every_cached_tab(tmp_path):
+    s, _ = _two_runs(tmp_path)
+    cache = pa.ScoreCache(s.conn)
+    old_uv, old_slip = cache.get("uv"), cache.get("slip")
+
+    def shift(rows):
+        return [{**r, "p": f"{1 - float(r['p']):.4f}"} for r in rows]
+    other = fb.Store(s.path)
+    sha2, rows2 = write_run(tmp_path / "r2" / "scores.tsv", other, tabs=("slip", "uv", "dried"),
+                            edit=shift)
+    new = pa.load(other, tmp_path / "r2" / "scores.tsv", sha2, gate_for(other))["run"]
+    uv = cache.get("uv")
+    assert uv.run == new != old_uv.run
+    assert uv.scores == {int(r["item_id"]): float(r["p"]) for r in rows2 if r["tab"] == "uv"}
+    assert all(a is None or a.run == new for a in cache.entries.values())
+    assert "slip" not in cache.entries                           # dropped, read again when asked
+    assert cache.get("slip").run == new and cache.get("slip").scores != old_slip.scores
+    assert cache.get("micrograph") is None                       # not in the new run
+
+
+def test_an_unfinished_load_of_the_same_file_is_replaced(tmp_path):
+    """Fix 3: a 'loading' run left by a load that died mid-way does not block the file."""
+    s = make_queue(tmp_path)
+    sha, rows = write_run(tmp_path / "run" / "scores.tsv", s)
+    pa.ensure_schema(s.conn)
+    with s.conn:
+        stale = s.conn.execute(
+            "insert into photo_audit_runs (run_id, tsv_sha256, manifest_sha256, manifest, "
+            "loaded_at) values ('r12-audit-test', ?, 'x', '{}', 1)", (sha,)).lastrowid
+        s.conn.execute("insert into photo_audit_scores (run, tab, item_id, p) "
+                       "values (?, 'habitat', 1, 0.5)", (stale,))       # a tab the file lacks
+    out = pa.load(s, tmp_path / "run" / "scores.tsv", sha, gate_for(s))
+    assert out["replaced_unfinished_run"] == stale
+    assert s.conn.execute("select count(*) from photo_audit_runs").fetchone()[0] == 1
+    assert s.conn.execute("select count(*) from photo_audit_scores where tab = 'habitat'"
+                          ).fetchone()[0] == 0
+    assert pa.latest_run(s.conn)["id"] == out["run"]
+    assert s.conn.execute("select count(*) from photo_audit_scores").fetchone()[0] == len(rows)
+    with pytest.raises(pa.LoadRefused, match="already loaded"):          # complete: still refused
+        pa.load(s, tmp_path / "run" / "scores.tsv", sha, gate_for(s))
+
+
+def test_no_v1_keys_or_nothing_to_load_is_refused(tmp_path):
+    """Fix 4: with no v1 keys (MV_FEEDBACK_V1_KEYS unset) --only-v1 would load an empty run."""
+    s = make_queue(tmp_path)
+    refused(tmp_path, s, "no v1 record keys", gate=gate_for(s, v1=frozenset()), only_v1=True)
+    refused(tmp_path, s, "no row would load", gate=gate_for(s, v1={"not-a-record"}), only_v1=True)
+    sha, _ = write_run(tmp_path / "run" / "scores.tsv", s)
+    with pytest.raises(pa.LoadRefused, match="no row would load"):        # the dry run says so too
+        pa.load(s, tmp_path / "run" / "scores.tsv", sha, gate_for(s, v1={"not-a-record"}),
+                only_v1=True, dry_run=True)
+
+
+def test_the_cli_refuses_when_no_v1_keys_are_named(conn, tmp_path, monkeypatch):
+    import argparse
+
+    from mycomap_vision import cli
+    monkeypatch.setenv("MV_PROSPECTIVE_SEAL", "off")
+    for k in ("MV_FEEDBACK_V1_KEYS", "MV_FEEDBACK_HOLD_KEYS", "MV_FEEDBACK_HOLD_SHA256"):
+        monkeypatch.delenv(k, raising=False)
+    s = make_queue(tmp_path)
+    sha, _ = write_run(tmp_path / "run" / "scores.tsv", s)
+    a = {"action": "load-audit-scores", "tsv": str(tmp_path / "run" / "scores.tsv"),
+         "expect_sha256": sha, "manifest": None, "dry_run": False, "v1_test_keys": None,
+         "v1_test_sha256": None, "only_v1": True, "v1_keys": None, "hold_keys": None,
+         "hold_sha256": None, "store": str(s.path)}
+    with pytest.raises(SystemExit, match="no v1 record keys"):
+        cli.cmd_feedback(conn, argparse.Namespace(**a))
+    assert pa.latest_run(s.conn) is None
+
+
+def test_not_in_this_tab_sorts_by_the_tabs_score_by_default():
+    """Fix 6: those photos have no flag in the tab, so Strongest first is their audit p."""
+    q = queue() + [item(11, "17", "R9 v2 slip p=0.95 (high)", decision="exclude_photo",
+                        reason="slip")]
+    a = pr.Audit("uv", {**SCORES, 11: 0.87}, 0.15, "R11.1", 1)
+    tiles = pr.flagged_tiles(q, "uv", "decided", outcome="high_not_in_tab", audit=a)
+    assert keys(tiles) == ["inat:6", "inat:11", "inat:7"]           # 0.91, 0.87, 0.20
+    up = pr.flagged_tiles(q, "uv", "decided", "p_asc", outcome="high_not_in_tab", audit=a)
+    assert keys(up) == ["inat:7", "inat:11", "inat:6"]
