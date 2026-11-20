@@ -622,32 +622,25 @@ class Store:
         memo: dict = {}
         return [shape.item(r, memo) for r in rows]
 
-    def latest_rows(self, item_types, step: int = 20_000, pause: float = 0.0
-                    ) -> tuple["RowShape | None", dict[str, list[tuple]]]:
-        """Every item of these types with its latest decision, as LATEST_SQL rows by type in
-        id order, read in one pass over the table by id range: the store's lock is held for
-        one range at a time (`step` ids), never the whole read, so saves go on between them,
-        and `pause` seconds are left between ranges (feedback_lists.Warmer)."""
+    def latest_ranges(self, item_types, step: int = 20_000, pause: float = 0.0):
+        """Every item of these types with its latest decision, as LATEST_SQL rows in id order,
+        read in one pass over the table by id range and yielded a range at a time as (shape,
+        rows): the store's lock is held for one range (`step` ids), never the whole read, so
+        saves go on between ranges, and `pause` seconds are left between them
+        (feedback_lists.Warmer). A caller that turns each range into items as it comes never
+        holds the whole table's rows at once."""
         types = tuple(item_types)
-        out: dict[str, list[tuple]] = {t: [] for t in types}
         top = self.conn.execute("select max(id) from items").fetchone()[0] or 0
         marks = ",".join("?" * len(types))
         # `+i.item_type`: the id range is the index here, not (item_type, status).
         sql = (self.LATEST_SQL + f"where i.id > ? and i.id <= ? and +i.item_type in ({marks}) "
                "order by i.id")
-        shape = None
-        type_at = None
         lo = 0
         while lo < top:
-            shape, rows = self._rows(sql, (lo, lo + step, *types))
-            if type_at is None:
-                type_at = shape.cols.index("item_type")
-            for r in rows:
-                out[r[type_at]].append(r)
+            yield self._rows(sql, (lo, lo + step, *types))
             lo += step
             if pause and lo < top:
                 time.sleep(pause)
-        return shape, out
 
     def quick_mark(self) -> tuple:
         """The part of change_mark that says a list must be read whole (items added or

@@ -15,7 +15,7 @@ connection (a `mv feedback` command or sqlite3 by hand on the box: SQLite's data
 writes need not be Store's decisions. The names from the manifest are filled again for the whole
 list every NAMES_TTL.
 
-A whole read reads every kept photo queue in one pass over the table (Store.latest_rows), the
+A whole read reads every kept photo queue in one pass over the table (Store.latest_ranges), the
 store's lock held one id range at a time, and keeps each item already in the old list whose row
 is unchanged (the same row hash; never one patched since): only new and changed rows are turned
 into items again. The first read after a restart builds every item.
@@ -33,6 +33,7 @@ A list handed out is never changed afterwards: a patch makes a new one.
 
 from __future__ import annotations
 
+import gc
 import os
 import threading
 import time
@@ -75,7 +76,7 @@ class ItemLists:
     clock: Callable[[], float] = time.monotonic
     # The queues read together in a whole read (any other one asked for is added).
     types: tuple = WARM_TYPES
-    read_step: int = 20_000             # ids per range of a whole read (Store.latest_rows)
+    read_step: int = 20_000             # ids per range of a whole read (Store.latest_ranges)
     lists: dict[str, _List] = field(default_factory=dict)
     # One lock for every list: a whole read covers them all, and a request that comes during
     # it waits for it rather than reading too.
@@ -136,27 +137,41 @@ class ItemLists:
 
     def _read_whole(self, types: tuple, pause: float = 0.0) -> None:
         mark = self.store.change_mark()       # before the read: anything later is found later
-        shape, rows = self.store.latest_rows(types, step=self.read_step, pause=pause)
+        old = {t: self.lists.get(t) for t in types}
+        raw: dict[str, list] = {t: [] for t in types}
+        sig: dict[str, dict] = {t: {} for t in types}
+        memo: dict = {}
+        built = 0
+        # The cyclic collector paused while the items are built: with 186,000 items of six
+        # containers each it walked the growing heap again and again (13 s on the box against
+        # 6.7 s without it, 2026-11-20). Nothing built here is a cycle.
+        collecting = gc.isenabled()
+        gc.disable()
+        try:
+            for shape, rows in self.store.latest_ranges(types, step=self.read_step, pause=pause):
+                at = shape.cols.index("item_type")
+                for r in rows:
+                    t, i, h = r[at], r[0], hash(r)
+                    sig[t][i] = h
+                    was = old[t]
+                    if was is not None and was.sig.get(i) == h and i not in was.patched:
+                        raw[t].append(was.raw[was.pos[i]])     # row unchanged: so is its item
+                    else:
+                        raw[t].append(shape.item(r, memo))
+                        built += 1
+        finally:
+            if collecting:
+                gc.enable()
         self.full_reads += 1
+        self.rows_built += built
+        self.rows_kept += sum(len(v) for v in raw.values()) - built
         for t in types:
-            old = self.lists.get(t)
-            memo: dict = {}
-            raw, sig, built = [], {}, 0
-            for r in rows[t]:
-                i, h = r[0], hash(r)
-                sig[i] = h
-                if old is not None and old.sig.get(i) == h and i not in old.patched:
-                    raw.append(old.raw[old.pos[i]])       # its row is unchanged: so is its item
-                else:
-                    raw.append(shape.item(r, memo))
-                    built += 1
-            self.rows_built += built
-            self.rows_kept += len(raw) - built
+            items = raw[t]
             self.last[t] = "full"
-            self.lists[t] = _List(mark, raw, self._filled(t, raw),
-                                  {it["id"]: k for k, it in enumerate(raw)},
-                                  sum(1 for it in raw if it["status"] == "open"), self.clock(),
-                                  sig)
+            self.lists[t] = _List(mark, items, self._filled(t, items),
+                                  {it["id"]: k for k, it in enumerate(items)},
+                                  sum(1 for it in items if it["status"] == "open"), self.clock(),
+                                  sig[t])
 
     def _refilled(self, item_type: str, have: _List) -> _List:
         self.last[item_type] = "names"

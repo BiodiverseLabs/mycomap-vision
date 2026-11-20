@@ -142,13 +142,13 @@ def test_requests_during_a_warm_up_wait_for_it_and_triggers_during_it_make_one_m
     names = Names()
     lists, warmer = warmer_for(s, names)
     entered, release = threading.Event(), threading.Event()
-    real = s.latest_rows
+    real = s.latest_ranges
 
     def slow(*a, **kw):
         entered.set()
         assert release.wait(WAIT)
-        return real(*a, **kw)
-    s.latest_rows = slow
+        yield from real(*a, **kw)
+    s.latest_ranges = slow
     warmer.start()
     assert entered.wait(WAIT)
     got = {}
@@ -228,3 +228,28 @@ def test_without_feedback_warm_nothing_reads_in_the_background(conn, tmp_path):
     c, _ = site_with_photos(conn, tmp_path)
     assert not hasattr(c.app.state, "feedback_warmer")
     assert c.app.state.feedback_lists.full_reads == 0
+
+
+def test_the_collector_paused_for_a_whole_read_is_always_turned_back_on(tmp_path):
+    import gc
+    s = make_queue(tmp_path)
+    lists = fl.ItemLists(s, fill_with(Names()), read_step=50)
+    lists.of(pr.ITEM_TYPE)
+    assert gc.isenabled()
+    real = s.latest_ranges
+
+    def broken(*a, **kw):
+        it = real(*a, **kw)
+        yield next(it)
+        raise OSError("disk I/O error")
+    s.latest_ranges = broken
+    s.seed(photo_rows(random.Random(8), 1, 70_000), "nightly")
+    try:
+        lists.of(pr.ITEM_TYPE)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("the read error was swallowed")
+    assert gc.isenabled()
+    s.latest_ranges = real
+    check(lists, s, Names(), "full")                     # the next request reads it whole
