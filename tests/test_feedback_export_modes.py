@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -500,3 +501,24 @@ def test_the_command_line_passes_the_v1_test_pin(site, monkeypatch):
     with pytest.raises(SystemExit, match="export refused: .*not the expected"):
         cli.cmd_feedback(None, args)
     assert not (tmp / "x.tsv").exists()
+
+
+def test_the_release_files_are_hashed_streaming_never_read_whole(site, monkeypatch):
+    """Release v1's release.sqlite is ~600 MB: its sha256 (and the v1-test release's) is taken
+    in blocks (dataset_release.sha256_file), never by reading the file into memory."""
+    s, live, rel, test, tmp = site
+    pin_v1(rel)
+    copy = backup(live, tmp / "copy.sqlite")
+    hold = dict(zip(("hold_keys", "hold_sha256"), hold_file(tmp / "h.txt", [])))
+    whole = Path.read_bytes
+
+    def read_bytes(self):
+        if self.suffix == ".sqlite":
+            raise AssertionError(f"{self.name} read whole")
+        return whole(self)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    data, summary = fx.export(copy, rel, CUT, KEY, live, mode="paper", v1_test_release=test,
+                              **hold)
+    assert data == GOLDEN.encode("utf-8")
+    monkeypatch.setattr(Path, "read_bytes", whole)
+    assert summary["v1_test_release_sha256"] == hashlib.sha256(test.read_bytes()).hexdigest()

@@ -66,6 +66,7 @@ from pathlib import Path
 
 from . import feedback as fb
 from . import photo_review as pr
+from .dataset_release import sha256_file
 
 COLUMNS = ("photo_key", "manifest_photo_id", "record_key", "v1_split", "decision", "reason",
            "decision_id", "decided_at", "reviewer_pseudonym", "confirmation", "flag_source")
@@ -167,7 +168,7 @@ def _release_hash(release: Path) -> str:
         raise ExportError(f"no readable MANIFEST.json beside {release.name} ({type(e).__name__}): "
                           "its release_hash pins which v1 the v1-test release is for") from None
     listed = {f.get("path"): f.get("sha256") for f in manifest.get("files") or []}
-    if listed.get(release.name) != hashlib.sha256(release.read_bytes()).hexdigest():
+    if listed.get(release.name) != sha256_file(release):    # streamed: v1 is ~600 MB
         raise ExportError(f"{release.name} is not the file its MANIFEST.json lists (sha256)")
     rh = (manifest.get("hashes") or {}).get("release") or manifest.get("release_hash")
     if not rh:
@@ -188,7 +189,7 @@ def _v1_test(path: Path | None, v1_hash: str,
     path = Path(path)
     if not path.exists():
         raise ExportError(f"no v1-test release at {path}")
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    sha = sha256_file(path)
     if expect_sha256 is not None and sha != expect_sha256.strip().lower():
         raise ExportError(f"{path.name}: sha256 {sha[:12]}, not the expected "
                           f"{expect_sha256.strip()[:12]}: not the v1-test release named")
