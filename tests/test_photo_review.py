@@ -314,6 +314,40 @@ def test_uv_chemical_tests_trees_and_drawings_are_reasons_of_their_own(conn, tmp
         reasons = {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")}
         assert reasons == {"inat:1000": code}
 
+
+def test_a_photo_of_several_species_is_left_out_as_multiple_species(conn, tmp_path):
+    """Steve, 2026-11-20: Multiple species is a reason (a bucket) of its own, before Other, even
+    though no flag finds those photos yet."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
+    assert offered["multiple_species"] == "Multiple species"
+    assert list(offered)[-1] == "other"
+    r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+        {"photo_key": "inat:1000", "decision": "exclude", "reason": "multiple_species"}]})
+    assert r.status_code == 200
+    assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {
+        "inat:1000": "multiple_species"}
+
+
+def test_a_photo_of_cooking_or_food_is_left_out_as_itself(conn, tmp_path):
+    """Steve, 2026-11-20: Cooking or food is a reason of its own, before Other."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
+    assert offered["food"] == "Cooking or food"
+    assert list(offered)[-1] == "other"
+    r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+        {"photo_key": "inat:1000", "decision": "exclude", "reason": "food"}]})
+    assert r.status_code == 200
+    assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {"inat:1000": "food"}
+
+
+def test_multiple_species_and_food_are_categories_on_excluded_photos():
+    from mycomap_vision import excluded_looked as el
+    assert el.CATEGORY_LABELS["multiple_species"] == "Multiple species"
+    assert el.CATEGORY_LABELS["food"] == "Cooking and food"
+
 # --- photos the box holds no readable copy of come from their source ----------------------------
 
 class FakeResp:

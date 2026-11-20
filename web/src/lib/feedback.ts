@@ -236,11 +236,12 @@ export function historyOrgText(org: Pick<OrgRequest, "request_id" | "chip"> | nu
 // --- the page's two sections ------------------------------------------------------------------
 
 /** The page's sections, in order (Steve, 2026-10-18): mechanical fixes a rule found, what each
- *  photo shows (Steve, 2026-10-21), then whether a record's label is right. */
+ *  photo shows (Steve, 2026-10-21), then whether a record's label is right. The photo queues
+ *  have a tab of their own (FEEDBACK_TABS), so the cleanup intro names only what is left. */
 export const SECTIONS: { code: string; title: string; intro: string }[] = [
   { code: "cleanup", title: "Data cleanup",
-    intro: "Fix what a rule found: photos that show no specimen, one name written several ways, "
-      + "retired or inactive names, one find posted twice or placed in two places." },
+    intro: "Fix what a rule found: one name written several ways, retired or inactive names, a "
+      + "species and its own varieties, one find posted twice or placed in two places." },
   { code: "views", title: "Photo views",
     intro: "Say what each photo shows (cap top, gills, stem and base, in situ, …): confirm or "
       + "correct the suggested tags." },
@@ -275,6 +276,112 @@ export function groupBySection<T extends Pick<FeedbackSummary, "type" | "open"> 
   return groups
     .filter((g) => g.types.length > 0)
     .map((g) => ({ ...g, open: g.types.reduce((n, t) => n + (t.open || 0), 0) }));
+}
+
+// --- the page's two main tabs (Steve, 2026-11-20) ---------------------------------------------
+// The page is opening up to more people, and "Data cleanup" mixed photo work with name work.
+// Photos comes first and is where the page opens; Taxonomy holds names, duplicates and label
+// validation. Which tab a queue is on is decided here, so a queue the page doesn't know yet
+// lands on Taxonomy (under its section, or "Other") rather than disappearing.
+
+export type FeedbackTab = "photos" | "taxonomy";
+
+/** The photo queues, in the order the Photos tab shows them. */
+export const PHOTO_TAB_TYPES = ["non_specimen_photo", "recovered_label", "photo_view"] as const;
+
+export const FEEDBACK_TABS: { code: FeedbackTab; label: string; intro: string }[] = [
+  { code: "photos", label: "Photos",
+    intro: "Check the photos Vision learns from. Pick one of the reviews below to start." },
+  { code: "taxonomy", label: "Taxonomy",
+    intro: "Check the names on the records: names to tidy, duplicate finds, and whether a "
+      + "record's label is right. Pick a queue below to start." },
+];
+
+export const DEFAULT_TAB: FeedbackTab = "photos";
+
+/** Which tab a queue is on. */
+export const tabOf = (type: string): FeedbackTab =>
+  (PHOTO_TAB_TYPES as readonly string[]).includes(type) ? "photos" : "taxonomy";
+
+/** A ?tab= link's tab, or null. */
+export function tabParam(search: string): FeedbackTab | null {
+  const v = new URLSearchParams(search).get("tab");
+  return v === "photos" || v === "taxonomy" ? v : null;
+}
+
+/** The tab the page shows: the one the viewer picked here, else a ?tab= link, else the tab of the
+ *  queue a ?queue= or ?item= link opens, else Photos. A remembered queue never moves the page off
+ *  Photos: the page always opens on Photos unless a link says otherwise. */
+export function openTab(o: { picked: FeedbackTab | null; param: FeedbackTab | null;
+                             linkQueue: string | null }): FeedbackTab {
+  return o.picked ?? o.param ?? (o.linkQueue ? tabOf(o.linkQueue) : DEFAULT_TAB);
+}
+
+/** One line on each photo card saying what the review asks for, in plain words. */
+export const QUEUE_BLURBS: Record<string, string> = {
+  non_specimen_photo: "Micrographs, field slips, habitat shots and the like: leave them out of "
+    + "Vision or keep them.",
+  recovered_label: "Field-slip photos of fresh specimens: crop the specimen away from the slip, "
+    + "or reject the crop.",
+  photo_view: "Tag what each photo shows: cap top, gills, stem and base, in place, and so on.",
+};
+
+/** The basic steps at the top of each photo review (Steve, 2026-11-20), for people new to it.
+ *  Field slips (Steve, 2026-11-20): a slip with a DRIED specimen is "Dried specimen"; a slip with
+ *  a FRESH specimen is "Field slip", and only those go on to Recovered labels, where the
+ *  specimen is cropped away from the slip. */
+export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?: string }> = {
+  non_specimen_photo: {
+    lead: "Vision should learn only from photos of the specimen itself. Each card is one "
+      + "observation; photos a rule or the tagger flagged are marked with a suggested reason.",
+    steps: [
+      "Keep a photo that shows the specimen.",
+      "Exclude a photo that doesn't (a micrograph, habitat scene, spore print, chemical test, "
+        + "drawing…) and pick why. A photo of more than one species is Multiple species.",
+      "Save the record (S), or turn on Auto-save. Press ? for the keyboard keys.",
+    ],
+    note: "Field slips: if the specimen on the slip is dried, exclude it as Dried specimen. "
+      + "If it is fresh, exclude it as Field slip: it then goes to Recovered labels, where the "
+      + "specimen is cropped away from the slip so Vision can still use it.",
+  },
+  recovered_label: {
+    lead: "Fresh-specimen photos someone excluded as Field slip. The outlined boxes are where "
+      + "the specimen detector found the specimen on the slip.",
+    steps: [
+      "Every crop starts as Include: leave it on when it shows the specimen, and it goes back "
+        + "into Vision.",
+      "Reject a crop that is not a fungus (a logo, a hand, a stick) or is still mostly label.",
+      "Click a photo to move or resize a crop that cuts the specimen off.",
+      "Save each tile, or Save page.",
+    ],
+    note: "A dried specimen on the slip gets no crop: change the photo's reason to Dried "
+      + "specimen. The photo itself stays excluded either way; only the crop is used.",
+  },
+  photo_view: {
+    lead: "Say what each photo shows. The suggested tags come from the photo-type tagger.",
+    steps: [
+      "Tap a tag to switch it on or off; + view adds one that is missing.",
+      "Save each photo, or Save page.",
+      "A photo that shows no specimen: press No specimen, and it goes to Photos that show no "
+        + "specimen.",
+    ],
+    note: "Nothing here leaves a photo out of Vision.",
+  },
+};
+
+/** The open count of a tab, for its label. */
+export const tabOpen = (summary: Pick<FeedbackSummary, "type" | "open">[], tab: FeedbackTab): number =>
+  summary.reduce((n, t) => n + (tabOf(t.type) === tab ? t.open || 0 : 0), 0);
+
+/** The groups of stat cards one tab shows. Photos: one group, its queues in PHOTO_TAB_TYPES order
+ *  (no heading of its own; the tab is the heading). Taxonomy: every other queue, by section. */
+export function tabSections<T extends Pick<FeedbackSummary, "type" | "open"> & { section?: string | null }>(
+    summary: T[], tab: FeedbackTab): SectionGroup<T>[] {
+  if (tab === "taxonomy") return groupBySection(summary.filter((t) => tabOf(t.type) === "taxonomy"));
+  const types = PHOTO_TAB_TYPES.flatMap((code) => summary.filter((t) => t.type === code));
+  if (!types.length) return [];
+  return [{ code: "photos", title: "Photos", intro: "", types,
+            open: types.reduce((n, t) => n + (t.open || 0), 0) }];
 }
 
 // --- "Show Vision's answer" on a blind item ----------------------------------------------------
