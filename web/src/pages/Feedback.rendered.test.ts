@@ -56,7 +56,8 @@ test("a ?tab=taxonomy link opens Taxonomy with the name and validation queues by
 test("an open photo review starts with its steps; a name queue has none", () => {
   const html = render("?queue=non_specimen_photo");
   assert.match(html, /data-testid="feedback-steps-non_specimen_photo"/);
-  assert.match(html, /How to review Photos that show no specimen/);
+  assert.match(html, />How to use</);
+  assert.match(html, /Strongest disagreement first/);
   assert.match(html, /exclude it as Dried specimen/);
   assert.doesNotMatch(render("?queue=name_retired"), /feedback-steps-/);
 });
