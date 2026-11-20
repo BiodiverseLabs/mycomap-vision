@@ -20,6 +20,7 @@ export const CATEGORIES: { code: string; label: string }[] = [
   { code: "blurry", label: "Blurry or badly exposed" },
   { code: "not_fungus", label: "Not a fungus" },
   { code: "species_description", label: "Species descriptions" },
+  { code: "multiple_species", label: "Multiple species" },
 ];
 
 export const categoryLabel = (code: string) => CATEGORIES.find((c) => c.code === code)?.label ?? code;

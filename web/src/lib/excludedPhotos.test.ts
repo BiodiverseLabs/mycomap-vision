@@ -44,8 +44,9 @@ test("the page sits in the Research section for everyone, before For researchers
 });
 
 test("every category is a reason a person can give, labelled for the page", () => {
-  assert.equal(CATEGORIES.length, 14);
+  assert.equal(CATEGORIES.length, 15);
   assert.equal(categoryLabel("slip"), "Field slips and labels");
+  assert.equal(categoryLabel("multiple_species"), "Multiple species");
   assert.equal(categoryLabel("something-new"), "something-new");
 });
 

@@ -88,8 +88,10 @@ def test_the_summary_offers_and_saves_uv_chemical_tests_trees_and_drawings(conn,
     assert "drawing_micro" not in offered and "drawing_specimen" not in offered
     assert offered["species_description"] == "Species description"
     assert offered["blurry"] == "Blurry or badly exposed"
+    assert offered["multiple_species"] == "Multiple species"   # Steve, 2026-11-20
     ids = {t["photo_key"]: t["item_id"] for t in body["tiles"]}
-    for code in ("uv", "chemical", "phylo_tree", "drawing", "species_description", "blurry"):
+    for code in ("uv", "chemical", "phylo_tree", "drawing", "species_description", "blurry",
+                 "multiple_species"):
         r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
             {"item_id": ids["inat:1000"], "decision": "exclude", "reason": code}]})
         assert r.status_code == 200, code

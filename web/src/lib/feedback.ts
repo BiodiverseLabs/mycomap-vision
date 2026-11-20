@@ -337,7 +337,7 @@ export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?
     steps: [
       "Keep a photo that shows the specimen.",
       "Exclude a photo that doesn't (a micrograph, habitat scene, spore print, chemical test, "
-        + "drawing…) and pick why.",
+        + "drawing…) and pick why. A photo of more than one species is Multiple species.",
       "Save the record (S), or turn on Auto-save. Press ? for the keyboard keys.",
     ],
     note: "Field slips: if the specimen on the slip is dried, exclude it as Dried specimen. "

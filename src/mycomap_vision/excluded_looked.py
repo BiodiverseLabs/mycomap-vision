@@ -95,8 +95,8 @@ CATEGORY_LABELS = {
     "dried": "Dried specimens", "spore_print": "Spore prints", "uv": "UV reactions",
     "chemical": "Chemical spot tests", "phylo_tree": "Phylogenetic trees / BLAST",
     "drawing": "Drawings",
-    "species_description": "Species descriptions", "blurry": "Blurry or badly exposed",
-    "other": "Other"}
+    "species_description": "Species descriptions", "multiple_species": "Multiple species",
+    "blurry": "Blurry or badly exposed", "other": "Other"}
 assert set(CATEGORY_LABELS) == set(pr.REASON_CODES)
 RANK_DEPTH = 10
 PAGE_MAX = 96

@@ -77,6 +77,9 @@ REASONS: tuple[tuple[str, str], ...] = (
     ("phylo_tree", "Phylogenetic tree / BLAST"),   # BLAST result screens too (Steve, 2026-10-21)
     ("drawing", "Drawing"),
     ("species_description", "Species description"),   # a photo of a written description
+    # Steve, 2026-11-20: a photo of more than one species, so it can't teach one name. A reason
+    # (a bucket) only for now: no flag or tab finds them; a classifier may come later.
+    ("multiple_species", "Multiple species"),
     # Steve, 2026-10-21: a reason even while no flag finds these reliably.
     ("blurry", "Blurry or badly exposed"),
     ("other", "Other"),
