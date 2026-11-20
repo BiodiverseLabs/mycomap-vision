@@ -210,7 +210,7 @@ function ReviewSteps({ type, title }: { type: string; title: string }) {
   return (
     <details className="mb-4 rounded-lg border border-myco-green/30 bg-myco-green/5 p-4 dark:bg-myco-green/10"
              data-testid={`feedback-steps-${type}`}>
-      <summary className={`cursor-pointer font-semibold ${INK}`}>How to review {title}</summary>
+      <summary className={`cursor-pointer font-semibold ${INK}`} title={`How to review ${title}`}>How to use</summary>
       <p className={`mt-2 max-w-3xl text-sm ${BODY}`}>{s.lead}</p>
       <ol className={`mt-2 max-w-3xl list-decimal space-y-1 pl-5 text-sm ${BODY}`}>
         {s.steps.map((step) => <li key={step}>{step}</li>)}

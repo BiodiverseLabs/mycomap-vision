@@ -339,6 +339,10 @@ export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?
       "Exclude a photo that doesn't (a micrograph, habitat scene, spore print, chemical test, "
         + "drawing…) and pick why. A photo of more than one species is Multiple species.",
       "Save the record (S), or turn on Auto-save. Press ? for the keyboard keys.",
+      "To check past decisions: open Decided and sort by Strongest disagreement first. The "
+        + "top photos are the ones a fair re-score disagrees with most (the tile shows \"audit\" "
+        + "and the score). Change any that are wrong, and stop when the top ones look right. "
+        + "Outcome: High score, not in this tab lists photos decided elsewhere that score high here.",
     ],
     note: "Field slips: if the specimen on the slip is dried, exclude it as Dried specimen. "
       + "If it is fresh, exclude it as Field slip: it then goes to Recovered labels, where the "
