@@ -1370,6 +1370,9 @@ def cmd_feedback(conn, args) -> None:
         if not out["ok"]:
             raise SystemExit(1)
         return
+    if args.action == "load-audit-scores":
+        print(json.dumps({"store": str(path), **_load_audit_scores(conn, store, args)}, indent=2))
+        return
     if args.action == "seed":
         out = feedback.seed_files(store, conn, Path(args.queue) if args.queue else None,
                                   Path(args.crosswalk) if args.crosswalk else None,
@@ -1386,6 +1389,28 @@ def cmd_feedback(conn, args) -> None:
         print(json.dumps({"store": str(path), **_seed_nightly_tags(conn, store, args)}, indent=2))
     else:
         print(json.dumps({"store": str(path), "types": store.summary()}, indent=2))
+
+
+def _load_audit_scores(conn, store, args) -> dict:
+    """`mv feedback load-audit-scores`: the rescoring audit's out-of-fold tagger scores
+    (photo_audit.py), checked against the store, the paper's seal and the hold list; the queue's
+    items and decisions are never changed. The dry run writes nothing."""
+    import getpass
+    from pathlib import Path
+
+    from . import feedback, photo_audit
+    gate = feedback.SealGate.from_manifest(conn, v1_keys_path=args.v1_keys,
+                                           hold_keys_path=args.hold_keys,
+                                           hold_sha256=args.hold_sha256)
+    try:
+        test_keys = (photo_audit.read_key_list(args.v1_test_keys, args.v1_test_sha256)
+                     if args.v1_test_keys else None)
+        return photo_audit.load(store, Path(args.tsv), args.expect_sha256, gate,
+                                Path(args.manifest) if args.manifest else None, test_keys,
+                                only_v1=args.only_v1, dry_run=args.dry_run,
+                                loaded_by=getpass.getuser())
+    except photo_audit.LoadRefused as e:
+        raise SystemExit(f"load refused: {e}") from None
 
 
 def _seed_nightly_tags(conn, store, args) -> dict:
@@ -2899,6 +2924,24 @@ def main(argv: list[str] | None = None) -> int:
                                        "MV_FEEDBACK_HOLD_KEYS); a held item fails the check")
     q.add_argument("--hold-sha256", help="the hold list's sha256 (default "
                                          "MV_FEEDBACK_HOLD_SHA256); a mismatch holds everything")
+    q = fsub.add_parser("load-audit-scores",
+                        help="load the photo review's rescoring audit (out-of-fold tagger scores "
+                             "per decided photo and tab, photo_audit.py) for the Decided view's "
+                             "disagreement sort; changes no item or decision")
+    q.add_argument("tsv", help="photo_audit_scores.tsv (the research repo's r12_audit.py)")
+    q.add_argument("--expect-sha256", required=True, help="refuse unless the TSV has this sha256")
+    q.add_argument("--manifest", help="its manifest (default: the TSV's name with .json)")
+    q.add_argument("--dry-run", action="store_true", help="check everything, write nothing")
+    q.add_argument("--v1-test-keys", help="the pinned v1-test record keys: rows on them are "
+                                          "refused, and rows off v1 train/val may load")
+    q.add_argument("--v1-test-sha256", help="that list's sha256 (required with it)")
+    q.add_argument("--only-v1", action="store_true",
+                   help="without a v1-test list: leave out rows whose record is not v1 train/val "
+                        "(default: refuse them)")
+    q.add_argument("--v1-keys", help="the pinned v1 record keys (default MV_FEEDBACK_V1_KEYS)")
+    q.add_argument("--hold-keys", help="the held records (default MV_FEEDBACK_HOLD_KEYS)")
+    q.add_argument("--hold-sha256", help="the hold list's sha256 (default MV_FEEDBACK_HOLD_SHA256)")
+    q.add_argument("--store")
     q = fsub.add_parser("seed-nightly-tags",
                         help="(server box) the nightly photo review's catch-up: tag the photos "
                              "of records first green since a day with the served photo-type "

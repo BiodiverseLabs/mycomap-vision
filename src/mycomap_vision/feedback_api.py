@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
 from . import feedback_lists
+from . import photo_audit
 from . import feedback_public as fp
 from . import name_context as nc
 from . import photo_review as pr
@@ -286,6 +287,21 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def items_cached(item_type: str, projects):
         return cached(("items", item_type, projkey(projects)),
                       lambda: lists.of(item_type, projects))
+
+    # The rescoring audit's scores (photo_audit.py), read apart from the queue's items and kept
+    # until another run is loaded: they never change an item, so the item lists and their cache
+    # are not touched by them.
+    audit_cache = ViewCache(lambda: (photo_audit.latest_run_id(store.conn),), limit=32)
+
+    def audit_for(tab: str) -> "pr.Audit | None":
+        def build():
+            run = photo_audit.latest_run(store.conn)
+            if run is None or tab not in run["tabs"]:
+                return None
+            return pr.Audit(tab, photo_audit.scores(store.conn, run["id"], tab),
+                            float(run["high"].get(tab, photo_audit.HIGH_FALLBACK)),
+                            run["comparators"].get(tab), run["run_id"])
+        return audit_cache(("audit", tab), build) if tab in pr.TAB_CODES else None
 
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
@@ -587,9 +603,10 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         would keep (Steve, 2026-10-30)."""
         _, projects, _, ro = viewer(request)
         counts: dict = {}
+        audit = audit_for(tab) if status == "decided" else None
         try:
             tiles = pr.flagged_tiles(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, q,
-                                     band, outcome, counts)
+                                     band, outcome, counts, audit)
         except fb.FeedbackError as e:
             bad(e)
         start = max(0, offset)
@@ -597,6 +614,20 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         out = photo_tiles(page, ro)
         return {"total": len(tiles), "offset": start, "tiles": out, "outcomes": counts,
                 "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
+
+    @app.get("/api/feedback/photo-review/audit")
+    def fb_photo_review_audit(request: Request):
+        """The rescoring audit loaded now (photo_audit.py; Steve, 2026-11-20): its run and the
+        tabs it scored, each with its High cut and the served comparator shown beside it. The
+        Summary offers "Strongest disagreement first" and "High score, not in this tab" on the
+        Decided list of these tabs only."""
+        viewer(request)
+        run = photo_audit.latest_run(store.conn)
+        if run is None:
+            return {"run": None, "tabs": []}
+        return {"run": {k: run[k] for k in ("run_id", "loaded_at", "rows", "items")},
+                "tabs": [{"code": t, "high": run["high"].get(t, photo_audit.HIGH_FALLBACK),
+                          "comparator": run["comparators"].get(t)} for t in run["tabs"]]}
 
     def photo_tiles(page: list[dict], ro: bool, thumb: str = "grid") -> list[dict]:
         """A page of tiles with each photo as this viewer may see it (Summary, Photo views,
