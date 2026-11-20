@@ -272,7 +272,13 @@ alone is the queries, and keeps every photo, so the model is judged on exactly v
 record left with no photo drops out of those reads. `--exclude-photo-reasons slip` keeps only
 rows with those reasons: one E35 arm, a subset of the one frozen list. The file ships with the
 run and the instance refuses it unless its sha256 is the launch's; its name, sha256, reasons and
-counts are in `dataset_release.photo_exclusions` and `train_photos.photo_exclusions`. It is not
+counts are in `dataset_release.photo_exclusions` and `train_photos.photo_exclusions`. The
+export names its mode, with no default (the paper coordinator's ruling of 15 Nov 2026,
+research f02ad4a): `--mode paper` for a v1 paper row refuses any decided photo on a `v1-test`
+record and, with none, gives the frozen E34/E35 exporter's bytes; `--mode serving` for a served
+or later model (v2.1, v2.2) includes them as `v1_split` `test`, counted in its summary, and
+needs the hold list (`--hold-keys`/`--hold-sha256` or `MV_FEEDBACK_HOLD_KEYS`). Both take
+`--v1-test-release`, and a decided photo on a held record refuses either. It is not
 an erratum (no record or label changes), and a run that uses it can't be resumed yet. On the
 2026-10-26 export (sha256 `b71caa99…`), all reasons: 65,217 of v1's 624,785 train photos out
 (860 records), and 5,659 val photos out of a train + val reference (53 records); slips only:
