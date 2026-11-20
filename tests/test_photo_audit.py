@@ -446,8 +446,9 @@ def test_the_api_sorts_by_disagreement_filters_not_in_tab_and_keeps_its_cache_ri
     body = flagged(sort="disagreement").json()
     assert [t["photo_key"] for t in body["tiles"]] == ["inat:2000", "inat:2001"]
     assert body["tiles"][1]["audit"]["disagreement"] == pytest.approx(0.05)
-    # a read-only viewer reads the same list
-    c.cookies.clear()
+    # a Contributor reads the same list (these photos are not in the manifest, so a viewer below
+    # Contributor sees none of them: test_feedback_read_only.py)
+    as_user(c, "leader-1")
     ro = flagged(sort="disagreement").json()
     assert [t["photo_key"] for t in ro["tiles"]] == ["inat:2000", "inat:2001"]
 

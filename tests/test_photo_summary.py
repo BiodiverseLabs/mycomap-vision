@@ -48,8 +48,9 @@ def test_the_summary_api_pages_tiles_with_small_thumbs_and_record_details(conn, 
     assert private["shown"] == "private" and private["thumb"].endswith("?size=grid")
     img = c.get(private["thumb"])
     assert img.status_code == 200 and img.headers["cache-control"] == "private, no-store"
-    as_user(c, "member-1")                                     # another project's contributor
-    assert c.get("/api/feedback/photo-review/flagged").json()["total"] == 0
+    as_user(c, "member-1")             # below Contributor: the photos anyone may see, any project
+    seen = c.get("/api/feedback/photo-review/flagged").json()["tiles"]
+    assert [t["photo_key"] for t in seen] == ["inat:1000"]
 
 
 def test_a_batch_writes_exactly_the_shown_split_and_nothing_before_it(conn, tmp_path):
@@ -115,10 +116,13 @@ def test_a_bad_batch_writes_nothing(conn, tmp_path):
         r = c.post("/api/feedback/photo-review/batch", json={"decisions": bad})
         assert r.status_code == 400 and why in r.json()["detail"], bad
     assert fstore.conn.execute("select count(*) from decisions").fetchone()[0] == 0
-    as_user(c, "member-1")                                     # not their project's items
+    hidden = next(i["id"] for i in fstore.items_of("non_specimen_photo")
+                  if i["subject"] == "inat:1100")
+    as_user(c, "member-1")             # below Contributor: not an all-rights-reserved photo
     r = c.post("/api/feedback/photo-review/batch",
-               json={"decisions": [{"item_id": ids[0], "decision": "keep"}]})
-    assert r.status_code == 400 and "not one you can review" in r.json()["detail"]
+               json={"decisions": [{"item_id": hidden, "decision": "keep"}]})
+    assert r.status_code == 403
+    assert fstore.conn.execute("select count(*) from decisions").fetchone()[0] == 0
 
 
 def test_the_seal_still_refuses_a_batch_on_a_sealed_record(tmp_path):
