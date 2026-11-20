@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import config, feedback as fb, feedback_org as fo, label_review as lr, name_equiv
 from . import feedback_lists
+from . import photo_audit
 from . import feedback_public as fp
 from . import name_context as nc
 from . import photo_review as pr
@@ -286,6 +287,31 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
     def items_cached(item_type: str, projects):
         return cached(("items", item_type, projkey(projects)),
                       lambda: lists.of(item_type, projects))
+
+    # The rescoring audit's scores (photo_audit.py), read apart from the queue's items: p only,
+    # for a few tabs at a time, all of the run loaded now (photo_audit.ScoreCache); a page's
+    # image-only and comparator scores are read for its tiles alone. They never change an item,
+    # so the item lists and their cache are not touched by them.
+    audit_scores = photo_audit.ScoreCache(store.conn)
+    app.state.photo_audit_scores = audit_scores
+
+    def audit_for(tab: str) -> "pr.Audit | None":
+        return audit_scores.get(tab)
+
+    def with_audit_details(page: list[dict], audit: "pr.Audit | None") -> list[dict]:
+        if audit is None:
+            return page
+        got = photo_audit.details(store.conn, audit.run, audit.tab,
+                                  [t["item_id"] for t in page if t.get("audit")])
+        out = []
+        for t in page:
+            if t.get("audit"):
+                pi, cp = got.get(t["item_id"], (None, None))
+                t = {**t, "audit": {**t["audit"],
+                                    "p_image": None if pi is None else round(pi, 4),
+                                    "comparator_p": None if cp is None else round(cp, 4)}}
+            out.append(t)
+        return out
 
     @app.get("/api/feedback/me")
     def fb_me(request: Request):
@@ -587,16 +613,31 @@ def add_routes(app: FastAPI, *, person: Callable[[Request], dict | None], store:
         would keep (Steve, 2026-10-30)."""
         _, projects, _, ro = viewer(request)
         counts: dict = {}
+        audit = audit_for(tab) if status == "decided" else None
         try:
             tiles = pr.flagged_tiles(items_cached(pr.ITEM_TYPE, projects), tab, status, sort, q,
-                                     band, outcome, counts)
+                                     band, outcome, counts, audit)
         except fb.FeedbackError as e:
             bad(e)
         start = max(0, offset)
-        page = tiles[start:start + min(max(1, limit), SUMMARY_MAX_PAGE)]
+        page = with_audit_details(tiles[start:start + min(max(1, limit), SUMMARY_MAX_PAGE)], audit)
         out = photo_tiles(page, ro)
         return {"total": len(tiles), "offset": start, "tiles": out, "outcomes": counts,
                 "reasons": [{"code": c, "label": t} for c, t in pr.REASONS]}
+
+    @app.get("/api/feedback/photo-review/audit")
+    def fb_photo_review_audit(request: Request):
+        """The rescoring audit loaded now (photo_audit.py; Steve, 2026-11-20): its run and the
+        tabs it scored, each with its High cut and the served comparator shown beside it. The
+        Summary offers "Strongest disagreement first" and "High score, not in this tab" on the
+        Decided list of these tabs only."""
+        viewer(request)
+        run = photo_audit.latest_run(store.conn)
+        if run is None:
+            return {"run": None, "tabs": []}
+        return {"run": {k: run[k] for k in ("run_id", "loaded_at", "rows", "items")},
+                "tabs": [{"code": t, "high": run["high"].get(t, photo_audit.HIGH_FALLBACK),
+                          "comparator": run["comparators"].get(t)} for t in run["tabs"]]}
 
     def photo_tiles(page: list[dict], ro: bool, thumb: str = "grid") -> list[dict]:
         """A page of tiles with each photo as this viewer may see it (Summary, Photo views,

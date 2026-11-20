@@ -18,6 +18,7 @@
 import type { FlaggedTile, PhotoBatchBody, PhotoBatchDecision, PhotoReviewTab } from "./api";
 import { recordLabel } from "./feedback";
 import { flagLabel, startsAsInclude, type Choice } from "./photoReview";
+import { auditLabel } from "./photoAudit";
 
 /** The Summary's photos per page: the default, and the choices (Steve, 2026-10-21), each
  *  remembered per viewer. The server serves at most the largest. */
@@ -434,7 +435,8 @@ export function decidedText(t: Pick<FlaggedTile, "decision">, reasons: { code: s
 }
 
 export type OverlayTile = Pick<FlaggedTile, "label" | "link" | "record_key" | "photo_key" | "position" |
-  "record_photos" | "flags" | "owner_login" | "license_code" | "license_class" | "status" | "decision">;
+  "record_photos" | "flags" | "owner_login" | "license_code" | "license_class" | "status" | "decision"> &
+  Partial<Pick<FlaggedTile, "audit">>;
 
 /** The viewer's overlay: the species name, the observation link, then its lines: source and id,
  *  photo n of N, each flag (the gate as "not a fungus, p(fungus)=…"), owner and licence, and a
@@ -450,6 +452,7 @@ export function overlay(t: OverlayTile, reasons: { code: string; label: string }
     const d = decidedText(t, reasons);
     if (d) lines.push(d);
   }
+  if (t.audit) lines.push(auditLabel(t.audit));
   return { name: t.label || "(no name)", link: { href: t.link, text: recordLabel(t.record_key) }, lines };
 }
 

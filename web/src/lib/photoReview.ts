@@ -6,7 +6,7 @@
 // Photo rule: a photo the server sends as "hidden" never gets an image URL here, and an admin's
 // "private" photo is only ever Vision's own same-origin copy, shown by a plain <img>.
 
-import type { FeedbackStatus, PhotoFlag, PhotoOutcome, PhotoOutcomeFilter, PhotoReviewDecisionBody, PhotoBand, PhotoBandFilter,
+import type { FeedbackStatus, PhotoFlag, PhotoOutcomeCode, PhotoOutcomeFilter, PhotoReviewDecisionBody, PhotoBand, PhotoBandFilter,
               PhotoReviewSort, PhotoReviewTab, ReviewPhoto, ReviewRecord } from "./api";
 
 export const PHOTO_REVIEW_TYPE = "non_specimen_photo";
@@ -58,7 +58,7 @@ export const outcomeInUse = (status: FeedbackStatus, outcome: PhotoOutcomeFilter
 
 /** " (n)" after an outcome's name: how many the list would show with it picked (photos in
  *  Summary, records in Full), when the counts are loaded; nothing for "All outcomes". */
-export function outcomeCount(counts: Partial<Record<PhotoOutcome, number>> | null | undefined,
+export function outcomeCount(counts: Partial<Record<PhotoOutcomeCode, number>> | null | undefined,
                              code: PhotoOutcomeFilter): string {
   if (code === "all" || !counts) return "";
   const n = counts[code];

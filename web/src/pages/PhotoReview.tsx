@@ -4,7 +4,7 @@ import { Check, Keyboard } from "lucide-react";
 import { BODY, BTN, CARD, ChoiceButtons, Ext, FIELD, INK, KeyHelp, PhotoLightbox, PhotoTile, QuickReasons, sciLike,
          StatusToggle, useDebounced } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FeedbackSummary, type PhotoReviewDecisionBody,
-         type PhotoBandFilter, type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewPage, type PhotoReviewSort,
+         type PhotoBandFilter, type PhotoOutcomeCode, type PhotoOutcomeFilter, type PhotoReviewPage, type PhotoReviewSort,
          type PhotoReviewTab, type ReviewPhoto,
          type ReviewRecord } from "@/lib/api";
 import { pageText, recordLabel } from "@/lib/feedback";
@@ -18,6 +18,7 @@ import { bulkExcludeFlagged, bulkKeepAll, chooseDecision, chosenCount, cycleReas
 import { PAGE_SIZES, readPageSize, readTileSize, readView, SUMMARY_KEY_HELP, SUMMARY_TABS, TILE_SIZES, writePageSize,
          writeTileSize, writeView, type PageSize, type ReviewView, type TileSize } from "@/lib/photoSummary";
 import { autosaveOnText, changedPhotos, pageSaves, readAutosave, writeAutosave } from "@/lib/reviewSave";
+import { auditAvailable, auditOutcomeInUse, outcomeOptions, sortInUse, sortOptions } from "@/lib/photoAudit";
 import { AutosaveToggle, SaveBar, useLeaveGuard } from "@/components/ReviewSave";
 import { ReadOnlyPhotoReview, useReadOnly } from "@/components/ReadOnlyReview";
 import { PhotoSummary } from "./PhotoSummary";
@@ -50,13 +51,12 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const qc = useQueryClient();
   const [tab, setTabNow] = useState<PhotoReviewTab>("all");
   const [status, setStatusNow] = useState<FeedbackStatus>("open");
-  const [sort, setSortNow] = useState<PhotoReviewSort>("p");
+  const [sortPick, setSortNow] = useState<PhotoReviewSort>("p");
   const [minFlagged, setMinFlaggedNow] = useState<number>(1);
   const [band, setBandNow] = useState<PhotoBandFilter>("all");
   // The Outcome filter (Steve, 2026-10-30): what became of a decided photo's flag. Asked for in
   // Decided only (outcomeInUse); the pick is kept while Open is shown.
   const [outcomePick, setOutcomeNow] = useState<PhotoOutcomeFilter>("all");
-  const outcome = outcomeInUse(status, outcomePick);
   const [text, setTextNow] = useState("");
   const q = useDebounced(text.trim());
   const [autosave, setAutosave] = useState(() => readAutosave(browserStorage));
@@ -96,6 +96,14 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
     setView(v);
     writeView(browserStorage, v);
   });
+  // The rescoring audit (lib/photoAudit.ts; Steve, 2026-11-20): its sort and Outcome option on a
+  // tab's Decided Summary, when a run scored the tab. Elsewhere the picks rest at the usual ones.
+  const audit = useQuery({ queryKey: ["feedback", "photo-review", "audit"],
+                           queryFn: () => feedbackApi.photoReviewAudit(), staleTime: 60_000,
+                           refetchOnWindowFocus: false });
+  const audited = auditAvailable(audit.data, view === "full" ? "full" : "summary", status, tab);
+  const sort = sortInUse(sortPick, audited);
+  const outcome = auditOutcomeInUse(outcomeInUse(status, outcomePick), audited);
   const [tileSize, setTileSize] = useState<TileSize>(() => readTileSize(browserStorage));
   // The Summary's photos per page, remembered per viewer (Steve, 2026-10-21). A change loads
   // the first page again, so unsaved changes are asked about first.
@@ -110,7 +118,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   };
   const [summaryTotal, setSummaryTotal] = useState<number | null>(null);
   // The Outcome filter's counts from the Summary (or the read-only view); Full's come with its page.
-  const [viewOutcomes, setViewOutcomes] = useState<Record<PhotoOutcome, number> | null>(null);
+  const [viewOutcomes, setViewOutcomes] = useState<Partial<Record<PhotoOutcomeCode, number>> | null>(null);
   // A read-only viewer (Steve, 2026-10-22): the same filters, no Auto-save, no choices.
   const readOnly = useReadOnly();
   // The reasons this reviewer picked, by photo: kept across tabs and pages (Board remounts).
@@ -155,8 +163,10 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
         <StatusToggle status={status} onChange={setStatus} />
         <label className="flex min-w-0 items-center gap-2 text-sm">
           <span className="text-muted-foreground">Sort</span>
-          <select className={FIELD} value={sort} onChange={(e) => setSort(e.target.value as PhotoReviewSort)}>
-            {SORTS.map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
+          <select className={FIELD} value={sort} onChange={(e) => setSort(e.target.value as PhotoReviewSort)}
+                  data-testid="photo-review-sort"
+                  title={audited ? "Strongest disagreement first: the decisions the photo-type tagger's audit score disagrees with most (a photo left out for this tab that scores low for it, or one kept or left out for another reason that scores high)." : undefined}>
+            {sortOptions(SORTS, audited).map((s) => <option key={s.code} value={s.code}>{s.label}</option>)}
           </select>
         </label>
         <label className="flex min-w-0 items-center gap-2 text-sm"
@@ -169,7 +179,8 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
             ))}
           </select>
         </label>
-        <OutcomeSelect status={status} outcome={outcome} counts={outcomeCounts} onChange={setOutcome} />
+        <OutcomeSelect status={status} outcome={outcome} counts={outcomeCounts} onChange={setOutcome}
+                       options={outcomeOptions(OUTCOME_FILTERS, audited)} />
         {full && <label className="flex min-w-0 items-center gap-2 text-sm">
           <span className="text-muted-foreground">Show</span>
           <select className={FIELD} value={minFlagged} onChange={(e) => setMinFlagged(Number(e.target.value))}>
@@ -234,10 +245,12 @@ const reasonSelectId = (recordKey: string, photoKey: string, lb = false) =>
 /** The Outcome filter, beside Sort and Confidence (Steve, 2026-10-30): what became of each
  *  decided photo's original flag for the tab. Each option carries how many the list would show
  *  with it picked; in Open it rests, disabled, at "All outcomes" (open photos have none yet). */
-export function OutcomeSelect({ status, outcome, counts, onChange }: {
+export function OutcomeSelect({ status, outcome, counts, onChange, options = OUTCOME_FILTERS }: {
   status: FeedbackStatus; outcome: PhotoOutcomeFilter;
-  counts: Partial<Record<PhotoOutcome, number>> | null | undefined;
+  counts: Partial<Record<PhotoOutcomeCode, number>> | null | undefined;
   onChange: (o: PhotoOutcomeFilter) => void;
+  /** The choices (default OUTCOME_FILTERS; the audit adds one on a tab's Decided Summary). */
+  options?: { code: PhotoOutcomeFilter; label: string; title: string }[];
 }) {
   const decided = status === "decided";
   return (
@@ -248,7 +261,7 @@ export function OutcomeSelect({ status, outcome, counts, onChange }: {
       <span className="text-muted-foreground">Outcome</span>
       <select className={FIELD} value={outcomeInUse(status, outcome)} disabled={!decided}
               onChange={(e) => onChange(e.target.value as PhotoOutcomeFilter)} data-testid="photo-review-outcome">
-        {OUTCOME_FILTERS.map((o) => (
+        {options.map((o) => (
           <option key={o.code} value={o.code} title={o.title}>
             {o.label}{decided ? outcomeCount(counts, o.code) : ""}
           </option>

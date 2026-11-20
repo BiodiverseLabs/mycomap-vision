@@ -304,6 +304,48 @@ def check_outcome(outcome: str) -> None:
         raise fb.FeedbackError(f"outcome is all or one of {', '.join(OUTCOME_CODES)}")
 
 
+# --- the rescoring audit (Steve, 2026-11-20; photo_audit.py) ----------------------------------------
+# The Summary's Decided list of a tab can sort by how strongly the tagger's out-of-fold audit
+# score disagrees with each decision, and show the decided photos the tab may have missed.
+DISAGREEMENT_SORT = "disagreement"
+# The outcome filter for photos decided elsewhere, never flagged for the tab and not left out for
+# its reason, that score at or above the run's High cut for it (photo_audit.HIGH_NOT_IN_TAB).
+HIGH_NOT_IN_TAB = "high_not_in_tab"
+
+
+@dataclass(frozen=True)
+class Audit:
+    """One tab's audit scores, read apart from the queue (photo_audit.ScoreCache): item id -> p
+    (only p: kept in memory per tab), the run's High cut for the tab, its comparator's name and
+    the run's row id. A page's image-only and comparator scores are read for its tiles alone
+    (photo_audit.details)."""
+    tab: str
+    scores: dict
+    high: float
+    comparator: str | None = None
+    run: int | None = None
+
+
+def audit_disagreement(last: dict | None, tab: str, p: float) -> float:
+    """1 - p for a photo left out for `tab`'s reason (TAB_OF_REASON), else p (kept, or left out
+    for another reason): how strongly the audit score disagrees with the decision."""
+    last = last or {}
+    reason_tab = (TAB_OF_REASON.get(last.get("value") or "")
+                  if last.get("decision") == "exclude_photo" else None)
+    return round(1.0 - p, 6) if reason_tab == tab else round(p, 6)
+
+
+def _audit_of(audit: "Audit | None", item: dict) -> dict | None:
+    if audit is None or item.get("status") != "decided":
+        return None
+    p = audit.scores.get(item["id"])
+    if p is None:
+        return None
+    return {"tab": audit.tab, "p": round(float(p), 4), "comparator": audit.comparator,
+            "disagreement": audit_disagreement(item.get("last_decision"), audit.tab, float(p)),
+            "high": audit.high}
+
+
 def record_of_item(item: dict) -> str | None:
     for k in item.get("record_keys") or []:
         return k
@@ -807,24 +849,40 @@ def decide_record(store: fb.Store, record_key: str, photos: list[dict], person: 
 
 def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sort: str = "p",
                   query: str = "", band: str = "all", outcome: str = "all",
-                  counts: dict | None = None) -> list[dict]:
+                  counts: dict | None = None, audit: Audit | None = None) -> list[dict]:
     """The queue's flagged photos in `tab`, one tile each (not grouped by record), sorted like the
     record view: by the strongest flag in the tab (p: highest first, p_asc: lowest first), or
     'flagged': the records with most flagged photos first, their photos together. `outcome` (one
     of OUTCOME_CODES, or 'all') keeps the photos that came to it in the tab (outcome_of); a
     `counts` dict is filled with the photos each outcome would keep, every other filter as
-    given."""
+    given.
+
+    With `audit` (the tab's rescoring audit scores; Decided only), each decided tile that has a
+    score carries it as "audit" ({tab, p, p_image, comparator, comparator_p, disagreement,
+    high}); sort 'disagreement' puts the strongest disagreement first (tiles with no score last);
+    and the outcome HIGH_NOT_IN_TAB lists, instead of the tab's own photos, the decided photos
+    with no flag for the tab and not left out for its reason whose score reaches the run's High
+    cut (counted in `counts` too). Neither is offered without an audit for the tab."""
     if tab != "all" and tab not in TAB_CODES:
         raise fb.FeedbackError(f"unknown tab {tab!r} ({', '.join(TAB_CODES)} or all)")
     if status not in ("open", "decided"):
         raise fb.FeedbackError("status is open or decided")
-    if sort not in ("p", "p_asc", "flagged"):
-        raise fb.FeedbackError("sort is p, p_asc or flagged")
+    if sort not in ("p", "p_asc", "flagged", DISAGREEMENT_SORT):
+        raise fb.FeedbackError("sort is p, p_asc, flagged or disagreement")
     if band != "all" and band not in BANDS:
         raise fb.FeedbackError(f"band is all or one of {', '.join(BANDS)}")
-    check_outcome(outcome)
+    if audit is not None and (tab == "all" or audit.tab != tab or status != "decided"):
+        audit = None                       # scores are per tab, and for decided photos only
+    if (sort == DISAGREEMENT_SORT or outcome == HIGH_NOT_IN_TAB) and audit is None:
+        raise fb.FeedbackError("no audit scores for this tab: the disagreement sort and "
+                               "'High score, not in this tab' need a tab, Decided, and a "
+                               "loaded audit run")
+    if outcome != HIGH_NOT_IN_TAB:
+        check_outcome(outcome)
     if counts is not None:
         counts.update(dict.fromkeys(OUTCOME_CODES, 0))
+        if audit is not None:
+            counts[HIGH_NOT_IN_TAB] = 0
     query = (query or "").strip().lower()
     tiles, per_record = [], {}
     for it in items:
@@ -838,30 +896,61 @@ def flagged_tiles(items: list[dict], tab: str = "all", status: str = "open", sor
             continue
         flags = tab_flags(it)
         mine = [f for f in flags if tab == "all" or f["tab"] == tab]
-        if not mine or (band != "all" and band_of(mine) != band):
+        if not mine:
+            # not in the tab: listed only as a photo the tab may have missed
+            a = _audit_of(audit, it)
+            if a is None or a["p"] < audit.high or band != "all":
+                continue
+            if counts is not None:
+                counts[HIGH_NOT_IN_TAB] += 1
+            if outcome != HIGH_NOT_IN_TAB:
+                continue
+            tiles.append(_tile(it, key, label, flags, flags, tab, None, a)
+                         | {"not_in_tab": True, "suggested_reason": REASON_OF_TAB.get(tab)})
+            per_record[key] = per_record.get(key, 0) + 1
+            continue
+        if band != "all" and band_of(mine) != band:
             continue
         came_to = item_outcome(it, tab)
         if counts is not None and came_to is not None:
             counts[came_to] += 1
-        if outcome != "all" and came_to != outcome:
+        if outcome == HIGH_NOT_IN_TAB or (outcome != "all" and came_to != outcome):
             continue
-        last = it.get("last_decision") or None
-        tiles.append({"band": band_of(mine),
-                      "suggested_decision": suggested_decision(flags),"item_id": it["id"], "photo_key": it["subject"], "record_key": key,
-                      "label": label, "link": fb.link(key), "flags": mine,
-                      "strength": max(f["strength"] for f in mine),
-                      "suggested_reason": suggested_reason([f for f in flags if not f.get("by_reason")]
-                                                           or flags, tab),
-                      "status": it["status"], "outcome": came_to,
-                      "decision": last and {"decision": last["decision"],
-                                            "reason": shown_reason(last.get("value"))}})
+        tiles.append(_tile(it, key, label, flags, mine, tab, came_to, _audit_of(audit, it)))
         per_record[key] = per_record.get(key, 0) + 1
     if sort == "flagged":
         tiles.sort(key=lambda t: (-per_record[t["record_key"]], t["record_key"], -t["strength"]))
+    elif sort == DISAGREEMENT_SORT:
+        tiles.sort(key=lambda t: (t.get("audit") is None,
+                                  -(t["audit"]["disagreement"] if t.get("audit") else 0.0),
+                                  t["record_key"], t["photo_key"]))
+    elif outcome == HIGH_NOT_IN_TAB:
+        # these photos have no flag in the tab: "strongest" is their audit score for it
+        sign = -1 if sort == "p" else 1
+        tiles.sort(key=lambda t: (sign * t["audit"]["p"], t["record_key"], t["photo_key"]))
     else:
         sign = -1 if sort == "p" else 1
         tiles.sort(key=lambda t: (sign * t["strength"], t["record_key"], t["photo_key"]))
     return tiles
+
+
+def _tile(it: dict, key: str, label: str, flags: list[dict], mine: list[dict], tab: str,
+          came_to: str | None, audit: dict | None) -> dict:
+    """One Summary tile (flagged_tiles)."""
+    last = it.get("last_decision") or None
+    out = {"band": band_of(mine),
+           "suggested_decision": suggested_decision(flags), "item_id": it["id"],
+           "photo_key": it["subject"], "record_key": key,
+           "label": label, "link": fb.link(key), "flags": mine,
+           "strength": max((f["strength"] for f in mine), default=0.0),
+           "suggested_reason": suggested_reason([f for f in flags if not f.get("by_reason")]
+                                                or flags, tab),
+           "status": it["status"], "outcome": came_to,
+           "decision": last and {"decision": last["decision"],
+                                 "reason": shown_reason(last.get("value"))}}
+    if audit is not None:
+        out["audit"] = audit
+    return out
 
 
 def batch_decide(store: fb.Store, decisions: list[dict], person: dict, note: str | None = None,
