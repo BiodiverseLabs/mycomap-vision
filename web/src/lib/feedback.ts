@@ -321,9 +321,52 @@ export function openTab(o: { picked: FeedbackTab | null; param: FeedbackTab | nu
 export const QUEUE_BLURBS: Record<string, string> = {
   non_specimen_photo: "Micrographs, field slips, habitat shots and the like: leave them out of "
     + "Vision or keep them.",
-  recovered_label: "Field-slip photos where the specimen was found on the slip: use or reject "
-    + "each crop.",
+  recovered_label: "Field-slip photos of fresh specimens: crop the specimen away from the slip, "
+    + "or reject the crop.",
   photo_view: "Tag what each photo shows: cap top, gills, stem and base, in place, and so on.",
+};
+
+/** The basic steps at the top of each photo review (Steve, 2026-11-20), for people new to it.
+ *  Field slips (Steve, 2026-11-20): a slip with a DRIED specimen is "Dried specimen"; a slip with
+ *  a FRESH specimen is "Field slip", and only those go on to Recovered labels, where the
+ *  specimen is cropped away from the slip. */
+export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?: string }> = {
+  non_specimen_photo: {
+    lead: "Vision should learn only from photos of the specimen itself. Each card is one "
+      + "observation; photos a rule or the tagger flagged are marked with a suggested reason.",
+    steps: [
+      "Keep a photo that shows the specimen.",
+      "Exclude a photo that doesn't (a micrograph, habitat scene, spore print, chemical test, "
+        + "drawing…) and pick why.",
+      "Save the record (S), or turn on Auto-save. Press ? for the keyboard keys.",
+    ],
+    note: "Field slips: if the specimen on the slip is dried, exclude it as Dried specimen. "
+      + "If it is fresh, exclude it as Field slip: it then goes to Recovered labels, where the "
+      + "specimen is cropped away from the slip so Vision can still use it.",
+  },
+  recovered_label: {
+    lead: "Fresh-specimen photos someone excluded as Field slip. The outlined boxes are where "
+      + "the specimen detector found the specimen on the slip.",
+    steps: [
+      "Every crop starts as Include: leave it on when it shows the specimen, and it goes back "
+        + "into Vision.",
+      "Reject a crop that is not a fungus (a logo, a hand, a stick) or is still mostly label.",
+      "Click a photo to move or resize a crop that cuts the specimen off.",
+      "Save each tile, or Save page.",
+    ],
+    note: "A dried specimen on the slip gets no crop: change the photo's reason to Dried "
+      + "specimen. The photo itself stays excluded either way; only the crop is used.",
+  },
+  photo_view: {
+    lead: "Say what each photo shows. The suggested tags come from the photo-type tagger.",
+    steps: [
+      "Tap a tag to switch it on or off; + view adds one that is missing.",
+      "Save each photo, or Save page.",
+      "A photo that shows no specimen: press No specimen, and it goes to Photos that show no "
+        + "specimen.",
+    ],
+    note: "Nothing here leaves a photo out of Vision.",
+  },
 };
 
 /** The open count of a tab, for its label. */

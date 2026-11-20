@@ -8,7 +8,7 @@ import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, f
          queueParam, QUEUE_STORAGE_KEY, readLastQueue, writeLastQueue,
          recordLabel, refreshVerdict, REVEAL_BUTTON, REVEAL_CONFIRM, REVEAL_SEEN, revealNote, revealProblem,
          shownRule, showsFeedbackNav, stepLook, stepText, storedVerdict, valueBox, whenText,
-         FEEDBACK_TABS, openTab, PHOTO_TAB_TYPES, QUEUE_BLURBS, tabOpen, tabParam, tabSections } from "./feedback";
+         FEEDBACK_TABS, openTab, PHOTO_TAB_TYPES, QUEUE_BLURBS, REVIEW_STEPS, tabOpen, tabParam, tabSections } from "./feedback";
 
 const item = (over: Partial<FeedbackItem> = {}): FeedbackItem => ({
   id: 1, item_type: "photos_unlike_label", subject: "123", granularity: "record",
@@ -229,6 +229,16 @@ test("Photos is the first tab and holds exactly the three photo reviews, in a fi
   assert.deepEqual(groups[0].types.map((t) => t.type), ["non_specimen_photo", "recovered_label", "photo_view"]);
   assert.equal(groups[0].open, 20);
   for (const t of PHOTO_TAB_TYPES) assert.ok(QUEUE_BLURBS[t], `${t} has a plain-words line on its card`);
+});
+
+test("each photo review has basic steps, and field slips are sorted by dried or fresh specimen", () => {
+  for (const t of PHOTO_TAB_TYPES) {
+    assert.ok(REVIEW_STEPS[t]?.lead && REVIEW_STEPS[t].steps.length > 0, `${t} has steps`);
+  }
+  const slip = REVIEW_STEPS.non_specimen_photo.note ?? "";
+  assert.match(slip, /dried, exclude it as Dried specimen/);
+  assert.match(slip, /fresh, exclude it as Field slip: it then goes to Recovered labels/);
+  assert.match(REVIEW_STEPS.recovered_label.note ?? "", /dried specimen on the slip gets no crop/i);
 });
 
 test("Taxonomy holds every other queue by section, an unknown one under Other, and no photo review", () => {

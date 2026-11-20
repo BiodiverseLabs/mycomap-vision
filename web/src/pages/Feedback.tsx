@@ -8,7 +8,7 @@ import { ApiError, feedbackApi, feedbackChangesUrl, signInUrl, type FeedbackItem
          type FeedbackMe, type FeedbackOption, type FeedbackStatus, type FeedbackSummary, type FeedbackType,
          type LiveRecord, type NameContext, type OrgChip, type OrgPreview, type OrgRequest, type RefreshedRecord,
          type Top5, type WritingList } from "@/lib/api";
-import { FEEDBACK_TABS, openTab, QUEUE_BLURBS, tabOf, tabOpen, tabParam, tabSections, type FeedbackTab } from "@/lib/feedback";
+import { FEEDBACK_TABS, openTab, QUEUE_BLURBS, REVIEW_STEPS, tabOf, tabOpen, tabParam, tabSections, type FeedbackTab } from "@/lib/feedback";
 import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, feedbackAccess,
          historyOrgText, inatLinks, isNameItem, itemBadges, linkedItem, NO_PROPOSAL_TEXT, noProposal, openQueue,
          orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, alreadyDoneText, decideOptions,
@@ -167,6 +167,7 @@ function FeedbackBody() {
                    data-testid="feedback-queue-section">
                   {tabInfo.label}{selSection && tab !== "photos" ? ` · ${selSection.title}` : ""}
                 </p>
+                {REVIEW_STEPS[sel.type] && <ReviewSteps type={sel.type} title={sel.title} />}
                 {sel.type === PHOTO_REVIEW_TYPE
                   ? <PhotoReview key={sel.type} summary={sel} />
                   : sel.type === PHOTO_VIEW_TYPE
@@ -203,6 +204,24 @@ function AdminDownloads() {
   );
 }
 
+/** The basic steps at the top of a photo review, open by default, folded away with a click. */
+function ReviewSteps({ type, title }: { type: string; title: string }) {
+  const s = REVIEW_STEPS[type];
+  return (
+    <details open className="mb-4 rounded-lg border border-myco-green/30 bg-myco-green/5 p-4 dark:bg-myco-green/10"
+             data-testid={`feedback-steps-${type}`}>
+      <summary className={`cursor-pointer font-semibold ${INK}`}>How to review {title}</summary>
+      <p className={`mt-2 max-w-3xl text-sm ${BODY}`}>{s.lead}</p>
+      <ol className={`mt-2 max-w-3xl list-decimal space-y-1 pl-5 text-sm ${BODY}`}>
+        {s.steps.map((step) => <li key={step}>{step}</li>)}
+      </ol>
+      {s.note && (
+        <p className={`mt-3 max-w-3xl border-l-2 border-myco-green/60 pl-3 text-sm ${BODY}`}>{s.note}</p>
+      )}
+    </details>
+  );
+}
+
 /** Photos | Taxonomy, with each tab's open count once the summary is in. */
 function MainTabs({ tab, onPick, counts }: {
   tab: FeedbackTab; onPick: (t: FeedbackTab) => void; counts: FeedbackSummary[] | null;
@@ -231,7 +250,7 @@ function MainTabs({ tab, onPick, counts }: {
                   data-testid={`feedback-tab-${t.code}`}>
             {t.label}
             {counts && (
-              <span className="text-sm font-normal tabular-nums text-muted-foreground">
+              <span className="whitespace-nowrap text-sm font-normal tabular-nums text-muted-foreground">
                 {tabOpen(counts, t.code).toLocaleString("en-US")} open
               </span>
             )}
