@@ -10,7 +10,10 @@ items that changed are read again (Store.changed_since; reopens found by countin
 and put in their place, their names filled again. The list is then exactly what a fresh read
 would give: the same items, in the same order (by id), with the same fields. What cannot be
 traced item by item reads the queue whole again: a seed (new items, or a flag added to an open
-item), items added or removed any other way, a decision removed.
+item), items added or removed any other way, a decision removed, and any commit from another
+connection (a `mv feedback` command or sqlite3 by hand on the box: SQLite's data_version), whose
+writes need not be Store's decisions. The names from the manifest are filled again for the whole
+list every NAMES_TTL.
 
 Lists are kept for every project (an admin's view); a reviewer's projects, and a read-only
 viewer's, are cut from it with Store.visible, as Store.items_of(type, projects) cuts them.
