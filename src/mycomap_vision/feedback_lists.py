@@ -15,6 +15,17 @@ connection (a `mv feedback` command or sqlite3 by hand on the box: SQLite's data
 writes need not be Store's decisions. The names from the manifest are filled again for the whole
 list every NAMES_TTL.
 
+A whole read reads every kept photo queue in one pass over the table (Store.latest_ranges), the
+store's lock held one id range at a time, and keeps each item already in the old list whose row
+is unchanged (the same row hash; never one patched since): only new and changed rows are turned
+into items again. The first read after a restart builds every item.
+
+So no person waits for a whole read, Warmer reads the queues in the background on a thread of
+its own: at startup once the preload is done, after a seed, a reopen or a system close
+(Store.notify), and whenever a cheap look (Store.quick_mark, every POLL_SECONDS) says a list must
+be read whole (another process's write). Triggers that come while it runs make one more run.
+A request that comes during a whole read waits for it (the lists' lock) instead of starting its own.
+
 Lists are kept for every project (an admin's view); a reviewer's projects, and a read-only
 viewer's, are cut from it with Store.visible, as Store.items_of(type, projects) cuts them.
 A list handed out is never changed afterwards: a patch makes a new one.
@@ -22,6 +33,7 @@ A list handed out is never changed afterwards: a patch makes a new one.
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,6 +45,19 @@ from . import feedback as fb
 # store changed for an item: the manifest can change under a kept list (a release, a record's
 # new DNA name), which a full read every Save used to pick up.
 NAMES_TTL = 600.0
+# The queues people read whole (items_cached): every photo queue (the photo review, Photo views,
+# Recovered labels; the Summary's counts of each).
+WARM_TYPES = tuple(t.code for t in fb.TYPES.values() if t.granularity == "photo")
+# How often the warmer looks for a write it was not told of (another process's).
+POLL_SECONDS = 20.0
+# Seconds the warmer leaves between id ranges of a whole read, for the requests.
+WARM_PAUSE = 0.02
+# The warmer never starts a whole read sooner than this after the last one ended (a request
+# that needs one reads it itself), so a script writing from outside cannot keep it reading.
+WHOLE_GAP = POLL_SECONDS
+# After a failed run it waits POLL_SECONDS, doubled for each failure in a row, up to this.
+MAX_BACKOFF = 600.0
+DEFERRED = "deferred"
 
 
 @dataclass
@@ -43,8 +68,8 @@ class _List:
     pos: dict[int, int]                 # item id -> its index
     open: int                           # how many are open
     filled_at: float
-    full_reads: int = 0
-    patches: int = 0
+    sig: dict[int, int] = field(default_factory=dict)   # id -> its row's hash at the whole read
+    patched: frozenset = frozenset()    # ids patched since: their sig no longer says their item
 
 
 @dataclass
@@ -54,11 +79,19 @@ class ItemLists:
     fill: Callable[[str, list[dict]], list[dict]] | None = None
     names_ttl: float = NAMES_TTL
     clock: Callable[[], float] = time.monotonic
+    # The queues read together in a whole read (any other one asked for is added).
+    types: tuple = WARM_TYPES
+    read_step: int = 20_000             # ids per range of a whole read (Store.latest_ranges)
     lists: dict[str, _List] = field(default_factory=dict)
-    _locks: dict[str, threading.Lock] = field(default_factory=dict)
-    _guard: threading.Lock = field(default_factory=threading.Lock)
-    # For the tests and the log: how each list was last brought up to date.
+    # One lock for every list: a whole read covers them all, and a request that comes during
+    # it waits for it rather than reading too.
+    _lock: threading.RLock = field(default_factory=threading.RLock)
+    # For the tests and the log: how each list was last brought up to date, and counts.
     last: dict[str, str] = field(default_factory=dict)
+    full_reads: int = 0
+    rows_built: int = 0
+    rows_kept: int = 0
+    whole_ended_at: float | None = None     # self.clock() when the last whole read ended
 
     def of(self, item_type: str, projects=None) -> list[dict]:
         """The queue's items as Store.items_of(item_type, projects) would read them now, with
@@ -69,36 +102,94 @@ class ItemLists:
         return [i for i in items if fb.Store.visible(i, projects)]
 
     def current(self, item_type: str) -> _List:
-        with self._guard:
-            lock = self._locks.setdefault(item_type, threading.Lock())
-        with lock:
-            have = self.lists.get(item_type)
-            got = self._patched(item_type, have) if have is not None else None
+        with self._lock:
+            if item_type not in self.types:
+                self.types = self.types + (item_type,)
+            got = self._up_to_date(item_type)
             if got is None:
-                got = self._read_whole(item_type, have)
-            elif self.clock() - got.filled_at > self.names_ttl:
-                got = self._refilled(item_type, got)
-            self.lists[item_type] = got
+                self._read_whole(self.types)
+                got = self.lists[item_type]
             return got
 
-    # --- the two ways a list is brought up to date ----------------------------------------
+    def warm(self, pause: float = 0.0, whole: bool = True) -> dict[str, str]:
+        """Every kept queue brought up to date (Warmer): what a request would do, before one
+        asks. {queue: how}. With `whole` False a queue that needs a whole read is left for
+        later ("deferred"); the others are still patched."""
+        with self._lock:
+            need = [t for t in self.types if self._up_to_date(t) is None]
+            if need and whole:
+                self._read_whole(tuple(need), pause=pause)
+            elif need:
+                for t in need:
+                    self.last[t] = DEFERRED
+            return {t: self.last.get(t, "") for t in self.types}
+
+    def needs_whole(self) -> bool:
+        """A list missing, or a write since its read that only a whole read follows (cheap)."""
+        lists = dict(self.lists)
+        if any(t not in lists for t in self.types):
+            return True
+        q = self.store.quick_mark()
+        return any(_quick(lst.mark) != q for lst in lists.values())
+
+    # --- the ways a list is brought up to date --------------------------------------------
+    def _up_to_date(self, item_type: str) -> _List | None:
+        have = self.lists.get(item_type)
+        got = self._patched(item_type, have) if have is not None else None
+        if got is not None and self.clock() - got.filled_at > self.names_ttl:
+            got = self._refilled(item_type, got)
+        if got is not None:
+            self.lists[item_type] = got
+        return got
+
     def _filled(self, item_type: str, raw: list[dict]) -> list[dict]:
         return self.fill(item_type, raw) if self.fill is not None else raw
 
-    def _read_whole(self, item_type: str, old: _List | None) -> _List:
+    def _read_whole(self, types: tuple, pause: float = 0.0) -> None:
         mark = self.store.change_mark()       # before the read: anything later is found later
-        raw = self.store.items_of(item_type)
-        self.last[item_type] = "full"
-        return _List(mark, raw, self._filled(item_type, raw),
-                     {it["id"]: k for k, it in enumerate(raw)},
-                     sum(1 for it in raw if it["status"] == "open"), self.clock(),
-                     full_reads=(old.full_reads if old else 0) + 1,
-                     patches=old.patches if old else 0)
+        old = {t: self.lists.get(t) for t in types}
+        raw: dict[str, list] = {t: [] for t in types}
+        sig: dict[str, dict] = {t: {} for t in types}
+        memo: dict = {}
+        built = 0
+        # The cyclic collector paused while each range's items are built: with 186,000 items of
+        # six containers each it walked the growing heap again and again (13 s on the box against
+        # 6.7 s without it, 2026-11-20). Nothing built here is a cycle. It is on again for the
+        # pauses between ranges and the waits for the store's lock.
+        collecting = gc.isenabled()
+        for shape, rows in self.store.latest_ranges(types, step=self.read_step, pause=pause):
+            at = shape.cols.index("item_type")
+            gc.disable()
+            try:
+                for r in rows:
+                    t, i, h = r[at], r[0], hash(r)
+                    sig[t][i] = h
+                    was = old[t]
+                    if was is not None and was.sig.get(i) == h and i not in was.patched:
+                        raw[t].append(was.raw[was.pos[i]])     # row unchanged: so is its item
+                    else:
+                        raw[t].append(shape.item(r, memo))
+                        built += 1
+            finally:
+                if collecting:
+                    gc.enable()
+        done = {t: _List(mark, raw[t], self._filled(t, raw[t]),
+                         {it["id"]: k for k, it in enumerate(raw[t])},
+                         sum(1 for it in raw[t] if it["status"] == "open"), self.clock(), sig[t])
+                for t in types}
+        # Counted only once the lists are in place: a read that failed counts for nothing.
+        for t in types:
+            self.last[t] = "full"
+            self.lists[t] = done[t]
+        self.full_reads += 1
+        self.rows_built += built
+        self.rows_kept += sum(len(v) for v in raw.values()) - built
+        self.whole_ended_at = self.clock()
 
     def _refilled(self, item_type: str, have: _List) -> _List:
         self.last[item_type] = "names"
         return _List(have.mark, have.raw, self._filled(item_type, have.raw), have.pos,
-                     have.open, self.clock(), have.full_reads, have.patches)
+                     have.open, self.clock(), have.sig, have.patched)
 
     def _patched(self, item_type: str, have: _List) -> _List | None:
         """`have` brought up to date by reading again only what changed since its mark, or
@@ -129,6 +220,7 @@ class ItemLists:
         filled = self._filled(item_type, fresh)
         for it in filled:
             items[have.pos[it["id"]]] = it
+        touched = {it["id"] for it in fresh}
         if n_open != open_now:
             # A reopen (it writes no decision), or a decision made between the reads above:
             # every item whose status differs from the list's is read again.
@@ -142,10 +234,16 @@ class ItemLists:
             for it, f in zip(more, self._filled(item_type, more)):
                 k = have.pos[it["id"]]
                 raw[k], items[k] = it, f
+            touched.update(it["id"] for it in more)
             n_open = sum(1 for it in raw if it["status"] == "open")
         self.last[item_type] = "patch"
-        return _List(mark, raw, items, have.pos, n_open, have.filled_at, have.full_reads,
-                     have.patches + 1)
+        return _List(mark, raw, items, have.pos, n_open, have.filled_at, have.sig,
+                     have.patched | touched)
+
+
+def _quick(mark: dict) -> tuple:
+    """Store.quick_mark's fields out of a change_mark."""
+    return (*mark["items"], *mark["seeds"], mark["data_version"])
 
 
 def _begin(store: fb.Store) -> bool:
@@ -160,3 +258,122 @@ def _begin(store: fb.Store) -> bool:
 def _end(store: fb.Store, began: bool) -> None:
     if began:
         store.conn.execute("commit")
+
+
+class Warmer:
+    """Keeps ItemLists up to date in the background so no person waits for a whole read. One
+    daemon thread at the server's own priority (a lowered one held the store's lock, the
+    manifest's and the GIL at the back of the queue: priority inversion), one run at a time,
+    leaving WARM_PAUSE between a whole read's id ranges. `trigger` (Store.notify's events) asks
+    for a run; triggers that arrive during a run make one more run after it. Between triggers
+    it looks every `poll` seconds whether a list must be read whole (ItemLists.needs_whole).
+    `after` blocks until the server is ready for it (the preload done); the first run is the
+    startup warm-up.
+
+    Never a whole read sooner than `min_gap` after the last one ended: a run that would need
+    one sooner patches what it can and waits out the gap (outside writes during a read would
+    otherwise start the next read at once, and keep it reading). After a failed run it waits
+    `poll`, doubled for each failure in a row up to `max_backoff`, before anything else: the
+    lists it failed to read look missing, which would start it again at once. `sleep` waits
+    those out (tests pass their own); triggers do not cut them short."""
+
+    def __init__(self, lists: ItemLists, *, after: Callable[[], object] | None = None,
+                 poll: float = POLL_SECONDS, pause: float = WARM_PAUSE, note=print,
+                 min_gap: float | None = None, max_backoff: float = MAX_BACKOFF,
+                 sleep: Callable[[float], object] | None = None):
+        self.lists, self.after, self.poll, self.pause = lists, after, poll, pause
+        self.note, self.max_backoff = note, max_backoff
+        self.min_gap = WHOLE_GAP if min_gap is None else min_gap
+        self._wake = threading.Event()
+        self._halt = threading.Event()
+        self.sleep = sleep or self._halt.wait
+        self._cond = threading.Condition()
+        self._pending: list[str] = ["startup"]
+        self._running = False
+        self.failures = 0                   # failed runs in a row
+        self.runs: list[dict] = []          # the last few runs, for the tests and health
+        self.thread: threading.Thread | None = None
+
+    def start(self) -> "Warmer":
+        self.thread = threading.Thread(target=self._loop, name="feedback lists warm-up",
+                                       daemon=True)
+        self.thread.start()
+        return self
+
+    def trigger(self, reason: str) -> None:
+        with self._cond:
+            self._pending.append(reason)
+        self._wake.set()
+
+    def idle(self, timeout: float | None = None) -> bool:
+        """Wait until nothing is running or waiting to run (the tests). False on timeout."""
+        with self._cond:
+            return self._cond.wait_for(lambda: not self._running and not self._pending,
+                                       timeout)
+
+    def health(self) -> dict:
+        with self._cond:
+            last = self.runs[-1] if self.runs else None
+        return {"running": self._running, "runs": len(self.runs), "failures": self.failures,
+                "last": last}
+
+    def _gap(self) -> float:
+        """Seconds until a whole read may start (0: now)."""
+        ended = self.lists.whole_ended_at
+        return 0.0 if ended is None else max(0.0, self.min_gap - (self.lists.clock() - ended))
+
+    def _loop(self) -> None:
+        if self.after is not None:
+            try:
+                self.after()
+            except Exception as e:  # noqa: BLE001 - warm up anyway
+                self.note(f"[feedback lists] waiting for the preload: {type(e).__name__}: {e}")
+        while True:
+            with self._cond:
+                reasons, self._pending = self._pending, []
+                self._running = bool(reasons)
+            if not reasons:
+                try:
+                    if self.lists.needs_whole():
+                        reasons = ["a write from another process"]
+                        with self._cond:
+                            self._running = True
+                except Exception as e:  # noqa: BLE001 - look again next time
+                    self.note(f"[feedback lists] look: {type(e).__name__}: {e}")
+            if not reasons:
+                self._wake.wait(self.poll)
+                self._wake.clear()
+                continue
+            gap = self._gap()
+            run = self._run(reasons, whole=gap <= 0)
+            if run["error"]:
+                self.failures += 1
+                self.sleep(min(self.poll * 2 ** (self.failures - 1), self.max_backoff))
+            else:
+                self.failures = 0
+                if run["deferred"]:          # keep the reasons; read whole once the gap is out
+                    self.sleep(gap)
+            # then round again at once: a trigger during the run makes one more run
+
+    def _run(self, reasons: list[str], whole: bool = True) -> dict:
+        start, full = time.monotonic(), self.lists.full_reads
+        try:
+            hows = self.lists.warm(pause=self.pause, whole=whole)
+            error = None
+        except Exception as e:  # noqa: BLE001 - the next request reads it itself
+            hows, error = {}, f"{type(e).__name__}: {e}"
+        took = round(time.monotonic() - start, 2)
+        run = {"reasons": sorted(set(reasons)), "hows": hows, "seconds": took,
+               "whole": self.lists.full_reads > full, "error": error,
+               "deferred": DEFERRED in hows.values()}
+        if run["whole"] or error:
+            self.note(f"[feedback lists] warm-up ({', '.join(run['reasons'])}): "
+                      f"{error or ', '.join(f'{t} {h}' for t, h in hows.items())} in {took} s "
+                      f"({self.lists.rows_built} rows built, {self.lists.rows_kept} kept so far)")
+        with self._cond:
+            self.runs = (self.runs + [run])[-20:]
+            if run["deferred"]:              # still to do: the reasons wait out the gap
+                self._pending = reasons + self._pending
+            self._running = bool(self._pending)
+            self._cond.notify_all()
+        return run
