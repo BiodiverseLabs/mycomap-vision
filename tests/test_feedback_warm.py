@@ -30,6 +30,7 @@ def warmer_for(store, names=None, **kw):
     lists = fl.ItemLists(store, fill_with(names or Names()))
     kw.setdefault("poll", 3600.0)               # no look-ups by the clock: only triggers
     kw.setdefault("pause", 0.0)
+    kw.setdefault("min_gap", 0.0)                # no wait between whole reads unless asked
     warmer = fl.Warmer(lists, note=lambda s: None, **kw)
     store.listeners.append(warmer.trigger)
     return lists, warmer
@@ -206,6 +207,7 @@ def test_every_write_the_lists_cannot_patch_tells_the_listeners(tmp_path):
 # --- through the app ----------------------------------------------------------------------
 def test_with_feedback_warm_the_first_tab_after_a_restart_takes_the_kept_list(conn, tmp_path,
                                                                              monkeypatch):
+    monkeypatch.setattr(fl, "WHOLE_GAP", 0.0)             # the test seeds right after startup
     monkeypatch.setattr(test_feedback_api, "create_app",
                         functools.partial(create_app, feedback_warm=True))
     c, fstore = site_with_photos(conn, tmp_path)
@@ -253,3 +255,115 @@ def test_the_collector_paused_for_a_whole_read_is_always_turned_back_on(tmp_path
     assert gc.isenabled()
     s.latest_ranges = real
     check(lists, s, Names(), "full")                     # the next request reads it whole
+
+
+# --- the review of 2026-11-20: the background thread must never stall the live site --------
+def test_a_failed_warm_up_waits_longer_each_time_and_counts_for_nothing(tmp_path):
+    s = make_queue(tmp_path)
+    names = Names()
+    tries, slept, third, resume = [], [], threading.Event(), threading.Event()
+
+    def broken(*a, **kw):
+        tries.append(1)
+        raise OSError("database is locked")
+        yield                                                       # a generator, like the real one
+    real = s.latest_ranges
+    s.latest_ranges = broken
+
+    def sleep(seconds):
+        slept.append(seconds)
+        if len(slept) == 3:
+            third.set()
+            assert resume.wait(WAIT)
+    lists, warmer = warmer_for(s, names, poll=1.0, max_backoff=3.0, sleep=sleep)
+    warmer.start()
+    assert third.wait(WAIT), "a failed run was retried without waiting"
+    assert slept == [1.0, 2.0, 3.0] and len(tries) == 3             # one try per wait, capped
+    assert lists.full_reads == 0 and lists.rows_built == 0 and not lists.lists
+    assert warmer.health()["failures"] == 3
+    s.latest_ranges = real                                          # the store answers again
+    resume.set()
+    for _ in range(WAIT * 20):
+        if lists.full_reads == 1:
+            break
+        time.sleep(0.05)
+    assert warmer.idle(WAIT) and lists.full_reads == 1 and warmer.failures == 0
+    check(lists, s, names, "same")
+
+
+def test_outside_writes_during_whole_reads_never_start_the_next_one_before_the_gap(tmp_path):
+    s = make_queue(tmp_path)
+    names = Names()
+    now = [1000.0]
+    other = fb.Store(s.path)
+    starts, slept = [], []
+    real = s.latest_ranges
+
+    def ranges(*a, **kw):
+        starts.append(now[0])
+        if len(starts) < 4:                    # a script writing while each read runs
+            other.decide(open_ids(other, 1)[0], "keep_photo", STEVE)
+        yield from real(*a, **kw)
+    s.latest_ranges = ranges
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+    lists = fl.ItemLists(s, fill_with(names), clock=lambda: now[0])
+    warmer = fl.Warmer(lists, note=lambda m: None, poll=0.01, pause=0.0, min_gap=20.0,
+                       sleep=sleep)
+    warmer.start()
+    for _ in range(WAIT * 20):
+        if len(starts) >= 4 and warmer.idle(0.05) and not lists.needs_whole():
+            break
+        time.sleep(0.05)
+    assert len(starts) == 4
+    assert all(b - a >= 20.0 for a, b in zip(starts, starts[1:])), starts
+    assert slept and all(x == 20.0 for x in slept)
+    check(lists, s, names, "same")
+    # A request never waits for the gap: it reads whole itself.
+    other.conn.execute("update items set rule = rule || '; R6 uv probe p=0.5' where id = ?",
+                       (open_ids(s, 1)[0],))
+    other.conn.commit()
+    assert lists.warm(whole=False)[pr.ITEM_TYPE] == fl.DEFERRED
+    check(lists, s, names, "full")
+
+
+def test_the_warm_up_thread_keeps_the_servers_priority(tmp_path, monkeypatch):
+    import os
+    lowered = []
+    monkeypatch.setattr(os, "setpriority", lambda *a: lowered.append(a), raising=False)
+    monkeypatch.setattr(os, "PRIO_PROCESS", 0, raising=False)
+    s = make_queue(tmp_path)
+    lists, warmer = warmer_for(s)
+    warmer.start()
+    assert warmer.idle(WAIT) and lists.full_reads == 1
+    assert lowered == []         # a lowered thread held the store's lock behind everything else
+
+
+def test_the_collector_runs_between_ranges_and_while_waiting_for_the_store(tmp_path):
+    import gc
+    s = make_queue(tmp_path)
+    lists = fl.ItemLists(s, fill_with(Names()), read_step=40)
+    seen = []
+    real = s.latest_ranges
+
+    def ranges(*a, **kw):
+        for got in real(*a, **kw):
+            seen.append(gc.isenabled())        # before handing the range over...
+            yield got
+            seen.append(gc.isenabled())        # ...and once its items are built
+    s.latest_ranges = ranges
+    lists.of(pr.ITEM_TYPE)
+    assert len(seen) > 6 and all(seen)
+
+
+def test_names_are_asked_of_the_manifest_in_short_queries(tmp_path):
+    asked = []
+
+    def query(sql, params):
+        asked.append(len(params))
+        return []
+    photos = pr.ReviewPhotos(query, lambda: None, read=object())
+    photos.names_of([str(k) for k in range(1234)])
+    assert asked == [500, 500, 234]            # its lock is taken and let go once per query

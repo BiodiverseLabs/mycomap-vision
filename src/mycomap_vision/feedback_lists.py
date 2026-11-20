@@ -20,8 +20,8 @@ store's lock held one id range at a time, and keeps each item already in the old
 is unchanged (the same row hash; never one patched since): only new and changed rows are turned
 into items again. The first read after a restart builds every item.
 
-So no person waits for a whole read, Warmer reads the queues in the background on a low-priority
-thread of its own: at startup once the preload is done, after a seed, a reopen or a system close
+So no person waits for a whole read, Warmer reads the queues in the background on a thread of
+its own: at startup once the preload is done, after a seed, a reopen or a system close
 (Store.notify), and whenever a cheap look (Store.quick_mark, every POLL_SECONDS) says a list must
 be read whole (another process's write). Triggers that come while it runs make one more run.
 A request that comes during a whole read waits for it (the lists' lock) instead of starting its own.
@@ -34,7 +34,6 @@ A list handed out is never changed afterwards: a patch makes a new one.
 from __future__ import annotations
 
 import gc
-import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -53,6 +52,12 @@ WARM_TYPES = tuple(t.code for t in fb.TYPES.values() if t.granularity == "photo"
 POLL_SECONDS = 20.0
 # Seconds the warmer leaves between id ranges of a whole read, for the requests.
 WARM_PAUSE = 0.02
+# The warmer never starts a whole read sooner than this after the last one ended (a request
+# that needs one reads it itself), so a script writing from outside cannot keep it reading.
+WHOLE_GAP = POLL_SECONDS
+# After a failed run it waits POLL_SECONDS, doubled for each failure in a row, up to this.
+MAX_BACKOFF = 600.0
+DEFERRED = "deferred"
 
 
 @dataclass
@@ -86,6 +91,7 @@ class ItemLists:
     full_reads: int = 0
     rows_built: int = 0
     rows_kept: int = 0
+    whole_ended_at: float | None = None     # self.clock() when the last whole read ended
 
     def of(self, item_type: str, projects=None) -> list[dict]:
         """The queue's items as Store.items_of(item_type, projects) would read them now, with
@@ -105,13 +111,17 @@ class ItemLists:
                 got = self.lists[item_type]
             return got
 
-    def warm(self, pause: float = 0.0) -> dict[str, str]:
+    def warm(self, pause: float = 0.0, whole: bool = True) -> dict[str, str]:
         """Every kept queue brought up to date (Warmer): what a request would do, before one
-        asks. {queue: how}."""
+        asks. {queue: how}. With `whole` False a queue that needs a whole read is left for
+        later ("deferred"); the others are still patched."""
         with self._lock:
             need = [t for t in self.types if self._up_to_date(t) is None]
-            if need:
+            if need and whole:
                 self._read_whole(tuple(need), pause=pause)
+            elif need:
+                for t in need:
+                    self.last[t] = DEFERRED
             return {t: self.last.get(t, "") for t in self.types}
 
     def needs_whole(self) -> bool:
@@ -142,14 +152,15 @@ class ItemLists:
         sig: dict[str, dict] = {t: {} for t in types}
         memo: dict = {}
         built = 0
-        # The cyclic collector paused while the items are built: with 186,000 items of six
-        # containers each it walked the growing heap again and again (13 s on the box against
-        # 6.7 s without it, 2026-11-20). Nothing built here is a cycle.
+        # The cyclic collector paused while each range's items are built: with 186,000 items of
+        # six containers each it walked the growing heap again and again (13 s on the box against
+        # 6.7 s without it, 2026-11-20). Nothing built here is a cycle. It is on again for the
+        # pauses between ranges and the waits for the store's lock.
         collecting = gc.isenabled()
-        gc.disable()
-        try:
-            for shape, rows in self.store.latest_ranges(types, step=self.read_step, pause=pause):
-                at = shape.cols.index("item_type")
+        for shape, rows in self.store.latest_ranges(types, step=self.read_step, pause=pause):
+            at = shape.cols.index("item_type")
+            gc.disable()
+            try:
                 for r in rows:
                     t, i, h = r[at], r[0], hash(r)
                     sig[t][i] = h
@@ -159,19 +170,21 @@ class ItemLists:
                     else:
                         raw[t].append(shape.item(r, memo))
                         built += 1
-        finally:
-            if collecting:
-                gc.enable()
+            finally:
+                if collecting:
+                    gc.enable()
+        done = {t: _List(mark, raw[t], self._filled(t, raw[t]),
+                         {it["id"]: k for k, it in enumerate(raw[t])},
+                         sum(1 for it in raw[t] if it["status"] == "open"), self.clock(), sig[t])
+                for t in types}
+        # Counted only once the lists are in place: a read that failed counts for nothing.
+        for t in types:
+            self.last[t] = "full"
+            self.lists[t] = done[t]
         self.full_reads += 1
         self.rows_built += built
         self.rows_kept += sum(len(v) for v in raw.values()) - built
-        for t in types:
-            items = raw[t]
-            self.last[t] = "full"
-            self.lists[t] = _List(mark, items, self._filled(t, items),
-                                  {it["id"]: k for k, it in enumerate(items)},
-                                  sum(1 for it in items if it["status"] == "open"), self.clock(),
-                                  sig[t])
+        self.whole_ended_at = self.clock()
 
     def _refilled(self, item_type: str, have: _List) -> _List:
         self.last[item_type] = "names"
@@ -249,21 +262,35 @@ def _end(store: fb.Store, began: bool) -> None:
 
 class Warmer:
     """Keeps ItemLists up to date in the background so no person waits for a whole read. One
-    daemon thread, at the lowest CPU priority it can set for itself (Linux), one run at a time.
-    `trigger` (Store.notify's events) asks for a run; triggers that arrive during a run make
-    one more run after it. Between triggers it looks every `poll` seconds whether a list must
-    be read whole (ItemLists.needs_whole). `after` blocks until the server is ready for it (the
-    preload done); the first run is the startup warm-up."""
+    daemon thread at the server's own priority (a lowered one held the store's lock, the
+    manifest's and the GIL at the back of the queue: priority inversion), one run at a time,
+    leaving WARM_PAUSE between a whole read's id ranges. `trigger` (Store.notify's events) asks
+    for a run; triggers that arrive during a run make one more run after it. Between triggers
+    it looks every `poll` seconds whether a list must be read whole (ItemLists.needs_whole).
+    `after` blocks until the server is ready for it (the preload done); the first run is the
+    startup warm-up.
+
+    Never a whole read sooner than `min_gap` after the last one ended: a run that would need
+    one sooner patches what it can and waits out the gap (outside writes during a read would
+    otherwise start the next read at once, and keep it reading). After a failed run it waits
+    `poll`, doubled for each failure in a row up to `max_backoff`, before anything else: the
+    lists it failed to read look missing, which would start it again at once. `sleep` waits
+    those out (tests pass their own); triggers do not cut them short."""
 
     def __init__(self, lists: ItemLists, *, after: Callable[[], object] | None = None,
                  poll: float = POLL_SECONDS, pause: float = WARM_PAUSE, note=print,
-                 nice: int = 19):
+                 min_gap: float | None = None, max_backoff: float = MAX_BACKOFF,
+                 sleep: Callable[[float], object] | None = None):
         self.lists, self.after, self.poll, self.pause = lists, after, poll, pause
-        self.note, self.nice = note, nice
+        self.note, self.max_backoff = note, max_backoff
+        self.min_gap = WHOLE_GAP if min_gap is None else min_gap
         self._wake = threading.Event()
+        self._halt = threading.Event()
+        self.sleep = sleep or self._halt.wait
         self._cond = threading.Condition()
         self._pending: list[str] = ["startup"]
         self._running = False
+        self.failures = 0                   # failed runs in a row
         self.runs: list[dict] = []          # the last few runs, for the tests and health
         self.thread: threading.Thread | None = None
 
@@ -287,10 +314,15 @@ class Warmer:
     def health(self) -> dict:
         with self._cond:
             last = self.runs[-1] if self.runs else None
-        return {"running": self._running, "runs": len(self.runs), "last": last}
+        return {"running": self._running, "runs": len(self.runs), "failures": self.failures,
+                "last": last}
+
+    def _gap(self) -> float:
+        """Seconds until a whole read may start (0: now)."""
+        ended = self.lists.whole_ended_at
+        return 0.0 if ended is None else max(0.0, self.min_gap - (self.lists.clock() - ended))
 
     def _loop(self) -> None:
-        _lower_priority(self.nice)
         if self.after is not None:
             try:
                 self.after()
@@ -308,38 +340,40 @@ class Warmer:
                             self._running = True
                 except Exception as e:  # noqa: BLE001 - look again next time
                     self.note(f"[feedback lists] look: {type(e).__name__}: {e}")
-            if reasons:
-                self._run(reasons)
-                continue                # a trigger during the run: run again before waiting
-            self._wake.wait(self.poll)
-            self._wake.clear()
+            if not reasons:
+                self._wake.wait(self.poll)
+                self._wake.clear()
+                continue
+            gap = self._gap()
+            run = self._run(reasons, whole=gap <= 0)
+            if run["error"]:
+                self.failures += 1
+                self.sleep(min(self.poll * 2 ** (self.failures - 1), self.max_backoff))
+            else:
+                self.failures = 0
+                if run["deferred"]:          # keep the reasons; read whole once the gap is out
+                    self.sleep(gap)
+            # then round again at once: a trigger during the run makes one more run
 
-    def _run(self, reasons: list[str]) -> None:
+    def _run(self, reasons: list[str], whole: bool = True) -> dict:
         start, full = time.monotonic(), self.lists.full_reads
         try:
-            hows = self.lists.warm(pause=self.pause)
+            hows = self.lists.warm(pause=self.pause, whole=whole)
             error = None
         except Exception as e:  # noqa: BLE001 - the next request reads it itself
             hows, error = {}, f"{type(e).__name__}: {e}"
         took = round(time.monotonic() - start, 2)
         run = {"reasons": sorted(set(reasons)), "hows": hows, "seconds": took,
-               "whole": self.lists.full_reads > full, "error": error}
+               "whole": self.lists.full_reads > full, "error": error,
+               "deferred": DEFERRED in hows.values()}
         if run["whole"] or error:
             self.note(f"[feedback lists] warm-up ({', '.join(run['reasons'])}): "
                       f"{error or ', '.join(f'{t} {h}' for t, h in hows.items())} in {took} s "
                       f"({self.lists.rows_built} rows built, {self.lists.rows_kept} kept so far)")
         with self._cond:
             self.runs = (self.runs + [run])[-20:]
+            if run["deferred"]:              # still to do: the reasons wait out the gap
+                self._pending = reasons + self._pending
             self._running = bool(self._pending)
             self._cond.notify_all()
-
-
-def _lower_priority(nice: int) -> None:
-    """This thread alone at `nice` (Linux: a thread is its own task); nothing elsewhere."""
-    setp = getattr(os, "setpriority", None)
-    if setp is None or not hasattr(threading, "get_native_id"):
-        return
-    try:
-        setp(os.PRIO_PROCESS, threading.get_native_id(), nice)
-    except OSError:
-        pass
+        return run
