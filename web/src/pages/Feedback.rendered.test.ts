@@ -1,0 +1,60 @@
+// Human Feedback, rendered to markup from its loaded queries: the Photos | Taxonomy tabs a viewer
+// meets first (Steve, 2026-11-20). Strings only: no DOM.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { FeedbackMe, FeedbackSummary } from "../lib/api";
+import { FeedbackPage } from "./Feedback";
+
+const fq = (type: string, section: string, open: number, title: string): FeedbackSummary => ({
+  type, title, about: "", granularity: "record", model_flagged: false, section, blind: false, open, decided: 3,
+});
+const SUMMARY: FeedbackSummary[] = [
+  fq("non_specimen_photo", "cleanup", 100, "Photos that show no specimen"),
+  fq("name_retired", "cleanup", 5, "Names retired on MycoMap's synonym list"),
+  fq("recovered_label", "cleanup", 20, "Recovered labels"),
+  fq("photo_view", "views", 3, "Photo views"),
+  fq("photos_unlike_label", "validation", 7, "Photos unlike their label"),
+];
+const ME: FeedbackMe = { user: { id: "1", name: "R" }, read_only: false, admin: false, projects: [] };
+
+function render(search = ""): string {
+  (globalThis as { location?: unknown }).location = { search };
+  const client = new QueryClient();
+  client.setQueryData(["feedback", "me"], ME);
+  client.setQueryData(["feedback", "summary"], SUMMARY);
+  client.setQueryData(["feedback", "catalogue"], []);
+  return renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(FeedbackPage)));
+}
+
+const selectedTab = (html: string) => /aria-selected="true"[^>]*data-testid="feedback-tab-(\w+)"/.exec(html)?.[1];
+
+test("the page opens on the Photos tab, with only the three photo reviews and what each asks for", () => {
+  const html = render();
+  assert.equal(selectedTab(html), "photos");
+  assert.ok(html.indexOf('data-testid="feedback-tab-photos"') < html.indexOf('data-testid="feedback-tab-taxonomy"'),
+            "Photos is the first tab");
+  const cards = [...html.matchAll(/data-testid="feedback-card-(\w+)"/g)].map((m) => m[1]);
+  assert.deepEqual(cards, ["non_specimen_photo", "recovered_label", "photo_view"]);
+  assert.match(html, /Tag what each photo shows/);
+  assert.match(html, /Pick one of the reviews above\./);
+  assert.match(html, /123 open/, "the Photos tab counts its open photos");
+  assert.match(html, /12 open/, "the Taxonomy tab counts its open items");
+});
+
+test("a ?tab=taxonomy link opens Taxonomy with the name and validation queues by section, no photo review", () => {
+  const html = render("?tab=taxonomy");
+  assert.equal(selectedTab(html), "taxonomy");
+  const cards = [...html.matchAll(/data-testid="feedback-card-(\w+)"/g)].map((m) => m[1]);
+  assert.deepEqual(cards, ["name_retired", "photos_unlike_label"]);
+  assert.match(html, /Data cleanup/);
+  assert.match(html, /Data validation/);
+});
+
+test("a ?queue= link to a name queue opens it on the Taxonomy tab", () => {
+  const html = render("?queue=name_retired");
+  assert.equal(selectedTab(html), "taxonomy");
+  assert.match(html, /data-testid="feedback-queue-section">Taxonomy · Data cleanup</);
+});
