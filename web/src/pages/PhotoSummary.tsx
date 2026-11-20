@@ -7,10 +7,10 @@ import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type Flag
 import { pageText, recordLabel } from "@/lib/feedback";
 import { QUICK_REASONS, quickReasons, tileImage, type Choice } from "@/lib/photoReview";
 import { AUTOSAVE_MS, autoDue, batchBody, beginSend, decidedText, discardChanges, freshPage, gridColumns, gridKey,
-         initialMarks, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, pendingDecisions, quickMark,
+         initialMarks, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, pagePosition, pendingDecisions, quickMark,
          reasonLabel, retry, SEEN_MS, SEEN_RATIO, sendDone, sendFailed, setDecision, setReason, STATUS_TEXT,
          SUMMARY_PAGE_SIZE, tileDecision, tileStatus, toggle, visitLine, visitTotals, type GridAction, type Mark,
-         reclassify, type Marks, type SaveState, type SaveStates, type TileSize } from "@/lib/photoSummary";
+         reclassify, type Marks, type PagePosition, type SaveState, type SaveStates, type TileSize } from "@/lib/photoSummary";
 import type { PhotoBatchDecision } from "@/lib/api";
 import { SaveBar } from "@/components/ReviewSave";
 
@@ -49,10 +49,14 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
   const qc = useQueryClient();
   const autosaveRef = useRef(autosave);
   autosaveRef.current = autosave;
-  const [offset, setOffset] = useState(0);
-  // Bumped on every page change, so each page is read afresh (saved tiles drop out of Open)
-  // while the page shown never reloads under the reviewer.
-  const [gen, setGen] = useState(0);
+  // The page's offset, and a generation bumped on every page change, so each page is read afresh
+  // (saved tiles drop out of Open) while the page shown never reloads under the reviewer. A filter
+  // change resets them in the same render (lib/photoSummary.ts pagePosition), so the new tab is
+  // asked for once, not once before the reset and again after it.
+  const filterKey = JSON.stringify([tab, status, sort, q, band, outcome, pageSize]);
+  const [posState, setPos] = useState<PagePosition>(() => ({ filters: filterKey, offset: 0, gen: 0 }));
+  const pos = pagePosition(posState, filterKey);
+  const { offset, gen } = pos;
   // The reviewer's marks and the saving of each tile this visit, by item id. Kept in refs too:
   // the autosave reads the latest without waiting for a render.
   const editsRef = useRef<Marks>({});
@@ -201,24 +205,19 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
   const seen = useCallback((id: number) => updateStates((s) => markSeen(s, id)), [updateStates]);
   const loaded = useCallback((id: number) => updateStates((s) => markLoaded(s, id)), [updateStates]);
 
-  // A filter change (or a new page size) starts at the first page; the page shown is saved first.
-  const filters = useRef({ tab, status, sort, q, band, outcome, pageSize });
+  // A filter change (or a new page size) starts at the first page (already shown so by
+  // pagePosition); the page shown before is saved first, and the new position kept.
   useEffect(() => {
-    const f = filters.current;
-    if (f.tab === tab && f.status === status && f.sort === sort && f.q === q && f.band === band
-        && f.outcome === outcome && f.pageSize === pageSize) return;
-    filters.current = { tab, status, sort, q, band, outcome, pageSize };
+    if (posState.filters === pos.filters) return;
     flushRef.current();
-    setOffset(0);
-    setGen((g) => g + 1);
-  }, [tab, status, sort, q, band, outcome, pageSize]);
+    setPos(pos);
+  }, [posState, pos]);
 
   const go = (next: number) => {
     if (!canLeave()) return;
     if (!autosaveRef.current) discardAll();
     flushRef.current();
-    setOffset(Math.max(0, next));
-    setGen((g) => g + 1);
+    setPos({ filters: filterKey, offset: Math.max(0, next), gen: gen + 1 });
     qc.invalidateQueries({ queryKey: ["feedback", "summary"] });
   };
 

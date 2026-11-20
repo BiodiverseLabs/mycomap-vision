@@ -301,6 +301,19 @@ export function discardChanges(edits: Marks, states: SaveStates, ids: Iterable<n
   return { edits: e, states: s };
 }
 
+/** Where the Summary is: its filters (as one key), the page's offset, and a generation bumped on
+ *  every page change so each page is read afresh. */
+export type PagePosition = { filters: string; offset: number; gen: number };
+
+/** The position to show for these filters. A filter change starts at the first page with the
+ *  next generation, worked out in the same render: when the reset waited for an effect, the
+ *  render before it asked for the new tab once with the old position and once more after the
+ *  reset (two identical GETs for tab=drawing in the nginx log, 2026-11-20). Unchanged filters:
+ *  the same position, so committing it asks nothing again. */
+export function pagePosition(pos: PagePosition, filters: string): PagePosition {
+  return pos.filters === filters ? pos : { filters, offset: 0, gen: pos.gen + 1 };
+}
+
 /** A page loaded afresh: its discarded tiles count again once they are shown again. */
 export function freshPage(states: SaveStates, ids: Iterable<number>): SaveStates {
   let s = states;
