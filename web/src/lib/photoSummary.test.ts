@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { FlaggedTile } from "./api";
 import { autoDue, batchBody, beginSend, decidedText, discardChanges, dueDecisions, freshPage, gridColumns, gridKey,
-         initialMarks, licenceText, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, NOTE_FLIPPED,
+         initialMarks, licenceText, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, NOTE_FLIPPED, pagePosition,
          NOTE_SAVED, NOTE_SHOWN, overlay, pendingDecisions, photoOfText, readTileSize, readView, retry, sameState,
          sendDone, sendFailed, setDecision, setReason, STATUS_TEXT, SUMMARY_KEY_HELP, TILE_SIZE_STORAGE_KEY,
          tileDecision, tileStatus, toggle, VIEW_STORAGE_KEY, visitLine, visitTotals, writeTileSize, writeView,
@@ -435,4 +435,14 @@ test("keys 1–5 are the quick reasons in the viewer only", () => {
   assert.equal(gridKey({ key: "1" }, { ...lb, lightbox: false }), null);
   assert.equal(gridKey({ key: "1" }, { ...lb, typing: true }), null);
   assert.ok(SUMMARY_KEY_HELP.some(([k]) => k.startsWith("1–5")));
+});
+
+test("a new tab is asked for once: its first page and next generation come in the same render", () => {
+  const start = { filters: "drawing", offset: 300, gen: 4 };
+  assert.equal(pagePosition(start, "drawing"), start);              // same filters: nothing new to ask
+  const next = pagePosition(start, "uv");
+  assert.deepEqual(next, { filters: "uv", offset: 0, gen: 5 });
+  // Kept by the page's effect, the position is the one the render already asked with.
+  assert.equal(pagePosition(next, "uv"), next);
+  assert.deepEqual(pagePosition(next, "drawing"), { filters: "drawing", offset: 0, gen: 6 });
 });

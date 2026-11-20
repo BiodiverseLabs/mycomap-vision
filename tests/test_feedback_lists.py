@@ -162,6 +162,20 @@ def test_items_that_share_a_project_list_each_get_their_own(tmp_path):
     assert s.items_of(pr.ITEM_TYPE)[0]["projects"] is not s.items_of(pr.ITEM_TYPE)[0]["projects"]
 
 
+@pytest.mark.parametrize("value", [
+    [], [""], ["https://www.inaturalist.org/observations/1"], ["a", "b"], ["a, b"], ["Ä"],
+    ["say \"hi\""], ["back\\slash"], ["tab\there"], ["new\nline"], [1, "x"], [["nested"]],
+    [{"a": 1}], ["été \U0001f344"],
+    ["P1", "P2 with, commas", "Ünïcode"]])
+def test_list_columns_read_exactly_as_json_reads_them(value):
+    for text in (json.dumps(value), json.dumps(value, ensure_ascii=False)):
+        assert fb._json_list(text) == json.loads(text)
+        memo = {}
+        first, again = fb._json_list(text, memo), fb._json_list(text, memo)
+        assert first == again == json.loads(text) and (first is not again or first == [])
+    assert fb._json_list("") == fb._json_list(None) == []
+
+
 def test_items_by_id_reads_those_items_as_items_of_does(tmp_path):
     s = make_queue(tmp_path)
     every = {i["id"]: i for i in s.items_of(pr.ITEM_TYPE)}
@@ -209,9 +223,15 @@ def test_after_each_save_the_kept_list_is_a_fresh_read_and_only_a_seed_reads_it_
     s.mark_applied_by(s.get(page[4])["decisions"][-1]["id"], "mycomap.org")
     check(lists, s, names, "patch")
 
-    other = fb.Store(s.path)                                    # another process's decision
-    other.decide(open_ids(s, 1)[0], "exclude_photo", STEVE, value="slip")
+    other = fb.Store(s.path)                    # another process (`mv feedback`, sqlite3 by
+    other.decide(open_ids(s, 1)[0], "exclude_photo", STEVE, value="slip")   # hand): read whole
+    check(lists, s, names, "full")
+    s.decide(open_ids(s, 1)[0], "keep_photo", STEVE)
     check(lists, s, names, "patch")
+    other.conn.execute("update items set current = 'Fixed by hand' where id = ?",
+                       (decided_ids(s, 1)[0],))                 # not a decision at all
+    other.conn.commit()
+    check(lists, s, names, "full")
 
     pv_item = lists.of(pv.ITEM_TYPE)[0]["id"]                   # another queue's batch
     pv.batch_decide(s, [{"item_id": pv_item, "views": ["gills"]}], STEVE)
@@ -360,3 +380,37 @@ def test_a_change_that_cannot_be_traced_reads_the_queue_whole(tmp_path, change):
         s.conn.execute("delete from decisions where id = (select min(id) from decisions)")
     s.conn.commit()
     check(lists, s, names, "full")
+
+
+def old_summary(store: fb.Store, projects=None) -> list[dict]:
+    """Store.summary as it was before 2026-11-20: every row read, for an admin too."""
+    rows = store._visible("select item_type, status, projects, current, proposed from items",
+                          (), projects)
+    counts, lists = {}, {}
+    for r in rows:
+        c = counts.setdefault(r["item_type"], {"open": 0, "decided": 0})
+        status = "open" if r["status"] == "open" else "decided"
+        c[status] += 1
+        if r["item_type"] == "name_writing_split":
+            kind = fb.writing_split.classify(r["current"], r["proposed"]).kind
+            lists.setdefault(kind, {"open": 0, "decided": 0})[status] += 1
+    out = [{"type": t.code, "title": t.title, "about": t.about, "granularity": t.granularity,
+            "model_flagged": t.model_flagged, "section": fb.SECTION_OF[t.code],
+            "blind": t.code in fb.BLIND_TYPES, **counts.get(t.code, {"open": 0, "decided": 0})}
+           for t in fb.TYPES.values()]
+    for t in out:
+        if t["type"] == "name_writing_split":
+            t["lists"] = {k: lists.get(k, {"open": 0, "decided": 0}) for k in fb.writing_split.LISTS}
+    return out
+
+
+def test_the_queue_counts_are_what_reading_every_item_gives(tmp_path):
+    s = make_queue(tmp_path)
+    s.seed([{"item_type": "name_writing_split", "subject": "Russula sp. 'x'", "rule": "R1",
+             "current": "Russula sp. 'x' (3); Russula sp. x (1); Russula sp. X (1)",
+             "proposed": "Russula sp. 'x'", "projects": ["P1"]}], "more names")
+    split = s.items_of("name_writing_split")[0]["id"]
+    s.decide(split, "different", STEVE)
+    s.reopen(decided_ids(s, 1)[0])
+    for p in SCOPES:
+        assert s.summary(p) == old_summary(s, p), p

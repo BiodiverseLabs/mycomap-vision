@@ -511,14 +511,24 @@ class Store:
     def summary(self, projects: set[str] | None = None) -> list[dict]:
         """Per item type: its title, description and open / decided counts (within
         `projects` when given: a leader or contributor sees their projects' items)."""
-        rows = self._visible("select item_type, status, projects, current, proposed from items",
-                             (), projects)
         counts: dict[str, dict] = {}
         lists: dict[str, dict] = {}
+        if projects is None:
+            # Every item: counted by SQLite from the (item_type, status) index, and only the
+            # split queue's rows read (all 200,000 rows took 1.7 s on the box, 2026-11-20).
+            for t, st, n in self.conn.execute("select item_type, status, count(*) from items "
+                                              "group by item_type, status"):
+                c = counts.setdefault(t, {"open": 0, "decided": 0})
+                c["open" if st == "open" else "decided"] += n
+            rows = self.conn.execute("select item_type, status, current, proposed from items "
+                                     "where item_type = 'name_writing_split'").fetchall()
+        else:
+            rows = self._visible("select item_type, status, projects, current, proposed "
+                                 "from items", (), projects)
         for r in rows:
-            c = counts.setdefault(r["item_type"], {"open": 0, "decided": 0})
             status = "open" if r["status"] == "open" else "decided"
-            c[status] += 1
+            if projects is not None:
+                counts.setdefault(r["item_type"], {"open": 0, "decided": 0})[status] += 1
             if r["item_type"] == "name_writing_split":     # its two lists (writing_split.py)
                 kind = writing_split.classify(r["current"], r["proposed"]).kind
                 lists.setdefault(kind, {"open": 0, "decided": 0})[status] += 1
@@ -594,30 +604,39 @@ class Store:
                 cur.close()
         icols, dcols = cols[:n], cols[n:]
         memo: dict = {}
-        return [self._finish(dict(zip(icols, r[:n])), memo)
-                | {"last_decision": dict(zip(dcols, r[n:])) if r[n] is not None else None}
-                for r in rows]
+        out = []
+        for r in rows:
+            d = self._finish(dict(zip(icols, r[:n])), memo)
+            d["last_decision"] = dict(zip(dcols, r[n:])) if r[n] is not None else None
+            out.append(d)
+        return out
 
     # --- what changed (feedback_lists.ItemLists keeps the queues' item lists across saves) ---
     def change_mark(self) -> dict:
         """What the item lists depend on, as counts and high-water marks: an item list read
         after this mark is current up to it, and what changed since is found from it
-        (changed_since)."""
+        (changed_since). "data_version" changes when another connection (another process: a
+        `mv feedback` command, or sqlite3 by hand on the box) commits to the file: its writes
+        are not all Store's own, so they are never traced item by item."""
         r = self.conn.execute(
             "select (select count(*) from items), (select max(id) from items), "
             "(select count(*) from decisions), (select max(id) from decisions), "
             "(select max(applied_at) from decisions), "
             "(select coalesce(sum(applied), 0) from decisions), "
-            "(select count(*) from seeds), (select total(at) from seeds)").fetchone()
+            "(select count(*) from seeds), (select total(at) from seeds), "
+            "(select data_version from pragma_data_version())").fetchone()
         return {"items": (r[0], r[1]), "decisions": r[2], "decision_max": r[3] or 0,
-                "applied_at": r[4], "applied": r[5], "seeds": (r[6], r[7])}
+                "applied_at": r[4], "applied": r[5], "seeds": (r[6], r[7]),
+                "data_version": r[8]}
 
     def changed_since(self, old: dict, new: dict) -> set[int] | None:
         """The ids of the items whose latest decision may differ between two marks (a decision
         added, or one applied since), or None when the change is not one of those (items
-        added or removed, a seed, a decision removed): the list must be read again whole. A
-        reopen changes no mark here: the caller counts open items (open_count)."""
-        if new["items"] != old["items"] or new["seeds"] != old["seeds"]:
+        added or removed, a seed, a decision removed, anything another process wrote): the
+        list must be read again whole. A reopen changes no mark here: the caller counts open
+        items (open_count)."""
+        if (new["items"] != old["items"] or new["seeds"] != old["seeds"]
+                or new["data_version"] != old["data_version"]):
             return None
         added = [r[0] for r in self.conn.execute(
             "select item_id from decisions where id > ?", (old["decision_max"],))]
@@ -827,10 +846,15 @@ class Store:
 
 
 def _json_list(text, memo: dict | None = None):
-    """json.loads(text or "[]"), with "[]" read without the parser and, given a `memo`, a list
-    of strings parsed once per distinct text (each caller gets its own copy)."""
+    """json.loads(text or "[]"), with "[]" and a one-string list such as a photo item's link
+    (["https://…"]: nothing escaped in it) read without the parser and, given a `memo`, a
+    list of strings parsed once per distinct text (each caller gets its own copy)."""
     if not text or text == "[]":
         return []
+    if len(text) >= 4 and text[:2] == '["' and text[-2:] == '"]':
+        inner = text[2:-2]
+        if '"' not in inner and "\\" not in inner and inner.isprintable():
+            return [inner]
     if memo is None:
         return json.loads(text)
     hit = memo.get(text)
