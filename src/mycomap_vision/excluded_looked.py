@@ -96,7 +96,7 @@ CATEGORY_LABELS = {
     "chemical": "Chemical spot tests", "phylo_tree": "Phylogenetic trees / BLAST",
     "drawing": "Drawings",
     "species_description": "Species descriptions", "multiple_species": "Multiple species",
-    "food": "Cooking and food", "culture": "Cultures", "uninformative": "Uninformative photos",
+    "food": "Cooking and food", "culture": "Cultures and mycelium", "uninformative": "Uninformative photos",
     "blurry": "Blurry or badly exposed", "other": "Other"}
 assert set(CATEGORY_LABELS) == set(pr.REASON_CODES)
 RANK_DEPTH = 10

@@ -22,7 +22,7 @@ export const CATEGORIES: { code: string; label: string }[] = [
   { code: "species_description", label: "Species descriptions" },
   { code: "multiple_species", label: "Multiple species" },
   { code: "food", label: "Cooking and food" },
-  { code: "culture", label: "Cultures" },
+  { code: "culture", label: "Cultures and mycelium" },
   { code: "uninformative", label: "Uninformative photos" },
 ];
 

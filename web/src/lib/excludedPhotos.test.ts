@@ -46,7 +46,7 @@ test("the page sits in the Research section for everyone, before For researchers
 test("every category is a reason a person can give, labelled for the page", () => {
   assert.equal(CATEGORIES.length, 18);
   assert.equal(categoryLabel("uninformative"), "Uninformative photos");
-  assert.equal(categoryLabel("culture"), "Cultures");
+  assert.equal(categoryLabel("culture"), "Cultures and mycelium");
   assert.equal(categoryLabel("food"), "Cooking and food");
   assert.equal(categoryLabel("slip"), "Field slips and labels");
   assert.equal(categoryLabel("multiple_species"), "Multiple species");
