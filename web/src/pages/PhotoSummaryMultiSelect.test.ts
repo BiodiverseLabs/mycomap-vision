@@ -57,7 +57,7 @@ test("the bar counts the selection, offers Include and every reason, and Apply w
     count, reasons: REASONS, note: null, onApply: () => {}, onAll: () => {}, onClear: () => {} }));
   const none = bar(0);
   assert.match(none, /Click photos to select them; Shift-click selects a run\./);
-  assert.match(none, /<option value="keep">Include \(shows the specimen\)<\/option>/);
+  assert.match(none, /<option value="keep">Include \(no tag\)<\/option>/);
   assert.match(none, /<option value="exclude:slip">Exclude: Field slip or label<\/option>/);
   assert.match(none, /<option value="exclude:culture">Exclude: Culture or mycelium<\/option>/);
   assert.match(none, /<button[^>]*disabled=""[^>]*data-testid="photo-summary-bulk-apply"/);

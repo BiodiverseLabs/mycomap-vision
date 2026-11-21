@@ -283,13 +283,25 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
   const sending = tiles.some((t) => states[t.item_id]?.sending);
   useEffect(() => { onPending(pending); }, [pending, onPending]);
   useEffect(() => () => onPending(0), [onPending]);
-  const bar = (sticky: boolean) => (
-    <SaveBar count={pending} busy={sending && pending === 0} onSave={savePage} onDiscard={discardAll} sticky={sticky}
-             note={sticky ? "Photos count once you have seen them; each photo also has its own Save." : undefined} />
+  const bar = (top: boolean) => (
+    <SaveBar count={pending} busy={sending && pending === 0} onSave={savePage} onDiscard={discardAll}
+             note={top ? "Photos count once you have seen them; each photo also has its own Save." : undefined} />
   );
+  const topSave = !autosave && status === "open";
+  const topBulk = multi && !!fresh && tiles.length > 0;
   return (
     <div className="min-w-0 space-y-3">
-      {!autosave && status === "open" && bar(true)}
+      {/* The Save page bar and Multiple select's bar stay in view together, one above the other. */}
+      {(topSave || topBulk) && (
+        <div className="sticky top-16 z-30 space-y-2 bg-background pb-1">
+          {topSave && bar(true)}
+          {topBulk && fresh && (
+            <BulkBar count={selected.size} reasons={fresh.reasons} note={bulkNote} onApply={applyBulk}
+                     onAll={() => { setSelected(new Set(order)); setBulkNote(null); }}
+                     onClear={() => { setSelected(new Set()); anchorRef.current = null; }} />
+          )}
+        </div>
+      )}
       <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-sm" aria-live="polite">
         <span className={`font-medium ${INK}`} data-testid="photo-summary-visit">{visitLine(totals)}</span>
         {failed > 0 && (
@@ -321,11 +333,6 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
         <p className="text-sm text-muted-foreground">
           {q ? "No record or name matches that search." : status === "open" ? "Nothing open here." : "Nothing decided here yet."}
         </p>
-      )}
-      {multi && fresh && tiles.length > 0 && (
-        <BulkBar count={selected.size} reasons={fresh.reasons} note={bulkNote} onApply={applyBulk}
-                 onAll={() => { setSelected(new Set(order)); setBulkNote(null); }}
-                 onClear={() => { setSelected(new Set()); anchorRef.current = null; }} />
       )}
       {fresh && tiles.length > 0 && (
         <Grid key={`${tab}|${status}|${sort}|${q}|${band}|${outcome}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
@@ -574,7 +581,9 @@ export function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manu
                  className="h-full w-full object-cover" />
           </button>
         ) : (
-          <div className="h-full w-full cursor-pointer" onClick={open}>
+          <div className="h-full w-full cursor-pointer" onClick={open}
+               {...(selecting ? { role: "button", "aria-pressed": isSelected,
+                                  "aria-label": `${isSelected ? "Unselect" : "Select"} ${recordLabel(tile.record_key)}` } : {})}>
             <Placeholder photo={shownPhoto(tile)} record={tile} failed={failed} />
           </div>
         )}
@@ -628,7 +637,7 @@ export function BulkBar({ count, reasons, note, onApply, onAll, onClear }: {
 }) {
   const [value, setValue] = useState("");
   return (
-    <div className="sticky top-16 z-30 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-sky-400 bg-sky-50 px-3 py-2 text-sm shadow-sm dark:border-sky-700 dark:bg-sky-950/60"
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-sky-400 bg-sky-50 px-3 py-2 text-sm dark:border-sky-700 dark:bg-sky-950/60"
          role="region" aria-label="Selected photos" data-testid="photo-summary-bulk-bar">
       <span className="font-medium text-sky-900 dark:text-sky-100" aria-live="polite">{selectedLine(count)}</span>
       <label className="flex min-w-0 items-center gap-2">

@@ -564,9 +564,10 @@ export function selectClick(selected: ReadonlySet<number>, order: readonly numbe
 /** What the bar sets the selected photos to. */
 export type BulkChoice = { decision: "keep" } | { decision: "exclude"; reason: string };
 
-/** The bar's choices: Include, then Exclude for each reason the server lists, in its order. */
+/** The bar's choices: Include (no tag: the photo shows the specimen; Steve, 2026-11-21), then
+ *  Exclude for each reason the server lists, in its order. */
 export function bulkOptions(reasons: { code: string; label: string }[]): { value: string; label: string }[] {
-  return [{ value: "keep", label: "Include (shows the specimen)" },
+  return [{ value: "keep", label: "Include (no tag)" },
           ...reasons.map((r) => ({ value: `exclude:${r.code}`, label: `Exclude: ${r.label}` }))];
 }
 

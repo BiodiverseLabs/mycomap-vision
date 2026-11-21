@@ -468,7 +468,7 @@ test("a click selects or unselects one photo; Shift-click adds the run from the 
 
 test("the bar offers Include and Exclude for each reason the server lists, and reads only those back", () => {
   assert.deepEqual(bulkOptions(REASONS), [
-    { value: "keep", label: "Include (shows the specimen)" },
+    { value: "keep", label: "Include (no tag)" },
     { value: "exclude:slip", label: "Exclude: Field slip or label" },
     { value: "exclude:micrograph", label: "Exclude: Microscopy" },
   ]);
