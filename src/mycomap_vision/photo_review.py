@@ -82,6 +82,9 @@ REASONS: tuple[tuple[str, str], ...] = (
     ("multiple_species", "Multiple species"),
     # Steve, 2026-11-20: mushrooms being cooked or served as food. A reason only, as above.
     ("food", "Cooking or food"),
+    # Steve, 2026-11-20: a fungal culture (a dish, plate or tube), not the fruiting body in the
+    # field. A reason only, as above.
+    ("culture", "Culture"),
     # Steve, 2026-10-21: a reason even while no flag finds these reliably.
     ("blurry", "Blurry or badly exposed"),
     ("other", "Other"),

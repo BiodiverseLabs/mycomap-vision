@@ -347,10 +347,25 @@ def test_a_photo_of_cooking_or_food_is_left_out_as_itself(conn, tmp_path):
     assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {"inat:1000": "food"}
 
 
+def test_a_photo_of_a_culture_is_left_out_as_culture(conn, tmp_path):
+    """Steve, 2026-11-20: a fungal culture in a dish or tube is a reason of its own, before Other."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
+    assert offered["culture"] == "Culture"
+    assert list(offered)[-1] == "other"
+    r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+        {"photo_key": "inat:1000", "decision": "exclude", "reason": "culture"}]})
+    assert r.status_code == 200
+    assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {
+        "inat:1000": "culture"}
+
+
 def test_multiple_species_and_food_are_categories_on_excluded_photos():
     from mycomap_vision import excluded_looked as el
     assert el.CATEGORY_LABELS["multiple_species"] == "Multiple species"
     assert el.CATEGORY_LABELS["food"] == "Cooking and food"
+    assert el.CATEGORY_LABELS["culture"] == "Cultures"
 
 # --- photos the box holds no readable copy of come from their source ----------------------------
 
