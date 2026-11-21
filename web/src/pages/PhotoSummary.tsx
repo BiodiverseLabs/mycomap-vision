@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ChevronLeft, ChevronRight, Lock, RotateCcw, X } from "lucide-react";
+import { Check, CheckCircle2, ChevronLeft, ChevronRight, Circle, Lock, RotateCcw, X } from "lucide-react";
 import { BODY, BTN, Ext, FIELD, INK, Placeholder, QuickReasons } from "@/components/ReviewPhotos";
 import { ApiError, feedbackApi, type FeedbackStatus, type FlaggedPage, type FlaggedTile, type PhotoBandFilter,
          type PhotoOutcome, type PhotoOutcomeFilter, type PhotoReviewSort, type PhotoReviewTab,
@@ -12,7 +12,8 @@ import { AUTOSAVE_MS, autoDue, batchBody, beginSend, decidedText, discardChanges
          initialMarks, markLoaded, markSeen, markTouched, mergeMarks, moveFocus, nextOffset, overlay, pagePosition, pendingDecisions, quickMark,
          reasonLabel, retry, SEEN_MS, SEEN_RATIO, sendDone, sendFailed, setDecision, setReason, STATUS_TEXT,
          SUMMARY_PAGE_SIZE, tileDecision, tileStatus, toggle, visitLine, visitTotals, type GridAction, type Mark,
-         reclassify, type Marks, type PagePosition, type SaveState, type SaveStates, type TileSize } from "@/lib/photoSummary";
+         reclassify, type Marks, type PagePosition, type SaveState, type SaveStates, type TileSize,
+         bulkDecisions, bulkMark, bulkOptions, parseBulk, selectClick, selectedLine } from "@/lib/photoSummary";
 import type { PhotoBatchDecision } from "@/lib/api";
 import { SaveBar } from "@/components/ReviewSave";
 
@@ -28,11 +29,16 @@ import { SaveBar } from "@/components/ReviewSave";
 //
 // Photos follow the record view's rule (lib/photoReview.ts tileImage): a hidden photo is a
 // placeholder with the record's link; a private one only Vision's own same-origin copy.
+//
+// Multiple select (Steve, 2026-11-21; rules in lib/photoSummary.ts): with the box ticked, a click
+// on a photo selects it (Shift-click a run) instead of opening it, and the bar sets them all to
+// Include or to Exclude for one reason, saved at once. The selection is the page's: a new page,
+// tab or filter starts it empty.
 
 type Reasons = FlaggedPage["reasons"];
 
 export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "all", show = "all", onShows, help, onHelp, tileSize, pageSize = SUMMARY_PAGE_SIZE, onTotal,
-                              onOutcomes, autosave, onPending, canLeave, discard }: {
+                              onOutcomes, autosave, onPending, canLeave, discard, multi = false }: {
   tab: PhotoReviewTab; status: FeedbackStatus; sort: PhotoReviewSort; q: string; band?: PhotoBandFilter;
   /** The Outcome filter (lib/photoReview.ts OUTCOME_FILTERS). */
   outcome?: PhotoOutcomeFilter; help: boolean;
@@ -50,6 +56,8 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
   canLeave: () => boolean;
   /** Bumped by the page when the reviewer chose to leave changes unsaved: drop them. */
   discard: number;
+  /** Multiple select: a click selects a photo; the bar sets the selected ones at once. */
+  multi?: boolean;
 }) {
   const qc = useQueryClient();
   const autosaveRef = useRef(autosave);
@@ -166,6 +174,45 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
   const tiles = fresh?.tiles ?? [];
   const marks = useMemo(() => mergeMarks(initialMarks(tiles), edits), [tiles, edits]);
 
+  // Multiple select: the selected tiles of this page, and the last one clicked (for Shift).
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
+  const anchorRef = useRef<number | null>(null);
+  const [bulkNote, setBulkNote] = useState<string | null>(null);
+  const pageKey = `${filterKey}|${offset}|${gen}|${multi}`;
+  const [selectedFor, setSelectedFor] = useState(pageKey);
+  if (selectedFor !== pageKey) {          // a new page, tab or filter, or the box unticked
+    setSelectedFor(pageKey);
+    setSelected(new Set());
+    setBulkNote(null);
+    anchorRef.current = null;
+  }
+  const order = useMemo(() => tiles.map((t) => t.item_id), [tiles]);
+  const select = useCallback((id: number, shift: boolean) => {
+    setSelected((s) => selectClick(s, order, id, anchorRef.current, shift));
+    anchorRef.current = id;
+    setBulkNote(null);
+  }, [order]);
+  // Apply: every selected tile set to the choice and saved now (Apply is the reviewer's Save).
+  const applyBulk = (value: string) => {
+    const c = parseBulk(value, fresh?.reasons ?? []);
+    if (!c) return;
+    const ids = order.filter((id) => selected.has(id));
+    const now = mergeMarks(initialMarks(tiles.filter((t) => selected.has(t.item_id))), editsRef.current);
+    const next = bulkMark(now, ids, c);
+    const due = bulkDecisions(next, statesRef.current, ids);
+    updateEdits((m) => {
+      const out = { ...m };
+      for (const id of ids) if (next[id] !== now[id]) out[id] = next[id];
+      return out;
+    });
+    updateStates((s) => due.reduce((acc, d) => markTouched(acc, d.item_id), s));
+    sendRef.current(due);
+    setBulkNote(due.length ? `Saving ${due.length.toLocaleString("en-US")} photo${due.length === 1 ? "" : "s"}; each tile shows when it is saved.`
+                           : "Nothing to change: the selected photos are already that way.");
+    setSelected(new Set());
+    anchorRef.current = null;
+  };
+
   // `viewer`: the change was made full screen, where a decided photo can be reclassified.
   const flip = useCallback((id: number, choice?: Choice, viewer = false) => {
     const t = tilesRef.current.get(id);
@@ -275,10 +322,16 @@ export function PhotoSummary({ tab, status, sort, q, band = "all", outcome = "al
           {q ? "No record or name matches that search." : status === "open" ? "Nothing open here." : "Nothing decided here yet."}
         </p>
       )}
+      {multi && fresh && tiles.length > 0 && (
+        <BulkBar count={selected.size} reasons={fresh.reasons} note={bulkNote} onApply={applyBulk}
+                 onAll={() => { setSelected(new Set(order)); setBulkNote(null); }}
+                 onClear={() => { setSelected(new Set()); anchorRef.current = null; }} />
+      )}
       {fresh && tiles.length > 0 && (
         <Grid key={`${tab}|${status}|${sort}|${q}|${band}|${outcome}|${offset}|${gen}`} tiles={tiles} reasons={fresh.reasons}
               marks={marks} states={states} tileSize={tileSize} help={help} onHelp={onHelp} manual={!autosave}
-              onFlip={flip} onReason={pickReason} onQuick={quick} onRetry={retryTile} onSave={saveTile} onSeen={seen} onLoaded={loaded} />
+              onFlip={flip} onReason={pickReason} onQuick={quick} onRetry={retryTile} onSave={saveTile} onSeen={seen} onLoaded={loaded}
+              selecting={multi} selected={selected} onSelect={select} />
       )}
       {!autosave && status === "open" && fresh && tiles.length > 0 && bar(false)}
       {total > 0 && fresh && (
@@ -303,10 +356,12 @@ function columnsOf(el: HTMLElement | null): number {
 }
 
 function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, onFlip, onReason, onQuick, onRetry, onSave,
-                onSeen, onLoaded }: {
+                onSeen, onLoaded, selecting = false, selected, onSelect }: {
   tiles: FlaggedTile[]; reasons: Reasons; marks: Marks; states: SaveStates; tileSize: TileSize; help: boolean;
   onHelp: () => void; manual: boolean; onFlip: (id: number, c?: Choice, viewer?: boolean) => void;
   onReason: (id: number, r: string, viewer?: boolean) => void; onQuick: (id: number, r: string, viewer?: boolean) => void; onRetry: (id: number) => void; onSave: (id: number) => void; onSeen: (id: number) => void; onLoaded: (id: number) => void;
+  /** Multiple select: a click on a photo selects it instead of opening it. */
+  selecting?: boolean; selected?: ReadonlySet<number>; onSelect?: (id: number, shift: boolean) => void;
 }) {
   const [focus, setFocus] = useState(0);
   const [lightbox, setLightbox] = useState<number | null>(null);
@@ -411,6 +466,8 @@ function Grid({ tiles, reasons, marks, states, tileSize, help, onHelp, manual, o
           <SummaryTile key={t.item_id} tile={t} reasons={reasons} mark={marks[t.item_id]} state={states[t.item_id]}
                        focused={focus === i} tileRef={(el) => { tileRefs.current[i] = el; }} manual={manual}
                        onFocus={() => setFocus(i)} onOpen={() => { setFocus(i); setLightbox(i); }}
+                       selecting={selecting} isSelected={!!selected?.has(t.item_id)}
+                       onSelect={(shift) => { setFocus(i); onSelect?.(t.item_id, shift); }}
                        onFlip={() => onFlip(t.item_id)} onRetry={() => onRetry(t.item_id)}
                        onSave={() => onSave(t.item_id)} onLoaded={() => onLoaded(t.item_id)} />
         ))}
@@ -474,12 +531,21 @@ function StatusMark({ mark, state, onRetry, dark = false, manual = false, onSave
   return <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${tone}`}>{STATUS_TEXT[s]}</span>;
 }
 
-function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onFocus, onOpen, onFlip, onRetry, onSave,
-                       onLoaded }: {
+export function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onFocus, onOpen, onFlip, onRetry, onSave,
+                       onLoaded, selecting = false, isSelected = false, onSelect }: {
   tile: FlaggedTile; reasons: Reasons; mark: Mark | undefined; state: SaveState | undefined; focused: boolean;
   tileRef: (el: HTMLLIElement | null) => void; manual: boolean; onFocus: () => void; onOpen: () => void;
   onFlip: () => void; onRetry: () => void; onSave: () => void; onLoaded: () => void;
+  /** Multiple select is on, and whether this tile is selected. */
+  selecting?: boolean; isSelected?: boolean; onSelect?: (shift: boolean) => void;
 }) {
+  // Multiple select: a click on the photo selects it; the viewer is not opened.
+  const open = (e: { shiftKey: boolean; preventDefault: () => void }) => {
+    if (selecting && onSelect) {
+      e.preventDefault();
+      onSelect(e.shiftKey);
+    } else onOpen();
+  };
   // A thumb that fails to load becomes the placeholder (and never saves by itself).
   const [failed, setFailed] = useState(false);
   const src = failed ? null : tileImage(tile, "thumb");
@@ -495,16 +561,20 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onF
         className="min-w-0 space-y-0.5 outline-none" data-testid={`photo-summary-tile-${tile.item_id}`}>
       <div className={`relative aspect-square w-full overflow-hidden rounded-md ${keep ? "border-4" : "border-2"} ${outline} ${
         unsaved ? "border-dashed" : ""} ${
-        focused ? "ring-2 ring-myco-green ring-offset-2 dark:ring-offset-background" : ""}`}>
+        isSelected ? "ring-4 ring-sky-500 ring-offset-2 dark:ring-offset-background"
+          : focused ? "ring-2 ring-myco-green ring-offset-2 dark:ring-offset-background" : ""}`}
+           data-selected={selecting ? String(isSelected) : undefined}>
         {src ? (
-          <button type="button" onClick={onOpen} className="block h-full w-full" tabIndex={-1}
-                  aria-label={`Open ${recordLabel(tile.record_key)} full screen`}>
+          <button type="button" onClick={open} className="block h-full w-full" tabIndex={-1}
+                  aria-pressed={selecting ? isSelected : undefined}
+                  aria-label={selecting ? `${isSelected ? "Unselect" : "Select"} ${recordLabel(tile.record_key)}`
+                                        : `Open ${recordLabel(tile.record_key)} full screen`}>
             <img src={src} alt={`${tile.label || "Photo"}, ${recordLabel(tile.record_key)}`} loading="lazy" decoding="async"
                  referrerPolicy="no-referrer" draggable={false} onLoad={onLoaded} onError={() => setFailed(true)}
                  className="h-full w-full object-cover" />
           </button>
         ) : (
-          <div className="h-full w-full cursor-pointer" onClick={onOpen}>
+          <div className="h-full w-full cursor-pointer" onClick={open}>
             <Placeholder photo={shownPhoto(tile)} record={tile} failed={failed} />
           </div>
         )}
@@ -514,8 +584,15 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onF
             {reason ?? "pick a reason"}
           </span>
         )}
+        {isSelected && <span className="pointer-events-none absolute inset-0 bg-sky-500/20" aria-hidden />}
+        {selecting && (
+          <span className={`pointer-events-none absolute right-1 top-1 rounded-full text-white ${
+                  isSelected ? "bg-sky-500" : "bg-black/40"}`} data-testid="photo-summary-select-mark">
+            {isSelected ? <CheckCircle2 className="h-5 w-5" aria-hidden /> : <Circle className="h-5 w-5" aria-hidden />}
+          </span>
+        )}
         {tile.shown === "private" && (
-          <span className="pointer-events-none absolute right-1 top-1 rounded bg-[#4a3728]/85 p-0.5 text-white"
+          <span className={`pointer-events-none absolute ${selecting ? "right-7" : "right-1"} top-1 rounded bg-[#4a3728]/85 p-0.5 text-white`}
                 title="reviewers only · not public">
             <Lock className="h-3 w-3" aria-label="reviewers only, not public" />
           </span>
@@ -541,6 +618,37 @@ function SummaryTile({ tile, reasons, mark, state, focused, tileRef, manual, onF
       {tile.audit && <p className="truncate text-xs text-muted-foreground" title={auditTitle(tile.audit)}
                         data-testid="photo-audit-score">{auditLabel(tile.audit)}</p>}
     </li>
+  );
+}
+
+/** Multiple select's bar: how many are selected, what to set them to, Apply, Select all, Clear. */
+export function BulkBar({ count, reasons, note, onApply, onAll, onClear }: {
+  count: number; reasons: Reasons; note: string | null; onApply: (value: string) => void;
+  onAll: () => void; onClear: () => void;
+}) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="sticky top-16 z-30 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-sky-400 bg-sky-50 px-3 py-2 text-sm shadow-sm dark:border-sky-700 dark:bg-sky-950/60"
+         role="region" aria-label="Selected photos" data-testid="photo-summary-bulk-bar">
+      <span className="font-medium text-sky-900 dark:text-sky-100" aria-live="polite">{selectedLine(count)}</span>
+      <label className="flex min-w-0 items-center gap-2">
+        <span className="text-muted-foreground">Set to</span>
+        <select className={FIELD} value={value} onChange={(e) => setValue(e.target.value)}
+                data-testid="photo-summary-bulk-choice">
+          <option value="">Pick…</option>
+          {bulkOptions(reasons).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </label>
+      <button type="button" className={BTN} disabled={count === 0 || !value}
+              onClick={() => onApply(value)} data-testid="photo-summary-bulk-apply">
+        Apply to {count.toLocaleString("en-US")}
+      </button>
+      <span className="ml-auto flex flex-wrap gap-2">
+        <button type="button" className={BTN} onClick={onAll}>Select all on page</button>
+        <button type="button" className={BTN} onClick={onClear} disabled={count === 0}>Clear</button>
+      </span>
+      {note && <span className="basis-full text-xs text-muted-foreground">{note}</span>}
+    </div>
   );
 }
 

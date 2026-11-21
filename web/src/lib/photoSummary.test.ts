@@ -6,7 +6,8 @@ import { autoDue, batchBody, beginSend, decidedText, discardChanges, dueDecision
          NOTE_SAVED, NOTE_SHOWN, overlay, pendingDecisions, photoOfText, readTileSize, readView, retry, sameState,
          sendDone, sendFailed, setDecision, setReason, STATUS_TEXT, SUMMARY_KEY_HELP, TILE_SIZE_STORAGE_KEY,
          tileDecision, tileStatus, toggle, VIEW_STORAGE_KEY, visitLine, visitTotals, writeTileSize, writeView,
-         quickMark, type GridKeyState, type Marks, type SaveStates } from "./photoSummary";
+         quickMark, type GridKeyState, type Marks, type SaveStates,
+         bulkDecisions, bulkMark, bulkOptions, NOTE_BULK, parseBulk, selectClick, selectedLine } from "./photoSummary";
 import { QUICK_REASONS, quickReasons } from "./photoReview";
 
 const micro = { tab: "micrograph", kind: "micrograph probe", p: 0.9, strength: 0.9 };
@@ -445,4 +446,87 @@ test("a new tab is asked for once: its first page and next generation come in th
   // Kept by the page's effect, the position is the one the render already asked with.
   assert.equal(pagePosition(next, "uv"), next);
   assert.deepEqual(pagePosition(next, "drawing"), { filters: "drawing", offset: 0, gen: 6 });
+});
+
+// --- multiple select (Steve, 2026-11-21) ----------------------------------------------------------
+
+const REASONS = [{ code: "slip", label: "Field slip or label" }, { code: "micrograph", label: "Microscopy" }];
+
+test("a click selects or unselects one photo; Shift-click adds the run from the last one clicked", () => {
+  const order = [1, 2, 3, 4, 5];
+  let sel = selectClick(new Set(), order, 2, null);
+  assert.deepEqual([...sel], [2]);
+  sel = selectClick(sel, order, 2, 2);
+  assert.deepEqual([...sel], [], "a second click takes it away");
+  sel = selectClick(new Set([2]), order, 4, 2, true);
+  assert.deepEqual([...sel].sort(), [2, 3, 4]);
+  sel = selectClick(new Set([4]), order, 1, 4, true);
+  assert.deepEqual([...sel].sort(), [1, 2, 3, 4], "upwards too");
+  assert.deepEqual([...selectClick(new Set(), order, 3, null, true)], [3], "Shift with nothing clicked yet: just that one");
+  assert.deepEqual([...selectClick(new Set(), order, 3, 99, true)], [3], "an anchor no longer on the page: just that one");
+});
+
+test("the bar offers Include and Exclude for each reason the server lists, and reads only those back", () => {
+  assert.deepEqual(bulkOptions(REASONS), [
+    { value: "keep", label: "Include (shows the specimen)" },
+    { value: "exclude:slip", label: "Exclude: Field slip or label" },
+    { value: "exclude:micrograph", label: "Exclude: Microscopy" },
+  ]);
+  assert.deepEqual(parseBulk("keep", REASONS), { decision: "keep" });
+  assert.deepEqual(parseBulk("exclude:micrograph", REASONS), { decision: "exclude", reason: "micrograph" });
+  assert.equal(parseBulk("exclude:made_up", REASONS), null);
+  assert.equal(parseBulk("exclude:", REASONS), null);
+  assert.equal(parseBulk("", REASONS), null);
+});
+
+test("Apply sets every selected photo, open or decided, and saves each with the bulk note", () => {
+  const marks = initialMarks(page());
+  const next = bulkMark(marks, [1, 2, 4, 5], { decision: "exclude", reason: "micrograph" });
+  assert.deepEqual(next[2], { decision: "exclude", reason: "micrograph" }, "an open tile, as a quick reason would");
+  assert.deepEqual(next[4], { decision: "exclude", reason: "micrograph", reclassified: true }, "decided: reclassified");
+  assert.deepEqual(next[5], { decision: "exclude", reason: "micrograph", reclassified: true });
+  assert.deepEqual(next[3], marks[3], "an unselected tile is untouched");
+  const sent = bulkDecisions(next, {}, [1, 2, 4, 5]);
+  assert.deepEqual(sent, [
+    { item_id: 1, decision: "exclude", reason: "micrograph", note: NOTE_BULK },
+    { item_id: 2, decision: "exclude", reason: "micrograph", note: NOTE_BULK },
+    { item_id: 4, decision: "exclude", reason: "micrograph", note: NOTE_BULK },
+    { item_id: 5, decision: "exclude", reason: "micrograph", note: NOTE_BULK },
+  ]);
+  assert.ok(NOTE_BULK.startsWith("summary:"), "the export reads it as flipped");
+  assert.ok(!([NOTE_FLIPPED, NOTE_SAVED, NOTE_SHOWN] as string[]).includes(NOTE_BULK), "and it is its own note");
+});
+
+test("Apply saves an open photo already showing the choice, but leaves a decided one stored that way alone", () => {
+  const marks = initialMarks(page());
+  // 1 starts as Exclude for micrograph; 4 is stored as Exclude for slip.
+  const next = bulkMark(marks, [1, 4], { decision: "exclude", reason: "slip" });
+  const again = bulkMark(next, [1, 4], { decision: "exclude", reason: "slip" });
+  assert.deepEqual(again, next);
+  const four = bulkMark(marks, [4], { decision: "exclude", reason: "slip" });
+  assert.equal(four, marks, "already stored so: nothing changes");
+  assert.deepEqual(bulkDecisions(four, {}, [4]), []);
+  const one = bulkMark(marks, [1], { decision: "exclude", reason: "micrograph" });
+  assert.deepEqual(bulkDecisions(one, {}, [1]), [{ item_id: 1, decision: "exclude", reason: "micrograph", note: NOTE_BULK }],
+                   "an open tile's starting Exclude is saved by Apply");
+});
+
+test("Include clears nothing it should keep, and Apply skips what is saved already or in flight", () => {
+  const marks = initialMarks(page());
+  const kept = bulkMark(marks, [1, 2, 3], { decision: "keep" });
+  assert.equal(kept[1].decision, "keep");
+  assert.equal(kept[1].reason, "micrograph", "the reason waits in case it is excluded again");
+  const states: SaveStates = { 1: { saved: { decision: "keep", reason: null } },
+                               2: { sending: { decision: "keep", reason: null } } };
+  assert.deepEqual(bulkDecisions(kept, states, [1, 2, 3, 3]), [{ item_id: 3, decision: "keep", note: NOTE_BULK }],
+                   "saved and in-flight tiles are not sent again; an id given twice goes once");
+  // A tile excluded with no reason is never sent.
+  const noReason = { ...marks, 3: { decision: "exclude" as const, reason: null } };
+  assert.deepEqual(bulkDecisions(noReason, {}, [3]), []);
+});
+
+test("the bar's line says how many are selected, or how to start", () => {
+  assert.equal(selectedLine(0), "Click photos to select them; Shift-click selects a run.");
+  assert.equal(selectedLine(1), "1 photo selected");
+  assert.equal(selectedLine(1200), "1,200 photos selected");
 });

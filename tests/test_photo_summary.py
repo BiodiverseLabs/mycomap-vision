@@ -201,6 +201,26 @@ def test_a_decided_photo_reclassified_full_screen_takes_its_new_decision(conn, t
     assert fstore.excluded_photos() == {"inat:1100"}                # included again: leaves the list
 
 
+def test_multiple_select_saves_open_and_decided_photos_in_one_batch_noted_bulk(conn, tmp_path):
+    """Steve, 2026-11-21: Multiple select sets the selected photos to one category at once. The
+    page sends them as one batch, each with the note "summary: bulk": a decided photo takes the
+    new reason, an open one is decided, and the paper's export reads the note as "flipped"."""
+    from mycomap_vision import feedback_export as fx
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    ids = {t["photo_key"]: t["item_id"] for t in c.get("/api/feedback/photo-review/flagged").json()["tiles"]}
+    c.post("/api/feedback/photo-review/batch", json={"decisions": [
+        {"item_id": ids["inat:1000"], "decision": "exclude", "reason": "micrograph", "note": "summary: shown"}]})
+    r = c.post("/api/feedback/photo-review/batch", json={"decisions": [
+        {"item_id": ids["inat:1000"], "decision": "exclude", "reason": "culture", "note": "summary: bulk"},
+        {"item_id": ids["inat:1100"], "decision": "exclude", "reason": "culture", "note": "summary: bulk"}]})
+    assert r.status_code == 200 and r.json()["excluded"] == 2
+    for key in ("inat:1000", "inat:1100"):
+        latest = fstore.get(ids[key])["decisions"][-1]
+        assert (latest["decision"], latest["value"], latest["note"]) == ("exclude_photo", "culture", "summary: bulk")
+    assert fx.confirmation("summary: bulk") == "flipped"
+
+
 def test_the_summary_serves_pages_of_up_to_500_photos(conn, tmp_path):
     """Steve, 2026-10-21: 150, 300 or 500 photos per page; the server serves up to 500."""
     from mycomap_vision import feedback_api

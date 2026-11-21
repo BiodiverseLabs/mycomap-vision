@@ -110,6 +110,9 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
   const outcome = auditOutcomeInUse(outcomeInUse(status, outcomePick), audited);
   const show = showInUse(status, tab, outcome, showPick);
   const [tileSize, setTileSize] = useState<TileSize>(() => readTileSize(browserStorage));
+  // Multiple select (Steve, 2026-11-21): Summary only, off each visit, so a click opens a photo
+  // until it is ticked again.
+  const [multi, setMulti] = useState(false);
   // The Summary's photos per page, remembered per viewer (Steve, 2026-10-21). A change loads
   // the first page again, so unsaved changes are asked about first.
   const [pageSize, setPageSizeNow] = useState<PageSize>(() => readPageSize(browserStorage));
@@ -207,6 +210,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
                  onChange={(e) => pickMode(e.target.checked)} data-testid="photo-review-suggest" />
           <span className={BODY}>Suggest Exclude for flagged photos</span>
         </label>}
+        {!full && !readOnly && <MultiSelectBox on={multi} onChange={setMulti} />}
         {!full && <SizeToggle size={tileSize} onChange={pickTileSize} />}
         {!full && <label className="flex min-w-0 items-center gap-2 text-sm">
           <span className="text-muted-foreground">Per page</span>
@@ -229,7 +233,7 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
       {!full && !readOnly && (
         <PhotoSummary tab={tab} status={status} sort={sort} q={q} band={band} outcome={outcome} show={show} onShows={setViewShows} onOutcomes={setViewOutcomes} help={help} onHelp={() => setHelp((h) => !h)}
                       tileSize={tileSize} pageSize={pageSize} onTotal={setSummaryTotal} autosave={autosave} onPending={setUnsaved}
-                      canLeave={canLeave} discard={discard} />
+                      canLeave={canLeave} discard={discard} multi={multi} />
       )}
       {full && !readOnly && list.error && (
         <p className={BODY}>{list.error instanceof ApiError ? list.error.message : "The photo review could not be loaded."}</p>
@@ -243,6 +247,19 @@ export function PhotoReview({ summary }: { summary: FeedbackSummary }) {
                onPage={leaving(reload)} autosave={autosave} onPending={setUnsaved} discard={discard} />
       )}
     </section>
+  );
+}
+
+/** "Multiple select" (Steve, 2026-11-21): while ticked a click on a photo selects it, and a bar
+ *  sets the selected ones to Include or to Exclude for one reason. */
+export function MultiSelectBox({ on, onChange }: { on: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className="flex min-h-10 min-w-0 items-center gap-2 text-sm"
+           title="Click photos to select them (Shift-click a run), then set them all to Include or to one reason at once.">
+      <input type="checkbox" className="h-4 w-4 accent-myco-green" checked={on}
+             onChange={(e) => onChange(e.target.checked)} data-testid="photo-review-multi" />
+      <span className={BODY}>Multiple select</span>
+    </label>
   );
 }
 

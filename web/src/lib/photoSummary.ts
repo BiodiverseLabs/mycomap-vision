@@ -531,3 +531,86 @@ export const SUMMARY_KEY_HELP: [string, string][] = [
   ["Esc", "close the full-screen photo"],
   ["?", "show or hide these keys"],
 ];
+
+// --- multiple select (Steve, 2026-11-21) --------------------------------------------------------
+// "a checkbox option here for "Multiple Select" if checked I would be able to click individual
+// photos down through the list and then bulk update them to a category". With the box ticked a
+// click on a photo selects it (Shift-click: the run from the last one clicked) instead of opening
+// it full screen; the bar then sets every selected photo to Include or to Exclude for one reason
+// and saves them at once, Auto-save on or off: Apply is the reviewer's Save. A decided photo is
+// reclassified as from the viewer; one already stored that way is left alone.
+
+/** The note the server stores on a bulk save. The paper's export reads any "summary:" note
+ *  other than shown and saved as "flipped" (feedback_export.confirmation), so it adds no
+ *  confirmation value. */
+export const NOTE_BULK = "summary: bulk";
+
+/** A click on a tile with Multiple select on: it is added or taken away; with Shift, every tile
+ *  from the last one clicked (`anchor`) to this one is added. `order`: the page's tiles. */
+export function selectClick(selected: ReadonlySet<number>, order: readonly number[], id: number,
+                            anchor: number | null, shift = false): Set<number> {
+  const out = new Set(selected);
+  const a = anchor == null ? -1 : order.indexOf(anchor);
+  const b = order.indexOf(id);
+  if (shift && a >= 0 && b >= 0) {
+    for (let i = Math.min(a, b); i <= Math.max(a, b); i++) out.add(order[i]);
+    return out;
+  }
+  if (out.has(id)) out.delete(id);
+  else out.add(id);
+  return out;
+}
+
+/** What the bar sets the selected photos to. */
+export type BulkChoice = { decision: "keep" } | { decision: "exclude"; reason: string };
+
+/** The bar's choices: Include, then Exclude for each reason the server lists, in its order. */
+export function bulkOptions(reasons: { code: string; label: string }[]): { value: string; label: string }[] {
+  return [{ value: "keep", label: "Include (shows the specimen)" },
+          ...reasons.map((r) => ({ value: `exclude:${r.code}`, label: `Exclude: ${r.label}` }))];
+}
+
+/** A bar choice back from its value; null for anything else. */
+export function parseBulk(value: string, reasons: { code: string }[]): BulkChoice | null {
+  if (value === "keep") return { decision: "keep" };
+  const code = value.startsWith("exclude:") ? value.slice("exclude:".length) : "";
+  return code && reasons.some((r) => r.code === code) ? { decision: "exclude", reason: code } : null;
+}
+
+/** Sets each selected tile to the choice: an open tile as a flip would, a decided one
+ *  reclassified (unchanged where it is already stored that way). */
+export function bulkMark(marks: Marks, ids: Iterable<number>, c: BulkChoice): Marks {
+  let out = marks;
+  for (const id of ids) {
+    const op = (m: Marks) => (c.decision === "keep" ? setDecision(m, id, "keep") : quickMark(m, id, c.reason));
+    out = reclassify(out, id, op);
+  }
+  return out;
+}
+
+/** What Apply sends: each selected tile whose mark is not what the server holds from this visit
+ *  (an open tile's starting Exclude included: Apply saves it), not in flight; a decided tile only
+ *  when it was reclassified. Each with NOTE_BULK. */
+export function bulkDecisions(marks: Marks, states: SaveStates, ids: Iterable<number>): PhotoBatchDecision[] {
+  const out: PhotoBatchDecision[] = [];
+  const seen = new Set<number>();
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const m = marks[id];
+    const s = states[id] ?? {};
+    if (!m || (m.readOnly && !m.reclassified) || s.sending || sameState(m, s.saved)) continue;
+    if (m.decision === "exclude") {
+      const reason = (m.reason ?? "").trim();
+      if (reason) out.push({ item_id: id, decision: "exclude", reason, note: NOTE_BULK });
+    } else {
+      out.push({ item_id: id, decision: "keep", note: NOTE_BULK });
+    }
+  }
+  return out;
+}
+
+/** The bar's line: how many are selected, and how to add more. */
+export const selectedLine = (n: number): string =>
+  n === 0 ? "Click photos to select them; Shift-click selects a run."
+    : `${n.toLocaleString("en-US")} photo${n === 1 ? "" : "s"} selected`;
