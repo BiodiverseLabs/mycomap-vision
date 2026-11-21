@@ -346,7 +346,8 @@ export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?
       "Keep a photo that shows the specimen.",
       "Exclude a photo that doesn't (a micrograph, habitat scene, spore print, chemical test, "
         + "drawing…) and pick why. A photo of more than one species is Multiple species; a "
-        + "fungus growing in a dish or tube is Culture.",
+        + "fungus growing in a dish or tube is Culture; a photo with nothing to learn from "
+        + "(too far off, an empty frame) is Uninformative.",
       "Save the record (S), or turn on Auto-save. Press ? for the keyboard keys.",
       "To check past decisions: open Decided and sort by Strongest disagreement first. The "
         + "top photos are the ones a fair re-score disagrees with most (the tile shows \"audit\" "

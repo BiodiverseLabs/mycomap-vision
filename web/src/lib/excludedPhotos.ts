@@ -23,6 +23,7 @@ export const CATEGORIES: { code: string; label: string }[] = [
   { code: "multiple_species", label: "Multiple species" },
   { code: "food", label: "Cooking and food" },
   { code: "culture", label: "Cultures" },
+  { code: "uninformative", label: "Uninformative photos" },
 ];
 
 export const categoryLabel = (code: string) => CATEGORIES.find((c) => c.code === code)?.label ?? code;

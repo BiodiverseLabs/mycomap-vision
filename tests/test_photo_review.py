@@ -361,11 +361,26 @@ def test_a_photo_of_a_culture_is_left_out_as_culture(conn, tmp_path):
         "inat:1000": "culture"}
 
 
+def test_a_photo_with_nothing_to_learn_from_is_left_out_as_uninformative(conn, tmp_path):
+    """Steve, 2026-11-20: Uninformative is a reason of its own, before Other."""
+    c, fstore = site_with_photos(conn, tmp_path)
+    as_user(c, "admin-1")
+    offered = {r["code"]: r["label"] for r in c.get("/api/feedback/photo-review").json()["reasons"]}
+    assert offered["uninformative"] == "Uninformative"
+    assert list(offered)[-1] == "other"
+    r = c.post("/api/feedback/photo-review/100/decision", json={"photos": [
+        {"photo_key": "inat:1000", "decision": "exclude", "reason": "uninformative"}]})
+    assert r.status_code == 200
+    assert {ch["subject"]: ch["value"] for ch in fstore.changes(applies="vision")} == {
+        "inat:1000": "uninformative"}
+
+
 def test_multiple_species_and_food_are_categories_on_excluded_photos():
     from mycomap_vision import excluded_looked as el
     assert el.CATEGORY_LABELS["multiple_species"] == "Multiple species"
     assert el.CATEGORY_LABELS["food"] == "Cooking and food"
     assert el.CATEGORY_LABELS["culture"] == "Cultures"
+    assert el.CATEGORY_LABELS["uninformative"] == "Uninformative photos"
 
 # --- photos the box holds no readable copy of come from their source ----------------------------
 

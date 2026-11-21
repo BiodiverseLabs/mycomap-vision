@@ -85,6 +85,9 @@ REASONS: tuple[tuple[str, str], ...] = (
     # Steve, 2026-11-20: a fungal culture (a dish, plate or tube), not the fruiting body in the
     # field. A reason only, as above.
     ("culture", "Culture"),
+    # Steve, 2026-11-20: a photo with nothing for Vision to learn from (too far off, a tiny
+    # corner of the fungus, an empty frame). A reason only, as above.
+    ("uninformative", "Uninformative"),
     # Steve, 2026-10-21: a reason even while no flag finds these reliably.
     ("blurry", "Blurry or badly exposed"),
     ("other", "Other"),
