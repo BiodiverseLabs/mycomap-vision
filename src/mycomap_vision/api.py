@@ -2748,9 +2748,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def daily_answer(model, rec: dict) -> dict | None:
         """A declared model's answer about a reference record from its own vectors, the
         record, its twins and any copy of its photos left out (identify.left_out), photos
-        only, ten deep; None while the record has no vectors for the model."""
+        only, ten deep, with how many of its photos the model holds; None while the record has
+        no vectors for the model."""
         key = str(rec["observation_id"])
-        source = "mo" if key.startswith("mo:") else "inat"
+        source = rec.get("source") or ("mo" if key.startswith("mo:") else "inat")
         number = rec.get("source_id") or key.rpartition(":")[2]
         ident = identifier(model.backbone, model.method, permission_view())
         if not ident.can_leave_out():
@@ -2769,7 +2770,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             key=id(ident), photos=0, embed=lambda: vecs, search=ident.nearest.photo_sims,
             finish=finish, interactive=False, timer=apiv1.Timer()))
         lists = deep[0] if deep else (result.get("ranks") or {})
-        return {"lists": lists, "photos": int(len(vecs))}
+        return {"lists": lists, "photos": int(len(own))}
 
     def score_daily_scores_tonight(answer=None) -> dict:
         """Scores since each declared model's training cut (daily_scores.score_pending), once

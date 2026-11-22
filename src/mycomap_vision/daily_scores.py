@@ -90,7 +90,7 @@ create table if not exists cut_answers (
     green_at         text not null,       -- early_answers.green_moment
     green_day        text not null,       -- its UTC day: the row of the daily table
     green_rule       text,                -- moment | day
-    photos           integer,             -- the record's photos the model answered from
+    photos           integer,             -- the record's photos the model holds (none trained on)
     depth            integer,             -- how deep the frozen ranked names go
     ranks_json       text,                -- the frozen first answer (species, genus, family)
     truth_species    text,
