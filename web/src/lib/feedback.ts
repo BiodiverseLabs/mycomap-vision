@@ -338,7 +338,10 @@ export const QUEUE_BLURBS: Record<string, string> = {
  *  Field slips (Steve, 2026-11-20): a slip with a DRIED specimen is "Dried specimen"; a slip with
  *  a FRESH specimen is "Field slip", and only those go on to Recovered labels, where the
  *  specimen is cropped away from the slip. */
-export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?: string }> = {
+/** A review's closing note: one line, or a heading over a list of rules. */
+export type ReviewNote = string | { title: string; rules: string[] };
+
+export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?: ReviewNote }> = {
   non_specimen_photo: {
     lead: "Vision should learn only from photos of the specimen itself. Each card is one "
       + "observation; photos a rule or the tagger flagged are marked with a suggested reason.",
@@ -354,9 +357,19 @@ export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?
         + "and the score). Change any that are wrong, and stop when the top ones look right. "
         + "Outcome: High score, not in this tab lists photos decided elsewhere that score high here.",
     ],
-    note: "Field slips: if the specimen on the slip is dried, exclude it as Dried specimen. "
-      + "If it is fresh, exclude it as Field slip: it then goes to Recovered labels, where the "
-      + "specimen is cropped away from the slip so Vision can still use it.",
+    // Steve, 2026-11-21, reviewing the Labels category: the three ways out of Field slip.
+    note: {
+      title: "Field slips and labels:",
+      rules: [
+        "The specimen fills most of the photo and a square crop would not help much: Include "
+          + "it (no tag).",
+        "No specimen, only the label: exclude it as Uninformative.",
+        "Only small dried fragments, with no real shape to learn from: exclude it as Dried "
+          + "specimen.",
+        "A fresh specimen beside the label: exclude it as Field slip. It then goes to Recovered "
+          + "labels, where the specimen is cropped away from the slip so Vision can still use it.",
+      ],
+    },
   },
   recovered_label: {
     lead: "Fresh-specimen photos someone excluded as Field slip. The outlined boxes are where "

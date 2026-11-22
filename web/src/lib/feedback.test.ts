@@ -232,14 +232,19 @@ test("Photos is the first tab and holds exactly the three photo reviews, in a fi
   for (const t of PHOTO_TAB_TYPES) assert.ok(QUEUE_BLURBS[t], `${t} has a plain-words line on its card`);
 });
 
-test("each photo review has basic steps, and field slips are sorted by dried or fresh specimen", () => {
+test("each photo review has basic steps, and a field slip is sorted four ways (Steve, 2026-11-21)", () => {
   for (const t of PHOTO_TAB_TYPES) {
     assert.ok(REVIEW_STEPS[t]?.lead && REVIEW_STEPS[t].steps.length > 0, `${t} has steps`);
   }
-  const slip = REVIEW_STEPS.non_specimen_photo.note ?? "";
-  assert.match(slip, /dried, exclude it as Dried specimen/);
-  assert.match(slip, /fresh, exclude it as Field slip: it then goes to Recovered labels/);
-  assert.match(REVIEW_STEPS.recovered_label.note ?? "", /dried specimen on the slip gets no crop/i);
+  const note = REVIEW_STEPS.non_specimen_photo.note;
+  assert.ok(note && typeof note !== "string", "the slip note is a list of rules");
+  const [fills, labelOnly, fragments, fresh] = note.rules;
+  assert.equal(note.rules.length, 4);
+  assert.match(fills, /fills most of the photo and a square crop would not help much: Include it \(no tag\)/);
+  assert.match(labelOnly, /only the label: exclude it as Uninformative/);
+  assert.match(fragments, /small dried fragments.*Dried specimen/);
+  assert.match(fresh, /fresh specimen.*Field slip.*Recovered labels/);
+  assert.match(String(REVIEW_STEPS.recovered_label.note ?? ""), /dried specimen on the slip gets no crop/i);
 });
 
 test("Taxonomy holds every other queue by section, an unknown one under Other, and no photo review", () => {

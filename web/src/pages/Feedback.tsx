@@ -207,7 +207,7 @@ function AdminDownloads() {
 }
 
 /** The basic steps at the top of a photo review, folded away by default (Steve, 2026-11-20), opened with a click. */
-function ReviewSteps({ type, title }: { type: string; title: string }) {
+export function ReviewSteps({ type, title }: { type: string; title: string }) {
   const s = REVIEW_STEPS[type];
   return (
     <details className="mb-4 rounded-lg border border-myco-green/30 bg-myco-green/5 p-4 dark:bg-myco-green/10"
@@ -217,8 +217,17 @@ function ReviewSteps({ type, title }: { type: string; title: string }) {
       <ol className={`mt-2 max-w-3xl list-decimal space-y-1 pl-5 text-sm ${BODY}`}>
         {s.steps.map((step) => <li key={step}>{step}</li>)}
       </ol>
-      {s.note && (
+      {typeof s.note === "string" && (
         <p className={`mt-3 max-w-3xl border-l-2 border-myco-green/60 pl-3 text-sm ${BODY}`}>{s.note}</p>
+      )}
+      {s.note && typeof s.note !== "string" && (
+        <div className={`mt-3 max-w-3xl border-l-2 border-myco-green/60 pl-3 text-sm ${BODY}`}
+             data-testid={`feedback-note-${type}`}>
+          <p className="font-semibold">{s.note.title}</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">
+            {s.note.rules.map((r) => <li key={r}>{r}</li>)}
+          </ul>
+        </div>
       )}
     </details>
   );

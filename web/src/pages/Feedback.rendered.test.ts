@@ -64,6 +64,19 @@ test("an open photo review starts with its steps; a name queue has none", () => 
   assert.doesNotMatch(render("?queue=name_retired"), /feedback-steps-/);
 });
 
+test("the field-slip note lists its four rules as a list under its heading (Steve, 2026-11-21)", () => {
+  const html = render("?queue=non_specimen_photo");
+  const note = html.match(/<div[^>]*data-testid="feedback-note-non_specimen_photo"[^>]*>([\s\S]*?)<\/ul><\/div>/);
+  assert.ok(note, "the note is drawn");
+  assert.match(note[1], /Field slips and labels:/);
+  const items = [...note[1].matchAll(/<li>([^<]*)<\/li>/g)].map((m) => m[1]);
+  assert.equal(items.length, 4);
+  assert.match(items[0], /Include it \(no tag\)/);
+  assert.match(items[1], /Uninformative/);
+  assert.match(items[2], /Dried specimen/);
+  assert.match(items[3], /Field slip/);
+});
+
 test("the How to review box starts folded (Steve, 2026-11-20)", () => {
   const html = render("?queue=non_specimen_photo");
   const box = html.match(/<details[^>]*data-testid="feedback-steps-non_specimen_photo"[^>]*>/);
