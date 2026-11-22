@@ -400,17 +400,19 @@ def test_species_by_depth_uses_the_reference_at_the_cut_and_says_too_few(conn, s
     after = [{"n": str(3000 + i), "name": "N n", "day": "2026-11-24"} for i in range(30)]
     after += [{"n": str(4000 + i), "name": "A x", "day": "2026-11-24"} for i in range(5)]
     after += [{"n": "5000", "name": "B y", "day": "2026-11-24"}]
+    # Green on the cut's own day, but after the cut: a test record, not the reference then.
+    after += [{"n": "5001", "name": "A x", "day": "2026-11-22", "moment": "2026-11-22T09:00:00Z"}]
     add(conn, recs + after)
     right = {r["n"]: r["name"] != "N n" for r in after}
     ds.score_pending(store, conn, [V2], says(right), frozenset())
     depth = {r["record_key"]: r["species_depth_at_cut"] for r in rows(store)}
-    assert depth["3000"] == 0 and depth["4000"] == 25 and depth["5000"] == 2, \
+    assert depth["3000"] == 0 and depth["4000"] == depth["5001"] == 25 and depth["5000"] == 2, \
         "records after the cut are not the reference at the cut"
     bands = {b["band"]: b for b in ds.report(store, V2, frozenset())["species_by_depth"]}
     assert list(bands) == ["0", "1-4", "5-19", "20-99", "100+"]
     assert bands["0"] == {"band": "0", "n": 30, "top1": 0.0, "top3": 0.0, "top5": 0.0, "top10": 0.0,
                           "too_few": False}
-    assert bands["20-99"] == {"band": "20-99", "n": 5, "top1": None, "top3": None, "top5": None,
+    assert bands["20-99"] == {"band": "20-99", "n": 6, "top1": None, "top3": None, "top5": None,
                               "top10": None, "too_few": True}
     assert bands["1-4"]["n"] == 1 and bands["1-4"]["too_few"] and bands["1-4"]["top1"] is None
     assert bands["100+"]["n"] == 0 and bands["100+"]["too_few"]
