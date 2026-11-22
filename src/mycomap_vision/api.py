@@ -2745,37 +2745,77 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             report["daily_scores"] = score_daily_scores_tonight()
         return report
 
-    def daily_answer(model, rec: dict) -> dict | None:
-        """A declared model's answer about a reference record from its own vectors, the
-        record, its twins and any copy of its photos left out (identify.left_out), photos
-        only, ten deep, with how many of its photos the model holds; None while the record has
-        no vectors for the model."""
-        key = str(rec["observation_id"])
-        source = rec.get("source") or ("mo" if key.startswith("mo:") else "inat")
-        number = rec.get("source_id") or key.rpartition(":")[2]
+    def daily_answers(db: sqlite3.Connection, model, recs: list[dict]) -> dict:
+        """A declared model's first answers about tonight's records (daily_scores.Answer),
+        measured as v1's How it works numbers are: from the records verified before them, with
+        each one's photos and public place and date. Every one of tonight's records, its twins
+        and any copy of its photos are left out of the reference (identify.left_out), and the
+        served method's place prior is fitted again without them, so none is answered with
+        itself, its place or its date. A method with no place and date weighting is refused
+        (daily_scores.PlaceRefused), never scored on photos alone."""
+        import numpy as np
+        from . import daily_scores, placeprior
+        from .evaluate import load_records
+        from .prior import Context
         ident = identifier(model.backbone, model.method, permission_view())
+        prior_now = getattr(ident.model, "prior", None)
+        if not hasattr(ident.model, "place_shift") or not isinstance(prior_now,
+                                                                      placeprior.PlaceBoost):
+            raise daily_scores.PlaceRefused(
+                f"{model.model} has no place and date weighting, so it can't be measured as v1 "
+                "is: declare its +place method (e.g. nearest+mean-records-balanced+place)")
         if not ident.can_leave_out():
-            raise RuntimeError(f"{model.model} can't answer with a record left out")
-        hidden, own = ident.left_out(source, str(number))
-        if not len(own):
-            return None
-        vecs = ident.reference_vectors(own[:MAX_PHOTOS])
-        deep: list = []
+            raise daily_scores.PlaceRefused(f"{model.model} can't answer with a record left out")
+        own_of, parts = {}, []
+        for rec in recs:
+            key = str(rec["observation_id"])
+            source = rec.get("source") or ("mo" if key.startswith("mo:") else "inat")
+            number = rec.get("source_id") or key.rpartition(":")[2]
+            hidden, own = ident.left_out(source, str(number))
+            if len(own):
+                own_of[key] = own
+                parts.append(hidden)
+        if not own_of:
+            return {}
+        hidden_all = np.unique(np.concatenate(parts)).astype(np.int64)
+        left = set(ident.col_record.obs[ident.col_record.rec[hidden_all]].tolist())
+        # The place prior of the served method, fitted on the index's records but tonight's.
+        ids = [int(r[0]) for r in db.execute("select photo_id from embeddings where backbone = ?",
+                                             (model.backbone,))]
+        in_index = set(ident.col_record.obs.tolist())
+        reference = [r for r in load_records(db, {p: p for p in ids})
+                     if r.observation_id in in_index and r.observation_id not in left]
+        prior = placeprior.PlaceBoost(setting=prior_now.setting_name)
+        prior.fit(reference, ident.index.species)
+        del reference
+        out: dict = {}
+        by_key = {str(r["observation_id"]): r for r in recs}
+        for key, own in own_of.items():
+            pub = by_key[key].get("public") or {}
+            ctx = Context(pub.get("latitude"), pub.get("longitude"), pub.get("observed_on"),
+                          pub.get("uuid"))
+            lp = prior.log_prior(ctx)
+            shift = None if lp is None else placeprior.PHOTO_TEMPERATURE * lp
+            vecs = ident.reference_vectors(own[:MAX_PHOTOS])
+            deep: list = []
 
-        def finish(v, sims):
-            return ident.identify_vectors(v, early_answers.DEPTH, context=None, sims=sims,
-                                          photo_lookup=photo_lookup, gate=None, hidden=hidden,
-                                          deep=deep)
-        result = model_queue.run(workqueue.Job(
-            key=id(ident), photos=0, embed=lambda: vecs, search=ident.nearest.photo_sims,
-            finish=finish, interactive=False, timer=apiv1.Timer()))
-        lists = deep[0] if deep else (result.get("ranks") or {})
-        return {"lists": lists, "photos": int(len(own))}
+            def finish(v, sims, shift=shift, deep=deep):
+                return ident.identify_vectors(v, early_answers.DEPTH, context=None, sims=sims,
+                                              photo_lookup=photo_lookup, gate=None,
+                                              hidden=hidden_all, deep=deep, place_shift=shift)
+            result = model_queue.run(workqueue.Job(
+                key=id(ident), photos=0, embed=lambda vecs=vecs: vecs,
+                search=ident.nearest.photo_sims, finish=finish, interactive=False,
+                timer=apiv1.Timer()))
+            out[key] = {"lists": deep[0] if deep else (result.get("ranks") or {}),
+                        "photos": int(len(own)), "place_used": placeprior.has_place(ctx),
+                        "date_used": placeprior.has_date(ctx)}
+        return out
 
     def score_daily_scores_tonight(answer=None) -> dict:
         """Scores since each declared model's training cut (daily_scores.score_pending), once
         tonight's records are in and embedded: MV_DAILY_SCORES=1 only. A model not served here
-        waits. Never fails the night."""
+        waits; one that can't be given a place and date is refused. Never fails the night."""
         from . import daily_scores
         if not daily_scores.computing():
             return {"off": f"{daily_scores.COMPUTE_SETTING} is not on"}
@@ -2785,11 +2825,18 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             models_ = daily_scores.declared(trained_through(own))
             held = daily_scores.held_keys()
             ready = set(ready_backbones())
-            served = [m for m in models_ if m.backbone in ready]
-            out: dict = {m.id: {"waiting": "not served here"} for m in models_ if m not in served}
-            out.update(daily_scores.score_pending(early_store.conn, own, served,
-                                                  answer or daily_answer, held,
-                                                  lock=early_store.lock))
+            out: dict = {}
+            for m in models_:
+                if m.backbone not in ready:
+                    out[m.id] = {"waiting": "not served here"}
+                    continue
+                try:
+                    out.update(daily_scores.score_pending(
+                        early_store.conn, own, [m],
+                        answer or (lambda model, recs: daily_answers(own, model, recs)), held,
+                        lock=early_store.lock))
+                except daily_scores.PlaceRefused as e:
+                    out[m.id] = {"refused": str(e)}
             note(f"[nightly] scores since training: {out}")
             return out
         except Exception as e:  # noqa: BLE001 - the reference set is already updated

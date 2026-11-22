@@ -120,11 +120,15 @@ def _all_keys(value, found: set) -> set:
     return found
 
 
-# Fields of a daily_scores ledger row that never leave it, besides PER_RECORD_KEYS.
-DAILY_PRIVATE_KEYS = frozenset({"ranks_json", "truth_species", "truth_genus", "truth_name",
-                                "decided_at", "green_at"})
+# Fields of a daily_scores ledger row that never leave it, besides PER_RECORD_KEYS: the frozen
+# answer and truth, each record's places of the right names, its depth at the cut, and
+# whether it had a place or date (the payload's own "public" is the display switch).
+DAILY_PRIVATE_KEYS = frozenset({"ranks_json", "truth_species", "truth_genus", "truth_family",
+                                "truth_name", "decided_at", "green_at", "sp_pos", "ge_pos",
+                                "fa_pos", "species_depth_at_cut", "place_used", "date_used"})
 _PLACE_OR_PERSON = frozenset({"latitude", "longitude", "lat", "lon", "lng", "place", "login",
-                              "user_login", "owner_login", "owner_name", "photo_id"})
+                              "user_login", "owner_login", "owner_name", "photo_id", "uuid",
+                              "inat_uuid", "observed_on"})
 
 
 def daily_scores(payload: dict) -> dict:
@@ -138,6 +142,15 @@ def daily_scores(payload: dict) -> dict:
         k for k in keys if "url" in str(k).lower()}
     if bad:
         raise ValueError(f"per-record fields in a public report: {sorted(bad)}")
+    for m in (payload.get("models") or {}).values():
+        least = m.get("min_band_records")
+        for band in m.get("species_by_depth") or []:
+            # A band with too few records gives no rate (a few records make a wild number).
+            few = not isinstance(least, int) or band.get("n", 0) < least
+            rates = [v for k, v in band.items() if k.startswith("top")]
+            if few and (not band.get("too_few") or any(v is not None for v in rates)):
+                raise ValueError(f"a depth band with too few records shows a rate: "
+                                 f"{band.get('band')}")
     return strip_paths(payload)
 
 

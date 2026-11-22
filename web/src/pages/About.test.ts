@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { HowItWorks, type HowItWorksData } from "./About";
 import { PERMISSION_LINE, PHOTO_PERMISSIONS_URL } from "../lib/publicView";
 import type { HowGood, ModelsInfo, SpeedDay, Stats } from "../lib/api";
-import { DAILY_V1_ONLY, DAILY_V2 } from "../lib/dailyScores.fixture";
+import { DAILY_V1_ONLY, DAILY_V2, fortyDays } from "../lib/dailyScores.fixture";
 
 const TODAY = "2026-10-22";
 
@@ -230,7 +230,7 @@ test("every daily value in v2's view is written with its n", () => {
   const table = html.match(/data-testid="table-daily"[^]*?<\/table>/)?.[0] ?? "";
   const cells = [...table.matchAll(/<td[^>]*>([^<]*)<\/td>/g)].map((m) => m[1]);
   const rates = cells.filter((c) => /%/.test(c));
-  assert.equal(rates.length, 9, "species, genus and 7-day species for each of the three days");
+  assert.equal(rates.length, 12, "species, genus, family and 7-day species for each of the three days");
   for (const c of rates) assert.match(c, /^\d+% \(n = [\d,]+\)$/, c);
   assert.doesNotMatch(table, /22 November 2026/, "a day with no records is not a row");
 });
@@ -240,4 +240,44 @@ test("v1's view is the page as it was, whatever v2 has", () => {
   assert.equal(withoutPicker(page({ dailyScores: DAILY_V1_ONLY })), withoutPicker(page()));
   const t = text(page({ dailyScores: DAILY_V2, model: "v1" }));
   for (const n of ["59.2%", "85.8%", "90.6%", "12,874", "155,648", "17 August 2026"]) assert.ok(t.includes(n), n);
+});
+
+const part = (html: string, id: string) => {
+  const at = html.indexOf(`data-testid="${id}"`);
+  return at < 0 ? "" : html.slice(at, html.indexOf("<p ", at));
+};
+const subs = (html: string) => [...html.matchAll(/<small[^>]*>([^<]*)<\/small>/g)].map((m) => m[1]);
+
+test("v2 is measured and said as v1 is: photos and public place and date, from the records before it", () => {
+  const t = text(page({ dailyScores: DAILY_V2 }));
+  assert.match(t, /Tested on the 403 DNA-verified finds validated since, none of them used in training, each identified from the records verified before it, with its photos and its public place and date\./);
+  const v1 = text(page());
+  assert.match(v1, /with each find's photos and its public place and date/, "v1's own words, unchanged");
+});
+
+test("v2 shows v1's breakdowns: family beside species and genus, the top-k ladder, and depth with too few said so", () => {
+  const html = page({ dailyScores: DAILY_V2 });
+  const t = text(html);
+  assert.match(html, /data-testid="total-family"/);
+  assert.match(t, /92\.8% Family right first time, 403 finds Likely between 90\.0% and 95\.0%/);
+  assert.match(t, /The right name, within the first few/);
+  const ladder = text(html.match(/data-testid="v2-top-k"[^]*?<\/table>/)?.[0] ?? "");
+  for (const v of ["63.0%", "78.3%", "83.0%", "87.8%", "86.6%", "94.5%", "96.3%", "97.5%"]) assert.ok(ladder.includes(v), v);
+  assert.match(t, /Every sequenced record makes it better/);
+  const depth = text(part(html, "chart-v2-by-depth"));
+  assert.match(depth, /0 records n = 21 too few yet/);
+  assert.match(depth, /1–4 records n = 64 26\.6%/);
+  assert.match(depth, /100\+ records n = 57 82\.5%/);
+  assert.doesNotMatch(depth, /0 records n = 21 \d/, "no rate for a band with too few");
+});
+
+test("the daily chart draws the last 30 days and the table keeps every day", () => {
+  const html = page({ dailyScores: fortyDays() });
+  const drawn = subs(part(html, "chart-daily"));
+  assert.equal(drawn.length, 30);
+  assert.equal(drawn[0], "n = 110", "the first drawn day is the 11th of 40");
+  assert.equal(drawn[29], "n = 139, so far");
+  assert.match(text(html), /day by day, last 30 days/);
+  const table = html.match(/data-testid="table-daily"[^]*?<\/table>/)?.[0] ?? "";
+  assert.equal((table.match(/<tr>/g) ?? []).length, 41, "a header and all 40 days");
 });

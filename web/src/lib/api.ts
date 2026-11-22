@@ -308,26 +308,41 @@ export interface ScoreDay {
   photos: number;
   species: RankScore;
   genus: RankScore;
-  rolling_7_days: { records: number; species: RankScore; genus: RankScore };
+  family: RankScore;
+  rolling_7_days: { records: number; species: RankScore; genus: RankScore; family: RankScore };
   /** False for the day the nightly is still on: more of its records may come. */
   complete: boolean;
 }
+/** Species right within the first k by the true species' reference records at the cut; a band
+ *  with too few records (`too_few`, under `min_band_records`) has no rates. */
+export interface DepthBand { band: string; n: number; top1: number | null; top3: number | null;
+                             top5: number | null; top10: number | null; too_few: boolean }
 /** A newer model scored on every record first green after its training cut (daily_scores.py):
- *  its first answer about each, aggregates only. */
+ *  its first answer about each, measured as v1's numbers are (photos + public place and date),
+ *  aggregates only. */
 export interface ModelScores {
   id: string;
   backbone: string;
   method: string;
   /** The training cut: every record green up to it was trained on. */
   trained_through: string;
+  /** "photos + public place and date", as v1's How it works numbers. */
   context: string;
+  answer_key?: string | null;
   as_of: string | null;
   records: number;
   new_photos: number;
+  with_place?: number;
+  with_date?: number;
+  min_band_records?: number;
   days: ScoreDay[];
   cumulative: { from: string; through: string; records: number; photos: number;
-                species: RankScore; genus: RankScore } | null;
-  rolling_7_days: { through: string; records: number; species: RankScore; genus: RankScore } | null;
+                species: RankScore; genus: RankScore; family: RankScore } | null;
+  rolling_7_days: { through: string; records: number; species: RankScore; genus: RankScore;
+                    family: RankScore } | null;
+  /** The right name within the first k, over the records since training. */
+  top_k: ({ k: number[] } & Record<Rank, TopK>) | null;
+  species_by_depth: DepthBand[] | null;
   left_out?: Record<string, number>;
 }
 /** Which models the v1 / v2 dropdowns offer (v1 always: its numbers are /api/how-good's), the

@@ -18,6 +18,7 @@ from mycomap_vision.records import build_records, save_records
 
 CUT = "2026-11-22T08:24:03+00:00"
 V2 = ds.Declared("v2", "bb2", "nearest", CUT)
+PLACE = "nearest+mean+place"
 SETTINGS = ("MV_DAILY_SCORES", "MV_DAILY_SCORES_PUBLIC", "MV_DAILY_SCORES_MODELS",
             "MV_FEEDBACK_HOLD_KEYS", "MV_FEEDBACK_HOLD_SHA256")
 
@@ -54,17 +55,32 @@ def add(conn, recs: list[dict]):
     conn.commit()
 
 
-def says(right: dict[str, bool], photos: int = 2):
-    """An answer function: right (the record's own name first) or wrong ("Z z" first)."""
-    def answer(model, rec):
-        key = rec["observation_id"]
-        if key not in right:
-            return None                                   # no vectors yet
-        sp = rec["scientific_name"] if right[key] else "Z z"
-        return {"lists": {"species": [{"name": sp, "confidence": 0.7}],
-                          "genus": [{"name": sp.split()[0], "confidence": 0.8}], "family": []},
-                "photos": photos}
+def says(right: dict[str, bool], photos: int = 2, asked: list | None = None):
+    """An answer function for tonight's records: right (the record's own name first, family F)
+    or wrong ("Z z" first, family G); a record not in `right` has no vectors yet."""
+    def answer(model, recs):
+        out = {}
+        for rec in recs:
+            key = rec["observation_id"]
+            if asked is not None:
+                asked.append(key)
+            if key not in right:
+                continue
+            sp = rec["scientific_name"] if right[key] else "Z z"
+            out[key] = {"lists": {"species": [{"name": sp, "confidence": 0.7}],
+                                  "genus": [{"name": sp.split()[0], "confidence": 0.8}],
+                                  "family": [{"name": "F" if right[key] else "G", "confidence": 0.9}]},
+                        "photos": photos, "place_used": True, "date_used": True}
+        return out
     return answer
+
+
+def ranked(species=(), genus=(), family=()):
+    """One answer, the names in order."""
+    return {"lists": {"species": [{"name": n, "confidence": 0.1} for n in species],
+                      "genus": [{"name": n, "confidence": 0.1} for n in genus],
+                      "family": [{"name": n, "confidence": 0.1} for n in family]},
+            "photos": 1, "place_used": True, "date_used": True}
 
 
 def rows(store) -> list[dict]:
@@ -130,10 +146,10 @@ def test_a_record_with_no_vectors_waits_and_a_first_answer_is_never_asked_again(
     # The next night 11's answer would be wrong; it is never asked again. 12 has vectors now.
     ds.score_pending(store, conn, [V2], says({"11": False, "12": False}), frozenset(),
                      now="2026-11-25T08:00:00+00:00")
-    got = {r["record_key"]: (r["sp_right"], r["decided_at"]) for r in rows(store)}
-    assert got == {"11": (1, "2026-11-24T08:00:00+00:00"), "12": (0, "2026-11-25T08:00:00+00:00")}
+    got = {r["record_key"]: (r["sp_pos"], r["decided_at"]) for r in rows(store)}
+    assert got == {"11": (0, "2026-11-24T08:00:00+00:00"), "12": (None, "2026-11-25T08:00:00+00:00")}
     with pytest.raises(sqlite3.DatabaseError, match="ledger"):
-        store.execute("update cut_answers set sp_right = 0")
+        store.execute("update cut_answers set sp_pos = 0")
     with pytest.raises(sqlite3.DatabaseError, match="ledger"):
         store.execute("delete from cut_answers")
 
@@ -187,10 +203,13 @@ def test_daily_cumulative_rolling_and_new_photo_figures(conn, store):
     cum = rep["cumulative"]
     assert cum["records"] == rep["records"] == len(every) == 15
     assert cum["species"]["right"] == sum(every) and cum["species"]["ci95"] == list(wilson(sum(every), 15))
-    assert cum["genus"]["right"] == sum(every)
+    assert cum["genus"]["right"] == sum(every) and cum["family"]["right"] == sum(every)
+    assert cum["family"]["ci95"] == list(wilson(sum(every), 15))
+    assert days["2026-11-23"]["family"]["n"] == 3 and roll["family"]["n"] == 12
     assert rep["new_photos"] == cum["photos"] == 45
     assert (cum["from"], cum["through"]) == ("2026-11-22", "2026-12-01")
-    assert rep["trained_through"] == CUT and rep["context"] == "photos only"
+    assert rep["trained_through"] == CUT and rep["context"] == "photos + public place and date"
+    assert rep["with_place"] == rep["with_date"] == 15
     # The day the nightly is still on may get more records: it says so.
     assert days["2026-12-01"]["complete"] is False and days["2026-11-30"]["complete"] is True
 
@@ -198,9 +217,8 @@ def test_daily_cumulative_rolling_and_new_photo_figures(conn, store):
 def test_genus_can_be_right_when_species_is_wrong(conn, store):
     add(conn, [{"n": "31", "name": "A x", "day": "2026-11-23"}])
 
-    def answer(model, rec):
-        return {"lists": {"species": [{"name": "A z", "confidence": 0.5}],
-                          "genus": [{"name": "A", "confidence": 0.9}], "family": []}, "photos": 1}
+    def answer(model, recs):
+        return {r["observation_id"]: ranked(["A z"], ["A"], ["F"]) for r in recs}
     ds.score_pending(store, conn, [V2], answer, frozenset())
     day = ds.report(store, V2, frozenset())["days"][-1]
     assert (day["species"]["right"], day["genus"]["right"]) == (0, 1)
@@ -213,12 +231,8 @@ def test_held_records_are_never_scored_and_never_counted(conn, store, tmp_path):
                {"n": "42", "name": "A x", "day": "2026-11-23"}])
     path, sha = hold_file(tmp_path, ["42"])
     held = ds.held_keys(path, sha)
-    asked = []
-
-    def answer(model, rec):
-        asked.append(rec["observation_id"])
-        return says({"41": True, "42": True})(model, rec)
-    out = ds.score_pending(store, conn, [V2], answer, held)
+    asked: list = []
+    out = ds.score_pending(store, conn, [V2], says({"41": True, "42": True}, asked=asked), held)
     assert asked == ["41"], "a held record is never even answered"
     assert [r["record_key"] for r in rows(store)] == ["41"]
     assert out["v2"]["held"] == 1
@@ -246,12 +260,12 @@ def test_a_hold_list_that_cannot_be_trusted_refuses_scoring_and_showing(conn, st
 
 def scored_site(conn, tmp_path, monkeypatch, compute=True, public=True):
     """The test server (record 106 'A x', 107 'B y', each one photo embedded by m1) with both
-    records moved to first green after a v2 cut, and m1/nearest declared as v2."""
+    records moved to first green after a v2 cut, and m1 with the place method declared as v2."""
     client = app_with_model(conn, tmp_path)
     conn.execute("update records set validated_on = '2026-11-23', first_seen_at = "
                  "'2026-11-24T08:00:00+00:00' where observation_id in ('106', '107')")
     conn.commit()
-    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v2=m1/nearest@{CUT}")
+    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v2=m1/{PLACE}@{CUT}")
     if compute:
         monkeypatch.setenv("MV_DAILY_SCORES", "1")
     if public:
@@ -303,9 +317,9 @@ def test_the_endpoint_serves_aggregates_only(conn, tmp_path, monkeypatch):
 
 def test_a_v1_declaration_scores_nothing_on_the_server(conn, tmp_path, monkeypatch):
     client = scored_site(conn, tmp_path, monkeypatch)
-    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v1=m1/nearest@{CUT}")
+    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v1=m1/{PLACE}@{CUT}")
     assert "v1 is never scored" in client.app.state.score_daily_scores()["error"]
-    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", "v2=m1/nearest@2026-10-01T00:00:00Z")
+    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v2=m1/{PLACE}@2026-10-01T00:00:00Z")
     assert "before the paper's seal" in client.app.state.score_daily_scores()["error"]
     store = client.app.state.early_store
     with store.lock:
@@ -328,3 +342,153 @@ def test_a_sha_mismatch_refuses_the_nightly_step(conn, tmp_path, monkeypatch):
 def test_the_feed_answers_a_signed_out_visitor(conn, tmp_path):
     c = gated_site_with_pages(conn, tmp_path)
     assert c.get("/api/daily-scores").status_code == 200
+
+
+# --- measured as v1 is: public place and date (Steve, 2026-11-22) ------------------------------
+
+def test_the_place_is_the_public_one_never_orgs(conn):
+    from mycomap_vision import mopoints
+    add(conn, [{"n": "51", "name": "A x", "day": "2026-11-23"},
+               {"n": "52", "name": "A x", "day": "2026-11-23"}])
+    conn.execute("update records set latitude = 45.5, longitude = -70.25, observed_on = '2026-11-01' "
+                 "where observation_id in ('51', '52')")
+    conn.execute("insert into inat_observations (observation_id, status, uuid, obscured, observed_on, "
+                 "inat_latitude, inat_longitude, fetched_at) values ('51', 'ok', 'u-51', 1, "
+                 "'2026-10-31', 39.1, -86.5, 't')")
+    conn.execute("insert into inat_observations (observation_id, status, uuid, obscured, observed_on, "
+                 "fetched_at) values ('52', 'ok', 'u-52', 0, '2026-10-31', 't')")      # private on iNat
+    conn.execute("insert into records (observation_id, source, source_id, scientific_name, north_america, "
+                 "exported_at, validated_on) values ('mo:9', 'mo', '9', 'A x', 1, 't', '2026-11-23')")
+    conn.execute("update records set latitude = 10.0, longitude = 10.0 where observation_id = 'mo:9'")
+    mopoints.ensure_schema(conn)
+    conn.execute("insert into mo_public_points (observation_id, gps_hidden, box_north, box_south, "
+                 "box_east, box_west, status, fetched_at) values ('mo:9', 1, 41, 40, -80, -82, 'ok', 't')")
+    got = ds.public_context(conn, ["51", "52", "mo:9"])
+    assert (got["51"]["latitude"], got["51"]["longitude"], got["51"]["kind"]) == (39.1, -86.5, "inat_obscured")
+    assert got["51"]["uuid"] == "u-51" and got["51"]["observed_on"] == "2026-11-01"   # .org's date first
+    assert got["52"]["latitude"] is None and got["52"]["longitude"] is None, "private on iNat: no place"
+    assert (got["mo:9"]["latitude"], got["mo:9"]["longitude"], got["mo:9"]["kind"]) == (40.5, -81.0, "mo_box_centre")
+    assert got["mo:9"]["uuid"] is None
+    for v in got.values():
+        assert v["latitude"] not in (45.5, 10.0), ".org's true point is never used"
+
+
+def test_top_k_and_family_are_judged_at_write_time_from_the_ten_deep_answer(conn, store):
+    add(conn, [{"n": "61", "name": "A x", "day": "2026-11-23"},
+               {"n": "62", "name": "A x", "day": "2026-11-23"},
+               {"n": "63", "name": "A x", "day": "2026-11-23"}])
+    answers = {"61": ranked(["A x"], ["A"], ["F"]),
+               "62": ranked(["B y", "C z", "A x"], ["B", "A"], ["G", "H", "I", "F"]),
+               "63": ranked(["B y", "C z", "D w", "E v", "G u", "H t", "A x"], ["B"], ["G"])}
+    ds.score_pending(store, conn, [V2], lambda m, recs: answers, frozenset())
+    got = {r["record_key"]: (r["sp_pos"], r["ge_pos"], r["fa_pos"]) for r in rows(store)}
+    assert got == {"61": (0, 0, 0), "62": (2, 1, 3), "63": (6, None, None)}
+    tk = ds.report(store, V2, frozenset())["top_k"]
+    assert tk["k"] == [1, 3, 5, 10]
+    assert tk["species"] == {"n": 3, "top1": round(1 / 3, 4), "top3": round(2 / 3, 4),
+                             "top5": round(2 / 3, 4), "top10": 1.0}
+    assert tk["genus"] == {"n": 3, "top1": round(1 / 3, 4), "top3": round(2 / 3, 4),
+                           "top5": round(2 / 3, 4), "top10": round(2 / 3, 4)}
+    assert tk["family"]["top1"] == round(1 / 3, 4) and tk["family"]["top5"] == round(2 / 3, 4)
+
+
+def test_species_by_depth_uses_the_reference_at_the_cut_and_says_too_few(conn, store):
+    # 'A x' has 25 records first green before the cut (band 20-99) and 'B y' 2 (1-4); after
+    # the cut, 30 new 'N n' (no record at the cut: band 0), 5 'A x', 1 'B y'.
+    recs = [{"n": str(1000 + i), "name": "A x", "day": "2026-11-01"} for i in range(25)]
+    recs += [{"n": str(2000 + i), "name": "B y", "day": "2026-11-02"} for i in range(2)]
+    after = [{"n": str(3000 + i), "name": "N n", "day": "2026-11-24"} for i in range(30)]
+    after += [{"n": str(4000 + i), "name": "A x", "day": "2026-11-24"} for i in range(5)]
+    after += [{"n": "5000", "name": "B y", "day": "2026-11-24"}]
+    add(conn, recs + after)
+    right = {r["n"]: r["name"] != "N n" for r in after}
+    ds.score_pending(store, conn, [V2], says(right), frozenset())
+    depth = {r["record_key"]: r["species_depth_at_cut"] for r in rows(store)}
+    assert depth["3000"] == 0 and depth["4000"] == 25 and depth["5000"] == 2, \
+        "records after the cut are not the reference at the cut"
+    bands = {b["band"]: b for b in ds.report(store, V2, frozenset())["species_by_depth"]}
+    assert list(bands) == ["0", "1-4", "5-19", "20-99", "100+"]
+    assert bands["0"] == {"band": "0", "n": 30, "top1": 0.0, "top3": 0.0, "top5": 0.0, "top10": 0.0,
+                          "too_few": False}
+    assert bands["20-99"] == {"band": "20-99", "n": 5, "top1": None, "top3": None, "top5": None,
+                              "top10": None, "too_few": True}
+    assert bands["1-4"]["n"] == 1 and bands["1-4"]["too_few"] and bands["1-4"]["top1"] is None
+    assert bands["100+"]["n"] == 0 and bands["100+"]["too_few"]
+    assert ds.MIN_BAND_RECORDS == 30
+
+
+def test_a_band_with_too_few_records_never_leaves_with_a_rate():
+    good = {"models": {"v2": {"min_band_records": 30, "species_by_depth": [
+        {"band": "0", "n": 29, "top1": None, "top3": None, "top5": None, "top10": None, "too_few": True},
+        {"band": "1-4", "n": 30, "top1": 0.5, "top3": 0.6, "top5": 0.7, "top10": 0.8, "too_few": False}]}}}
+    assert research_public.daily_scores(good) == good
+    for band in ({"band": "0", "n": 29, "top1": 0.9, "too_few": False},
+                 {"band": "0", "n": 29, "top1": 0.9, "too_few": True},
+                 {"band": "0", "n": 3, "top1": None, "too_few": False}):
+        with pytest.raises(ValueError, match="too few"):
+            research_public.daily_scores({"models": {"v2": {"min_band_records": 30,
+                                                            "species_by_depth": [band]}}})
+    for leak in ("sp_pos", "truth_family", "species_depth_at_cut", "place_used", "uuid"):
+        with pytest.raises(ValueError, match="per-record"):
+            research_public.daily_scores({"models": {"v2": {"days": [{leak: 1}]}}})
+
+
+def test_a_method_without_place_and_date_is_refused_not_scored_on_photos_alone(conn, tmp_path, monkeypatch):
+    client = scored_site(conn, tmp_path, monkeypatch)
+    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v2=m1/nearest@{CUT}")
+    out = client.app.state.score_daily_scores()
+    assert "no place and date weighting" in out["v2"]["refused"], out
+    store = client.app.state.early_store
+    with store.lock:
+        assert rows(store.conn) == []
+
+
+def test_the_nightly_answers_with_the_public_place_and_a_prior_without_tonights_records(
+        conn, tmp_path, monkeypatch):
+    from mycomap_vision import placeprior
+    client = scored_site(conn, tmp_path, monkeypatch)
+    fitted: list[set] = []
+    real_fit = placeprior.PlaceBoost.fit
+
+    def spy(self, records, species):
+        fitted.append({r.observation_id for r in records})
+        return real_fit(self, records, species)
+    monkeypatch.setattr(placeprior.PlaceBoost, "fit", spy)
+    seen: list = []
+    real_shift = placeprior.PlaceBoost.log_prior
+
+    def spy_prior(self, ctx):
+        seen.append((ctx.latitude, ctx.longitude, ctx.observed_on))
+        return real_shift(self, ctx)
+    monkeypatch.setattr(placeprior.PlaceBoost, "log_prior", spy_prior)
+    out = client.app.state.score_daily_scores()
+    assert out["v2"]["scored"] == 2, out
+    tonight = fitted[-1]
+    assert tonight and not tonight & {"106", "107"}, "tonight's records are not in the prior"
+    assert {"100", "103"} <= tonight
+    assert (39.1, -86.5, "2025-09-01") in seen, "the public iNat place and the date"
+    store = client.app.state.early_store
+    with store.lock:
+        assert {(r["place_used"], r["date_used"]) for r in rows(store.conn)} == {(1, 1)}
+    v2 = client.get("/api/daily-scores").json()["models"]["v2"]
+    assert v2["context"] == "photos + public place and date" and v2["with_place"] == 2
+    assert v2["cumulative"]["family"]["n"] == 2 and v2["top_k"]["species"]["n"] == 2
+
+
+def test_a_left_out_record_takes_the_given_place_shift_and_a_method_without_one_refuses_it(conn, tmp_path):
+    import numpy as np
+    from mycomap_vision.identify import Identifier
+    app_with_model(conn, tmp_path)
+    plain = Identifier(conn, "m1", "nearest", tmp_path / "emb" / "m1", photo_info=False)
+    v = plain.reference_vectors(np.array([0]))
+    with pytest.raises(ValueError, match="no place and date shift"):
+        plain.identify_vectors(v, 5, place_shift=np.zeros(len(plain.index.species)))
+    place = Identifier(conn, "m1", PLACE, tmp_path / "emb" / "m1", photo_info=False)
+    hidden, own = place.left_out("inat", "106")                       # an 'A x' record
+    vecs = place.reference_vectors(own)
+    alone = place.identify_vectors(vecs, 5, hidden=hidden)
+    assert alone["ranks"]["species"][0]["name"] == "A x"
+    shift = np.zeros(len(place.index.species))
+    shift[place.index.species.index("B y")] = 5.0                   # the place strongly says B y
+    moved = place.identify_vectors(vecs, 5, hidden=hidden, place_shift=shift)
+    assert moved["ranks"]["species"][0]["name"] == "B y" and moved["prior"]["applied"]

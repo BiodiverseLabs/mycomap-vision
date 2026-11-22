@@ -40,8 +40,30 @@ export function rangeText(s: RankScore | null | undefined): string | null {
   return s?.ci95 ? `between ${pct(s.ci95[0], 1)} and ${pct(s.ci95[1], 1)}` : null;
 }
 
-/** The days with records scored, newest last; the newest `last` for the chart. */
-export function scoredDays(m: ModelScores, last?: number): ScoreDay[] {
-  const days = m.days.filter((d) => d.records > 0);
-  return last ? days.slice(-last) : days;
+/** How many days the day-by-day chart draws; every day stays in the table. */
+export const CHART_DAYS = 30;
+
+/** The days with records scored, newest last; with `lastDays`, only those among the last
+ *  `lastDays` calendar days to the newest (the server sends every day since the cut). */
+export function scoredDays(m: ModelScores, lastDays?: number): ScoreDay[] {
+  const days = lastDays ? m.days.slice(-lastDays) : m.days;
+  return days.filter((d) => d.records > 0);
+}
+
+/** "Every sequenced record makes it better": each band with its n, the rate only when the
+ *  band has enough records ("too few yet" otherwise). */
+export function depthRows(m: ModelScores): { band: string; n: number; top1: number | null;
+                                             tooFew: boolean }[] | null {
+  const bands = m.species_by_depth;
+  if (!bands?.length) return null;
+  return bands.map((b) => ({ band: b.band, n: b.n, top1: b.too_few ? null : b.top1,
+                             tooFew: b.too_few || b.top1 == null }));
+}
+
+/** The top-k ladder's rows, species and genus, as v1's How it works draws them. */
+export function topKLadder(m: ModelScores): { k: number; species: number | null; genus: number | null }[] | null {
+  const t = m.top_k;
+  if (!t) return null;
+  return t.k.map((k) => ({ k, species: t.species?.[`top${k}` as "top1"] ?? null,
+                           genus: t.genus?.[`top${k}` as "top1"] ?? null }));
 }

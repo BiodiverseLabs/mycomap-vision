@@ -7,7 +7,7 @@ import { GetInvolved, type GetInvolvedData } from "./GetInvolved";
 import { PERMISSION_LINE, PHOTO_PERMISSIONS_URL } from "../lib/publicView";
 import type { FeedbackSummary, HowGood, Stats } from "../lib/api";
 import type { Outline } from "../lib/apiOutline";
-import { DAILY_V1_ONLY, DAILY_V2 } from "../lib/dailyScores.fixture";
+import { DAILY_V1_ONLY, DAILY_V2, fortyDays } from "../lib/dailyScores.fixture";
 
 const STATS = {
   records: 182877, records_north_america: 177341, label_conflicts: 0, inat_ok: 1, inat_missing: 0,
@@ -165,7 +165,7 @@ test("the dropdown opens on v2 once the server offers it, with every daily value
   assert.match(html, /chart-names-by-records/, "the names chart is no model's score and stays");
   const t = text(html);
   for (const n of ["63.0%", "86.6%", "n = 152", "n = 185", "n = 63, so far"]) assert.ok(t.includes(n), n);
-  assert.match(t, /403 records verified since training, with 1,291 new photos\./);
+  assert.match(t, /403 finds verified since training, with 1,291 new photos\./);
   assert.match(t, /Last 7 days \(to 25 November 2026\): species 63\.0% \(n = 400\)/);
   const bars = [...(html.match(/data-testid="chart-daily"[^]*/)?.[0] ?? "").matchAll(/<small[^>]*>([^<]*)<\/small>/g)]
     .map((m) => m[1]).slice(0, 3);
@@ -177,4 +177,18 @@ test("v1's view is the page as it was, whatever v2 has", () => {
   assert.equal(withoutPicker(page({ dailyScores: DAILY_V2, model: "v1" })), withoutPicker(page()));
   assert.equal(withoutPicker(page({ dailyScores: DAILY_V1_ONLY })), withoutPicker(page()));
   assert.ok(text(page({ dailyScores: DAILY_V2, model: "v1" })).includes("77%"), "v1's depth chart");
+});
+
+test("Get involved's v2 card shows family, the depth bands with too few said so, and 30 days", () => {
+  const html = page({ dailyScores: DAILY_V2 });
+  const t = text(html);
+  assert.match(t, /92\.8% Family, right first time/);
+  assert.match(t, /0 records n = 21 too few yet/);
+  assert.match(t, /photos and its public place and date/);
+  const forty = page({ dailyScores: fortyDays() });
+  const at = forty.indexOf('data-testid="chart-daily"');
+  const chart = forty.slice(at, forty.indexOf("<p ", at));
+  assert.equal([...chart.matchAll(/<small[^>]*>n = /g)].length, 30);
+  assert.match(text(forty), /day by day, last 30 days/);
+  assert.doesNotMatch(forty, /table-daily/, "the table is How it works'");
 });

@@ -8,10 +8,20 @@ cut, so every record first green AFTER the cut is one its weights never saw: a f
 Each night, after the green records are read and tonight's photos are embedded
 (api.run_nightly, after early_answers.score_pending), every such record not yet decided gets
 the model's answer, frozen in an insert-only ledger and never asked again: the model's FIRST
-answer about it. The answer is the served index's, from the record's own vectors with the
-record itself, its cross-post twins and any copy of its photos left out of the reference
-(identify.left_out), photos only (no place or date). A record whose photos have no vectors
-for the model yet waits for a later night.
+answer about it. A record whose photos have no vectors for the model yet waits.
+
+Measured the way v1's How it works numbers are (Steve, 2026-11-22: like with like): each
+record is identified from the records verified before it, with its photos and its PUBLIC
+place and date, by the served place method (nearest+mean-records-balanced+place). Tonight's
+records are the test, the rest of the served index the reference: every one of tonight's
+records, its cross-post twins and any copy of its photos are left out of the photo reference
+(identify.left_out), and the place prior is fitted again without them (the served method's
+own prior counts them), so no record is scored against itself, its place or its date. The
+place is what the source itself shows (dataset_release.public_place: iNat's point as the
+anonymous API gives it, obscured as-is, none when private; MO's shown GPS, else its location
+box's centre), never .org's point; the date is .org's, else iNat's (evaluate.load_records).
+A method with no place and date weighting is refused (PlaceRefused), never scored on photos
+alone.
 
 When a record turned green is early_answers.green_moment: the earliest of .org's first green
 moment, the start of its first green day and when Vision's nightly first listed it. A record
@@ -20,10 +30,16 @@ cut); no moment, or one at or before the cut, and it is never scored. Its day (U
 moment's.
 
 Left out, as early_answers leaves them out: a label conflict (waits), a record validated with
-Vision's help (vision_assisted: circular), a guest or no fungus (not_a_fungus_label). Scored
-against the DNA-validated name by early_answers.Judge (the manifest's labels,
-taxonomy.labels_for): species and genus right first (strict). Record level, one answer per
-record.
+Vision's help (vision_assisted: circular), a guest or no fungus (not_a_fungus_label). The
+truth is the DNA-validated name by early_answers.Judge (the manifest's labels,
+taxonomy.labels_for, so family is iNat's for the genus from the taxonomy cache, else .org's,
+as in evaluate.load_records). Judged as evaluate.evaluate judges v1's runs, at write time and
+frozen: species by the answer key (name_equiv.first_credited over the collapsed list), genus
+and family as written; the place of the first right name in the ten-deep answer, so top
+1/3/5/10 at each rank. Each record also keeps its true species' reference depth AT the cut
+(the North American, unconflicted records of that species, by the answer key, first green at
+or before it: v2's reference then), for the bands of "Every sequenced record makes it
+better". A band with fewer than MIN_BAND_RECORDS records gives no rate.
 
 The paper's seals, kept as they are:
 
@@ -46,10 +62,12 @@ They are separate because whether these scores may be public before the v1 paper
 (the records after v2's cut are also records first green after v1's seal) is the Paper
 Coordinator's question, not this module's.
 
-    MV_DAILY_SCORES_MODELS=v2=<backbone>/<method>@<cut, ISO UTC>[, v2-open=...@...]
+    MV_DAILY_SCORES_MODELS=v2=<backbone>/nearest+mean-records-balanced+place@<cut, ISO UTC>
+                           [, v2-open=...@...]
 
 declares each model by the id the pages' dropdown shows, so a later model (v2-open) joins the
-dropdown with a config change only.
+dropdown with a config change only. Its method is the served place method, v1's: a method
+without place and date weighting is refused.
 
 State: the ledger is a table in state/early-answers.sqlite (early_answers.default_path), which
 outlives releases. Only aggregates leave it (report; research_public.daily_scores).
@@ -74,6 +92,11 @@ V1 = "v1"                         # the pages' sealed choice: /api/how-good, nev
 ROLLING_DAYS = 7
 DEFAULT_LIMIT = 5000              # answers made in one night (the first night catches up)
 
+RANKS = ("species", "genus", "family")
+KS = (1, 3, 5, 10)                 # evaluate.STANDARD_K
+MIN_BAND_RECORDS = 30              # a depth band with fewer gives no rate: "too few yet"
+CONTEXT = "photos + public place and date"
+
 SCORED = "scored"
 VISION_ASSISTED = "vision_assisted"
 NOT_FUNGUS = "not_a_fungus_label"
@@ -91,12 +114,18 @@ create table if not exists cut_answers (
     green_day        text not null,       -- its UTC day: the row of the daily table
     green_rule       text,                -- moment | day
     photos           integer,             -- the record's photos the model holds (none trained on)
+    place_used       integer,             -- 1: answered with a public place
+    date_used        integer,             -- 1: answered with a date
+    answer_key       text,                -- name_equiv's species key it was judged by
     depth            integer,             -- how deep the frozen ranked names go
     ranks_json       text,                -- the frozen first answer (species, genus, family)
     truth_species    text,
     truth_genus      text,
-    sp_right         integer,             -- 1/0: species right first (strict); null: no species label
-    ge_right         integer,             -- 1/0: genus right first (strict); null: no genus label
+    truth_family     text,
+    sp_pos           integer,             -- 0-based place of the first right species; null: none
+    ge_pos           integer,             -- ... genus
+    fa_pos           integer,             -- ... family
+    species_depth_at_cut integer,         -- the true species' reference records at the cut
     primary key (backbone, method, cut, record_key)
 );
 create trigger if not exists cut_answers_no_update before update on cut_answers
@@ -106,8 +135,11 @@ begin select raise(abort, 'cut_answers is a ledger: no DELETE'); end;
 """
 
 COLUMNS = ("backbone", "method", "cut", "record_key", "decided_at", "outcome", "green_at",
-           "green_day", "green_rule", "photos", "depth", "ranks_json", "truth_species",
-           "truth_genus", "sp_right", "ge_right")
+           "green_day", "green_rule", "photos", "place_used", "date_used", "answer_key",
+           "depth", "ranks_json", "truth_species", "truth_genus", "truth_family", "sp_pos",
+           "ge_pos", "fa_pos", "species_depth_at_cut")
+POS = {"species": "sp_pos", "genus": "ge_pos", "family": "fa_pos"}
+TRUTH = {"species": "truth_species", "genus": "truth_genus", "family": "truth_family"}
 
 
 class DeclarationRefused(ValueError):
@@ -116,6 +148,10 @@ class DeclarationRefused(ValueError):
 
 class HoldListRefused(RuntimeError):
     """The held records' list can't be trusted: nothing is scored or reported."""
+
+
+class PlaceRefused(RuntimeError):
+    """The model can't be given a record's place and date: it is not scored on photos alone."""
 
 
 def _on(name: str) -> bool:
@@ -277,19 +313,111 @@ def candidates(manifest: sqlite3.Connection, model: Declared, done: set[str],
 
 # --- scoring --------------------------------------------------------------------------------
 
-Answer = Callable[[Declared, dict], "dict | None"]
-"""(model, record) -> {"lists": {"species": [{"name", "confidence"}], "genus", "family"},
-"photos": n} the model's answer from the record's own vectors, itself and its twins left out;
-None while it has no vectors for the model."""
+Answer = Callable[[Declared, list], dict]
+"""(model, tonight's records) -> {record key: {"lists": {"species": [{"name", "confidence"}],
+"genus", "family"}, "photos": n, "place_used": bool, "date_used": bool}, or None while it has
+no vectors for the model}. Each record arrives with "public" (public_context). All of them
+are answered as tonight's test: from the records verified before them, every one of them
+left out of the reference and of the place prior (api.daily_answers)."""
+
+
+def public_context(manifest: sqlite3.Connection, keys: list[str]) -> dict[str, dict]:
+    """{record key: {"latitude", "longitude", "observed_on", "uuid", "kind"}}: the record's
+    PUBLIC place (dataset_release.public_place: never .org's point; None when the source
+    shows none or was never read) and its date (.org's, else iNat's, as evaluate.load_records)."""
+    from .dataset_release import public_place
+    from .dates import real_date
+    tables = {r[0] for r in manifest.execute("select name from sqlite_master where type = 'table'")}
+    points = "mo_public_points" in tables
+    pt = ("p.latitude, p.longitude, p.gps_hidden, p.box_north, p.box_south, p.box_east, "
+          "p.box_west, p.fetched_at, p.status" if points else ", ".join(["null"] * 9))
+    join = "left join mo_public_points p on p.observation_id = r.observation_id" if points else ""
+    out: dict[str, dict] = {}
+    for i in range(0, len(keys), 500):
+        part = keys[i:i + 500]
+        q = ",".join("?" for _ in part)
+        for row in manifest.execute(f"""
+            select r.observation_id, r.source, r.observed_on, o.observed_on, o.status,
+                   o.inat_latitude, o.inat_longitude, o.obscured, o.geoprivacy,
+                   o.taxon_geoprivacy, o.positional_accuracy, o.fetched_at, o.uuid, {pt}
+            from records r
+            left join inat_observations o on o.observation_id = r.observation_id
+            {join}
+            where r.observation_id in ({q})""", part):
+            (key, source, org_day, inat_day, i_status, i_lat, i_lon, i_obs, i_geo, i_tgeo,
+             i_acc, i_at, uuid, m_lat, m_lon, m_hidden, m_n, m_s, m_e, m_w, m_at, m_status) = row
+            inat = None if i_status is None else {
+                "latitude": i_lat, "longitude": i_lon, "obscured": i_obs, "geoprivacy": i_geo,
+                "taxon_geoprivacy": i_tgeo, "positional_accuracy": i_acc, "fetched_at": i_at}
+            mo = None if m_at is None else ({
+                "latitude": m_lat, "longitude": m_lon, "gps_hidden": m_hidden, "box_north": m_n,
+                "box_south": m_s, "box_east": m_e, "box_west": m_w, "fetched_at": m_at}
+                if m_status == "ok" else {"fetched_at": m_at})
+            pp = public_place(key, source, inat, mo) or {}
+            lat, lon = pp.get("public_lat_micro"), pp.get("public_lon_micro")
+            known = lat is not None and lon is not None
+            out[key] = {"latitude": lat / 1e6 if known else None,
+                        "longitude": lon / 1e6 if known else None,
+                        "observed_on": real_date(org_day) or real_date(inat_day),
+                        "uuid": (uuid or None) if source == "inat" else None,
+                        "kind": pp.get("public_kind", "none")}
+    return out
+
+
+def depth_at_cut(manifest: sqlite3.Connection, cut: str, judge, answer_key: str):
+    """name_equiv.ReferenceDepth of the North American, unconflicted, fungal records first
+    green at or before `cut` (v2's reference then), by their species labels."""
+    from .early_answers import green_moment
+    from .name_equiv import ReferenceDepth
+    have = {r[1] for r in manifest.execute("pragma table_info(records)")}
+    fg = "first_green_at" if "first_green_at" in have else "null"
+    at_cut = _moment(cut)
+    labels = []
+    for name, genus, family, vo, fs, g in manifest.execute(
+            f"select scientific_name, genus, family, validated_on, first_seen_at, {fg} "
+            "from records where label_conflict = 0 and north_america = 1 "
+            "and (validated_on is null or substr(validated_on, 1, 10) <= ?)", (cut[:10],)):
+        moment, _ = green_moment(vo, fs, g)
+        if moment is None or moment > at_cut:
+            continue
+        labs = judge.truth(name, genus, family)
+        if labs is not None and labs.species:
+            labels.append(labs.species)
+    return ReferenceDepth(labels, answer_key)
+
+
+def judge_lists(lists: dict, labs, judge, answer_key: str) -> dict:
+    """{"sp_pos", "ge_pos", "fa_pos"}: the 0-based place of the first right name at each rank
+    (evaluate.evaluate's rules: species by the answer key over the collapsed list, genus and
+    family as written), None when none in the list or no label at that rank."""
+    from . import name_equiv
+    out = {"sp_pos": None, "ge_pos": None, "fa_pos": None}
+    if labs.species:
+        out["sp_pos"] = name_equiv.first_credited(
+            [judge.label(c["name"]) for c in lists.get("species") or []], labs.species,
+            answer_key)
+    for rank, col, truth in (("genus", "ge_pos", labs.genus), ("family", "fa_pos", labs.family)):
+        if not truth:
+            continue
+        seen: list[str] = []
+        for c in lists.get(rank) or []:
+            name = judge.label(c["name"])
+            if name not in seen:
+                seen.append(name)
+        out[col] = seen.index(truth) if truth in seen else None
+    return out
 
 
 def score_pending(store: sqlite3.Connection, manifest: sqlite3.Connection,
                   models: list[Declared], answer: Answer, held: frozenset,
-                  now: str | None = None, limit: int = DEFAULT_LIMIT, lock=None) -> dict:
+                  now: str | None = None, limit: int = DEFAULT_LIMIT, lock=None,
+                  answer_key: str | None = None) -> dict:
     """Decides, once, each record first green after a model's cut that has no decision yet
     (see the module's notes). Returns counts per model id."""
     import contextlib
-    from .early_answers import DEPTH, RANKS, Judge, ranked_lists
+    from . import name_equiv
+    from .early_answers import DEPTH, Judge, ranked_lists
+    answer_key = answer_key or name_equiv.ANSWER_KEY
     now = now or datetime.now(timezone.utc).isoformat(timespec="seconds")
     guard = lock or contextlib.nullcontext()
     with guard:
@@ -302,23 +430,30 @@ def score_pending(store: sqlite3.Connection, manifest: sqlite3.Connection,
                 "and cut = ?", (model.backbone, model.method, model.cut))}
         todo, stats = candidates(manifest, model, done, held)
         decided: list[tuple[dict, str, dict | None]] = []
-        asked = 0
+        batch = []
         for rec in todo:
             if rec.get("vision_assisted"):
                 decided.append((rec, VISION_ASSISTED, None))
-                continue
-            if asked >= limit:
+            elif len(batch) >= limit:
                 stats["waiting: tonight's limit"] += 1
-                continue
-            asked += 1
-            got = answer(model, rec)
-            if not got:
-                stats["waiting: no vectors yet"] += 1
-                continue
-            decided.append((rec, SCORED, got))
+            else:
+                batch.append(rec)
+        if batch:
+            places = public_context(manifest, [r["observation_id"] for r in batch])
+            for rec in batch:
+                rec["public"] = places.get(rec["observation_id"]) or {}
+            got = answer(model, batch)
+            for rec in batch:
+                g = got.get(rec["observation_id"])
+                if not g:
+                    stats["waiting: no vectors yet"] += 1
+                else:
+                    decided.append((rec, SCORED, g))
         names = [c["name"] for _, _, g in decided if g
                  for c in (g.get("lists") or {}).get("species") or []]
         judge = Judge(manifest, names) if decided else None
+        depth = (depth_at_cut(manifest, model.cut, judge, answer_key)
+                 if any(o == SCORED for _, o, _ in decided) else None)
         rows = []
         for rec, outcome, got in decided:
             base = {"backbone": model.backbone, "method": model.method, "cut": model.cut,
@@ -334,14 +469,17 @@ def score_pending(store: sqlite3.Connection, manifest: sqlite3.Connection,
                 else:
                     lists, _ = ranked_lists(None, got["lists"], DEPTH)
                     lists = {r: lists.get(r) or [] for r in RANKS}
-                    depth = max((len(v) for v in lists.values()), default=0)
-                    pos = judge.positions(lists, labs.species, labs.genus)
                     base.update({
-                        "photos": int(got.get("photos") or 0), "depth": depth,
+                        "photos": int(got.get("photos") or 0),
+                        "place_used": int(bool(got.get("place_used"))),
+                        "date_used": int(bool(got.get("date_used"))),
+                        "answer_key": answer_key,
+                        "depth": max((len(v) for v in lists.values()), default=0),
                         "ranks_json": json.dumps(lists, separators=(",", ":")),
                         "truth_species": labs.species or None, "truth_genus": labs.genus or None,
-                        "sp_right": int(pos["sp_strict"] == 0) if labs.species else None,
-                        "ge_right": int(pos["ge_strict"] == 0) if labs.genus else None})
+                        "truth_family": labs.family or None,
+                        "species_depth_at_cut": depth(labs.species) if labs.species else None,
+                        **judge_lists(lists, labs, judge, answer_key)})
             base["outcome"] = outcome
             stats[outcome] += 1
             rows.append(tuple(base.get(c) for c in COLUMNS))
@@ -359,14 +497,45 @@ def _rate(k: int, n: int) -> float | None:
     return round(k / n, 4) if n else None
 
 
-def _rank(rows: list[dict], col: str) -> dict:
-    """{"right", "n", "top1", "ci95"}: right first over the rows with that label; ci95 the
-    Wilson score interval (heldout_report.wilson)."""
+def _labelled(rows: list[dict], rank: str) -> list[dict]:
+    return [r for r in rows if r[TRUTH[rank]]]
+
+
+def _rank(rows: list[dict], rank: str) -> dict:
+    """{"right", "n", "top1", "ci95"}: right first over the rows with a label at `rank`;
+    ci95 the Wilson score interval (heldout_report.wilson)."""
     from .heldout_report import wilson
-    use = [r[col] for r in rows if r[col] is not None]
-    k, n = sum(use), len(use)
+    use = _labelled(rows, rank)
+    k, n = sum(r[POS[rank]] == 0 for r in use), len(use)
     ci = wilson(k, n)
     return {"right": k, "n": n, "top1": _rate(k, n), "ci95": list(ci) if ci else None}
+
+
+def _top_k(rows: list[dict], rank: str) -> dict:
+    """{"n", "top1", "top3", "top5", "top10"}: the right name within the first k (as
+    evaluate's standard table)."""
+    use = _labelled(rows, rank)
+    out = {"n": len(use)}
+    for k in KS:
+        out[f"top{k}"] = _rate(sum(r[POS[rank]] is not None and r[POS[rank]] < k for r in use),
+                               len(use))
+    return out
+
+
+def _by_depth(rows: list[dict]) -> list[dict]:
+    """Species by the true species' reference records at the cut, in evaluate's bands; a band
+    with fewer than MIN_BAND_RECORDS records gives no rate (`too_few`)."""
+    from .evaluate import STANDARD_DEPTH, standard_band
+    use = [r for r in _labelled(rows, "species") if r["species_depth_at_cut"] is not None]
+    out = []
+    for _, _, band in STANDARD_DEPTH:
+        mine = [r for r in use if standard_band(r["species_depth_at_cut"]) == band]
+        cell = _top_k(mine, "species")
+        too_few = cell["n"] < MIN_BAND_RECORDS
+        if too_few:
+            cell = {"n": cell["n"], **{f"top{k}": None for k in KS}}
+        out.append({"band": band, **cell, "too_few": too_few})
+    return out
 
 
 def _days(start: str, end: str) -> list[str]:
@@ -374,11 +543,16 @@ def _days(start: str, end: str) -> list[str]:
     return [(a + timedelta(days=i)).isoformat() for i in range((b - a).days + 1)]
 
 
+def _three(rows: list[dict]) -> dict:
+    return {rank: _rank(rows, rank) for rank in RANKS}
+
+
 def report(store: sqlite3.Connection, model: Declared, held: frozenset, lock=None) -> dict:
     """One model's scores since its cut, aggregates only: per UTC green day the records
-    scored, their photos and species and genus right first (each with its n), the 7-day
-    rolling value ending that day, and the cumulative total with its 95% interval. Held
-    records are left out whatever the ledger holds. No record key, name, photo or place."""
+    scored, their photos and species, genus and family right first (each with its n), the
+    7-day rolling value ending that day; the cumulative total with its 95% intervals; top
+    1/3/5/10 at each rank; species by reference depth at the cut. Held records are left out
+    whatever the ledger holds. No record key, name, photo or place."""
     import contextlib
     with lock or contextlib.nullcontext():
         ensure_schema(store)
@@ -391,11 +565,14 @@ def report(store: sqlite3.Connection, model: Declared, held: frozenset, lock=Non
     left = Counter(r["outcome"] for r in found if r["outcome"] != SCORED)
     as_of = max((r["decided_at"] for r in found), default=None)
     base = {"id": model.id, "backbone": model.backbone, "method": model.method,
-            "trained_through": model.cut, "context": "photos only", "as_of": as_of,
+            "trained_through": model.cut, "context": CONTEXT,
+            "answer_key": next((r["answer_key"] for r in rows if r["answer_key"]), None),
+            "as_of": as_of, "min_band_records": MIN_BAND_RECORDS,
             "left_out": {k: left.get(k, 0) for k in OUTCOMES if k != SCORED}}
     if not rows:
-        return {**base, "records": 0, "new_photos": 0, "days": [], "cumulative": None,
-                "rolling_7_days": None}
+        return {**base, "records": 0, "new_photos": 0, "with_place": 0, "with_date": 0,
+                "days": [], "cumulative": None, "rolling_7_days": None, "top_k": None,
+                "species_by_depth": None}
     by_day: dict[str, list[dict]] = {}
     for r in rows:
         by_day.setdefault(r["green_day"], []).append(r)
@@ -407,17 +584,19 @@ def report(store: sqlite3.Connection, model: Declared, held: frozenset, lock=Non
         window = [r for w in span[max(0, i - ROLLING_DAYS + 1):i + 1] for r in by_day.get(w, [])]
         days.append({
             "day": d, "records": len(today), "photos": sum(r["photos"] or 0 for r in today),
-            "species": _rank(today, "sp_right"), "genus": _rank(today, "ge_right"),
-            "rolling_7_days": {"records": len(window), "species": _rank(window, "sp_right"),
-                               "genus": _rank(window, "ge_right")},
+            **_three(today),
+            "rolling_7_days": {"records": len(window), **_three(window)},
             # A day the nightly has not finished with: more of its records may still come.
             "complete": bool(as_of_day) and d < as_of_day})
     photos = sum(r["photos"] or 0 for r in rows)
-    return {**base, "records": len(rows), "new_photos": photos, "days": days,
+    return {**base, "records": len(rows), "new_photos": photos,
+            "with_place": sum(bool(r["place_used"]) for r in rows),
+            "with_date": sum(bool(r["date_used"]) for r in rows), "days": days,
             "cumulative": {"from": span[0], "through": span[-1], "records": len(rows),
-                           "photos": photos, "species": _rank(rows, "sp_right"),
-                           "genus": _rank(rows, "ge_right")},
-            "rolling_7_days": {"through": span[-1], **days[-1]["rolling_7_days"]}}
+                           "photos": photos, **_three(rows)},
+            "rolling_7_days": {"through": span[-1], **days[-1]["rolling_7_days"]},
+            "top_k": {"k": list(KS), **{rank: _top_k(rows, rank) for rank in RANKS}},
+            "species_by_depth": _by_depth(rows)}
 
 
 def public_payload(store: sqlite3.Connection | None, models: list[Declared] | None = None,
