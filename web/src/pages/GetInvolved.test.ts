@@ -150,7 +150,7 @@ test("the Sequence section has the model dropdown, on v1 while v2 is not availab
   for (const daily of [undefined, DAILY_V1_ONLY]) {
     const html = page({ dailyScores: daily });
     assert.match(html, /data-testid="model-picker"/);
-    assert.match(html, /<option value="v1" selected="">Vision v1<\/option>/);
+    assert.match(html, /<option value="v1" selected="">MycoMap Vision v1<\/option>/);
     assert.doesNotMatch(html, /value="v2"/);
     const at = html.indexOf('data-testid="model-picker"');
     assert.ok(at > html.indexOf('data-testid="section-sequence"') && at < html.indexOf('data-testid="chart-by-depth"'));
@@ -159,7 +159,7 @@ test("the Sequence section has the model dropdown, on v1 while v2 is not availab
 
 test("the dropdown opens on v2 once the server offers it, with every daily value beside its n", () => {
   const html = page({ dailyScores: DAILY_V2 });
-  assert.match(html, /<option value="v2" selected="">Vision v2<\/option>/);
+  assert.match(html, /<option value="v2" selected="">MycoMap Vision v2<\/option>/);
   assert.match(html, /data-testid="scores-v2"/);
   assert.doesNotMatch(html, /chart-by-depth/, "v1's depth chart gives way to v2's days");
   assert.match(html, /chart-names-by-records/, "the names chart is no model's score and stays");

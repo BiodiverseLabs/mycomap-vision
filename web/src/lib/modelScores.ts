@@ -9,13 +9,13 @@ export const V1 = "v1";
 
 export interface ModelOption { id: string; label: string }
 
-/** "Vision v1", "Vision v2", "Vision v2-open". */
-export const modelLabel = (id: string) => `Vision ${id}`;
+/** "MycoMap Vision v1", "MycoMap Vision v2", "MycoMap Vision v2-open": the site's names for its models. */
+export const choiceLabel = (id: string) => `MycoMap Vision ${id}`;
 
 /** The dropdown's choices: v1 always, then each newer model the server has scores for. */
 export function modelOptions(d: DailyScores | null | undefined): ModelOption[] {
   const ids = [V1, ...(d?.available ?? []).filter((id) => id !== V1 && d?.models?.[id])];
-  return [...new Set(ids)].map((id) => ({ id, label: modelLabel(id) }));
+  return [...new Set(ids)].map((id) => ({ id, label: choiceLabel(id) }));
 }
 
 /** Which model the dropdown opens on: the server's default when it is a choice, else v1. */

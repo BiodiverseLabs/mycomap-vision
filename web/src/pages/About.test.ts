@@ -202,7 +202,7 @@ test("the How good section has the model dropdown, on v1 while v2 is not availab
   for (const daily of [undefined, DAILY_V1_ONLY]) {
     const html = page({ dailyScores: daily });
     assert.match(html, /data-testid="model-picker"/);
-    assert.match(html, /<option value="v1" selected="">Vision v1<\/option>/);
+    assert.match(html, /<option value="v1" selected="">MycoMap Vision v1<\/option>/);
     assert.doesNotMatch(html, /value="v2"/, "no v2 to choose until the server offers it");
     assert.ok(html.indexOf('data-testid="model-picker"') > html.indexOf('data-testid="section-how-good"'));
   }
@@ -210,11 +210,11 @@ test("the How good section has the model dropdown, on v1 while v2 is not availab
 
 test("the dropdown opens on v2 once the server offers it, and shows v2's numbers", () => {
   const html = page({ dailyScores: DAILY_V2 });
-  assert.match(html, /<option value="v2" selected="">Vision v2<\/option>/);
+  assert.match(html, /<option value="v2" selected="">MycoMap Vision v2<\/option>/);
   assert.match(html, /data-testid="scores-v2"/);
   assert.doesNotMatch(html, /chart-top-k|table-by-depth|text-model-credit/, "v1's run is not shown under v2");
   const t = text(html);
-  assert.match(t, /Vision v2 learned from every DNA-verified record up to 22 November 2026/);
+  assert.match(t, /MycoMap Vision v2 learned from every DNA-verified record up to 22 November 2026/);
   assert.ok(t.includes("63.0%"), "species overall");
   assert.match(t, /Likely between 58\.1% and 67\.7%/);
   assert.ok(t.includes("403") && t.includes("1,291"), "records and new photos since training");

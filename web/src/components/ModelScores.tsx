@@ -6,7 +6,7 @@ import { useId } from "react";
 import { Bars, C, Card, H3, Ink, Small, Tile } from "@/components/Explainer";
 import { num, pct, type ModelScores } from "@/lib/api";
 import { longDate } from "@/lib/publicView";
-import { modelLabel, rangeText, scoredDays, withN, type ModelOption } from "@/lib/modelScores";
+import { choiceLabel, rangeText, scoredDays, withN, type ModelOption } from "@/lib/modelScores";
 
 /** The dropdown. With one choice it still shows which model the numbers are for. */
 export function ModelPicker({ options, value, onChange, testId = "model-picker" }: {
@@ -30,7 +30,7 @@ export function ModelPicker({ options, value, onChange, testId = "model-picker" 
 export function SinceTraining({ m, compact }: { m: ModelScores; compact?: boolean }) {
   const cum = m.cumulative;
   const roll = m.rolling_7_days;
-  const name = modelLabel(m.id);
+  const name = choiceLabel(m.id);
   const chart = scoredDays(m, 14);
   return (
     <div data-testid={`scores-${m.id}`}>
