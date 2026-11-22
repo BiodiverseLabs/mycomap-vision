@@ -153,6 +153,11 @@ test("Results: eight sections in the nav's order, the two models with both v1-op
   assert.match(t, /honest to within 4\.3 points/);
   assert.match(t, /iNaturalist's computer vision on these records: not scored yet/);
   assert.match(t, /574 answers kept/);
+  // The headline run is scored with the place and date recorded with each find, not its public place.
+  assert.match(t, /MycoMap Vision v1 on dataset release v1's validation split, with each find's photos and the place and date recorded with it\. The same summary/);
+  assert.doesNotMatch(t, /its public place and date/);
+  // The sealed test's iNat line stays: it is scored on the frozen public points (paper_inat_cv.PLACE_RULE).
+  assert.match(t, /on the same photos and the same public place, after the analysis freeze/);
   assert.match(html, /data-testid="permission-control"/, "an approved photographer line");
   assert.match(t, /Photographers stay in control of how their photos are used in MycoMap Vision\./);
 });
@@ -435,7 +440,10 @@ test("Benchmarks: the summary's headings follow h1 → h2 → h3, and the advanc
   const card = html.slice(html.indexOf('data-testid="benchmark-card-advance-predictions"'));
   assert.match(text(card.slice(0, card.indexOf("</a>"))), /Paused Live Advance predictions .* Paused since 19 October 2026\. No records awaiting validation reach Vision/);
   assert.match(html, /data-testid="pill-paused"/);
-  assert.match(text(html), /Newest weeks: MycoMap Vision v1 on 12,798 finds, with each find's photos and its public place and date\./);
+  // The how-good run is scored with the place and date recorded with each find (evaluate.context_of:
+  // .org's coordinates, never shown), not its public place (Steve, 2026-11-22).
+  assert.match(text(html), /Newest weeks: MycoMap Vision v1 on 12,798 finds, with each find's photos and the place and date recorded with it\./);
+  assert.doesNotMatch(text(html), /Newest weeks:[^.]*public place/);
 });
 
 test("Benchmarks, the v1 validation card: the 224 px → 336 px step, paired, beside the released models", () => {
