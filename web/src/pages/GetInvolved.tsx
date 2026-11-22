@@ -401,7 +401,7 @@ function DepthCard({ h, loading }: { h?: HowGood; loading?: boolean }) {
           </div>
           <Cap>
             Tested on the newest {num(run.n_test)} finds (validated after {longDate(run.cutoff)}), each
-            identified from the records verified before it{run.method.endsWith("+place") ? ", with its photos and its public place and date" : ", from its photos alone"}.{" "}
+            identified from the records verified before it{run.method.endsWith("+place") ? ", with its photos and the place and date recorded with it" : ", from its photos alone"}.{" "}
             <a className="underline" href="/about#how-good">More in How it works</a>.
           </Cap>
         </>

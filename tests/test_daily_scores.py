@@ -208,7 +208,7 @@ def test_daily_cumulative_rolling_and_new_photo_figures(conn, store):
     assert days["2026-11-23"]["family"]["n"] == 3 and roll["family"]["n"] == 12
     assert rep["new_photos"] == cum["photos"] == 45
     assert (cum["from"], cum["through"]) == ("2026-11-22", "2026-12-01")
-    assert rep["trained_through"] == CUT and rep["context"] == "photos + public place and date"
+    assert rep["trained_through"] == CUT and rep["context"] == "photos + place and date"
     assert rep["with_place"] == rep["with_date"] == 15
     # The day the nightly is still on may get more records: it says so.
     assert days["2026-12-01"]["complete"] is False and days["2026-11-30"]["complete"] is True
@@ -346,31 +346,46 @@ def test_the_feed_answers_a_signed_out_visitor(conn, tmp_path):
 
 # --- measured as v1 is: public place and date (Steve, 2026-11-22) ------------------------------
 
-def test_the_place_is_the_public_one_never_orgs(conn):
-    from mycomap_vision import mopoints
-    add(conn, [{"n": "51", "name": "A x", "day": "2026-11-23"},
-               {"n": "52", "name": "A x", "day": "2026-11-23"}])
+def test_v2_scores_with_the_place_and_date_v1s_runs_use_and_none_of_it_leaves(
+        conn, tmp_path, monkeypatch):
+    # Steve, 2026-11-22: like with like. v1's runs give a test record evaluate.context_of of
+    # its evaluate.load_records record: .org's coordinates (never shown), .org's date else
+    # iNat's. A record with no coordinates is answered with its date alone, as v1's are.
+    from mycomap_vision import evaluate, placeprior
+    client = scored_site(conn, tmp_path, monkeypatch)
     conn.execute("update records set latitude = 45.5, longitude = -70.25, observed_on = '2026-11-01' "
-                 "where observation_id in ('51', '52')")
-    conn.execute("insert into inat_observations (observation_id, status, uuid, obscured, observed_on, "
-                 "inat_latitude, inat_longitude, fetched_at) values ('51', 'ok', 'u-51', 1, "
-                 "'2026-10-31', 39.1, -86.5, 't')")
-    conn.execute("insert into inat_observations (observation_id, status, uuid, obscured, observed_on, "
-                 "fetched_at) values ('52', 'ok', 'u-52', 0, '2026-10-31', 't')")      # private on iNat
-    conn.execute("insert into records (observation_id, source, source_id, scientific_name, north_america, "
-                 "exported_at, validated_on) values ('mo:9', 'mo', '9', 'A x', 1, 't', '2026-11-23')")
-    conn.execute("update records set latitude = 10.0, longitude = 10.0 where observation_id = 'mo:9'")
-    mopoints.ensure_schema(conn)
-    conn.execute("insert into mo_public_points (observation_id, gps_hidden, box_north, box_south, "
-                 "box_east, box_west, status, fetched_at) values ('mo:9', 1, 41, 40, -80, -82, 'ok', 't')")
-    got = ds.public_context(conn, ["51", "52", "mo:9"])
-    assert (got["51"]["latitude"], got["51"]["longitude"], got["51"]["kind"]) == (39.1, -86.5, "inat_obscured")
-    assert got["51"]["uuid"] == "u-51" and got["51"]["observed_on"] == "2026-11-01"   # .org's date first
-    assert got["52"]["latitude"] is None and got["52"]["longitude"] is None, "private on iNat: no place"
-    assert (got["mo:9"]["latitude"], got["mo:9"]["longitude"], got["mo:9"]["kind"]) == (40.5, -81.0, "mo_box_centre")
-    assert got["mo:9"]["uuid"] is None
-    for v in got.values():
-        assert v["latitude"] not in (45.5, 10.0), ".org's true point is never used"
+                 "where observation_id = '106'")
+    conn.execute("update records set latitude = null, longitude = null where observation_id = '107'")
+    conn.commit()
+    seen: list = []
+    real = placeprior.PlaceBoost.log_prior
+
+    def spy(self, ctx):
+        seen.append((ctx.latitude, ctx.longitude, ctx.observed_on, ctx.uuid))
+        return real(self, ctx)
+    monkeypatch.setattr(placeprior.PlaceBoost, "log_prior", spy)
+    out = client.app.state.score_daily_scores()
+    assert out["v2"]["scored"] == 2, out
+    ids = [r[0] for r in conn.execute("select photo_id from embeddings where backbone = 'm1'")]
+    v1_way = {r.observation_id: evaluate.context_of(r)
+              for r in evaluate.load_records(conn, {p: p for p in ids})}
+    for key in ("106", "107"):
+        c = v1_way[key]
+        assert (c.latitude, c.longitude, c.observed_on, c.uuid) in seen, key
+    assert (45.5, -70.25, "2026-11-01", "uuid-106") in seen, ".org's point and date, not iNat's public ones"
+    assert (None, None, "2025-09-01", "uuid-107") in seen, "no coordinates: the date alone"
+    store = client.app.state.early_store
+    with store.lock:
+        got = {r["record_key"]: (r["outcome"], r["place_used"], r["date_used"]) for r in rows(store.conn)}
+    assert got == {"106": ("scored", 1, 1), "107": ("scored", 0, 1)}
+    body = client.get("/api/daily-scores").text
+    for leak in ("45.5", "-70.25", "39.1", "-86.5", "latitude", "longitude", "uuid-10", "2026-11-01"):
+        assert leak not in body, leak
+    v2 = json.loads(body)["models"]["v2"]
+    assert v2["context"] == "photos + place and date"
+    assert (v2["with_place"], v2["with_date"]) == (1, 2)
+    with pytest.raises(ValueError, match="per-record"):
+        research_public.daily_scores({"models": {"v2": {"days": [{"latitude": 45.5}]}}})
 
 
 def test_top_k_and_family_are_judged_at_write_time_from_the_ten_deep_answer(conn, store):
@@ -445,7 +460,7 @@ def test_a_method_without_place_and_date_is_refused_not_scored_on_photos_alone(c
         assert rows(store.conn) == []
 
 
-def test_the_nightly_answers_with_the_public_place_and_a_prior_without_tonights_records(
+def test_the_nightly_fits_the_place_prior_without_tonights_records(
         conn, tmp_path, monkeypatch):
     from mycomap_vision import placeprior
     client = scored_site(conn, tmp_path, monkeypatch)
@@ -456,24 +471,16 @@ def test_the_nightly_answers_with_the_public_place_and_a_prior_without_tonights_
         fitted.append({r.observation_id for r in records})
         return real_fit(self, records, species)
     monkeypatch.setattr(placeprior.PlaceBoost, "fit", spy)
-    seen: list = []
-    real_shift = placeprior.PlaceBoost.log_prior
-
-    def spy_prior(self, ctx):
-        seen.append((ctx.latitude, ctx.longitude, ctx.observed_on))
-        return real_shift(self, ctx)
-    monkeypatch.setattr(placeprior.PlaceBoost, "log_prior", spy_prior)
     out = client.app.state.score_daily_scores()
     assert out["v2"]["scored"] == 2, out
     tonight = fitted[-1]
     assert tonight and not tonight & {"106", "107"}, "tonight's records are not in the prior"
     assert {"100", "103"} <= tonight
-    assert (39.1, -86.5, "2025-09-01") in seen, "the public iNat place and the date"
     store = client.app.state.early_store
     with store.lock:
-        assert {(r["place_used"], r["date_used"]) for r in rows(store.conn)} == {(1, 1)}
+        assert {r["date_used"] for r in rows(store.conn)} == {1}
     v2 = client.get("/api/daily-scores").json()["models"]["v2"]
-    assert v2["context"] == "photos + public place and date" and v2["with_place"] == 2
+    assert v2["context"] == "photos + place and date"
     assert v2["cumulative"]["family"]["n"] == 2 and v2["top_k"]["species"]["n"] == 2
 
 

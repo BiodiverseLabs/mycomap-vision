@@ -159,7 +159,7 @@ test("a run scored before the standard summary shows its top-1 tiles and no ladd
 });
 
 test("How it works: the headline names its test, place and date included; the speed chart says when it is loading", () => {
-  assert.match(text(page()), /Tested on the newest 12,874 DNA-verified finds \(validated after 17 August 2026\), identified from the 155,648 records verified before them, with each find's photos and its public place and date\./);
+  assert.match(text(page()), /Tested on the newest 12,874 DNA-verified finds \(validated after 17 August 2026\), identified from the 155,648 records verified before them, with each find's photos and the place and date recorded with it\./);
   const loading = text(page({ speed: undefined, loading: true }));
   assert.match(loading, /Loading the daily averages…/);
   assert.doesNotMatch(loading, /No day recorded yet/);
@@ -248,11 +248,12 @@ const part = (html: string, id: string) => {
 };
 const subs = (html: string) => [...html.matchAll(/<small[^>]*>([^<]*)<\/small>/g)].map((m) => m[1]);
 
-test("v2 is measured and said as v1 is: photos and public place and date, from the records before it", () => {
+test("v2 is measured and said as v1 is: photos and the place and date recorded with it, from the records before it", () => {
   const t = text(page({ dailyScores: DAILY_V2 }));
-  assert.match(t, /Tested on the 403 DNA-verified finds validated since, none of them used in training, each identified from the records verified before it, with its photos and its public place and date\./);
+  assert.match(t, /Tested on the 403 DNA-verified finds validated since, none of them used in training, each identified from the records verified before it, with its photos and the place and date recorded with it\./);
   const v1 = text(page());
-  assert.match(v1, /with each find's photos and its public place and date/, "v1's own words, unchanged");
+  assert.match(v1, /with each find's photos and the place and date recorded with it/, "v1's words, the same as v2's");
+  for (const t2 of [v1, t]) assert.doesNotMatch(t2, /public place/, "neither view says public place");
 });
 
 test("v2 shows v1's breakdowns: family beside species and genus, the top-k ladder, and depth with too few said so", () => {

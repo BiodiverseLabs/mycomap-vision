@@ -2748,15 +2748,15 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def daily_answers(db: sqlite3.Connection, model, recs: list[dict]) -> dict:
         """A declared model's first answers about tonight's records (daily_scores.Answer),
         measured as v1's How it works numbers are: from the records verified before them, with
-        each one's photos and public place and date. Every one of tonight's records, its twins
+        each one's photos and the place and date v1's runs score with (evaluate.context_of on
+        evaluate.load_records' record: .org's coordinates, never shown). Every one of tonight's records, its twins
         and any copy of its photos are left out of the reference (identify.left_out), and the
         served method's place prior is fitted again without them, so none is answered with
         itself, its place or its date. A method with no place and date weighting is refused
         (daily_scores.PlaceRefused), never scored on photos alone."""
         import numpy as np
         from . import daily_scores, placeprior
-        from .evaluate import load_records
-        from .prior import Context
+        from .evaluate import context_of, load_records
         ident = identifier(model.backbone, model.method, permission_view())
         prior_now = getattr(ident.model, "prior", None)
         if not hasattr(ident.model, "place_shift") or not isinstance(prior_now,
@@ -2783,17 +2783,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         ids = [int(r[0]) for r in db.execute("select photo_id from embeddings where backbone = ?",
                                              (model.backbone,))]
         in_index = set(ident.col_record.obs.tolist())
-        reference = [r for r in load_records(db, {p: p for p in ids})
+        loaded = load_records(db, {p: p for p in ids})
+        # Tonight's records' place and date, as v1's runs give a test record theirs.
+        contexts = {r.observation_id: context_of(r) for r in loaded if r.observation_id in own_of}
+        reference = [r for r in loaded
                      if r.observation_id in in_index and r.observation_id not in left]
+        del loaded
         prior = placeprior.PlaceBoost(setting=prior_now.setting_name)
         prior.fit(reference, ident.index.species)
         del reference
         out: dict = {}
-        by_key = {str(r["observation_id"]): r for r in recs}
         for key, own in own_of.items():
-            pub = by_key[key].get("public") or {}
-            ctx = Context(pub.get("latitude"), pub.get("longitude"), pub.get("observed_on"),
-                          pub.get("uuid"))
+            ctx = contexts.get(key)
+            if ctx is None:
+                continue                    # not one of the records v1's runs would load
             lp = prior.log_prior(ctx)
             shift = None if lp is None else placeprior.PHOTO_TEMPERATURE * lp
             vecs = ident.reference_vectors(own[:MAX_PHOTOS])

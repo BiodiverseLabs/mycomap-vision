@@ -1,7 +1,7 @@
 // The v1 / v2 dropdown and a newer model's scores since its training cut (lib/modelScores.ts),
 // shared by How it works and Get involved. A newer model is measured as v1's numbers are (each
-// find identified from the records verified before it, with its photos and its public place
-// and date), and shown with the same breakdowns. Every daily value is written with its n: a
+// find identified from the records verified before it, with its photos and the place and date
+// recorded with it), and shown with the same breakdowns. Every daily value is written with its n: a
 // day holds a hundred or two records, so a day's figure swings.
 
 import { useId } from "react";
@@ -35,8 +35,8 @@ function TestLine({ m }: { m: ModelScores }) {
     <Small className="mb-3">
       {choiceLabel(m.id)} learned from every DNA-verified record up to {longDate(m.trained_through)}.
       Tested on the <Ink>{num(m.records)}</Ink> DNA-verified finds validated since, none of them used
-      in training, each identified from the records verified before it, with its photos and its
-      public place and date. Each find is checked once, on its first answer.
+      in training, each identified from the records verified before it, with its photos and the
+      place and date recorded with it. Each find is checked once, on its first answer.
     </Small>
   );
 }

@@ -137,7 +137,7 @@ test("never mycomap.com, and every outside link is a real mycomap.org or iNatura
 
 test("the depth chart names its test, finds and place and date; researchers score their model on the same records", () => {
   const t = text(page());
-  assert.match(t, /Tested on the newest 12,874 finds \(validated after 17 August 2026\), each identified from the records verified before it, with its photos and its public place and date\./);
+  assert.match(t, /Tested on the newest 12,874 finds \(validated after 17 August 2026\), each identified from the records verified before it, with its photos and the place and date recorded with it\./);
   assert.match(t, /how to cite, and how to score your own model on the same records\./);
   assert.doesNotMatch(t, /\bours\b/);
 });
@@ -184,7 +184,9 @@ test("Get involved's v2 card shows family, the depth bands with too few said so,
   const t = text(html);
   assert.match(t, /92\.8% Family, right first time/);
   assert.match(t, /0 records n = 21 too few yet/);
-  assert.match(t, /photos and its public place and date/);
+  assert.match(t, /photos and the place and date recorded with it/);
+  assert.doesNotMatch(t, /public place/);
+  assert.doesNotMatch(text(page()), /public place/, "v1's view says it the same way");
   const forty = page({ dailyScores: fortyDays() });
   const at = forty.indexOf('data-testid="chart-daily"');
   const chart = forty.slice(at, forty.indexOf("<p ", at));

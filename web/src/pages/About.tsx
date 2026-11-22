@@ -388,7 +388,7 @@ function HowGoodSection({ h, loading, speed, today, picker, scores }: {
           <Sub>
             Tested on the newest <Ink>{num(run.n_test)}</Ink> DNA-verified finds (validated
             after {longDate(run.cutoff)}), identified from the <Ink>{num(run.n_reference)}</Ink> records
-            verified before them{run.method.endsWith("+place") ? ", with each find's photos and its public place and date" : ", from the photos alone"}.
+            verified before them{run.method.endsWith("+place") ? ", with each find's photos and the place and date recorded with it" : ", from the photos alone"}.
           </Sub>
           <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-2">
             <Score rank="Species" value={h.top1.species} />

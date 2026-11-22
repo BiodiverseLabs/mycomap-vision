@@ -19,7 +19,7 @@ const tk = (n: number, top1: number, top3: number, top5: number, top10: number) 
 
 export const V2_SCORES: ModelScores = {
   id: "v2", backbone: "bioclip-2.5-h14-336-ft-20261122-164602", method: "nearest+mean-records-balanced+place",
-  trained_through: "2026-11-22T08:24:03+00:00", context: "photos + public place and date",
+  trained_through: "2026-11-22T08:24:03+00:00", context: "photos + place and date",
   answer_key: "species-rank-2026-10-18", as_of: "2026-11-25T08:10:00+00:00",
   records: 403, new_photos: 1291, with_place: 391, with_date: 403, min_band_records: 30,
   days: [

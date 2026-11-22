@@ -318,7 +318,7 @@ export interface ScoreDay {
 export interface DepthBand { band: string; n: number; top1: number | null; top3: number | null;
                              top5: number | null; top10: number | null; too_few: boolean }
 /** A newer model scored on every record first green after its training cut (daily_scores.py):
- *  its first answer about each, measured as v1's numbers are (photos + public place and date),
+ *  its first answer about each, measured as v1's numbers are (photos + place and date),
  *  aggregates only. */
 export interface ModelScores {
   id: string;
@@ -326,7 +326,7 @@ export interface ModelScores {
   method: string;
   /** The training cut: every record green up to it was trained on. */
   trained_through: string;
-  /** "photos + public place and date", as v1's How it works numbers. */
+  /** "photos + place and date", as v1's How it works numbers. */
   context: string;
   answer_key?: string | null;
   as_of: string | null;

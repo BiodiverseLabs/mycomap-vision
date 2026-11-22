@@ -11,17 +11,18 @@ the model's answer, frozen in an insert-only ledger and never asked again: the m
 answer about it. A record whose photos have no vectors for the model yet waits.
 
 Measured the way v1's How it works numbers are (Steve, 2026-11-22: like with like): each
-record is identified from the records verified before it, with its photos and its PUBLIC
-place and date, by the served place method (nearest+mean-records-balanced+place). Tonight's
+record is identified from the records verified before it, with its photos and the place and
+date recorded with it, by the served place method (nearest+mean-records-balanced+place). Tonight's
 records are the test, the rest of the served index the reference: every one of tonight's
 records, its cross-post twins and any copy of its photos are left out of the photo reference
 (identify.left_out), and the place prior is fitted again without them (the served method's
 own prior counts them), so no record is scored against itself, its place or its date. The
-place is what the source itself shows (dataset_release.public_place: iNat's point as the
-anonymous API gives it, obscured as-is, none when private; MO's shown GPS, else its location
-box's centre), never .org's point; the date is .org's, else iNat's (evaluate.load_records).
-A method with no place and date weighting is refused (PlaceRefused), never scored on photos
-alone.
+place and date are the ones v1's runs score with (Steve, 2026-11-22): evaluate.load_records'
+record, through evaluate.context_of: .org's coordinates (records.latitude/longitude, used for
+scores and never shown), .org's date, else iNat's, and the iNat uuid. A record with no
+coordinates is answered with its date alone, as v1's are. None of it leaves the server
+(research_public.daily_scores refuses any coordinate field). A method with no place and date
+weighting is refused (PlaceRefused), never scored on photos alone.
 
 When a record turned green is early_answers.green_moment: the earliest of .org's first green
 moment, the start of its first green day and when Vision's nightly first listed it. A record
@@ -95,7 +96,7 @@ DEFAULT_LIMIT = 5000              # answers made in one night (the first night c
 RANKS = ("species", "genus", "family")
 KS = (1, 3, 5, 10)                 # evaluate.STANDARD_K
 MIN_BAND_RECORDS = 30              # a depth band with fewer gives no rate: "too few yet"
-CONTEXT = "photos + public place and date"
+CONTEXT = "photos + place and date"
 
 SCORED = "scored"
 VISION_ASSISTED = "vision_assisted"
@@ -114,7 +115,7 @@ create table if not exists cut_answers (
     green_day        text not null,       -- its UTC day: the row of the daily table
     green_rule       text,                -- moment | day
     photos           integer,             -- the record's photos the model holds (none trained on)
-    place_used       integer,             -- 1: answered with a public place
+    place_used       integer,             -- 1: answered with a place (.org's, as v1)
     date_used        integer,             -- 1: answered with a date
     answer_key       text,                -- name_equiv's species key it was judged by
     depth            integer,             -- how deep the frozen ranked names go
@@ -316,52 +317,9 @@ def candidates(manifest: sqlite3.Connection, model: Declared, done: set[str],
 Answer = Callable[[Declared, list], dict]
 """(model, tonight's records) -> {record key: {"lists": {"species": [{"name", "confidence"}],
 "genus", "family"}, "photos": n, "place_used": bool, "date_used": bool}, or None while it has
-no vectors for the model}. Each record arrives with "public" (public_context). All of them
-are answered as tonight's test: from the records verified before them, every one of them
-left out of the reference and of the place prior (api.daily_answers)."""
-
-
-def public_context(manifest: sqlite3.Connection, keys: list[str]) -> dict[str, dict]:
-    """{record key: {"latitude", "longitude", "observed_on", "uuid", "kind"}}: the record's
-    PUBLIC place (dataset_release.public_place: never .org's point; None when the source
-    shows none or was never read) and its date (.org's, else iNat's, as evaluate.load_records)."""
-    from .dataset_release import public_place
-    from .dates import real_date
-    tables = {r[0] for r in manifest.execute("select name from sqlite_master where type = 'table'")}
-    points = "mo_public_points" in tables
-    pt = ("p.latitude, p.longitude, p.gps_hidden, p.box_north, p.box_south, p.box_east, "
-          "p.box_west, p.fetched_at, p.status" if points else ", ".join(["null"] * 9))
-    join = "left join mo_public_points p on p.observation_id = r.observation_id" if points else ""
-    out: dict[str, dict] = {}
-    for i in range(0, len(keys), 500):
-        part = keys[i:i + 500]
-        q = ",".join("?" for _ in part)
-        for row in manifest.execute(f"""
-            select r.observation_id, r.source, r.observed_on, o.observed_on, o.status,
-                   o.inat_latitude, o.inat_longitude, o.obscured, o.geoprivacy,
-                   o.taxon_geoprivacy, o.positional_accuracy, o.fetched_at, o.uuid, {pt}
-            from records r
-            left join inat_observations o on o.observation_id = r.observation_id
-            {join}
-            where r.observation_id in ({q})""", part):
-            (key, source, org_day, inat_day, i_status, i_lat, i_lon, i_obs, i_geo, i_tgeo,
-             i_acc, i_at, uuid, m_lat, m_lon, m_hidden, m_n, m_s, m_e, m_w, m_at, m_status) = row
-            inat = None if i_status is None else {
-                "latitude": i_lat, "longitude": i_lon, "obscured": i_obs, "geoprivacy": i_geo,
-                "taxon_geoprivacy": i_tgeo, "positional_accuracy": i_acc, "fetched_at": i_at}
-            mo = None if m_at is None else ({
-                "latitude": m_lat, "longitude": m_lon, "gps_hidden": m_hidden, "box_north": m_n,
-                "box_south": m_s, "box_east": m_e, "box_west": m_w, "fetched_at": m_at}
-                if m_status == "ok" else {"fetched_at": m_at})
-            pp = public_place(key, source, inat, mo) or {}
-            lat, lon = pp.get("public_lat_micro"), pp.get("public_lon_micro")
-            known = lat is not None and lon is not None
-            out[key] = {"latitude": lat / 1e6 if known else None,
-                        "longitude": lon / 1e6 if known else None,
-                        "observed_on": real_date(org_day) or real_date(inat_day),
-                        "uuid": (uuid or None) if source == "inat" else None,
-                        "kind": pp.get("public_kind", "none")}
-    return out
+no vectors for the model}. All of them are answered as tonight's test: from the records
+verified before them, with the place and date v1's runs use (evaluate.context_of), every one
+of them left out of the reference and of the place prior (api.daily_answers)."""
 
 
 def depth_at_cut(manifest: sqlite3.Connection, cut: str, judge, answer_key: str):
@@ -439,9 +397,6 @@ def score_pending(store: sqlite3.Connection, manifest: sqlite3.Connection,
             else:
                 batch.append(rec)
         if batch:
-            places = public_context(manifest, [r["observation_id"] for r in batch])
-            for rec in batch:
-                rec["public"] = places.get(rec["observation_id"]) or {}
             got = answer(model, batch)
             for rec in batch:
                 g = got.get(rec["observation_id"])
