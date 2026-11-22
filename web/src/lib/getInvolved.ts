@@ -9,7 +9,7 @@ import { groupBySection } from "./feedback";
 import { namesByRecords } from "./howItWorks";
 
 /** The feeds the page reads, every one open signed out (tests/test_get_involved.py). */
-export const GET_INVOLVED_FEEDS = ["/api/stats", "/api/how-good", "/api/feedback/summary",
+export const GET_INVOLVED_FEEDS = ["/api/stats", "/api/how-good", "/api/daily-scores", "/api/feedback/summary",
                                    "/api/docs/v1.json"] as const;
 
 /** mycomap.org pages the page links to (its routes, as the page linked them before). */

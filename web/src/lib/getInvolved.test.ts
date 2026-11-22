@@ -29,9 +29,9 @@ const SUMMARY: FeedbackSummary[] = [
   q("crosspost_twin", "cleanup", 0, "One find posted to both iNaturalist and Mushroom Observer"),
 ];
 
-test("the page reads only the four feeds that answer signed out", () => {
+test("the page reads only the five feeds that answer signed out", () => {
   assert.deepEqual([...GET_INVOLVED_FEEDS],
-                   ["/api/stats", "/api/how-good", "/api/feedback/summary", "/api/docs/v1.json"]);
+                   ["/api/stats", "/api/how-good", "/api/daily-scores", "/api/feedback/summary", "/api/docs/v1.json"]);
 });
 
 test("the banner's share is the names resting on one record, or nothing", () => {

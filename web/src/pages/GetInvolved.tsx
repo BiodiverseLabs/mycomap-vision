@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   ArrowDown, ArrowUp, ArrowUpRight, Camera, Check, Code, Dna, Eye, FlaskConical, Heart, ListChecks,
@@ -7,7 +8,10 @@ import {
   Bars, C, Cap, Card, FlowArrow, GHOST_BUTTON, H2, H3, Icon, Ink, Kicker, PermissionBox,
   PRIMARY_BUTTON, Small, Sub, Tile, Wrap,
 } from "@/components/Explainer";
-import { api, feedbackApi, num, pct, type FeedbackSummary, type HowGood, type Stats } from "@/lib/api";
+import { ModelPicker, SinceTrainingCard } from "@/components/ModelScores";
+import {
+  api, feedbackApi, num, pct, type DailyScores, type FeedbackSummary, type HowGood, type ModelScores, type Stats,
+} from "@/lib/api";
 import { fetchOutline, type Outline } from "@/lib/apiOutline";
 import { FEEDBACK_PATH } from "@/lib/feedback";
 import {
@@ -15,6 +19,7 @@ import {
   VISION_KEYS_URL,
 } from "@/lib/getInvolved";
 import { namesByRecords } from "@/lib/howItWorks";
+import { defaultModel, modelOptions, scoresFor, type ModelOption } from "@/lib/modelScores";
 import { JOIN_URL, longDate, PHOTO_CHECKLIST, SEQUENCING_URL } from "@/lib/publicView";
 import { VIEW_ART } from "@/components/ViewArt";
 import { API_PATH } from "@/lib/research";
@@ -28,6 +33,10 @@ export interface GetInvolvedData {
   howGood?: HowGood;
   feedback?: FeedbackSummary[];
   outline?: Outline;
+  /** The v1 / v2 dropdown (/api/daily-scores): which models it offers and their scores. */
+  dailyScores?: DailyScores;
+  /** The dropdown's first choice; default: the server's (v2 once available, else v1). */
+  model?: string;
   loading?: boolean;
 }
 
@@ -36,20 +45,29 @@ export function GetInvolvedPage() {
   const howGood = useQuery({ queryKey: ["how-good"], queryFn: api.howGood });
   const feedback = useQuery({ queryKey: ["feedback", "summary"], queryFn: feedbackApi.summary });
   const outline = useQuery({ queryKey: ["api-outline"], queryFn: () => fetchOutline(), retry: 1 });
+  const daily = useQuery({ queryKey: ["daily-scores"], queryFn: api.dailyScores });
   return (
     <GetInvolved stats={stats.data} howGood={howGood.data} feedback={feedback.data} outline={outline.data}
+                 dailyScores={daily.data}
                  loading={stats.isLoading || howGood.isLoading || feedback.isLoading} />
   );
 }
 
 /** The page, from its data alone (so every state can be rendered in a test). */
 export function GetInvolved(d: GetInvolvedData) {
+  // The v1 / v2 dropdown: until someone picks, the server's default (it may arrive later).
+  const [picked, setPicked] = useState<string | null>(null);
+  const options = modelOptions(d.dailyScores);
+  const want = picked ?? d.model ?? defaultModel(d.dailyScores);
+  const choice = options.some((o) => o.id === want) ? want : options[0].id;
   return (
     <div className="text-[#5c4a3a] leading-relaxed">
       <Hero s={d.stats} />
       <SixWays />
       <Photograph />
-      <Sequence s={d.stats} h={d.howGood} loading={d.loading} />
+      <Sequence s={d.stats} h={d.howGood} loading={d.loading}
+                picker={{ options, value: choice, onChange: setPicked }}
+                scores={scoresFor(d.dailyScores, choice)} />
       <Projects s={d.stats} />
       <Review feedback={d.feedback} loading={d.loading} />
       <Build outline={d.outline} />
@@ -258,7 +276,12 @@ function LaneStep({ org, end, icon, step, title, text }: {
   );
 }
 
-function Sequence({ s, h, loading }: { s?: Stats; h?: HowGood; loading?: boolean }) {
+function Sequence({ s, h, loading, picker, scores }: {
+  s?: Stats; h?: HowGood; loading?: boolean;
+  picker: { options: ModelOption[]; value: string; onChange: (id: string) => void };
+  /** A newer model's scores since training, in place of v1's depth chart; null shows v1's. */
+  scores: ModelScores | null;
+}) {
   const one = singleRecordNames(s);
   return (
     <Wrap id="sequence" testId="section-sequence">
@@ -282,9 +305,12 @@ function Sequence({ s, h, loading }: { s?: Stats; h?: HowGood; loading?: boolean
         </Lane>
       </div>
 
-      <div className="mt-10 grid gap-8 md:grid-cols-2 items-start">
+      <div className="mt-10">
+        <ModelPicker {...picker} />
+      </div>
+      <div className="grid gap-8 md:grid-cols-2 items-start">
         <NamesCard s={s} loading={loading} />
-        <DepthCard h={h} loading={loading} />
+        {scores ? <SinceTrainingCard m={scores} /> : <DepthCard h={h} loading={loading} />}
       </div>
 
       {one && (

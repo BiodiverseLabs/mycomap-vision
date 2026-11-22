@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { HowItWorks, type HowItWorksData } from "./About";
 import { PERMISSION_LINE, PHOTO_PERMISSIONS_URL } from "../lib/publicView";
 import type { HowGood, ModelsInfo, SpeedDay, Stats } from "../lib/api";
+import { DAILY_V1_ONLY, DAILY_V2 } from "../lib/dailyScores.fixture";
 
 const TODAY = "2026-10-22";
 
@@ -191,4 +192,52 @@ test("no waiting line when nothing is waiting, the count is missing, or the week
   }
   const noWeek = page({ stats: { ...STATS, recent_week: null, waiting: { records: 5, since: null, as_of: null } } });
   assert.doesNotMatch(noWeek, /more validated since/);
+});
+
+// --- the v1 / v2 dropdown (Steve, 2026-11-22) -------------------------------------------------
+
+const withoutPicker = (html: string) => html.replace(/<div[^>]*data-testid="model-picker"[^]*?<\/select><\/div>/, "");
+
+test("the How good section has the model dropdown, on v1 while v2 is not available", () => {
+  for (const daily of [undefined, DAILY_V1_ONLY]) {
+    const html = page({ dailyScores: daily });
+    assert.match(html, /data-testid="model-picker"/);
+    assert.match(html, /<option value="v1" selected="">Vision v1<\/option>/);
+    assert.doesNotMatch(html, /value="v2"/, "no v2 to choose until the server offers it");
+    assert.ok(html.indexOf('data-testid="model-picker"') > html.indexOf('data-testid="section-how-good"'));
+  }
+});
+
+test("the dropdown opens on v2 once the server offers it, and shows v2's numbers", () => {
+  const html = page({ dailyScores: DAILY_V2 });
+  assert.match(html, /<option value="v2" selected="">Vision v2<\/option>/);
+  assert.match(html, /data-testid="scores-v2"/);
+  assert.doesNotMatch(html, /chart-top-k|table-by-depth|text-model-credit/, "v1's run is not shown under v2");
+  const t = text(html);
+  assert.match(t, /Vision v2 learned from every DNA-verified record up to 22 November 2026/);
+  assert.ok(t.includes("63.0%"), "species overall");
+  assert.match(t, /Likely between 58\.1% and 67\.7%/);
+  assert.ok(t.includes("403") && t.includes("1,291"), "records and new photos since training");
+  assert.match(t, /Last 7 days \(to 25 November 2026\): species 63\.0% \(n = 400\) ?, genus 86\.6% \(n = 403\)/);
+  assert.match(t, /403 verified since, each tested once/);
+});
+
+test("every daily value in v2's view is written with its n", () => {
+  const html = page({ dailyScores: DAILY_V2 });
+  const chart = html.match(/data-testid="chart-daily"[^]*?<\/div><\/div><\/div>/)?.[0] ?? "";
+  assert.ok(chart, "the daily chart");
+  for (const n of ["n = 152", "n = 185", "n = 63, so far"]) assert.ok(text(html).includes(n), n);
+  const table = html.match(/data-testid="table-daily"[^]*?<\/table>/)?.[0] ?? "";
+  const cells = [...table.matchAll(/<td[^>]*>([^<]*)<\/td>/g)].map((m) => m[1]);
+  const rates = cells.filter((c) => /%/.test(c));
+  assert.equal(rates.length, 9, "species, genus and 7-day species for each of the three days");
+  for (const c of rates) assert.match(c, /^\d+% \(n = [\d,]+\)$/, c);
+  assert.doesNotMatch(table, /22 November 2026/, "a day with no records is not a row");
+});
+
+test("v1's view is the page as it was, whatever v2 has", () => {
+  assert.equal(withoutPicker(page({ dailyScores: DAILY_V2, model: "v1" })), withoutPicker(page()));
+  assert.equal(withoutPicker(page({ dailyScores: DAILY_V1_ONLY })), withoutPicker(page()));
+  const t = text(page({ dailyScores: DAILY_V2, model: "v1" }));
+  for (const n of ["59.2%", "85.8%", "90.6%", "12,874", "155,648", "17 August 2026"]) assert.ok(t.includes(n), n);
 });
