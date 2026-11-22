@@ -364,8 +364,7 @@ export const REVIEW_STEPS: Record<string, { lead: string; steps: string[]; note?
         "The specimen fills most of the photo and a square crop would not help much: Include "
           + "it (no tag).",
         "No specimen, only the label: exclude it as Uninformative.",
-        "Only small dried fragments, with no real shape to learn from: exclude it as Dried "
-          + "specimen.",
+        "A dried specimen, whole or only small fragments: exclude it as Dried specimen.",
         "A fresh specimen beside the label: exclude it as Field slip. It then goes to Recovered "
           + "labels, where the specimen is cropped away from the slip so Vision can still use it.",
       ],

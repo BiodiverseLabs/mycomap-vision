@@ -238,11 +238,11 @@ test("each photo review has basic steps, and a field slip is sorted four ways (S
   }
   const note = REVIEW_STEPS.non_specimen_photo.note;
   assert.ok(note && typeof note !== "string", "the slip note is a list of rules");
-  const [fills, labelOnly, fragments, fresh] = note.rules;
+  const [fills, labelOnly, dried, fresh] = note.rules;
   assert.equal(note.rules.length, 4);
   assert.match(fills, /fills most of the photo and a square crop would not help much: Include it \(no tag\)/);
   assert.match(labelOnly, /only the label: exclude it as Uninformative/);
-  assert.match(fragments, /small dried fragments.*Dried specimen/);
+  assert.match(dried, /A dried specimen, whole or only small fragments: exclude it as Dried specimen/);
   assert.match(fresh, /fresh specimen.*Field slip.*Recovered labels/);
   assert.match(String(REVIEW_STEPS.recovered_label.note ?? ""), /dried specimen on the slip gets no crop/i);
 });
