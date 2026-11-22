@@ -1358,6 +1358,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"groups": research_public.early_answers(groups, person(request) is not None),
                 "sealed_after": research_public.SEAL}
 
+    @app.get("/api/daily-scores")
+    def daily_scores_report():
+        """Scores since a newer model's training cut (daily_scores.py): which models the How it
+        works and Get involved dropdowns offer, and each one's daily, 7-day and cumulative
+        figures, aggregates only, the same for everyone. Only v1 (its sealed numbers are
+        /api/how-good's) until MV_DAILY_SCORES_PUBLIC=1; v1 itself is never scored here."""
+        from . import daily_scores
+        payload = daily_scores.public_payload(early_store.conn, lock=early_store.lock)
+        return research_public.daily_scores(payload)
+
     @app.get("/api/how-good")
     def how_good_report():
         """How it works' "How good is it" (howgood.py): the served model's newest open run,
@@ -2730,7 +2740,63 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 report["predictions"] = predict_pending_tonight(report["id"], fetch_pending,
                                                                 answering)
         report["early_answers"] = score_early_answers_tonight()
+        from . import daily_scores
+        if daily_scores.computing():
+            report["daily_scores"] = score_daily_scores_tonight()
         return report
+
+    def daily_answer(model, rec: dict) -> dict | None:
+        """A declared model's answer about a reference record from its own vectors, the
+        record, its twins and any copy of its photos left out (identify.left_out), photos
+        only, ten deep; None while the record has no vectors for the model."""
+        key = str(rec["observation_id"])
+        source = "mo" if key.startswith("mo:") else "inat"
+        number = rec.get("source_id") or key.rpartition(":")[2]
+        ident = identifier(model.backbone, model.method, permission_view())
+        if not ident.can_leave_out():
+            raise RuntimeError(f"{model.model} can't answer with a record left out")
+        hidden, own = ident.left_out(source, str(number))
+        if not len(own):
+            return None
+        vecs = ident.reference_vectors(own[:MAX_PHOTOS])
+        deep: list = []
+
+        def finish(v, sims):
+            return ident.identify_vectors(v, early_answers.DEPTH, context=None, sims=sims,
+                                          photo_lookup=photo_lookup, gate=None, hidden=hidden,
+                                          deep=deep)
+        result = model_queue.run(workqueue.Job(
+            key=id(ident), photos=0, embed=lambda: vecs, search=ident.nearest.photo_sims,
+            finish=finish, interactive=False, timer=apiv1.Timer()))
+        lists = deep[0] if deep else (result.get("ranks") or {})
+        return {"lists": lists, "photos": int(len(vecs))}
+
+    def score_daily_scores_tonight(answer=None) -> dict:
+        """Scores since each declared model's training cut (daily_scores.score_pending), once
+        tonight's records are in and embedded: MV_DAILY_SCORES=1 only. A model not served here
+        waits. Never fails the night."""
+        from . import daily_scores
+        if not daily_scores.computing():
+            return {"off": f"{daily_scores.COMPUTE_SETTING} is not on"}
+        own = manifest.connect(manifest_path)
+        own.execute("pragma busy_timeout = 30000")
+        try:
+            models_ = daily_scores.declared(trained_through(own))
+            held = daily_scores.held_keys()
+            ready = set(ready_backbones())
+            served = [m for m in models_ if m.backbone in ready]
+            out: dict = {m.id: {"waiting": "not served here"} for m in models_ if m not in served}
+            out.update(daily_scores.score_pending(early_store.conn, own, served,
+                                                  answer or daily_answer, held,
+                                                  lock=early_store.lock))
+            note(f"[nightly] scores since training: {out}")
+            return out
+        except Exception as e:  # noqa: BLE001 - the reference set is already updated
+            note(f"[nightly] scores since training failed: {type(e).__name__}: {e}")
+            return {"error": f"{type(e).__name__}: {e}"[:500]}
+        finally:
+            own.close()
+    app.state.score_daily_scores = score_daily_scores_tonight
 
     def score_early_answers_tonight() -> dict:
         """Answers given before the DNA verdict, decided now that tonight's green records are

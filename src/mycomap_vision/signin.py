@@ -86,6 +86,9 @@ RESEARCH_API = ("/api/stats", "/api/models", "/api/scoreboard", "/api/prospectiv
                 # How it works (a share page, open to anyone): its accuracy summary, never the
                 # sealed test (howgood.py), and the daily seconds per photo, averages only.
                 "/api/how-good", "/api/speed/daily",
+                # Both pages' v1 / v2 dropdown: scores since a newer model's training cut,
+                # aggregates only (daily_scores.py); only v1 until MV_DAILY_SCORES_PUBLIC=1.
+                "/api/daily-scores",
                 # Research > Excluded photos (excluded_looked.py): the list and kept maps; asking
                 # for a map (POST) needs sign-in.
                 "/api/research/excluded-photos", "/api/research/excluded-photos/looked",

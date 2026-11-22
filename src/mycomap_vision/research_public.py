@@ -109,6 +109,38 @@ PER_RECORD_KEYS = frozenset({"observation_id", "observations", "record_key", "re
                              "scored_rows", "rows"})
 
 
+def _all_keys(value, found: set) -> set:
+    if isinstance(value, dict):
+        found |= set(value)
+        for v in value.values():
+            _all_keys(v, found)
+    elif isinstance(value, list):
+        for v in value:
+            _all_keys(v, found)
+    return found
+
+
+# Fields of a daily_scores ledger row that never leave it, besides PER_RECORD_KEYS.
+DAILY_PRIVATE_KEYS = frozenset({"ranks_json", "truth_species", "truth_genus", "truth_name",
+                                "decided_at", "green_at"})
+_PLACE_OR_PERSON = frozenset({"latitude", "longitude", "lat", "lon", "lng", "place", "login",
+                              "user_login", "owner_login", "owner_name", "photo_id"})
+
+
+def daily_scores(payload: dict) -> dict:
+    """Scores since a model's training cut (/api/daily-scores, daily_scores.public_payload):
+    aggregates only, for everyone. Refuses, anywhere in it, a field that could name a record,
+    a person, a photo or a place (PER_RECORD_KEYS, DAILY_PRIVATE_KEYS, a url or coordinate
+    field), and cuts file paths. v1's choice carries no numbers here: they are
+    /api/how-good's, cut at SEAL."""
+    keys = _all_keys(payload, set())
+    bad = ((PER_RECORD_KEYS | DAILY_PRIVATE_KEYS | _PLACE_OR_PERSON) & keys) | {
+        k for k in keys if "url" in str(k).lower()}
+    if bad:
+        raise ValueError(f"per-record fields in a public report: {sorted(bad)}")
+    return strip_paths(payload)
+
+
 # Counts of photographers by the rights on their photos (Steve, 2026-10-22): never served.
 STATS_HIDDEN = ("contributors_arr",)
 
