@@ -59,6 +59,15 @@ PINNED = {
         {"version": "v2.1-336", "base": "bioclip-2-336",
          "source": "photo-type tagger t20 (research exp/photo-type-tagger a27bb67)",
          "bands_from": "t21_336_bands.json (by-eye bands, t21)"},
+    # TODO(v2 serving): the head refit on bioclip-2.5-336 frozen vectors, for MycoMap Vision
+    # v2 (fine-tune bioclip-2.5-336-ft-20261122-171257; Steve approved the refit 2026-11-23).
+    # Add it here once the refit lane reports its model.npz sha256 and bands file:
+    #   "<sha256 of its model.npz>":
+    #       {"version": "<its name>", "base": "bioclip-2.5-336",
+    #        "source": "photo-type tagger <run> (research ...)", "bands_from": "<bands json>"},
+    # Until then a 2.5 head is refused at load ("not a pinned one"), and with MV_PHOTO_TAGGER
+    # serving the 336 head, a v2 backbone is refused (servedbases.py) unless
+    # MV_UNTAGGED_BACKBONES names it.
 }
 
 SPECIMEN = "specimen"
@@ -225,9 +234,35 @@ class PhotoTagger:
     @classmethod
     def from_setting(cls) -> "PhotoTagger | None":
         """The tagger MV_PHOTO_TAGGER names (Refused if it can't be served), or None when
-        the setting is unset: then photos are not tagged."""
-        named = config.setting(SETTING)
-        return cls.load(Path(named)) if named else None
+        the setting is unset: then photos are not tagged. With several files named, the
+        first (all_from_setting reads them all)."""
+        named = setting_files()
+        return cls.load(named[0]) if named else None
+
+    @classmethod
+    def all_from_setting(cls) -> tuple[list["PhotoTagger"], list[str]]:
+        """Every tagger MV_PHOTO_TAGGER names (a comma-separated list of files: one head per
+        base model, e.g. the bioclip-2-336 head for v1 and the bioclip-2.5-336 head for v2),
+        in the order named, and why any was refused: a file that fails its checks, or a
+        second head for a base already served."""
+        taggers: list[PhotoTagger] = []
+        errors: list[str] = []
+        for path in setting_files():
+            try:
+                tagger = cls.load(path)
+            except (Refused, OSError, ValueError, KeyError) as e:
+                errors.append(f"{type(e).__name__}: {e}")
+                continue
+            if any(t.base == tagger.base for t in taggers):
+                errors.append(f"{path.name}: a {tagger.base} head is already served")
+                continue
+            taggers.append(tagger)
+        return taggers, errors
+
+
+def setting_files() -> list[Path]:
+    """The files MV_PHOTO_TAGGER names (comma-separated; one file as before)."""
+    return [Path(p.strip()) for p in (config.setting(SETTING) or "").split(",") if p.strip()]
 
 
 def sidecar(path: Path) -> Path:

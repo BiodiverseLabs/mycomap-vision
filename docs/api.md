@@ -370,7 +370,9 @@ model's result, not a `results` list.
   (`mv fungus-gate tune --release v1`, Open Images negatives only): a photo is `not_fungus`
   when `p_fungus` is below 0.05 and `unsure` below 0.50 (was 0.70 before v1). The cut-offs
   belong to the served gate and may change with it; callers read the verdict, not
-  `p_fungus`.
+  `p_fungus`. Each served model reads the gate of its own base model (servedbases.py,
+  2026-11-23: v1 the bioclip-2-336 gate, v2 a bioclip-2.5-336 one); a model with no gate
+  for its base is not offered at all (`GET /api/v1/models`), never answered ungated.
 - **`photo_types`** (photo-type tags, Steve 2026-10-22; `phototypes.py`): absent while the
   server has no tagger file (`MV_PHOTO_TAGGER`). Each photo's frozen BioCLIP 2 vector, the
   one the gate reads, goes through the photo-type tagger trained on that same base's vectors
@@ -547,6 +549,7 @@ the website's routes). Retryable ones carry `Retry-After` and `retry_after_secon
 | 502 | `source_unavailable` | iNat or MO did not answer |
 | 503 | `busy` | the queue is full; `estimated_wait_seconds`, `Retry-After` |
 | 503 | `updating` | the reference set is being swapped (seconds); `Retry-After: 30` |
+| 503 | `not_served` | the model can't be served with its not-a-fungus gate here, so it isn't served at all (never answered ungated) |
 | 503 | `auth_unavailable` | .org couldn't be asked about a key Vision has no recent answer for |
 
 429 means the caller's own limits; 503 means the server is out of capacity, so the
@@ -778,7 +781,9 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_TWIN_GROUPS` | the cross-post twin groups (`mv twin-groups`) the specimen scoring needs; default: `twin-groups.tsv` in the served release |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |
-| `MV_PHOTO_TAGGER` | the photo-type tagger file (`mv photo-tagger build`): photo types and the micrograph/label leave-out (§4 `photo_types`). Unset: no tagging |
+| `MV_PHOTO_TAGGER` | the photo-type tagger file (`mv photo-tagger build`): photo types and the micrograph/label leave-out (§4 `photo_types`). Unset: no tagging. Several files, comma-separated, one head per base model (v1's bioclip-2-336 head, v2's bioclip-2.5-336 head): each model is tagged by its own base's head |
+| `fungus-gate.<base>.npz` + `.json` | in the release's `models/` beside `fungus-gate.npz` (or `MV_FUNGUS_GATE_DIR`): the not-a-fungus gate for the models on that base (`FungusGate.save(by_base=True)`). While any gate is served, a model whose base has none is refused (`/api/models` `refused`, `/api/health` `refused_backbones`), never served ungated; likewise for the tagger while any is served |
+| `MV_UNTAGGED_BACKBONES` | backbones (comma-separated) that may answer without photo-type tags while a tagger is served for other bases; listed in `/api/health` `untagged_backbones`. There is no such setting for the gate |
 | `MV_PHOTOS_PER_MINUTE`, `MV_QUEUE_MAX_WAIT`, `MV_SESSIONS_MAX_MB`, `MV_QUOTA_DEFAULT_MONTHLY`, `MV_USAGE_REPORT_SECONDS` | limits, defaults in .env.example |
 
 mycomap.org's side: the `vision` service in its service keys, the introspection fields,

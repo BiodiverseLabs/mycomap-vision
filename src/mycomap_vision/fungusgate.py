@@ -305,12 +305,15 @@ class FungusGate:
 
     # --- files -----------------------------------------------------------------------
 
-    def save(self, root: Path | None = None) -> Path:
+    def save(self, root: Path | None = None, by_base: bool = False) -> Path:
+        """fungus-gate.npz and .json in `root`; `by_base`: fungus-gate.<base>.npz and .json,
+        a gate served beside the default one for the backbones on its base (load_all)."""
         root = root or config.DATA_DIR / "models"
         root.mkdir(parents=True, exist_ok=True)
+        stem = file_stem(self.base) if by_base else GATE_NAME
         extra = ({} if self.probe_w is None else
                  {"probe_w": np.asarray(self.probe_w, np.float32)})
-        np.savez(root / f"{GATE_NAME}.npz", classes=self.classes, sides=self.sides,
+        np.savez(root / f"{stem}.npz", classes=self.classes, sides=self.sides,
                  vectors=self.vectors.astype(np.float32), **extra)
         meta = {"base": self.base, "scale": self.scale, "mode": self.mode,
                 "probe_b": self.probe_b, "lift_to_unsure": dict(self.lift_to_unsure),
@@ -318,16 +321,17 @@ class FungusGate:
                 "thresholds": {"not_fungus": self.thresholds.not_fungus,
                                "unsure": self.thresholds.unsure},
                 "provenance": self.provenance}
-        path = root / f"{GATE_NAME}.json"
+        path = root / f"{stem}.json"
         path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return path
 
     @classmethod
-    def load(cls, root: Path | None = None) -> "FungusGate | None":
+    def load(cls, root: Path | None = None, stem: str = GATE_NAME) -> "FungusGate | None":
         """The saved gate, or None when there is none (the identifier then runs ungated).
-        MV_FUNGUS_GATE_DIR points at another folder (a candidate gate, for a preview)."""
-        root = root or Path(config.setting("MV_FUNGUS_GATE_DIR") or config.DATA_DIR / "models")
-        meta_path, vec_path = root / f"{GATE_NAME}.json", root / f"{GATE_NAME}.npz"
+        MV_FUNGUS_GATE_DIR points at another folder (a candidate gate, for a preview).
+        `stem`: another gate file in that folder (load_all)."""
+        root = root or gate_dir()
+        meta_path, vec_path = root / f"{stem}.json", root / f"{stem}.npz"
         if not (meta_path.is_file() and vec_path.is_file()):
             return None
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -339,6 +343,50 @@ class FungusGate:
                        float(meta.get("probe_b", 0.0)), meta.get("mode", "zero-shot"),
                        dict(meta.get("lift_to_unsure") or {}),
                        dict(meta.get("looks_like") or {}))
+
+
+def gate_dir() -> Path:
+    """Where the served gates are: MV_FUNGUS_GATE_DIR, else data/models (the release's)."""
+    return Path(config.setting("MV_FUNGUS_GATE_DIR") or config.DATA_DIR / "models")
+
+
+def file_stem(base: str) -> str:
+    """The file name (without .npz/.json) of a gate served for the backbones on `base`,
+    beside the default fungus-gate.npz: fungus-gate.<base>."""
+    return f"{GATE_NAME}.{base}"
+
+
+def load_all(root: Path | None = None) -> tuple[dict[str, FungusGate], list[str]]:
+    """Every gate this server serves, by the base model whose frozen vectors it reads, and
+    what was refused ({base: gate}, [why]). The default file (fungus-gate.npz + .json, as
+    before) names its base in its json; a gate for another base sits beside it as
+    fungus-gate.<base>.npz + .json, and its json must name that same base. A second gate
+    for a base already served is refused (the default file's stands). A server on one base
+    reads exactly what load() reads."""
+    root = root or gate_dir()
+    gates: dict[str, FungusGate] = {}
+    errors: list[str] = []
+    first = FungusGate.load(root)
+    if first is not None:
+        gates[first.base] = first
+    prefix = GATE_NAME + "."
+    for meta_path in sorted(root.glob(f"{prefix}*.json")) if root.is_dir() else []:
+        base = meta_path.name[len(prefix):-len(".json")]
+        try:
+            gate = FungusGate.load(root, file_stem(base))
+        except (OSError, ValueError, KeyError) as e:
+            errors.append(f"{meta_path.name}: {type(e).__name__}: {e}")
+            continue
+        if gate is None:
+            errors.append(f"{meta_path.name} has no {file_stem(base)}.npz beside it")
+        elif gate.base != base:
+            errors.append(f"{meta_path.name} says it reads {gate.base} vectors, not {base}")
+        elif base in gates:
+            errors.append(f"{meta_path.name}: a gate for {base} is already served "
+                          f"({GATE_NAME}.json)")
+        else:
+            gates[base] = gate
+    return gates, errors
 
 
 # --- choosing thresholds (on development sets only) ------------------------------------

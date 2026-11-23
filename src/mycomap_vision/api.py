@@ -39,7 +39,7 @@ from . import (answercache, apidocs, e17review, early_answers, apiv1, byobservat
                feedback_org as feedback_org_rules, modelcard, models, name_changes, names, nightly,
                nightly_review,
                excluded_looked as xl, looked, modified_photos as mp, name_context, onnxtower, pair_places, permissions, dhash, runs as run_links, twins, uploadmeter,
-               quotas as quota_rules, research_public, serving, sessions as session_store, sources,
+               quotas as quota_rules, research_public, servedbases, serving, sessions as session_store, sources,
                speedlog, uploads,
                workqueue, yours)
 from .dates import real_date
@@ -49,7 +49,7 @@ from .embed import _crops_sql as embed_crops_sql
 from .embed import normalise, photos_per_second
 from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
                      TooLarge)
-from .identify import PHOTO_INFO_SQL, Identifier, NotTrainedHere, photo_info_rows
+from .identify import PHOTO_INFO_SQL, Identifier, NoBaseVector, NotTrainedHere, photo_info_rows
 from .identify import left_out_photos as left_out_of
 from .licenses import photo_url
 from .methods import method_ready
@@ -416,13 +416,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     the server key; tests pass a fake).
 
     `fungus_gate`: the not-a-fungus gate every identification passes (fungusgate.py).
-    True loads the saved one from data/models (none saved, or MV_FUNGUS_GATE=0: no
-    gate); a FungusGate uses that one; None or False runs ungated.
+    True loads the saved ones from data/models (fungus-gate.npz, and fungus-gate.<base>.npz
+    for the backbones on another base: fungusgate.load_all; none saved, or
+    MV_FUNGUS_GATE=0: no gate); a FungusGate uses that one, a {base: gate} dict those;
+    None or False runs ungated. Each backbone reads its own base's gate, and while any
+    gate is served a backbone whose base has none is refused (servedbases.py).
 
     `photo_tagger`: the photo-type tagger (phototypes.py) on the gate's frozen vectors:
     micrograph and label photos tagged in the high band are left out of the answer
-    (habitat is tagged only). True loads the file MV_PHOTO_TAGGER names (unset: no tagger, nothing tagged; a
-    file that fails its checks is refused and reported); None or False: no tagger.
+    (habitat is tagged only). True loads the files MV_PHOTO_TAGGER names, one head per base
+    (unset: no tagger, nothing tagged; a file that fails its checks is refused and
+    reported); a list: those heads; None or False: no tagger.
 
     `linked_accounts`: a signed-in person's verified iNat and MO accounts from mycomap.org,
     for "Your collections" on the Identify result (yours.py). True reads them with
@@ -469,27 +473,45 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         from .finetune import models_dir
         backbone_loader = onnxtower.loader(backbone_loader, models_dir(), note=note)
     limits = limits or Limits.from_settings()
+    # The not-a-fungus gates and photo-type taggers, by the base model whose frozen vectors
+    # each reads; every served backbone gets the pair of its own base (servedbases.py).
+    gate_errors: list[str] = []
     if fungus_gate is True:
-        fungus_gate = (fungusgate.FungusGate.load()
-                       if config.setting("MV_FUNGUS_GATE", "1") != "0" else None)
-    fungus_gate = fungus_gate or None
+        gates, gate_errors = ((fungusgate.load_all() if config.setting("MV_FUNGUS_GATE", "1") != "0"
+                               else ({}, [])))
+        for e in gate_errors:
+            note(f"[fungus-gate] not served: {e}")
+    elif isinstance(fungus_gate, dict):                 # {base: gate} (tests)
+        gates = dict(fungus_gate)
+    else:
+        gates = {fungus_gate.base: fungus_gate} if fungus_gate else {}
+    fungus_gate = next(iter(gates.values()), None)      # the default file's: health, as before
     tagger_error: list[str] = []
     if photo_tagger is True:
-        try:
-            photo_tagger = phototypes.PhotoTagger.from_setting()
-        except (phototypes.Refused, OSError, ValueError, KeyError) as e:
-            tagger_error.append(f"{type(e).__name__}: {e}")
-            note(f"[photo-tagger] not served: {tagger_error[0]}")
-            photo_tagger = None
-    photo_tagger = photo_tagger or None
-    if photo_tagger is not None and fungus_gate is not None and photo_tagger.base != fungus_gate.base:
-        # It must read the vector the gate already computes, never a second tower's.
-        tagger_error.append(phototypes.base_mismatch(photo_tagger.base, fungus_gate.base))
-        note(f"[photo-tagger] not served: {tagger_error[-1]}")
-        photo_tagger = None
-    if photo_tagger is not None:
-        note(f"[photo-tagger] {photo_tagger.version} ({photo_tagger.fingerprint()}) tags every "
-             "identified photo")
+        taggers, tagger_error = phototypes.PhotoTagger.all_from_setting()
+        for e in tagger_error:
+            note(f"[photo-tagger] not served: {e}")
+    elif isinstance(photo_tagger, (list, tuple)):       # several heads (tests)
+        taggers = list(photo_tagger)
+    else:
+        taggers = [photo_tagger] if photo_tagger else []
+    # A head must read the vector its base's gate already computes, never a second tower's.
+    served_taggers, unpaired = servedbases.pair_taggers(gates, taggers,
+                                                       phototypes.base_mismatch)
+    for e in unpaired:
+        tagger_error.append(e)
+        note(f"[photo-tagger] not served: {e}")
+    readers = servedbases.Readers(gates, served_taggers, servedbases.untagged_setting())
+    photo_tagger = readers.tagger                       # the first named: health, as before
+    for t in served_taggers.values():
+        note(f"[photo-tagger] {t.version} ({t.fingerprint()}) tags every identified photo"
+             + (f" on {t.base}" if len(served_taggers) > 1 else ""))
+    if len(gates) > 1:
+        note(f"[fungus-gate] gates served for {', '.join(gates)}")
+
+    def tagger_for(backbone: str | None):
+        """The photo-type tagger this backbone's photos are tagged by (None: untagged)."""
+        return photo_tagger if backbone is None else readers.choose(backbone).tagger
 
     def type_options(include=()) -> dict:
         """What a kept observation answer is keyed on besides model, place and date: the
@@ -502,17 +524,20 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return {}
         return {"include": ".".join(str(i) for i in sorted(include))}
 
-    def with_tagger(index_version: tuple) -> tuple:
-        """An index version with the photo-type tagger in it, when one is served: a new
-        tagger, like a new release, makes every kept answer not current."""
-        if photo_tagger is None:
+    def with_tagger(index_version: tuple, backbone: str | None = None) -> tuple:
+        """An index version with the photo-type tagger in it, when one is served (the one
+        `backbone` reads): a new tagger, like a new release, makes every kept answer not
+        current."""
+        tagger = tagger_for(backbone)
+        if tagger is None:
             return index_version
-        return (*index_version, f"photo-tagger:{photo_tagger.fingerprint()}")
+        return (*index_version, f"photo-tagger:{tagger.fingerprint()}")
 
-    def tagger_mark(payload: dict) -> dict:
+    def tagger_mark(payload: dict, backbone: str | None = None) -> dict:
         """A kept answer with the version of the tagger that made it (absent without one)."""
-        if photo_tagger is not None:
-            payload["photo_tagger"] = photo_tagger.version
+        tagger = tagger_for(backbone)
+        if tagger is not None:
+            payload["photo_tagger"] = tagger.version
         return payload
 
     def asked_include(value, photos: int | None = None) -> list[int]:
@@ -601,6 +626,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     @app.exception_handler(apiv1.V1Error)
     async def v1_refusal(request: Request, exc: apiv1.V1Error):
         return exc.response()
+
+    @app.exception_handler(NoBaseVector)
+    @app.exception_handler(servedbases.NotServed)
+    async def not_served(request: Request, exc: Exception):
+        """A backbone that would answer ungated (servedbases.py: fail closed): refused, and
+        said in the log. API v1 callers get no model name."""
+        note(f"[fungus-gate] refused: {exc}")
+        if apiv1.is_v1(request.url.path):
+            return apiv1.V1Error(503, "not_served", "this model is not served here; see "
+                                 "GET /api/v1/models").response()
+        return JSONResponse({"detail": str(exc)}, status_code=503)
 
     @app.exception_handler(RequestValidationError)
     async def bad_fields(request: Request, exc: RequestValidationError):
@@ -821,6 +857,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
     def build_index(key: tuple[str, str], version: tuple) -> Identifier:
         backbone, method = key
+        # Its own base's gate and tagger; a backbone with none is never built ungated.
+        chosen = readers.choose(backbone)
+        if chosen.refused:
+            raise servedbases.NotServed(f"{backbone} is not served: {chosen.refused}")
         with db_lock:
             cal = evaluate.latest_calibration(conn, backbone, method)
         root = embeddings_root / backbone if embeddings_root else None
@@ -832,8 +872,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             ident = Identifier(own, backbone, method, root, calibration=cal,
                                train=limits.fit_on_demand, photo_info=False,
                                layer_root=layer.embeddings if layer else None,
-                               gate=fungus_gate, twins_file=twins_path(),
-                               specimen_groups=served_groups(), tagger=photo_tagger)
+                               gate=chosen.gate, twins_file=twins_path(),
+                               specimen_groups=served_groups(), tagger=chosen.tagger)
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
@@ -913,7 +953,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         the served index's version (the old one's while a rebuild runs behind it). A kept
         observation answer is served only under it."""
         return answercache.answers_version(model_card().get("version"), with_tagger(
-            indexes.answering((backbone, method), index_version(backbone, method, view))))
+            indexes.answering((backbone, method), index_version(backbone, method, view)),
+            backbone))
 
     # --- the identification log (identifylog.py) -----------------------------------------
     def release_now() -> str | None:
@@ -929,7 +970,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return None
         if cur is None or cur[1] is not ident:
             return None
-        return lambda: answercache.answers_version(release_now(), with_tagger(cur[0]))
+        return lambda: answercache.answers_version(release_now(), with_tagger(cur[0], backbone))
 
     def freeze_answer(**fields) -> None:
         """Keeps a fresh by-observation answer for the benchmark of answers given before the
@@ -1026,7 +1067,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                  {"error": tagger_error[0]} if tagger_error else None),
                 "vectors": vector_storage(),
                 "excluded_preload": (app.state.excluded_preload.health()
-                                     if getattr(app.state, "excluded_preload", None) else None)}
+                                     if getattr(app.state, "excluded_preload", None) else None),
+                **served_readers_health()}
         given = request.headers.get("authorization", "")
         if org_secret and secrets.compare_digest(given.encode(),
                                                  f"Bearer {org_secret}".encode()):
@@ -1040,8 +1082,31 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         known = {*limits.allowed_backbones, *ready, *(full["nightly"].get("layer") or {}),
                  *full["embed"], *(m.split("/", 1)[0] for m in warm.models),
                  *(k.split("/", 1)[0] for k in full["vectors"]),
-                 *([fungus_gate.base] if fungus_gate else [])}
+                 *([fungus_gate.base] if fungus_gate else []), *readers.bases(),
+                 *(full.get("refused_backbones") or {})}
         return apiv1.public_health(full, served, known)
+
+    def served_readers_health() -> dict:
+        """What /api/health adds when more than one base is served, or a backbone is refused
+        or served untagged (servedbases.py); nothing on a one-base server (health as before)."""
+        out: dict = {}
+        if len(gates) > 1 or gate_errors:
+            out["fungus_gates"] = {b: g.summary() for b, g in gates.items()}
+            if gate_errors:
+                out["fungus_gate_errors"] = list(gate_errors)
+        if len(served_taggers) > 1:
+            out["photo_taggers"] = {b: t.summary() for b, t in served_taggers.items()}
+        if not gates and not served_taggers:
+            return out
+        # From the allowed names, not the database: health is read often (no count query).
+        choices = {b: readers.choose(b) for b in sorted(limits.allowed_backbones)}
+        refused = {b: c.refused for b, c in choices.items() if c.refused}
+        if refused:
+            out["refused_backbones"] = refused
+        untagged = [b for b, c in choices.items() if c.untagged_allowed and not c.refused]
+        if untagged:
+            out["untagged_backbones"] = untagged
+        return out
 
     def vector_storage() -> dict:
         """Per served index (backbone/method): reference vectors held as int8 and float."""
@@ -1061,7 +1126,21 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return out
 
     def ready_backbones() -> list[str]:
-        return [b for b, n in embedded_counts().items() if n and b in limits.allowed_backbones]
+        """The backbones offered for identification: embedded, allowed here, and not refused
+        for want of their base's gate or tagger (refused_backbones)."""
+        return [b for b, n in embedded_counts().items()
+                if n and b in limits.allowed_backbones and not readers.choose(b).refused]
+
+    def refused_backbones() -> dict[str, str]:
+        """{backbone: why it is not served} for the embedded, allowed backbones no gate (or
+        tagger) here reads the base of (servedbases.py): never served ungated."""
+        out = {}
+        for b, n in embedded_counts().items():
+            if n and b in limits.allowed_backbones:
+                why = readers.choose(b).refused
+                if why:
+                    out[b] = why
+        return out
 
     def default_method() -> str:
         """What an identification uses when no method is named (MV_DEFAULT_METHOD)."""
@@ -1083,12 +1162,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             out.append({"backbone": name, "spec": name, "note": "", "embedded_photos": n,
                         "photos_per_second": speed.get(name),
                         "trained_through": through.get(name)})
+        refused = refused_backbones()
+        for b in out:
+            if b["backbone"] in refused:                 # never served ungated: say why
+                b["refused"] = refused[b["backbone"]]
         return {"backbones": out,
                 "methods": [m for m in evaluate.METHODS
                             if limits.method_allowed(m) and served_ready(m)],
                 "max_models": limits.max_models,
                 "default_method": default_method(),
-                "ready": [b["backbone"] for b in out if b["embedded_photos"]]}
+                "ready": [b["backbone"] for b in out
+                          if b["embedded_photos"] and b["backbone"] not in refused]}
 
     def compute_stats() -> dict:
         """On a connection of its own, never the shared one: over the full set this takes
@@ -1456,6 +1540,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if backbone not in limits.allowed_backbones:
                 raise HTTPException(400, f"{backbone!r} is not offered here")
             if backbone not in ready:
+                why = readers.choose(backbone).refused
+                if why:
+                    raise HTTPException(503, f"{backbone!r} is not served here: {why}")
                 raise HTTPException(400, f"{backbone!r} has no embeddings")
             if method not in evaluate.METHODS:
                 raise HTTPException(400, f"unknown method {method!r}")
@@ -3646,10 +3733,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                           photos_credit=[None] * n_photos)
                     kept_site, _, _ = site_kept(pooled[0], scored_vecs, hidden, used, site_about)
                     kept_site["release"] = model_card().get("version")
-                    answer_cache.put(site_key, version, tagger_mark(kept_site), who)
+                    answer_cache.put(site_key, version, tagger_mark(kept_site, backbone), who)
                 answer_cache.put(kept_key, version, tagger_mark(answercache.without_confusions(
-                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")})),
-                    who)
+                    {k: v for k, v in body.items() if k not in ("request_id", "timing", "usage")}),
+                    backbone), who)
                 body["answered"] = answer_cache.held(kept_key).about(version)
                 body["cached"] = False
                 body["usage"] = quotas.usage(cred)
@@ -3928,7 +4015,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                                                        scored):
                     kept, result, spare = site_kept(pooled, vecs, hidden, used, about)
                     kept["release"] = model_card().get("version")
-                    answer_cache.put(key, version, tagger_mark(kept), "site")
+                    answer_cache.put(key, version, tagger_mark(kept, ident.backbone), "site")
                     mine = yours.for_person(ident, result, spare, vecs, hidden, linked,
                                             photo_lookup, may_show)
                     confusions.annotate(mine, table)

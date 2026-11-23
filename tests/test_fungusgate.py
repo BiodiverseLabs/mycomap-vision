@@ -151,10 +151,18 @@ def test_fungus_photos_pass_the_gate_with_their_answer_unchanged(conn, tmp_path)
         assert gated[key] == ungated[key]
 
 
-def test_the_gate_only_runs_on_a_backbone_whose_base_vectors_it_can_read(conn, tmp_path):
-    r = identify(client_for(conn, tmp_path, loader=Const), [photo(247, DUCK_GREEN)])
-    assert r["gate"] is None                   # m1 isn't BioCLIP 2: answered as before
-    assert r["ranks"]["species"][0]["confidence"] is not None
+def test_a_backbone_whose_base_vectors_the_gate_cant_read_is_refused_not_answered_ungated(
+        conn, tmp_path):
+    # Until 2026-11-23 such a backbone answered without the gate, silently (v2's bug). Now
+    # the answer is refused (servedbases.py: fail closed), and the same server without a
+    # gate answers it as before.
+    client = client_for(conn, tmp_path, loader=Const)        # m1 gives no bioclip-2 vectors
+    files = [("photos", ("p0.png", photo(247, DUCK_GREEN), "image/png"))]
+    res = client.post("/api/identify", files=files, data={"models": "m1/nearest"})
+    assert res.status_code == 503 and "not served ungated" in res.json()["detail"]
+    r = identify(client_for(conn, tmp_path, loader=Const, with_gate=False),
+                 [photo(247, DUCK_GREEN)])
+    assert r["gate"] is None and r["ranks"]["species"][0]["confidence"] is not None
 
 
 def test_mv_fungus_gate_0_turns_the_saved_gate_off(conn, tmp_path, monkeypatch):

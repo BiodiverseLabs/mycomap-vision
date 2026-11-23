@@ -85,6 +85,19 @@ def apps(conn, tmp_path):
     return tagged, plain
 
 
+def forking(base):
+    """A loader of fine-tune stand-ins on `base`: its base vectors are its own vectors (all a
+    FakeGate needs). A gate served on a backbone that can't give its base's vectors refuses
+    the answer (servedbases.py), so the gated tests here serve one that can."""
+    class Forks(Const):
+        base_name = base
+
+        def encode_with_base(self, images):
+            v = self.encode(images)
+            return v, v
+    return lambda n: Forks(n)
+
+
 def upload(client, reds, **data):
     files = [("photos", (f"p{i}.png", png(r), "image/png")) for i, r in enumerate(reds)]
     res = client.post("/api/identify", files=files, data={"models": "m1/nearest", **data})
@@ -234,7 +247,7 @@ def test_a_tagger_for_other_vectors_than_the_gates_is_not_served(conn, tmp_path)
                  tmp_path / "emb" / "m1", log=lambda s: None)
     conn.commit()
     client = TestClient(create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
-                                   backbone_loader=lambda n: Const(n), limits=open_limits(),
+                                   backbone_loader=forking(gate.base), limits=open_limits(),
                                    background=False, fungus_gate=gate,
                                    photo_tagger=StubTagger(), note=notes.append))
     assert "photo_types" not in upload(client, [247, SLIP])
@@ -258,7 +271,7 @@ def gated_app(conn, tmp_path, gate, notes):
                  tmp_path / "emb" / "m1", log=lambda s: None)
     conn.commit()
     return TestClient(create_app(tmp_path / "manifest.sqlite", tmp_path / "emb",
-                                 backbone_loader=lambda n: Const(n), limits=open_limits(),
+                                 backbone_loader=forking(gate.base), limits=open_limits(),
                                  background=False, server_key=SERVER_KEY, fungus_gate=gate,
                                  photo_tagger=True, note=notes.append))
 

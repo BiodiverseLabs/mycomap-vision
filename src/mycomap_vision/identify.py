@@ -94,6 +94,12 @@ class NotTrainedHere(RuntimeError):
     that must not train (MV_FIT_ON_DEMAND=0)."""
 
 
+class NoBaseVector(RuntimeError):
+    """A photo the served gate or photo-type tagger must read, on a backbone that can't give
+    the base-model vector they read (its base is another model's, or it can't fork the
+    pass). Raised rather than answering ungated (servedbases.py: fail closed)."""
+
+
 def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key: str,
                train: bool = True) -> bool:
     """Fit the model, reusing saved trained weights when this exact reference set has been
@@ -832,8 +838,9 @@ class Identifier:
 
     def encode(self, backbone_model, items: list) -> tuple[np.ndarray, np.ndarray | None]:
         """(this model's vectors, the base-model vectors the gate and the photo-type tagger
-        read, or None when neither can run on this backbone). A fine-tuned BioCLIP 2 gives
-        both from one pass."""
+        read, or None when neither is served). A fine-tuned BioCLIP 2 (or 2.5) gives both
+        from one pass. NoBaseVector when one is served but this model can't give its
+        vectors: the answer is refused, never given ungated."""
         base = self.base_name()
         if base is not None:
             both = getattr(backbone_model, "encode_with_base", None)
@@ -844,6 +851,13 @@ class Identifier:
             if self.backbone == base:
                 vecs = backbone_model.encode(items)
                 return vecs, vecs
+            # Never answered ungated: the gate (or tagger) this backbone is served with
+            # reads vectors this model can't give.
+            has = getattr(backbone_model, "base_name", None)
+            raise NoBaseVector(
+                f"{self.backbone} is served with a gate or photo-type tagger reading {base} "
+                f"vectors, but its model {'forks ' + has if has else 'gives no base'} "
+                "vectors here; it is not served ungated")
         return backbone_model.encode(items), None
 
     def base_name(self) -> str | None:
