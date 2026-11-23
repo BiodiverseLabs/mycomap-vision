@@ -192,10 +192,16 @@ ratios between rows are the reliable part. Source: the retrain data's
 | v2 `encode_with_base` (its vector + the bioclip-2.5-336 base vector) | 4.49 | 1.75x |
 | v2 + a separate v1 BioCLIP 2 pass for today's 336 gate | 6.77 | 2.6x |
 
-The fork costs v2 about 13% over its plain pass; a second tower for the gate would cost
-70%, so v2 is served with gate and tagger heads refit on its own base's vectors
-(servedbases.py: each backbone reads the gate and tagger of its own base, and one with
-none is refused, never served ungated).
+The fork costs v2 about 13% over its plain pass; a second tower for the gate costs 70%.
+The bioclip-2.5 gate refit failed its test (12% of everyday non-fungi passed against
+1.8%), so Steve chose (2026-11-23) the slower row for now: v2 is served with today's
+bioclip-2-336 gate read from a second pass through v1's own fork (`MV_CROSS_BASE_GATE`),
+and with its own bioclip-2.5 photo-type head on its own fork. Measured: 6.77 s a photo
+for v2's plain pass plus the v1 pass; v2 forking its 2.5 vector for the tagger as well
+should be about 4.49 + 2.56 = 7.05 s (the sum of the measured rows, not measured as one). Without that setting a backbone with no gate for
+its base is refused, never served ungated (servedbases.py). The second pass reuses the
+v1 tower already loaded for v1's own answers, so it adds no memory; only without v1
+does it load the frozen bioclip-2-336 tower.
 
 Memory: the v2 tower holds about 2.6 GB resident, with a +1.2 GB peak while it loads
 (23.8 s; v1 loads in 7.5 s). v2's reference set is 739,737 vectors of 1,024 dimensions;

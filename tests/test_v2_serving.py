@@ -60,16 +60,22 @@ class SpyGate:
 class SpyTagger(PhotoTagger):
     """A tagger on `base` that calls every photo `kind` (tag-only kinds keep the answer)."""
 
-    def __init__(self, base, kind="specimen"):
+    def __init__(self, base, kind="specimen", leave_out=phototypes.LEAVE_OUT):
         super().__init__(np.zeros((2, len(CLASSES)), np.float32), np.zeros(len(CLASSES)),
-                         CLASSES, BANDS, 0.35, base, f"test-{base}")
-        self.kind, self.read = kind, []
+                         CLASSES, BANDS, 0.35, base, f"test-{base}", leave_out=leave_out)
+        # `kind`: one kind for every photo, or a list taken in turn, photo after photo.
+        self.kinds = [kind] if isinstance(kind, str) else list(kind)
+        self.read = []
 
     def probs(self, base_vectors):
-        self.read.extend(np.asarray(base_vectors).tolist())
-        row = np.full(len(CLASSES), 0.1 / (len(CLASSES) - 1))
-        row[CLASSES.index(self.kind)] = 0.9
-        return np.tile(row, (len(base_vectors), 1))
+        rows = []
+        for v in np.asarray(base_vectors).tolist():
+            kind = self.kinds[len(self.read) % len(self.kinds)]
+            self.read.append(v)
+            row = np.full(len(CLASSES), 0.1 / (len(CLASSES) - 1))
+            row[CLASSES.index(kind)] = 0.9
+            rows.append(row)
+        return np.asarray(rows)
 
 
 def record_finetune(name, base):
@@ -94,18 +100,26 @@ def emb(conn, tmp_path):
     return root
 
 
-def server(tmp_path, root, gates, taggers=None, allowed=(V1, V2), loaded=None):
+def server(tmp_path, root, gates, taggers=None, allowed=(V1, V2), loaded=None, frozen=None,
+           **kw):
+    """`frozen`: what loading the frozen base alias BASE1 gives (a stand-in model, or an
+    exception to raise); unset, loading it fails (KeyError)."""
     bases = {V1: BASE1, V2: BASE2}
     models = loaded if loaded is not None else {}
 
     def loader(name):
+        if name == BASE1 and frozen is not None:
+            if isinstance(frozen, Exception):
+                raise frozen
+            models[name] = frozen
+            return frozen
         models[name] = FineTune(name, bases[name])
         return models[name]
     return TestClient(create_app(tmp_path / "manifest.sqlite", root, backbone_loader=loader,
                                  limits=open_limits(allowed_backbones=set(allowed)),
                                  background=False, fungus_gate=gates,
                                  photo_tagger=taggers if taggers is not None else None,
-                                 note=lambda s: None))
+                                 note=lambda s: None, **kw))
 
 
 def answer(client, backbone, reds=(247, 12)):
@@ -321,3 +335,131 @@ def test_a_25_head_without_its_pin_is_refused(tmp_path, monkeypatch):
     monkeypatch.setenv(phototypes.SETTING, str(b))
     taggers, errors = PhotoTagger.all_from_setting()
     assert taggers == [] and "not a pinned one" in errors[0]
+
+
+# --- v2 with today's bioclip-2-336 gate from a second pass (Steve, 2026-11-23) -----------
+
+CROSS = f"{V2}={BASE1}"
+
+
+def fork_of(name, base, red):
+    return FineTune(name, base).encode_with_base([png_image(red)])[1][0].tolist()
+
+
+def head_25(kind="specimen"):
+    """The 2.5 head as pinned: slip tag-only, only a High micrograph leaves the answer."""
+    return SpyTagger(BASE2, kind=kind, leave_out=("micrograph",))
+
+
+def test_v2_with_the_cross_base_gate_reads_the_336_gate_from_a_second_pass_and_25_tags_from_its_own_fork(
+        emb, tmp_path, monkeypatch):
+    monkeypatch.setenv(servedbases.CROSS_SETTING, CROSS)
+    g1 = SpyGate(BASE1, verdict="unsure")
+    t1, t2 = SpyTagger(BASE1), head_25("uv")
+    loaded = {}
+    # The frozen base could be loaded too, but v1's tower (already serving) is used first.
+    client = server(tmp_path, emb, {BASE1: g1}, [t1, t2], loaded=loaded,
+                    frozen=Const(BASE1, 1.0))
+    r = answer(client, V2)
+    # The gate read v1's bioclip-2-336 fork of each photo (the second pass, no extra tower) ...
+    assert np.allclose(g1.read, [fork_of(V1, BASE1, 247), fork_of(V1, BASE1, 12)])
+    assert BASE1 not in loaded and loaded[V1].forks == 2
+    # ... and the 2.5 head v2's own bioclip-2.5-336 fork.
+    assert np.allclose(t2.read, [fork_of(V2, BASE2, 247), fork_of(V2, BASE2, 12)])
+    assert t1.read == [] and loaded[V2].forks == 2
+    assert r["gate"]["verdict"] == "unsure"
+    assert [p["photo_type"]["type"] for p in r["per_photo"]] == ["uv", "uv"]
+    health = client.get("/api/health").json()
+    assert len(health["cross_base_gates"]) == 1 and "refused_backbones" not in health
+
+
+def test_without_the_cross_base_gate_setting_v2_is_still_refused(emb, tmp_path):
+    client = server(tmp_path, emb, {BASE1: SpyGate(BASE1)}, [SpyTagger(BASE1), head_25()])
+    res = post_photos(client, [247], f"{V2}/nearest")
+    assert res.status_code == 503 and "no not-a-fungus gate reads bioclip-2.5-336" in res.text
+
+
+def test_the_cross_base_gate_must_name_a_gate_that_is_served(emb, tmp_path, monkeypatch):
+    monkeypatch.setenv(servedbases.CROSS_SETTING, f"{V2}=bioclip-2-448")
+    client = server(tmp_path, emb, {BASE1: SpyGate(BASE1)}, [SpyTagger(BASE1), head_25()])
+    res = post_photos(client, [247], f"{V2}/nearest")
+    assert res.status_code == 503 and "no not-a-fungus gate reads bioclip-2-448" in res.text
+
+
+def test_a_slip_at_high_on_the_25_head_stays_in_the_answer_while_a_micrograph_leaves(
+        emb, tmp_path, monkeypatch):
+    monkeypatch.setenv(servedbases.CROSS_SETTING, CROSS)
+    for kind, left in (("slip", []), ("micrograph", [1])):
+        client = server(tmp_path, emb, {BASE1: SpyGate(BASE1)},
+                        [SpyTagger(BASE1), head_25(["specimen", kind])])
+        r = answer(client, V2)
+        assert r["photo_types"]["left_out"] == left, kind
+        tag = r["per_photo"][1]["photo_type"]
+        assert (tag["type"], tag["band"]) == (kind, "high") and tag["label"]  # chip shows
+    assert head_25().summary()["leave_out"] == ["micrograph"]
+
+
+def test_the_v1_head_still_leaves_out_a_high_slip_and_micrograph(emb, tmp_path, monkeypatch):
+    monkeypatch.setenv(servedbases.CROSS_SETTING, CROSS)
+    for kind in ("slip", "micrograph"):
+        t1 = SpyTagger(BASE1, kind=["specimen", kind])
+        client = server(tmp_path, emb, {BASE1: SpyGate(BASE1)}, [t1, head_25()])
+        assert answer(client, V1)["photo_types"]["left_out"] == [1], kind
+    assert t1.summary()["leave_out"] == ["micrograph", "slip"]
+    # The default kinds keep a head's fingerprint as it was (the formula from before the
+    # per-head kinds, so a kept v1 answer stays current); the 2.5 head's own differ.
+    import hashlib
+    h = hashlib.sha256(json.dumps([list(t1.classes), t1.bands, t1.floor, t1.base],
+                                  sort_keys=True).encode())
+    h.update(t1.W.tobytes())
+    h.update(t1.b.tobytes())
+    assert t1.fingerprint() == h.hexdigest()[:16]
+    assert head_25().fingerprint() != SpyTagger(BASE2).fingerprint()
+
+
+def test_without_v1_the_second_pass_loads_the_frozen_336_base(emb, tmp_path, monkeypatch):
+    # v1 not served here: the gate's vectors come from the frozen base model, loaded once.
+    monkeypatch.setenv(servedbases.CROSS_SETTING, CROSS)
+    g1, loaded, frozen = SpyGate(BASE1), {}, Const(BASE1, 1.0)
+    client = server(tmp_path, emb, {BASE1: g1}, [SpyTagger(BASE1), head_25()],
+                    allowed=(V2,), loaded=loaded, frozen=frozen)
+    answer(client, V2, reds=(247,))
+    assert V1 not in loaded and loaded[BASE1] is frozen
+    assert np.allclose(g1.read, frozen.encode([png_image(247)]))
+
+
+def test_with_no_tower_for_the_second_pass_v2_is_refused_not_answered_ungated(
+        emb, tmp_path, monkeypatch):
+    monkeypatch.setenv(servedbases.CROSS_SETTING, CROSS)
+    g1 = SpyGate(BASE1)
+    client = server(tmp_path, emb, {BASE1: g1}, [SpyTagger(BASE1), head_25()],
+                    allowed=(V2,), frozen=OSError("no weights offline"))
+    res = post_photos(client, [247], f"{V2}/nearest")
+    assert res.status_code == 503 and "not served ungated" in res.text
+    assert "no weights offline" in res.text and g1.read == []
+
+
+def test_a_session_rejudges_a_cross_base_photo_from_its_second_pass_vector(
+        emb, tmp_path, monkeypatch):
+    from test_api_v1_identify import FakeOrg, SERVER_KEY
+    from test_api_v1_sessions import add, open_session
+    from test_signin import HERE, PUBLIC_KEY
+
+    from mycomap_vision import apiv1
+    monkeypatch.setenv(servedbases.CROSS_SETTING, CROSS)
+    g1 = SpyGate(BASE1)
+    client = server(tmp_path, emb, {BASE1: g1}, [SpyTagger(BASE1), head_25()], allowed=(V2,),
+                    frozen=Const(BASE1, 1.0), server_key=SERVER_KEY, api_v1=True,
+                    sessions=True, app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE),
+                    introspect=FakeOrg())
+    sid = open_session(client)["session_id"]
+    assert add(client, sid, 247, "p1").status_code == 200
+    [s] = client.app.state.sessions._by_id.values()
+    [photo] = s.photos
+    second = Const(BASE1, 1.0).encode([png_image(247)])[0]
+    assert np.allclose(photo.gate_base, second)                  # kept beside the photo
+    g1.read.clear()
+    g1.fingerprint = lambda: "gate-2"                            # the gate changed
+    client.patch(f"/api/v1/sessions/{sid}", headers=__import__(
+        "test_api_v1_sessions").APP, json={"observed_on": "2026-10-12"})
+    assert np.allclose(g1.read, [second])                        # re-judged from it

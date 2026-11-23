@@ -59,15 +59,15 @@ PINNED = {
         {"version": "v2.1-336", "base": "bioclip-2-336",
          "source": "photo-type tagger t20 (research exp/photo-type-tagger a27bb67)",
          "bands_from": "t21_336_bands.json (by-eye bands, t21)"},
-    # TODO(v2 serving): the head refit on bioclip-2.5-336 frozen vectors, for MycoMap Vision
-    # v2 (fine-tune bioclip-2.5-336-ft-20261122-171257; Steve approved the refit 2026-11-23).
-    # Add it here once the refit lane reports its model.npz sha256 and bands file:
-    #   "<sha256 of its model.npz>":
-    #       {"version": "<its name>", "base": "bioclip-2.5-336",
-    #        "source": "photo-type tagger <run> (research ...)", "bands_from": "<bands json>"},
-    # Until then a 2.5 head is refused at load ("not a pinned one"), and with MV_PHOTO_TAGGER
-    # serving the 336 head, a v2 backbone is refused (servedbases.py) unless
-    # MV_UNTAGGED_BACKBONES names it.
+    # The head refit on bioclip-2.5-336 frozen vectors, for MycoMap Vision v2 (fine-tune
+    # bioclip-2.5-336-ft-20261122-171257), read from v2's own fork (Steve, 2026-11-23). Slip
+    # is tag-only on this head: only a High micrograph leaves the answer.
+    "70735e7fa7acaa2e0ab5e0e3e50cc1ff021b2f8a9b3d60d992c5581b567019be":
+        {"version": "v2.2-bc25", "base": "bioclip-2.5-336",
+         "source": "photo-type tagger bc25 refit (research exp/tagger-gate-bc25 6548ccd)",
+         "bands_from": "tagger-run1/bands.json "
+                       "e58ce07ac04e1418ff15427b08ee96b5723aaabe5374c76b5c94444af0b3b90c",
+         "leave_out": ("micrograph",)},
 }
 
 SPECIMEN = "specimen"
@@ -76,6 +76,9 @@ BANDS = (HIGH, MEDIUM, LOW)
 # Kinds left out of the answer when tagged in the HIGH band (Steve, 2026-10-23: micrograph
 # and slip; habitat tag-only).
 LEAVE_OUT = ("micrograph", "slip")
+# A pin may name its own kinds ("leave_out"; Steve, 2026-11-23: the bioclip-2.5-336 head
+# leaves out micrograph only, slip is tag-only there). A pin without one leaves out LEAVE_OUT.
+# It lives in the pin, not the file's json, which isn't pinned.
 # A chip on the page for these bands; a low-band tag is mostly wrong, so it shows none.
 CHIP_BANDS = (HIGH, MEDIUM)
 
@@ -137,6 +140,7 @@ class PhotoTagger:
     base: str = "bioclip-2"        # whose frozen image vectors it reads
     version: str | None = None     # PINNED name of the research model ("v2")
     provenance: dict = field(default_factory=dict)
+    leave_out: tuple = LEAVE_OUT   # kinds a HIGH tag leaves out of the answer (its pin's)
 
     def __post_init__(self):
         self.W = np.asarray(self.W, np.float32)
@@ -148,6 +152,10 @@ class PhotoTagger:
                           f"{len(self.classes)} classes")
         if SPECIMEN not in self.classes:
             raise Refused("the head has no specimen class")
+        self.leave_out = tuple(str(k) for k in self.leave_out)
+        if set(self.leave_out) - set(LOOKS):
+            raise Refused(f"leave_out names kinds with no wording: "
+                          f"{sorted(set(self.leave_out) - set(LOOKS))}")
         unknown = sorted(set(self.bands) - set(self.classes))
         if unknown:
             raise Refused(f"bands for classes the head doesn't have: {unknown}")
@@ -185,12 +193,15 @@ class PhotoTagger:
                                       sort_keys=True).encode())
         h.update(self.W.tobytes())
         h.update(self.b.tobytes())
+        if self.leave_out != LEAVE_OUT:       # a head's own kinds (unchanged for older pins)
+            h.update(json.dumps(["leave_out", list(self.leave_out)]).encode())
         return h.hexdigest()[:16]
 
     def summary(self) -> dict:
         """What /api/health says about the tagger."""
         return {"version": self.version, "base": self.base, "fingerprint": self.fingerprint(),
-                "leave_out": [k for k in LEAVE_OUT if k in self.classes], "leave_out_band": HIGH}
+                "leave_out": [k for k in self.leave_out if k in self.classes],
+                "leave_out_band": HIGH}
 
     # --- files -----------------------------------------------------------------------
 
@@ -229,7 +240,7 @@ class PhotoTagger:
         with np.load(path) as f:
             return cls(f["W"], f["b"], tuple(str(c) for c in f["classes"]), meta["bands"],
                        float(meta["floor"]), pin["base"], pin["version"],
-                       meta.get("provenance") or {})
+                       meta.get("provenance") or {}, tuple(pin.get("leave_out", LEAVE_OUT)))
 
     @classmethod
     def from_setting(cls) -> "PhotoTagger | None":
@@ -291,22 +302,23 @@ def build(model_npz: Path, seed_json: Path, built_at: str | None = None) -> Phot
                         "seed_sha256": sha256_file(Path(seed_json)),
                         "source": pin.get("source"),
                         "bands_from": pin.get("bands_from"),
-                        "built_at": built_at})
+                        "built_at": built_at}, tuple(pin.get("leave_out", LEAVE_OUT)))
 
 
 # --- the decision ----------------------------------------------------------------------
 
-def would_leave_out(tag: dict | None) -> bool:
-    """A tag that leaves its photo out of the answer: a LEAVE_OUT kind in the HIGH band."""
-    return bool(tag) and tag.get("type") in LEAVE_OUT and tag.get("band") == HIGH
+def would_leave_out(tag: dict | None, leave_out=LEAVE_OUT) -> bool:
+    """A tag that leaves its photo out of the answer: a `leave_out` kind (the head's; LEAVE_OUT
+    by default) in the HIGH band."""
+    return bool(tag) and tag.get("type") in leave_out and tag.get("band") == HIGH
 
 
-def decide(tags: list[dict | None], counted: list[int], include=()) -> dict:
+def decide(tags: list[dict | None], counted: list[int], include=(), leave_out=LEAVE_OUT) -> dict:
     """Which of the photos the gate kept (`counted`, indices) are left out by their tag.
     `include`: indices asked to count anyway. When every counted photo would be left out,
     none is (`kept_all`). {"left_out", "included", "kept_all"}, indices ascending."""
     asked = {int(i) for i in include}
-    would = [i for i in counted if would_leave_out(tags[i])]
+    would = [i for i in counted if would_leave_out(tags[i], leave_out)]
     included = [i for i in would if i in asked]
     left = [i for i in would if i not in asked]
     kept_all = bool(left) and len(left) == len(counted)

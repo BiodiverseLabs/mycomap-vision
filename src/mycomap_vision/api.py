@@ -498,13 +498,25 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         taggers = list(photo_tagger)
     else:
         taggers = [photo_tagger] if photo_tagger else []
-    # A head must read the vector its base's gate already computes, never a second tower's.
-    served_taggers, unpaired = servedbases.pair_taggers(gates, taggers,
-                                                       phototypes.base_mismatch)
+    # A backbone given another base's gate explicitly (MV_CROSS_BASE_GATE): read from a
+    # second pass, its own head on its own fork (servedbases.py).
+    cross, cross_errors = servedbases.cross_setting()
+    for e in cross_errors:
+        note(f"[fungus-gate] {e}")
+    readers = servedbases.Readers(gates, {}, servedbases.untagged_setting(), cross=cross)
+    # A head must read the vector its base's gate already computes, never a second tower's
+    # (or the fork of a backbone whose gate reads a second pass).
+    served_taggers, unpaired = servedbases.pair_taggers(
+        gates, taggers, phototypes.base_mismatch,
+        readers.forked_bases(limits.allowed_backbones))
     for e in unpaired:
         tagger_error.append(e)
         note(f"[photo-tagger] not served: {e}")
-    readers = servedbases.Readers(gates, served_taggers, servedbases.untagged_setting())
+    readers.taggers = served_taggers
+    for b, gb in cross.items():
+        why = readers.choose(b).refused
+        note(f"[fungus-gate] {b}: the {gb} gate from a second pass"
+             + (f"; refused: {why}" if why else ""))
     photo_tagger = readers.tagger                       # the first named: health, as before
     for t in served_taggers.values():
         note(f"[photo-tagger] {t.version} ({t.fingerprint()}) tags every identified photo"
@@ -876,7 +888,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                train=limits.fit_on_demand, photo_info=False,
                                layer_root=layer.embeddings if layer else None,
                                gate=chosen.gate, twins_file=twins_path(),
-                               specimen_groups=served_groups(), tagger=chosen.tagger)
+                               specimen_groups=served_groups(), tagger=chosen.tagger,
+                               gate_pass=(second_pass(chosen.gate_base, backbone)
+                                          if chosen.gate_base else None))
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
@@ -1101,6 +1115,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 out["fungus_gate_errors"] = list(gate_errors)
         if len(served_taggers) > 1:
             out["photo_taggers"] = {b: t.summary() for b, t in served_taggers.items()}
+        if cross:                                  # gates read from a second pass
+            out["cross_base_gates"] = dict(cross)
         if not gates and not served_taggers:
             return out
         # From the allowed names, not the database: health is read often (no count query).
@@ -1427,11 +1443,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         vecs, base = ident.encode(model, [prepare(image)])
         vector = normalise(vecs)[0].astype(np.float32)
         gate = getattr(ident, "gate", None)
-        verdict = gate.judge(base)[0] if gate is not None and base is not None else None
+        # The gate's vector: the fork, or a second pass when it reads another base.
+        read = ident.gate_vectors([image], base) if gate is not None else None
+        verdict = gate.judge(read)[0] if gate is not None and read is not None else None
         tagger = getattr(ident, "tagger", None)
         tag = tagger.tag(base)[0] if tagger is not None and base is not None else None
+        second = np.asarray(read[0]) if read is not None and read is not base else None
         return (vector, (None if base is None or base is vecs else np.asarray(base[0])), verdict,
-                tag)
+                tag, second)
 
     def embed_and_score(ident: Identifier, backbone: str, images: list, context: "Context",
                         may_show, timer: "apiv1.Timer", top_k: int = 5,
@@ -1449,11 +1468,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         def embed():                                 # the worker holds gpu_lock
             model = backbone_model(backbone)
             parts = [embed_one(ident, model, im) for im in images]
-            judged = [v for _, _, v, _ in parts]
+            judged = [p[2] for p in parts]
             verdicts.append(judged if all(v is not None for v in judged) else None)
-            tagged = [t for _, _, _, t in parts]
+            tagged = [p[3] for p in parts]
             tags.append(tagged if all(t is not None for t in tagged) else None)
-            return np.stack([vec for vec, _, _, _ in parts])
+            return np.stack([p[0] for p in parts])
 
         def finish(vecs, sims):
             if vectors is not None:
@@ -2350,6 +2369,45 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             backbones[backbone] = backbone_loader(backbone)
             models.release_memory()
         return backbones[backbone]
+
+    def second_pass(gate_base: str, backbone: str) -> Callable[[list], np.ndarray]:
+        """The gate's vectors for `backbone`'s photos when its gate reads another base
+        (MV_CROSS_BASE_GATE): photos -> `gate_base` vectors from a second pass. Called with
+        gpu_lock held (inside the identifier's embed step).
+
+        Which tower makes them: a served backbone that forks `gate_base`
+        (encode_with_base; v1 for the bioclip-2-336 gate), so no extra tower sits in memory,
+        since v1 is loaded for its own answers anyway; else the frozen base model itself
+        (`gate_base` as an alias), loaded once beside the rest. Models are never evicted from
+        this process, and MV_MAX_MODELS caps only the models one identification compares
+        and the packed search matrices, so the second pass never counts against it. If
+        neither can be loaded or forked, the photo is refused (NoBaseVector, a 503), never
+        answered ungated."""
+        def run(images: list) -> np.ndarray:
+            tried = []
+            forks = sorted((b for b in limits.allowed_backbones
+                            if b != backbone and b not in cross
+                            and readers.base(b) == gate_base),
+                           key=lambda b: (b not in backbones, b))   # a loaded one first
+            for name in [*forks, gate_base]:
+                try:
+                    model = backbone_model(name)
+                    prepare = getattr(model, "prepare", None) or (lambda im: im)
+                    items = [prepare(im) for im in images]
+                    if name == gate_base:
+                        return np.asarray(model.encode(items))
+                    if getattr(model, "base_name", None) == gate_base and callable(
+                            getattr(model, "encode_with_base", None)):
+                        pair = model.encode_with_base(items)
+                        if pair is not None:
+                            return np.asarray(pair[1])
+                    tried.append(f"{name} doesn't fork {gate_base}")
+                except Exception as e:  # noqa: BLE001 - the next tower, else refused
+                    tried.append(f"{name}: {type(e).__name__}: {e}")
+            raise NoBaseVector(f"{backbone}'s gate reads {gate_base} vectors, but no second "
+                               f"pass could make them ({'; '.join(tried)}); it is not served "
+                               "ungated")
+        return run
 
     # Set once the preload is done (or failed, or there is none): the Human Feedback lists'
     # warm-up waits for it, so a restart's model load and index build go first.
@@ -4094,18 +4152,21 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
             def embed():                                # the worker holds gpu_lock
                 if image is not None:
-                    vector, base, verdict, tag = embed_one(ident, backbone_model(s.backbone),
-                                                           image)
+                    vector, base, verdict, tag, second = embed_one(
+                        ident, backbone_model(s.backbone), image)
                     added.append(session_store.Photo(
                         ref=ref, vector=vector, base=base, verdict=verdict,
                         gate_fingerprint=fingerprint if verdict else None, found=found,
-                        photo_type=tag, type_fingerprint=type_print if tag else None))
+                        photo_type=tag, type_fingerprint=type_print if tag else None,
+                        gate_base=second))
                 for p in s.photos:                      # judged by an older gate: again
                     base = p.base if p.base is not None else (
                         p.vector if ident.backbone == ident.base_name() else None)
+                    # A gate on another base reads the photo's kept second-pass vector.
+                    read = p.gate_base if getattr(ident, "gate_pass", None) is not None else base
                     if gate is not None and p.gate_fingerprint != fingerprint:
-                        if base is not None:
-                            p.verdict = gate.judge(np.asarray(base)[None])[0]
+                        if read is not None:
+                            p.verdict = gate.judge(np.asarray(read)[None])[0]
                             p.gate_fingerprint = fingerprint
                     if tagger is not None and p.type_fingerprint != type_print:
                         if base is not None:            # tagged by an older tagger: again

@@ -214,9 +214,16 @@ V2 = "526ca22f62e66643193f3d97ba9ab0684d9ab602d8b841895ea1b41d310230c1"
 V21_336 = "128f4f874dad41253e57433ddd196a54e2f8929600df82bf706986db86ada1e6"
 
 
-def test_v2_and_v2_1_336_are_the_only_pinned_models_each_with_its_base():
+V22_BC25 = "70735e7fa7acaa2e0ab5e0e3e50cc1ff021b2f8a9b3d60d992c5581b567019be"
+
+
+def test_v2_v2_1_336_and_v2_2_bc25_are_the_only_pinned_models_each_with_its_base():
     assert {sha: (pin["version"], pin["base"]) for sha, pin in phototypes.PINNED.items()} == {
-        V2: ("v2", "bioclip-2"), V21_336: ("v2.1-336", "bioclip-2-336")}
+        V2: ("v2", "bioclip-2"), V21_336: ("v2.1-336", "bioclip-2-336"),
+        V22_BC25: ("v2.2-bc25", "bioclip-2.5-336")}
+    # Only the 2.5 head names its own leave-out (Steve, 2026-11-23: slip tag-only there).
+    assert {sha: pin.get("leave_out") for sha, pin in phototypes.PINNED.items()} == {
+        V2: None, V21_336: None, V22_BC25: ("micrograph",)}
 
 
 def pinned_file(tmp_path, source_sha, base):

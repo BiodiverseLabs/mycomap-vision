@@ -48,10 +48,13 @@ class Photo:
     found: tuple = (None, None, None)     # its EXIF (latitude, longitude, date), for gaps
     photo_type: dict | None = None        # its photo-type tag (phototypes.py), when tagged
     type_fingerprint: str | None = None   # which tagger tagged it (tagged again when it changes)
+    gate_base: np.ndarray | None = None   # the gate's vector from a second pass, when it reads
+                                          # another base than this model's (servedbases.py)
 
     @property
     def nbytes(self) -> int:
-        return self.vector.nbytes + (self.base.nbytes if self.base is not None else 0) + 256
+        return (self.vector.nbytes + (self.base.nbytes if self.base is not None else 0)
+                + (self.gate_base.nbytes if self.gate_base is not None else 0) + 256)
 
 
 @dataclass

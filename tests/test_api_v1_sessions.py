@@ -210,7 +210,7 @@ def test_no_photo_is_kept_only_its_vector(conn, tmp_path):
     [photo] = s.photos
     # Its photo-type tag (phototypes.py) is a few words about it, not the photo.
     assert set(vars(photo)) == {"ref", "vector", "base", "verdict", "gate_fingerprint", "found",
-                                "photo_type", "type_fingerprint"}
+                                "photo_type", "type_fingerprint", "gate_base"}
     assert isinstance(photo.vector, np.ndarray) and photo.vector.ndim == 1
 
 

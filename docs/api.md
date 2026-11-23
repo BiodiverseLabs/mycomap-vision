@@ -371,8 +371,10 @@ model's result, not a `results` list.
   when `p_fungus` is below 0.05 and `unsure` below 0.50 (was 0.70 before v1). The cut-offs
   belong to the served gate and may change with it; callers read the verdict, not
   `p_fungus`. Each served model reads the gate of its own base model (servedbases.py,
-  2026-11-23: v1 the bioclip-2-336 gate, v2 a bioclip-2.5-336 one); a model with no gate
-  for its base is not offered at all (`GET /api/v1/models`), never answered ungated.
+  2026-11-23: v1 the bioclip-2-336 gate); a model with no gate for its base is not offered
+  at all (`GET /api/v1/models`), never answered ungated, unless the server names it in
+  `MV_CROSS_BASE_GATE`: Steve, 2026-11-23, v2 keeps today's bioclip-2-336 gate (read from
+  a second pass) until a bioclip-2.5 gate passes its test.
 - **`photo_types`** (photo-type tags, Steve 2026-10-22; `phototypes.py`): absent while the
   server has no tagger file (`MV_PHOTO_TAGGER`). Each photo's frozen BioCLIP 2 vector, the
   one the gate reads, goes through the photo-type tagger trained on that same base's vectors
@@ -385,6 +387,10 @@ model's result, not a `results` list.
   `micrograph` or `slip` photo in the `high` band is left out of the combined
   answer like a gated photo (`photo_types.left_out`), unless the call names it in
   `include` (`photo_types.included`). Every other type (`habitat` included) is tagged only and still counts.
+  The kinds left out belong to the head (its pin in `phototypes.PINNED`): v2's bioclip-2.5
+  head (`v2.2-bc25`, Steve 2026-11-23) leaves out a `high` `micrograph` only; a `slip` is
+  tagged and its chip shown but it still counts. `/api/health` `photo_tagger.leave_out`
+  (`photo_taggers.<base>.leave_out` with several heads) says which.
   When every photo the gate kept would be left out, none is: `photo_types.kept_all` is
   `true`, the chance is still stated, and a hint says "Only non-specimen photos: this
   answer is less reliable." (unlike the gate, which gives no answer then: a micrograph or
@@ -782,7 +788,9 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |
 | `MV_PHOTO_TAGGER` | the photo-type tagger file (`mv photo-tagger build`): photo types and the micrograph/label leave-out (§4 `photo_types`). Unset: no tagging. Several files, comma-separated, one head per base model (v1's bioclip-2-336 head, v2's bioclip-2.5-336 head): each model is tagged by its own base's head |
+| (comparisons) | while any gate is served, a backbone none reads the base of (a DINOv2 or other non-BioCLIP model served for comparison) is refused; run comparisons with `MV_FUNGUS_GATE=0` (Steve, 2026-11-23) |
 | `fungus-gate.<base>.npz` + `.json` | in the release's `models/` beside `fungus-gate.npz` (or `MV_FUNGUS_GATE_DIR`): the not-a-fungus gate for the models on that base (`FungusGate.save(by_base=True)`). While any gate is served, a model whose base has none is refused (`/api/models` `refused`, `/api/health` `refused_backbones`), never served ungated; likewise for the tagger while any is served |
+| `MV_CROSS_BASE_GATE` | `backbone=gate base`, comma-separated: serve that backbone with the gate of ANOTHER base. The gate's vector then comes from a second pass over each photo: a served backbone that forks that base (v1, for the bioclip-2-336 gate; no extra tower, ~6.77 s a photo on the box for v2 + v1, docs/capacity.md) or else the frozen base model, loaded once. Its tagger is still its own base's head on its own fork. Without the entry the backbone is refused; if no tower can make the second pass, the photo is refused (503, v1 `not_served`). Models are never evicted from the process, and the second pass doesn't count against `MV_MAX_MODELS` |
 | `MV_UNTAGGED_BACKBONES` | backbones (comma-separated) that may answer without photo-type tags while a tagger is served for other bases; listed in `/api/health` `untagged_backbones`. There is no such setting for the gate |
 | `MV_PHOTOS_PER_MINUTE`, `MV_QUEUE_MAX_WAIT`, `MV_SESSIONS_MAX_MB`, `MV_QUOTA_DEFAULT_MONTHLY`, `MV_USAGE_REPORT_SECONDS` | limits, defaults in .env.example |
 
