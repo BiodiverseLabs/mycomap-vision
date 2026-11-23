@@ -473,6 +473,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         from .finetune import models_dir
         backbone_loader = onnxtower.loader(backbone_loader, models_dir(), note=note)
     limits = limits or Limits.from_settings()
+    # One packed int8 matrix per served backbone, at most as many as one identification
+    # may compare (MV_MAX_MODELS; fastsearch.Slot).
+    fastsearch.SLOT.limit = limits.max_models or None
     # The not-a-fungus gates and photo-type taggers, by the base model whose frozen vectors
     # each reads; every served backbone gets the pair of its own base (servedbases.py).
     gate_errors: list[str] = []
@@ -877,21 +880,23 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         finally:
             own.close()
         # The fast int8 search (fastsearch.py, MV_SEARCH_INT8=1): packed here, on the build
-        # thread, after taking the one packed slot from the index serving now. Only for a
-        # backbone offered for identification.
+        # thread, after taking this backbone's packed slot from its index serving now (one
+        # matrix per backbone, at most MV_MAX_MODELS). Only for a backbone offered for
+        # identification.
         if config.setting("MV_SEARCH_INT8") == "1" and backbone in ready_backbones():
             ref = getattr(getattr(getattr(ident, "nearest", None), "scorer", None), "ref", None)
             if not hasattr(ref, "use_int8"):
-                fastsearch.SLOT.last_error = ("the reference vectors aren't memory-mapped here "
-                                              "(on a GPU?): the plain search answers")
+                fastsearch.SLOT.fail(backbone, "the reference vectors aren't memory-mapped here "
+                                               "(on a GPU?): the plain search answers")
             else:
                 try:
                     start = time.monotonic()
-                    ref.use_int8(int(_setting_number("MV_SEARCH_REFINE") or fastsearch.REFINE))
+                    ref.use_int8(int(_setting_number("MV_SEARCH_REFINE") or fastsearch.REFINE),
+                                 key=backbone)
                     note(f"[search] {backbone}/{method}: int8 search packed, "
                          f"{ref.packed.nbytes / 2**20:.0f} MB in {time.monotonic() - start:.0f} s")
                 except Exception as e:  # noqa: BLE001 - the mapped search keeps answering
-                    fastsearch.SLOT.last_error = f"{type(e).__name__}: {e}"
+                    fastsearch.SLOT.fail(backbone, f"{type(e).__name__}: {e}")
                     note(f"[search] int8 search off, mapped search kept: {fastsearch.SLOT.last_error}")
         ident.warm()
         return ident
@@ -1083,7 +1088,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                  *full["embed"], *(m.split("/", 1)[0] for m in warm.models),
                  *(k.split("/", 1)[0] for k in full["vectors"]),
                  *([fungus_gate.base] if fungus_gate else []), *readers.bases(),
-                 *(full.get("refused_backbones") or {})}
+                 *(full.get("refused_backbones") or {}), *(full["search"].get("backbones") or {})}
         return apiv1.public_health(full, served, known)
 
     def served_readers_health() -> dict:

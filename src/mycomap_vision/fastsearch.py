@@ -11,10 +11,12 @@ and a query is scored with one int8 matrix product per block: ~0.01-0.03 s on tw
   vectors (as before), so the names and specimens that decide an answer score as they did;
   only columns far down the list keep the int8 approximation.
 - Memory (Steve, 2026-10-12: keep it low, no resize): the packed matrix lives in memory
-  (~1 byte per dimension per photo, ~465 MB at 605k photos), unlike the mapped files the
-  kernel can drop. It is packed a block at a time, and the process holds at most ONE
-  packed matrix (`SLOT`): an index being built first takes the slot from the one serving,
-  which goes back to the mapped search until the swap, so a rebuild never holds two.
+  (~1 byte per dimension per photo, ~465 MB at 605k photos; v2's 1,024-d vectors: 0.71 GB
+  at 740k), unlike the mapped files the kernel can drop. It is packed a block at a time, and
+  the process holds at most ONE packed matrix per backbone (`SLOT`, at most MV_MAX_MODELS
+  in all): an index being built first takes its backbone's slot from the one serving,
+  which goes back to the mapped search until the swap, so a rebuild never holds two for
+  one backbone; the other served backbone keeps its own.
 
 Rows come from serving.MappedSelection in index order: an int8 release's codes as they
 are, float16 rows (the nightly update's) quantized by quantize.py's rule.
@@ -91,37 +93,81 @@ def search(packed: PackedInt8, query: np.ndarray, refine: int = REFINE, *, exact
     return out
 
 
+class Full(RuntimeError):
+    """Every packed matrix this process may hold is held by another backbone."""
+
+
 class Slot:
-    """The one packed matrix this process may hold, and who holds it. `take(owner)` drops
-    the current holder's matrix before a new one is packed (the holder falls back to the
-    mapped search), so two never coexist; `peak_holders` records the most ever held."""
+    """The packed matrices this process may hold, and who holds them: at most ONE per
+    backbone (`key`), and at most `limit` in all (MV_MAX_MODELS; None: no bound), so v1 and
+    v2 served side by side each search fast. `take(owner, key)` drops that key's current
+    matrix before a new one is packed (its index falls back to the mapped search until the
+    swap), so a rebuild never holds two for one backbone; another backbone's matrix is never
+    touched. A key past `limit` is refused (Full) and searches mapped. `peak_holders`
+    records the most matrices ever held at once, `peak_by_key` the most for one backbone
+    (always 1)."""
 
-    def __init__(self):
+    def __init__(self, limit: int | None = None):
         self._lock = threading.Lock()
-        self.owner = None
+        self.holders: dict = {}               # key -> the selection holding its matrix
+        self.errors: dict = {}                # key -> why it isn't packed (cleared on success)
+        self.limit = limit
+        self.owner = None                     # the most recent holder
         self.peak_holders = 0
-        self.last_error: str | None = None
+        self.peak_by_key: dict = {}
+        self.last_error: str | None = None    # the most recent error, any key
 
-    def take(self, owner) -> None:
+    def take(self, owner, key=None) -> None:
         with self._lock:
-            if self.owner is not None and self.owner is not owner:
-                self.owner.drop_packed()
-            self.owner = None
+            held = self.holders.pop(key, None)
+            if held is not None and held is not owner:
+                held.drop_packed()
+            if self.owner is held:
+                self.owner = None
+            if self.limit and len(self.holders) >= self.limit:
+                raise Full(f"{len(self.holders)} packed matrices are held already, the most "
+                           f"this process may hold (MV_MAX_MODELS={self.limit}): "
+                           f"{key} searches mapped")
 
-    def hold(self, owner) -> None:
+    def hold(self, owner, key=None) -> None:
         with self._lock:
-            held = sum(1 for o in (self.owner, owner) if o is not None and o.packed is not None)
-            self.peak_holders = max(self.peak_holders, held if self.owner is not owner else 1)
-            self.owner = owner
+            prev = self.holders.get(key)
+            same = 1 + (1 if prev is not None and prev is not owner
+                        and prev.packed is not None else 0)
+            total = 1 + sum(1 for k, o in self.holders.items()
+                            if k != key and o.packed is not None)
+            self.peak_by_key[key] = max(self.peak_by_key.get(key, 0), same)
+            self.peak_holders = max(self.peak_holders, total)
+            self.holders[key] = self.owner = owner
+            self.errors.pop(key, None)
+
+    def fail(self, key, error: str) -> None:
+        """Why `key` searches mapped (in /api/health until it packs)."""
+        with self._lock:
+            self.errors[key] = self.last_error = error
 
     def state(self) -> dict:
-        """For /api/health: how the reference set is searched right now."""
+        """For /api/health: how the reference set is searched right now, in all and, once a
+        backbone has packed or tried to, per backbone (rows, bytes, engine, last_error)."""
         with self._lock:
-            p = self.owner.packed if self.owner is not None else None
-        return {"mode": p.engine if p is not None else "float",
-                "packed_rows": p.rows if p is not None else 0,
-                "packed_bytes": p.nbytes if p is not None else 0,
-                "last_error": self.last_error}
+            held = {k: o.packed for k, o in self.holders.items()}
+            errors = dict(self.errors)
+        packed = [p for p in held.values() if p is not None]
+        per = {}
+        for k in [*held, *(k for k in errors if k not in held)]:
+            p = held.get(k)
+            per["default" if k is None else str(k)] = {
+                "engine": p.engine if p is not None else "float",
+                "rows": p.rows if p is not None else 0,
+                "bytes": p.nbytes if p is not None else 0,
+                "last_error": errors.get(k)}
+        out = {"mode": packed[0].engine if packed else "float",
+               "packed_rows": sum(p.rows for p in packed),
+               "packed_bytes": sum(p.nbytes for p in packed),
+               "last_error": self.last_error}
+        if per:                                   # nothing packed or tried: as before
+            out["backbones"] = per
+        return out
 
 
 SLOT = Slot()

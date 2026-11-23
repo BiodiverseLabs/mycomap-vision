@@ -134,3 +134,80 @@ def test_with_int8_on_the_search_stays_on_the_cpu_even_beside_a_gpu(monkeypatch)
     sel = mixed(vectors(200, 16)).select(np.arange(200))
     monkeypatch.setenv("MV_SEARCH_INT8", "1")
     assert Scorer(sel).ref is sel
+
+
+# --- one packed matrix per served backbone (v1 and v2 side by side, 2026-11-23) ----------
+
+def test_two_served_backbones_each_keep_their_own_packed_matrix():
+    slot = fastsearch.Slot(limit=2)
+    v = vectors(600, 32)
+    one, two = mixed(v).select(np.arange(600)), mixed(v).select(np.arange(500))
+    one.use_int8(refine=10, slot=slot, key="v1")
+    two.use_int8(refine=10, slot=slot, key="v2")
+    assert one.packed is not None and two.packed is not None      # both search fast
+    assert slot.peak_holders == 2
+    state = slot.state()
+    assert state["backbones"]["v1"] == {"engine": one.packed.engine, "rows": 600,
+                                        "bytes": 600 * 36, "last_error": None}
+    assert state["backbones"]["v2"]["rows"] == 500
+    assert state["packed_bytes"] == 600 * 36 + 500 * 36 and state["packed_rows"] == 1100
+
+
+def test_a_rebuild_never_holds_two_matrices_for_one_backbone(monkeypatch):
+    slot = fastsearch.Slot(limit=2)
+    v = vectors(600, 32)
+    old, other = mixed(v).select(np.arange(600)), mixed(v).select(np.arange(400))
+    old.use_int8(refine=10, slot=slot, key="v1")
+    other.use_int8(refine=10, slot=slot, key="v2")
+    kept = other.packed
+    new = mixed(v).select(np.arange(600)[::-1])
+    seen = []
+    real = fastsearch.PackedInt8.build
+
+    def build(*a, **kw):
+        seen.append((old.packed, other.packed))   # what is held while v1's new matrix packs
+        return real(*a, **kw)
+    monkeypatch.setattr(fastsearch.PackedInt8, "build", build)
+    new.use_int8(refine=10, slot=slot, key="v1")
+    assert seen == [(None, kept)]                  # v1's old one dropped first; v2's untouched
+    assert old.packed is None and new.packed is not None and other.packed is kept
+    assert slot.peak_by_key == {"v1": 1, "v2": 1} and slot.peak_holders == 2
+    assert old.sims(v[:2]).shape == (2, 600)       # the old index answers, mapped
+
+
+def test_a_backbone_past_the_limit_searches_mapped_and_says_why():
+    slot = fastsearch.Slot(limit=2)
+    v = vectors(300, 16)
+    held = [mixed(v).select(np.arange(300)) for _ in range(3)]
+    held[0].use_int8(refine=10, slot=slot, key="a")
+    held[1].use_int8(refine=10, slot=slot, key="b")
+    with pytest.raises(fastsearch.Full):
+        held[2].use_int8(refine=10, slot=slot, key="c")
+    assert held[2].packed is None and held[0].packed is not None and held[1].packed is not None
+    assert held[2].sims(v[:1]).shape == (1, 300)
+
+
+def test_with_v1_and_v2_served_both_search_int8_and_health_says_so_per_backbone(
+        conn, tmp_path, monkeypatch):
+    store = seed_two_species(conn, tmp_path)
+    root = tmp_path / "emb"
+    for name in ("m1", "m2"):
+        todo = photos_to_embed(conn, name, "large", store.location, "local")
+        embed_photos(conn, store, Const(name), todo, root / name, log=lambda s: None)
+    conn.commit()
+    monkeypatch.setenv("MV_SEARCH_INT8", "1")
+    monkeypatch.setattr(fastsearch, "SLOT", fastsearch.Slot())
+    client = TestClient(create_app(tmp_path / "manifest.sqlite", root,
+                                   backbone_loader=lambda n: Const(n),
+                                   limits=open_limits(allowed_backbones={"m1", "m2"},
+                                                      max_models=2),
+                                   background=False, fungus_gate=None, note=lambda s: None,
+                                   server_key=HEALTH_KEY))
+    for name in ("m1", "m2"):
+        assert post_photos(client, [247], f"{name}/nearest").status_code == 200
+    search = full_health(client)["search"]
+    assert sorted(search["backbones"]) == ["m1", "m2"]
+    for state in search["backbones"].values():
+        assert state["engine"] in ("fbgemm", "x86", "onednn") and state["rows"] == 8
+    assert search["packed_bytes"] == sum(s["bytes"] for s in search["backbones"].values())
+    assert fastsearch.SLOT.limit == 2 and fastsearch.SLOT.peak_holders == 2

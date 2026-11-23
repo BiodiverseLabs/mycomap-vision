@@ -165,17 +165,18 @@ class MappedSelection:
         out = self.vectors[self.cols]
         return out if dtype is None else out.astype(dtype, copy=False)
 
-    def use_int8(self, refine: int, slot=None) -> None:
-        """Pack these rows for the fast int8 search, after taking the process's one packed
-        slot (the index serving now drops its copy and searches mapped until the swap)."""
+    def use_int8(self, refine: int, slot=None, key=None) -> None:
+        """Pack these rows for the fast int8 search, after taking the packed slot of `key`
+        (the backbone) from the index serving it now, which drops its copy and searches
+        mapped until the swap. Another backbone's packed matrix is kept."""
         from . import fastsearch
         slot = slot or fastsearch.SLOT
-        slot.take(self)
+        slot.take(self, key)
         self.drop_packed()
         packed = fastsearch.PackedInt8.build(
             lambda lo, hi: self.vectors.int8_rows(self.cols[lo:hi]), len(self.cols))
         self.packed, self.refine = packed, refine
-        slot.hold(self)
+        slot.hold(self, key)
 
     def drop_packed(self) -> None:
         self.packed = None
