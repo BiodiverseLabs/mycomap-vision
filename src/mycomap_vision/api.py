@@ -858,6 +858,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         marks = ",".join("?" for _ in photo_ids)
         return photo_info_rows(q(f"{PHOTO_INFO_SQL} where photo_id in ({marks})", tuple(photo_ids)))
 
+    def twin_groups() -> dict[str, int]:
+        """The served twin table's finds ({record key: find}, twins.npz), for the same-find
+        rule's observer links; empty when there is none."""
+        import numpy as np
+        path = twins_path()
+        if path is None or not Path(path).is_file():
+            return {}
+        with np.load(Path(path), allow_pickle=False) as z:
+            return {str(k): int(g) for k, g in zip(z["group_record"].tolist(),
+                                                   z["group_id"].tolist())}
+
     def twins_path() -> Path | None:
         """The cross-post twin table (twins.py): MV_TWINS, else the served release's, else
         the one beside the manifest; None when there is none (links then leave out only
@@ -2817,6 +2828,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         own: dict = {m.id: {} for m in models}
         hidden_records: set = set(keys)
         hidden_photos: set = set()
+        twins_of: dict = {k: set() for k in keys}       # by the release's twin pass
         for model in models:
             ident = idents[model.id]
             obs_of = ident.col_record.obs
@@ -2827,7 +2839,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 hid, mine = ident.left_out(source, str(number))
                 if len(mine):
                     own[model.id][key] = mine
-                hidden_records |= {str(o) for o in obs_of[ident.col_record.rec[hid]].tolist()}
+                found = {str(o) for o in obs_of[ident.col_record.rec[hid]].tolist()}
+                hidden_records |= found
+                twins_of[key] |= found - {key}
                 hidden_photos |= {int(p) for p in ident.col_photo[hid].tolist()}
         # The photos every model holds for a record, in the first model's order.
         shared: dict = {}
@@ -2851,8 +2865,27 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 if r.observation_id in shared:
                     tonight.setdefault(r.observation_id, r)
         contexts = {k: context_of(r) for k, r in tonight.items()}
-        # The same-find guard: the other site's record of the same name on the same day.
-        hidden_records |= daily_scores.same_find_records(tonight.values(), loaded_by.values())
+        # The same-find rule: the other site's record of the same label on the same day, by
+        # the same observer wherever both are known (the accounts the release's twin groups
+        # join), by label and day alone where not.
+        cands = daily_scores.same_find_candidates(tonight.values(), loaded_by.values())
+        accounts = daily_scores.accounts_of(
+            db, set(cands) | {o for c in cands.values() for o, _ in c})
+        links = daily_scores.observer_links(db, twin_groups())
+        rule = daily_scores.same_find(cands, accounts, links)
+        counts: dict = {}
+        same_found: set = set()
+        for key in shared:
+            r = rule.get(key) or {"observer": set(), "fallback": set(), "spared": set(),
+                                  "form": daily_scores.LABEL_DAY}
+            same_found |= r["observer"] | r["fallback"]
+            mine = twins_of.get(key, set())
+            counts[key] = {"twins_hidden": len(mine),
+                           "same_find_hidden": len((r["observer"] | r["fallback"]) - mine - {key}),
+                           "same_find_fallback": len(r["fallback"] - mine - {key}),
+                           "same_find_spared": len(r["spared"] - mine - {key}),
+                           "same_find_form": r["form"]}
+        hidden_records |= same_found                    # from every model's reference alike
         hidden_sha = daily_scores.records_sha(hidden_records)
         hidden_list = np.asarray(sorted(hidden_records), dtype=str)
         out: dict = {}
@@ -2898,7 +2931,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                             "date_used": placeprior.has_date(ctx), "release": release,
                             "reference_state": state,
                             "photos_sha": daily_scores.photo_sha(photos[:MAX_PHOTOS]),
-                            "hidden_sha": hidden_sha}
+                            "hidden_sha": hidden_sha, **counts[key]}
             out[model.id] = got
         return out
 

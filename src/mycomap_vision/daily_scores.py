@@ -23,7 +23,15 @@ conditions this module keeps:
   and scored: each is its own labelled group (GROUPS), counted, never mixed into the primary.
 - (c) Each record's own photos and its twins (the cross-posted copy, by the served release's
   twin pass, twins.ReferenceTwins) are hidden from BOTH references, the same records for both
-  (api.daily_answers). A model with no twin table is refused (TwinsRefused).
+  (api.daily_answers). A model with no twin table is refused (TwinsRefused). For cross-posts
+  newer than the release's twin pass, the same-find rule (same_find; accepted by the Paper
+  Coordinator with two conditions, research 8c4fb04): the other site's record of the same
+  label on the same day, narrowed to the SAME OBSERVER wherever the observer is known on both
+  sites (observer_links: the iNat and MO accounts the release's own twin groups join), label
+  and day alone only where it is not. Each row records how many references each rule hid,
+  apart (twins_hidden; same_find_hidden, of them same_find_fallback by label and day alone),
+  the same-label same-day records a known different observer spared (same_find_spared), and
+  which form was used (same_find_form).
 - (d) The ledger stops at S2: a record first validated after S2_STOP (2027-01-15T00:00:00Z,
   the v2-test seal) is refused, fail-closed (s2_allows), until the v2-test sealed run is done
   and the Paper Coordinator gives the word. S2_STOP is a constant changed by commit, never a
@@ -204,6 +212,11 @@ create table if not exists cut_answers (
     held_by_vision   integer not null,    -- .org's held_by_vision
     photos_sha       text,                -- the photos answered from (the same for the pair)
     hidden_sha       text,                -- the records hidden (the same for the pair)
+    twins_hidden     integer,             -- references the release's twin pass hid for it
+    same_find_hidden integer,             -- references the same-find rule hid besides
+    same_find_fallback integer,           -- ... of them by label and day alone
+    same_find_spared integer,             -- same label and day, a known other observer: kept
+    same_find_form   text,                -- observer | label_day | both (same_find)
     photos           integer,             -- the record's photos answered from (none trained on)
     place_used       integer,             -- 1: answered with a place (.org's, as v1)
     date_used        integer,             -- 1: answered with a date
@@ -255,11 +268,15 @@ COLUMNS = ("cohort", "model_id", "backbone", "method", "cut", "record_key", "dec
            "outcome", "green_at", "green_day", "green_rule", "first_green_at", "release",
            "reference_state", "code_commit", "route_group", "route_method",
            "route_rules_version", "vision_roles", "vision_called", "vision_assisted",
-           "held_by_vision", "photos_sha", "hidden_sha", "photos", "place_used", "date_used",
+           "held_by_vision", "photos_sha", "hidden_sha", "twins_hidden", "same_find_hidden",
+           "same_find_fallback", "same_find_spared", "same_find_form", "photos", "place_used",
+           "date_used",
            "answer_key", "depth", "ranks_json", "truth_species", "truth_genus", "truth_family",
            "sp_pos", "ge_pos", "fa_pos", "species_depth_at_cut")
 ROUTE_COLUMNS = ("route_group", "route_method", "route_rules_version", "vision_roles",
                  "vision_called", "vision_assisted", "held_by_vision")
+SAME_FIND_COLUMNS = ("twins_hidden", "same_find_hidden", "same_find_fallback",
+                     "same_find_spared", "same_find_form")
 POS = {"species": "sp_pos", "genus": "ge_pos", "family": "fa_pos"}
 TRUTH = {"species": "truth_species", "genus": "truth_genus", "family": "truth_family"}
 
@@ -302,17 +319,20 @@ def public_v1() -> bool:
 
 
 class LedgerSchemaRefused(RuntimeError):
-    """A cut_answers table from before the paired ledger: never written to or read as one."""
+    """A cut_answers table of an earlier layout: never written to or read as this one."""
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """The ledger's tables and triggers. A cut_answers table of the earlier, v2-only layout
-    (no cohort or code_commit column; feat/v2-daily-scores before 24 Nov, never deployed) is
-    refused rather than mixed in: score into a fresh store."""
+    """The ledger's tables and triggers. A cut_answers table of an earlier layout (the v2-only
+    one, with no cohort or code_commit column; or the paired one of 17cf1f3, with no same-find
+    counts; neither ever on the box) is refused rather than mixed in: score into a fresh
+    store."""
     have = {r[1] for r in conn.execute("pragma table_info(cut_answers)")}
-    if have and not {"cohort", "model_id", "code_commit", "route_group"} <= have:
-        raise LedgerSchemaRefused("cut_answers has the earlier v2-only layout: start a fresh "
-                                  "store; it is never altered or deleted here")
+    if have and not set(COLUMNS) <= have:
+        kind = ("the earlier v2-only layout" if "cohort" not in have
+                else "an earlier layout (no same-find counts)")
+        raise LedgerSchemaRefused(f"cut_answers has {kind}: start a fresh store; it is never "
+                                  "altered or deleted here")
     conn.executescript(SCHEMA + S2_TRIGGER.format(stop=S2_STOP))
     conn.commit()
 
@@ -715,7 +735,8 @@ def score_pending(store: sqlite3.Connection, manifest: sqlite3.Connection,
             if not all(gs):
                 stats["waiting: no vectors yet"] += 1
             elif not (_same(g.get("photos_sha") for g in gs)
-                      and _same(g.get("hidden_sha") for g in gs)):
+                      and _same(g.get("hidden_sha") for g in gs)
+                      and all(_same(g.get(c) for g in gs) for c in SAME_FIND_COLUMNS)):
                 stats["waiting: the models' photos or hidden records differ"] += 1
             else:
                 decided.append((rec, gs))
@@ -738,7 +759,8 @@ def score_pending(store: sqlite3.Connection, manifest: sqlite3.Connection,
                         "first_green_at": rec.get("first_green_at"),
                         "release": g.get("release"), "reference_state": g.get("reference_state"),
                         "code_commit": code, "photos_sha": g.get("photos_sha"),
-                        "hidden_sha": g.get("hidden_sha"), **route}
+                        "hidden_sha": g.get("hidden_sha"), **route,
+                        **{c: g.get(c) for c in SAME_FIND_COLUMNS}}
                 if outcome == SCORED:
                     lists, _ = ranked_lists(None, g["lists"], DEPTH)
                     lists = {r: lists.get(r) or [] for r in RANKS}
@@ -1070,22 +1092,117 @@ def public_payload(store: sqlite3.Connection | None, models: list[Declared] | No
     return out
 
 
-def same_find_records(tonight, loaded_lists) -> set[str]:
-    """The records that may be another site's copy of one of `tonight`'s (evaluate.Record):
-    the same label and the same observation day, from the other site. The served release's
-    twin pass (twins.ReferenceTwins) covers the records it was built with; this covers the
-    cross-posts newer than it, for ruling (c). It may hide a few records of another find of
-    that name and day too: they are hidden from every model alike."""
+# --- the same-find rule (ruling (c); the Paper Coordinator's conditions, research 8c4fb04) -------
+
+OBSERVER = "observer"            # the same-find form: both observers known, matched
+LABEL_DAY = "label_day"          # the fallback: an observer not known on one side
+BOTH = "both"
+
+
+def account_of(source: str | None, user_id, login) -> str | None:
+    """A site account as the manifest knows it: "inat:<user id>" or "mo:<user id>", or the
+    login (lower case) where the site gave no id; None when neither is known."""
+    site = "mo" if source == "mo" else "inat" if source == "inat" else None
+    if site is None:
+        return None
+    if user_id not in (None, ""):
+        return f"{site}:{int(user_id)}"
+    if login and str(login).strip():
+        return f"{site}:@{str(login).strip().lower()}"
+    return None
+
+
+def accounts_of(conn: sqlite3.Connection, keys) -> dict[str, str]:
+    """{record key: its observer's account} for the records whose account the manifest holds:
+    the iNat observation's user (inat_observations), the MO observation's owner
+    (mo_observations)."""
+    keys = sorted({str(k) for k in keys})
+    tables = {r[0] for r in conn.execute("select name from sqlite_master where type = 'table'")}
+    inat = "inat_observations" in tables
+    mo = "mo_observations" in tables
+    out: dict[str, str] = {}
+    for i in range(0, len(keys), 500):
+        part = keys[i:i + 500]
+        cur = conn.execute(
+            "select r.observation_id, r.source, "
+            + ("o.user_id, o.user_login, " if inat else "null, null, ")
+            + ("m.owner_id, m.owner_login " if mo else "null, null ")
+            + "from records r "
+            + ("left join inat_observations o on o.observation_id = r.observation_id "
+               "and r.source = 'inat' " if inat else "")
+            + ("left join mo_observations m on m.observation_id = r.observation_id "
+               "and r.source = 'mo' " if mo else "")
+            + f"where r.observation_id in ({', '.join('?' for _ in part)})", part)
+        for key, source, uid, login, mid, mlogin in cur.fetchall():
+            acct = (account_of(source, uid, login) if source == "inat"
+                    else account_of(source, mid, mlogin))
+            if acct:
+                out[str(key)] = acct
+    return out
+
+
+def observer_links(conn: sqlite3.Connection, groups: dict[str, int]) -> dict[str, set[str]]:
+    """Which iNat and MO accounts are one observer, as far as the manifest shows: the accounts
+    of the records the release's twin pass puts in one find (`groups`, {record key: find},
+    twins.npz). {account: the other site's accounts joined to it}."""
+    accounts = accounts_of(conn, groups)
+    finds: dict[int, set[str]] = {}
+    for key, find in groups.items():
+        if str(key) in accounts:
+            finds.setdefault(int(find), set()).add(accounts[str(key)])
+    links: dict[str, set[str]] = {}
+    for accts in finds.values():
+        for a in accts:
+            for b in accts:
+                if a.split(":", 1)[0] != b.split(":", 1)[0]:
+                    links.setdefault(a, set()).add(b)
+    return links
+
+
+def same_find_candidates(tonight, loaded_lists) -> dict[str, set[tuple[str, str]]]:
+    """{each of tonight's records (evaluate.Record): the other site's records (key, source)
+    with the same label on the same observation day}."""
     finds: dict = {}
     for loaded in loaded_lists:
         for r in loaded:
             if r.unit and r.observed_on:
                 finds.setdefault((r.unit, r.observed_on), set()).add((r.observation_id, r.source))
-    out: set[str] = set()
+    out: dict[str, set] = {}
     for r in tonight:
-        for other, source in finds.get((r.unit, r.observed_on), ()):
-            if source != r.source:
-                out.add(other)
+        out[r.observation_id] = {(o, s) for o, s in finds.get((r.unit, r.observed_on), ())
+                                 if s != r.source} if r.unit and r.observed_on else set()
+    return out
+
+
+def same_find(candidates: dict, accounts: dict[str, str],
+              links: dict[str, set[str]]) -> dict[str, dict]:
+    """The same-find rule for each record: of its candidates (same_find_candidates), the ones
+    hidden because the observer is the same (both accounts known, and joined by observer_links
+    either way), the ones hidden by label and day alone (either account unknown, or neither
+    account known on the other site), and the ones spared (both known on both sites, another
+    observer). {key: {"observer", "fallback", "spared" (sets of keys), "form"}}; the form is
+    the one used: observer, label_day, or both; with no candidate, the one that would be (the
+    record's observer known on the other site: observer)."""
+    out: dict[str, dict] = {}
+    for key, cands in candidates.items():
+        mine = accounts.get(key)
+        obs, fall, spared = set(), set(), set()
+        for other, _ in cands:
+            theirs = accounts.get(other)
+            if mine and theirs and (links.get(mine) or links.get(theirs)):
+                if theirs in links.get(mine, ()) or mine in links.get(theirs, ()):
+                    obs.add(other)
+                else:
+                    spared.add(other)
+            else:
+                fall.add(other)
+        used = {OBSERVER} if (obs or spared) else set()
+        if fall:
+            used.add(LABEL_DAY)
+        if not used:
+            used = {OBSERVER} if mine and links.get(mine) else {LABEL_DAY}
+        out[key] = {"observer": obs, "fallback": fall, "spared": spared,
+                    "form": BOTH if len(used) > 1 else used.pop()}
     return out
 
 

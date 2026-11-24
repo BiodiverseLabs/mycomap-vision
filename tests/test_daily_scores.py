@@ -890,17 +890,143 @@ def test_twins_are_hidden_from_both_references(conn, tmp_path, monkeypatch):
         assert {"100", "106", "107"} <= obs, (backbone, obs)
 
 
-def test_the_other_sites_record_of_the_same_name_and_day_is_hidden_as_a_twin_the_release_does_not_know():
-    # A cross-post newer than the release's twin pass: same name, same day, the other site.
+def same_find_world():
+    """Tonight's 'A x' record 106 by iNat account 7 (joined to MO account 42 by a twin group
+    of the release), and the MO records of 'A x' on its day."""
     from mycomap_vision.evaluate import Record
-    tonight = [Record("106", "A x", "A", "F", None, None, observed_on="2026-11-20", source="inat")]
-    loaded = tonight + [
-        Record("mo:1", "A x", "A", "F", None, None, observed_on="2026-11-20", source="mo"),   # twin
-        Record("mo:2", "A x", "A", "F", None, None, observed_on="2026-11-21", source="mo"),   # other day
-        Record("mo:3", "B y", "B", "F", None, None, observed_on="2026-11-20", source="mo"),   # other name
-        Record("101", "A x", "A", "F", None, None, observed_on="2026-11-20", source="inat"),  # same site
-        Record("mo:4", "A x", "A", "F", None, None, observed_on=None, source="mo")]           # no day
-    assert ds.same_find_records(tonight, [loaded]) == {"mo:1"}
+
+    def rec(key, source, day="2026-11-20", name="A x"):
+        return Record(key, name, name.split()[0], "F", None, None, observed_on=day, source=source)
+    tonight = [rec("106", "inat")]
+    loaded = tonight + [rec("mo:1", "mo"), rec("mo:2", "mo"), rec("mo:3", "mo"),
+                        rec("mo:4", "mo", day="2026-11-21"), rec("mo:5", "mo", name="B y"),
+                        rec("101", "inat")]
+    return tonight, loaded
+
+
+def test_the_same_find_rule_takes_the_same_observer_when_known_on_both_sites():
+    # The Paper Coordinator's condition 2 (research 8c4fb04): narrowed to the same observer
+    # wherever the observer is known on both sites.
+    tonight, loaded = same_find_world()
+    cands = ds.same_find_candidates(tonight, [loaded])
+    assert {o for o, _ in cands["106"]} == {"mo:1", "mo:2", "mo:3"}, "other site, same label and day"
+    links = {"inat:7": {"mo:42"}, "mo:42": {"inat:7"}, "mo:43": {"inat:8"}, "inat:8": {"mo:43"}}
+    accounts = {"106": "inat:7", "mo:1": "mo:42",       # the same observer: hidden
+                "mo:2": "mo:43",                        # another, known observer: kept
+                "mo:3": "mo:44"}                        # unlinked, but 106's is known: kept
+    got = ds.same_find(cands, accounts, links)["106"]
+    assert (got["observer"], got["fallback"], got["spared"]) == ({"mo:1"}, set(), {"mo:2", "mo:3"})
+    assert got["form"] == ds.OBSERVER
+
+
+def test_label_and_day_alone_are_used_only_where_the_observer_is_not_known():
+    tonight, loaded = same_find_world()
+    cands = ds.same_find_candidates(tonight, [loaded])
+    links = {"inat:8": {"mo:43"}, "mo:43": {"inat:8"}}
+    # 106's account is joined to none on MO, and mo:1 and mo:3 are joined to none on iNat; mo:2's
+    # owner is unknown. mo:3 is known as another observer through its own link: kept.
+    accounts = {"106": "inat:7", "mo:1": "mo:42", "mo:3": "mo:43"}
+    got = ds.same_find(cands, accounts, links)["106"]
+    assert (got["observer"], got["fallback"], got["spared"]) == (set(), {"mo:1", "mo:2"}, {"mo:3"})
+    assert got["form"] == ds.BOTH
+    # Nobody's account known: label and day alone, for every candidate.
+    alone = ds.same_find(cands, {}, links)["106"]
+    assert alone["fallback"] == {"mo:1", "mo:2", "mo:3"} and alone["form"] == ds.LABEL_DAY
+    # No candidate: the form the record would have.
+    none = {"106": set()}
+    assert ds.same_find(none, {"106": "inat:7"}, {"inat:7": {"mo:42"}})["106"]["form"] == ds.OBSERVER
+    assert ds.same_find(none, {"106": "inat:7"}, {})["106"]["form"] == ds.LABEL_DAY
+
+
+def test_observers_are_joined_by_the_accounts_of_the_releases_own_twin_groups():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("create table records (observation_id text, source text)")
+    conn.execute("create table inat_observations (observation_id text, user_id integer, user_login text)")
+    conn.execute("create table mo_observations (observation_id text, owner_id integer, owner_login text)")
+    conn.executemany("insert into records values (?, ?)",
+                     [("10", "inat"), ("mo:1", "mo"), ("20", "inat"), ("30", "inat"), ("mo:3", "mo")])
+    conn.executemany("insert into inat_observations values (?, ?, ?)",
+                     [("10", 7, "alice"), ("20", 8, "bob"), ("30", None, "Carol")])
+    conn.executemany("insert into mo_observations values (?, ?, ?)", [("mo:1", 42, "al"), ("mo:3", None, "cj")])
+    # Finds: 10 + mo:1 (one observer on two sites), 20 + 30 (both iNat: no link across sites),
+    # 30 + mo:3 (logins only where there is no id).
+    links = ds.observer_links(conn, {"10": 0, "mo:1": 0, "20": 1, "30": 2, "mo:3": 2})
+    assert links == {"inat:7": {"mo:42"}, "mo:42": {"inat:7"},
+                     "inat:@carol": {"mo:@cj"}, "mo:@cj": {"inat:@carol"}}
+    assert ds.accounts_of(conn, ["10", "30", "mo:3", "missing"]) == {
+        "10": "inat:7", "30": "inat:@carol", "mo:3": "mo:@cj"}
+
+
+def make_mo(conn, key, owner_id, owner_login, day):
+    """Turn reference record `key` (one photo, 1000 + its number) into a Mushroom Observer record
+    by `owner_id`, observed on `day`."""
+    conn.execute("update records set source = 'mo', observed_on = ? where observation_id = ?", (day, key))
+    photo = 1000 + int(key) - 100
+    conn.execute("update photos set source = 'mo', ok_for_export = 1, source_url = ? where photo_id = ?",
+                 (f"https://mushroomobserver.org/images/thumb/{photo}.jpg", photo))
+    conn.execute("insert into mo_observations (observation_id, mo_id, status, owner_id, owner_login, "
+                 "fetched_at) values (?, ?, 'ok', ?, ?, 't')", (key, int(key), owner_id, owner_login))
+
+
+def test_each_row_records_the_twin_pass_and_the_same_find_rule_apart_and_both_models_hide_alike(
+        conn, tmp_path, monkeypatch):
+    # The Paper Coordinator's condition 1: how many references each rule hid, separately.
+    # 106 ('A x', iNat account 7, 20 Nov): the release's twin pass pairs it with 102; 101 is an
+    # MO 'A x' of the same day by MO account 42, which a twin group of the release (100 + 103)
+    # joins to iNat account 7: the same observer, hidden by the same-find rule.
+    from mycomap_vision.identify import Identifier
+    client = paired_site(conn, tmp_path, monkeypatch,
+                         groups={"106": 1, "102": 1, "101": 2, "100": 0, "103": 0})
+    conn.execute("update records set observed_on = '2026-11-20' where observation_id = '106'")
+    make_mo(conn, "101", 42, "al", "2026-11-20")
+    make_mo(conn, "103", 42, "al", "2025-01-01")
+    conn.commit()
+    seen: list = []
+    real = Identifier.identify_vectors
+
+    def spy(self, *a, hidden=None, **kw):
+        seen.append((self.backbone, set(self.col_record.obs[self.col_record.rec[hidden]].tolist())))
+        return real(self, *a, hidden=hidden, **kw)
+    monkeypatch.setattr(Identifier, "identify_vectors", spy)
+    out = client.app.state.score_daily_scores()
+    assert out["v2"]["scored"] == 2, out
+    store = client.app.state.early_store
+    with store.lock:
+        got = {(r["record_key"], r["model_id"]): r for r in rows(store.conn, None)}
+    for mid in ("v1", "v2"):
+        r = got[("106", mid)]
+        assert (r["twins_hidden"], r["same_find_hidden"], r["same_find_fallback"],
+                r["same_find_spared"], r["same_find_form"]) == (1, 1, 0, 0, "observer"), mid
+        assert got[("107", mid)]["twins_hidden"] == got[("107", mid)]["same_find_hidden"] == 0
+    assert {b for b, _ in seen} == {"m1", "m0"}
+    for backbone, obs in seen:
+        assert {"101", "102", "106", "107"} <= obs, (backbone, obs)
+
+
+def test_another_known_observers_record_of_the_same_label_and_day_is_kept(conn, tmp_path, monkeypatch):
+    from mycomap_vision.identify import Identifier
+    # 106's iNat account 7 is joined to MO account 42 (the release's find 100 + 104), and
+    # 101's MO account 43 to iNat account 7 by none: both observers are known, and differ, so
+    # 101 ('A x', MO, 106's day) stays in both references.
+    client = paired_site(conn, tmp_path, monkeypatch, groups={"101": 2, "100": 0, "104": 0})
+    conn.execute("update records set observed_on = '2026-11-20' where observation_id = '106'")
+    make_mo(conn, "101", 43, "other", "2026-11-20")
+    make_mo(conn, "104", 42, "al", "2025-01-01")
+    conn.commit()
+    seen: list = []
+    real = Identifier.identify_vectors
+
+    def spy(self, *a, hidden=None, **kw):
+        assert "101" in set(self.col_record.obs.tolist()), "101 is a reference record"
+        seen.append(set(self.col_record.obs[self.col_record.rec[hidden]].tolist()))
+        return real(self, *a, hidden=hidden, **kw)
+    monkeypatch.setattr(Identifier, "identify_vectors", spy)
+    assert client.app.state.score_daily_scores()["v2"]["scored"] == 2
+    store = client.app.state.early_store
+    with store.lock:
+        r = {(x["record_key"], x["model_id"]): x for x in rows(store.conn, None)}[("106", "v2")]
+    assert (r["same_find_hidden"], r["same_find_spared"], r["same_find_form"]) == (0, 1, "observer")
+    assert seen and all("101" not in obs for obs in seen)
 
 
 def test_an_index_with_no_twin_table_is_refused_not_scored(conn, tmp_path, monkeypatch):
@@ -941,5 +1067,10 @@ def test_a_ledger_of_the_earlier_v2_only_layout_is_refused_not_mixed_in(store):
                   "record_key text, outcome text)")
     with pytest.raises(ds.LedgerSchemaRefused, match="earlier v2-only layout"):
         ds.ensure_schema(store)
+    # The paired layout of 17cf1f3, without the same-find counts, is refused too.
+    other = ea.connect(None)
+    other.execute(f"create table cut_answers ({', '.join(c for c in ds.COLUMNS if c not in ds.SAME_FIND_COLUMNS)})")
+    with pytest.raises(ds.LedgerSchemaRefused, match="no same-find counts"):
+        ds.ensure_schema(other)
     assert ds.public_payload(store, [V2], frozenset(), show=True) == {
         "public": True, "available": ["v1"], "default": "v1", "models": {}}
