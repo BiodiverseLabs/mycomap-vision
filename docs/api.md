@@ -113,10 +113,12 @@ answered from a proxy's cache.
   itself, "100% alike". `left_out_photos` counts the reference photos left out.
 - The answer adds `observation`: `{"source", "id", "url", "photos"` (at the source),
   `"photos_used", "place"` (`coordinates`, `obscured`, `area` or null), `"name_at_source",
-  "rank_at_source", "photos_shown"}` (the source's current name, for comparison; null for
-  a reused reference record, which isn't read). `photos_shown` has one entry per scored
-  photo, in `per_photo`'s order: the photo's URL when it is Creative Commons or public
-  domain, else null (null as a whole for a reused reference record).
+  "rank_at_source", "photos_shown"}` (the source's current name, for comparison). A reused
+  reference record isn't read: `photos` is its photos in the reference, and its name at
+  the source is iNat's as Vision last read it (null for an MO record). `photos_shown` has
+  one entry per scored photo, in `per_photo`'s order: the photo's URL when it is Creative
+  Commons or public domain, else null. For a reused reference record that comes from the
+  licence Vision holds for each of its photos, nothing fetched.
 - **Answers are kept until someone runs them again** (Steve, 2026-10-19). Each answer
   is saved on the box per observation, model and options (`top_k`, `use_place`,
   `use_date`) and given again, without reading the observation or scoring it, to every

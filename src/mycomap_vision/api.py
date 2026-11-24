@@ -858,6 +858,48 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         marks = ",".join("?" for _ in photo_ids)
         return photo_info_rows(q(f"{PHOTO_INFO_SQL} where photo_id in ({marks})", tuple(photo_ids)))
 
+    def reference_shown(photo_ids: list[int]) -> tuple[list, list]:
+        """A DNA reference record's photos, in this order, as a page may show them
+        (byobservation.held_photo_shown: Creative Commons or public domain only), from the
+        licence and owner held now; (shown URLs, credits), null where one may not be shown
+        or isn't held. Nothing is fetched."""
+        if not photo_ids:
+            return [], []
+        marks = ",".join("?" for _ in photo_ids)
+        rows = {int(r[0]): r[1:] for r in q(
+            "select photo_id, source, source_url, license_class, license_code, owner_name, "
+            f"owner_login, attribution from photos where photo_id in ({marks})",
+            tuple(int(p) for p in photo_ids))}
+        urls, credits = [], []
+        for p in photo_ids:
+            r = rows.get(int(p))
+            if r is None:
+                urls.append(None)
+                credits.append(None)
+                continue
+            src, url, cls, code, name, login, attribution = r
+            # An MO image credits its copyright holder (mo.parse_image keeps it in the
+            # attribution, "(c) holder, licence"), as a fetched MO photo does (mo_credit).
+            holder = (attribution[4:].rsplit(", ", 1)[0]
+                      if src == sources.MO and (attribution or "").startswith("(c) ") else None)
+            shown, credit = byobservation.held_photo_shown(src, url, cls, code,
+                                                           holder or name or login)
+            urls.append(shown)
+            credits.append(credit)
+        return urls, credits
+
+    def held_name_at_source(source: str, number: str) -> tuple[str | None, str | None]:
+        """A reference record's name at its source as Vision last read it (iNat's taxon in
+        inat_observations); (None, None) when none is held (MO's isn't)."""
+        if source != sources.INAT:
+            return None, None
+        try:
+            got = q("select taxon_name, taxon_rank from inat_observations "
+                    "where observation_id = ? and status = 'ok'", (str(number),))
+        except sqlite3.OperationalError:          # a manifest without that table
+            return None, None
+        return (got[0][0] or None, got[0][1] or None) if got else (None, None)
+
     def twin_groups() -> dict[str, int]:
         """The served twin table's finds ({record key: find}, twins.npz), for the same-find
         rule's observer links; empty when there is none."""
@@ -4120,6 +4162,16 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     vecs = ident.reference_vectors(cols)
                     hidden, context, used = with_own, None, none_used
                     about["photos_used"] = n_photos = len(cols)
+                    # Which of its photos may be shown, in per_photo's order, by the rule
+                    # for a fetched observation (Creative Commons or public domain only),
+                    # from the licence and owner Vision holds; and its name at the source
+                    # as last read. Every page and API caller then shows an openly
+                    # licensed reference record's photos (MycoBLAST, 11/24/2026).
+                    shown, credits = reference_shown(
+                        [int(p) for p in ident.col_photo[cols].tolist()])
+                    name_at, rank_at = held_name_at_source(source, number)
+                    about.update(photos=int(len(own)), photos_shown=shown,
+                                 name_at_source=name_at, rank_at_source=rank_at)
                 else:
                     def admit(obs) -> int:
                         n = min(MAX_PHOTOS, len(obs.photo_urls))
@@ -4231,9 +4283,6 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                   "photos_credit": credits,
                                   "excluded_reference": bool(len(own)),
                                   "left_out_photos": int(len(hidden))}
-                    if site_about["photos_shown"] is None:   # a reference record: none shown
-                        site_about.update(photos=n_photos, photos_shown=[None] * n_photos,
-                                          photos_credit=[None] * n_photos)
                     kept_site, _, _ = site_kept(pooled[0], scored_vecs, hidden, used, site_about)
                     kept_site["release"] = model_card().get("version")
                     answer_cache.put(site_key, version, tagger_mark(kept_site, backbone), who)

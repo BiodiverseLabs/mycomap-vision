@@ -248,6 +248,25 @@ def shown_photo_credit(obs: Observation, index: int) -> dict | None:
     return {"licence": licence_code(obs.source, licence), "by": by}
 
 
+def held_photo_shown(source: str, source_url: str | None, license_class: str | None,
+                     license_code: str | None, by: str | None) -> tuple[str | None, dict | None]:
+    """A DNA reference record's photo as Vision holds it (its manifest photos row), shown by
+    the rule for a fetched observation's (shown_photo_url, shown_photo_credit): Creative
+    Commons or public domain only (licence class open or nc), at PHOTO_SIZE on the source's
+    own photo host. (url, {"licence", "by"}), or (None, None) when it may not be shown or
+    has no address there. Nothing is fetched."""
+    if license_class not in ("open", "nc") or not source_url:
+        return None, None
+    try:
+        url = photo_url(source, source_url, PHOTO_SIZE)
+    except ValueError:
+        return None, None
+    if not source_photo_ok(source, url):
+        return None, None
+    return url, {"licence": (license_code or "").strip().lower() or None,
+                 "by": str(by or "").strip() or None}
+
+
 def source_photo_ok(source: str, url: str) -> bool:
     """A photo address a kept run may have fetched again: HTTPS on that source's own photo
     host (iNat's open-data bucket or static host; MO's site), nothing else."""

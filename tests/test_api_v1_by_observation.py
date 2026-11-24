@@ -127,8 +127,10 @@ def fetcher(clock=None, **kw):
     return bo.Fetcher(session=Site(clock), clock=clock, sleep=clock.sleep, **kw)
 
 
-def app(conn, tmp_path, by_observation=True, quotas=None):
+def app(conn, tmp_path, by_observation=True, quotas=None, seed=None):
     store = seed_two_species(conn, tmp_path)
+    if seed is not None:
+        seed(conn, store)
     root = tmp_path / "emb"
     todo = photos_to_embed(conn, "m1", "large", store.location, "local")
     embed_photos(conn, store, Const("m1"), todo, root / "m1", log=lambda s: None)
@@ -197,6 +199,66 @@ def test_a_reference_record_is_answered_without_itself_and_without_fetching(conn
     assert body["context_used"]["place_from"] is None and body["context_used"]["date_from"] is None
     assert body["ranks"]["species"][0]["name"] == "A x"     # the other A records still match
     assert body["observation"]["photos_used"] == 1
+
+
+def mixed_licence_reference(conn, store):
+    """Reference record 100 ("A x") with two photos: 1000 (red, A-like) now all rights
+    reserved, and a new 1008 (blue, B-like) licensed CC BY-NC."""
+    import io
+
+    from conftest import inat_obs as org_obs
+    from PIL import Image
+    from test_models_and_scoreboard import OPEN
+
+    from mycomap_vision.inat import save_batch
+    from mycomap_vision.photos import Result, save_result
+    save_batch(conn, ["100"], [org_obs(100, photos=[(0, 1000, None, STATIC),
+                                                    (1, 1008, "cc-by-nc", OPEN)])], "t2")
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (12, 0, 0)).save(buf, "PNG")
+    store.put("p/1008.png", buf.getvalue())
+    save_result(conn, Result(1008, "done", "p/1008.png", 1, "h1008"), "large", "now",
+                store.location)
+
+
+STATIC = "static.inaturalist.org"
+SHOWN_1008 = "https://inaturalist-open-data.s3.amazonaws.com/photos/1008/large.jpg"
+
+
+def test_a_reference_records_open_photos_are_listed_in_per_photo_order(conn, tmp_path):
+    client, site = app(conn, tmp_path, seed=mixed_licence_reference)
+    body = by_number(client, "inat", 100).json()
+    assert site.log == []                           # still nothing read from iNat
+    obs = body["observation"]
+    assert (obs["photos"], obs["photos_used"]) == (2, 2)
+    # Its CC BY-NC photo is listed, its all-rights-reserved one is null, each where that
+    # photo is in per_photo (the blue photo is the one that looks like "B y").
+    looks = [p["ranks"]["species"][0]["name"] for p in body["per_photo"]]
+    assert sorted(looks) == ["A x", "B y"]
+    assert obs["photos_shown"] == [SHOWN_1008 if n == "B y" else None for n in looks]
+    # Its name at iNat, as Vision last read it.
+    assert (obs["name_at_source"], obs["rank_at_source"]) == ("Russula sp.", "genus")
+    # The site's copy (Identify, run cards) says the same, with the shown photo's credit.
+    kept = client.post("/api/identify/observation",
+                       json={"source": "inat", "id": "100"}).json()["observation"]
+    assert kept["photos_shown"] == obs["photos_shown"]
+    assert kept["photos_credit"] == [{"licence": "cc-by-nc", "by": "Alice"} if u else None
+                                     for u in obs["photos_shown"]]
+
+
+def test_a_held_reference_photo_is_shown_only_when_openly_licensed_at_the_source_host():
+    url = "https://inaturalist-open-data.s3.amazonaws.com/photos/7/square.jpg"
+    assert bo.held_photo_shown("inat", url, "nc", "cc-by-nc", "Al") == (
+        url.replace("square", "large"), {"licence": "cc-by-nc", "by": "Al"})
+    assert bo.held_photo_shown("inat", url, "open", "cc0", None)[1] == {"licence": "cc0",
+                                                                        "by": None}
+    assert bo.held_photo_shown("inat", url, "arr", "", "Al") == (None, None)
+    assert bo.held_photo_shown("inat", url, None, "cc-by", "Al") == (None, None)
+    assert bo.held_photo_shown("inat", "https://example.com/photos/7/square.jpg", "open",
+                               "cc0", "Al") == (None, None)
+    assert bo.held_photo_shown("inat", None, "open", "cc0", "Al") == (None, None)
+    mo = "https://mushroomobserver.org/images/thumb/12.jpg"
+    assert bo.held_photo_shown("mo", mo, "nc", "cc-by-sa", "Bo")[0] ==         "https://mushroomobserver.org/images/960/12.jpg"
 
 
 def test_a_photo_filed_under_a_reference_record_is_left_out_too(conn, tmp_path):
