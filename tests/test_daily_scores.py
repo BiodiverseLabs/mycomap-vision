@@ -934,3 +934,12 @@ def test_the_internal_view_is_for_the_server_key_and_admins_and_names_v1(conn, t
     body = res.json()
     assert body["internal"] is True and body["s2_stop"] == ds.S2_STOP
     assert body["paired_from"] == ds.PAIRED_FROM and body["public_v1"] is False
+
+
+def test_a_ledger_of_the_earlier_v2_only_layout_is_refused_not_mixed_in(store):
+    store.execute("create table cut_answers (backbone text, method text, cut text, "
+                  "record_key text, outcome text)")
+    with pytest.raises(ds.LedgerSchemaRefused, match="earlier v2-only layout"):
+        ds.ensure_schema(store)
+    assert ds.public_payload(store, [V2], frozenset(), show=True) == {
+        "public": True, "available": ["v1"], "default": "v1", "models": {}}

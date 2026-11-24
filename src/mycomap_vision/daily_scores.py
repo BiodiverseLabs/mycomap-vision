@@ -118,6 +118,7 @@ research_public.daily_scores).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -300,7 +301,18 @@ def public_v1() -> bool:
     return _on(PUBLIC_V1_SETTING)
 
 
+class LedgerSchemaRefused(RuntimeError):
+    """A cut_answers table from before the paired ledger: never written to or read as one."""
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
+    """The ledger's tables and triggers. A cut_answers table of the earlier, v2-only layout
+    (no cohort or code_commit column; feat/v2-daily-scores before 24 Nov, never deployed) is
+    refused rather than mixed in: score into a fresh store."""
+    have = {r[1] for r in conn.execute("pragma table_info(cut_answers)")}
+    if have and not {"cohort", "model_id", "code_commit", "route_group"} <= have:
+        raise LedgerSchemaRefused("cut_answers has the earlier v2-only layout: start a fresh "
+                                  "store; it is never altered or deleted here")
     conn.executescript(SCHEMA + S2_TRIGGER.format(stop=S2_STOP))
     conn.commit()
 
@@ -677,7 +689,6 @@ def score_pending(store: sqlite3.Connection, manifest: sqlite3.Connection,
     (see the module's notes): every model of the pair (pair_of) answers it, and its rows are
     written together once all have answered from the same photos. Returns counts per model
     id (records, not rows), with the records by group."""
-    import contextlib
     from . import name_equiv
     from .early_answers import DEPTH, Judge, ranked_lists
     answer_key = answer_key or name_equiv.ANSWER_KEY
@@ -832,7 +843,6 @@ def routes(store: sqlite3.Connection, cohort: Declared) -> dict[str, dict]:
 
 def _rows(store, model: Declared, cohort: Declared, held: frozenset, lock=None
           ) -> tuple[list[dict], dict[str, dict]]:
-    import contextlib
     with lock or contextlib.nullcontext():
         ensure_schema(store)
         found = _ledger(store, cohort.id, model)
@@ -986,6 +996,11 @@ def internal_payload(store: sqlite3.Connection | None, models: list[Declared] | 
     except (DeclarationRefused, HoldListRefused) as e:
         return {**out, "refused": str(e)}
     out["v1"] = comp.model if comp else None
+    try:
+        with lock or contextlib.nullcontext():
+            ensure_schema(store)
+    except LedgerSchemaRefused as e:
+        return {**out, "refused": str(e)}
     for m in models:
         pair = pair_of(m, comp)
         by_model = {p.id: _rows(store, p, m, held, lock)[0] for p in pair}
@@ -1034,18 +1049,24 @@ def public_payload(store: sqlite3.Connection | None, models: list[Declared] | No
             comp = companion(models)
     except (DeclarationRefused, HoldListRefused):
         return out
-    for m in models:
-        rep = report(store, m, held, lock=lock, groups=(PRIMARY,))
-        if rep["records"]:
-            out["models"][m.id] = rep
-            out["available"].append(m.id)
+    shown: dict = {"models": {}, "available": [V1]}
+    try:
+        for m in models:
+            rep = report(store, m, held, lock=lock, groups=(PRIMARY,))
+            if rep["records"]:
+                shown["models"][m.id] = rep
+                shown["available"].append(m.id)
+        if show_v1 and comp:
+            shown["v1_live"] = {m.id: report(store, comp.paired(m), held, lock=lock, cohort=m,
+                                             groups=(PRIMARY,))
+                                for m in models if m.id in shown["models"]}
+            shown["paired"] = {m.id: paired(store, m, comp, held, lock) for m in models
+                               if m.id in shown["models"]}
+    except LedgerSchemaRefused:
+        return out
+    out.update(shown)
     if len(out["available"]) > 1:
         out["default"] = out["available"][1]
-    if show_v1 and comp:
-        out["v1_live"] = {m.id: report(store, comp.paired(m), held, lock=lock, cohort=m,
-                                       groups=(PRIMARY,)) for m in models if m.id in out["models"]}
-        out["paired"] = {m.id: paired(store, m, comp, held, lock) for m in models
-                         if m.id in out["models"]}
     return out
 
 
