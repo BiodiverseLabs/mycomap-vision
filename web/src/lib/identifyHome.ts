@@ -7,6 +7,7 @@ import { num, pct, RANKS, type HowGood, type Rank, type RunView, type Specimen, 
 import { answerFor } from "@/lib/answer";
 import { chanceWithheld, gateBanner } from "@/lib/gate";
 import { sourceName } from "@/lib/observationLink";
+import { publicModelName } from "@/lib/publicNames";
 import { longDate, recentWeekLine } from "@/lib/publicView";
 import { runPath, runPhotos } from "@/lib/runLink";
 
@@ -92,6 +93,8 @@ export interface ExampleView {
   perPhoto: { url: string; chance: string | null; agrees: boolean }[];
   /** How many photos the answer is from. */
   count: number;
+  /** The model that gave the answer, by its public name ("MycoMap Vision v1"). */
+  model: string;
 }
 
 /** iNaturalist's own smaller copy of a photo (240 px on the long side), for a thumbnail: the
@@ -141,5 +144,6 @@ export function exampleView(run: RunView | null | undefined, specimens = 3): Exa
                       agrees: sp?.position === 1 }] : [];
     }),
     count: o?.photos_used ?? run.photos ?? r.photos,
+    model: publicModelName(r.model.backbone),
   };
 }

@@ -7,7 +7,7 @@ import { PageHeader } from "@/components/Layout";
 import { api, ApiError, runApi, signInUrl, type ContextUsed, type RunView } from "@/lib/api";
 import { localWhen } from "@/lib/keptRun";
 import { sourceName } from "@/lib/observationLink";
-import { publicModelName } from "@/lib/publicNames";
+import { answerModels } from "@/lib/publicNames";
 import { runPhotos } from "@/lib/runLink";
 import { OthersRun, ResultCard, WhatNext } from "@/pages/Identify";
 import { InatSuggestions } from "@/components/InatSuggestions";
@@ -96,7 +96,6 @@ export function RunPage({ id }: { id: string }) {
 export function RunFacts({ r }: { r: RunView }) {
   const o = r.observation;
   const urls = runPhotos(r);
-  const model = r.results[0]?.model;
   return (
     <Card>
       <CardContent className="pt-5 space-y-3 text-sm text-[#5c4a3a]">
@@ -122,7 +121,8 @@ export function RunFacts({ r }: { r: RunView }) {
           </li>
           <li className="flex items-center gap-1.5">
             <Microscope className="h-3.5 w-3.5" aria-hidden />
-            {model ? publicModelName(model.backbone) : "MycoMap Vision"}{r.release ? `, release ${r.release}` : ""}
+            <span data-testid="run-models">{answerModels(r.results.map((res) => res.model?.backbone))}</span>
+            {r.release ? `, release ${r.release}` : ""}
           </li>
         </ul>
       </CardContent>

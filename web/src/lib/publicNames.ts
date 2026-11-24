@@ -94,6 +94,14 @@ export function publicModelName(backbone: string, siteDefault: string | null = s
   return visionVersion(backbone, siteDefault)?.name ?? "MycoMap Vision";
 }
 
+/** The models behind an answer, by their public names, each once and in order: "MycoMap Vision
+ *  v1", or "MycoMap Vision v1 and MycoMap Vision v2 (beta)" for a comparison. Every answer
+ *  says which model gave it (Steve, 2026-11-24: "every answer is associated with a model"). */
+export function answerModels(backbones: (string | null | undefined)[], siteDefault: string | null = siteDefaultFromPage()): string {
+  const names = [...new Set(backbones.filter((b): b is string => !!b).map((b) => publicModelName(b, siteDefault)))];
+  return names.length ? names.join(" and ") : "MycoMap Vision";
+}
+
 /** How a method scores, in plain words; "closest" as in "Closest DNA-verified specimens". */
 export const PUBLIC_METHOD_LABEL: Record<string, string> = {
   nearest: "closest specimen",

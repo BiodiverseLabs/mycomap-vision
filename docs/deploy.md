@@ -330,7 +330,11 @@ gets the site's default and a `vision_` key (kind `key`) or mycomap.org's server
 A named model's label follows the setting: v2 is "MycoMap Vision v2 (beta)" while it is
 opt-in, and "MycoMap Vision v2" once it is `MV_SITE_DEFAULT_BACKBONE` (Steve,
 2026-11-24), on the site (the page shell carries `<meta name="mv-site-default">`), in the
-app's answers (`model.name`) and in the public `/api/health`. An answer carries a model
+app's answers (`model.name`, and `model.label`, which every API v1 answer carries: the
+model's own public name, the same whichever model is the default) and in the public
+`/api/health`. Every answer surface names its model (Steve, 2026-11-24): the site's
+answer cards, a kept run's page and its link card, the home page's example, Human
+Feedback's re-asks, API v1's `model` block and the identification log. An answer carries a model
 card only for a model in the release's `release.json` backbones, so v2's answers keep
 `version: null` and `data: null` until a release includes it, default or not.
 
@@ -406,7 +410,9 @@ mycomap.org's Validate Records kept, and is answered afresh once.
 **Stage 0: v2 opt-in.** `MV_DEFAULT_BACKBONE=v1`, API v1 v1 only, `MV_SITE_DEFAULT_BACKBONE`
 unset. v2 is "MycoMap Vision v2 (beta)" in the model list.
 
-**Stage 1: site visitors and the app on v2.** Add one line, everything else unchanged:
+**Stage 1 (Steve, 2026-11-24: not taken).** v1 stays the site default until the
+auto-validation switch; the site, the app and auto-validation move to v2 together at stage
+2, and developer keys with them. The site-only step stays available:
 
 ```
 MV_SITE_DEFAULT_BACKBONE=bioclip-2.5-336-ft-20261122-171257
@@ -419,14 +425,15 @@ and `site_default_ready` true; an upload on the site names "MycoMap Vision v2"; 
 server-key `GET /api/v1/models` still answers "MycoMap Vision" with the release's card.
 Rollback: delete the line, restart.
 
-**Stage 2: mycomap.org auto-validation on v2.** Only after about two weeks of paired data
+**Stage 2: the site, the app, mycomap.org auto-validation and developer keys on v2
+together.** Only after about two weeks of paired data
 on the same records, mycomap.org's thresholds reviewed (a .org change of its own), its
 stored answers and kept-answer versions checked, the PC agreeing, and a dry run of
 server-key calls naming v2 on recent records. Then set `MV_API_V1_BACKBONES=v2,v1` **and**
 `MV_DEFAULT_BACKBONE=v2` together, in one restart (v2 first in the list is not enough: the
 default decides), so no request can meet a default API v1 doesn't offer; v1 stays offered
-by name for a fallback. `MV_SITE_DEFAULT_BACKBONE` may then be deleted (it equals the
-default). Rollback: restore the vision.env backup, restart.
+by name for a fallback. Leave `MV_SITE_DEFAULT_BACKBONE` unset (or set it to v2 too):
+the site and the app then follow `MV_DEFAULT_BACKBONE`. Rollback: restore the vision.env backup, restart.
 
 **Stage 3: v2 everywhere.** Advance predictions, Human Feedback and How it works follow
 `MV_DEFAULT_BACKBONE` already; then the two-model serving release, and whether v1 stays

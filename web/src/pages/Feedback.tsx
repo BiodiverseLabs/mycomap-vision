@@ -13,7 +13,7 @@ import { appliesWords, blastAnchor, decisionBody, decisionLabel, evidenceRows, f
          historyOrgText, inatLinks, isNameItem, itemBadges, linkedItem, NO_PROPOSAL_TEXT, noProposal, openQueue,
          orgChipClass, PAGE_SIZE, pageText, prefillValue, roleText, alreadyDoneText, decideOptions,
          FORMAT_PANEL_TEXT, formatRow, hasLists, listCount, listReasonText, seededNote, WRITING_LISTS,
-         queueParam, readLastQueue, recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
+         queueParam, readLastQueue, reaskModel, recordLabel, refreshVerdict, shownRule, stepLook, stepText, storedVerdict, takesPhotoKeys,
          statCardLines, valueBox, whenText, writeLastQueue, yes, type SectionGroup,
          type Verdict } from "@/lib/feedback";
 import { optionGroups, pairSides } from "@/lib/twinCompare";
@@ -979,6 +979,9 @@ function Refresh({ item }: { item: FeedbackItemDetail }) {
               <span className="text-muted-foreground">name now:</span> <Name s={r.name_now} />
             </p>
             <p className={`font-medium ${TONE[v.tone]}`}>{v.text}</p>
+            {r.vision.available && reaskModel(r.vision) && (
+              <p className="text-xs text-muted-foreground" data-testid="text-reask-model">{reaskModel(r.vision)}</p>
+            )}
             {r.vision.available && <Top5Line top5={r.vision.top5} />}
           </div>
         );

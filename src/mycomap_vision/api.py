@@ -1062,8 +1062,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         default = limits.default_backbone or served_backbones()[0]
         card = model_card()
         name = apiv1.public_name(backbone, default, limits.site_default_backbone)
+        # Every answer says which model gave it (Steve, 2026-11-24): its own public name, the
+        # same whichever model is the default; a model without one, its `name`.
+        label = apiv1.model_label(backbone, limits.site_default_backbone) or name
         return apiv1.public_model(card, calibration_id, name=name,
-                                  own_card=modelcard.belongs_to(card, backbone, default))
+                                  own_card=modelcard.belongs_to(card, backbone, default),
+                                  label=label)
 
     # /api/health is public: model ids only with mycomap.org's server key (apiv1.public_health).
     # Which backbone answers is read from the database at most once a minute.
@@ -2138,7 +2142,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         logo = Image.open(card_logo) if card_logo else None
         return linkcards.run_card_jpeg(bodies, linkcards.headline(linkcards.run_answer(run)),
                                        logo, credits=credits,
-                                       answered_from=int(used) if used else None)
+                                       answered_from=int(used) if used else None,
+                                       model=linkcards.run_model_name(
+                                           run, limits.site_default_backbone))
 
     def remembered_card(rid: str) -> bytes | None:
         with card_lock:
@@ -2205,7 +2211,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     return None
                 logo = Image.open(card_logo) if card_logo else None
                 body = linkcards.run_card_jpeg(
-                    bodies, linkcards.headline(linkcards.run_answer(run)), logo)
+                    bodies, linkcards.headline(linkcards.run_answer(run)), logo,
+                    model=linkcards.run_model_name(run, limits.site_default_backbone))
                 try:
                     run_store.keep_card(rid, body)
                 except Exception as e:  # noqa: BLE001 - served now, made again next time
@@ -2264,7 +2271,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 note(f"[runs] no card state for {rid}: {type(e).__name__}: {e}")
             if not ready:
                 card_later(rid)
-        return linkcards.run_card(origin, rid, run, card_version, card_ready=ready), 200
+        return linkcards.run_card(origin, rid, run, card_version, card_ready=ready,
+                                  site_default=limits.site_default_backbone), 200
 
     # "Where Vision looked" (looked.py; Steve, 2026-10-26): each photo's map of where its
     # evidence for the answer's species was, made when someone asks and kept beside the run

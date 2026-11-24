@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ApiError, type FeedbackItem, type FeedbackOption } from "./api";
+import { reaskModel } from "./feedback";
 import { appliesWords, blastAnchor, statCardLines, decisionBody, evidenceRows, feedbackAccess, formatTop5, groupBySection,
          inatLinks, isNameItem, noProposal, roleText, usableOptions, alreadyDoneText, decideOptions, DONE_AT_SOURCE,
          FORMAT_PANEL_TEXT, formatRow, hasLists, listCount, listReasonText, seededNote, WRITING_LISTS,
@@ -497,4 +498,11 @@ test("a needs-a-look card says why, and when the proposal is not the most used w
                "Proposed in MycoMap's current format; the most used writing was Lactarius \"acrid orange\".");
   assert.equal(seededNote({ proposed: "A sp. 'X1'", proposed_seeded: null }), null);
   assert.equal(isNameItem(item({ item_type: "name_writing_split" })), true);   // gets the names panel
+});
+
+test("a Human Feedback re-ask names the model that answered", () => {
+  assert.equal(reaskModel({ model: "bioclip-2-336-ft-20261018-171420/nearest+mean" }), "MycoMap Vision v1");
+  assert.equal(reaskModel({ model: "bioclip-2.5-336-ft-20261122-171257/nearest" }), "MycoMap Vision v2 (beta)");
+  assert.equal(reaskModel({}), null);
+  assert.equal(reaskModel(undefined), null);
 });

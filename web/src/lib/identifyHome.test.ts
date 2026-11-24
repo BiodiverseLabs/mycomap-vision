@@ -125,3 +125,10 @@ test("the example's photos come at iNaturalist's small size, not the large origi
   assert.equal(v.perPhoto[0].url, `${base}small.jpeg`);
   assert.equal(v.specimens[0].photo_url, "https://inaturalist-open-data.s3.amazonaws.com/photos/560548350/small.jpg");
 });
+
+test("the home page's example answer names the model that gave it", () => {
+  const v1 = { ...EXAMPLE_RUN, results: [{ ...EXAMPLE_RUN.results[0], model: { backbone: "bioclip-2-336-ft-20261018-171420", method: "m" } }] };
+  const v2 = { ...EXAMPLE_RUN, results: [{ ...EXAMPLE_RUN.results[0], model: { backbone: "bioclip-2.5-336-ft-20261122-171257", method: "m" } }] };
+  assert.equal(exampleView(v1 as RunView)!.model, "MycoMap Vision v1");
+  assert.equal(exampleView(v2 as RunView)!.model, "MycoMap Vision v2 (beta)");
+});

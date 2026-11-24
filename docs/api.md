@@ -189,7 +189,7 @@ photo forwarded to mycomap.org with the session's `client_ref` and its `photo_re
 the app reads the lines from mycomap.org; Vision's answers are unchanged.
 
 → `201 {"session_id": "s_7Yp2…", "expires_at": "…", "max_photos": 10,
-"model": {"name", "version", "data", "calibrated_on"}, "context_used": {…}}`
+"model": {"name", "label", "version", "data", "calibrated_on"}, "context_used": {…}}`
 
 `POST /api/v1/sessions/{id}/photos`, multipart: `photo` (one file; JPEG, long side
 1024, q≈85, EXIF date kept) and `photo_ref` (the app's id for it, ≤ 64 chars):
@@ -244,7 +244,7 @@ credential asking: an app token gets the site's default model when `MV_SITE_DEFA
 is set (§9), mycomap.org's server key and developer keys `MV_DEFAULT_BACKBONE`'s.
 
 ```json
-{"models": [{"name": "MycoMap Vision", "version": "2026-10-13",
+{"models": [{"name": "MycoMap Vision", "label": "MycoMap Vision v1", "version": "2026-10-13",
              "data": {"snapshot": "2026-10-13", "records": 176655, "species": 18944,
                       "genera": 1543},
              "calibrated_on": "2026-10-13", "default": true,
@@ -290,7 +290,7 @@ model's result, not a `results` list.
 ```json
 {
   "request_id": "r_01J…",
-  "model": {"name": "MycoMap Vision", "version": "2026-10-13",
+  "model": {"name": "MycoMap Vision", "label": "MycoMap Vision v1", "version": "2026-10-13",
             "data": {"snapshot": "2026-10-13", "records": 176655, "species": 18944,
                      "genera": 1543},
             "calibrated_on": "2026-10-13"},
@@ -337,7 +337,12 @@ model's result, not a `results` list.
 ```
 
 - **`model`** (Steve, 2026-10-11: the product never names the backbone underneath):
-  `name` is always "MycoMap Vision". `version` reflects the **training data** (Steve,
+  `name` is "MycoMap Vision" for the default model (v1); a model with a public name of
+  its own keeps it, default or not ("MycoMap Vision v2 (beta)"; "MycoMap Vision v2" once
+  it is the site's default). `label` (2026-11-24, Steve: "every answer is associated with a
+  model") is the model's own public name, the same whichever model is the default and
+  whether or not it has a card: "MycoMap Vision v1", "MycoMap Vision v2 (beta)"; store it
+  with an answer to know which model gave it. `version` reflects the **training data** (Steve,
   2026-10-11): the date the DNA-validated label set behind the served model was
   exported from mycomap.org (`YYYY-MM-DD`), then `.2`, `.3` for a later release built on
   the same export; opaque, matches `[A-Za-z0-9._:-]{1,40}`, never a backbone id. Store it
@@ -715,7 +720,7 @@ stay in front of the monthly numbers.
 
 ```json
 {"generated_at": "2026-10-11T12:00:00Z",
- "model": {"name": "MycoMap Vision", "version": "2026-10-13", "data": {…}, "calibrated_on": null},
+ "model": {"name": "MycoMap Vision", "label": "MycoMap Vision v1", "version": "2026-10-13", "data": {…}, "calibrated_on": null},
  "nightly_version": 12,
  "counts_are": "reference_records",
  "species": {"Amanita muscaria": 412, "Russula sp. 'IN01'": 7},

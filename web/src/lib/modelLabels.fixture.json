@@ -1,0 +1,10 @@
+[
+  {"backbone": "bioclip-2-336-ft-20261018-171420", "site_default": null, "label": "MycoMap Vision v1"},
+  {"backbone": "bioclip-2-336-ft-20261018-171420", "site_default": "bioclip-2.5-336-ft-20261122-171257", "label": "MycoMap Vision v1"},
+  {"backbone": "bioclip-2-336-ft-20261020-173106", "site_default": null, "label": "MycoMap Vision v1-open"},
+  {"backbone": "bioclip-2-ft-20261014-003539", "site_default": null, "label": "MycoMap Vision v0-open"},
+  {"backbone": "bioclip-2-ft-20261001-120000", "site_default": null, "label": "MycoMap Vision v0"},
+  {"backbone": "bioclip-2.5-336-ft-20261122-171257", "site_default": null, "label": "MycoMap Vision v2 (beta)"},
+  {"backbone": "bioclip-2.5-336-ft-20261122-171257", "site_default": "bioclip-2-336-ft-20261018-171420", "label": "MycoMap Vision v2 (beta)"},
+  {"backbone": "bioclip-2.5-336-ft-20261122-171257", "site_default": "bioclip-2.5-336-ft-20261122-171257", "label": "MycoMap Vision v2"}
+]
