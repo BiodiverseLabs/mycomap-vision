@@ -912,23 +912,25 @@ def test_the_same_find_rule_takes_the_same_observer_when_known_on_both_sites():
     assert {o for o, _ in cands["106"]} == {"mo:1", "mo:2", "mo:3"}, "other site, same label and day"
     links = {"inat:7": {"mo:42"}, "mo:42": {"inat:7"}, "mo:43": {"inat:8"}, "inat:8": {"mo:43"}}
     accounts = {"106": "inat:7", "mo:1": "mo:42",       # the same observer: hidden
-                "mo:2": "mo:43",                        # another, known observer: kept
-                "mo:3": "mo:44"}                        # unlinked, but 106's is known: kept
+                "mo:2": "mo:43",                        # another observer, joins on both: kept
+                "mo:3": "mo:44"}                        # no join of its own: label and day
     got = ds.same_find(cands, accounts, links)["106"]
-    assert (got["observer"], got["fallback"], got["spared"]) == ({"mo:1"}, set(), {"mo:2", "mo:3"})
-    assert got["form"] == ds.OBSERVER
+    assert (got["observer"], got["fallback"], got["spared"]) == ({"mo:1"}, {"mo:3"}, {"mo:2"})
+    assert got["form"] == ds.BOTH
+    only = ds.same_find({"106": {("mo:1", "mo"), ("mo:2", "mo")}}, accounts, links)["106"]
+    assert only["form"] == ds.OBSERVER
 
 
 def test_label_and_day_alone_are_used_only_where_the_observer_is_not_known():
     tonight, loaded = same_find_world()
     cands = ds.same_find_candidates(tonight, [loaded])
     links = {"inat:8": {"mo:43"}, "mo:43": {"inat:8"}}
-    # 106's account is joined to none on MO, and mo:1 and mo:3 are joined to none on iNat; mo:2's
-    # owner is unknown. mo:3 is known as another observer through its own link: kept.
+    # 106's account is joined to none on MO, mo:1's to none on iNat; mo:2's owner is unknown;
+    # mo:3's owner has a join, but 106's has none: label and day for all three.
     accounts = {"106": "inat:7", "mo:1": "mo:42", "mo:3": "mo:43"}
     got = ds.same_find(cands, accounts, links)["106"]
-    assert (got["observer"], got["fallback"], got["spared"]) == (set(), {"mo:1", "mo:2"}, {"mo:3"})
-    assert got["form"] == ds.BOTH
+    assert (got["observer"], got["fallback"], got["spared"]) == (set(), {"mo:1", "mo:2", "mo:3"}, set())
+    assert got["form"] == ds.LABEL_DAY
     # Nobody's account known: label and day alone, for every candidate.
     alone = ds.same_find(cands, {}, links)["106"]
     assert alone["fallback"] == {"mo:1", "mo:2", "mo:3"} and alone["form"] == ds.LABEL_DAY
@@ -956,6 +958,42 @@ def test_observers_are_joined_by_the_accounts_of_the_releases_own_twin_groups():
                      "inat:@carol": {"mo:@cj"}, "mo:@cj": {"inat:@carol"}}
     assert ds.accounts_of(conn, ["10", "30", "mo:3", "missing"]) == {
         "10": "inat:7", "30": "inat:@carol", "mo:3": "mo:@cj"}
+
+
+def test_one_account_joined_and_the_other_not_falls_back_to_label_and_day_and_is_hidden(
+        conn, tmp_path, monkeypatch):
+    # The Paper Coordinator's rule (research 7a71fc7): spared only when BOTH accounts have a
+    # cross-site join. 106's iNat account 7 is joined to MO account 42 (find 100 + 104); 101's
+    # MO account 43 has no join: label and day decide, and 101 is hidden from both references.
+    from mycomap_vision.identify import Identifier
+    client = paired_site(conn, tmp_path, monkeypatch, groups={"100": 0, "104": 0})
+    conn.execute("update records set observed_on = '2026-11-20' where observation_id = '106'")
+    make_mo(conn, "101", 43, "other", "2026-11-20")
+    make_mo(conn, "104", 42, "al", "2025-01-01")
+    conn.commit()
+    seen: list = []
+    real = Identifier.identify_vectors
+
+    def spy(self, *a, hidden=None, **kw):
+        assert "101" in set(self.col_record.obs.tolist()), "101 is a reference record"
+        seen.append((self.backbone, set(self.col_record.obs[self.col_record.rec[hidden]].tolist())))
+        return real(self, *a, hidden=hidden, **kw)
+    monkeypatch.setattr(Identifier, "identify_vectors", spy)
+    assert client.app.state.score_daily_scores()["v2"]["scored"] == 2
+    store = client.app.state.early_store
+    with store.lock:
+        got = {(r["record_key"], r["model_id"]): r for r in rows(store.conn, None)}
+    for mid in ("v1", "v2"):
+        r = got[("106", mid)]
+        assert (r["twins_hidden"], r["same_find_hidden"], r["same_find_fallback"],
+                r["same_find_spared"], r["same_find_form"]) == (0, 1, 1, 0, "label_day"), mid
+    assert {b for b, _ in seen} == {"m1", "m0"}
+    assert all("101" in obs for _, obs in seen)
+    # The other way round (101's account joined, 106's not) falls back alike.
+    cands = {"106": {("101", "mo")}}
+    for links in ({"inat:7": {"mo:42"}, "mo:42": {"inat:7"}}, {"mo:43": {"inat:8"}, "inat:8": {"mo:43"}}):
+        rule = ds.same_find(cands, {"106": "inat:7", "101": "mo:43"}, links)["106"]
+        assert (rule["fallback"], rule["spared"], rule["form"]) == ({"101"}, set(), ds.LABEL_DAY)
 
 
 def make_mo(conn, key, owner_id, owner_login, day):
@@ -1006,13 +1044,16 @@ def test_each_row_records_the_twin_pass_and_the_same_find_rule_apart_and_both_mo
 
 def test_another_known_observers_record_of_the_same_label_and_day_is_kept(conn, tmp_path, monkeypatch):
     from mycomap_vision.identify import Identifier
-    # 106's iNat account 7 is joined to MO account 42 (the release's find 100 + 104), and
-    # 101's MO account 43 to iNat account 7 by none: both observers are known, and differ, so
-    # 101 ('A x', MO, 106's day) stays in both references.
-    client = paired_site(conn, tmp_path, monkeypatch, groups={"101": 2, "100": 0, "104": 0})
+    # 106's iNat account 7 is joined to MO account 42 (the release's find 100 + 104), and 101's
+    # MO account 43 to iNat account 8 (find 105 + 102): both accounts have joins, not to each
+    # other, so 101 ('A x', MO, 106's day) stays in both references.
+    client = paired_site(conn, tmp_path, monkeypatch,
+                         groups={"101": 2, "100": 0, "104": 0, "105": 3, "102": 3})
     conn.execute("update records set observed_on = '2026-11-20' where observation_id = '106'")
+    conn.execute("update inat_observations set user_id = 8 where observation_id = '105'")
     make_mo(conn, "101", 43, "other", "2026-11-20")
     make_mo(conn, "104", 42, "al", "2025-01-01")
+    make_mo(conn, "102", 43, "other", "2025-01-01")
     conn.commit()
     seen: list = []
     real = Identifier.identify_vectors

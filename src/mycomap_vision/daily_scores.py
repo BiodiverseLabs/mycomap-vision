@@ -27,8 +27,8 @@ conditions this module keeps:
   newer than the release's twin pass, the same-find rule (same_find; accepted by the Paper
   Coordinator with two conditions, research 8c4fb04): the other site's record of the same
   label on the same day, narrowed to the SAME OBSERVER wherever the observer is known on both
-  sites (observer_links: the iNat and MO accounts the release's own twin groups join), label
-  and day alone only where it is not. Each row records how many references each rule hid,
+  sites (observer_links: the iNat and MO accounts the release's own twin groups join; spared
+  only when both accounts have joins and not to each other), label and day alone otherwise. Each row records how many references each rule hid,
   apart (twins_hidden; same_find_hidden, of them same_find_fallback by label and day alone),
   the same-label same-day records a known different observer spared (same_find_spared), and
   which form was used (same_find_form).
@@ -1176,24 +1176,28 @@ def same_find_candidates(tonight, loaded_lists) -> dict[str, set[tuple[str, str]
 
 def same_find(candidates: dict, accounts: dict[str, str],
               links: dict[str, set[str]]) -> dict[str, dict]:
-    """The same-find rule for each record: of its candidates (same_find_candidates), the ones
-    hidden because the observer is the same (both accounts known, and joined by observer_links
-    either way), the ones hidden by label and day alone (either account unknown, or neither
-    account known on the other site), and the ones spared (both known on both sites, another
-    observer). {key: {"observer", "fallback", "spared" (sets of keys), "form"}}; the form is
-    the one used: observer, label_day, or both; with no candidate, the one that would be (the
-    record's observer known on the other site: observer)."""
+    """The same-find rule for each record (the Paper Coordinator's rule, research 7a71fc7): of
+    its candidates (same_find_candidates),
+
+      observer   hidden: the two accounts are joined (observer_links, either way)
+      spared     kept: BOTH accounts have at least one cross-site join, and not to each other
+      fallback   hidden by label and day alone: anything else (an account unknown, or one
+                 account with joins and the other with none)
+
+    {key: {"observer", "fallback", "spared" (sets of keys), "form"}}; the form is the one
+    used: observer, label_day, or both; with no candidate, the one that would be (the
+    record's observer joined on the other site: observer)."""
     out: dict[str, dict] = {}
     for key, cands in candidates.items():
         mine = accounts.get(key)
         obs, fall, spared = set(), set(), set()
         for other, _ in cands:
             theirs = accounts.get(other)
-            if mine and theirs and (links.get(mine) or links.get(theirs)):
-                if theirs in links.get(mine, ()) or mine in links.get(theirs, ()):
-                    obs.add(other)
-                else:
-                    spared.add(other)
+            if mine and theirs and (theirs in links.get(mine, ())
+                                    or mine in links.get(theirs, ())):
+                obs.add(other)
+            elif mine and theirs and links.get(mine) and links.get(theirs):
+                spared.add(other)
             else:
                 fall.add(other)
         used = {OBSERVER} if (obs or spared) else set()
