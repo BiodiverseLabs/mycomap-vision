@@ -95,10 +95,47 @@ def parse_validation_date(s: str | None) -> str | None:
 #   "true"/"yes"/"1", or a list holding one); missing is 0.
 # FIRST_GREEN_FIELD: the moment (UTC, ISO 8601) the record first turned green, when the feed
 #   gives one. Without it only the day (validation_date_N) is known. Also provisional.
+# ROUTE_METHOD_FIELD, ROUTE_RULES_FIELD, VISION_ROLES_FIELD, VISION_CALLED_FIELD: how the record's
+#   FIRST green validation was made, for the paired v1/v2 scores (daily_scores.route_of; the
+#   Paper Coordinator's ruling of 24 Nov 2026, conditions a and b): "manual" or "auto", the
+#   auto-validation rules version ("1.4"), the kinds of .org's vision_decision_events for the
+#   record up to that validation (agreement_validated, penalty_lift, second_source_vision,
+#   vision_shown_at_manual_validation, ...; [] for none), and whether .org called Vision for it
+#   at all. NOT IN THE FEED YET: proposed in docs/proposals/org-green-records-validation-route.md;
+#   these names are provisional. Without them a record's route is unknown (validation_route null).
 VISION_ASSISTED_FIELD = "validated_with_vision"
 VISION_ASSISTED_METHOD = "DNA + MycoMap Vision"
 HELD_BY_VISION_FIELD = "held_by_vision"
 FIRST_GREEN_FIELD = "first_green_at"
+ROUTE_METHOD_FIELD = "first_green_method"
+ROUTE_RULES_FIELD = "first_green_rules_version"
+VISION_ROLES_FIELD = "vision_roles"
+VISION_CALLED_FIELD = "vision_called"
+ROUTE_METHODS = ("manual", "auto")
+
+
+def validation_route(rows: list[dict]) -> str | None:
+    """A record's validation route from its feed rows (ROUTE_METHOD_FIELD and beside it), as
+    JSON {"method": manual | auto | mixed | null, "rules_version", "vision_roles" (a list, or
+    null when not every row gives one), "vision_called" (null unless every row says)}; None
+    when no row gives a method (the feed does not carry the route)."""
+    given = [g for g in rows if g.get(ROUTE_METHOD_FIELD) not in (None, "")]
+    if not given:
+        return None
+    methods = {str(g[ROUTE_METHOD_FIELD]).strip().lower() for g in given}
+    method = (None if not methods <= set(ROUTE_METHODS)
+              else "mixed" if len(methods) > 1 else next(iter(methods)))
+    roles_given = [g.get(VISION_ROLES_FIELD) for g in given]
+    roles = (sorted({str(x) for r in roles_given for x in r})
+             if all(isinstance(r, list) and all(isinstance(x, str) for x in r)
+                    for r in roles_given) else None)
+    rules = sorted({str(g.get(ROUTE_RULES_FIELD)).strip() for g in given
+                    if g.get(ROUTE_RULES_FIELD) not in (None, "")})
+    called = [g.get(VISION_CALLED_FIELD) for g in given]
+    return json.dumps({"method": method, "rules_version": ",".join(rules) or None,
+                       "vision_roles": roles,
+                       "vision_called": any(called) if all(isinstance(c, bool) for c in called)
+                       else None}, sort_keys=True)
 
 
 def vision_assisted(value) -> bool:
@@ -222,6 +259,8 @@ def build_records(rows: list[dict], exported_at: str) -> list[dict]:
             "held_by_vision": int(any(held_by_vision(g.get(HELD_BY_VISION_FIELD))
                                       for g in group)),
             "first_green_at": min(greens) if greens else None,
+            # How it was first validated, when the feed says (daily_scores.route_of).
+            "validation_route": validation_route(group),
         })
     return records
 
@@ -254,10 +293,11 @@ _COLUMNS = [
     "genus", "species", "infraspecies", "latitude", "longitude", "observed_on", "state",
     "country", "continent", "north_america", "sequence_id", "green_projects", "validated_on",
     "label_conflict", "names_json", "exported_at", "vision_assisted", "first_green_at",
-    "held_by_vision",
+    "held_by_vision", "validation_route",
 ]
 # Columns a record dict built by older code may lack, and what they are then.
-_LATER_DEFAULTS = {"vision_assisted": 0, "first_green_at": None, "held_by_vision": 0}
+_LATER_DEFAULTS = {"vision_assisted": 0, "first_green_at": None, "held_by_vision": 0,
+                   "validation_route": None}
 
 
 def save_records(conn: sqlite3.Connection, records: list[dict]) -> dict:

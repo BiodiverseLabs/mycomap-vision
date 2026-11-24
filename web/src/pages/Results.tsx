@@ -141,7 +141,7 @@ function Headline({ d }: { d: ResultsData }) {
   const errata = (report as unknown as { errata?: { file?: string } } | undefined)?.errata?.file?.match(/-(r\d+)\.tsv$/)?.[1];
   return (
     <Section id="headline" kicker="1 · Headline" title="The site's model, at every rank"
-             lead={run ? `${modelParts(run.backbone).name} on ${runOf(d, run.id)?.dataset_release ? `dataset release ${runOf(d, run.id)!.dataset_release}'s validation split` : "the newest validations"}, with each find's photos${run.method.endsWith("+place") ? " and its public place and date" : ""}. The same summary is reported for every test on this site.` : undefined}>
+             lead={run ? `${modelParts(run.backbone).name} on ${runOf(d, run.id)?.dataset_release ? `dataset release ${runOf(d, run.id)!.dataset_release}'s validation split` : "the newest validations"}, with each find's photos${run.method.endsWith("+place") ? " and the place and date recorded with it" : ""}. The same summary is reported for every test on this site.` : undefined}>
       <ChartCard>
         {rows.length ? <TopKChart rows={rows} labelHead="Rank" trackHead="Share right within the first k answers" testId="chart-headline" />
           : <p className="small" data-testid="headline-empty">{d.loading ? "Reading the latest results…" : "The headline results could not be read just now."}</p>}

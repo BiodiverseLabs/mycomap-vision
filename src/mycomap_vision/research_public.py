@@ -109,6 +109,63 @@ PER_RECORD_KEYS = frozenset({"observation_id", "observations", "record_key", "re
                              "scored_rows", "rows"})
 
 
+def _all_keys(value, found: set) -> set:
+    if isinstance(value, dict):
+        found |= set(value)
+        for v in value.values():
+            _all_keys(v, found)
+    elif isinstance(value, list):
+        for v in value:
+            _all_keys(v, found)
+    return found
+
+
+# Fields of a daily_scores ledger row that never leave it, besides PER_RECORD_KEYS: the frozen
+# answer and truth, each record's places of the right names, its depth at the cut, and
+# whether it had a place or date (the payload's own "public" is the display switch).
+DAILY_PRIVATE_KEYS = frozenset({"ranks_json", "truth_species", "truth_genus", "truth_family",
+                                "truth_name", "decided_at", "green_at", "sp_pos", "ge_pos",
+                                "fa_pos", "species_depth_at_cut", "place_used", "date_used"})
+_PLACE_OR_PERSON = frozenset({"latitude", "longitude", "lat", "lon", "lng", "place", "login",
+                              "user_login", "owner_login", "owner_name", "photo_id", "uuid",
+                              "inat_uuid", "observed_on"})
+
+
+# Where v1's live figures could sit in a daily-scores payload (daily_scores.public_payload with
+# MV_DAILY_SCORES_PUBLIC_V1, internal_payload): never public by default.
+DAILY_V1_KEYS = frozenset({"v1_live", "paired"})
+
+
+def daily_scores(payload: dict, v1: bool = False) -> dict:
+    """Scores since a model's training cut (/api/daily-scores, daily_scores.public_payload):
+    aggregates only, for everyone. Refuses, anywhere in it, a field that could name a record,
+    a person, a photo or a place (PER_RECORD_KEYS, DAILY_PRIVATE_KEYS, a url or coordinate
+    field), and cuts file paths. v1's choice carries no numbers here: they are
+    /api/how-good's, cut at SEAL. Unless `v1` (MV_DAILY_SCORES_PUBLIC_V1, or the internal
+    view), it also refuses v1's live figures: a "v1_live" or "paired" block, a model keyed or
+    named v1 (the Paper Coordinator's ruling of 24 Nov 2026: not public before the v1 paper)."""
+    if not v1:
+        models = payload.get("models") or {}
+        if (DAILY_V1_KEYS & set(payload) or "v1" in models
+                or any(isinstance(m, dict) and m.get("id") == "v1" for m in models.values())):
+            raise ValueError("v1's live scores in a public report")
+    keys = _all_keys(payload, set())
+    bad = ((PER_RECORD_KEYS | DAILY_PRIVATE_KEYS | _PLACE_OR_PERSON) & keys) | {
+        k for k in keys if "url" in str(k).lower()}
+    if bad:
+        raise ValueError(f"per-record fields in a public report: {sorted(bad)}")
+    for m in (payload.get("models") or {}).values():
+        least = m.get("min_band_records")
+        for band in m.get("species_by_depth") or []:
+            # A band with too few records gives no rate (a few records make a wild number).
+            few = not isinstance(least, int) or band.get("n", 0) < least
+            rates = [v for k, v in band.items() if k.startswith("top")]
+            if few and (not band.get("too_few") or any(v is not None for v in rates)):
+                raise ValueError(f"a depth band with too few records shows a rate: "
+                                 f"{band.get('band')}")
+    return strip_paths(payload)
+
+
 # Counts of photographers by the rights on their photos (Steve, 2026-10-22): never served.
 STATS_HIDDEN = ("contributors_arr",)
 

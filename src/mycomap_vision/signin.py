@@ -86,6 +86,9 @@ RESEARCH_API = ("/api/stats", "/api/models", "/api/scoreboard", "/api/prospectiv
                 # How it works (a share page, open to anyone): its accuracy summary, never the
                 # sealed test (howgood.py), and the daily seconds per photo, averages only.
                 "/api/how-good", "/api/speed/daily",
+                # Both pages' v1 / v2 dropdown: scores since a newer model's training cut,
+                # aggregates only (daily_scores.py); only v1 until MV_DAILY_SCORES_PUBLIC=1.
+                "/api/daily-scores",
                 # Research > Excluded photos (excluded_looked.py): the list and kept maps; asking
                 # for a map (POST) needs sign-in.
                 "/api/research/excluded-photos", "/api/research/excluded-photos/looked",
@@ -115,9 +118,10 @@ def feedback_read_path(method: str, path: str) -> bool:
         or path.startswith("/api/feedback/"))
 
 
-# Routes that check their caller themselves: the identification log's read for the paper
-# (identifylog.py), for mycomap.org's server key or a signed-in admin.
-SELF_CHECKED = ("/api/identify-log/first",)
+# Routes that check their caller themselves, for mycomap.org's server key or a signed-in admin:
+# the identification log's read for the paper (identifylog.py), and the paired v1 / v2 scores
+# (daily_scores.internal_payload).
+SELF_CHECKED = ("/api/identify-log/first", "/api/daily-scores/internal")
 
 
 def public_page(method: str, path: str) -> bool:

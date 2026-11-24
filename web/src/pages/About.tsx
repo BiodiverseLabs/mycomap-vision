@@ -6,12 +6,14 @@ import {
 } from "lucide-react";
 import { SafetyNote } from "@/components/SafetyNote";
 import { PhotoPermissionLine } from "@/components/PhotoPermissionLine";
+import { ModelPicker, SinceTraining } from "@/components/ModelScores";
 import {
   Bars, C, Cap, Card, ExternalLinkText, FlowArrow, H2, H3, Icon, Ink, Kicker, PermissionBox, Small, Sub, Tile, Wrap,
 } from "@/components/Explainer";
 import {
-  api, num, pct, type HowGood, type ModelsInfo, type SpeedDay, type Stats,
+  api, num, pct, type DailyScores, type HowGood, type ModelScores, type ModelsInfo, type SpeedDay, type Stats,
 } from "@/lib/api";
+import { defaultModel, modelOptions, scoresFor, type ModelOption } from "@/lib/modelScores";
 import { publicMethodLabel, publicModelName } from "@/lib/publicNames";
 import { JOIN_URL, longDate, SEQUENCING_URL, shareWords } from "@/lib/publicView";
 import {
@@ -28,6 +30,10 @@ export interface HowItWorksData {
   models?: ModelsInfo;
   howGood?: HowGood;
   speed?: SpeedDay[];
+  /** The v1 / v2 dropdown (/api/daily-scores): which models it offers and their scores. */
+  dailyScores?: DailyScores;
+  /** The dropdown's first choice; default: the server's (v2 once available, else v1). */
+  model?: string;
   /** Today, US Eastern (YYYY-MM-DD), for "today" beside the newest speed figure. */
   today: string;
   loading?: boolean;
@@ -38,9 +44,10 @@ export function AboutPage() {
   const models = useQuery({ queryKey: ["models"], queryFn: api.models });
   const howGood = useQuery({ queryKey: ["how-good"], queryFn: api.howGood });
   const speed = useQuery({ queryKey: ["speed-daily"], queryFn: api.speedDaily });
+  const daily = useQuery({ queryKey: ["daily-scores"], queryFn: api.dailyScores });
   return (
     <HowItWorks stats={stats.data} models={models.data} howGood={howGood.data}
-                speed={speed.data?.days} today={easternDay(new Date())}
+                speed={speed.data?.days} dailyScores={daily.data} today={easternDay(new Date())}
                 loading={howGood.isLoading || models.isLoading} />
   );
 }
@@ -49,14 +56,21 @@ export function AboutPage() {
 export function HowItWorks(d: HowItWorksData) {
   const s = d.stats;
   const model = servedModel(d.models, d.howGood?.run?.backbone);
+  // The v1 / v2 dropdown: until someone picks, the server's default (it may arrive later).
+  const [picked, setPicked] = useState<string | null>(null);
+  const options = modelOptions(d.dailyScores);
+  const want = picked ?? d.model ?? defaultModel(d.dailyScores);
+  const choice = options.some((o) => o.id === want) ? want : options[0].id;
+  const scores = scoresFor(d.dailyScores, choice);
   return (
     <div className="text-[#5c4a3a] leading-relaxed">
       <Hero s={s} referencePhotos={model?.embedded_photos} />
       <HowAnIdentificationWorks s={s} h={d.howGood} />
       <DnaNotVotes s={s} />
       <Provisional s={s} />
-      <HowGoodSection h={d.howGood} loading={d.loading} speed={d.speed} today={d.today} />
-      <FirstStepAndNewestWeeks h={d.howGood} />
+      <HowGoodSection h={d.howGood} loading={d.loading} speed={d.speed} today={d.today}
+                      picker={{ options, value: choice, onChange: setPicked }} scores={scores} />
+      <FirstStepAndNewestWeeks h={d.howGood} scores={scores} />
       <Standards />
       <YourPhotos />
       <Contributors s={s} />
@@ -354,8 +368,11 @@ function Provisional({ s }: { s?: Stats }) {
 
 /* --------------------------------------------------------------- 5. how good */
 
-function HowGoodSection({ h, loading, speed, today }: {
+function HowGoodSection({ h, loading, speed, today, picker, scores }: {
   h?: HowGood; loading?: boolean; speed?: SpeedDay[]; today: string;
+  picker: { options: ModelOption[]; value: string; onChange: (id: string) => void };
+  /** A newer model's scores since training, in place of v1's numbers; null shows v1's. */
+  scores: ModelScores | null;
 }) {
   const run = h?.run;
   const ladder = topKRows(h);
@@ -363,14 +380,15 @@ function HowGoodSection({ h, loading, speed, today }: {
     <Wrap band id="how-good" testId="section-how-good">
       <Kicker>How good is it</Kicker>
       <H2>Right first time, on records it had never seen</H2>
-      {!run || !h?.top1 ? (
+      <ModelPicker {...picker} />
+      {scores ? <SinceTraining m={scores} /> : !run || !h?.top1 ? (
         <p className="mb-7">{loading ? "Loading the latest results…" : "Results for this model are not published yet."}</p>
       ) : (
         <>
           <Sub>
             Tested on the newest <Ink>{num(run.n_test)}</Ink> DNA-verified finds (validated
             after {longDate(run.cutoff)}), identified from the <Ink>{num(run.n_reference)}</Ink> records
-            verified before them{run.method.endsWith("+place") ? ", with each find's photos and its public place and date" : ", from the photos alone"}.
+            verified before them{run.method.endsWith("+place") ? ", with each find's photos and the place and date recorded with it" : ", from the photos alone"}.
           </Sub>
           <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-2">
             <Score rank="Species" value={h.top1.species} />
@@ -403,7 +421,7 @@ function HowGoodSection({ h, loading, speed, today }: {
         </>
       )}
       <SpeedCard days={speed} today={today} loading={loading} />
-      {run && (
+      {run && !scores && (
         <div data-testid="text-model-credit">
           <Small className="mt-[18px]">
             Model: {modelCredit(run.backbone).name}, {publicMethodLabel(run.method)}. Measured on
@@ -667,7 +685,7 @@ function SpeedLine({ view, today }: { view: Extract<SpeedView, { state: "chart" 
 
 /* ------------------------------------------- 6 and 7. first step, newest weeks */
 
-function FirstStepAndNewestWeeks({ h }: { h?: HowGood }) {
+function FirstStepAndNewestWeeks({ h, scores }: { h?: HowGood; scores: ModelScores | null }) {
   const run = h?.run;
   return (
     <Wrap testId="section-first-step">
@@ -700,7 +718,8 @@ function FirstStepAndNewestWeeks({ h }: { h?: HowGood }) {
       <div className="mt-12" data-testid="section-newest-weeks">
         <Kicker>Measured on the newest weeks</Kicker>
         <H2>Tested the way it meets a new find</H2>
-        {run && (
+        {scores && <SinceTrainingSplit m={scores} />}
+        {run && !scores && (
           <>
             <div className="flex min-h-14 gap-0.5 overflow-hidden rounded-lg mt-[18px] mb-2 text-white" role="img"
                  aria-label={`${num(run.n_reference)} earlier records are the reference; the ${num(run.n_test)} newest are the test`}>
@@ -728,6 +747,28 @@ function FirstStepAndNewestWeeks({ h }: { h?: HowGood }) {
         </Cap>
       </div>
     </Wrap>
+  );
+}
+
+/** A newer model's split: everything verified up to its training cut, then every record since. */
+function SinceTrainingSplit({ m }: { m: ModelScores }) {
+  return (
+    <>
+      <div className="flex min-h-14 gap-0.5 overflow-hidden rounded-lg mt-[18px] mb-2 text-white" role="img"
+           aria-label={`Trained on the records verified up to ${longDate(m.trained_through)}; the ${num(m.records)} verified since are the test`}
+           data-testid="split-since-training">
+        <div className="flex min-w-0 flex-[3_1_0] flex-col justify-center bg-[#8a7560] px-3.5 py-2 text-[13px] leading-tight">
+          <b className="text-base">Up to {longDate(m.trained_through)}</b><span className="truncate">every record it learned from</span>
+        </div>
+        <div className="flex min-w-[130px] sm:min-w-[220px] flex-col justify-center px-3.5 py-2 text-[13px] leading-tight"
+             style={{ background: C.ramp[3] }}>
+          <b className="text-base">{num(m.records)}</b><span>verified since, each tested once</span>
+        </div>
+      </div>
+      <div className="flex justify-between gap-3 text-xs text-muted-foreground">
+        <span>Oldest DNA-verified records</span><span className="text-right">{longDate(m.trained_through)} → newest</span>
+      </div>
+    </>
   );
 }
 

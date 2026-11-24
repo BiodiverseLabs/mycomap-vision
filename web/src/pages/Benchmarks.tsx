@@ -104,7 +104,7 @@ function Glance({ d }: { d: BenchmarksData }) {
       <div className="mt-4 border-t border-[#ece6de] pt-1.5">
         {lines.map(([k, v]) => <div key={k} className="gl"><span>{k}</span><b>{v}</b></div>)}
       </div>
-      <p className="small mt-2.5">{run && s ? `Newest weeks: ${modelParts(run.backbone).name} on ${nf(s.n)} finds, ${run.method.endsWith("+place") ? "with each find's photos and its public place and date" : "photos only"}. ` : ""}Every setting is chosen on the validation split; the sealed test is opened once.</p>
+      <p className="small mt-2.5">{run && s ? `Newest weeks: ${modelParts(run.backbone).name} on ${nf(s.n)} finds, ${run.method.endsWith("+place") ? "with each find's photos and the place and date recorded with it" : "photos only"}. ` : ""}Every setting is chosen on the validation split; the sealed test is opened once.</p>
       <SourceLine parts={["research.ts BENCHMARKS (statuses)", run ? "/api/how-good" : null, lead ? "/api/prospective" : null, e ? "/api/early-answers" : null]} />
     </div>
   );

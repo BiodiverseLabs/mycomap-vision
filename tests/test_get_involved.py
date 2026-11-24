@@ -5,7 +5,8 @@ import pytest
 
 from test_signin import gated_site_with_pages
 
-FEEDS = ("/api/stats", "/api/how-good", "/api/feedback/summary", "/api/docs/v1.json")
+FEEDS = ("/api/stats", "/api/how-good", "/api/daily-scores", "/api/feedback/summary",
+         "/api/docs/v1.json")
 
 
 def test_the_page_answers_a_signed_out_visitor(conn, tmp_path):

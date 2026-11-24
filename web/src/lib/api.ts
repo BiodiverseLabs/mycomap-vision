@@ -299,6 +299,60 @@ export interface HowGood {
   inat?: { method: string; n_test: number | null; species_top1: number | null;
            genus_top1: number | null; family_top1: number | null } | null;
 }
+/** Right first at one rank over n records, with the 95% range (Wilson) when n > 0. */
+export interface RankScore { right: number; n: number; top1: number | null; ci95: [number, number] | null }
+/** One UTC day of a newer model's scores since its training cut (GET /api/daily-scores). */
+export interface ScoreDay {
+  day: string;
+  records: number;
+  photos: number;
+  species: RankScore;
+  genus: RankScore;
+  family: RankScore;
+  rolling_7_days: { records: number; species: RankScore; genus: RankScore; family: RankScore };
+  /** False for the day the nightly is still on: more of its records may come. */
+  complete: boolean;
+}
+/** Species right within the first k by the true species' reference records at the cut; a band
+ *  with too few records (`too_few`, under `min_band_records`) has no rates. */
+export interface DepthBand { band: string; n: number; top1: number | null; top3: number | null;
+                             top5: number | null; top10: number | null; too_few: boolean }
+/** A newer model scored on every record first green after its training cut (daily_scores.py):
+ *  its first answer about each, measured as v1's numbers are (photos + place and date),
+ *  aggregates only. */
+export interface ModelScores {
+  id: string;
+  backbone: string;
+  method: string;
+  /** The training cut: every record green up to it was trained on. */
+  trained_through: string;
+  /** "photos + place and date", as v1's How it works numbers. */
+  context: string;
+  answer_key?: string | null;
+  as_of: string | null;
+  records: number;
+  new_photos: number;
+  with_place?: number;
+  with_date?: number;
+  min_band_records?: number;
+  days: ScoreDay[];
+  cumulative: { from: string; through: string; records: number; photos: number;
+                species: RankScore; genus: RankScore; family: RankScore } | null;
+  rolling_7_days: { through: string; records: number; species: RankScore; genus: RankScore;
+                    family: RankScore } | null;
+  /** The right name within the first k, over the records since training. */
+  top_k: ({ k: number[] } & Record<Rank, TopK>) | null;
+  species_by_depth: DepthBand[] | null;
+  left_out?: Record<string, number>;
+}
+/** Which models the v1 / v2 dropdowns offer (v1 always: its numbers are /api/how-good's), the
+ *  one to show first, and each newer model's scores. */
+export interface DailyScores {
+  public: boolean;
+  available: string[];
+  default: string;
+  models: Record<string, ModelScores>;
+}
 /** One UTC day's average seconds per photo (GET /api/speed/daily); never how many photos. */
 export interface SpeedDay { day: string; seconds_per_photo: number }
 
@@ -1258,6 +1312,8 @@ export const api = {
    *  the run as its link shows anyone (`view`, null when it couldn't be read just then). */
   example: () => getJson<{ run: string | null; view?: RunView | null }>("/api/example"),
   speedDaily: () => getJson<{ days: SpeedDay[] }>("/api/speed/daily"),
+  /** The v1 / v2 dropdowns: newer models' scores since their training cut. */
+  dailyScores: () => getJson<DailyScores>("/api/daily-scores"),
   /** `onWait(attempt, seconds)`: the server was busy and the photos wait in line.
    *  `onSent(fraction)`: how much of the photos has been sent, 0 to 1, for each try. */
   async identify(photos: File[], models: string[], where: Where = {},

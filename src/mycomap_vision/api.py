@@ -1358,6 +1358,44 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return {"groups": research_public.early_answers(groups, person(request) is not None),
                 "sealed_after": research_public.SEAL}
 
+    @app.get("/api/daily-scores")
+    def daily_scores_report():
+        """Scores since a newer model's training cut (daily_scores.py): which models the How it
+        works and Get involved dropdowns offer, and each one's daily, 7-day and cumulative
+        figures on its primary records, aggregates only, the same for everyone. Only v1 (its
+        sealed numbers are /api/how-good's) until MV_DAILY_SCORES_PUBLIC=1. v1's live figures
+        and the paired comparison never, unless MV_DAILY_SCORES_PUBLIC_V1=1 too (the Paper
+        Coordinator's ruling: not before the v1 paper is out)."""
+        from . import daily_scores
+        payload = daily_scores.public_payload(early_store.conn, lock=early_store.lock)
+        return research_public.daily_scores(payload, v1=daily_scores.public_v1())
+
+    @app.get("/api/daily-scores/internal", include_in_schema=False)
+    def daily_scores_internal(request: Request):
+        """The paired v1 / v2 scores (daily_scores.internal_payload): every group, the
+        primary's sub-counts, each model's figures and the paired differences. Internal:
+        mycomap.org's server key or a signed-in mycomap.org admin only; private, never
+        cached. Aggregates only; it names v1."""
+        from . import daily_scores
+        given = request.headers.get("authorization", "")
+        by_key = bool(org_secret) and secrets.compare_digest(
+            given.encode(), f"Bearer {org_secret}".encode())
+        if not by_key:
+            who = person(request)
+            if not who:
+                raise HTTPException(401, "mycomap.org's server key or an admin's sign-in",
+                                    headers=NOT_INDEXED)
+            if not is_admin(str(who.get("sub"))):
+                raise HTTPException(403, "mycomap.org admins only", headers=NOT_INDEXED)
+        own = manifest.connect(manifest_path)
+        try:
+            through = trained_through(own)
+        finally:
+            own.close()
+        payload = daily_scores.internal_payload(early_store.conn, lock=early_store.lock,
+                                                trained_through=through)
+        return JSONResponse(research_public.daily_scores(payload, v1=True), headers=NOT_INDEXED)
+
     @app.get("/api/how-good")
     def how_good_report():
         """How it works' "How good is it" (howgood.py): the served model's newest open run,
@@ -2730,7 +2768,187 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 report["predictions"] = predict_pending_tonight(report["id"], fetch_pending,
                                                                 answering)
         report["early_answers"] = score_early_answers_tonight()
+        from . import daily_scores
+        if daily_scores.computing():
+            report["daily_scores"] = score_daily_scores_tonight()
         return report
+
+    def daily_answers(db: sqlite3.Connection, models: list, recs: list[dict]) -> dict:
+        """Each model's first answers about tonight's records (daily_scores.Answer), as
+        {model id: {record key: answer}}: the cohort model's and, paired with it, v1's, from
+        the SAME photos of each record with the SAME records hidden from every reference.
+        Measured as v1's How it works numbers are: from the records verified before them, with
+        each one's photos and the place and date v1's runs score with (evaluate.context_of on
+        evaluate.load_records' record: .org's coordinates, never shown).
+
+        Hidden from every model's reference (ruling (c)), the union over the models of:
+        tonight's records; each one's cross-post twins and any record holding a copy of its
+        pictures by the served release's twin pass (identify.left_out with the index's
+        twins.ReferenceTwins); and, for records newer than the release's twin pass, any
+        record from the other site with the same name and the same date (the cross-post's
+        signature); then every column holding a photo of those records. The served method's
+        place prior is fitted again without them, so none is answered with itself, its twin,
+        its place or its date. A record is answered only from the photos every model holds
+        for it; one no model can answer waits. A method with no place and date weighting is
+        refused (daily_scores.PlaceRefused), never scored on photos alone; an index with no
+        twin table too (daily_scores.TwinsRefused)."""
+        import numpy as np
+        from . import daily_scores, placeprior
+        from .evaluate import context_of, load_records
+        view = permission_view()
+        idents = {}
+        for model in models:
+            ident = identifier(model.backbone, model.method, view)
+            prior_now = getattr(ident.model, "prior", None)
+            if not hasattr(ident.model, "place_shift") or not isinstance(prior_now,
+                                                                          placeprior.PlaceBoost):
+                raise daily_scores.PlaceRefused(
+                    f"{model.model} has no place and date weighting, so it can't be measured as "
+                    "v1 is: declare its +place method (e.g. nearest+mean-records-balanced+place)")
+            if not ident.can_leave_out():
+                raise daily_scores.PlaceRefused(f"{model.model} can't answer with a record left out")
+            if getattr(ident, "twins", None) is None:
+                raise daily_scores.TwinsRefused(
+                    f"{model.model}'s index has no twin table (twins.npz in the served release, "
+                    "or MV_TWINS): a record's cross-post twin can't be hidden")
+            idents[model.id] = ident
+        keys = [str(r["observation_id"]) for r in recs]
+        # Per model: each record's own columns, and what left_out hides for it.
+        own: dict = {m.id: {} for m in models}
+        hidden_records: set = set(keys)
+        hidden_photos: set = set()
+        for model in models:
+            ident = idents[model.id]
+            obs_of = ident.col_record.obs
+            for rec in recs:
+                key = str(rec["observation_id"])
+                source = rec.get("source") or ("mo" if key.startswith("mo:") else "inat")
+                number = rec.get("source_id") or key.rpartition(":")[2]
+                hid, mine = ident.left_out(source, str(number))
+                if len(mine):
+                    own[model.id][key] = mine
+                hidden_records |= {str(o) for o in obs_of[ident.col_record.rec[hid]].tolist()}
+                hidden_photos |= {int(p) for p in ident.col_photo[hid].tolist()}
+        # The photos every model holds for a record, in the first model's order.
+        shared: dict = {}
+        for key in keys:
+            lists = [[int(p) for p in idents[m.id].col_photo[own[m.id][key]].tolist()]
+                     if key in own[m.id] else [] for m in models]
+            common = [p for p in lists[0] if all(p in other for other in lists[1:])]
+            if common:
+                shared[key] = common
+        if not shared:
+            return {m.id: {} for m in models}
+        # Each model's reference records with their place and date, and tonight's records.
+        loaded_by: dict = {}
+        tonight: dict = {}
+        for model in models:
+            ids = [int(r[0]) for r in db.execute(
+                "select photo_id from embeddings where backbone = ?", (model.backbone,))]
+            loaded = load_records(db, {p: p for p in ids})
+            loaded_by[model.id] = loaded
+            for r in loaded:
+                if r.observation_id in shared:
+                    tonight.setdefault(r.observation_id, r)
+        contexts = {k: context_of(r) for k, r in tonight.items()}
+        # The same-find guard: the other site's record of the same name on the same day.
+        hidden_records |= daily_scores.same_find_records(tonight.values(), loaded_by.values())
+        hidden_sha = daily_scores.records_sha(hidden_records)
+        hidden_list = np.asarray(sorted(hidden_records), dtype=str)
+        out: dict = {}
+        for model in models:
+            ident = idents[model.id]
+            col_obs = ident.col_record.obs[ident.col_record.rec].astype(str)
+            hide = np.flatnonzero(
+                np.isin(col_obs, hidden_list)
+                | np.isin(ident.col_photo, np.asarray(sorted(hidden_photos),
+                                                      dtype=ident.col_photo.dtype))
+            ).astype(np.int64)
+            left = set(col_obs[hide].tolist()) | hidden_records
+            in_index = set(ident.col_record.obs.tolist())
+            reference = [r for r in loaded_by[model.id]
+                         if r.observation_id in in_index and r.observation_id not in left]
+            prior = placeprior.PlaceBoost(setting=ident.model.prior.setting_name)
+            prior.fit(reference, ident.index.species)
+            del reference
+            release, state = release_now(), answers_version(model.backbone, model.method, view)
+            got: dict = {}
+            for key, photos in shared.items():
+                ctx = contexts.get(key)
+                if ctx is None:
+                    continue                # not one of the records v1's runs would load
+                mine = own[model.id][key]
+                at = {int(p): c for p, c in zip(ident.col_photo[mine].tolist(), mine.tolist())}
+                cols = np.asarray([at[p] for p in photos[:MAX_PHOTOS]], dtype=np.int64)
+                lp = prior.log_prior(ctx)
+                shift = None if lp is None else placeprior.PHOTO_TEMPERATURE * lp
+                vecs = ident.reference_vectors(cols)
+                deep: list = []
+
+                def finish(v, sims, shift=shift, deep=deep, ident=ident, hide=hide):
+                    return ident.identify_vectors(v, early_answers.DEPTH, context=None, sims=sims,
+                                                  photo_lookup=photo_lookup, gate=None,
+                                                  hidden=hide, deep=deep, place_shift=shift)
+                result = model_queue.run(workqueue.Job(
+                    key=id(ident), photos=0, embed=lambda vecs=vecs: vecs,
+                    search=ident.nearest.photo_sims, finish=finish, interactive=False,
+                    timer=apiv1.Timer()))
+                got[key] = {"lists": deep[0] if deep else (result.get("ranks") or {}),
+                            "photos": len(photos), "place_used": placeprior.has_place(ctx),
+                            "date_used": placeprior.has_date(ctx), "release": release,
+                            "reference_state": state,
+                            "photos_sha": daily_scores.photo_sha(photos[:MAX_PHOTOS]),
+                            "hidden_sha": hidden_sha}
+            out[model.id] = got
+        return out
+
+    def score_daily_scores_tonight(answer=None) -> dict:
+        """Scores since each declared model's training cut (daily_scores.score_pending), once
+        tonight's records are in and embedded: MV_DAILY_SCORES=1 only. Every record is
+        answered by the declared model and, when MV_DAILY_SCORES_V1 names it, by v1 beside it
+        (daily_answers: the same photos, the same records hidden). A pair with a model not
+        served here waits; one that can't be given a place and date, or its twins hidden, is
+        refused. Never fails the night."""
+        from . import daily_scores
+        if not daily_scores.computing():
+            return {"off": f"{daily_scores.COMPUTE_SETTING} is not on"}
+        own = manifest.connect(manifest_path)
+        own.execute("pragma busy_timeout = 30000")
+        try:
+            models_ = daily_scores.declared(trained_through(own))
+            comp = daily_scores.companion(models_)
+            held = daily_scores.held_keys()
+            ready = set(ready_backbones())
+            out: dict = {}
+            for m in models_:
+                pair = daily_scores.pair_of(m, comp)
+                missing = [p.model for p in pair if p.backbone not in ready]
+                if missing:
+                    out[m.id] = {"waiting": f"not served here: {', '.join(missing)}"}
+                    continue
+                cache: dict = {}
+
+                def paired_answer(model, recs, pair=pair, cache=cache):
+                    # One plan for the pair, asked for by each model with the same records.
+                    keys = tuple(str(r["observation_id"]) for r in recs)
+                    if cache.get("keys") != keys:
+                        cache.clear()
+                        cache.update(keys=keys, got=daily_answers(own, pair, recs))
+                    return cache["got"].get(model.id, {})
+                try:
+                    out.update(daily_scores.score_pending(
+                        early_store.conn, own, [m], answer or paired_answer, held,
+                        lock=early_store.lock, companion=comp, code=config.code_version()))
+                except (daily_scores.PlaceRefused, daily_scores.TwinsRefused) as e:
+                    out[m.id] = {"refused": str(e)}
+            note(f"[nightly] scores since training: {out}")
+            return out
+        except Exception as e:  # noqa: BLE001 - the reference set is already updated
+            note(f"[nightly] scores since training failed: {type(e).__name__}: {e}")
+            return {"error": f"{type(e).__name__}: {e}"[:500]}
+        finally:
+            own.close()
+    app.state.score_daily_scores = score_daily_scores_tonight
 
     def score_early_answers_tonight() -> dict:
         """Answers given before the DNA verdict, decided now that tonight's green records are

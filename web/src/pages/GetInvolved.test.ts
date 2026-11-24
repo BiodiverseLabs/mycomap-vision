@@ -7,6 +7,7 @@ import { GetInvolved, type GetInvolvedData } from "./GetInvolved";
 import { PERMISSION_LINE, PHOTO_PERMISSIONS_URL } from "../lib/publicView";
 import type { FeedbackSummary, HowGood, Stats } from "../lib/api";
 import type { Outline } from "../lib/apiOutline";
+import { DAILY_V1_ONLY, DAILY_V2, fortyDays } from "../lib/dailyScores.fixture";
 
 const STATS = {
   records: 182877, records_north_america: 177341, label_conflicts: 0, inat_ok: 1, inat_missing: 0,
@@ -136,7 +137,60 @@ test("never mycomap.com, and every outside link is a real mycomap.org or iNatura
 
 test("the depth chart names its test, finds and place and date; researchers score their model on the same records", () => {
   const t = text(page());
-  assert.match(t, /Tested on the newest 12,874 finds \(validated after 17 August 2026\), each identified from the records verified before it, with its photos and its public place and date\./);
+  assert.match(t, /Tested on the newest 12,874 finds \(validated after 17 August 2026\), each identified from the records verified before it, with its photos and the place and date recorded with it\./);
   assert.match(t, /how to cite, and how to score your own model on the same records\./);
   assert.doesNotMatch(t, /\bours\b/);
+});
+
+// --- the v1 / v2 dropdown (Steve, 2026-11-22) -------------------------------------------------
+
+const withoutPicker = (html: string) => html.replace(/<div[^>]*data-testid="model-picker"[^]*?<\/select><\/div>/, "");
+
+test("the Sequence section has the model dropdown, on v1 while v2 is not available", () => {
+  for (const daily of [undefined, DAILY_V1_ONLY]) {
+    const html = page({ dailyScores: daily });
+    assert.match(html, /data-testid="model-picker"/);
+    assert.match(html, /<option value="v1" selected="">MycoMap Vision v1<\/option>/);
+    assert.doesNotMatch(html, /value="v2"/);
+    const at = html.indexOf('data-testid="model-picker"');
+    assert.ok(at > html.indexOf('data-testid="section-sequence"') && at < html.indexOf('data-testid="chart-by-depth"'));
+  }
+});
+
+test("the dropdown opens on v2 once the server offers it, with every daily value beside its n", () => {
+  const html = page({ dailyScores: DAILY_V2 });
+  assert.match(html, /<option value="v2" selected="">MycoMap Vision v2<\/option>/);
+  assert.match(html, /data-testid="scores-v2"/);
+  assert.doesNotMatch(html, /chart-by-depth/, "v1's depth chart gives way to v2's days");
+  assert.match(html, /chart-names-by-records/, "the names chart is no model's score and stays");
+  const t = text(html);
+  for (const n of ["63.0%", "86.6%", "n = 152", "n = 185", "n = 63, so far"]) assert.ok(t.includes(n), n);
+  assert.match(t, /403 finds verified since training, with 1,291 new photos\./);
+  assert.match(t, /Last 7 days \(to 25 November 2026\): species 63\.0% \(n = 400\)/);
+  const bars = [...(html.match(/data-testid="chart-daily"[^]*/)?.[0] ?? "").matchAll(/<small[^>]*>([^<]*)<\/small>/g)]
+    .map((m) => m[1]).slice(0, 3);
+  assert.deepEqual(bars, ["n = 152", "n = 185", "n = 63, so far"]);
+  assert.doesNotMatch(t, /v1-test|sealed/i);
+});
+
+test("v1's view is the page as it was, whatever v2 has", () => {
+  assert.equal(withoutPicker(page({ dailyScores: DAILY_V2, model: "v1" })), withoutPicker(page()));
+  assert.equal(withoutPicker(page({ dailyScores: DAILY_V1_ONLY })), withoutPicker(page()));
+  assert.ok(text(page({ dailyScores: DAILY_V2, model: "v1" })).includes("77%"), "v1's depth chart");
+});
+
+test("Get involved's v2 card shows family, the depth bands with too few said so, and 30 days", () => {
+  const html = page({ dailyScores: DAILY_V2 });
+  const t = text(html);
+  assert.match(t, /92\.8% Family, right first time/);
+  assert.match(t, /0 records n = 21 too few yet/);
+  assert.match(t, /photos and the place and date recorded with it/);
+  assert.doesNotMatch(t, /public place/);
+  assert.doesNotMatch(text(page()), /public place/, "v1's view says it the same way");
+  const forty = page({ dailyScores: fortyDays() });
+  const at = forty.indexOf('data-testid="chart-daily"');
+  const chart = forty.slice(at, forty.indexOf("<p ", at));
+  assert.equal([...chart.matchAll(/<small[^>]*>n = /g)].length, 30);
+  assert.match(text(forty), /day by day, last 30 days/);
+  assert.doesNotMatch(forty, /table-daily/, "the table is How it works'");
 });

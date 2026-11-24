@@ -412,7 +412,8 @@ class Identifier:
                          higher_ranks: bool = False, sims: np.ndarray | None = None,
                          hidden: np.ndarray | None = None,
                          types: list[dict | None] | None = None, include=(),
-                         deep: list | None = None) -> dict:
+                         deep: list | None = None,
+                         place_shift: np.ndarray | None = None) -> dict:
         """identify_vectors_ungated, behind the fungus gate (fungusgate.py) when `gate`
         holds a verdict per photo. A photo judged not a fungus is left out of the answer
         (a duck among mushroom photos doesn't sink the find); when every photo is, there
@@ -431,11 +432,15 @@ class Identifier:
         `deep`, when given, gets the answer's ranked names appended DEEP_RANKS deep
         whatever `top_k` is (identify_vectors_ungated), for the copy frozen for the
         benchmark of answers given before the DNA verdict (early_answers.py). Nothing is
-        appended when no photo is left to answer from."""
+        appended when no photo is left to answer from.
+
+        `place_shift`: the place and date's shift, made by a place prior fitted WITHOUT the
+        `hidden` records (daily_scores.py), for a method with one (place_shift); identify_
+        vectors_ungated."""
         kw = dict(top_k=top_k, n_specimens=n_specimens, context=context,
                   photo_lookup=photo_lookup, may_show=may_show,
                   n_photo_specimens=n_photo_specimens, higher_ranks=higher_ranks,
-                  hidden=hidden, deep=deep)
+                  hidden=hidden, deep=deep, place_shift=place_shift)
         if types is not None and len(types) != len(query):
             raise ValueError(f"{len(types)} photo-type tags for {len(query)} photos")
         if gate is None and types is None:
@@ -519,7 +524,8 @@ class Identifier:
                                  n_photo_specimens: int = 3, higher_ranks: bool = False,
                                  sims: np.ndarray | None = None,
                                  hidden: np.ndarray | None = None,
-                                 deep: list | None = None) -> dict:
+                                 deep: list | None = None,
+                                 place_shift: np.ndarray | None = None) -> dict:
         """Query photo vectors (already normalised) -> ranks, specimens, hints.
         `context` (place and date) is used by methods with a range-and-season score.
         `higher_ranks` adds order, class and phylum (higher.py) to the combined and
@@ -527,7 +533,11 @@ class Identifier:
         the caller already has them (a batch scored together, workqueue.py). `hidden`:
         reference columns left out of this answer, as if never there (left_out: an
         observation that is itself a reference record must not match itself); only for
-        methods that can (can_leave_out), and with no context.
+        methods that can (can_leave_out), and with no context. `place_shift` (with no
+        context): the place and date's shift from a place prior fitted without the hidden
+        records, so a left-out record can be answered with its place and date (the prior
+        the served method holds counts that record); refused for a method with no place
+        shift.
 
         The main answer uses all the photos together. `per_photo` gives what the same
         model says from each photo on its own, so a person can see which photo pulled
@@ -541,6 +551,8 @@ class Identifier:
         if sims is None:
             sims = self.nearest.photo_sims(query)             # (q, reference photos)
         leaving_out = hidden is not None and len(hidden) > 0
+        if place_shift is not None and not hasattr(self.model, "place_shift"):
+            raise ValueError(f"{self.method} has no place and date shift to replace")
         if leaving_out:
             if not self.can_leave_out():
                 raise ValueError(f"{self.method} can't leave reference records out")
@@ -562,7 +574,8 @@ class Identifier:
             if leaving_out:
                 per_photo = self.model.leave_out(per_photo, unmasked, query, hidden)
             photo_only = per_photo.mean(axis=0)
-            shift = self.model.place_shift(context)
+            shift = (place_shift if place_shift is not None
+                     else self.model.place_shift(context))
             if shift is not None:
                 per_photo = per_photo + shift
             scores = per_photo.mean(axis=0)
