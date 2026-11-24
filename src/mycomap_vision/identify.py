@@ -94,6 +94,12 @@ class NotTrainedHere(RuntimeError):
     that must not train (MV_FIT_ON_DEMAND=0)."""
 
 
+class NoBaseVector(RuntimeError):
+    """A photo the served gate or photo-type tagger must read, on a backbone that can't give
+    the base-model vector they read (its base is another model's, or it can't fork the
+    pass). Raised rather than answering ungated (servedbases.py: fail closed)."""
+
+
 def fit_cached(model, vectors: np.ndarray, index, records, cache_dir: Path, key: str,
                train: bool = True) -> bool:
     """Fit the model, reusing saved trained weights when this exact reference set has been
@@ -230,7 +236,8 @@ class Identifier:
                  gate: "fungusgate.FungusGate | None" = None,
                  twins_file: Path | None = None,
                  specimen_groups: dict[str, str] | None = None,
-                 tagger: "phototypes.PhotoTagger | None" = None):
+                 tagger: "phototypes.PhotoTagger | None" = None,
+                 gate_pass: "Callable[[list], np.ndarray] | None" = None):
         if method not in METHODS:
             raise ValueError(f"unknown method {method!r}")
         if specimen_groups is None and twins.is_grouped(method):
@@ -240,11 +247,15 @@ class Identifier:
         self.backbone, self.method = backbone, method
         # The not-a-fungus gate (fungusgate.py), or None: answers are then ungated.
         self.gate = gate
+        # A gate on another base than this backbone's (servedbases.py, MV_CROSS_BASE_GATE):
+        # photos -> the vectors it reads, from a second pass; None: the gate reads the fork.
+        self.gate_pass = gate_pass if gate is not None else None
         # The photo-type tagger (phototypes.py), or None: photos are then not tagged. It
         # reads the same frozen base vector as the gate, so it runs only when its base is
-        # the gate's (or there is no gate).
-        self.tagger = (tagger if tagger is not None and (gate is None or tagger.base == gate.base)
-                       else None)
+        # the gate's (or there is no gate), or reads this backbone's own fork while the gate
+        # reads a second pass.
+        self.tagger = (tagger if tagger is not None and (
+            gate is None or tagger.base == gate.base or self.gate_pass is not None) else None)
         ids, vecs = map_embeddings(conn, backbone, embeddings_root, layer_root)
         if not len(ids):
             raise ValueError(f"no embeddings for {backbone!r}")
@@ -435,7 +446,10 @@ class Identifier:
         verdicts = [g["verdict"] for g in gate] if gate is not None else None
         kept = [i for i in range(len(query))
                 if verdicts is None or verdicts[i] != fungusgate.NOT_FUNGUS]
-        typed = phototypes.decide(types, kept, include) if types is not None else None
+        typed = (phototypes.decide(types, kept, include,
+                                   getattr(getattr(self, "tagger", None), "leave_out",
+                                           phototypes.LEAVE_OUT))
+                 if types is not None else None)
         if typed is not None:
             kept = [i for i in kept if i not in typed["left_out"]]
         if kept:
@@ -827,13 +841,22 @@ class Identifier:
         that answers from photos goes through here, so none can skip the gate."""
         prepare = getattr(backbone_model, "prepare", None) or (lambda im: im)
         vecs, base = self.encode(backbone_model, [prepare(im) for im in images])
-        verdicts = self.gate.judge(base) if self.gate is not None and base is not None else None
+        read = self.gate_vectors(images, base)
+        verdicts = self.gate.judge(read) if self.gate is not None and read is not None else None
         return normalise(vecs), verdicts
+
+    def gate_vectors(self, images: list, base: np.ndarray | None) -> np.ndarray | None:
+        """What the gate reads for these photos: a second pass (gate_pass) when it reads
+        another base than this backbone's, else the base vectors encode() forked."""
+        if self.gate_pass is not None:
+            return np.asarray(self.gate_pass(images))
+        return base
 
     def encode(self, backbone_model, items: list) -> tuple[np.ndarray, np.ndarray | None]:
         """(this model's vectors, the base-model vectors the gate and the photo-type tagger
-        read, or None when neither can run on this backbone). A fine-tuned BioCLIP 2 gives
-        both from one pass."""
+        read, or None when neither is served). A fine-tuned BioCLIP 2 (or 2.5) gives both
+        from one pass. NoBaseVector when one is served but this model can't give its
+        vectors: the answer is refused, never given ungated."""
         base = self.base_name()
         if base is not None:
             both = getattr(backbone_model, "encode_with_base", None)
@@ -844,11 +867,22 @@ class Identifier:
             if self.backbone == base:
                 vecs = backbone_model.encode(items)
                 return vecs, vecs
+            # Never answered ungated: the gate (or tagger) this backbone is served with
+            # reads vectors this model can't give.
+            has = getattr(backbone_model, "base_name", None)
+            raise NoBaseVector(
+                f"{self.backbone} is served with a gate or photo-type tagger reading {base} "
+                f"vectors, but its model {'forks ' + has if has else 'gives no base'} "
+                "vectors here; it is not served ungated")
         return backbone_model.encode(items), None
 
     def base_name(self) -> str | None:
-        """The base model whose frozen vectors the gate and the photo-type tagger read (one
-        and the same vector), or None when neither is served."""
+        """The base model whose frozen vectors this backbone's own pass forks: the one the
+        gate and the photo-type tagger read (one and the same vector), or, while the gate
+        reads a second pass, the tagger's alone; None when nothing reads one."""
+        if getattr(self, "gate_pass", None) is not None:
+            tagger = getattr(self, "tagger", None)
+            return tagger.base if tagger is not None else None
         for reader in (self.gate, getattr(self, "tagger", None)):
             if reader is not None:
                 return reader.base

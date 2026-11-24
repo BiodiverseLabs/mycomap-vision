@@ -419,6 +419,19 @@ def public_health(full: dict, served: str | None, backbones) -> dict:
     search = body.get("search")
     if isinstance(search, dict) and search.get("last_error"):
         search["last_error"] = "see the server log"
+    for state in (search.get("backbones") or {}).values() if isinstance(search, dict) else ():
+        if isinstance(state, dict) and state.get("last_error"):
+            state["last_error"] = "see the server log"
+    # Several bases served (servedbases.py): no base, file or reason text in public.
+    for name in ("fungus_gates", "photo_taggers"):
+        for reader in (body.get(name) or {}).values():
+            if isinstance(reader, dict):
+                reader.pop("base", None)
+    if body.get("fungus_gate_errors"):
+        body["fungus_gate_errors"] = ["not served; see the server log"] * len(
+            body["fungus_gate_errors"])
+    for b in list(body.get("refused_backbones") or {}):
+        body["refused_backbones"][b] = "not served; see the server log"
     for state in (body.get("embed") or {}).values():
         if isinstance(state, dict):
             state.pop("reason", None)

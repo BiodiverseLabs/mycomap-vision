@@ -7,6 +7,7 @@ import json
 from fastapi.testclient import TestClient
 from test_api import open_limits
 from test_api_v1_identify import FakeOrg, SERVER_KEY, bearer, identify
+from test_api_photo_types import forking
 from test_api_v1_sessions import FakeGate
 from test_models_and_scoreboard import Const, seed_two_species
 from test_signin import HERE, PUBLIC_KEY
@@ -123,7 +124,7 @@ def app(conn, tmp_path):
     gate.base = "bioclip-2"
     gate.summary = lambda: {"fingerprint": gate.fp, "base": gate.base}
     return TestClient(create_app(
-        tmp_path / "manifest.sqlite", root, backbone_loader=lambda n: Const(n),
+        tmp_path / "manifest.sqlite", root, backbone_loader=forking(gate.base),
         limits=open_limits(allowed_backbones={SERVED}), background=False,
         server_key=SERVER_KEY, api_v1=True, app_tokens=apiv1.AppTokens(PUBLIC_KEY, HERE),
         introspect=FakeOrg(), fungus_gate=gate, note=lambda s: None))
