@@ -69,8 +69,8 @@ image id, so a backbone whose release shipped their vectors needs nothing and se
 record as soon as the rows exist), only when MO's use rule allows them (ok_for_export,
 not all rights reserved), at most MV_NIGHTLY_MAX_MO_PHOTOS (1500) MO photos a night
 (MO's image host: 5 s apart, so a backlog spreads over nights), embedded within
-MV_NIGHTLY_MAX_PHOTOS and tagged for the photo review like any night's photo. Its failure is reported under `mo` and never
-undoes the night.
+MV_NIGHTLY_MAX_PHOTOS and tagged for the photo review like any night's photo. Its
+failure is reported under `mo` and never undoes the night.
 """
 
 from __future__ import annotations
