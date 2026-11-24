@@ -21,10 +21,12 @@ conditions this module keeps:
   Vision gated (agreement_validated, penalty_lift, second_source_vision) and, fail-closed,
   every record whose route is not known yet. Those records are still answered by both models
   and scored: each is its own labelled group (GROUPS), counted, never mixed into the primary.
-  The kinds as ruled (research 900b62b): read_pick, read_set_aside and read_trashed are
-  Vision-assisted; skipped_for_person alone and vision_available_at_manual_validation are
-  primary (counted); an assisted kind, then a gated one, decides whatever else is there; a
-  kind not ruled on keeps the record route_unknown (KNOWN_ROLES, group_from).
+  The kinds as ruled (research 900b62b, 115ef57): read_pick, read_set_aside, read_trashed
+  and model_guided_change are Vision-assisted; alone, skipped_for_person,
+  vision_available_at_manual_validation, model_guided_review, the hold kinds and the other
+  kinds in PRIMARY_ROLES are primary; an assisted kind, then a gated one, decides whatever
+  else is there; a kind not ruled on keeps the record route_unknown (KNOWN_ROLES,
+  group_from).
 - (c) Each record's own photos and its twins (the cross-posted copy, by the served release's
   twin pass, twins.ReferenceTwins) are hidden from BOTH references, the same records for both
   (api.daily_answers). A model with no twin table is refused (TwinsRefused). For cross-posts
@@ -186,19 +188,29 @@ GROUP_LABELS = {
                    "a part for Vision not ruled on yet): kept out of the primary until it is",
 }
 # .org's vision_decision_events kinds (lib/validation-engine visionDecisionEvents.ts), as the
-# Paper Coordinator has ruled on them (research f79c7d2, 900b62b). Precedence: assisted, then
+# Paper Coordinator has ruled on them (research f79c7d2, 900b62b, 115ef57). Precedence: assisted, then
 # gated, then primary; an assisted or gated kind decides the group whatever else is there. A
 # kind in none of these sets is not ruled on: the record is route_unknown, never primary,
 # until the coordinator rules and a commit adds it (KNOWN_ROLES). The group is worked out from
 # the roles each row keeps whenever a report is made (group_of), so a later ruling regroups
 # records already scored without touching a row.
 ASSISTED_ROLES = frozenset({"vision_shown_at_manual_validation",
-                            "read_pick", "read_set_aside", "read_trashed"})
+                            "read_pick", "read_set_aside", "read_trashed",
+                            "model_guided_change"})
 GATED_ROLES = frozenset({"agreement_validated", "penalty_lift", "second_source_vision"})
 PRIMARY_ROLES = frozenset({"skipped_for_person",                       # alone: primary
-                           "vision_available_at_manual_validation"})   # primary, counted
+                           "vision_available_at_manual_validation",    # primary, counted
+                           # 115ef57: no part in the decision when alone
+                           "model_guided_review",                      # counted
+                           "second_source_observer", "observer_over_vision",
+                           "hold", "genus_veto", "no_second_source",
+                           "flagged_read_to_person", "vision_no_answer",
+                           "vision_checked_no_effect"})
 KNOWN_ROLES = ASSISTED_ROLES | GATED_ROLES | PRIMARY_ROLES
 SKIPPED_FOR_PERSON = "skipped_for_person"
+MODEL_GUIDED_REVIEW = "model_guided_review"
+# A record held for a person (.org's hold, with its reasons as .org writes them).
+HELD_ROLES = frozenset({"hold", "genus_veto", "no_second_source"})
 VISION_AVAILABLE = "vision_available_at_manual_validation"
 ROUTE_METHODS = ("manual", "auto", "mixed")
 
@@ -1048,14 +1060,15 @@ def _summary(rows: list[dict]) -> dict:
             "top_k": {"k": list(KS), **{rank: _top_k(scored, rank) for rank in RANKS}}}
 
 
-# What .org would need to send for the open skipped_for_person count (ruling 900b62b, 6):
-# the green feed holds only green records, and the pending feed (GET
-# /api/vision/pending-records) carries no Vision roles.
-OPEN_SKIPPED_NEEDS = ("mycomap.org sends no count of records skipped for a person and not "
-                      "validated yet: the green feed has green records only, and the pending "
-                      "feed carries no Vision roles. It would need either vision_roles (or a "
-                      "skipped_for_person flag) on each GET /api/vision/pending-records row, or "
-                      "an open_skipped_for_person total on its first page.")
+# What .org would need to send for the open counts (rulings 900b62b 6, 115ef57): records
+# skipped for a person, or held for one, and not validated yet. The green feed holds only
+# green records, and the pending feed (GET /api/vision/pending-records) carries no Vision roles.
+OPEN_SKIPPED_NEEDS = ("The open count at mycomap.org is unknown: it sends no count of records "
+                      "skipped for a person or held for one and not validated yet. The green "
+                      "feed has green records only, and the pending feed carries no Vision "
+                      "roles. It would need vision_roles (or skipped_for_person and held flags) "
+                      "on each GET /api/vision/pending-records row, or open_skipped_for_person "
+                      "and open_held totals on its first page.")
 
 
 def role_counts(rows: list[dict]) -> dict:
@@ -1068,11 +1081,11 @@ def role_counts(rows: list[dict]) -> dict:
 
 
 def skipped_waiting(manifest: sqlite3.Connection, model: Declared, done: set[str],
-                    held: frozenset) -> int:
-    """Green records after the cut whose feed roles hold skipped_for_person and that have no
+                    held: frozenset, kinds=frozenset({SKIPPED_FOR_PERSON})) -> int:
+    """Green records after the cut whose feed roles hold one of `kinds` and that have no
     ledger row yet (waiting, or not answered yet)."""
     todo, _ = candidates(manifest, model, done, held)
-    return sum(SKIPPED_FOR_PERSON in (roles_of(route_of(r)["vision_roles"]) or ()) for r in todo)
+    return sum(bool(set(roles_of(route_of(r)["vision_roles"]) or ()) & kinds) for r in todo)
 
 
 def internal_payload(store: sqlite3.Connection | None, models: list[Declared] | None = None,
@@ -1120,6 +1133,8 @@ def internal_payload(store: sqlite3.Connection | None, models: list[Declared] | 
                                                                    or ()) for r in mine)
                 entry[SKIPPED_FOR_PERSON] = sum(SKIPPED_FOR_PERSON in (roles_of(r["vision_roles"])
                                                                        or ()) for r in mine)
+                entry[MODEL_GUIDED_REVIEW] = sum(MODEL_GUIDED_REVIEW in (roles_of(r["vision_roles"])
+                                                                         or ()) for r in mine)
             keys = {r["record_key"] for r in mine}
             entry["models"] = {p.id: _summary([r for r in by_model[p.id]
                                                if r["record_key"] in keys]) for p in pair}
@@ -1128,9 +1143,12 @@ def internal_payload(store: sqlite3.Connection | None, models: list[Declared] | 
             groups[g] = entry
         skipped = [r for r in cohort_rows
                    if SKIPPED_FOR_PERSON in (roles_of(r["vision_roles"]) or ())]
-        waiting = None
+        held_rows = [r for r in cohort_rows if set(roles_of(r["vision_roles"]) or ()) & HELD_ROLES]
+        waiting = waiting_held = None
         if manifest is not None:
-            waiting = skipped_waiting(manifest, m, {r["record_key"] for r in cohort_rows}, held)
+            done = {r["record_key"] for r in cohort_rows}
+            waiting = skipped_waiting(manifest, m, done, held)
+            waiting_held = skipped_waiting(manifest, m, done, held, HELD_ROLES)
         out["cohorts"][m.id] = {
             "trained_through": m.cut, "models": {p.id: p.model for p in pair},
             "records": len(cohort_rows), "groups": groups,
@@ -1138,6 +1156,10 @@ def internal_payload(store: sqlite3.Connection | None, models: list[Declared] | 
             SKIPPED_FOR_PERSON: {"in_ledger": dict(Counter(r["route_group"] for r in skipped)),
                                  "green_not_scored_yet": waiting,
                                  "open_at_org": None, "open_at_org_needs": OPEN_SKIPPED_NEEDS},
+            # Held for a person (hold, genus_veto, no_second_source): the same caveat.
+            "held": {"in_ledger": dict(Counter(r["route_group"] for r in held_rows)),
+                     "green_not_scored_yet": waiting_held,
+                     "open_at_org": None, "open_at_org_needs": OPEN_SKIPPED_NEEDS},
             "primary": {p.id: report(store, p, held, lock=lock, cohort=m, groups=(PRIMARY,))
                         for p in pair}}
     return out
