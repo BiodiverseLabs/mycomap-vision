@@ -88,17 +88,20 @@ class FakeOutside:
         return {"asked": 0}
 
     def download(self, conn, store, size, limit=None, first_seen_since=None,
-                 unembedded_for=None, new_photos_since=None, mo_use_rule=False, log=print):
+                 unembedded_for=None, new_photos_since=None, mo_use_rule=False,
+                 max_mo=None, log=print):
         rows = pending_photos(conn, True, limit, size, store.location,
                               first_seen_since=first_seen_since, unembedded_for=unembedded_for,
-                              new_photos_since=new_photos_since, mo_use_rule=mo_use_rule)
+                              new_photos_since=new_photos_since, mo_use_rule=mo_use_rule,
+                              max_mo=max_mo)
+        now = nightly.iso(nightly.now_utc())
         with conn:
             for r in rows:
                 pid = r["photo_id"]
                 rel = f"n/{pid}.png"
                 store.put(rel, png(self.photo_reds[pid] if pid in self.photo_reds
                                    else self.reds[pid // 10]))
-                save_result(conn, Result(pid, "done", rel, 1, "h"), size, "now", store.location)
+                save_result(conn, Result(pid, "done", rel, 1, "h"), size, now, store.location)
                 self.downloads.append(pid)
         return {"done": len(rows)}
 

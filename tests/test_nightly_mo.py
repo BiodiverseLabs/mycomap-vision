@@ -274,7 +274,8 @@ def test_a_failed_mo_step_is_reported_and_the_nights_other_work_stands(box, laye
     assert health["mo"]["failed"] and health["mo"]["added"] == 40
     assert "503" not in json.dumps(health)                    # public: counts only
     assert "503" in status["runs"][0]["report"]["mo"]["error"]  # `mv nightly` has the reason
-    assert status["mo"] == {"on": True, "max_per_night": 2000, "waiting": 5}
+    assert status["mo"] == {"on": True, "max_per_night": 2000, "max_photos_per_night": 1500,
+                            "waiting": 5}
     [line] = [t for lvl, t in nightly_notes.notes({**health, "state": "ok"}) if "Mushroom" in t]
     assert "it failed" in line
 
@@ -300,8 +301,8 @@ def test_the_mo_step_is_off_unless_switched_on(box, layer, monkeypatch):
     conn = sqlite3.connect(layer.manifest)
     try:
         assert "mo" not in nightly.health(conn, nightly.Settings())
-        assert nightly.status(conn, nightly.Settings())["mo"] == {"on": False,
-                                                                  "max_per_night": 2000}
+        assert nightly.status(conn, nightly.Settings())["mo"] == {
+            "on": False, "max_per_night": 2000, "max_photos_per_night": 1500}
     finally:
         conn.close()
     monkeypatch.setenv("MV_NIGHTLY_MO", "1")
@@ -316,21 +317,23 @@ def test_the_mo_step_is_off_unless_switched_on(box, layer, monkeypatch):
 def test_health_and_mv_nightly_show_the_mo_step_in_counts_only(box, layer):
     conn = sqlite3.connect(layer.manifest)
     try:
-        assert nightly.health(conn, ON)["mo"] == {"on": True, "max_per_night": 2000}
+        assert nightly.health(conn, ON)["mo"] == {"on": True, "max_per_night": 2000,
+                                                  "max_photos_per_night": 1500}
     finally:
         conn.close()
-    outside = MOOutside({}, {pid(1): 130}, {500: [mo_image(1, [500])]})
-    run(layer, seed_rows() + [mo_row(500)], outside)
+    outside = MOOutside({}, {pid(987654): 130}, {876543: [mo_image(987654, [876543])]})
+    run(layer, seed_rows() + [mo_row(876543)], outside)
     conn = sqlite3.connect(layer.manifest)
     try:
         block = nightly.health(conn, ON)
     finally:
         conn.close()
-    assert block["mo"] == {"on": True, "max_per_night": 2000, "requested": 1, "added": 1,
+    assert block["mo"] == {"on": True, "max_per_night": 2000, "max_photos_per_night": 1500,
+                           "requested": 1, "added": 1,
                            "ok": 1, "missing": 0, "gone_on_mo": 0, "photos_new": 1,
                            "batches": 1, "still_pending": 0, "failed": False,
                            "stopped_for_time": False}
-    assert "500" not in json.dumps(block["mo"])
+    assert "876543" not in json.dumps(block) and "987654" not in json.dumps(block)
     lines = dict((t, lvl) for lvl, t in nightly_notes.notes(block))
     assert ("Mushroom Observer: 1 records gained MO details, 1 new photos, 0 records still "
             "without") in lines
@@ -459,3 +462,25 @@ def test_mo_details_alone_change_the_reference_set_so_the_index_is_rebuilt(two_m
     finally:
         conn.close()
     assert served(layer, two_model_box, "m2")["mo:500"] == {pid(41)}
+
+
+def test_mo_photos_a_night_are_capped_for_every_backbone_together_and_the_rest_follow(
+        two_model_box):
+    # MO's image host takes one request every 5 s: a 5,000-photo backlog is 7 hours, so the
+    # night takes at most MV_NIGHTLY_MAX_MO_PHOTOS of them, whichever backbone needs them;
+    # iNat photos are not held back.
+    layer = nightly.prepare(two_model_box, **QUIET)
+    images = {n: [mo_image(n * 10, [n])] for n in (500, 501, 502)}
+    outside = MOOutside({300: 130}, {pid(n * 10): 130 for n in images}, images)
+    rows = seed_rows() + [row(300, "C z")] + [mo_row(n) for n in images]
+    capped = nightly.Settings(mo=True, max_mo_photos=2)
+    both = {"m1": lambda: Const("m1"), "m2": lambda: Const("m2")}
+    first = run(layer, rows, outside, capped, backbones=both)
+    assert sorted(outside.downloads) == [3000, pid(5000), pid(5010)]
+    assert first["embedded"] == {"m1": 3, "m2": 3}
+    run(layer, rows, outside, capped, backbones=both)
+    assert sorted(outside.downloads) == [3000, pid(5000), pid(5010), pid(5020)]
+    none = MOOutside({}, {}, {503: [mo_image(5030, [503])]})
+    run(layer, rows + [mo_row(503)], none, nightly.Settings(mo=True, max_mo_photos=0),
+        backbones=both)
+    assert none.downloads == []                               # 0: no MO photos at all

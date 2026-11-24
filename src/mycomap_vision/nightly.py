@@ -67,8 +67,9 @@ MV_NIGHTLY_MAX_MO (2000, 50 requests of 40) a night. Its photos are new to the l
 for each backbone that has no vector for them (an MO photo's id is fixed, 10^12 + MO's
 image id, so a backbone whose release shipped their vectors needs nothing and serves the
 record as soon as the rows exist), only when MO's use rule allows them (ok_for_export,
-not all rights reserved), embedded within MV_NIGHTLY_MAX_PHOTOS and tagged for the
-photo review like any night's photo. Its failure is reported under `mo` and never
+not all rights reserved), at most MV_NIGHTLY_MAX_MO_PHOTOS (1500) MO photos a night
+(MO's image host: 5 s apart, so a backlog spreads over nights), embedded within
+MV_NIGHTLY_MAX_PHOTOS and tagged for the photo review like any night's photo. Its failure is reported under `mo` and never
 undoes the night.
 """
 
@@ -191,12 +192,18 @@ class Settings:
     # unless set), at most max_mo observations a night (40 a request, 5 s apart). 0: none.
     mo: bool = False
     max_mo: int = 2000
+    # MO photos downloaded in one night, every backbone together (MO's image host: one at a
+    # time, 5 s apart, so 1500 are about 2 h; a backlog spreads over nights). 0: none.
+    max_mo_photos: int = 1500
 
     def __post_init__(self):
         if not _AT.match(self.at):
             raise ValueError(f"MV_NIGHTLY_AT must be HH:MM, not {self.at!r}")
         if self.max_mo < 0:
             raise ValueError(f"MV_NIGHTLY_MAX_MO must be 0 or more, not {self.max_mo}")
+        if self.max_mo_photos < 0:
+            raise ValueError("MV_NIGHTLY_MAX_MO_PHOTOS must be 0 or more, not "
+                             f"{self.max_mo_photos}")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -212,7 +219,8 @@ class Settings:
                    catch_up_after_hours=_number("MV_NIGHTLY_CATCHUP_AFTER_HOURS", 24.0),
                    catch_up_delay_minutes=_number("MV_NIGHTLY_CATCHUP_DELAY_MINUTES", 10.0),
                    mo=_flag("MV_NIGHTLY_MO"),
-                   max_mo=int(_number("MV_NIGHTLY_MAX_MO", 2000)))
+                   max_mo=int(_number("MV_NIGHTLY_MAX_MO", 2000)),
+                   max_mo_photos=int(_number("MV_NIGHTLY_MAX_MO_PHOTOS", 1500)))
 
     def zone(self) -> tzinfo:
         from zoneinfo import ZoneInfo
@@ -885,10 +893,12 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
             # MO photos MO's use rule leaves out are never fetched (never served or reviewed).
             since = layer_started(conn)
             for name in served:
+                mo_left = max(0, settings.max_mo_photos
+                              - mo_photos_fetched_since(conn, store, iso(started)))
                 report["photos"][name] = _step(lambda: steps.download(
                     conn, store, size=settings.size, limit=settings.max_photos,
                     first_seen_since=since, new_photos_since=since, unembedded_for=name,
-                    mo_use_rule=True, log=log),
+                    mo_use_rule=True, max_mo=mo_left, log=log),
                     f"photos for {name}", log)
                 todo = photos_to_embed(conn, name, settings.size, store.location,
                                        str(layer.photos))[:settings.max_photos]
@@ -977,6 +987,14 @@ def fetch_mo_details(conn: sqlite3.Connection, layer: Layer, settings: Settings,
         f"{out.get('photos_new', 0):,} new photos, {out.get('still_pending', '?')} still "
         "without" + (f"; {out['error']}" if out.get("error") else ""))
     return out
+
+
+def mo_photos_fetched_since(conn: sqlite3.Connection, store: LocalStore, since: str) -> int:
+    """MO photos downloaded into the layer's store since `since` (tonight's start): what the
+    night's MO photo cap has used, whichever backbone fetched them."""
+    return conn.execute("select count(*) from photo_copies c join photos p on "
+                        "p.photo_id = c.photo_id where p.source = 'mo' and c.store = ? "
+                        "and c.downloaded_at >= ?", (store.location, since)).fetchone()[0]
 
 
 # The MO step's counts health shows (fetch_mo_details, mo.fetch_all): no ids, no error text.
@@ -1183,7 +1201,8 @@ def _mo_health(settings: Settings, report: dict | None) -> dict:
     step = (report or {}).get("mo")
     if not settings.mo and not isinstance(step, dict):
         return {}
-    block: dict = {"on": settings.mo, "max_per_night": settings.max_mo}
+    block: dict = {"on": settings.mo, "max_per_night": settings.max_mo,
+                   "max_photos_per_night": settings.max_mo_photos}
     if isinstance(step, dict):
         block.update({k: int(step.get(k) or 0) for k in MO_COUNTS})
         block["failed"] = bool(step.get("error"))
@@ -1209,7 +1228,8 @@ def status(conn: sqlite3.Connection, settings: Settings, now: datetime | None = 
     ok_at = conn.execute("select max(finished_at) from nightly_runs where ok = 1").fetchone()[0]
     out = {"at": settings.at, "tz": settings.tz, "last_ok_at": ok_at, "runs": last,
            "layer": layer_sizes(conn, settings.warn_share),
-           "mo": {"on": settings.mo, "max_per_night": settings.max_mo}}
+           "mo": {"on": settings.mo, "max_per_night": settings.max_mo,
+                  "max_photos_per_night": settings.max_mo_photos}}
     if settings.mo:
         try:
             out["mo"]["waiting"] = len(mo.pending(conn))   # green NA MO records with no answer

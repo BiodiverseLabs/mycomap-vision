@@ -333,7 +333,9 @@ Each answer is kept gzipped in the layer's `raw/mo/`, and its rows go into the l
 manifest only (`mo_observations`, `photos`, `observation_photos`, `license_history`).
 Its photos then go through the photo steps above:
 - downloaded only for a backbone that has no vector for them, from MO's image host at
-  MO's 5 s pace, within `MV_NIGHTLY_MAX_PHOTOS`;
+  MO's 5 s pace, within `MV_NIGHTLY_MAX_PHOTOS` and at most `MV_NIGHTLY_MAX_MO_PHOTOS`
+  (1500, about 2 h of MO requests) MO photos a night for every backbone together, so a
+  backlog (5,012 photos for v1 on 24 Nov: 7 h at 5 s) spreads over nights;
 - only when MO's use rule allows them (`ok_for_export`, not all rights reserved). Others
   are never fetched, served or reviewed;
 - tagged for the photo review like any night's photo.

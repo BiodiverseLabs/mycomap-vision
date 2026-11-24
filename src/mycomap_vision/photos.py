@@ -200,7 +200,8 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
                    random_order: bool = False, record_sample: int | None = None,
                    first_seen_since: str | None = None, held_at: str | None = None,
                    hosts: tuple[str, ...] | None = None, unembedded_for: str | None = None,
-                   new_photos_since: str | None = None, mo_use_rule: bool = False):
+                   new_photos_since: str | None = None, mo_use_rule: bool = False,
+                   max_mo: int | None = None):
     """Photos of green records with no copy at `size` (in `store_location`, when given),
     failed fewest times first. Photos iNat no longer has, and ones that failed
     MAX_ATTEMPTS times, are left out. A copy at another size or in another store
@@ -224,6 +225,10 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
     `mo_use_rule` leaves out the MO photos MO's use rule leaves out of every reference
     set (permissions.MO_EXCLUDED_FROM_USE_SQL: not ok_for_export, or all rights
     reserved), so nothing is fetched from MO that could never be served or reviewed.
+
+    `max_mo` keeps at most that many MO photos (the nightly update's own MO cap: MO's
+    image host takes one request every 5 s, so 5,000 photos are 7 hours), in the same
+    order; `limit` then applies to what is left.
 
     A benchmark's held-out records (holdouts.py) get no reference photos; the
     benchmark keeps its own (heldout.py).
@@ -284,9 +289,19 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
                         and c.size = ? and (? is null or c.store = ?)){extra}
       order by {"random()" if random_order else "p.attempts, p.photo_id"}
     """
-    if limit is not None:
+    if limit is not None and max_mo is None:
         sql += f" limit {int(limit)}"
-    return conn.execute(sql, (*params, size, store_location, store_location, *tail)).fetchall()
+    rows = conn.execute(sql, (*params, size, store_location, store_location, *tail)).fetchall()
+    if max_mo is not None:
+        kept, mo_left = [], max(0, int(max_mo))
+        for r in rows:
+            if r["source"] == sources.MO:
+                if not mo_left:
+                    continue
+                mo_left -= 1
+            kept.append(r)
+        rows = kept if limit is None else kept[:int(limit)]
+    return rows
 
 
 def save_result(conn: sqlite3.Connection, r: Result, size: str, now: str,
@@ -372,7 +387,7 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                  held_at: str | None = None, hosts: tuple[str, ...] | None = None,
                  policies: dict[str, HostPolicy] | None = None, poll: float = 30,
                  unembedded_for: str | None = None, new_photos_since: str | None = None,
-                 mo_use_rule: bool = False, log=print) -> dict:
+                 mo_use_rule: bool = False, max_mo: int | None = None, log=print) -> dict:
     """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
     runs every `checkpoint_every` seconds and once at the end.
 
@@ -382,7 +397,7 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
     config.ensure_dirs()
     rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
                           record_sample, first_seen_since, held_at, hosts, unembedded_for,
-                          new_photos_since, mo_use_rule)
+                          new_photos_since, mo_use_rule, max_mo)
     return run_downloads(conn, rows, store, size,
                          lambda r, now: save_result(conn, r, size, now, store.location),
                          policies=policies, max_hours=max_hours, checkpoint=checkpoint,
