@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/Layout";
 import { api, ApiError, runApi, signInUrl, type ContextUsed, type RunView } from "@/lib/api";
 import { localWhen } from "@/lib/keptRun";
+import { noContextWords } from "@/lib/photoPlace";
 import { sourceName } from "@/lib/observationLink";
 import { answerModels } from "@/lib/publicNames";
 import { runPhotos } from "@/lib/runLink";
@@ -73,7 +74,7 @@ export function RunPage({ id }: { id: string }) {
           )}
         </div>
         <div className="min-w-0">
-          <div className="mb-4"><RunContext used={r.context_used} /></div>
+          <div className="mb-4"><RunContext used={r.context_used} excludedReference={!!r.observation?.excluded_reference} /></div>
           <OthersRun.Provider value={!r.mine}>
             <div className={`grid gap-6 ${r.results.length > 1 ? "xl:grid-cols-2" : ""}`}>
               {r.results.map((res, i) => (
@@ -193,9 +194,9 @@ function SignInToIdentify({ signedIn }: { signedIn: boolean }) {
 }
 
 /** The place and date the answer used, as the Identify page shows them (place to 0.1°). */
-function RunContext({ used }: { used: ContextUsed }) {
+export function RunContext({ used, excludedReference = false }: { used: ContextUsed; excludedReference?: boolean }) {
   if (!used.place_from && !used.date_from) {
-    return <p className="text-sm text-muted-foreground">From the photos alone (no place or date given).</p>;
+    return <p className="text-sm text-muted-foreground" data-testid="run-no-context">{noContextWords(false, excludedReference)}</p>;
   }
   return (
     <p className="text-sm text-muted-foreground flex flex-wrap gap-x-4 gap-y-1" data-testid="run-context">

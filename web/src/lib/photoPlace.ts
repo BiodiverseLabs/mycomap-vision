@@ -49,6 +49,25 @@ export function placeNote(w: Where): string | null {
   return [placeLine, date && `Date from ${date}.`].filter(Boolean).join(" ") || null;
 }
 
+/**
+ * In the line above the answer when no place or date was used: why not. A find that is one
+ * of Vision's DNA-checked reference records is left out of its own answer, and its place and
+ * date with it, because the range-and-season score is built from those same records (the
+ * server's identify_observation). Saying "none given" there would be wrong: the observation
+ * has them.
+ */
+export function noContextWords(placeModel: boolean, excludedReference = false): string {
+  if (excludedReference) {
+    return placeModel
+      ? "The observation's place and date weren't used: it is one of the DNA-checked records the " +
+        "range-and-season score is built from, so it would count toward its own name. The photos alone were used."
+      : "From the photos alone (the observation is one of Vision's DNA-checked records, so its place and date aren't used).";
+  }
+  return placeModel
+    ? "No place or date given or found in the photos, so models with a range-and-season score used the photos alone."
+    : "From the photos alone (no place or date given).";
+}
+
 /** In the line above the answer: where the place or date the server used came from. */
 export function sourceWords(from: "entered" | "photo" | "observation" | null, sentFromPhoto?: number,
                             sentFromDevice?: boolean, sentFromMap?: boolean): string {
