@@ -21,6 +21,10 @@ conditions this module keeps:
   Vision gated (agreement_validated, penalty_lift, second_source_vision) and, fail-closed,
   every record whose route is not known yet. Those records are still answered by both models
   and scored: each is its own labelled group (GROUPS), counted, never mixed into the primary.
+  The kinds as ruled (research 900b62b): read_pick, read_set_aside and read_trashed are
+  Vision-assisted; skipped_for_person alone and vision_available_at_manual_validation are
+  primary (counted); an assisted kind, then a gated one, decides whatever else is there; a
+  kind not ruled on keeps the record route_unknown (KNOWN_ROLES, group_from).
 - (c) Each record's own photos and its twins (the cross-posted copy, by the served release's
   twin pass, twins.ReferenceTwins) are hidden from BOTH references, the same records for both
   (api.daily_answers). A model with no twin table is refused (TwinsRefused). For cross-posts
@@ -175,15 +179,27 @@ GROUP_LABELS = {
     PRIMARY: "Primary: validated with Vision taking no part in the decision",
     VISION_GATED: "Auto-validated where Vision gated the decision (agreement, penalty lift "
                   "or second source); the served v1 chose these",
-    VISION_ASSISTED: "Validated with Vision's help (DNA + MycoMap Vision, or Vision's answer "
-                     "on screen when a person validated)",
-    ROUTE_UNKNOWN: "Validation route not known yet (mycomap.org's feed does not say): kept "
-                   "out of the primary until it does",
+    VISION_ASSISTED: "Validated with Vision's help (DNA + MycoMap Vision, Vision's answer on "
+                     "screen when a person validated, or the read Vision picked, set aside or "
+                     "trashed)",
+    ROUTE_UNKNOWN: "Validation route not known yet (mycomap.org's feed does not say, or names "
+                   "a part for Vision not ruled on yet): kept out of the primary until it is",
 }
-# .org's vision_decision_events kinds (lib/validation-engine visionDecisionEvents.ts) that
-# put a record in a group other than the primary.
+# .org's vision_decision_events kinds (lib/validation-engine visionDecisionEvents.ts), as the
+# Paper Coordinator has ruled on them (research f79c7d2, 900b62b). Precedence: assisted, then
+# gated, then primary; an assisted or gated kind decides the group whatever else is there. A
+# kind in none of these sets is not ruled on: the record is route_unknown, never primary,
+# until the coordinator rules and a commit adds it (KNOWN_ROLES). The group is worked out from
+# the roles each row keeps whenever a report is made (group_of), so a later ruling regroups
+# records already scored without touching a row.
+ASSISTED_ROLES = frozenset({"vision_shown_at_manual_validation",
+                            "read_pick", "read_set_aside", "read_trashed"})
 GATED_ROLES = frozenset({"agreement_validated", "penalty_lift", "second_source_vision"})
-SHOWN_ROLES = frozenset({"vision_shown_at_manual_validation"})
+PRIMARY_ROLES = frozenset({"skipped_for_person",                       # alone: primary
+                           "vision_available_at_manual_validation"})   # primary, counted
+KNOWN_ROLES = ASSISTED_ROLES | GATED_ROLES | PRIMARY_ROLES
+SKIPPED_FOR_PERSON = "skipped_for_person"
+VISION_AVAILABLE = "vision_available_at_manual_validation"
 ROUTE_METHODS = ("manual", "auto", "mixed")
 
 SCHEMA = """
@@ -528,31 +544,55 @@ def parse_route(raw) -> dict | None:
             "vision_roles": roles, "vision_called": called if isinstance(called, bool) else None}
 
 
+def group_from(assisted, method, roles) -> str:
+    """The group of a record from its route (rulings f79c7d2 (b) and 900b62b), in order:
+
+      Vision-assisted   .org's validated_with_vision, or any ASSISTED_ROLES kind (Vision's
+                        answer on screen when a person validated; the read it picked, set
+                        aside or trashed), whatever else is there
+      Vision-gated      any GATED_ROLES kind (the agreement, the penalty lift, the second
+                        source), whatever else is there
+      route unknown     no route, no roles, or a kind not ruled on (not in KNOWN_ROLES):
+                        fail-closed, never primary
+      primary           a known route whose kinds are all ruled no part in the decision
+                        (none, skipped_for_person, vision_available_at_manual_validation)"""
+    kinds = set(roles) if roles is not None else None
+    if assisted or (kinds and kinds & ASSISTED_ROLES):
+        return VISION_ASSISTED
+    if kinds and kinds & GATED_ROLES:
+        return VISION_GATED
+    if method is None or kinds is None or kinds - KNOWN_ROLES:
+        return ROUTE_UNKNOWN
+    return PRIMARY
+
+
+def roles_of(stored) -> list[str] | None:
+    """A row's vision_roles (JSON) as a list; None when not known."""
+    if stored is None:
+        return None
+    try:
+        got = json.loads(stored)
+    except (TypeError, ValueError):
+        return None
+    return got if isinstance(got, list) else None
+
+
+def group_of(fields: dict) -> str:
+    """The group, under today's rulings, of a ledger or cut_routes row's stored route."""
+    return group_from(fields.get("vision_assisted"), fields.get("route_method"),
+                      roles_of(fields.get("vision_roles")))
+
+
 def route_of(rec: dict) -> dict:
-    """The record's validation route and its group (ruling (b)), from the manifest's fields:
+    """The record's validation route and its group (group_from), from the manifest's fields:
     {"route_group", "route_method", "route_rules_version", "vision_roles" (JSON or None),
     "vision_called", "vision_assisted", "held_by_vision"}. Decides the group only: every
-    record is answered and scored whatever it says.
-
-      Vision-assisted   .org's validated_with_vision, or Vision's answer on screen when a
-                        person validated (vision_shown_at_manual_validation)
-      Vision-gated      Vision was the agreement, the penalty lift or the second source
-      route unknown     the feed gives no route, or no Vision roles: fail-closed
-      primary           a known route with no such part for Vision"""
+    record is answered and scored whatever it says."""
     assisted = int(bool(rec.get("vision_assisted")))
     held = int(bool(rec.get("held_by_vision")))
     route = parse_route(rec.get("validation_route")) or {}
     method, roles = route.get("method"), route.get("vision_roles")
-    if assisted:
-        group = VISION_ASSISTED
-    elif roles is not None and GATED_ROLES & set(roles):
-        group = VISION_GATED
-    elif roles is not None and SHOWN_ROLES & set(roles):
-        group = VISION_ASSISTED
-    elif method is None or roles is None:
-        group = ROUTE_UNKNOWN
-    else:
-        group = PRIMARY
+    group = group_from(assisted, method, roles)
     called = route.get("vision_called")
     return {"route_group": group, "route_method": method,
             "route_rules_version": route.get("rules_version"),
@@ -668,12 +708,14 @@ def _ledger(store: sqlite3.Connection, cohort: str, model: Declared) -> list[dic
 
 def learn_routes(store: sqlite3.Connection, manifest: sqlite3.Connection, model: Declared,
                  now: str, code: str) -> int:
-    """For the cohort's records scored while their route was unknown, the route the
-    manifest knows now, appended once to cut_routes (insert-only). Returns how many."""
+    """For the cohort's records scored before the feed gave their route (no method or no
+    roles kept), the route the manifest knows now, appended once to cut_routes
+    (insert-only). Returns how many. A record scored with its route, even one with a kind
+    not ruled on yet, needs none: its group is worked out from its own roles (group_of)."""
     unknown = {r[0] for r in store.execute(
         "select record_key from cut_answers where cohort = ? and model_id = ? and backbone = ? "
-        "and method = ? and cut = ? and route_group = ?",
-        (model.id, model.id, model.backbone, model.method, model.cut, ROUTE_UNKNOWN))}
+        "and method = ? and cut = ? and (route_method is null or vision_roles is null)",
+        (model.id, model.id, model.backbone, model.method, model.cut))}
     unknown -= {r[0] for r in store.execute("select record_key from cut_routes where cohort = ?",
                                             (model.id,))}
     if not unknown:
@@ -687,7 +729,7 @@ def learn_routes(store: sqlite3.Connection, manifest: sqlite3.Connection, model:
                                f"({', '.join('?' for _ in part)})", part)
         for row in cur.fetchall():
             route = route_of(dict(zip(cols, row)))
-            if route["route_group"] != ROUTE_UNKNOWN:
+            if route["route_method"] is not None and route["vision_roles"] is not None:
                 rows.append((model.id, row[0], now, *(route[c] for c in ROUTE_COLUMNS), code))
     with store:
         store.executemany("insert or ignore into cut_routes (cohort, record_key, learned_at, "
@@ -851,15 +893,22 @@ def _three(rows: list[dict]) -> dict:
 
 def routes(store: sqlite3.Connection, cohort: Declared) -> dict[str, dict]:
     """Each of the cohort's records' route as the reports use it: the one it was scored
-    with, or, for one scored with its route unknown, the first route learned since
-    (cut_routes). {record key: {"route_group", "vision_called", "held_by_vision", ...}}."""
+    with, or, for one scored before the feed gave it, the first route learned since
+    (cut_routes); its group worked out now from those stored fields (group_of), so a later
+    ruling regroups it without a row being edited. The group the row was written with stays
+    in the row (route_group) and is given here as route_group_at_write. {record key:
+    {"route_group", "vision_roles", "vision_called", "held_by_vision", ...}}."""
     out = {r["record_key"]: {c: r[c] for c in ROUTE_COLUMNS}
            for r in _ledger(store, cohort.id, cohort)}
     cur = store.execute(f"select record_key, {', '.join(ROUTE_COLUMNS)} from cut_routes "
                         "where cohort = ?", (cohort.id,))
-    for row in cur.fetchall():
-        if row[0] in out and out[row[0]]["route_group"] == ROUTE_UNKNOWN:
-            out[row[0]] = dict(zip(ROUTE_COLUMNS, row[1:]))
+    learned = {row[0]: dict(zip(ROUTE_COLUMNS, row[1:])) for row in cur.fetchall()}
+    for key, fields in out.items():
+        at_write = fields["route_group"]
+        if (fields["route_method"] is None or fields["vision_roles"] is None) and key in learned:
+            fields = out[key] = dict(learned[key])
+        fields["route_group_at_write"] = at_write
+        fields["route_group"] = group_of(fields)
     return out
 
 
@@ -999,14 +1048,45 @@ def _summary(rows: list[dict]) -> dict:
             "top_k": {"k": list(KS), **{rank: _top_k(scored, rank) for rank in RANKS}}}
 
 
+# What .org would need to send for the open skipped_for_person count (ruling 900b62b, 6):
+# the green feed holds only green records, and the pending feed (GET
+# /api/vision/pending-records) carries no Vision roles.
+OPEN_SKIPPED_NEEDS = ("mycomap.org sends no count of records skipped for a person and not "
+                      "validated yet: the green feed has green records only, and the pending "
+                      "feed carries no Vision roles. It would need either vision_roles (or a "
+                      "skipped_for_person flag) on each GET /api/vision/pending-records row, or "
+                      "an open_skipped_for_person total on its first page.")
+
+
+def role_counts(rows: list[dict]) -> dict:
+    """Per kind, the records whose stored roles hold it; and the kinds not ruled on."""
+    kinds: Counter = Counter()
+    for r in rows:
+        kinds.update(set(roles_of(r.get("vision_roles")) or ()))
+    return {"by_kind": dict(sorted(kinds.items())),
+            "not_ruled_on": {k: n for k, n in sorted(kinds.items()) if k not in KNOWN_ROLES}}
+
+
+def skipped_waiting(manifest: sqlite3.Connection, model: Declared, done: set[str],
+                    held: frozenset) -> int:
+    """Green records after the cut whose feed roles hold skipped_for_person and that have no
+    ledger row yet (waiting, or not answered yet)."""
+    todo, _ = candidates(manifest, model, done, held)
+    return sum(SKIPPED_FOR_PERSON in (roles_of(route_of(r)["vision_roles"]) or ()) for r in todo)
+
+
 def internal_payload(store: sqlite3.Connection | None, models: list[Declared] | None = None,
                      comp: Companion | None = None, held: frozenset | None = None,
-                     lock=None, trained_through: dict | None = None) -> dict:
+                     lock=None, trained_through: dict | None = None,
+                     manifest: sqlite3.Connection | None = None) -> dict:
     """The internal view (/api/daily-scores/internal): for each declared model, every group's
     records (answered by both models), with the primary's sub-counts (no Vision call at all,
-    Vision call not known, held by Vision once), each model's figures per group, the paired
-    comparison per group, and the primary's full reports for both models. Aggregates only; it
-    may name v1. Refused whole (its reason only) when a declaration or the hold list is."""
+    Vision call not known, held by Vision once, Vision available at a manual validation,
+    skipped for a person), each model's figures per group, the paired comparison per group,
+    the primary's full reports for both models, the records per Vision kind (and the kinds
+    not ruled on), and what is known of skipped_for_person (in the ledger by group, green and
+    not scored yet; the open count at .org is not sent: OPEN_SKIPPED_NEEDS). Aggregates only;
+    it may name v1. Refused whole (its reason only) when a declaration or the hold list is."""
     out: dict = {"internal": True, "paired_from": PAIRED_FROM, "s2_stop": S2_STOP,
                  "public": public(), "public_v1": public_v1(), "cohorts": {}}
     if store is None:
@@ -1036,15 +1116,28 @@ def internal_payload(store: sqlite3.Connection | None, models: list[Declared] | 
                 entry["no_vision_call"] = sum(r["vision_called"] == 0 for r in mine)
                 entry["vision_call_not_known"] = sum(r["vision_called"] is None for r in mine)
                 entry["held_by_vision"] = sum(bool(r["held_by_vision"]) for r in mine)
+                entry[VISION_AVAILABLE] = sum(VISION_AVAILABLE in (roles_of(r["vision_roles"])
+                                                                   or ()) for r in mine)
+                entry[SKIPPED_FOR_PERSON] = sum(SKIPPED_FOR_PERSON in (roles_of(r["vision_roles"])
+                                                                       or ()) for r in mine)
             keys = {r["record_key"] for r in mine}
             entry["models"] = {p.id: _summary([r for r in by_model[p.id]
                                                if r["record_key"] in keys]) for p in pair}
             if comp:
                 entry["paired"] = paired(store, m, comp, held, lock, groups=(g,))
             groups[g] = entry
+        skipped = [r for r in cohort_rows
+                   if SKIPPED_FOR_PERSON in (roles_of(r["vision_roles"]) or ())]
+        waiting = None
+        if manifest is not None:
+            waiting = skipped_waiting(manifest, m, {r["record_key"] for r in cohort_rows}, held)
         out["cohorts"][m.id] = {
             "trained_through": m.cut, "models": {p.id: p.model for p in pair},
             "records": len(cohort_rows), "groups": groups,
+            "roles": role_counts(cohort_rows),
+            SKIPPED_FOR_PERSON: {"in_ledger": dict(Counter(r["route_group"] for r in skipped)),
+                                 "green_not_scored_yet": waiting,
+                                 "open_at_org": None, "open_at_org_needs": OPEN_SKIPPED_NEEDS},
             "primary": {p.id: report(store, p, held, lock=lock, cohort=m, groups=(PRIMARY,))
                         for p in pair}}
     return out

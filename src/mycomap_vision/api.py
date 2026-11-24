@@ -1438,12 +1438,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if not is_admin(str(who.get("sub"))):
                 raise HTTPException(403, "mycomap.org admins only", headers=NOT_INDEXED)
         own = manifest.connect(manifest_path)
+        own.execute("pragma busy_timeout = 30000")
         try:
-            through = trained_through(own)
+            payload = daily_scores.internal_payload(early_store.conn, lock=early_store.lock,
+                                                    trained_through=trained_through(own),
+                                                    manifest=own)
         finally:
             own.close()
-        payload = daily_scores.internal_payload(early_store.conn, lock=early_store.lock,
-                                                trained_through=through)
         return JSONResponse(research_public.daily_scores(payload, v1=True), headers=NOT_INDEXED)
 
     @app.get("/api/how-good")

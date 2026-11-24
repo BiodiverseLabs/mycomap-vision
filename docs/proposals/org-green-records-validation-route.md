@@ -42,10 +42,14 @@ mycomap.org sends the route.
 Kinds that decide the group on the Vision side (`daily_scores.route_of`):
 
 - `agreement_validated`, `penalty_lift`, `second_source_vision`: Vision gated the decision.
-- `vision_shown_at_manual_validation`: Vision's answer was on screen when a person validated
-  it, so it counts as Vision-assisted.
-- Any other kind, or `[]`: no part in the decision. The record joins the primary when the
-  method is known. `vision_called: false` adds it to the primary's "no Vision call" sub-count.
+- `vision_shown_at_manual_validation`, `read_pick`, `read_set_aside`, `read_trashed`:
+  Vision-assisted (research 900b62b for the read kinds).
+- `skipped_for_person` (alone) and `vision_available_at_manual_validation`: no part in the
+  decision; primary, counted.
+- `[]`: no part. `vision_called: false` adds it to the primary's "no Vision call" sub-count.
+- Any other kind: not ruled on yet, so the record is "route unknown" (never primary) until
+  the Paper Coordinator rules and a commit adds the kind (`daily_scores.KNOWN_ROLES`).
+- An assisted kind, then a gated one, decides the group whatever else is present.
 
 ### Notes for the implementer
 
