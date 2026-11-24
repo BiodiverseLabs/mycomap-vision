@@ -376,6 +376,21 @@ class Timer:
 # Backbone and method ids stay internal (logs, the full /api/health, the website's own pages).
 PUBLIC_MODEL_NAME = "MycoMap Vision"
 INTERNAL_MARKERS = ("bioclip", "-ft-")      # what no public health string may contain
+# Models with a public name of their own beside the default one (Steve, 2026-11-24: v2 is
+# the opt-in beta). The website names them the same way (web/src/lib/publicNames.ts,
+# NAMED_VERSIONS; tests/test_v2_beta_prefixes.py checks the two agree).
+V2_BETA = "bioclip-2.5-336-ft-20261122-171257"
+NAMED_MODELS = {V2_BETA: "MycoMap Vision v2 (beta)"}
+OTHER_MODEL_NAME = "MycoMap Vision (another model)"
+
+
+def public_name(backbone: str | None, default: str | None) -> str:
+    """What API v1 calls the model that answered: "MycoMap Vision" for the default one (as
+    always), a named model's own name (NAMED_MODELS), else OTHER_MODEL_NAME: never the
+    default's name for another model."""
+    if backbone is None or backbone == default:
+        return PUBLIC_MODEL_NAME
+    return NAMED_MODELS.get(backbone, OTHER_MODEL_NAME)
 
 
 def public_health(full: dict, served: str | None, backbones) -> dict:
@@ -383,13 +398,14 @@ def public_health(full: dict, served: str | None, backbones) -> dict:
     method after it, "backbone/method") replaced by a public label, and no error or reason
     text (which can name files, hosts or models). `served` is the backbone answering
     identifications ("MycoMap Vision"); any other in `backbones` is "model 2", "model 3",
-    ... in name order. Keys keep their order, so deploy.sh's read of
+    ... in name order, or its own public name (NAMED_MODELS: "MycoMap Vision v2 (beta)").
+    Keys keep their order, so deploy.sh's read of
     `"preload":{"state":` still works, and the nightly block keeps every field
     nightly_notes reads. Anything left that still looks like an id (INTERNAL_MARKERS)
     reads "internal"."""
     others = sorted({b for b in backbones if b} - {served})
     labels = {**({served: PUBLIC_MODEL_NAME} if served else {}),
-              **{b: f"model {i}" for i, b in enumerate(others, 2)}}
+              **{b: NAMED_MODELS.get(b, f"model {i}") for i, b in enumerate(others, 2)}}
     ids = sorted(labels, key=len, reverse=True)
     pattern = (re.compile("|".join(re.escape(b) + r"(?:/[A-Za-z0-9+._-]+)?" for b in ids))
                if ids else None)
@@ -450,13 +466,19 @@ def id_date(stamped: str | None) -> str | None:
     return f"{m[1]}-{m[2]}-{m[3]}" if m else None
 
 
-def public_model(card: dict | None, calibration_id: str | None = None) -> dict:
+def public_model(card: dict | None, calibration_id: str | None = None,
+                 name: str = PUBLIC_MODEL_NAME, own_card: bool = True) -> dict:
     """The `model` block of every v1 answer (docs/api.md §4): a name; the version of the
     training data behind it and that snapshot's size (modelcard.py); the date its
-    confidence was last calibrated. Nothing names a backbone or method."""
+    confidence was last calibrated. Nothing names a backbone or method. `own_card` False
+    (the card describes another model: modelcard.belongs_to): `version` and `data` are
+    null, never another model's card."""
+    if not own_card:
+        return {"name": name, "version": None, "data": None,
+                "calibrated_on": id_date((calibration_id or "")[:16] + "-")}
     card = card or {}
     data = card.get("data") or {"snapshot": None, "records": 0, "species": 0, "genera": 0}
-    return {"name": PUBLIC_MODEL_NAME, "version": card.get("version"),
+    return {"name": name, "version": card.get("version"),
             "data": {k: data.get(k) for k in ("snapshot", "records", "species", "genera")},
             "calibrated_on": id_date((calibration_id or "")[:16] + "-")}
 

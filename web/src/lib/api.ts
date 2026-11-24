@@ -223,6 +223,11 @@ export interface ModelsInfo {
   default_method?: string;
   /** Most models one identification may run on this server (null: no limit). */
   max_models?: number | null;
+  /** The model an identification that names none uses (MV_DEFAULT_BACKBONE), when the
+   *  server names one; absent: the first ready one. */
+  default_backbone?: string;
+  /** False while that named default is not served here (nothing stands in for it). */
+  default_ready?: boolean;
 }
 
 export interface Stats {

@@ -93,3 +93,14 @@ export function defaultChoice(offered: string[], preferred?: string | null): Cho
 
 /** Most models compared side by side in one identification. */
 export const MAX_COMPARED = 2;
+
+/** The model the page selects first (GET /api/models): the server's named default
+ *  (`default_backbone`, MV_DEFAULT_BACKBONE) when it is ready; null while it is named but
+ *  not ready, so the page selects none rather than another model in its place (the server
+ *  refuses an identification that names no model then); with no named default, the first
+ *  ready one, as before. */
+export function defaultBackbone(m: { ready: string[]; default_backbone?: string | null } | undefined): string | null {
+  if (!m) return null;
+  if (m.default_backbone) return m.ready.includes(m.default_backbone) ? m.default_backbone : null;
+  return m.ready[0] ?? null;
+}

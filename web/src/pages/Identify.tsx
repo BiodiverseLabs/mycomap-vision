@@ -60,7 +60,8 @@ import { shouldScrollTo, showPinnedBar, SINGLE_COLUMN_BELOW, waitingSteps, type 
 import { exampleView, homeStage } from "@/lib/identifyHome";
 import { ExampleResult, PhotoGuide, ViewsChecklist, ViewsRow, WhyVision } from "@/components/IdentifyHome";
 import {
-  BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base, type Choice,
+  BASE_LABEL, MAX_COMPARED, defaultBackbone, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base,
+  type Choice,
 } from "@/lib/modelChoice";
 
 const MAX_PHOTOS = 10;
@@ -955,7 +956,8 @@ function ModelPicker({ models, onChange }: {
 
   // Defaults once the server says what it offers.
   useEffect(() => {
-    if (!backbone && ready.length) setBackbone(ready[0]);
+    const start = defaultBackbone(models.data);
+    if (!backbone && start) setBackbone(start);
     if (!choice && offered.length) setChoice(defaultChoice(offered, models.data?.default_method));
   }, [ready, offered, backbone, choice]);
 
@@ -978,6 +980,8 @@ function ModelPicker({ models, onChange }: {
   const cap = Math.min(MAX_COMPARED, models.data?.max_models ?? MAX_COMPARED);
   const canCompare = cap >= 2 && ready.length * offered.length > 1;
   const info = models.data?.backbones.find((b) => b.backbone === backbone);
+  // A named default that isn't served: nothing is selected for the person (no stand-in).
+  const defaultMissing = !!models.data?.default_backbone && models.data.default_ready === false;
 
   // Folded to one line (the model, how it scores) until "Model" opens the choices; folded,
   // it keeps its choices, and a second model to compare.
@@ -997,7 +1001,7 @@ function ModelPicker({ models, onChange }: {
           Model
         </button>
       </div>
-      <div className={`space-y-3 pt-3 ${open || models.isError || (models.data && (!ready.length || !bases.length)) ? "" : "hidden"}`}>
+      <div className={`space-y-3 pt-3 ${open || models.isError || defaultMissing || (models.data && (!ready.length || !bases.length)) ? "" : "hidden"}`}>
         {models.isError && (
           <p className="text-sm text-destructive">
             The identifier isn't answering. Please try again in a minute.
@@ -1010,9 +1014,15 @@ function ModelPicker({ models, onChange }: {
         )}
         {choice && ready.length > 0 && (
           <fieldset className="space-y-3">
-            {ready.length > 1 && (
-              <select className={selectClass} value={backbone ?? ""} onChange={(e) => setBackbone(e.target.value)}
+            {defaultMissing && (
+              <p className="text-sm text-muted-foreground" data-testid="text-default-missing">
+                The usual model isn't available right now.{ready.length ? " You can choose another one." : ""}
+              </p>
+            )}
+            {(ready.length > 1 || defaultMissing) && (
+              <select className={selectClass} value={backbone ?? ""} onChange={(e) => setBackbone(e.target.value || null)}
                 aria-label="Backbone" data-testid="select-backbone">
+                {!backbone && <option value="">Choose a model</option>}
                 {ready.map((b) => <option key={b} value={b}>{publicModelName(b)}</option>)}
               </select>
             )}

@@ -109,6 +109,12 @@ class Gate:
             self.active -= 1
 
 
+def _names(value: str | None) -> set[str] | None:
+    """A comma list of names as a set; None when unset or empty."""
+    names = {v.strip() for v in (value or "").split(",") if v.strip()}
+    return names or None
+
+
 # A default method that can't answer here falls back to this one before nearest.
 # Each served method's fallback when this server can't answer it (not allowed, or not ready:
 # the place store or the twin groups missing). Steve, 2026-10-18 (E32): nearest+mean-records-
@@ -134,6 +140,17 @@ class Limits:
     # Most models one identification may run (None = no limit). The box: 2, so a
     # side-by-side comparison can't outlast the proxy's timeout.
     max_models: int | None = None
+    # The backbone an identification uses when none is named (MV_DEFAULT_BACKBONE), on every
+    # path: the site, API v1, the app's sessions, by-observation and its kept answers, the
+    # nightly advance predictions, taxon counts, Human Feedback's re-asks and excluded maps.
+    # When it is named but not served here, those are refused, never answered by another
+    # model (default_of). None: the first ready backbone by name, as before (deprecated on a
+    # server with more than one model: names decide the default).
+    default_backbone: str | None = None
+    # The backbones API v1 (/api/v1/...: mycomap.org, the app, developer keys) answers with
+    # (MV_API_V1_BACKBONES). None: the default backbone only. A request naming another is
+    # refused (400 model_not_offered), so the v2 beta stays on the site.
+    api_v1_backbones: set[str] | None = None
 
     @classmethod
     def from_settings(cls) -> "Limits":
@@ -151,7 +168,17 @@ class Limits:
             max_models=(int(config.setting("MV_MAX_MODELS")) if (config.setting("MV_MAX_MODELS") or "").isdigit()
                         else None),
             default_method=(config.setting("MV_DEFAULT_METHOD") or "nearest+mean").strip(),
+            default_backbone=(config.setting("MV_DEFAULT_BACKBONE") or "").strip() or None,
+            api_v1_backbones=_names(config.setting("MV_API_V1_BACKBONES")),
         )
+
+    def default_of(self, ready: "list[str]") -> str | None:
+        """The default backbone among `ready` (the backbones offered now, in name order):
+        MV_DEFAULT_BACKBONE when it is one of them, else None (refused: never another model
+        in its place); unset, the first ready one, as before."""
+        if self.default_backbone:
+            return self.default_backbone if self.default_backbone in ready else None
+        return ready[0] if ready else None
 
     def method_allowed(self, method: str) -> bool:
         return self.allowed_methods is None or method in self.allowed_methods

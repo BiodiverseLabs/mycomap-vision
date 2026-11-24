@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { defaultChoice, methodFor, offeredBases, resolveMethod, switchesFor } from "./modelChoice";
+import { defaultBackbone, defaultChoice, methodFor, offeredBases, resolveMethod, switchesFor } from "./modelChoice";
 
 const ALL = ["nearest", "species-mean", "linear", "hybrid", "linear+prior", "hybrid+prior",
              "nearest+prior", "species-mean+prior"];
@@ -90,4 +90,17 @@ test("the page asks for the server's by-specimen default, with place and date", 
   assert.deepEqual(switchesFor("nearest+mean-records-balanced", BOX_C), { weighNearest: false, usePlace: true });
   assert.equal(resolveMethod({ ...c, usePlace: false }, BOX_C), "nearest+mean-records-balanced");
   assert.deepEqual(offeredBases(BOX_C), ["nearest+mean-records-balanced", "nearest+mean", "nearest"]);
+});
+
+test("the page selects the named default model first, even when another sorts first", () => {
+  const v1 = "bioclip-2-336-ft-20261018-171420", v2 = "bioclip-2.5-336-ft-20261122-171257";
+  assert.equal(defaultBackbone({ ready: [v2, v1], default_backbone: v1 }), v1);
+  assert.equal(defaultBackbone({ ready: [v1, v2] }), v1, "unset: the first ready one, as before");
+  assert.equal(defaultBackbone({ ready: [v2, v1] }), v2);
+  assert.equal(defaultBackbone(undefined), null);
+});
+
+test("a named default that isn't ready selects nothing, never another model", () => {
+  assert.equal(defaultBackbone({ ready: ["bioclip-2.5-336-ft-20261122-171257"], default_backbone: "v1" }), null);
+  assert.equal(defaultBackbone({ ready: [], default_backbone: "v1" }), null);
 });

@@ -348,7 +348,10 @@ model's result, not a `results` list.
   (live since 2026-10-14 00:19 UTC): the v1 model, trained 2026-10-13 on dataset release
   v1's `train` split; `version` 2026-10-13, `data` 176,655 records, 18,944 species, 1,543
   genera; `calibrated_on` 2026-10-13 (`GET /api/v1/models`, 2026-10-14). The model before
-  it was `version` 2026-10-06.
+  it was `version` 2026-10-06. The card (`version`, `data`) belongs to the models the
+  release was built with (release.json `backbones`). An answer from any other model that
+  `MV_API_V1_BACKBONES` lets through (the v2 beta: `name` "MycoMap Vision v2 (beta)") carries
+  `version: null` and `data: null`, never another model's card (2026-11-24).
 - **Combined and per-photo, at every rank.** Top-level `ranks`/`likely`/`specimens` are
   the combined answer over the photos the gate kept. `per_photo[i]` is photo *i* alone,
   with `overall_top`: where the combined top name places in that photo's own ranking.
@@ -541,6 +544,7 @@ the website's routes). Retryable ones carry `Retry-After` and `retry_after_secon
 | Status | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | malformed field, lat/lng out of range, bad date, unknown model |
+| 400 | `model_not_offered` | `model` names a model the website offers but API v1 does not (`MV_API_V1_BACKBONES`; by default only the default model answers through API v1, so the v2 beta stays on the site). Leave `model` out |
 | 400 | `too_many_photos` | > 10 in a request or session |
 | 401 | `invalid_token` | missing, unknown or malformed credential |
 | 401 | `token_expired` | an app token past `exp`: re-mint once and retry |
@@ -555,7 +559,7 @@ the website's routes). Retryable ones carry `Retry-After` and `retry_after_secon
 | 502 | `source_unavailable` | iNat or MO did not answer |
 | 503 | `busy` | the queue is full; `estimated_wait_seconds`, `Retry-After` |
 | 503 | `updating` | the reference set is being swapped (seconds); `Retry-After: 30` |
-| 503 | `not_served` | the model can't be served with its not-a-fungus gate here, so it isn't served at all (never answered ungated) |
+| 503 | `not_served` | the model can't be served with its not-a-fungus gate here, so it isn't served at all (never answered ungated); or the default model (`MV_DEFAULT_BACKBONE`) isn't served here, and no other model answers in its place |
 | 503 | `auth_unavailable` | .org couldn't be asked about a key Vision has no recent answer for |
 
 429 means the caller's own limits; 503 means the server is out of capacity, so the
@@ -784,6 +788,8 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_QUOTAS=off\|count\|enforce` | §6: `count` counts and reports use without refusing, for a trial |
 | `MV_TAXON_COUNTS=1` | `GET /api/v1/taxon-counts` (§7) |
 | `MV_DEFAULT_METHOD` | the method an identification uses (default `nearest+mean`). The box serves `nearest+mean+place`, which answers as `nearest+mean` without a place or date; from Steve's decision of 2026-10-18 (E32), `nearest+mean-records-balanced+place`, which scores each species by its two best specimens and counts an MO/iNat cross-post as one. If it can't answer, it falls back to `nearest+mean-records-balanced`, then `nearest+mean+place`, then `nearest+mean`. No method or backbone id appears in any v1 answer. |
+| `MV_DEFAULT_BACKBONE` | the model an identification that names none uses, on every path: the site's Identify page (selected first), API v1, the app's sessions, by-observation and its kept answers, taxon counts, the nightly advance predictions, Human Feedback's re-asks and excluded-photo maps, How it works' numbers, and the public `/api/health` "MycoMap Vision". If it isn't served here (not allowed, no embeddings, refused for want of its gate), those are refused (site 503, v1 503 `not_served`, predictions skipped) and nothing stands in for it: a `[default]` line at startup and `default_backbone` in the server-key `/api/health` say why. The site then selects no model, says so, and lets a person choose another one. Unset: the first ready backbone by name, as before; deprecated on a server with more than one model, where names would decide the default |
+| `MV_API_V1_BACKBONES` | the models API v1 answers with (comma list). Unset: the default model only. A request naming another model the site offers is refused (400 `model_not_offered`); one naming no model gets the default, as always |
 | `MV_TWIN_GROUPS` | the cross-post twin groups (`mv twin-groups`) the specimen scoring needs; default: `twin-groups.tsv` in the served release |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |
