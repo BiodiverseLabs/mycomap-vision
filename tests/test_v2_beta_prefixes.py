@@ -247,6 +247,40 @@ def test_the_card_belongs_to_the_releases_own_models(tmp_path):
 
 # --- a v1-only server answers as before ---------------------------------------------------
 
+# What differs between two runs of the same answer because it is MEASURED (time taken) or
+# drawn at random, by exact path: each must be present on both sides and of its kind, and is
+# then left out of the byte-for-byte comparison. Nothing else is left out.
+TIMING_MS = ("queue_ms", "decode_ms", "embed_ms", "score_ms", "model_ms", "total_ms")
+MEASURED = {
+    "answer": [*(("timing", k) for k in TIMING_MS), ("timing", "fetch_ms")],
+    "health": [("started",), ("preload", "seconds"), ("queue", "embed_seconds_per_photo"),
+               ("queue", "search_seconds"), ("excluded_preload", "last_map_seconds"),
+               ("excluded_preload", "last_pass_seconds"), ("excluded_preload", "last_map_at")],
+}
+MAY_BE_NULL = {("timing", "fetch_ms"), ("preload", "seconds"),
+               ("excluded_preload", "last_map_seconds"), ("excluded_preload", "last_pass_seconds"),
+               ("excluded_preload", "last_map_at")}
+
+
+def without_measured(body: dict, kind: str) -> dict:
+    """`body` (a deep copy) without its measured fields (MEASURED[kind]), each checked to be
+    there and a number (or null where MAY_BE_NULL), and without a v1 request id (checked to
+    be one)."""
+    out = json.loads(json.dumps(body))
+    for path in MEASURED[kind]:
+        holder = out
+        for key in path[:-1]:
+            assert isinstance(holder, dict) and key in holder, (kind, path)
+            holder = holder[key]
+        assert path[-1] in holder, (kind, path)
+        value = holder.pop(path[-1])
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        assert ok or (value is None and path in MAY_BE_NULL), (kind, path, value)
+    if "request_id" in out:
+        assert out.pop("request_id").startswith("r_")
+    return out
+
+
 def test_a_v1_only_server_answers_the_same_with_or_without_the_new_settings(conn, tmp_path):
     a = server(conn, tmp_path, names=(V1,), allowed=(V1,))
     before = {"identify": identify(a, SERVER).json(), "site": post_photos(a, [247]).json(),
@@ -260,19 +294,12 @@ def test_a_v1_only_server_answers_the_same_with_or_without_the_new_settings(conn
     after = {"identify": identify(b, SERVER).json(), "site": post_photos(b, [247]).json(),
              "models": b.get("/api/models").json(), "health": b.get("/api/health").json()}
     conn_b.close()
-
-    def stable(x):
-        drop = {"request_id", "timing", "run", "started", "seconds", "id", "at"}
-        if isinstance(x, dict):
-            return {k: stable(v) for k, v in x.items() if k not in drop}
-        if isinstance(x, list):
-            return [stable(v) for v in x]
-        return x.replace(str(tmp_path / "b"), str(tmp_path)) if isinstance(x, str) else x
-    assert stable(before["identify"]) == stable(after["identify"])
-    assert stable(before["site"]) == stable(after["site"])
-    assert stable(before["health"]) == stable(after["health"])
+    for name, kind in (("identify", "answer"), ("site", "answer"), ("health", "health")):
+        assert without_measured(before[name], kind) == without_measured(after[name], kind), name
     # Unset, /api/models has no new field at all; set, only the default's two.
-    assert set(after["models"]) - set(before["models"]) == {"default_backbone", "default_ready"}
+    assert {k: v for k, v in after["models"].items()
+            if k not in ("default_backbone", "default_ready")} == before["models"]
+    assert (after["models"]["default_backbone"], after["models"]["default_ready"]) == (V1, True)
     assert "default_backbone" not in before["models"]
     assert before["identify"]["model"]["name"] == "MycoMap Vision"
     assert set(before["identify"]["model"]["data"]) == {"snapshot", "records", "species",
