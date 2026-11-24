@@ -36,6 +36,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from . import apiv1
 from .guards import photo_formats
 from .settled import runner_up, settled
 
@@ -168,23 +169,36 @@ def _ranked(h: Headline) -> str:
     return h.name if h.rank == "species" else f"{h.rank} {h.name}"
 
 
-def run_title(h: Headline) -> str:
+def run_title(h: Headline, name: str | None = None) -> str:
+    """The card's title, naming the model that gave the answer (`name`: run_model_name;
+    Steve, 2026-11-24: "every answer is associated with a model"); "MycoMap Vision" when
+    the run doesn't say which."""
+    who = name or SITE_NAME
     if h.kind == "settled":
-        return f"MycoMap Vision says: {_ranked(h)} ({pct(h.confidence)})"
+        return f"{who} says: {_ranked(h)} ({pct(h.confidence)})"
     if h.kind == "look_alike":
-        return f"MycoMap Vision: the closest look-alike is {_ranked(h)}"
+        return f"{who}: the closest look-alike is {_ranked(h)}"
     if h.kind == "unsettled":
         chance = f", {pct(h.confidence)}" if h.confidence is not None else ""
-        return f"MycoMap Vision: no confident answer yet ({_ranked(h)}{chance})"
+        return f"{who}: no confident answer yet ({_ranked(h)}{chance})"
     if h.kind == "not_fungus":
-        return "MycoMap Vision: these photos don't look like a fungus"
-    return "An identification from MycoMap Vision"
+        return f"{who}: these photos don't look like a fungus"
+    return f"An identification from {who}"
 
 
 def run_answer(run: dict) -> dict | None:
     """The answer a run's page leads with: its first model's, all photos together."""
     models = run.get("models") or []
     return (models[0] or {}).get("result") if models else None
+
+
+def run_model_name(run: dict, site_default: str | None = None) -> str | None:
+    """The public name of the model whose answer the run's card shows (its first model's:
+    run_answer), as the site names it ("MycoMap Vision v1", "MycoMap Vision v2 (beta)":
+    apiv1.model_label); None when the run doesn't say, or the model has no public name."""
+    model = (run_answer(run) or {}).get("model") or {}
+    backbone = model.get("backbone") if isinstance(model, dict) else None
+    return apiv1.model_label(backbone, site_default) if backbone else None
 
 
 def credit(source: str | None, licence: str | None, by: str | None) -> str | None:
@@ -220,7 +234,7 @@ def card_photos(run: dict) -> list[tuple[str, str]]:
 
 
 def run_card(origin: str, rid: str, run: dict, version: str | None = None,
-             card_ready: bool = False) -> Card:
+             card_ready: bool = False, site_default: str | None = None) -> Card:
     """A run's card. Only the answer and the find's own photos go in it: never the place,
     the date, the observation, or who ran it (nor who took an observation's photos: that
     credit is printed on the image). `card_ready`: an iNat/MO run's card.jpg is kept (made
@@ -234,7 +248,8 @@ def run_card(origin: str, rid: str, run: dict, version: str | None = None,
     image = f"{origin}/api/runs/{rid}/card.jpg" if photos else site_image(origin, version)
     alt = (f"{photos} photo{'s' if photos != 1 else ''} of one find, identified by MycoMap Vision"
            if photos else SITE_IMAGE_ALT)
-    return Card(run_title(h), RUN_DESCRIPTION, f"{origin}/r/{rid}", image, alt)
+    return Card(run_title(h, run_model_name(run, site_default)), RUN_DESCRIPTION,
+                f"{origin}/r/{rid}", image, alt)
 
 
 # --- the tags --------------------------------------------------------------------------------
@@ -380,9 +395,24 @@ def credits_on(card: Image.Image, lines: list[str], left: int) -> None:
         y += height + 6
 
 
-def card_lines(h: Headline, photos: int) -> tuple[str, str | None, str | None, str]:
-    """(the line above, the rank word, the name, the chance) printed on a run's card."""
+def card_lines(h: Headline, photos: int,
+               model: str | None = None) -> tuple[str, str | None, str | None, str]:
+    """(the line above, the rank word, the name, the chance) printed on a run's card; the
+    line above names the model that answered (`model`: run_model_name) when it is known."""
     from_photos = f"from {photos} photo{'s' if photos != 1 else ''}"
+    if model:
+        if h.kind == "settled":
+            return (f"{model} says, {from_photos}",
+                    None if h.rank == "species" else h.rank, h.name, pct(h.confidence))
+        if h.kind == "look_alike":
+            return (f"{model}: closest look-alike, {from_photos}",
+                    None if h.rank == "species" else h.rank, h.name, "")
+        if h.kind == "unsettled":
+            return (f"{model}: no confident answer yet, {from_photos}", h.rank, h.name,
+                    pct(h.confidence))
+        if h.kind == "not_fungus":
+            return (f"{model}: these photos don't look like a fungus", None, None, "")
+        return (f"Identified by {model}, {from_photos}", None, None, "")
     if h.kind == "settled":
         return (f"MycoMap Vision says, {from_photos}",
                 None if h.rank == "species" else h.rank, h.name, pct(h.confidence))
@@ -398,7 +428,7 @@ def card_lines(h: Headline, photos: int) -> tuple[str, str | None, str | None, s
 
 def run_card_jpeg(photos: list[bytes], h: Headline, logo: Image.Image | None = None,
                   quality: int = 85, credits: list[str] = (),
-                  answered_from: int | None = None) -> bytes:
+                  answered_from: int | None = None, model: str | None = None) -> bytes:
     """A run's 1200x630 card: its photos (first large, up to four beside it), the badge, and
     the answer printed at the bottom. Made from the run's own kept copies (no EXIF), or an
     observation's CC0 / CC BY photos with their `credits` printed at the top right (each
@@ -419,7 +449,7 @@ def run_card_jpeg(photos: list[bytes], h: Headline, logo: Image.Image | None = N
     card.alpha_composite(shade, (0, H - band))
     right = badge(card, logo)
     credits_on(card, list(dict.fromkeys(credits)), right)
-    above, rank, name, chance = card_lines(h, answered_from or len(photos))
+    above, rank, name, chance = card_lines(h, answered_from or len(photos), model)
     d = ImageDraw.Draw(card, "RGBA")
     d.text((36, H - 160), above, font=font(30), fill=(255, 255, 255, 235))
     x, base = 36, H - 108

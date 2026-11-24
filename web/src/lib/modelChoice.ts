@@ -104,3 +104,22 @@ export function defaultBackbone(m: { ready: string[]; default_backbone?: string 
   if (m.default_backbone) return m.ready.includes(m.default_backbone) ? m.default_backbone : null;
   return m.ready[0] ?? null;
 }
+
+type SiteModels = { ready: string[]; default_backbone?: string | null; default_ready?: boolean;
+                    site_default_backbone?: string | null; site_default_ready?: boolean };
+
+/** The model the Identify page selects first: the site's default (`site_default_backbone`,
+ *  MV_SITE_DEFAULT_BACKBONE) when the server names one, null while it isn't ready (never
+ *  another model in its place); else defaultBackbone, as before. How it works keeps
+ *  defaultBackbone (mycomap.org's model). */
+export function siteDefaultBackbone(m: SiteModels | undefined): string | null {
+  if (m?.site_default_backbone) return m.ready.includes(m.site_default_backbone) ? m.site_default_backbone : null;
+  return defaultBackbone(m);
+}
+
+/** Whether the page's default model is named but not served (the page selects none and
+ *  says so): the site's when it names one, else MV_DEFAULT_BACKBONE's. */
+export function siteDefaultMissing(m: SiteModels | undefined): boolean {
+  if (m?.site_default_backbone) return m.site_default_ready === false;
+  return !!m?.default_backbone && m.default_ready === false;
+}

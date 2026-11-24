@@ -58,7 +58,7 @@ answered from a proxy's cache.
 | `photos` | file, 1–10 | the same find, several angles. JPEG preferred; PNG and WebP accepted |
 | `latitude`, `longitude` | number, optional | decimal degrees; scoring only, never stored |
 | `observed_on` | `YYYY-MM-DD`, optional | the day it was found |
-| `model` | string, optional | one of `GET /api/v1/models`; default the served default. One model per request |
+| `model` | string, optional | one of `GET /api/v1/models`; default the served default (for an app token, the site's when `MV_SITE_DEFAULT_BACKBONE` is set, §9). One model per request |
 | `top_k` | int 1–10, optional | candidates per rank, default 5 |
 | `client_ref` | string 1–64, optional | the caller's id for the find: the same find counted in the last 24 h (by its session or an earlier call) isn't counted again (§6.4) |
 | `include` | photo indices, optional | 0-based, comma-separated: photos to count even though their photo type would leave them out (`photo_types`, §4). Ignored while photo types are off |
@@ -189,7 +189,7 @@ photo forwarded to mycomap.org with the session's `client_ref` and its `photo_re
 the app reads the lines from mycomap.org; Vision's answers are unchanged.
 
 → `201 {"session_id": "s_7Yp2…", "expires_at": "…", "max_photos": 10,
-"model": {"name", "version", "data", "calibrated_on"}, "context_used": {…}}`
+"model": {"name", "label", "version", "data", "calibrated_on"}, "context_used": {…}}`
 
 `POST /api/v1/sessions/{id}/photos`, multipart: `photo` (one file; JPEG, long side
 1024, q≈85, EXIF date kept) and `photo_ref` (the app's id for it, ≤ 64 chars):
@@ -239,10 +239,12 @@ the app reads the lines from mycomap.org; Vision's answers are unchanged.
 ### 3.4 Model and usage
 
 `GET /api/v1/models` (any credential; `Cache-Control: private, max-age=300`): the one
-model answering, by its public name only. Requests leave `model` out.
+model answering, by its public name only. Requests leave `model` out. It answers for the
+credential asking: an app token gets the site's default model when `MV_SITE_DEFAULT_BACKBONE`
+is set (§9), mycomap.org's server key and developer keys `MV_DEFAULT_BACKBONE`'s.
 
 ```json
-{"models": [{"name": "MycoMap Vision", "version": "2026-10-13",
+{"models": [{"name": "MycoMap Vision", "label": "MycoMap Vision v1", "version": "2026-10-13",
              "data": {"snapshot": "2026-10-13", "records": 176655, "species": 18944,
                       "genera": 1543},
              "calibrated_on": "2026-10-13", "default": true,
@@ -288,7 +290,7 @@ model's result, not a `results` list.
 ```json
 {
   "request_id": "r_01J…",
-  "model": {"name": "MycoMap Vision", "version": "2026-10-13",
+  "model": {"name": "MycoMap Vision", "label": "MycoMap Vision v1", "version": "2026-10-13",
             "data": {"snapshot": "2026-10-13", "records": 176655, "species": 18944,
                      "genera": 1543},
             "calibrated_on": "2026-10-13"},
@@ -335,7 +337,12 @@ model's result, not a `results` list.
 ```
 
 - **`model`** (Steve, 2026-10-11: the product never names the backbone underneath):
-  `name` is always "MycoMap Vision". `version` reflects the **training data** (Steve,
+  `name` is "MycoMap Vision" for the default model (v1); a model with a public name of
+  its own keeps it, default or not ("MycoMap Vision v2 (beta)"; "MycoMap Vision v2" once
+  it is the site's default). `label` (2026-11-24, Steve: "every answer is associated with a
+  model") is the model's own public name, the same whichever model is the default and
+  whether or not it has a card: "MycoMap Vision v1", "MycoMap Vision v2 (beta)"; store it
+  with an answer to know which model gave it. `version` reflects the **training data** (Steve,
   2026-10-11): the date the DNA-validated label set behind the served model was
   exported from mycomap.org (`YYYY-MM-DD`), then `.2`, `.3` for a later release built on
   the same export; opaque, matches `[A-Za-z0-9._:-]{1,40}`, never a backbone id. Store it
@@ -351,7 +358,10 @@ model's result, not a `results` list.
   it was `version` 2026-10-06. The card (`version`, `data`) belongs to the models the
   release was built with (release.json `backbones`). An answer from any other model that
   `MV_API_V1_BACKBONES` lets through (the v2 beta: `name` "MycoMap Vision v2 (beta)") carries
-  `version: null` and `data: null`, never another model's card (2026-11-24).
+  `version: null` and `data: null`, never another model's card (2026-11-24). So does an
+  answer from the site's default model (`MV_SITE_DEFAULT_BACKBONE`) to an app token; its
+  `name` is then "MycoMap Vision v2", without "(beta)" (a named model drops "(beta)" while it
+  is the site's default).
 - **Combined and per-photo, at every rank.** Top-level `ranks`/`likely`/`specimens` are
   the combined answer over the photos the gate kept. `per_photo[i]` is photo *i* alone,
   with `overall_top`: where the combined top name places in that photo's own ranking.
@@ -544,7 +554,7 @@ the website's routes). Retryable ones carry `Retry-After` and `retry_after_secon
 | Status | `code` | When |
 |---|---|---|
 | 400 | `bad_request` | malformed field, lat/lng out of range, bad date, unknown model |
-| 400 | `model_not_offered` | `model` names a model the website offers but API v1 does not (`MV_API_V1_BACKBONES`; by default only the default model answers through API v1, so the v2 beta stays on the site). Leave `model` out |
+| 400 | `model_not_offered` | `model` names a model the website offers but API v1 does not (`MV_API_V1_BACKBONES`; by default only the default model answers through API v1, so the v2 beta stays on the site; an app token may also name the site's default, `MV_SITE_DEFAULT_BACKBONE`). Leave `model` out |
 | 400 | `too_many_photos` | > 10 in a request or session |
 | 401 | `invalid_token` | missing, unknown or malformed credential |
 | 401 | `token_expired` | an app token past `exp`: re-mint once and retry |
@@ -559,7 +569,7 @@ the website's routes). Retryable ones carry `Retry-After` and `retry_after_secon
 | 502 | `source_unavailable` | iNat or MO did not answer |
 | 503 | `busy` | the queue is full; `estimated_wait_seconds`, `Retry-After` |
 | 503 | `updating` | the reference set is being swapped (seconds); `Retry-After: 30` |
-| 503 | `not_served` | the model can't be served with its not-a-fungus gate here, so it isn't served at all (never answered ungated); or the default model (`MV_DEFAULT_BACKBONE`) isn't served here, and no other model answers in its place |
+| 503 | `not_served` | the model can't be served with its not-a-fungus gate here, so it isn't served at all (never answered ungated); or the caller's default model (`MV_DEFAULT_BACKBONE`; for an app token `MV_SITE_DEFAULT_BACKBONE` when set) isn't served here, and no other model answers in its place |
 | 503 | `auth_unavailable` | .org couldn't be asked about a key Vision has no recent answer for |
 
 429 means the caller's own limits; 503 means the server is out of capacity, so the
@@ -710,7 +720,7 @@ stay in front of the monthly numbers.
 
 ```json
 {"generated_at": "2026-10-11T12:00:00Z",
- "model": {"name": "MycoMap Vision", "version": "2026-10-13", "data": {…}, "calibrated_on": null},
+ "model": {"name": "MycoMap Vision", "label": "MycoMap Vision v1", "version": "2026-10-13", "data": {…}, "calibrated_on": null},
  "nightly_version": 12,
  "counts_are": "reference_records",
  "species": {"Amanita muscaria": 412, "Russula sp. 'IN01'": 7},
@@ -789,7 +799,8 @@ upper bound, and expect fewer `confident` answers in the field.
 | `MV_TAXON_COUNTS=1` | `GET /api/v1/taxon-counts` (§7) |
 | `MV_DEFAULT_METHOD` | the method an identification uses (default `nearest+mean`). The box serves `nearest+mean+place`, which answers as `nearest+mean` without a place or date; from Steve's decision of 2026-10-18 (E32), `nearest+mean-records-balanced+place`, which scores each species by its two best specimens and counts an MO/iNat cross-post as one. If it can't answer, it falls back to `nearest+mean-records-balanced`, then `nearest+mean+place`, then `nearest+mean`. No method or backbone id appears in any v1 answer. |
 | `MV_DEFAULT_BACKBONE` | the model an identification that names none uses, on every path: the site's Identify page (selected first), API v1, the app's sessions, by-observation and its kept answers, taxon counts, the nightly advance predictions, Human Feedback's re-asks and excluded-photo maps, How it works' numbers, and the public `/api/health` "MycoMap Vision". If it isn't served here (not allowed, no embeddings, refused for want of its gate), those are refused (site 503, v1 503 `not_served`, predictions skipped) and nothing stands in for it: a `[default]` line at startup and `default_backbone` in the server-key `/api/health` say why. The site then selects no model, says so, and lets a person choose another one. Unset: the first ready backbone by name, as before; deprecated on a server with more than one model, where names would decide the default |
-| `MV_API_V1_BACKBONES` | the models API v1 answers with (comma list). Unset: the default model only. A request naming another model the site offers is refused (400 `model_not_offered`); one naming no model gets the default, as always |
+| `MV_API_V1_BACKBONES` | the models API v1 answers with (comma list). Unset: the default model only. A request naming another model the site offers is refused (400 `model_not_offered`); one naming no model gets the default, as always. An app token may also use `MV_SITE_DEFAULT_BACKBONE` |
+| `MV_SITE_DEFAULT_BACKBONE` | the model the site's visitors and the app get when they name none (Steve, 2026-11-24: stage 1 of the default switch, docs/deploy.md "Switching the default model"): the Identify page selects it first (`/api/models` `site_default_backbone`, `site_default_ready`), the site's uploads and "from a link" naming no model use it, and so do API v1 calls with an app token (sessions, identify, by-observation, kept answers, `/api/v1/models`). mycomap.org's server key and developer keys keep `MV_DEFAULT_BACKBONE`, and so do taxon counts, advance predictions, Human Feedback, How it works and the public health's "MycoMap Vision". Refused (site 503, v1 503 `not_served`), never replaced, while it isn't served. A named model is "(beta)" only while it is not this. Unset: `MV_DEFAULT_BACKBONE`, exactly as before |
 | `MV_TWIN_GROUPS` | the cross-post twin groups (`mv twin-groups`) the specimen scoring needs; default: `twin-groups.tsv` in the served release |
 | `MV_SEARCH_INT8=1` | the fast int8 search of the reference set (docs/capacity.md, option C) |
 | `MV_EMBED_ONNX=1` | the image tower as ONNX: not for the 4 GB box (docs/capacity.md, option D) |

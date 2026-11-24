@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { OPEN_V1, PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName, SERVED_V1, V2_BETA, visionVersion } from "./publicNames";
+import {
+  answerModels, OPEN_V1, PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName, SERVED_V1, siteDefaultFromPage, V2_BETA,
+  visionVersion,
+} from "./publicNames";
 import { MODEL_CREDIT_LINE, modelName, releaseNote } from "./publicView";
 import { modelCredit } from "./howItWorks";
 import { modelLabel } from "./api";
@@ -186,4 +189,54 @@ test("v2 is the beta by name, and v1 keeps its own", () => {
   // Another BioCLIP 2.5 fine-tune (the step-1 model) is not the beta.
   assert.equal(publicModelName("bioclip-2.5-336-ft-20261029-152340"), "MycoMap Vision (development)");
   assert.equal(visionVersion("constructor"), null);
+});
+
+test("v2 drops (beta) once it is the site default, and keeps it while opt-in", () => {
+  assert.equal(publicModelName(V2_BETA, V2_BETA), "MycoMap Vision v2");
+  assert.equal(visionVersion(V2_BETA, V2_BETA)?.name, "MycoMap Vision v2");
+  assert.equal(publicModelName(V2_BETA, SERVED_V1), "MycoMap Vision v2 (beta)");
+  assert.equal(publicModelName(V2_BETA, null), "MycoMap Vision v2 (beta)");
+  assert.equal(publicModelName(SERVED_V1, V2_BETA), "MycoMap Vision v1", "v1 keeps its name either way");
+});
+
+test("every page reads the site default from the shell the server sends", () => {
+  assert.equal(siteDefaultFromPage(), null, "no page: unset");
+  const g = globalThis as { document?: unknown };
+  const before = g.document;
+  try {
+    g.document = { querySelector: (q: string) =>
+      q === 'meta[name="mv-site-default"]' ? { getAttribute: (a: string) => (a === "content" ? V2_BETA : null) } : null };
+    assert.equal(siteDefaultFromPage(), V2_BETA);
+    assert.equal(publicModelName(V2_BETA), "MycoMap Vision v2");
+    assert.equal(modelName(V2_BETA), "MycoMap Vision v2");
+    g.document = { querySelector: () => null };
+    assert.equal(publicModelName(V2_BETA), "MycoMap Vision v2 (beta)");
+  } finally {
+    g.document = before;
+  }
+});
+
+// Every answer is associated with a model (Steve, 2026-11-24).
+test("the website labels each model as the server does (one shared table)", () => {
+  const table = JSON.parse(read("lib/modelLabels.fixture.json")) as { backbone: string; site_default: string | null; label: string }[];
+  assert.ok(table.length >= 8);
+  for (const row of table) assert.equal(publicModelName(row.backbone, row.site_default), row.label, row.backbone);
+});
+
+test("a kept run names every model behind its answers, each once", () => {
+  assert.equal(answerModels([SERVED_V1], null), "MycoMap Vision v1");
+  assert.equal(answerModels([SERVED_V1, V2_BETA], null), "MycoMap Vision v1 and MycoMap Vision v2 (beta)");
+  assert.equal(answerModels([V2_BETA, V2_BETA], V2_BETA), "MycoMap Vision v2");
+  assert.equal(answerModels([], null), "MycoMap Vision");
+  assert.equal(answerModels([undefined], null), "MycoMap Vision");
+});
+
+test("every answer surface on the site names its model", () => {
+  // The answer card's footer (Identify, a comparison, "from a link", a kept run's page).
+  assert.match(read("pages/Identify.tsx"), /\{publicModelName\(r\.model\.backbone\)\} · \{publicMethodLabel\(r\.model\.method\)\}/);
+  assert.match(read("pages/Run.tsx"), /<ResultCard key=/);
+  assert.match(read("pages/Run.tsx"), /answerModels\(r\.results\.map\(\(res\) => res\.model\?\.backbone\)\)/);
+  // The home page's example answer, and a Human Feedback re-ask.
+  assert.match(read("components/IdentifyHome.tsx"), /data-testid="example-model">· \{view\.model\}/);
+  assert.match(read("pages/Feedback.tsx"), /data-testid="text-reask-model">\{reaskModel\(r\.vision\)\}/);
 });

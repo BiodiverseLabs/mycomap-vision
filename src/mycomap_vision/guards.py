@@ -124,6 +124,13 @@ DEFAULT_FALLBACK = {"nearest+mean-records-balanced+place": "nearest+mean-records
                     "nearest+mean+place": "nearest+mean"}
 
 
+# The callers that get the site's default model (MV_SITE_DEFAULT_BACKBONE) when they name
+# none: the website itself, and API v1 with an app token (apiv1.Credential.kind "app": the
+# mobile app). mycomap.org's server key ("server") and developer keys ("key") keep
+# MV_DEFAULT_BACKBONE.
+SITE_KINDS = ("site", "app")
+
+
 @dataclass
 class Limits:
     rate: tuple[int, float]
@@ -142,7 +149,8 @@ class Limits:
     max_models: int | None = None
     # The backbone an identification uses when none is named (MV_DEFAULT_BACKBONE), on every
     # path: the site, API v1, the app's sessions, by-observation and its kept answers, the
-    # nightly advance predictions, taxon counts, Human Feedback's re-asks and excluded maps.
+    # nightly advance predictions, taxon counts, Human Feedback's re-asks and excluded maps;
+    # the site and the app only until site_default_backbone is set.
     # When it is named but not served here, those are refused, never answered by another
     # model (default_of). None: the first ready backbone by name, as before (deprecated on a
     # server with more than one model: names decide the default).
@@ -151,6 +159,15 @@ class Limits:
     # (MV_API_V1_BACKBONES). None: the default backbone only. A request naming another is
     # refused (400 model_not_offered), so the v2 beta stays on the site.
     api_v1_backbones: set[str] | None = None
+    # The model the site's visitors and the app get when they name none
+    # (MV_SITE_DEFAULT_BACKBONE; Steve, 2026-11-24: "lets go with v2" for site visitors, and
+    # "mobile app should move with the site", while mycomap.org stays on v1 until its own
+    # switch): the Identify page's first choice and the site's identifications that name no
+    # model (uploads and "from a link"), and API v1 calls made with an app token (the app's
+    # sessions and identify; SITE_KINDS). An app token may also use it through API v1 when
+    # MV_API_V1_BACKBONES doesn't list it. Every other path keeps default_backbone. Refused,
+    # never replaced by another model, while it isn't served. None: default_backbone.
+    site_default_backbone: str | None = None
 
     @classmethod
     def from_settings(cls) -> "Limits":
@@ -170,6 +187,8 @@ class Limits:
             default_method=(config.setting("MV_DEFAULT_METHOD") or "nearest+mean").strip(),
             default_backbone=(config.setting("MV_DEFAULT_BACKBONE") or "").strip() or None,
             api_v1_backbones=_names(config.setting("MV_API_V1_BACKBONES")),
+            site_default_backbone=(config.setting("MV_SITE_DEFAULT_BACKBONE") or "").strip()
+            or None,
         )
 
     def default_of(self, ready: "list[str]") -> str | None:
@@ -179,6 +198,54 @@ class Limits:
         if self.default_backbone:
             return self.default_backbone if self.default_backbone in ready else None
         return ready[0] if ready else None
+
+    def named_default_for(self, kind: str) -> str | None:
+        """The model a caller of `kind` gets when it names none, as set: for the site and an
+        app token (SITE_KINDS) MV_SITE_DEFAULT_BACKBONE when set; otherwise, and for
+        mycomap.org's server key and developer keys always, MV_DEFAULT_BACKBONE (None: unset,
+        name order decides)."""
+        if kind in SITE_KINDS and self.site_default_backbone:
+            return self.site_default_backbone
+        return self.default_backbone
+
+    def setting_for(self, kind: str) -> str:
+        """The setting that names `kind`'s default (for refusals and the log)."""
+        return ("MV_SITE_DEFAULT_BACKBONE" if kind in SITE_KINDS and self.site_default_backbone
+                else "MV_DEFAULT_BACKBONE")
+
+    def default_for(self, kind: str, ready: "list[str]") -> str | None:
+        """default_of for a caller of `kind`: its named default (named_default_for) when it
+        is ready, else None (refused: never another model); with neither setting, the first
+        ready backbone, as before."""
+        if kind in SITE_KINDS and self.site_default_backbone:
+            return self.site_default_backbone if self.site_default_backbone in ready else None
+        return self.default_of(ready)
+
+    def default_conflicts(self) -> list[str]:
+        """Settings under which some caller's default model is one that caller may not use
+        (DEFAULT-SWITCH-PLAN trap 1: MV_DEFAULT_BACKBONE=v2 with MV_API_V1_BACKBONES=v1
+        refused every call of mycomap.org's that names no model). Each line says which
+        callers are refused. Said at startup ("[default] REFUSED") and in the server-key
+        /api/health (`default_backbone.conflicts`); those callers' no-model calls are
+        refused (503), never answered by another model. Empty: none."""
+        out = []
+        d, s = self.default_backbone, self.site_default_backbone
+        if d and d not in self.allowed_backbones:
+            out.append(f"MV_DEFAULT_BACKBONE={d} is not in MV_ALLOWED_BACKBONES: "
+                       + ("mycomap.org's server key, developer keys and the nightly's paths "
+                          "that name no model are refused" if s
+                          else "every path that names no model is refused"))
+        if d and self.api_v1_backbones is not None and d not in self.api_v1_backbones:
+            out.append(f"MV_DEFAULT_BACKBONE={d} is not in MV_API_V1_BACKBONES: mycomap.org's "
+                       "server key and developer keys are refused (503 not_served) on every "
+                       "API v1 call that names no model")
+        if s and s not in self.allowed_backbones:
+            out.append(f"MV_SITE_DEFAULT_BACKBONE={s} is not in MV_ALLOWED_BACKBONES: the "
+                       "site's and the app's identifications that name no model are refused")
+        if s and not d:
+            out.append("MV_SITE_DEFAULT_BACKBONE is set but MV_DEFAULT_BACKBONE is not: "
+                       "mycomap.org's default would be decided by name order; set both")
+        return out
 
     def method_allowed(self, method: str) -> bool:
         return self.allowed_methods is None or method in self.allowed_methods

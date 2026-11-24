@@ -47,8 +47,8 @@ from .embed import CROP_VECTOR_SQL, apply_box
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import _crops_sql as embed_crops_sql
 from .embed import normalise, photos_per_second
-from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, Gate, Limits, RateLimiter,
-                     TooLarge)
+from .guards import (MAX_FILE_BYTES, MAX_PHOTOS, MAX_REQUEST_BYTES, SITE_KINDS, Gate, Limits,
+                     RateLimiter, TooLarge)
 from .identify import PHOTO_INFO_SQL, Identifier, NoBaseVector, NotTrainedHere, photo_info_rows
 from .identify import left_out_photos as left_out_of
 from .licenses import photo_url
@@ -1072,8 +1072,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         answer)."""
         default = limits.default_backbone or served_backbones()[0]
         card = model_card()
-        return apiv1.public_model(card, calibration_id, name=apiv1.public_name(backbone, default),
-                                  own_card=modelcard.belongs_to(card, backbone, default))
+        name = apiv1.public_name(backbone, default, limits.site_default_backbone)
+        # Every answer says which model gave it (Steve, 2026-11-24): its own public name, the
+        # same whichever model is the default; a model without one, its `name`.
+        label = apiv1.model_label(backbone, limits.site_default_backbone) or name
+        return apiv1.public_model(card, calibration_id, name=name,
+                                  own_card=modelcard.belongs_to(card, backbone, default),
+                                  label=label)
 
     # /api/health is public: model ids only with mycomap.org's server key (apiv1.public_health).
     # Which backbone answers is read from the database at most once a minute.
@@ -1126,7 +1131,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                  *(k.split("/", 1)[0] for k in full["vectors"]),
                  *([fungus_gate.base] if fungus_gate else []), *readers.bases(),
                  *(full.get("refused_backbones") or {}), *(full["search"].get("backbones") or {})}
-        return apiv1.public_health(full, served, known)
+        return apiv1.public_health(full, served, known, limits.site_default_backbone)
 
     def served_readers_health() -> dict:
         """What /api/health adds when more than one base is served, or a backbone is refused
@@ -1181,9 +1186,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         the first ready backbone by name (as before)."""
         return limits.default_of(ready_backbones() if ready is None else ready)
 
-    def default_refusal(ready: list[str] | None = None) -> str | None:
-        """Why the named default (MV_DEFAULT_BACKBONE) is not answering here, or None."""
-        named = limits.default_backbone
+    def site_default_backbone(ready: list[str] | None = None) -> str | None:
+        """The backbone the site's visitors and the app get when they name none
+        (Limits.default_for: MV_SITE_DEFAULT_BACKBONE when set and ready, else None, so the
+        caller refuses; unset, default_backbone exactly)."""
+        return limits.default_for("site", ready_backbones() if ready is None else ready)
+
+    def default_refusal(ready: list[str] | None = None,
+                        named: str | None = None) -> str | None:
+        """Why a named default (MV_DEFAULT_BACKBONE, or `named`: the site's) is not answering
+        here, or None."""
+        named = named or limits.default_backbone
         ready = ready_backbones() if ready is None else ready
         if not named or named in ready:
             return None
@@ -1197,25 +1210,46 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         """The default backbone as the server-key /api/health reports it."""
         ready = ready_backbones()
         why = default_refusal(ready)
-        return {"backbone": limits.default_backbone or (ready[0] if ready else None),
-                "from": "MV_DEFAULT_BACKBONE" if limits.default_backbone else "name order",
-                "ready": why is None and default_backbone(ready) is not None,
-                "refused": why,
-                "api_v1": sorted(v1_backbones(ready))}
+        out = {"backbone": limits.default_backbone or (ready[0] if ready else None),
+               "from": "MV_DEFAULT_BACKBONE" if limits.default_backbone else "name order",
+               "ready": why is None and default_backbone(ready) is not None,
+               "refused": why,
+               "api_v1": sorted(v1_backbones(ready))}
+        site = limits.site_default_backbone
+        if site:                    # only when set: unset, health reads as before
+            out["site"] = {"backbone": site, "from": "MV_SITE_DEFAULT_BACKBONE",
+                           "ready": site_default_backbone(ready) is not None,
+                           "refused": default_refusal(ready, site),
+                           "api_v1_app": sorted(v1_backbones(ready, "app"))}
+        if default_conflicts:
+            out["conflicts"] = list(default_conflicts)
+        return out
 
-    def no_default() -> str:
-        """What a refusal for want of the default says (no model id: it may be public)."""
-        if limits.default_backbone:
-            return ("the default model is not served here (MV_DEFAULT_BACKBONE); see the "
-                    "server log")
+    def no_default(kind: str = "server") -> str:
+        """What a refusal for want of the default says (no model id: it may be public);
+        `kind`: whose default (SITE_KINDS get the site's)."""
+        if limits.named_default_for(kind):
+            return (f"the default model is not served here ({limits.setting_for(kind)}); see "
+                    "the server log")
         return "no model has embeddings yet"
 
-    def v1_backbones(ready: list[str] | None = None) -> set[str]:
-        """What API v1 answers with (MV_API_V1_BACKBONES), else the default backbone only."""
+    def v1_backbones(ready: list[str] | None = None, kind: str = "server") -> set[str]:
+        """What API v1 answers with (MV_API_V1_BACKBONES), else the default backbone only.
+        An app token (`kind` "app") may also use the site's default (MV_SITE_DEFAULT_BACKBONE),
+        so the app moves with the site while mycomap.org's server key keeps the list."""
         if limits.api_v1_backbones is not None:
-            return set(limits.api_v1_backbones)
-        named = default_backbone(ready)
-        return {named} if named else set()
+            out = set(limits.api_v1_backbones)
+        else:
+            named = default_backbone(ready)
+            out = {named} if named else set()
+        if kind in SITE_KINDS and limits.site_default_backbone:
+            out.add(limits.site_default_backbone)
+        return out
+
+    # Settings under which a caller's default model is one it may not use (trap 1): said once
+    # at startup and in the server-key /api/health; those calls are refused, never answered
+    # by another model.
+    default_conflicts = limits.default_conflicts()
 
     def default_answering() -> tuple[str, str] | None:
         """(backbone, method) of the model people get by default, as preloaded: the nightly
@@ -1285,6 +1319,11 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # (default_ready false), and identifications that name no model are refused.
             body["default_backbone"] = limits.default_backbone
             body["default_ready"] = default_backbone() is not None
+        if limits.site_default_backbone:
+            # The Identify page selects this one first (MV_SITE_DEFAULT_BACKBONE); How it works
+            # keeps default_backbone's numbers. Only when set: unset, the body is as before.
+            body["site_default_backbone"] = limits.site_default_backbone
+            body["site_default_ready"] = site_default_backbone() is not None
         return body
 
     def compute_stats() -> dict:
@@ -1684,9 +1723,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         ready = ready_backbones()
         wanted = [m.strip() for m in models_.split(",") if m.strip()]
         if not wanted:
-            named = default_backbone(ready)
+            named = site_default_backbone(ready)
             if named is None:
-                raise HTTPException(503, no_default())
+                raise HTTPException(503, no_default("site"))
             wanted = [f"{named}/{default_method()}"]
         if limits.max_models and len(wanted) > limits.max_models:
             raise HTTPException(400, f"compare at most {limits.max_models} models at a time here")
@@ -2114,7 +2153,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         logo = Image.open(card_logo) if card_logo else None
         return linkcards.run_card_jpeg(bodies, linkcards.headline(linkcards.run_answer(run)),
                                        logo, credits=credits,
-                                       answered_from=int(used) if used else None)
+                                       answered_from=int(used) if used else None,
+                                       model=linkcards.run_model_name(
+                                           run, limits.site_default_backbone))
 
     def remembered_card(rid: str) -> bytes | None:
         with card_lock:
@@ -2181,7 +2222,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     return None
                 logo = Image.open(card_logo) if card_logo else None
                 body = linkcards.run_card_jpeg(
-                    bodies, linkcards.headline(linkcards.run_answer(run)), logo)
+                    bodies, linkcards.headline(linkcards.run_answer(run)), logo,
+                    model=linkcards.run_model_name(run, limits.site_default_backbone))
                 try:
                     run_store.keep_card(rid, body)
                 except Exception as e:  # noqa: BLE001 - served now, made again next time
@@ -2240,7 +2282,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 note(f"[runs] no card state for {rid}: {type(e).__name__}: {e}")
             if not ready:
                 card_later(rid)
-        return linkcards.run_card(origin, rid, run, card_version, card_ready=ready), 200
+        return linkcards.run_card(origin, rid, run, card_version, card_ready=ready,
+                                  site_default=limits.site_default_backbone), 200
 
     # "Where Vision looked" (looked.py; Steve, 2026-10-26): each photo's map of where its
     # evidence for the answer's species was, made when someone asks and kept beside the run
@@ -2594,6 +2637,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         elif len(ready_now) > 1:
             note(f"[default] MV_DEFAULT_BACKBONE is unset: {ready_now[0]} is the default only "
                  "because its name sorts first; set it on a server with several models")
+        site = limits.site_default_backbone
+        if site and site_default_backbone(ready_now) is None:
+            note(f"[default] MV_SITE_DEFAULT_BACKBONE={site} is not served here "
+                 f"({default_refusal(ready_now, site)}): the site's and the app's "
+                 "identifications that name no model are refused, and no other model answers "
+                 "in their place")
+        elif site:
+            app_list = ", ".join(sorted(v1_backbones(ready_now, "app"))) or "none"
+            note(f"[default] {site} answers the site's and the app's identifications that name "
+                 f"no model (MV_SITE_DEFAULT_BACKBONE); the app may use {app_list} through "
+                 "API v1")
+        for line in default_conflicts:
+            note(f"[default] REFUSED: {line}")
     except Exception as e:  # noqa: BLE001 - the server starts regardless
         note(f"[default] {type(e).__name__}: {e}")
 
@@ -3708,14 +3764,18 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 raise apiv1.V1Error(503, "updating", "the model is being updated; try "
                                     "again shortly", retry_after=30) from e
 
-        def v1_model(spec: str | None) -> tuple[str, str]:
+        def v1_model(spec: str | None, cred: "apiv1.Credential") -> tuple[str, str]:
+            """The (backbone, method) a v1 call answers with. Naming no model: the default of
+            the credential's kind (Limits.default_for: an app token gets the site's,
+            MV_SITE_DEFAULT_BACKBONE; mycomap.org's server key and developer keys
+            MV_DEFAULT_BACKBONE), refused while it isn't served, never another model."""
             ready = ready_backbones()
-            offered = v1_backbones(ready)
+            offered = v1_backbones(ready, cred.kind)
             if not spec:
-                named = default_backbone(ready)
-                if named is None and limits.default_backbone:
-                    # Never another model in its place (MV_DEFAULT_BACKBONE).
-                    raise apiv1.V1Error(503, "not_served", no_default())
+                named = limits.default_for(cred.kind, ready)
+                if named is None and limits.named_default_for(cred.kind):
+                    # Never another model in its place (MV_DEFAULT_BACKBONE, or the site's).
+                    raise apiv1.V1Error(503, "not_served", no_default(cred.kind))
                 if named is None:
                     raise apiv1.V1Error(503, "updating", "no model is ready yet", retry_after=30)
                 if named not in offered:
@@ -3780,7 +3840,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 counted_anyway = asked_include(include, len(photos))
             except ValueError as e:
                 raise apiv1.V1Error(400, "bad_request", str(e)) from None
-            backbone, method = v1_model(model)
+            backbone, method = v1_model(model, cred)
             if client_ref is not None and not (
                     1 <= len(client_ref) <= session_store.MAX_REF_LENGTH):
                 raise apiv1.V1Error(400, "bad_request", "client_ref is 1 to "
@@ -3848,7 +3908,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # GET /api/v1/models: the model answering now, by its public name only.
             @app.get("/api/v1/models")
             def v1_models(request: Request):
-                backbone, method = v1_model(None)
+                backbone, method = v1_model(None, request.state.credential)
                 ident = v1_index(backbone, method, permission_view(), apiv1.Timer())
                 cal = (ident.calibration or {}).get("comparison_id")
                 doc = apiv1.models_doc(
@@ -4010,7 +4070,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                         1 <= len(client_ref) <= session_store.MAX_REF_LENGTH):
                     raise apiv1.V1Error(400, "bad_request", "client_ref is 1 to "
                                         f"{session_store.MAX_REF_LENGTH} characters")
-                backbone, method = v1_model(model)
+                backbone, method = v1_model(model, cred)
                 same_find = quotas.counted_before(cred, client_ref)
                 if not same_find:
                     quotas.check(cred)
@@ -4230,7 +4290,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     counted_anyway = asked_include(include)
                 except ValueError as e:
                     raise apiv1.V1Error(400, "bad_request", str(e)) from None
-                backbone, method = v1_model(model)
+                backbone, method = v1_model(model, cred)
                 body = held_v1(source, number, backbone, method, top_k, use_place, use_date,
                                permission_view(), timer, counted_anyway, want_run=run_link)
                 if body is None:
@@ -4621,7 +4681,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             top_k = payload.get("top_k", 5)
             if not isinstance(top_k, int) or isinstance(top_k, bool) or not 1 <= top_k <= 10:
                 raise apiv1.V1Error(400, "bad_request", "top_k is 1 to 10")
-            backbone, method = v1_model(payload.get("model"))
+            backbone, method = v1_model(payload.get("model"), cred)
             try:
                 s = store.create(cred.rate_key, backbone=backbone, method=method, top_k=top_k,
                                  entered=entered, client_ref=client_ref,
@@ -4819,6 +4879,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # The shell, with the link-preview card of the page (linkcards.py).
             card, status = page_card(request, "/" + path)
             shell = linkcards.with_tags((root / "index.html").read_text(encoding="utf-8"), card)
+            shell = with_site_default(shell, limits.site_default_backbone)
             # A run's link is found only by whoever was given it: never by a search engine.
             headers = dict(NOT_INDEXED) if run_path("/" + path) else {}
             # The Identify page asks for its example result while its scripts still load, and
@@ -4828,6 +4889,24 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             return HTMLResponse(shell, status_code=status, headers=headers or None)
 
     return app
+
+
+# The site's default model (MV_SITE_DEFAULT_BACKBONE) as the page shell carries it, so every
+# page names a named model as the setting says, from its first paint: "(beta)" only while it
+# is opt-in (Steve, 2026-11-24; web/src/lib/publicNames.ts siteDefaultFromPage reads it, the
+# server names it the same way: apiv1.named_model).
+SITE_DEFAULT_META = "mv-site-default"
+
+
+def with_site_default(shell: str, backbone: str | None) -> str:
+    """The page shell with the site's default model in a meta tag at the end of its head;
+    unchanged when the setting is unset."""
+    if not backbone:
+        return shell
+    tag = (f'<meta name="{SITE_DEFAULT_META}" content="{html.escape(backbone, quote=True)}" />'
+           "\n  ")
+    at = shell.find("</head>")
+    return shell[:at] + tag + shell[at:] if at >= 0 else tag + shell
 
 
 def line_buffered_output(streams=None) -> None:

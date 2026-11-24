@@ -11,6 +11,7 @@ import type { AlreadyDone, BlastLink, WritingList, WritingNow, FeedbackApplies, 
               FeedbackSummary, LiveSequence, Me, NameContextEntry, NameRole, OrgChip, OrgRequest, OrgStep,
               RefreshedRecord, Revealed, RevealedAnswer } from "./api";
 import { ApiError } from "./api";
+import { publicModelName } from "./publicNames";
 
 export const FEEDBACK_PATH = "/feedback";
 export const FEEDBACK_NAV = { href: FEEDBACK_PATH, label: "Human Feedback" };
@@ -163,6 +164,13 @@ export function refreshVerdict(r: Pick<RefreshedRecord, "still_disagrees" | "vis
              text: `Vision can't re-check this record${r.vision.reason ? ` (${r.vision.reason})` : ""}` };
   }
   return storedVerdict(r.still_disagrees);
+}
+
+/** The model a re-ask answered with ("backbone/method" from the server), by its public name;
+ *  null when the server didn't say. Every answer says which model gave it. */
+export function reaskModel(vision: { model?: string } | null | undefined): string | null {
+  const backbone = vision?.model?.split("/")[0];
+  return backbone ? publicModelName(backbone) : null;
 }
 
 /** The same for a refresh kept in the item's history (still_disagrees as 1 / 0 / null). */

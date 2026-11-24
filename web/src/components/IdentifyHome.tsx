@@ -73,6 +73,7 @@ export function ExampleResult({ view, loading = false }: { view: ExampleView | n
           <div className="border-y border-[#4f7a43]/15 bg-[#f1f6ec] px-4 py-3.5 text-[#4a3728]">
             <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[.08em] text-[#4f7a43]">
               <span className={mark} aria-hidden>1</span>Best answer from these {view.count} photos
+              <span className="font-normal normal-case tracking-normal" data-testid="example-model">· {view.model}</span>
             </p>
             <div className="mt-1 flex items-center justify-between gap-2.5">
               <span className={`${italic(view.headline.rank)} text-[21px] font-semibold leading-tight text-[#2f2419] sm:text-[24px]`}>

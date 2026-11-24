@@ -378,34 +378,80 @@ PUBLIC_MODEL_NAME = "MycoMap Vision"
 INTERNAL_MARKERS = ("bioclip", "-ft-")      # what no public health string may contain
 # Models with a public name of their own beside the default one (Steve, 2026-11-24: v2 is
 # the opt-in beta). The website names them the same way (web/src/lib/publicNames.ts,
-# NAMED_VERSIONS; tests/test_v2_beta_prefixes.py checks the two agree).
+# NAMED_VERSIONS and BETA_VERSIONS; tests/test_v2_beta_prefixes.py checks the two agree).
 V2_BETA = "bioclip-2.5-336-ft-20261122-171257"
-NAMED_MODELS = {V2_BETA: "MycoMap Vision v2 (beta)"}
+NAMED_MODELS = {V2_BETA: "MycoMap Vision v2"}
+# A named model is "(beta)" while it is opt-in only, and drops it once it is the site's
+# default (MV_SITE_DEFAULT_BACKBONE; Steve, 2026-11-24: "once we move to v2 as default it
+# will no longer be beta"). The label follows the setting, never a list of its own.
+BETA_MODELS = frozenset({V2_BETA})
+BETA_SUFFIX = " (beta)"
 OTHER_MODEL_NAME = "MycoMap Vision (another model)"
 
 
-def public_name(backbone: str | None, default: str | None) -> str:
-    """What API v1 calls the model that answered: "MycoMap Vision" for the default one (as
-    always), a named model's own name (NAMED_MODELS), else OTHER_MODEL_NAME: never the
-    default's name for another model."""
+def named_model(backbone: str | None, site_default: str | None = None) -> str | None:
+    """A named model's public name: "MycoMap Vision v2 (beta)" while it is opt-in only,
+    "MycoMap Vision v2" while it is the site's default (`site_default`,
+    MV_SITE_DEFAULT_BACKBONE); None for a model without a name of its own."""
+    name = NAMED_MODELS.get(backbone) if backbone else None
+    if name is None:
+        return None
+    return name + (BETA_SUFFIX if backbone in BETA_MODELS and backbone != site_default else "")
+
+
+def public_name(backbone: str | None, default: str | None,
+                site_default: str | None = None) -> str:
+    """What API v1 calls the model that answered: a named model's own name (named_model:
+    "(beta)" unless it is `site_default`), whether or not it is the default, so a v2 answer
+    never reads like a v1 one ("every answer is associated with a model", Steve,
+    2026-11-24); "MycoMap Vision" for the default one otherwise (as always: v1); else
+    OTHER_MODEL_NAME: never the default's name for another model."""
+    named = named_model(backbone, site_default)
+    if named:
+        return named
     if backbone is None or backbone == default:
         return PUBLIC_MODEL_NAME
-    return NAMED_MODELS.get(backbone, OTHER_MODEL_NAME)
+    return OTHER_MODEL_NAME
 
 
-def public_health(full: dict, served: str | None, backbones) -> dict:
+# The fine-tunes trained on open data only (web/src/lib/publicNames.ts PUBLIC_TRAINED): "-open".
+OPEN_MODELS = frozenset({"bioclip-2-336-ft-20261020-173106", "bioclip-2-ft-20261014-003539"})
+_VERSIONED = re.compile(r"^(bioclip-2-336|bioclip-2)-ft-\d{8}-\d+$")
+
+
+def model_label(backbone: str | None, site_default: str | None = None) -> str | None:
+    """The model's own public name, the same whichever model is the default, as the website
+    names it (web/src/lib/publicNames.ts visionVersion; the shared table in
+    web/src/lib/modelLabels.fixture.json keeps the two alike): "MycoMap Vision v1",
+    "MycoMap Vision v1-open", "MycoMap Vision v0", "MycoMap Vision v2 (beta)" (named_model).
+    None for a model without such a name (a development model, a test model)."""
+    named = named_model(backbone, site_default)
+    if named:
+        return named
+    m = _VERSIONED.match(backbone or "")
+    if not m:
+        return None
+    version = "v1" if m[1] == "bioclip-2-336" else "v0"
+    return f"{PUBLIC_MODEL_NAME} {version}{'-open' if backbone in OPEN_MODELS else ''}"
+
+
+def public_health(full: dict, served: str | None, backbones,
+                  site_default: str | None = None) -> dict:
     """/api/health as anyone may read it: the same figures, with every backbone id (and a
     method after it, "backbone/method") replaced by a public label, and no error or reason
     text (which can name files, hosts or models). `served` is the backbone answering
     identifications ("MycoMap Vision"); any other in `backbones` is "model 2", "model 3",
-    ... in name order, or its own public name (NAMED_MODELS: "MycoMap Vision v2 (beta)").
+    ... in name order, or its own public name (named_model: "MycoMap Vision v2 (beta)", or
+    "MycoMap Vision v2" while it is `site_default`).
     Keys keep their order, so deploy.sh's read of
     `"preload":{"state":` still works, and the nightly block keeps every field
     nightly_notes reads. Anything left that still looks like an id (INTERNAL_MARKERS)
     reads "internal"."""
     others = sorted({b for b in backbones if b} - {served})
-    labels = {**({served: PUBLIC_MODEL_NAME} if served else {}),
-              **{b: NAMED_MODELS.get(b, f"model {i}") for i, b in enumerate(others, 2)}}
+    labels = {**({served: named_model(served, site_default) or PUBLIC_MODEL_NAME}
+                 if served else {}),
+              **{b: named_model(b, site_default) or f"model {i}"
+                 for i, b in enumerate(others, 2)}}
     ids = sorted(labels, key=len, reverse=True)
     pattern = (re.compile("|".join(re.escape(b) + r"(?:/[A-Za-z0-9+._-]+)?" for b in ids))
                if ids else None)
@@ -467,18 +513,22 @@ def id_date(stamped: str | None) -> str | None:
 
 
 def public_model(card: dict | None, calibration_id: str | None = None,
-                 name: str = PUBLIC_MODEL_NAME, own_card: bool = True) -> dict:
-    """The `model` block of every v1 answer (docs/api.md §4): a name; the version of the
-    training data behind it and that snapshot's size (modelcard.py); the date its
-    confidence was last calibrated. Nothing names a backbone or method. `own_card` False
-    (the card describes another model: modelcard.belongs_to): `version` and `data` are
-    null, never another model's card."""
+                 name: str = PUBLIC_MODEL_NAME, own_card: bool = True,
+                 label: str | None = None) -> dict:
+    """The `model` block of every v1 answer (docs/api.md §4): a name; `label`, the model's
+    own public name ("MycoMap Vision v1", "MycoMap Vision v2 (beta)": model_label), when
+    given, so every answer says which model gave it, card or no card (Steve, 2026-11-24);
+    the version of the training data behind it and that snapshot's size (modelcard.py); the
+    date its confidence was last calibrated. Nothing names a backbone or method. `own_card`
+    False (the card describes another model: modelcard.belongs_to): `version` and `data`
+    are null, never another model's card."""
+    named = {"name": name, **({"label": label} if label is not None else {})}
     if not own_card:
-        return {"name": name, "version": None, "data": None,
+        return {**named, "version": None, "data": None,
                 "calibrated_on": id_date((calibration_id or "")[:16] + "-")}
     card = card or {}
     data = card.get("data") or {"snapshot": None, "records": 0, "species": 0, "genera": 0}
-    return {"name": name, "version": card.get("version"),
+    return {**named, "version": card.get("version"),
             "data": {k: data.get(k) for k in ("snapshot", "records", "species", "genera")},
             "calibrated_on": id_date((calibration_id or "")[:16] + "-")}
 

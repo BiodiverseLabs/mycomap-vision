@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { defaultBackbone, defaultChoice, methodFor, offeredBases, resolveMethod, switchesFor } from "./modelChoice";
+import {
+  defaultBackbone, defaultChoice, methodFor, offeredBases, resolveMethod, siteDefaultBackbone, siteDefaultMissing, switchesFor,
+} from "./modelChoice";
 
 const ALL = ["nearest", "species-mean", "linear", "hybrid", "linear+prior", "hybrid+prior",
              "nearest+prior", "species-mean+prior"];
@@ -103,4 +105,33 @@ test("the page selects the named default model first, even when another sorts fi
 test("a named default that isn't ready selects nothing, never another model", () => {
   assert.equal(defaultBackbone({ ready: ["bioclip-2.5-336-ft-20261122-171257"], default_backbone: "v1" }), null);
   assert.equal(defaultBackbone({ ready: [], default_backbone: "v1" }), null);
+});
+
+// Stage 1 (Steve, 2026-11-24): site visitors get v2 by default (MV_SITE_DEFAULT_BACKBONE);
+// How it works and mycomap.org stay on v1 (MV_DEFAULT_BACKBONE).
+const V1 = "bioclip-2-336-ft-20261018-171420", V2 = "bioclip-2.5-336-ft-20261122-171257";
+
+test("with the site default v2 the Identify page preselects v2, How it works keeps v1", () => {
+  const m = { ready: [V2, V1], default_backbone: V1, default_ready: true,
+              site_default_backbone: V2, site_default_ready: true };
+  assert.equal(siteDefaultBackbone(m), V2);
+  assert.equal(siteDefaultMissing(m), false);
+  assert.equal(defaultBackbone(m), V1, "How it works' model");
+});
+
+test("unset, the Identify page preselects exactly what it did before", () => {
+  for (const m of [{ ready: [V2, V1], default_backbone: V1, default_ready: true }, { ready: [V1, V2] },
+                   { ready: [V2, V1] }, { ready: [V2], default_backbone: V1, default_ready: false }]) {
+    assert.equal(siteDefaultBackbone(m), defaultBackbone(m));
+    assert.equal(siteDefaultMissing(m), !!m.default_backbone && m.default_ready === false);
+  }
+  assert.equal(siteDefaultBackbone(undefined), null);
+  assert.equal(siteDefaultMissing(undefined), false);
+});
+
+test("a site default that isn't ready selects nothing and says so, never v1 in its place", () => {
+  const m = { ready: [V1], default_backbone: V1, default_ready: true,
+              site_default_backbone: V2, site_default_ready: false };
+  assert.equal(siteDefaultBackbone(m), null);
+  assert.equal(siteDefaultMissing(m), true);
 });
