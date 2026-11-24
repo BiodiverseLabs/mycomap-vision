@@ -568,7 +568,7 @@ def every_kind_of_validation(conn):
          "route": route("manual", ["vision_shown_at_manual_validation"], True)},
         {"n": "75", "name": "A x", "day": "2026-11-23", "route": MANUAL},              # never called
         {"n": "76", "name": "A x", "day": "2026-11-23",                                # called, no part
-         "route": route("auto", ["vision_checked_no_effect"], True, "1.4")},
+         "route": route("manual", ["vision_available_at_manual_validation"], True)},
         {"n": "77", "name": "A x", "day": "2026-11-23", "held": 1,                     # not known
          "route": route("manual", [], None)},
         {"n": "78", "name": "A x", "day": "2026-11-23",                                # roles not said
@@ -650,7 +650,7 @@ def test_v1_and_v2_answer_from_the_same_photos_or_the_record_waits(conn, store):
 
 def test_each_row_records_the_model_release_reference_time_first_green_route_and_commit(conn, store):
     add(conn, [{"n": "95", "name": "A x", "day": "2026-11-23", "moment": "2026-11-23T10:11:12Z",
-                "route": route("auto", ["vision_checked_no_effect"], True, "1.4")}])
+                "route": route("auto", ["skipped_for_person"], True, "1.4")}])
 
     def answer(model, recs):
         out = says({r["observation_id"]: True for r in recs})(model, recs)
@@ -668,7 +668,7 @@ def test_each_row_records_the_model_release_reference_time_first_green_route_and
         assert r["decided_at"] == "2026-11-24T08:00:00+00:00" and r["code_commit"] == "abc1234"
         assert r["first_green_at"] == "2026-11-23T10:11:12Z"
         assert (r["route_method"], r["route_rules_version"], r["vision_roles"], r["vision_called"]) == (
-            "auto", "1.4", '["vision_checked_no_effect"]', 1)
+            "auto", "1.4", '["skipped_for_person"]', 1)
         assert (r["route_group"], r["cut"], r["photos_sha"], r["hidden_sha"]) == ("primary", CUT, "p", "h")
 
 
@@ -1116,3 +1116,159 @@ def test_a_ledger_of_the_earlier_v2_only_layout_is_refused_not_mixed_in(store):
         ds.ensure_schema(other)
     assert ds.public_payload(store, [V2], frozenset(), show=True) == {
         "public": True, "available": ["v1"], "default": "v1", "models": {}}
+
+
+# --- the Vision kinds as ruled (research 900b62b) ------------------------------------------------
+
+def group_for(*roles, method="manual", assisted=False):
+    return ds.route_of({"vision_assisted": int(assisted),
+                        "validation_route": route(method, list(roles), True)})["route_group"]
+
+
+def test_read_pick_set_aside_and_trashed_are_vision_assisted():
+    for kind in ("read_pick", "read_set_aside", "read_trashed"):
+        assert group_for(kind, method="auto") == ds.VISION_ASSISTED, kind
+
+
+def test_skipped_for_person_alone_is_primary():
+    assert group_for("skipped_for_person") == ds.PRIMARY
+    assert group_for("skipped_for_person", method="auto") == ds.PRIMARY
+
+
+def test_an_assisted_or_gated_kind_decides_the_group_whatever_else_is_present():
+    assert group_for("skipped_for_person", "vision_shown_at_manual_validation") == ds.VISION_ASSISTED
+    assert group_for("second_source_vision", "read_pick", method="auto") == ds.VISION_ASSISTED
+    assert group_for("agreement_validated", "vision_shown_at_manual_validation") == ds.VISION_ASSISTED
+    assert group_for("skipped_for_person", "penalty_lift", method="auto") == ds.VISION_GATED
+    assert group_for("vision_available_at_manual_validation", "agreement_validated") == ds.VISION_GATED
+    # A kind not ruled on beside an assisted or gated one: the ruled kind decides.
+    assert group_for("brand_new_kind", "read_trashed") == ds.VISION_ASSISTED
+    assert group_for("brand_new_kind", "second_source_vision", method="auto") == ds.VISION_GATED
+    assert group_for("skipped_for_person", assisted=True) == ds.VISION_ASSISTED
+
+
+def test_a_vision_kind_the_code_does_not_know_keeps_the_record_out_of_the_primary(conn, store):
+    # Fail closed until the Paper Coordinator rules: never primary, and listed by name.
+    for roles in (["brand_new_kind"], ["skipped_for_person", "brand_new_kind"],
+                  ["vision_available_at_manual_validation", "another_new_kind"],
+                  ["hold", "not_yet_ruled"]):
+        assert group_for(*roles) == ds.ROUTE_UNKNOWN, roles
+    add(conn, [{"n": "61", "name": "A x", "day": "2026-11-23", "route": route("manual", ["brand_new_kind"], True)},
+               {"n": "62", "name": "A x", "day": "2026-11-23", "route": MANUAL}])
+    ds.score_pending(store, conn, [V2], says({"61": True, "62": True}), frozenset(), companion=V1C)
+    assert ds.report(store, V2, frozenset(), groups=(ds.PRIMARY,))["records"] == 1
+    inside = ds.internal_payload(store, [V2], V1C, frozenset())["cohorts"]["v2"]
+    assert inside["groups"]["route_unknown"]["records"] == 1
+    assert inside["groups"]["route_unknown"]["models"]["v1"]["records"] == 1, "scored all the same"
+    assert inside["roles"]["not_ruled_on"] == {"brand_new_kind": 1}
+
+
+def test_vision_available_at_manual_validation_stays_primary_and_is_counted(conn, store):
+    assert group_for("vision_available_at_manual_validation") == ds.PRIMARY
+    add(conn, [{"n": "63", "name": "A x", "day": "2026-11-23",
+                "route": route("manual", ["vision_available_at_manual_validation"], True)},
+               {"n": "64", "name": "A x", "day": "2026-11-23",
+                "route": route("auto", ["skipped_for_person"], True, "1.4")},
+               {"n": "65", "name": "A x", "day": "2026-11-23", "route": MANUAL}])
+    ds.score_pending(store, conn, [V2], says({"63": True, "64": True, "65": True}), frozenset(),
+                     companion=V1C)
+    primary = ds.internal_payload(store, [V2], V1C, frozenset())["cohorts"]["v2"]["groups"]["primary"]
+    assert primary["records"] == 3
+    assert primary["vision_available_at_manual_validation"] == 1
+    assert primary["skipped_for_person"] == 1
+
+
+def test_the_internal_view_counts_skipped_for_person_records_and_says_what_org_must_send_for_open_ones(
+        conn, store):
+    add(conn, [{"n": "66", "name": "A x", "day": "2026-11-23",
+                "route": route("auto", ["skipped_for_person"], True, "1.4")},
+               {"n": "67", "name": "A x", "day": "2026-11-23",
+                "route": route("manual", ["skipped_for_person", "vision_shown_at_manual_validation"], True)},
+               {"n": "68", "name": "A x", "day": "2026-11-23",
+                "route": route("manual", ["skipped_for_person"], True)}])
+    # 68 has no vectors yet: green, not scored.
+    ds.score_pending(store, conn, [V2], says({"66": True, "67": True}), frozenset(), companion=V1C)
+    got = ds.internal_payload(store, [V2], V1C, frozenset(), manifest=conn)["cohorts"]["v2"]
+    skipped = got["skipped_for_person"]
+    assert skipped["in_ledger"] == {"primary": 1, "vision_assisted": 1}
+    assert skipped["green_not_scored_yet"] == 1
+    assert skipped["open_at_org"] is None and "pending-records" in skipped["open_at_org_needs"]
+    assert got["roles"]["by_kind"]["skipped_for_person"] == 2
+
+
+def test_a_later_ruling_regroups_records_already_scored_without_editing_a_row(conn, store, monkeypatch):
+    # The group is worked out from each row's stored roles when a report is made.
+    add(conn, [{"n": "69", "name": "A x", "day": "2026-11-23",
+                "route": route("manual", ["brand_new_kind"], True)}])
+    ds.score_pending(store, conn, [V2], says({"69": True}), frozenset(), companion=V1C)
+    before = rows(store, None)
+    assert {r["route_group"] for r in before} == {"route_unknown"}
+    assert ds.report(store, V2, frozenset(), groups=(ds.PRIMARY,))["records"] == 0
+    # The coordinator rules the kind no part in the decision; a commit adds it.
+    monkeypatch.setattr(ds, "PRIMARY_ROLES", ds.PRIMARY_ROLES | {"brand_new_kind"})
+    monkeypatch.setattr(ds, "KNOWN_ROLES", ds.KNOWN_ROLES | {"brand_new_kind"})
+    assert ds.report(store, V2, frozenset(), groups=(ds.PRIMARY,))["records"] == 1
+    assert ds.paired(store, V2, V1C, frozenset())["records"] == 1
+    # Or Vision-assisted instead: the same row moves again.
+    monkeypatch.setattr(ds, "ASSISTED_ROLES", ds.ASSISTED_ROLES | {"brand_new_kind"})
+    assert ds.report(store, V2, frozenset(), groups=(ds.VISION_ASSISTED,))["records"] == 1
+    assert rows(store, None) == before, "no row is edited"
+    with store:
+        assert store.execute("select count(*) from cut_routes").fetchone()[0] == 0
+
+
+# --- more Vision kinds as ruled (research 115ef57) -----------------------------------------------
+
+NOW_PRIMARY = ("model_guided_review", "second_source_observer", "observer_over_vision", "hold",
+               "genus_veto", "no_second_source", "flagged_read_to_person", "vision_no_answer",
+               "vision_checked_no_effect")
+
+
+def test_each_newly_ruled_kind_lands_in_its_group_alone():
+    assert group_for("model_guided_change") == ds.VISION_ASSISTED
+    assert group_for("model_guided_change", method="auto") == ds.VISION_ASSISTED
+    for kind in NOW_PRIMARY:
+        assert group_for(kind) == ds.PRIMARY, kind
+        assert group_for(kind, method="auto") == ds.PRIMARY, kind
+
+
+def test_model_guided_change_is_assisted_even_beside_primary_kinds():
+    assert group_for("model_guided_change", *NOW_PRIMARY) == ds.VISION_ASSISTED
+    assert group_for("model_guided_change", "skipped_for_person",
+                     "vision_available_at_manual_validation") == ds.VISION_ASSISTED
+    assert group_for("model_guided_change", "second_source_vision", method="auto") == ds.VISION_ASSISTED
+
+
+def test_flagged_read_to_person_with_read_pick_is_assisted():
+    assert group_for("flagged_read_to_person", "read_pick", method="auto") == ds.VISION_ASSISTED
+
+
+def test_a_kind_still_not_ruled_on_stays_route_unknown_beside_the_newly_ruled_ones():
+    assert group_for("still_not_ruled") == ds.ROUTE_UNKNOWN
+    assert group_for("hold", "model_guided_review", "still_not_ruled") == ds.ROUTE_UNKNOWN
+    assert group_for("still_not_ruled", "model_guided_change") == ds.VISION_ASSISTED
+
+
+def test_the_open_count_caveat_counts_held_records_beside_skipped_for_person(conn, store):
+    add(conn, [{"n": "51", "name": "A x", "day": "2026-11-23",
+                "route": route("auto", ["hold"], True, "1.4")},
+               {"n": "52", "name": "A x", "day": "2026-11-23",
+                "route": route("manual", ["genus_veto", "vision_shown_at_manual_validation"], True)},
+               {"n": "53", "name": "A x", "day": "2026-11-23",
+                "route": route("manual", ["no_second_source"], True)},
+               {"n": "54", "name": "A x", "day": "2026-11-23",
+                "route": route("manual", ["skipped_for_person", "model_guided_review"], True)}])
+    # 53 has no vectors yet: green, held once, not scored.
+    ds.score_pending(store, conn, [V2], says({"51": True, "52": True, "54": True}), frozenset(),
+                     companion=V1C)
+    got = ds.internal_payload(store, [V2], V1C, frozenset(), manifest=conn)["cohorts"]["v2"]
+    held = got["held"]
+    assert held["in_ledger"] == {"primary": 1, "vision_assisted": 1}
+    assert held["green_not_scored_yet"] == 1
+    assert held["open_at_org"] is None and got["skipped_for_person"]["open_at_org"] is None
+    for block in (held, got["skipped_for_person"]):
+        assert "unknown" in block["open_at_org_needs"] and "pending-records" in block["open_at_org_needs"]
+        assert "held" in block["open_at_org_needs"]
+    assert got["skipped_for_person"]["in_ledger"] == {"primary": 1}
+    primary = got["groups"]["primary"]
+    assert primary["records"] == 2 and primary["model_guided_review"] == 1
