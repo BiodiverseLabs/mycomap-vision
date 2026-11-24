@@ -118,9 +118,10 @@ def feedback_read_path(method: str, path: str) -> bool:
         or path.startswith("/api/feedback/"))
 
 
-# Routes that check their caller themselves: the identification log's read for the paper
-# (identifylog.py), for mycomap.org's server key or a signed-in admin.
-SELF_CHECKED = ("/api/identify-log/first",)
+# Routes that check their caller themselves, for mycomap.org's server key or a signed-in admin:
+# the identification log's read for the paper (identifylog.py), and the paired v1 / v2 scores
+# (daily_scores.internal_payload).
+SELF_CHECKED = ("/api/identify-log/first", "/api/daily-scores/internal")
 
 
 def public_page(method: str, path: str) -> bool:

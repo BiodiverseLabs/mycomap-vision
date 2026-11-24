@@ -1,11 +1,14 @@
 """Scores since training (daily_scores.py; Steve, 2026-11-22): a newer model scored day by day on
 the records first green after its training cut, with a cumulative total, a 7-day rolling value
-and the new photos, behind two settings that are off by default. v1 is never scored here, and
-the held records are never scored or counted. Synthetic records and hold lists only."""
+and the new photos, behind settings that are off by default; and, paired with it on the same
+records, the served v1 (Steve, 2026-11-24; the Paper Coordinator's ruling, research f79c7d2),
+internal only. The held records are never scored or counted. Synthetic records and hold lists
+only."""
 
 import hashlib
 import json
 import sqlite3
+from collections import Counter
 
 import pytest
 
@@ -19,8 +22,20 @@ from mycomap_vision.records import build_records, save_records
 CUT = "2026-11-22T08:24:03+00:00"
 V2 = ds.Declared("v2", "bb2", "nearest", CUT)
 PLACE = "nearest+mean+place"
+V1C = ds.Companion("bb1", "nearest")                 # v1, paired with each cohort
 SETTINGS = ("MV_DAILY_SCORES", "MV_DAILY_SCORES_PUBLIC", "MV_DAILY_SCORES_MODELS",
+            "MV_DAILY_SCORES_V1", "MV_DAILY_SCORES_PUBLIC_V1", "MV_TWINS",
             "MV_FEEDBACK_HOLD_KEYS", "MV_FEEDBACK_HOLD_SHA256")
+
+
+def route(method="manual", roles=(), called=False, rules=None) -> str:
+    """A validation route as records.validation_route stores it from .org's feed."""
+    return json.dumps({"method": method, "rules_version": rules,
+                       "vision_roles": None if roles is None else list(roles),
+                       "vision_called": called}, sort_keys=True)
+
+
+MANUAL = route()                                     # a person, Vision never called: primary
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +53,7 @@ def store():
 def add(conn, recs: list[dict]):
     """Green records: {"n": number, "name", "day": "YYYY-MM-DD" (first green day),
     "moment": .org's first green moment or None, "seen": Vision's first listing or None,
-    "assisted", "conflict"}. Called once a test."""
+    "assisted", "held", "route" (validation_route JSON), "conflict"}. Called once a test."""
     rows = []
     for r in recs:
         y, m, d = r["day"].split("-")
@@ -49,9 +64,11 @@ def add(conn, recs: list[dict]):
     save_records(conn, build_records(rows, "2026-12-01T03:00:00+00:00"))
     for r in recs:
         conn.execute("update records set first_seen_at = ?, first_green_at = ?, vision_assisted = ?, "
-                     "label_conflict = ? where observation_id = ?",
+                     "held_by_vision = ?, validation_route = ?, label_conflict = ? "
+                     "where observation_id = ?",
                      (r.get("seen", "2026-12-01T03:00:00+00:00"), r.get("moment"),
-                      int(r.get("assisted", 0)), int(r.get("conflict", 0)), r["n"]))
+                      int(r.get("assisted", 0)), int(r.get("held", 0)), r.get("route"),
+                      int(r.get("conflict", 0)), r["n"]))
     conn.commit()
 
 
@@ -83,9 +100,11 @@ def ranked(species=(), genus=(), family=()):
             "photos": 1, "place_used": True, "date_used": True}
 
 
-def rows(store) -> list[dict]:
+def rows(store, model_id="v2") -> list[dict]:
+    """The ledger's rows answered by `model_id` (None: every model's)."""
     ds.ensure_schema(store)
-    cur = store.execute("select * from cut_answers order by record_key")
+    cur = store.execute("select * from cut_answers where ? is null or model_id = ? "
+                        "order by record_key, model_id", (model_id, model_id))
     return [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
 
 
@@ -121,6 +140,20 @@ def test_a_later_model_joins_by_config_alone_and_a_bad_declaration_is_refused_wh
     assert ds.parse_models("") == [] and ds.parse_models(None) == []
 
 
+def test_a_model_cut_before_the_rulings_start_is_refused():
+    # The ruling covers records first validated after 2026-11-22T08:24:03Z only.
+    with pytest.raises(ds.DeclarationRefused, match="covers only records first validated after"):
+        ds.parse_models("v2=bb2/nearest@2026-11-22T08:24:02Z")
+    assert ds.PAIRED_FROM == CUT and ds.parse_models(f"v2=bb2/nearest@{CUT}")
+    # v1 is only ever the companion, never its own declared model or a declared model's twin.
+    assert ds.parse_companion("bb1/nearest+place") == ds.Companion("bb1", "nearest+place")
+    assert ds.parse_companion("") is None and ds.parse_companion(None) is None
+    with pytest.raises(ds.DeclarationRefused):
+        ds.parse_companion("bb1")
+    with pytest.raises(ds.DeclarationRefused, match="v2's own backbone"):
+        ds.parse_companion("bb2/nearest", [V2])
+
+
 # --- which records -------------------------------------------------------------------------
 
 def test_only_records_first_green_after_the_cut_are_scored(conn, store):
@@ -142,7 +175,7 @@ def test_a_record_with_no_vectors_waits_and_a_first_answer_is_never_asked_again(
     add(conn, [{"n": "11", "name": "A x", "day": "2026-11-23"},
                {"n": "12", "name": "B y", "day": "2026-11-23"}])
     first = ds.score_pending(store, conn, [V2], says({"11": True}), frozenset(), now="2026-11-24T08:00:00+00:00")
-    assert first["v2"] == {"scored": 1, "waiting: no vectors yet": 1}
+    assert first["v2"] == {"scored": 1, "waiting: no vectors yet": 1, "groups": {"route_unknown": 1}}
     # The next night 11's answer would be wrong; it is never asked again. 12 has vectors now.
     ds.score_pending(store, conn, [V2], says({"11": False, "12": False}), frozenset(),
                      now="2026-11-25T08:00:00+00:00")
@@ -154,18 +187,22 @@ def test_a_record_with_no_vectors_waits_and_a_first_answer_is_never_asked_again(
         store.execute("delete from cut_answers")
 
 
-def test_vision_assisted_label_conflicts_and_non_fungi_are_left_out_as_early_answers_leaves_them(
+def test_label_conflicts_wait_non_fungi_get_no_rank_and_vision_assisted_records_are_scored_apart(
         conn, store):
+    # Steve, 2026-11-24: a Vision-assisted record is answered and scored too, in its own group.
     add(conn, [{"n": "21", "name": "A x", "day": "2026-11-23", "assisted": 1},
                {"n": "22", "name": "A x", "day": "2026-11-23", "conflict": 1},
                {"n": "23", "name": "Candida albicans", "day": "2026-11-23"},
                {"n": "24", "name": "A x", "day": "2026-11-23"}])
-    out = ds.score_pending(store, conn, [V2], says({k: True for k in ("21", "22", "23", "24")}),
-                           frozenset())
-    assert out["v2"] == {"vision_assisted": 1, "label_conflict": 1, "not_a_fungus_label": 1, "scored": 1}
+    asked: list = []
+    out = ds.score_pending(store, conn, [V2], says({k: True for k in ("21", "22", "23", "24")},
+                                                   asked=asked), frozenset())
+    assert sorted(asked) == ["21", "23", "24"], "only the label conflict waits"
+    assert out["v2"] == {"label_conflict": 1, "not_a_fungus_label": 1, "scored": 2,
+                         "groups": {"vision_assisted": 1, "route_unknown": 2}}
     rep = ds.report(store, V2, frozenset())
-    assert rep["records"] == 1
-    assert rep["left_out"] == {"vision_assisted": 1, "not_a_fungus_label": 1}
+    assert rep["records"] == 2
+    assert rep["left_out"] == {"not_a_fungus_label": 1}
 
 
 # --- the numbers ---------------------------------------------------------------------------
@@ -258,12 +295,23 @@ def test_a_hold_list_that_cannot_be_trusted_refuses_scoring_and_showing(conn, st
 
 # --- the settings and the endpoint ---------------------------------------------------------
 
+def twin_table(tmp_path, monkeypatch, groups=None):
+    """The served release's twin pass (twins.npz, here by MV_TWINS): finds as {record: group}."""
+    from test_link_twins import write_table
+    path = write_table(tmp_path / "twins.npz", groups=groups or {})
+    monkeypatch.setenv("MV_TWINS", str(path))
+    return path
+
+
 def scored_site(conn, tmp_path, monkeypatch, compute=True, public=True):
     """The test server (record 106 'A x', 107 'B y', each one photo embedded by m1) with both
-    records moved to first green after a v2 cut, and m1 with the place method declared as v2."""
+    records moved to first green after a v2 cut, validated by a person with no Vision call
+    (the primary), a twin table served, and m1 with the place method declared as v2."""
+    twin_table(tmp_path, monkeypatch)
     client = app_with_model(conn, tmp_path)
     conn.execute("update records set validated_on = '2026-11-23', first_seen_at = "
-                 "'2026-11-24T08:00:00+00:00' where observation_id in ('106', '107')")
+                 "'2026-11-24T08:00:00+00:00', validation_route = ? "
+                 "where observation_id in ('106', '107')", (MANUAL,))
     conn.commit()
     monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v2=m1/{PLACE}@{CUT}")
     if compute:
@@ -501,3 +549,388 @@ def test_a_left_out_record_takes_the_given_place_shift_and_a_method_without_one_
     shift[place.index.species.index("B y")] = 5.0                   # the place strongly says B y
     moved = place.identify_vectors(vecs, 5, hidden=hidden, place_shift=shift)
     assert moved["ranks"]["species"][0]["name"] == "B y" and moved["prior"]["applied"]
+
+
+# --- v1 and v2 paired (Steve, 2026-11-24; the Paper Coordinator's ruling, research f79c7d2) --------
+
+V1P = V1C.paired(V2)
+
+
+def every_kind_of_validation(conn):
+    """One record of each way .org can have validated it, all first green after the cut."""
+    add(conn, [
+        {"n": "71", "name": "A x", "day": "2026-11-23"},                              # no route given
+        {"n": "72", "name": "A x", "day": "2026-11-23", "assisted": 1,                 # DNA + Vision
+         "route": route("auto", ["agreement_validated"], True, "1.4")},
+        {"n": "73", "name": "A x", "day": "2026-11-23",                                # Vision gated
+         "route": route("auto", ["penalty_lift"], True, "1.4")},
+        {"n": "74", "name": "A x", "day": "2026-11-23",                                # on screen
+         "route": route("manual", ["vision_shown_at_manual_validation"], True)},
+        {"n": "75", "name": "A x", "day": "2026-11-23", "route": MANUAL},              # never called
+        {"n": "76", "name": "A x", "day": "2026-11-23",                                # called, no part
+         "route": route("auto", ["vision_checked_no_effect"], True, "1.4")},
+        {"n": "77", "name": "A x", "day": "2026-11-23", "held": 1,                     # not known
+         "route": route("manual", [], None)},
+        {"n": "78", "name": "A x", "day": "2026-11-23",                                # roles not said
+         "route": route("auto", None, True, "1.4")},
+    ])
+    return {"71": ds.ROUTE_UNKNOWN, "72": ds.VISION_ASSISTED, "73": ds.VISION_GATED,
+            "74": ds.VISION_ASSISTED, "75": ds.PRIMARY, "76": ds.PRIMARY, "77": ds.PRIMARY,
+            "78": ds.ROUTE_UNKNOWN}
+
+
+def test_every_new_green_record_is_answered_by_both_models_whether_or_not_vision_was_called(
+        conn, store):
+    # Steve: "any record that gets green checked that has vision should be scored and any green
+    # check that doesnt have vision should have it run". How .org validated it only decides
+    # its group.
+    groups = every_kind_of_validation(conn)
+    asked: dict = {"v2": [], "v1": []}
+
+    def answer(model, recs):
+        return says({r["observation_id"]: True for r in recs}, asked=asked[model.id])(model, recs)
+    out = ds.score_pending(store, conn, [V2], answer, frozenset(), companion=V1C)
+    assert sorted(asked["v2"]) == sorted(asked["v1"]) == sorted(groups)
+    assert out["v2"]["scored"] == len(groups)
+    got = {(r["record_key"], r["model_id"]): r["route_group"] for r in rows(store, None)}
+    assert got == {(k, m): g for k, g in groups.items() for m in ("v1", "v2")}
+    assert out["v2"]["groups"] == dict(Counter(groups.values()))
+
+
+def test_the_primary_leaves_out_vision_assisted_vision_gated_and_unknown_route_records_but_counts_them(
+        conn, store):
+    groups = every_kind_of_validation(conn)
+    ds.score_pending(store, conn, [V2], says({k: True for k in groups}), frozenset(),
+                     companion=V1C)
+    primary = [k for k, g in groups.items() if g == ds.PRIMARY]
+    rep = ds.report(store, V2, frozenset(), groups=(ds.PRIMARY,))
+    assert rep["records"] == len(primary) == 3
+    assert rep["left_out"] == {"not_a_fungus_label": 0, "vision_gated": 1, "vision_assisted": 2,
+                               "route_unknown": 2}
+    assert rep["groups"] == ["primary"]
+    # The public figure is the primary's.
+    shown = ds.public_payload(store, [V2], frozenset(), show=True, show_v1=False)
+    assert shown["models"]["v2"]["records"] == 3
+    # Inside: every group scored by both models, labelled, and the primary's sub-counts.
+    inside = ds.internal_payload(store, [V2], V1C, frozenset())
+    g = inside["cohorts"]["v2"]["groups"]
+    assert {k: v["records"] for k, v in g.items()} == {"primary": 3, "vision_gated": 1,
+                                                       "vision_assisted": 2, "route_unknown": 2}
+    assert all(v["label"] for v in g.values())
+    assert g["primary"]["no_vision_call"] == 1                          # 75
+    assert g["primary"]["vision_call_not_known"] == 1                   # 77
+    assert g["primary"]["held_by_vision"] == 1                          # 77
+    for name, entry in g.items():
+        assert entry["models"]["v2"]["records"] == entry["models"]["v1"]["records"] == entry["records"]
+        assert entry["paired"]["records"] == entry["records"], name
+    assert inside["cohorts"]["v2"]["primary"]["v1"]["records"] == 3
+
+
+def test_v1_and_v2_answer_from_the_same_photos_or_the_record_waits(conn, store):
+    add(conn, [{"n": "91", "name": "A x", "day": "2026-11-23", "route": MANUAL},
+               {"n": "92", "name": "A x", "day": "2026-11-23", "route": MANUAL}])
+
+    def answer(model, recs):
+        out = says({r["observation_id"]: True for r in recs})(model, recs)
+        for key, got in out.items():
+            got["photos_sha"] = "same" if key == "91" or model.id == "v2" else "other"
+            got["hidden_sha"] = "h"
+        return out
+    out = ds.score_pending(store, conn, [V2], answer, frozenset(), companion=V1C)
+    assert out["v2"]["waiting: the models' photos or hidden records differ"] == 1
+    assert {(r["record_key"], r["model_id"]) for r in rows(store, None)} == {("91", "v1"), ("91", "v2")}
+    # v1 with no answer for 92 yet: neither model's row is written.
+
+    def v2_only(model, recs):
+        return answer(model, recs) if model.id == "v2" else {}
+    out = ds.score_pending(store, conn, [V2], v2_only, frozenset(), companion=V1C)
+    assert out["v2"]["waiting: no vectors yet"] == 1
+    assert "92" not in {r["record_key"] for r in rows(store, None)}
+
+
+def test_each_row_records_the_model_release_reference_time_first_green_route_and_commit(conn, store):
+    add(conn, [{"n": "95", "name": "A x", "day": "2026-11-23", "moment": "2026-11-23T10:11:12Z",
+                "route": route("auto", ["vision_checked_no_effect"], True, "1.4")}])
+
+    def answer(model, recs):
+        out = says({r["observation_id"]: True for r in recs})(model, recs)
+        for got in out.values():
+            got.update(release=f"rel-{model.id}", reference_state=f"state-{model.id}",
+                       photos_sha="p", hidden_sha="h")
+        return out
+    ds.score_pending(store, conn, [V2], answer, frozenset(), companion=V1C,
+                     now="2026-11-24T08:00:00+00:00", code="abc1234")
+    got = {r["model_id"]: r for r in rows(store, None)}
+    assert set(got) == {"v1", "v2"}
+    for mid, r in got.items():
+        assert (r["cohort"], r["backbone"]) == ("v2", "bb1" if mid == "v1" else "bb2")
+        assert (r["release"], r["reference_state"]) == (f"rel-{mid}", f"state-{mid}")
+        assert r["decided_at"] == "2026-11-24T08:00:00+00:00" and r["code_commit"] == "abc1234"
+        assert r["first_green_at"] == "2026-11-23T10:11:12Z"
+        assert (r["route_method"], r["route_rules_version"], r["vision_roles"], r["vision_called"]) == (
+            "auto", "1.4", '["vision_checked_no_effect"]', 1)
+        assert (r["route_group"], r["cut"], r["photos_sha"], r["hidden_sha"]) == ("primary", CUT, "p", "h")
+
+
+def test_the_ledger_and_the_routes_it_learns_are_insert_only(conn, store):
+    add(conn, [{"n": "96", "name": "A x", "day": "2026-11-23"}])
+    ds.score_pending(store, conn, [V2], says({"96": True}), frozenset(), companion=V1C)
+    conn.execute("update records set validation_route = ? where observation_id = '96'", (MANUAL,))
+    conn.commit()
+    out = ds.score_pending(store, conn, [V2], says({}), frozenset(), companion=V1C)
+    assert out["v2"]["routes learned"] == 1
+    for table in ("cut_answers", "cut_routes"):
+        with pytest.raises(sqlite3.DatabaseError, match="ledger: no UPDATE"):
+            store.execute(f"update {table} set route_group = 'primary'")
+        with pytest.raises(sqlite3.DatabaseError, match="ledger: no DELETE"):
+            store.execute(f"delete from {table}")
+
+
+def test_a_route_learned_later_moves_the_record_into_its_group_and_never_changes_its_answer(conn, store):
+    add(conn, [{"n": "97", "name": "A x", "day": "2026-11-23"}])
+    ds.score_pending(store, conn, [V2], says({"97": True}), frozenset(), companion=V1C,
+                     now="2026-11-24T08:00:00+00:00")
+    assert ds.report(store, V2, frozenset(), groups=(ds.PRIMARY,))["records"] == 0
+    before = rows(store, None)
+    conn.execute("update records set validation_route = ? where observation_id = '97'", (MANUAL,))
+    conn.commit()
+    ds.score_pending(store, conn, [V2], says({}), frozenset(), companion=V1C,
+                     now="2026-11-25T08:00:00+00:00")
+    assert rows(store, None) == before, "the answers and their rows never change"
+    assert ds.report(store, V2, frozenset(), groups=(ds.PRIMARY,))["records"] == 1
+    assert ds.paired(store, V2, V1C, frozenset())["records"] == 1
+    # Learned once: a later change in the feed adds nothing.
+    conn.execute("update records set validation_route = ? where observation_id = '97'",
+                 (route("auto", ["agreement_validated"], True),))
+    conn.commit()
+    out = ds.score_pending(store, conn, [V2], says({}), frozenset(), companion=V1C)
+    assert "routes learned" not in out["v2"]
+    assert ds.report(store, V2, frozenset(), groups=(ds.PRIMARY,))["records"] == 1
+
+
+def test_the_ledger_refuses_records_first_validated_after_s2_fail_closed(conn, store):
+    # The Paper Coordinator's ruling (d): nothing first validated after 2027-01-15T00:00:00Z
+    # until the v2-test sealed run is done and the coordinator gives the word.
+    assert ds.S2_STOP == "2027-01-15T00:00:00+00:00"
+    add(conn, [
+        {"n": "81", "name": "A x", "day": "2027-01-14", "seen": "2027-01-14T05:00:00+00:00"},
+        {"n": "82", "name": "A x", "day": "2027-01-16", "moment": "2027-01-16T10:00:00Z",
+         "seen": "2027-01-17T03:00:00+00:00"},
+        # Its day is S2's own: nothing shows it was green by 00:00 UTC, so it is refused.
+        {"n": "83", "name": "A x", "day": "2027-01-15", "seen": "2027-01-16T03:00:00+00:00"},
+        # .org's moment shows it was green a second before S2.
+        {"n": "84", "name": "A x", "day": "2027-01-14", "moment": "2027-01-14T23:59:59Z",
+         "seen": "2027-01-15T03:00:00+00:00"},
+    ])
+    asked: list = []
+    out = ds.score_pending(store, conn, [V2], says({k: True for k in ("81", "82", "83", "84")},
+                                                   asked=asked), frozenset(), companion=V1C)
+    assert sorted(asked) == ["81", "81", "84", "84"], "each model asked about 81 and 84 only"
+    assert sorted({r["record_key"] for r in rows(store, None)}) == ["81", "84"]
+    assert out["v2"]["refused: first green after S2 (v2-test seal)"] == 2
+    assert not ds.s2_allows({}), "no sign of when: refused"
+    # The ledger itself refuses such a row, whoever writes it.
+    ds.ensure_schema(store)
+    row = {c: None for c in ds.COLUMNS}
+    row.update(cohort="v2", model_id="v2", backbone="bb2", method="nearest", cut=CUT,
+               record_key="x", decided_at="2027-01-16T00:00:00+00:00", outcome="scored",
+               green_at="2027-01-15T00:00:01+00:00", green_day="2027-01-15", code_commit="c",
+               route_group="primary", vision_assisted=0, held_by_vision=0)
+    with pytest.raises(sqlite3.DatabaseError, match="stops at S2"):
+        store.execute(f"insert or ignore into cut_answers ({', '.join(ds.COLUMNS)}) values "
+                      f"({', '.join('?' for _ in ds.COLUMNS)})", [row[c] for c in ds.COLUMNS])
+
+
+def test_the_paired_difference_has_counts_a_paired_interval_and_mcnemar(conn, store):
+    # Ten primary records: both right 4, only v2 right 4, only v1 right 1, both wrong 1.
+    keys = [str(800 + i) for i in range(10)]
+    add(conn, [{"n": k, "name": "A x", "day": "2026-11-23", "route": MANUAL} for k in keys])
+    v2_right = dict(zip(keys, [True] * 8 + [False] * 2))
+    v1_right = dict(zip(keys, [True] * 4 + [False] * 4 + [True, False]))
+
+    def answer(model, recs):
+        return says(v2_right if model.id == "v2" else v1_right)(model, recs)
+    ds.score_pending(store, conn, [V2], answer, frozenset(), companion=V1C)
+    got = ds.paired(store, V2, V1C, frozenset())
+    sp = got["species"]
+    assert got["records"] == 10 and got["against"] == "v1"
+    assert (sp["n"], sp["both_right"], sp["only_cohort_right"], sp["only_v1_right"],
+            sp["both_wrong"]) == (10, 4, 4, 1, 1)
+    assert sp["top1"] == {"v2": 0.8, "v1": 0.5} and sp["difference"] == 0.3
+    assert sp["mcnemar_p"] == 0.375                          # 2 * (1 + 5) / 2**5
+    lo, hi = sp["ci95"]
+    assert lo <= 0.3 <= hi and -1 <= lo < hi <= 1
+    assert ds.paired_interval([True] * 5, [True] * 5) == [0.0, 0.0]
+    assert ds.mcnemar_p(0, 0) is None
+
+
+def test_v2_alone_is_scored_as_before_when_no_v1_is_declared(conn, store):
+    add(conn, [{"n": "98", "name": "A x", "day": "2026-11-23", "route": MANUAL}])
+    ds.score_pending(store, conn, [V2], says({"98": True}), frozenset())
+    assert [(r["record_key"], r["model_id"]) for r in rows(store, None)] == [("98", "v2")]
+    assert ds.internal_payload(store, [V2], None, frozenset())["cohorts"]["v2"]["models"] == {
+        "v2": "bb2/nearest"}
+
+
+# --- the feed's validation route (records.validation_route) ---------------------------------------
+
+def test_the_feeds_validation_route_is_read_and_a_feed_without_it_leaves_the_route_unknown():
+    def row(n, **extra):
+        return {"source": "iNaturalist", "observation_id": n, "scientific_name": "A x",
+                "genus": "A", "family": "F", "continent": "North America",
+                "validation_status_1": "yes", "validation_date_1": "11/23/2026", **extra}
+    recs = {r["observation_id"]: r for r in build_records([
+        row("1"),
+        row("2", first_green_method="manual", vision_roles=[], vision_called=False),
+        row("3", first_green_method="auto", first_green_rules_version="1.4",
+            vision_roles=["second_source_vision"], vision_called=True),
+        row("4", first_green_method="auto", vision_called=True),       # roles not given
+        row("5", first_green_method="by hand", vision_roles=[]),         # not a method
+    ], "t")}
+    assert recs["1"]["validation_route"] is None
+    assert json.loads(recs["3"]["validation_route"]) == {
+        "method": "auto", "rules_version": "1.4", "vision_roles": ["second_source_vision"],
+        "vision_called": True}
+    groups = {k: ds.route_of(r)["route_group"] for k, r in recs.items()}
+    assert groups == {"1": "route_unknown", "2": "primary", "3": "vision_gated",
+                      "4": "route_unknown", "5": "route_unknown"}
+    assert ds.route_of(recs["2"])["vision_called"] == 0
+
+
+# --- on the server: both models, the same records, twins hidden, v1 kept internal -----------------
+
+def paired_site(conn, tmp_path, monkeypatch, groups=None, public=True, twins=True):
+    """The test server with two models: m1 declared as v2 and m0 (another stand-in) as the v1
+    paired with it, both with the place method; 106 and 107 first green after the cut,
+    validated by a person with no Vision call; the release's twin table `groups`."""
+    from fastapi.testclient import TestClient
+    from test_api import open_limits
+    from test_models_and_scoreboard import Const, seed_two_species
+
+    from mycomap_vision.api import create_app
+    from mycomap_vision.embed import embed_photos, photos_to_embed
+    store_ = seed_two_species(conn, tmp_path)
+    root = tmp_path / "emb"
+    for bb in (Const("m1"), Const("m0", twist=0.4)):
+        embed_photos(conn, store_, bb, photos_to_embed(conn, bb.name, "large", store_.location,
+                                                       "local"), root / bb.name, log=lambda s: None)
+    conn.execute("update records set validated_on = '2026-11-23', first_seen_at = "
+                 "'2026-11-24T08:00:00+00:00', validation_route = ? "
+                 "where observation_id in ('106', '107')", (MANUAL,))
+    conn.commit()
+    if twins:
+        twin_table(tmp_path, monkeypatch, groups)
+    monkeypatch.setenv("MV_DAILY_SCORES_MODELS", f"v2=m1/{PLACE}@{CUT}")
+    monkeypatch.setenv("MV_DAILY_SCORES_V1", f"m0/{PLACE}")
+    monkeypatch.setenv("MV_DAILY_SCORES", "1")
+    if public:
+        monkeypatch.setenv("MV_DAILY_SCORES_PUBLIC", "1")
+    return TestClient(create_app(tmp_path / "manifest.sqlite", root,
+                                 backbone_loader=lambda name: Const(name),
+                                 limits=open_limits(allowed_backbones={"m1", "m0"}),
+                                 background=False))
+
+
+def test_v1_and_v2_are_both_scored_on_the_same_records_on_the_server(conn, tmp_path, monkeypatch):
+    client = paired_site(conn, tmp_path, monkeypatch)
+    out = client.app.state.score_daily_scores()
+    assert out["v2"]["scored"] == 2, out
+    store = client.app.state.early_store
+    with store.lock:
+        got = rows(store.conn, None)
+    by = {(r["record_key"], r["model_id"]): r for r in got}
+    assert set(by) == {("106", "v1"), ("106", "v2"), ("107", "v1"), ("107", "v2")}
+    for key in ("106", "107"):
+        a, b = by[(key, "v2")], by[(key, "v1")]
+        assert (a["backbone"], b["backbone"]) == ("m1", "m0")
+        assert a["photos_sha"] == b["photos_sha"] and a["hidden_sha"] == b["hidden_sha"]
+        assert a["photos"] == b["photos"] == 1 and a["green_at"] == b["green_at"]
+        assert a["reference_state"] and b["reference_state"]
+        assert a["code_commit"] and a["route_group"] == "primary"
+    # Each answers right: the other records of its species name it, with itself left out.
+    assert all(r["sp_pos"] == 0 for r in got)
+
+
+def test_v1_is_never_in_the_public_payload_by_default(conn, tmp_path, monkeypatch):
+    client = paired_site(conn, tmp_path, monkeypatch)
+    client.app.state.score_daily_scores()
+    res = client.get("/api/daily-scores")
+    body = res.json()
+    assert set(body) == {"public", "available", "default", "models"}
+    assert list(body["models"]) == ["v2"] and body["available"] == ["v1", "v2"]
+    assert "m0" not in res.text and "v1_live" not in res.text and '"paired"' not in res.text
+    for sneaked in ({"models": {"v1": {"records": 2}}}, {"models": {"x": {"id": "v1"}}},
+                    {"models": {}, "v1_live": {}}, {"models": {}, "paired": {}}):
+        with pytest.raises(ValueError, match="v1's live scores"):
+            research_public.daily_scores(sneaked)
+    # Only a separate, explicit setting shows v1 publicly (off until the v1 paper is out).
+    monkeypatch.setenv("MV_DAILY_SCORES_PUBLIC_V1", "1")
+    body = client.get("/api/daily-scores").json()
+    assert body["v1_live"]["v2"]["records"] == 2 and body["paired"]["v2"]["records"] == 2
+    assert "v1" not in body["models"] and body["available"] == ["v1", "v2"]
+
+
+def test_twins_are_hidden_from_both_references(conn, tmp_path, monkeypatch):
+    # The release's twin pass puts 100 (an 'A x') in one find with 106: hidden from both
+    # models' references while tonight's records are answered.
+    from mycomap_vision.identify import Identifier
+    client = paired_site(conn, tmp_path, monkeypatch, groups={"106": 0, "100": 0})
+    seen: list = []
+    real = Identifier.identify_vectors
+
+    def spy(self, *a, hidden=None, **kw):
+        obs = set(self.col_record.obs[self.col_record.rec[hidden]].tolist()) if hidden is not None else set()
+        seen.append((self.backbone, obs))
+        return real(self, *a, hidden=hidden, **kw)
+    monkeypatch.setattr(Identifier, "identify_vectors", spy)
+    out = client.app.state.score_daily_scores()
+    assert out["v2"]["scored"] == 2, out
+    assert {b for b, _ in seen} == {"m1", "m0"}
+    for backbone, obs in seen:
+        assert {"100", "106", "107"} <= obs, (backbone, obs)
+
+
+def test_the_other_sites_record_of_the_same_name_and_day_is_hidden_as_a_twin_the_release_does_not_know():
+    # A cross-post newer than the release's twin pass: same name, same day, the other site.
+    from mycomap_vision.evaluate import Record
+    tonight = [Record("106", "A x", "A", "F", None, None, observed_on="2026-11-20", source="inat")]
+    loaded = tonight + [
+        Record("mo:1", "A x", "A", "F", None, None, observed_on="2026-11-20", source="mo"),   # twin
+        Record("mo:2", "A x", "A", "F", None, None, observed_on="2026-11-21", source="mo"),   # other day
+        Record("mo:3", "B y", "B", "F", None, None, observed_on="2026-11-20", source="mo"),   # other name
+        Record("101", "A x", "A", "F", None, None, observed_on="2026-11-20", source="inat"),  # same site
+        Record("mo:4", "A x", "A", "F", None, None, observed_on=None, source="mo")]           # no day
+    assert ds.same_find_records(tonight, [loaded]) == {"mo:1"}
+
+
+def test_an_index_with_no_twin_table_is_refused_not_scored(conn, tmp_path, monkeypatch):
+    client = paired_site(conn, tmp_path, monkeypatch, twins=False)
+    out = client.app.state.score_daily_scores()
+    assert "no twin table" in out["v2"]["refused"], out
+    store = client.app.state.early_store
+    with store.lock:
+        assert rows(store.conn, None) == []
+
+
+def test_a_pair_with_v1_not_served_waits_and_writes_nothing(conn, tmp_path, monkeypatch):
+    client = paired_site(conn, tmp_path, monkeypatch)
+    monkeypatch.setenv("MV_DAILY_SCORES_V1", f"m9/{PLACE}")
+    out = client.app.state.score_daily_scores()
+    assert "not served here: m9/" in out["v2"]["waiting"], out
+    store = client.app.state.early_store
+    with store.lock:
+        assert rows(store.conn, None) == []
+
+
+def test_the_internal_view_is_for_the_server_key_and_admins_and_names_v1(conn, tmp_path):
+    from test_identify_log import SERVER
+    from test_run_links import person, site, visitor
+    app, _, _ = site(conn, tmp_path, by_observation=True)
+    assert visitor(app).get("/api/daily-scores/internal").status_code == 401
+    assert person(app, "user-5").get("/api/daily-scores/internal").status_code == 403
+    assert person(app, "admin-1").get("/api/daily-scores/internal").status_code == 200
+    res = visitor(app).get("/api/daily-scores/internal", headers=SERVER)
+    assert res.status_code == 200 and res.headers["cache-control"] == "private, no-store"
+    body = res.json()
+    assert body["internal"] is True and body["s2_stop"] == ds.S2_STOP
+    assert body["paired_from"] == ds.PAIRED_FROM and body["public_v1"] is False
