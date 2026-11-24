@@ -199,7 +199,8 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
                    size: str = "medium", store_location: str | None = None,
                    random_order: bool = False, record_sample: int | None = None,
                    first_seen_since: str | None = None, held_at: str | None = None,
-                   hosts: tuple[str, ...] | None = None, unembedded_for: str | None = None):
+                   hosts: tuple[str, ...] | None = None, unembedded_for: str | None = None,
+                   new_photos_since: str | None = None, mo_use_rule: bool = False):
     """Photos of green records with no copy at `size` (in `store_location`, when given),
     failed fewest times first. Photos iNat no longer has, and ones that failed
     MAX_ATTEMPTS times, are left out. A copy at another size or in another store
@@ -212,6 +213,17 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
 
     `unembedded_for` keeps only photos with no vector yet from that backbone (the
     nightly update: the release's photos are embedded but not held on the box).
+
+    `new_photos_since` also takes a photo that itself first appeared at or after that
+    moment (photos.first_seen_at), whatever its record's first_seen_at: a photo added
+    later to a record that joined before (gap report of 2026-11-24: 41 such photos on
+    14 records were never embedded), and the photos of an MO record whose MO details
+    the night fetched for the first time. With `first_seen_since` too, either rule
+    takes a photo; alone, only the photo's own date counts.
+
+    `mo_use_rule` leaves out the MO photos MO's use rule leaves out of every reference
+    set (permissions.MO_EXCLUDED_FROM_USE_SQL: not ok_for_export, or all rights
+    reserved), so nothing is fetched from MO that could never be served or reviewed.
 
     A benchmark's held-out records (holdouts.py) get no reference photos; the
     benchmark keeps its own (heldout.py).
@@ -230,10 +242,17 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
     holdouts.ensure_schema(conn)
     na = "and r.north_america = 1" if north_america_only else ""
     params: list = []
-    if first_seen_since:
+    if first_seen_since and new_photos_since:
+        # Records that joined the list at or after this export, or photos that did.
+        na += " and (r.first_seen_at >= ? or p.first_seen_at >= ?)"
+        params += [first_seen_since, new_photos_since]
+    elif first_seen_since:
         # Only records that joined the list at or after this export (e.g. a refresh's new ones).
         na += " and r.first_seen_at >= ?"
         params.append(first_seen_since)
+    elif new_photos_since:
+        na += " and p.first_seen_at >= ?"
+        params.append(new_photos_since)
     if record_sample:
         # All photos of a random set of records: a small but complete reference set.
         na += (" and r.observation_id in (select observation_id from records"
@@ -250,6 +269,9 @@ def pending_photos(conn: sqlite3.Connection, north_america_only: bool, limit: in
         extra += (" and not exists (select 1 from embeddings e where e.backbone = ?"
                   " and e.photo_id = p.photo_id)")
         tail.append(unembedded_for)
+    if mo_use_rule:
+        from .permissions import MO_EXCLUDED_FROM_USE_SQL
+        extra += f" and {MO_EXCLUDED_FROM_USE_SQL}"
     sql = f"""
       select distinct p.photo_id, p.source_url, p.host, p.attempts, p.source
       from photos p
@@ -349,7 +371,8 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
                  record_sample: int | None = None, first_seen_since: str | None = None,
                  held_at: str | None = None, hosts: tuple[str, ...] | None = None,
                  policies: dict[str, HostPolicy] | None = None, poll: float = 30,
-                 unembedded_for: str | None = None, log=print) -> dict:
+                 unembedded_for: str | None = None, new_photos_since: str | None = None,
+                 mo_use_rule: bool = False, log=print) -> dict:
     """Download pending photos into `store`. `checkpoint` (e.g. copy the manifest to S3)
     runs every `checkpoint_every` seconds and once at the end.
 
@@ -358,7 +381,8 @@ def download_all(conn: sqlite3.Connection, store: PhotoStore, size: str = "mediu
     the others need. Budgets start from what earlier runs fetched (seed_budgets)."""
     config.ensure_dirs()
     rows = pending_photos(conn, north_america_only, limit, size, store.location, random_order,
-                          record_sample, first_seen_since, held_at, hosts, unembedded_for)
+                          record_sample, first_seen_since, held_at, hosts, unembedded_for,
+                          new_photos_since, mo_use_rule)
     return run_downloads(conn, rows, store, size,
                          lambda r, now: save_result(conn, r, size, now, store.location),
                          policies=policies, max_hours=max_hours, checkpoint=checkpoint,

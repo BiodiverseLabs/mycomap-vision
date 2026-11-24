@@ -9,6 +9,8 @@ key in permissions.org_key()), compares the answer with what it serves, and then
     records new to the list      iNat details -> photos -> one vector per photo,
                                  embedded on the box's CPU with the served model,
                                  then they join the reference set
+    MO records without details   (MV_NIGHTLY_MO=1) Mushroom Observer's image list,
+                                 at MO's pace (mo.py), then the same photo steps
 
 and, first and on its own, it reads mycomap.org's "commonly misidentified as" table
 (confusions.py: GET /api/misidentifications/all, public), kept beside the manifest for
@@ -50,7 +52,24 @@ reports, `--plan` shows what tonight would change without changing it, and
 `--now` asks the running server to update within a minute.
 
 Read-only toward every outside system, like the rest of Vision: it reads
-mycomap.org and iNat, within iNat's limits (inat.py, photos.py).
+mycomap.org and iNat, within iNat's limits (inat.py, photos.py), and with
+MV_NIGHTLY_MO=1 Mushroom Observer, within MO's (mo.py: 5 s apart, at most
+MV_NIGHTLY_MAX_MO observations and MO_MAX_MINUTES a night).
+
+The Mushroom Observer step (Steve, 2026-11-24). Without it an MO record that turned
+green after the layer began never got MO's details on the box (only `mv fetch-mo`
+read them, on the laptop), so it had no photos and no model served it: 1,140 North
+America records by 24 Nov, about 30 more a day. With MV_NIGHTLY_MO=1 the night asks MO
+(mo.fetch_all) about every green North-America MO record with no MO answer yet,
+whatever its first-seen date, so the first night backfills them all, at most
+MV_NIGHTLY_MAX_MO (2000, 50 requests of 40) a night. Its photos are new to the layer
+(photos.first_seen_at), so the photo steps take them like a new record's: downloaded
+for each backbone that has no vector for them (an MO photo's id is fixed, 10^12 + MO's
+image id, so a backbone whose release shipped their vectors needs nothing and serves the
+record as soon as the rows exist), only when MO's use rule allows them (ok_for_export,
+not all rights reserved), embedded within MV_NIGHTLY_MAX_PHOTOS and tagged for the
+photo review like any night's photo. Its failure is reported under `mo` and never
+undoes the night.
 """
 
 from __future__ import annotations
@@ -69,7 +88,7 @@ from typing import Callable
 
 import requests
 
-from . import confusions, config, holdouts, inat, names, photos, refresh, taxonomy
+from . import confusions, config, holdouts, inat, mo, names, photos, refresh, taxonomy
 from .embed import SCHEMA as EMBED_SCHEMA
 from .embed import (CROP_VECTOR_SQL, crop_photos_to_fetch, crops_to_embed, embed_photos,
                     next_shard, photos_to_embed)
@@ -85,6 +104,7 @@ PAGE_LIMIT = 5000
 MAX_PAGES = 1000                 # 5 million records: far past any real answer
 LOCK_STALE_SECONDS = 6 * 3600    # a lock this old was left by a run that died
 PAGE_RETRY_PAUSES = (30.0, 120.0)  # a page that fails is asked again after these pauses
+MO_MAX_MINUTES = 30.0            # the MO step asks no new batch after this (50 requests: ~5 min)
 
 SCHEMA = """
 -- Where each backbone's nightly shards start, and how many photos the release had.
@@ -133,8 +153,12 @@ def iso(t: datetime) -> str:
 # ---------------------------------------------------------------------------
 # Settings
 
+def _flag(name: str) -> bool:
+    return (config.setting(name) or "").lower() in ("1", "true", "yes", "on")
+
+
 def enabled() -> bool:
-    return (config.setting("MV_NIGHTLY") or "").lower() in ("1", "true", "yes", "on")
+    return _flag("MV_NIGHTLY")
 
 
 def _number(name: str, default: float) -> float:
@@ -163,10 +187,16 @@ class Settings:
     predict: int = 300                   # advance predictions a night (0: none)
     catch_up_after_hours: float = 24.0   # a fresh layer exported longer ago catches up (0: never)
     catch_up_delay_minutes: float = 10.0  # after startup, and only once the preload is done
+    # Mushroom Observer's details for green MO records that have none (MV_NIGHTLY_MO=1; off
+    # unless set), at most max_mo observations a night (40 a request, 5 s apart). 0: none.
+    mo: bool = False
+    max_mo: int = 2000
 
     def __post_init__(self):
         if not _AT.match(self.at):
             raise ValueError(f"MV_NIGHTLY_AT must be HH:MM, not {self.at!r}")
+        if self.max_mo < 0:
+            raise ValueError(f"MV_NIGHTLY_MAX_MO must be 0 or more, not {self.max_mo}")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -180,7 +210,9 @@ class Settings:
                    warn_share=_number("MV_NIGHTLY_WARN_SHARE", 0.20),
                    predict=int(_number("MV_NIGHTLY_PREDICT", 300)),
                    catch_up_after_hours=_number("MV_NIGHTLY_CATCHUP_AFTER_HOURS", 24.0),
-                   catch_up_delay_minutes=_number("MV_NIGHTLY_CATCHUP_DELAY_MINUTES", 10.0))
+                   catch_up_delay_minutes=_number("MV_NIGHTLY_CATCHUP_DELAY_MINUTES", 10.0),
+                   mo=_flag("MV_NIGHTLY_MO"),
+                   max_mo=int(_number("MV_NIGHTLY_MAX_MO", 2000)))
 
     def zone(self) -> tzinfo:
         from zoneinfo import ZoneInfo
@@ -703,6 +735,7 @@ class Locked:
 class Steps:
     """The outside calls, injectable for tests."""
     fetch_inat: Callable[..., dict] = inat.fetch_all
+    fetch_mo: Callable[..., dict] = mo.fetch_all
     taxonomy: Callable[..., dict] = refresh.new_genera_taxonomy
     download: Callable[..., dict] = photos.download_all
     misidentifications: Callable[..., dict] = confusions.refresh_from_settings
@@ -838,16 +871,24 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
             # Kingdoms learnt for names that are no fungus take records out of the index
             # (taxonomy.nonfungal): a change, so the index is rebuilt.
             changed = changed or bool((report["taxonomy"] or {}).get("outside_asked"))
+            if settings.mo and settings.max_mo > 0:
+                report["mo"] = fetch_mo_details(conn, layer, settings, steps, log)
+                # A record that gained its MO answer can be served at once by a backbone
+                # whose release holds its photos' vectors: the index is rebuilt.
+                changed = changed or report["mo"]["added"] > 0
             report["photos"], report["embedded"] = {}, {}
             store = LocalStore(layer.photos)
             served = [b for b in _layer_backbones(conn) if b in backbones]
-            # Only records that joined after the layer began: a release that embedded a
-            # sample of the records must not have the nights fetch all the others.
+            # Only records that joined after the layer began, and photos that did (one added
+            # later to an older record; an MO record's, read from MO tonight): a release that
+            # embedded a sample of the records must not have the nights fetch all the others.
+            # MO photos MO's use rule leaves out are never fetched (never served or reviewed).
             since = layer_started(conn)
             for name in served:
                 report["photos"][name] = _step(lambda: steps.download(
                     conn, store, size=settings.size, limit=settings.max_photos,
-                    first_seen_since=since, unembedded_for=name, log=log),
+                    first_seen_since=since, new_photos_since=since, unembedded_for=name,
+                    mo_use_rule=True, log=log),
                     f"photos for {name}", log)
                 todo = photos_to_embed(conn, name, settings.size, store.location,
                                        str(layer.photos))[:settings.max_photos]
@@ -910,6 +951,37 @@ def run_once(conn: sqlite3.Connection, layer: Layer,
                      (iso(now_utc()), int(ok), int(changed), generated, json.dumps(report),
                       error[:1000] if error else None, run_id))
     return {"id": run_id, "ok": ok, "changed": changed, "error": error, **report}
+
+
+def fetch_mo_details(conn: sqlite3.Connection, layer: Layer, settings: Settings, steps: Steps,
+                     log=print) -> dict:
+    """The night's Mushroom Observer step: MO's image list for the green North-America MO
+    records with no MO answer yet, any first-seen date (mo.pending), at most
+    settings.max_mo of them, at MO's pace (mo.Pacer) and within MO_MAX_MINUTES. Answers are
+    kept gzipped under the layer's raw/mo. Never raises: a failure is reported (`error`), and
+    the batches saved before it stay (each is its own transaction). `added`: records that
+    gained an 'ok' MO answer tonight; `still_pending`: those still without one."""
+    def ok_rows() -> int:
+        return conn.execute("select count(*) from mo_observations where status = 'ok'").fetchone()[0]
+    before = ok_rows()
+    out = dict(_step(lambda: steps.fetch_mo(conn, raw_dir=layer.raw / "mo",
+                                            limit=settings.max_mo,
+                                            max_minutes=MO_MAX_MINUTES, log=log),
+                     "Mushroom Observer details", log) or {})
+    out["added"] = ok_rows() - before
+    try:
+        out["still_pending"] = len(mo.pending(conn))
+    except Exception as e:  # noqa: BLE001 - a count for the report only
+        out.setdefault("error", f"{type(e).__name__}: {e}"[:500])
+    log(f"[nightly] Mushroom Observer: {out['added']:,} records gained MO details, "
+        f"{out.get('photos_new', 0):,} new photos, {out.get('still_pending', '?')} still "
+        "without" + (f"; {out['error']}" if out.get("error") else ""))
+    return out
+
+
+# The MO step's counts health shows (fetch_mo_details, mo.fetch_all): no ids, no error text.
+MO_COUNTS = ("requested", "added", "ok", "missing", "gone_on_mo", "photos_new", "batches",
+             "still_pending")
 
 
 def _step(work: Callable[[], dict], what: str, log) -> dict:
@@ -1086,7 +1158,7 @@ def health(conn: sqlite3.Connection, settings: Settings, zone: tzinfo | None = N
            "new_release_due": any(s["new_release_due"] for s in layer.values()),
            "next_run": iso(next_run(now or now_utc(), settings.at, zone)) if zone else None}
     if last is None:
-        return {**out, "state": "never", "last_run_at": None}
+        return {**out, "state": "never", "last_run_at": None, **_mo_health(settings, None)}
     started, ok, report, error = last
     report = json.loads(report) if report else {}
     records = report.get("records") or {}
@@ -1101,7 +1173,22 @@ def health(conn: sqlite3.Connection, settings: Settings, zone: tzinfo | None = N
     if isinstance(review, dict):            # counts only: no error text in public health
         out["photo_review"] = {k: review.get(k, 0) for k in PHOTO_REVIEW_COUNTS}
         out["photo_review"]["failed"] = bool(review.get("error"))
+    out.update(_mo_health(settings, report))
     return out
+
+
+def _mo_health(settings: Settings, report: dict | None) -> dict:
+    """The MO step's part of health: whether it is on, and the last night's counts (no ids,
+    no error text). Nothing when it is off and the last night didn't run it."""
+    step = (report or {}).get("mo")
+    if not settings.mo and not isinstance(step, dict):
+        return {}
+    block: dict = {"on": settings.mo, "max_per_night": settings.max_mo}
+    if isinstance(step, dict):
+        block.update({k: int(step.get(k) or 0) for k in MO_COUNTS})
+        block["failed"] = bool(step.get("error"))
+        block["stopped_for_time"] = bool(step.get("stopped_for_time"))
+    return {"mo": block}
 
 
 # The photo review's counts health shows (nightly_review.NightlyReview.queue).
@@ -1121,7 +1208,13 @@ def status(conn: sqlite3.Connection, settings: Settings, now: datetime | None = 
              "report": json.loads(r[6]) if r[6] else None, "error": r[7]} for r in rows]
     ok_at = conn.execute("select max(finished_at) from nightly_runs where ok = 1").fetchone()[0]
     out = {"at": settings.at, "tz": settings.tz, "last_ok_at": ok_at, "runs": last,
-           "layer": layer_sizes(conn, settings.warn_share)}
+           "layer": layer_sizes(conn, settings.warn_share),
+           "mo": {"on": settings.mo, "max_per_night": settings.max_mo}}
+    if settings.mo:
+        try:
+            out["mo"]["waiting"] = len(mo.pending(conn))   # green NA MO records with no answer
+        except Exception as e:  # noqa: BLE001 - a report
+            out["mo"]["waiting"] = f"{type(e).__name__}: {e}"
     if zone is not None:
         out["next_run"] = iso(next_run(now or now_utc(), settings.at, zone))
     return out

@@ -73,8 +73,9 @@ class FakeOutside:
     """iNat and its photos for the nightly steps: each new record gets one photo whose
     red level is in `reds` (by observation id); every photo asked for is noted."""
 
-    def __init__(self, reds):
-        self.reds, self.downloads = reds, []
+    def __init__(self, reds, photo_reds=None):
+        # photo_reds: a red level by photo id (an MO photo's id is 10^12 + its MO image id).
+        self.reds, self.photo_reds, self.downloads = reds, photo_reds or {}, []
 
     def fetch_inat(self, conn, raw_dir=None, log=print):
         from mycomap_vision.inat import pending_ids
@@ -87,14 +88,16 @@ class FakeOutside:
         return {"asked": 0}
 
     def download(self, conn, store, size, limit=None, first_seen_since=None,
-                 unembedded_for=None, log=print):
+                 unembedded_for=None, new_photos_since=None, mo_use_rule=False, log=print):
         rows = pending_photos(conn, True, limit, size, store.location,
-                              first_seen_since=first_seen_since, unembedded_for=unembedded_for)
+                              first_seen_since=first_seen_since, unembedded_for=unembedded_for,
+                              new_photos_since=new_photos_since, mo_use_rule=mo_use_rule)
         with conn:
             for r in rows:
                 pid = r["photo_id"]
                 rel = f"n/{pid}.png"
-                store.put(rel, png(self.reds[pid // 10]))
+                store.put(rel, png(self.photo_reds[pid] if pid in self.photo_reds
+                                   else self.reds[pid // 10]))
                 save_result(conn, Result(pid, "done", rel, 1, "h"), size, "now", store.location)
                 self.downloads.append(pid)
         return {"done": len(rows)}
@@ -190,7 +193,9 @@ def test_only_records_new_since_the_layer_began_are_fetched_never_the_releases_u
     # The release holds a record it never embedded (a sample release): not tonight's job.
     conn = manifest.connect(layer.manifest)
     save_records(conn, build_records(seed_rows() + [row(200, "D w")], "2026-09-01T00:00:00+00:00"))
-    save_batch(conn, ["200"], [inat_obs(200, photos=[(0, 2000, "cc0", OPEN)])], "t")
+    # Its iNat details came with the release, before the layer began.
+    save_batch(conn, ["200"], [inat_obs(200, photos=[(0, 2000, "cc0", OPEN)])],
+               "2026-09-01T00:00:00+00:00")
     conn.close()
     outside = FakeOutside({300: 130})
     night(layer, seed_rows() + [row(200, "D w"), row(300, "C z")], outside)

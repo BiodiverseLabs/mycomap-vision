@@ -311,6 +311,40 @@ leave it and renamed records carry their new name that same night. Records new t
 the green list get their iNat details and photos, are embedded on this box's CPU
 with the served model (about 0.7 s a photo, at most `MV_NIGHTLY_MAX_PHOTOS` a
 night), and join it. Their photos are deleted once embedded; only the vectors stay.
+A photo that first appeared after the layer began (`photos.first_seen_at`) is taken the
+same way even when its record is older: one added later to an older record, and an MO
+record's photos the night read from MO for the first time. Older photos of records
+older than the layer are not (a release that embedded a sample stays a sample).
+
+**Mushroom Observer records** (`MV_NIGHTLY_MO=1`; off unless set; Steve, 2026-11-24).
+Without it, an MO record that turned green after the layer began never got MO's
+details on this box (only `mv fetch-mo` on the laptop read them), so it had no photos
+and no model served it (1,140 North-America records by 24 Nov). With it, after the
+green list and iNat's details and before any photo is fetched, the night asks MO
+(`mo.fetch_all`, read-only) for the image list of every green North-America MO record
+with no MO answer yet, whatever its first-seen date. So the first night backfills them
+all. Limits:
+- MO's pace: one request at a time, 5 s apart or MO's last `run_time` if longer, 40
+  observations a request, `config.USER_AGENT`;
+- at most `MV_NIGHTLY_MAX_MO` (2000: about 50 requests, 5 min) observations a night, and
+  no new request after 30 minutes; the rest follow on later nights.
+
+Each answer is kept gzipped in the layer's `raw/mo/`, and its rows go into the layer's
+manifest only (`mo_observations`, `photos`, `observation_photos`, `license_history`).
+Its photos then go through the photo steps above:
+- downloaded only for a backbone that has no vector for them, from MO's image host at
+  MO's 5 s pace, within `MV_NIGHTLY_MAX_PHOTOS`;
+- only when MO's use rule allows them (`ok_for_export`, not all rights reserved). Others
+  are never fetched, served or reviewed;
+- tagged for the photo review like any night's photo.
+
+An MO photo's id is fixed (10^12 + MO's image id), so a backbone whose release already
+holds their vectors (v2, for the 5,005 photos of the 1,135 records it trained on) embeds
+nothing and serves the records as soon as the rows exist; the night counts that as a
+change and rebuilds the index. A failure (MO down, a refused answer) is reported under
+`mo` in `mv nightly`, keeps the batches saved before it and never undoes the night.
+`/api/health`'s `nightly.mo` block shows whether it is on and the last night's counts
+(no ids, no error text); `mv nightly` adds the records still `waiting`.
 
 The same night embeds the specimen crops Human Feedback's **Recovered labels** queue keeps
 (`recovered_labels.py`): each crop of a photo a person left out as a field slip, unless a
