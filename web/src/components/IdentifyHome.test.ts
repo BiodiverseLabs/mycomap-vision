@@ -57,7 +57,8 @@ test("the example result is labelled at the top and links to the real run", () =
   assert.match(h, /href="\/r\/AAAAAAAAAAAAAAAA"[^>]*data-testid="link-example-run"/);
   assert.match(t, /Open the full result/);
   assert.match(t, /iNaturalist 91443365 · photos Tom Norton \(CC BY\)/);
-  assert.match(t, /Best answer from these 3 photos Laetiporus sulphureus 80%/);
+  // It names the model that gave it (every answer is associated with a model).
+  assert.match(t, /Best answer from these 3 photos · MycoMap Vision Laetiporus sulphureus 80%/);
   assert.match(t, /Species · Genus Laetiporus 100% · Family Laetiporaceae 100%/);
 });
 
