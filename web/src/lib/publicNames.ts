@@ -22,11 +22,29 @@ export const SERVED_V1 = "bioclip-2-336-ft-20261018-171420";
 
 /** Fine-tunes released under a name of their own (Steve, 2026-11-24: v2 is the opt-in beta,
  *  "MycoMap Vision v2 (beta)"). The server names them the same way in API v1 and the public
- *  /api/health (apiv1.NAMED_MODELS; a Python test checks the two agree). */
+ *  /api/health (apiv1.NAMED_MODELS, BETA_MODELS; a Python test checks the two agree). */
 export const V2_BETA = "bioclip-2.5-336-ft-20261122-171257";
 export const NAMED_VERSIONS: Record<string, VisionVersion> = {
-  [V2_BETA]: { name: "MycoMap Vision v2 (beta)", qualifier: null, px: 336 },
+  [V2_BETA]: { name: "MycoMap Vision v2", qualifier: null, px: 336 },
 };
+/** Named versions that are "(beta)" while they are opt-in only. One stops being the beta
+ *  when it is the site's default (MV_SITE_DEFAULT_BACKBONE; Steve, 2026-11-24: "once we move
+ *  to v2 as default it will no longer be beta"): the label follows the setting. */
+export const BETA_VERSIONS: ReadonlySet<string> = new Set([V2_BETA]);
+export const BETA_SUFFIX = " (beta)";
+
+/** The site's default model as the server writes it into the page shell
+ *  (`<meta name="mv-site-default">`, api.with_site_default, from MV_SITE_DEFAULT_BACKBONE);
+ *  null when it is unset, or outside the served page (tests, the dev server). */
+export function siteDefaultFromPage(): string | null {
+  try {
+    if (typeof document === "undefined") return null;
+    const v = document.querySelector('meta[name="mv-site-default"]')?.getAttribute("content");
+    return v ? v : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The image size each base model (models.ALIASES) reads, in px. */
 export const BASE_PX: Record<string, number> = {
@@ -47,9 +65,13 @@ export interface VisionVersion {
 }
 
 /** A fine-tune of ours (`<base>-ft-<YYYYMMDD>-<HHMMSS>` from finetune.py, or `<base>-ft-sample`)
- *  as the MycoMap Vision version it is; null for anything that is not one of our fine-tunes. */
-export function visionVersion(backbone: string): VisionVersion | null {
-  if (Object.prototype.hasOwnProperty.call(NAMED_VERSIONS, backbone)) return NAMED_VERSIONS[backbone];
+ *  as the MycoMap Vision version it is; null for anything that is not one of our fine-tunes.
+ *  A named version is "(beta)" unless it is `siteDefault` (the page's, by default). */
+export function visionVersion(backbone: string, siteDefault: string | null = siteDefaultFromPage()): VisionVersion | null {
+  if (Object.prototype.hasOwnProperty.call(NAMED_VERSIONS, backbone)) {
+    const v = NAMED_VERSIONS[backbone];
+    return BETA_VERSIONS.has(backbone) && backbone !== siteDefault ? { ...v, name: v.name + BETA_SUFFIX } : v;
+  }
   const ft = /^(.+)-ft-(\d{8}-\d+|sample)$/.exec(backbone);
   if (!ft) return null;
   const [, base, run] = ft;
@@ -67,9 +89,9 @@ export function visionVersion(backbone: string): VisionVersion | null {
 
 /** The model as visitors outside Research read it: "MycoMap Vision v1", "MycoMap Vision v0",
  *  "MycoMap Vision (development, 448 px)"; plain "MycoMap Vision" for anything else of ours. */
-export function publicModelName(backbone: string): string {
+export function publicModelName(backbone: string, siteDefault: string | null = siteDefaultFromPage()): string {
   if (backbone === "external:inat-cv") return "iNaturalist's computer vision";
-  return visionVersion(backbone)?.name ?? "MycoMap Vision";
+  return visionVersion(backbone, siteDefault)?.name ?? "MycoMap Vision";
 }
 
 /** How a method scores, in plain words; "closest" as in "Closest DNA-verified specimens". */

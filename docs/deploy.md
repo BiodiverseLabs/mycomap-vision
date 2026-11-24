@@ -303,6 +303,135 @@ deletes nothing), and prints what serving would read afterwards, with a warning 
 served method (`MV_DEFAULT_METHOD`) would still read none. Undo: restore the backup with the
 service stopped, or delete the rows it printed.
 
+## Switching the default model
+
+Which model answers an identification that names none is set per caller, so the site's
+visitors and the app can move to a new model while mycomap.org's auto-validation stays on
+the old one until its own switch (Steve, 2026-11-24). v1 = `bioclip-2-336-ft-20261018-171420`,
+v2 = `bioclip-2.5-336-ft-20261122-171257`.
+
+### The settings
+
+| Setting | What it decides | Unset |
+|---|---|---|
+| `MV_ALLOWED_BACKBONES` | which models can be served at all | (required) |
+| `MV_DEFAULT_BACKBONE` | mycomap.org's model and everything that isn't the site or the app: API v1 with the server key or a developer key (identify, by-observation, kept answers, `/api/v1/models`), taxon counts, the nightly advance predictions, Human Feedback re-asks, excluded-photo maps, How it works (`/api/how-good`), the public health's "MycoMap Vision" | the first ready model **by name** (fragile: `bioclip-2-336…` sorts before `bioclip-2.5…`) |
+| `MV_SITE_DEFAULT_BACKBONE` | the site's visitors and the app: the Identify page's first choice, the site's identifications that name no model (uploads and "from a link"), and API v1 with an app token (the app's sessions and identify). An app token may also name it through API v1 | `MV_DEFAULT_BACKBONE`: exactly as before |
+| `MV_API_V1_BACKBONES` | which models API v1 answers mycomap.org's server key and developer keys with (an app token also gets `MV_SITE_DEFAULT_BACKBONE`) | the default model only |
+| `MV_PRELOAD` | which models load at startup (`default` is `MV_DEFAULT_BACKBONE`'s) | `default` |
+| `MV_PHOTO_TAGGER` | tagger files, comma list; the **first** drives the nightly photo review and health's `photo_tagger` | no tagging |
+| `MV_CROSS_BASE_GATE` | a model that borrows another base's gate (v2 → `bioclip-2-336`, a second pass through v1's tower) | none: such a model is refused |
+
+Who is which caller is told by the credential, not the path: the app and developer keys
+both call `POST /api/v1/identify` with no model, so an app token (`mvt.`, kind `app`)
+gets the site's default and a `vision_` key (kind `key`) or mycomap.org's server key
+(kind `server`) gets `MV_DEFAULT_BACKBONE`.
+
+A named model's label follows the setting: v2 is "MycoMap Vision v2 (beta)" while it is
+opt-in, and "MycoMap Vision v2" once it is `MV_SITE_DEFAULT_BACKBONE` (Steve,
+2026-11-24), on the site (the page shell carries `<meta name="mv-site-default">`), in the
+app's answers (`model.name`) and in the public `/api/health`. An answer carries a model
+card only for a model in the release's `release.json` backbones, so v2's answers keep
+`version: null` and `data: null` until a release includes it, default or not.
+
+### Refused, never another model
+
+- A named default that isn't served here (not allowed, no embeddings, refused for want of its
+  gate) is refused on its callers' paths: the site 503, API v1 503 `not_served`, predictions
+  `skipped`. Nothing answers in its place, and the other callers are unaffected. A
+  `[default]` line at startup and `default_backbone` (with `site` when the site default is
+  set) in the server-key `/api/health` say why.
+- Settings under which some caller's default is a model it may not use are said at startup
+  as `[default] REFUSED: ...` and listed in the server-key `/api/health` under
+  `default_backbone.conflicts` (never in the public health): `MV_DEFAULT_BACKBONE` not in
+  `MV_ALLOWED_BACKBONES` or not in `MV_API_V1_BACKBONES` (trap 1 below),
+  `MV_SITE_DEFAULT_BACKBONE` not in `MV_ALLOWED_BACKBONES`, or `MV_SITE_DEFAULT_BACKBONE` set
+  without `MV_DEFAULT_BACKBONE`. After every restart that changes these, check:
+
+```bash
+sudo journalctl -u mycomap-vision --since -5min | grep '\[default\]'
+# The key goes in a header made by printf (a shell builtin), never on a command line.
+curl -s -H @<(printf 'Authorization: Bearer %s\n' "$(cat /etc/mycomap-vision/org-vision-key)") \
+    http://127.0.0.1:8010/api/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["default_backbone"])'
+```
+
+Expect no `REFUSED` line and no `conflicts` key.
+
+### Who uses the default, and what a switch does to them
+
+| Caller | Path | Setting | Switch risk |
+|---|---|---|---|
+| Site visitors | Identify page preselection, uploads and "from a link" naming no model | site | low; the other model stays offered |
+| The mobile app | API v1 sessions and identify, app token | site | the app shows `model.name`; with no card it loses the "trained on data to" line |
+| **mycomap.org auto-validation** | API v1 by-observation, server key, no `model` | default | **high**: its agreement thresholds were set for v1 |
+| mycomap.org record pages, kept answers | `/api/v1/answers`, `/api/v1/models` (answers version) | default | kept answers carry an answers version per model |
+| Developer keys (the validation tool) | API v1 with a `vision_` key | default | the tool's agreement rules were set for v1 |
+| The paper's prospective test | nightly advance predictions | default | changing model splits the series |
+| Human Feedback | re-asks, excluded-photo maps | default | reviewers would see the new model's answers |
+| How it works / Get involved | `/api/how-good` | default | a model with no benchmark rows shows an empty section |
+| Taxon counts | `/api/v1/taxon-counts` | default | minor |
+
+A site "from a link" answer and mycomap.org's by-observation answer are kept per model, so
+while the two defaults differ they are two answers: the site's no longer reuses the one
+mycomap.org's Validate Records kept, and is answered afresh once.
+
+### Traps already hit
+
+1. **Default v2 + API v1 list v1 = mycomap.org broken.** With `MV_DEFAULT_BACKBONE=v2` and
+   `MV_API_V1_BACKBONES=v1`, every API v1 call naming no model is refused 503 `not_served`,
+   and mycomap.org names no model. Now said as `[default] REFUSED`; never set it.
+2. **Name-order default.** Unset `MV_DEFAULT_BACKBONE` picks by name. Always set it on a
+   multi-model box (and always with `MV_SITE_DEFAULT_BACKBONE`).
+3. **Model card.** Only the release's own backbones carry a card (above).
+4. **Calibration is per backbone + method + place setting.** A model's borrowed rows
+   ("A calibration borrowed from another model") cover only the methods copied; changing
+   `MV_DEFAULT_METHOD` or `MV_PLACE_SETTING` needs new rows first, or confidences fall back
+   to the method's own temperature.
+5. **Tagger order.** v1's tagger file stays first in `MV_PHOTO_TAGGER` while v1 is the
+   review model; the nightly photo review uses the first.
+6. **Predictions stop if the default isn't ready**: recorded `skipped`, never another model.
+7. **The gate depends on v1's tower.** v2's gate is v1's 336 gate read from a second pass
+   through v1's tower; without v1 in `MV_ALLOWED_BACKBONES` the frozen `bioclip-2-336`
+   tower is loaded instead (more memory).
+8. **Memory.** Two models need the raised cap (about 9.7 GB steady, 11-11.5 GB peak,
+   estimated); re-measure after each switch.
+9. **Paper rules.** The paper's PC agrees before the prospective series' model changes, and
+   nothing compares the two models in public before the paper allows it.
+10. **Nightly timing.** Never restart during the nightly (08:00 UTC, 0.3-2.5 h).
+11. **Preload.** `default` in `MV_PRELOAD` is `MV_DEFAULT_BACKBONE`'s model; list the site's
+    default too, or its first visitor waits for it to load.
+
+### The order of switches
+
+**Stage 0: v2 opt-in.** `MV_DEFAULT_BACKBONE=v1`, API v1 v1 only, `MV_SITE_DEFAULT_BACKBONE`
+unset. v2 is "MycoMap Vision v2 (beta)" in the model list.
+
+**Stage 1: site visitors and the app on v2.** Add one line, everything else unchanged:
+
+```
+MV_SITE_DEFAULT_BACKBONE=bioclip-2.5-336-ft-20261122-171257
+```
+
+with `MV_DEFAULT_BACKBONE=bioclip-2-336-ft-20261018-171420` and `MV_API_V1_BACKBONES` unset or
+`=bioclip-2-336-ft-20261018-171420`, and v2 in `MV_PRELOAD`. Back up vision.env, restart
+outside the nightly, run the checks above, then: `/api/models` has `site_default_backbone` v2
+and `site_default_ready` true; an upload on the site names "MycoMap Vision v2"; a
+server-key `GET /api/v1/models` still answers "MycoMap Vision" with the release's card.
+Rollback: delete the line, restart.
+
+**Stage 2: mycomap.org auto-validation on v2.** Only after about two weeks of paired data
+on the same records, mycomap.org's thresholds reviewed (a .org change of its own), its
+stored answers and kept-answer versions checked, the PC agreeing, and a dry run of
+server-key calls naming v2 on recent records. Then set `MV_API_V1_BACKBONES=v2,v1` **and**
+`MV_DEFAULT_BACKBONE=v2` together, in one restart (v2 first in the list is not enough: the
+default decides), so no request can meet a default API v1 doesn't offer; v1 stays offered
+by name for a fallback. `MV_SITE_DEFAULT_BACKBONE` may then be deleted (it equals the
+default). Rollback: restore the vision.env backup, restart.
+
+**Stage 3: v2 everywhere.** Advance predictions, Human Feedback and How it works follow
+`MV_DEFAULT_BACKBONE` already; then the two-model serving release, and whether v1 stays
+served at all (it carries the gate's second pass: trap 7).
+
 ## Nightly update (between releases)
 
 With `MV_NIGHTLY=1` the server keeps the reference set in step with mycomap.org

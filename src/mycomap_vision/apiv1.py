@@ -378,34 +378,53 @@ PUBLIC_MODEL_NAME = "MycoMap Vision"
 INTERNAL_MARKERS = ("bioclip", "-ft-")      # what no public health string may contain
 # Models with a public name of their own beside the default one (Steve, 2026-11-24: v2 is
 # the opt-in beta). The website names them the same way (web/src/lib/publicNames.ts,
-# NAMED_VERSIONS; tests/test_v2_beta_prefixes.py checks the two agree).
+# NAMED_VERSIONS and BETA_VERSIONS; tests/test_v2_beta_prefixes.py checks the two agree).
 V2_BETA = "bioclip-2.5-336-ft-20261122-171257"
-NAMED_MODELS = {V2_BETA: "MycoMap Vision v2 (beta)"}
+NAMED_MODELS = {V2_BETA: "MycoMap Vision v2"}
+# A named model is "(beta)" while it is opt-in only, and drops it once it is the site's
+# default (MV_SITE_DEFAULT_BACKBONE; Steve, 2026-11-24: "once we move to v2 as default it
+# will no longer be beta"). The label follows the setting, never a list of its own.
+BETA_MODELS = frozenset({V2_BETA})
+BETA_SUFFIX = " (beta)"
 OTHER_MODEL_NAME = "MycoMap Vision (another model)"
 
 
-def public_name(backbone: str | None, default: str | None) -> str:
+def named_model(backbone: str | None, site_default: str | None = None) -> str | None:
+    """A named model's public name: "MycoMap Vision v2 (beta)" while it is opt-in only,
+    "MycoMap Vision v2" while it is the site's default (`site_default`,
+    MV_SITE_DEFAULT_BACKBONE); None for a model without a name of its own."""
+    name = NAMED_MODELS.get(backbone) if backbone else None
+    if name is None:
+        return None
+    return name + (BETA_SUFFIX if backbone in BETA_MODELS and backbone != site_default else "")
+
+
+def public_name(backbone: str | None, default: str | None,
+                site_default: str | None = None) -> str:
     """What API v1 calls the model that answered: "MycoMap Vision" for the default one (as
-    always), a named model's own name (NAMED_MODELS), else OTHER_MODEL_NAME: never the
-    default's name for another model."""
+    always), a named model's own name (named_model: "(beta)" unless it is `site_default`),
+    else OTHER_MODEL_NAME: never the default's name for another model."""
     if backbone is None or backbone == default:
         return PUBLIC_MODEL_NAME
-    return NAMED_MODELS.get(backbone, OTHER_MODEL_NAME)
+    return named_model(backbone, site_default) or OTHER_MODEL_NAME
 
 
-def public_health(full: dict, served: str | None, backbones) -> dict:
+def public_health(full: dict, served: str | None, backbones,
+                  site_default: str | None = None) -> dict:
     """/api/health as anyone may read it: the same figures, with every backbone id (and a
     method after it, "backbone/method") replaced by a public label, and no error or reason
     text (which can name files, hosts or models). `served` is the backbone answering
     identifications ("MycoMap Vision"); any other in `backbones` is "model 2", "model 3",
-    ... in name order, or its own public name (NAMED_MODELS: "MycoMap Vision v2 (beta)").
+    ... in name order, or its own public name (named_model: "MycoMap Vision v2 (beta)", or
+    "MycoMap Vision v2" while it is `site_default`).
     Keys keep their order, so deploy.sh's read of
     `"preload":{"state":` still works, and the nightly block keeps every field
     nightly_notes reads. Anything left that still looks like an id (INTERNAL_MARKERS)
     reads "internal"."""
     others = sorted({b for b in backbones if b} - {served})
     labels = {**({served: PUBLIC_MODEL_NAME} if served else {}),
-              **{b: NAMED_MODELS.get(b, f"model {i}") for i, b in enumerate(others, 2)}}
+              **{b: named_model(b, site_default) or f"model {i}"
+                 for i, b in enumerate(others, 2)}}
     ids = sorted(labels, key=len, reverse=True)
     pattern = (re.compile("|".join(re.escape(b) + r"(?:/[A-Za-z0-9+._-]+)?" for b in ids))
                if ids else None)

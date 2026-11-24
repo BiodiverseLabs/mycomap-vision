@@ -115,10 +115,20 @@ def test_v2_is_labelled_the_beta_and_v1_keeps_its_name():
 
 
 def test_the_server_and_the_website_name_the_beta_alike():
+    """One rule on both sides: the named versions, which of them are "(beta)" while opt-in,
+    the suffix, and where the page learns the site's default (the shell's meta tag), so the
+    label follows MV_SITE_DEFAULT_BACKBONE alike on the site, in the app and in health."""
+    from mycomap_vision.api import SITE_DEFAULT_META
     ts = (REPO / "web" / "src" / "lib" / "publicNames.ts").read_text(encoding="utf-8")
     assert re.search(r'export const V2_BETA = "([^"]+)";', ts)[1] == apiv1.V2_BETA
     named = re.search(r"NAMED_VERSIONS[^=]*= \{\s*\[V2_BETA\]: \{ name: \"([^\"]+)\"", ts)
     assert named and named[1] == apiv1.NAMED_MODELS[apiv1.V2_BETA]
+    assert set(apiv1.NAMED_MODELS) == {apiv1.V2_BETA}       # one entry each side, read above
+    beta = re.search(r"BETA_VERSIONS[^=]*= new Set\(\[([^\]]*)\]\)", ts)
+    assert beta and [b.strip() for b in beta[1].split(",") if b.strip()] == ["V2_BETA"]
+    assert apiv1.BETA_MODELS == {apiv1.V2_BETA}
+    assert re.search(r'export const BETA_SUFFIX = "([^"]+)";', ts)[1] == apiv1.BETA_SUFFIX
+    assert f'meta[name="{SITE_DEFAULT_META}"]' in ts
 
 
 # --- the default model ------------------------------------------------------------------

@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { OPEN_V1, PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName, SERVED_V1, V2_BETA, visionVersion } from "./publicNames";
+import {
+  OPEN_V1, PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName, SERVED_V1, siteDefaultFromPage, V2_BETA, visionVersion,
+} from "./publicNames";
 import { MODEL_CREDIT_LINE, modelName, releaseNote } from "./publicView";
 import { modelCredit } from "./howItWorks";
 import { modelLabel } from "./api";
@@ -186,4 +188,29 @@ test("v2 is the beta by name, and v1 keeps its own", () => {
   // Another BioCLIP 2.5 fine-tune (the step-1 model) is not the beta.
   assert.equal(publicModelName("bioclip-2.5-336-ft-20261029-152340"), "MycoMap Vision (development)");
   assert.equal(visionVersion("constructor"), null);
+});
+
+test("v2 drops (beta) once it is the site default, and keeps it while opt-in", () => {
+  assert.equal(publicModelName(V2_BETA, V2_BETA), "MycoMap Vision v2");
+  assert.equal(visionVersion(V2_BETA, V2_BETA)?.name, "MycoMap Vision v2");
+  assert.equal(publicModelName(V2_BETA, SERVED_V1), "MycoMap Vision v2 (beta)");
+  assert.equal(publicModelName(V2_BETA, null), "MycoMap Vision v2 (beta)");
+  assert.equal(publicModelName(SERVED_V1, V2_BETA), "MycoMap Vision v1", "v1 keeps its name either way");
+});
+
+test("every page reads the site default from the shell the server sends", () => {
+  assert.equal(siteDefaultFromPage(), null, "no page: unset");
+  const g = globalThis as { document?: unknown };
+  const before = g.document;
+  try {
+    g.document = { querySelector: (q: string) =>
+      q === 'meta[name="mv-site-default"]' ? { getAttribute: (a: string) => (a === "content" ? V2_BETA : null) } : null };
+    assert.equal(siteDefaultFromPage(), V2_BETA);
+    assert.equal(publicModelName(V2_BETA), "MycoMap Vision v2");
+    assert.equal(modelName(V2_BETA), "MycoMap Vision v2");
+    g.document = { querySelector: () => null };
+    assert.equal(publicModelName(V2_BETA), "MycoMap Vision v2 (beta)");
+  } finally {
+    g.document = before;
+  }
 });

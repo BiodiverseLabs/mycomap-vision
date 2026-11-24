@@ -60,8 +60,8 @@ import { shouldScrollTo, showPinnedBar, SINGLE_COLUMN_BELOW, waitingSteps, type 
 import { exampleView, homeStage } from "@/lib/identifyHome";
 import { ExampleResult, PhotoGuide, ViewsChecklist, ViewsRow, WhyVision } from "@/components/IdentifyHome";
 import {
-  BASE_LABEL, MAX_COMPARED, defaultBackbone, defaultChoice, offeredBases, resolveMethod, switchesFor, type Base,
-  type Choice,
+  BASE_LABEL, MAX_COMPARED, defaultChoice, offeredBases, resolveMethod, siteDefaultBackbone, siteDefaultMissing,
+  switchesFor, type Base, type Choice,
 } from "@/lib/modelChoice";
 
 const MAX_PHOTOS = 10;
@@ -956,7 +956,7 @@ function ModelPicker({ models, onChange }: {
 
   // Defaults once the server says what it offers.
   useEffect(() => {
-    const start = defaultBackbone(models.data);
+    const start = siteDefaultBackbone(models.data);
     if (!backbone && start) setBackbone(start);
     if (!choice && offered.length) setChoice(defaultChoice(offered, models.data?.default_method));
   }, [ready, offered, backbone, choice]);
@@ -981,7 +981,7 @@ function ModelPicker({ models, onChange }: {
   const canCompare = cap >= 2 && ready.length * offered.length > 1;
   const info = models.data?.backbones.find((b) => b.backbone === backbone);
   // A named default that isn't served: nothing is selected for the person (no stand-in).
-  const defaultMissing = !!models.data?.default_backbone && models.data.default_ready === false;
+  const defaultMissing = siteDefaultMissing(models.data);
 
   // Folded to one line (the model, how it scores) until "Model" opens the choices; folded,
   // it keeps its choices, and a second model to compare.

@@ -228,6 +228,12 @@ export interface ModelsInfo {
   default_backbone?: string;
   /** False while that named default is not served here (nothing stands in for it). */
   default_ready?: boolean;
+  /** The model the site's visitors (and the app) get when they name none
+   *  (MV_SITE_DEFAULT_BACKBONE), when the server names one: the Identify page selects it
+   *  first. Absent: default_backbone, as before. */
+  site_default_backbone?: string;
+  /** False while that site default is not served here (nothing stands in for it). */
+  site_default_ready?: boolean;
 }
 
 export interface Stats {
