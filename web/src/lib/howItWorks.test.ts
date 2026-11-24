@@ -165,3 +165,14 @@ test("today beside the speed figure is the US Eastern day, as the server counts 
   assert.equal(easternDay(new Date("2026-10-23T04:00:00Z")), "2026-10-23");   // midnight EDT
   assert.equal(easternDay(new Date("2026-12-01T04:59:00Z")), "2026-11-30");   // 11:59 pm EST
 });
+
+test("with a named default the model card is the default, never another model in its place", () => {
+  const backbones = ["a", "b"].map((backbone) =>
+    ({ backbone, spec: "", note: "", embedded_photos: 10, photos_per_second: null }));
+  const m = { ready: ["a", "b"], methods: [], max_models: 2, backbones, default_backbone: "b",
+              default_ready: true } as unknown as ModelsInfo;
+  assert.equal(servedModel(m)?.backbone, "b");
+  assert.equal(servedModel(m, "a")?.backbone, "a", "the results' own model first, as before");
+  const missing = { ...m, ready: ["a"], default_backbone: "z", default_ready: false } as unknown as ModelsInfo;
+  assert.equal(servedModel(missing), null);
+});

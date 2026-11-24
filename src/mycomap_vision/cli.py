@@ -1610,6 +1610,84 @@ def cmd_heldout(conn, args) -> None:
         print_heldout_report(out)
 
 
+def cmd_calibration(args) -> int:
+    """mv calibration copy (calcopy.py): another model's calibration as the target's rows."""
+    from pathlib import Path
+
+    from . import calcopy, nightly
+    if args.source == args.target:
+        print("refused: --from and --to are the same model")
+        return 2
+    path = Path(args.manifest) if args.manifest else nightly.served_manifest()
+    if not path.is_file():
+        print(f"refused: no manifest at {path}")
+        return 2
+    ro = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    methods = ({m.strip() for m in args.methods.split(",") if m.strip()}
+               if args.methods else None)
+    try:
+        if args.from_file:
+            planned, skipped = calcopy.plan_from_file(Path(args.from_file), args.source), []
+            if methods:
+                planned = [p for p in planned if p.method in methods]
+        else:
+            src_path = Path(args.from_manifest) if args.from_manifest else path
+            src = (ro if src_path == path else
+                   sqlite3.connect(src_path.resolve().as_uri() + "?mode=ro", uri=True))
+            planned, skipped = calcopy.plan_from_rows(src, args.source, methods)
+        rows = calcopy.rows_to_write(args.target, planned, args.note, by=args.by)
+        clash = calcopy.clashes(ro, args.target, planned)
+        print(f"manifest: {path}")
+        print(f"{len(rows)} row(s) for {args.target}, copied from {args.source}"
+              + (f" ({Path(args.from_file).name})" if args.from_file else "") + ":")
+        for line in calcopy.describe(planned, rows):
+            print(line)
+        for line in skipped:
+            print(f"  skipped: {line}")
+        served = config.setting("MV_DEFAULT_METHOD")         # what the server answers with
+        shown = calcopy.methods_reading(planned)
+        if served and served not in shown and served in calcopy.evaluate.METHODS:
+            shown.append(served)
+        reads = calcopy.served_reads(ro, args.target, rows, shown)
+        print("what serving would read for the target afterwards (this environment's "
+              f"MV_PLACE_CALIBRATION={config.setting('MV_PLACE_CALIBRATION') or 'shared'}, "
+              f"MV_PLACE_SETTING={config.setting('MV_PLACE_SETTING') or 'default'}):")
+        for m, got in reads.items():
+            print(f"  {m}: {json.dumps(got, sort_keys=True)}")
+        if served in reads and reads[served] is None:
+            print(f"warning: the served method (MV_DEFAULT_METHOD={served}) would still read "
+                  "no calibration for the target")
+        if not rows:
+            print("refused: nothing to copy")
+            return 2
+        if clash and not args.replace:
+            print("refused: the target already has rows for these methods (add --replace to "
+                  "add the copies as newer rows; nothing is deleted):")
+            for c in clash:
+                print(f"  {c}")
+            return 2
+    except calcopy.Refused as e:
+        print(f"refused: {e}")
+        return 2
+    finally:
+        ro.close()
+    if args.dry_run:
+        print("dry run: nothing written")
+        return 0
+    rw = sqlite3.connect(path, timeout=30, isolation_level=None)
+    try:
+        rw.execute("pragma busy_timeout = 30000")
+        ids = calcopy.insert(rw, rows, check=None if args.replace else (
+            lambda c: calcopy.clashes(c, args.target, planned)))
+    except calcopy.Refused as e:
+        print(f"refused: {e}")
+        return 2
+    finally:
+        rw.close()
+    print(f"written: eval_runs ids {', '.join(map(str, ids))}")
+    return 0
+
+
 def cmd_v1_test_count(args) -> None:
     """The sealed test's size so far, by the day each record turned green (v1_test_count.py):
     counts only, from the manifest opened read-only."""
@@ -2645,6 +2723,41 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
     p.add_argument("--backbone", help="only this backbone's rows")
     p.add_argument("--method", help="only this method's rows")
+    p = sub.add_parser(
+        "calibration", help="copy a model's calibration onto another model (calcopy.py)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Copy the calibration serving reads (eval_runs rows, evaluate."
+        "latest_calibration) from one model to another, e.g. the step-1 BioCLIP 2.5 "
+        "fine-tune's onto MycoMap Vision v2 (Steve, 2026-11-07).",
+        epilog="On the server box the manifest is the nightly layer's (the live one):\n"
+        "  1. stop the service: sudo systemctl stop mycomap-vision\n"
+        "  2. back it up: sqlite3 <manifest> \".backup <manifest>.bak-<stamp>.sqlite\"\n"
+        "  3. run with --dry-run and read what it would write\n"
+        "  4. run again without --dry-run (one transaction: all rows or none)\n"
+        "  5. start the service; the model's index rebuilds with the new calibration.\n"
+        "Undo: restore the backup with the service stopped, or delete the rows it printed.\n"
+        "Nothing is overwritten: if the target already has a row for a method the copy\n"
+        "writes, it refuses unless --replace (the copies are then newer rows, read first;\n"
+        "the old rows stay).")
+    calsub = p.add_subparsers(dest="action", required=True)
+    q = calsub.add_parser("copy", help="copy one model's calibration rows to another model")
+    q.add_argument("--from", dest="source", required=True,
+                   help="the backbone whose calibration is copied")
+    q.add_argument("--to", dest="target", required=True, help="the backbone it is copied to")
+    q.add_argument("--note", required=True, help="why (kept with each row)")
+    q.add_argument("--by", help="who (kept with each row; default: this login)")
+    q.add_argument("--manifest", help="the manifest written to (default: the served one, on "
+                   "the box the nightly layer's)")
+    q.add_argument("--from-manifest", help="read the source's rows from this manifest "
+                   "(opened read-only; default: --manifest)")
+    q.add_argument("--from-file", help="a calibration file instead of rows (the step-1 "
+                   "<backbone>.calibration-v1-val.json format: photos_only and place blocks)")
+    q.add_argument("--methods", help="only these methods (comma list)")
+    q.add_argument("--replace", action="store_true",
+                   help="add the copies even where the target has rows of its own")
+    q.add_argument("--dry-run", action="store_true",
+                   help="print what would be written; open the manifest read-only")
+
     p = sub.add_parser("scoreboard-export", help="one model's rows of a comparison as JSON "
                        "(e.g. the iNat baseline, for the server box)")
     p.add_argument("--comparison", required=True, help="comparison id from mv scoreboard")
@@ -3311,6 +3424,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "experiments-check":   # the private registry only: no manifest
         return cmd_experiments_check(args)
+    if args.command == "calibration":         # opens the manifest itself (read-only to look)
+        return cmd_calibration(args)
     if args.command == "v1-test-count":       # opens the manifest itself, read-only
         cmd_v1_test_count(args)
         return 0

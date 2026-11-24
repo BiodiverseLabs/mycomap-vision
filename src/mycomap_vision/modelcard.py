@@ -81,13 +81,28 @@ def card(release_dir: Path | None, manifest: Path | None) -> dict:
             data = data_of(conn)
         finally:
             conn.close()
-    version = None
+    version = backbones = None
     if release_dir:
         try:
-            version = json.loads((release_dir / "release.json").read_text(encoding="utf-8")
-                                 ).get("version")
+            info = json.loads((release_dir / "release.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            version = None
+            info = {}
+        version = info.get("version") if isinstance(info, dict) else None
+        named = info.get("backbones") if isinstance(info, dict) else None
+        if isinstance(named, list) and all(isinstance(b, str) for b in named):
+            backbones = list(named)
     if not (isinstance(version, str) and VERSION.match(version)):
         version = data["snapshot"]
-    return {"version": version, "data": data}
+    # The models this card describes: the release's own (release.json `backbones`); None
+    # with no release (a laptop or test server: the default model's). A backbone added to
+    # a release folder after it was built (the v2 beta) has no card here (belongs_to).
+    return {"version": version, "data": data, "backbones": backbones}
+
+
+def belongs_to(card: dict | None, backbone: str, default: str | None) -> bool:
+    """Whether `card` describes `backbone`: one the release was built with, or, for a card
+    that names none (no release.json), the default backbone."""
+    if not card:
+        return False
+    owners = card.get("backbones")
+    return backbone in owners if owners is not None else backbone == default

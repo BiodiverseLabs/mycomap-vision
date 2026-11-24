@@ -749,13 +749,18 @@ def latest_calibration(conn: sqlite3.Connection, backbone: str, method: str) -> 
                            (backbone, method)).fetchone()
     if not row:
         return None
-    cal = json.loads(row[2]).get("all_photos", {}).get("calibration")
+    report = json.loads(row[2])
+    cal = report.get("all_photos", {}).get("calibration")
     if not cal:
         return None
-    return {"run_id": row[0], "comparison_id": row[1],
-            "temperatures": {rank: c["temperature"] for rank, c in cal.items()},
-            "n": {rank: c["n"] for rank, c in cal.items()},
-            "sets": {rank: c["sets"] for rank, c in cal.items() if c.get("sets")}}
+    out = {"run_id": row[0], "comparison_id": row[1],
+           "temperatures": {rank: c["temperature"] for rank, c in cal.items()},
+           "n": {rank: c["n"] for rank, c in cal.items()},
+           "sets": {rank: c["sets"] for rank, c in cal.items() if c.get("sets")}}
+    copied = report.get("calibration_copy")        # calcopy.py: another model's, copied
+    if isinstance(copied, dict):
+        out["copied"] = {k: copied.get(k) for k in ("from_backbone", "copied_at", "note")}
+    return out
 
 
 SCOREBOARD_SCHEMA = """
@@ -1070,9 +1075,10 @@ SCOREBOARD_COLUMNS = ["id", "comparison_id", "backbone", "method", "cutoff", "te
 def scoreboard(conn: sqlite3.Connection, comparison_id: str | None = None) -> list[dict]:
     """Saved runs, newest comparison first, best species top-1 first within it."""
     conn.executescript(SCOREBOARD_SCHEMA)
-    where, params = "", ()
+    # A calibration copied from another model (calcopy.py) is not a run: never listed.
+    where, params = "where json_extract(report_json, '$.calibration_copy') is null", ()
     if comparison_id:
-        where, params = "where comparison_id = ?", (comparison_id,)
+        where, params = where + " and comparison_id = ?", (comparison_id,)
     rows = conn.execute(
         f"select {', '.join(SCOREBOARD_COLUMNS)}, "
         "json_extract(report_json, '$.dataset_release.dataset_release'), "

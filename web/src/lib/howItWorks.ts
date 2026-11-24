@@ -4,6 +4,7 @@
 
 import type { HowGood, ModelsInfo, SpeedDay, Stats, TopK } from "./api";
 import { longDate, MODEL_CREDIT_LINE, modelName } from "./publicView";
+import { defaultBackbone } from "./modelChoice";
 
 /** Fewer days than this are listed, not drawn as a line. */
 export const MIN_CHART_DAYS = 3;
@@ -149,11 +150,14 @@ export function topKRows(h: HowGood | undefined): { k: number; species: number |
   return rows.length ? rows : null;
 }
 
-/** The model the site serves: the one the results are for when it is ready, else the first
- *  ready one. */
+/** The model the site serves: the one the results are for when it is ready, else the
+ *  server's default (modelChoice.defaultBackbone: MV_DEFAULT_BACKBONE, else the first ready
+ *  one). */
 export function servedModel(m: ModelsInfo | undefined, prefer?: string | null) {
   const ready = m?.backbones.filter((b) => b.embedded_photos > 0 && m.ready.includes(b.backbone)) ?? [];
-  return ready.find((b) => b.backbone === prefer) ?? ready[0] ?? null;
+  const named = defaultBackbone(m);
+  return ready.find((b) => b.backbone === prefer) ?? ready.find((b) => b.backbone === named)
+    ?? (m?.default_backbone ? null : ready[0]) ?? null;
 }
 
 /** The small model credit, the only place How it works names the base model (Steve,

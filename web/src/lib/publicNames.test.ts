@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { OPEN_V1, PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName, SERVED_V1 } from "./publicNames";
+import { OPEN_V1, PUBLIC_METHOD_LABEL, publicMethodLabel, publicModelName, SERVED_V1, V2_BETA, visionVersion } from "./publicNames";
 import { MODEL_CREDIT_LINE, modelName, releaseNote } from "./publicView";
 import { modelCredit } from "./howItWorks";
 import { modelLabel } from "./api";
@@ -173,4 +173,17 @@ test("the credit line is said where the models are explained: Research's two mod
     assert.match(read(page), /\{MODEL_CREDIT_LINE\}/, page);
   }
   assert.equal(modelCredit(SERVED_V1).madeBy, MODEL_CREDIT_LINE, "How it works' model credit");
+});
+
+test("v2 is the beta by name, and v1 keeps its own", () => {
+  assert.equal(V2_BETA, "bioclip-2.5-336-ft-20261122-171257");
+  assert.equal(publicModelName(V2_BETA), "MycoMap Vision v2 (beta)");
+  assert.equal(modelName(V2_BETA), "MycoMap Vision v2 (beta)");
+  assert.equal(visionVersion(V2_BETA)?.px, 336);
+  assert.doesNotMatch(publicModelName(V2_BETA), BACKBONE_WORDS);
+  assert.equal(publicModelName(SERVED_V1), "MycoMap Vision v1");
+  assert.equal(modelName(SERVED_V1), "MycoMap Vision v1 (public + non-public training data)");
+  // Another BioCLIP 2.5 fine-tune (the step-1 model) is not the beta.
+  assert.equal(publicModelName("bioclip-2.5-336-ft-20261029-152340"), "MycoMap Vision (development)");
+  assert.equal(visionVersion("constructor"), null);
 });

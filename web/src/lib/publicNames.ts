@@ -20,6 +20,14 @@ export const PUBLIC_TRAINED = new Set([OPEN_V1, "bioclip-2-ft-20261014-003539"])
 /** The site's served model when the names were set (any internal 336 px fine-tune is v1). */
 export const SERVED_V1 = "bioclip-2-336-ft-20261018-171420";
 
+/** Fine-tunes released under a name of their own (Steve, 2026-11-24: v2 is the opt-in beta,
+ *  "MycoMap Vision v2 (beta)"). The server names them the same way in API v1 and the public
+ *  /api/health (apiv1.NAMED_MODELS; a Python test checks the two agree). */
+export const V2_BETA = "bioclip-2.5-336-ft-20261122-171257";
+export const NAMED_VERSIONS: Record<string, VisionVersion> = {
+  [V2_BETA]: { name: "MycoMap Vision v2 (beta)", qualifier: null, px: 336 },
+};
+
 /** The image size each base model (models.ALIASES) reads, in px. */
 export const BASE_PX: Record<string, number> = {
   "bioclip-2": 224, "bioclip-2-336": 336, "bioclip-2-448": 448, bioclip: 224,
@@ -41,6 +49,7 @@ export interface VisionVersion {
 /** A fine-tune of ours (`<base>-ft-<YYYYMMDD>-<HHMMSS>` from finetune.py, or `<base>-ft-sample`)
  *  as the MycoMap Vision version it is; null for anything that is not one of our fine-tunes. */
 export function visionVersion(backbone: string): VisionVersion | null {
+  if (Object.prototype.hasOwnProperty.call(NAMED_VERSIONS, backbone)) return NAMED_VERSIONS[backbone];
   const ft = /^(.+)-ft-(\d{8}-\d+|sample)$/.exec(backbone);
   if (!ft) return null;
   const [, base, run] = ft;

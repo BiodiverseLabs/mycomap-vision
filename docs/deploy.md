@@ -277,6 +277,32 @@ the box, cut and pull a release right after `mv heldout freeze --holdout` or
 held-out list but none of the benchmark's own tables (`heldout_*`), which stay on the
 laptop.
 
+### A calibration borrowed from another model
+
+A model served before it has a calibration of its own (the v2 beta: Steve, 2026-11-07,
+the step-1 BioCLIP 2.5 fine-tune's) gets that model's calibration as rows of its own with
+`mv calibration copy` (calcopy.py), written exactly where serving reads them
+(`evaluate.latest_calibration`), each with where it came from, when, who and why, and no
+scores (the scoreboard never lists them). On the box the manifest is the nightly layer's,
+the live one, so stop the service, back it up, dry-run, then write:
+
+```bash
+sudo systemctl stop mycomap-vision
+sqlite3 $L/manifest.sqlite ".backup $R/state/layer-manifest.bak-$STAMP-pre-calcopy.sqlite"
+.venv/bin/mv calibration copy --from <source> --to <target> --from-file <source>.calibration-v1-val.json \
+    --note "<why>" --by <who> --dry-run
+.venv/bin/mv calibration copy ... (the same, without --dry-run)
+sudo systemctl start mycomap-vision
+```
+
+`--from-file` takes the step-1 calibration file (its `photos_only` and `place` blocks: the
+served by-specimen method and its place variant); without it the source's own rows are
+copied (`--from-manifest` reads them from another manifest, read-only). It refuses if the
+target already has rows for those methods (`--replace` adds the copies as newer rows and
+deletes nothing), and prints what serving would read afterwards, with a warning when the
+served method (`MV_DEFAULT_METHOD`) would still read none. Undo: restore the backup with the
+service stopped, or delete the rows it printed.
+
 ## Nightly update (between releases)
 
 With `MV_NIGHTLY=1` the server keeps the reference set in step with mycomap.org
@@ -406,7 +432,9 @@ before"), never as live rows:
 After the reference set, the night makes **advance predictions**: up to
 `MV_NIGHTLY_PREDICT` (300) records still awaiting validation on mycomap.org
 (`GET /api/vision/pending-records`), newest first, are identified from their iNat
-photos with the model people get by default (the first in `MV_PRELOAD`), photos
+photos with the model people get by default (`MV_DEFAULT_BACKBONE`, as preloaded; unset,
+the first in `MV_PRELOAD`; skipped, never another model, while a named default isn't
+served), photos
 held in memory only. Each prediction is scored once its record turns green, and
 only if it was made before: `.venv/bin/mv prospective` on the box. That is the
 honest test of the model, since nothing could have seen the answer. A failure here

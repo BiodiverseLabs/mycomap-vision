@@ -1053,6 +1053,17 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     if background:
         threading.Thread(target=model_card, name="model card", daemon=True).start()
 
+    def answer_model(backbone: str, calibration_id: str | None = None) -> dict:
+        """The v1 `model` block of the model that answered: its own public name, and the
+        release's card only when that card describes it (modelcard.belongs_to); for any
+        other model `version` and `data` are null, never another model's card. The default
+        is the named one, else the name-order one cached once a minute (no count query per
+        answer)."""
+        default = limits.default_backbone or served_backbones()[0]
+        card = model_card()
+        return apiv1.public_model(card, calibration_id, name=apiv1.public_name(backbone, default),
+                                  own_card=modelcard.belongs_to(card, backbone, default))
+
     # /api/health is public: model ids only with mycomap.org's server key (apiv1.public_health).
     # Which backbone answers is read from the database at most once a minute.
     served_cache: dict = {"at": -1e9, "served": None, "ready": []}
@@ -1061,7 +1072,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         now = time.monotonic()
         if now - served_cache["at"] > 60:
             ready = ready_backbones()
-            served_cache.update(at=now, ready=ready, served=ready[0] if ready else None)
+            served_cache.update(at=now, ready=ready, served=default_backbone(ready))
         return served_cache["served"], served_cache["ready"]
 
     # When this process's app was made (epoch seconds), in /api/health: deploy.sh counts an
@@ -1095,6 +1106,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             # identification log's counters (rows written, waiting, dropped, failed), and how
             # many runs are kept under their own links and the room their photos take.
             return {**full, "upload_matches": upload_meter.summary(),
+                    "default_backbone": default_health(),
                     "identify_log": identify_log.state(),
                     "run_links": run_store.summary() if run_store is not None else None}
         served, ready = served_backbones()
@@ -1152,6 +1164,69 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return [b for b, n in embedded_counts().items()
                 if n and b in limits.allowed_backbones and not readers.choose(b).refused]
 
+    def default_backbone(ready: list[str] | None = None) -> str | None:
+        """The backbone an identification that names none uses (Limits.default_of):
+        MV_DEFAULT_BACKBONE when it is ready here, else None, so the caller refuses; unset,
+        the first ready backbone by name (as before)."""
+        return limits.default_of(ready_backbones() if ready is None else ready)
+
+    def default_refusal(ready: list[str] | None = None) -> str | None:
+        """Why the named default (MV_DEFAULT_BACKBONE) is not answering here, or None."""
+        named = limits.default_backbone
+        ready = ready_backbones() if ready is None else ready
+        if not named or named in ready:
+            return None
+        if named not in limits.allowed_backbones:
+            return "it is not in MV_ALLOWED_BACKBONES"
+        if not embedded_counts().get(named):
+            return "it has no embeddings here"
+        return readers.choose(named).refused or "it is not ready here"
+
+    def default_health() -> dict:
+        """The default backbone as the server-key /api/health reports it."""
+        ready = ready_backbones()
+        why = default_refusal(ready)
+        return {"backbone": limits.default_backbone or (ready[0] if ready else None),
+                "from": "MV_DEFAULT_BACKBONE" if limits.default_backbone else "name order",
+                "ready": why is None and default_backbone(ready) is not None,
+                "refused": why,
+                "api_v1": sorted(v1_backbones(ready))}
+
+    def no_default() -> str:
+        """What a refusal for want of the default says (no model id: it may be public)."""
+        if limits.default_backbone:
+            return ("the default model is not served here (MV_DEFAULT_BACKBONE); see the "
+                    "server log")
+        return "no model has embeddings yet"
+
+    def v1_backbones(ready: list[str] | None = None) -> set[str]:
+        """What API v1 answers with (MV_API_V1_BACKBONES), else the default backbone only."""
+        if limits.api_v1_backbones is not None:
+            return set(limits.api_v1_backbones)
+        named = default_backbone(ready)
+        return {named} if named else set()
+
+    def default_answering() -> tuple[str, str] | None:
+        """(backbone, method) of the model people get by default, as preloaded: the nightly
+        advance predictions and taxon counts answer with it. Unset MV_DEFAULT_BACKBONE: the
+        first preloaded spec, else the first ready backbone (as before). Set: that
+        backbone's first preloaded spec, else it with the default method; None when it is
+        not ready (refused, never another model)."""
+        if not limits.default_backbone:
+            if warm.models:
+                backbone, _, method = warm.models[0].partition("/")
+                return backbone, method
+            ready = ready_backbones()
+            return (ready[0], default_method()) if ready else None
+        named = default_backbone()
+        if named is None:
+            return None
+        for spec in warm.models:
+            backbone, _, method = spec.partition("/")
+            if backbone == named:
+                return backbone, method
+        return named, default_method()
+
     def refused_backbones() -> dict[str, str]:
         """{backbone: why it is not served} for the embedded, allowed backbones no gate (or
         tagger) here reads the base of (servedbases.py): never served ungated."""
@@ -1187,13 +1262,19 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         for b in out:
             if b["backbone"] in refused:                 # never served ungated: say why
                 b["refused"] = refused[b["backbone"]]
-        return {"backbones": out,
+        body = {"backbones": out,
                 "methods": [m for m in evaluate.METHODS
                             if limits.method_allowed(m) and served_ready(m)],
                 "max_models": limits.max_models,
                 "default_method": default_method(),
                 "ready": [b["backbone"] for b in out
                           if b["embedded_photos"] and b["backbone"] not in refused]}
+        if limits.default_backbone:
+            # The site selects this one first; while it is not ready it selects none
+            # (default_ready false), and identifications that name no model are refused.
+            body["default_backbone"] = limits.default_backbone
+            body["default_ready"] = default_backbone() is not None
+        return body
 
     def compute_stats() -> dict:
         """On a connection of its own, never the shared one: over the full set this takes
@@ -1283,6 +1364,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         top 1/3/5/10, species by reference depth, first photo only. Never the sealed test."""
         from . import howgood
         served, method = ready_backbones(), default_method()
+        if limits.default_backbone:                # the default model's numbers only
+            served = [b for b in served if b == limits.default_backbone]
         with db_lock:
             return howgood.how_good(conn, served, method)
 
@@ -1552,9 +1635,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         ready = ready_backbones()
         wanted = [m.strip() for m in models_.split(",") if m.strip()]
         if not wanted:
-            if not ready:
-                raise HTTPException(503, "no model has embeddings yet")
-            wanted = [f"{ready[0]}/{default_method()}"]
+            named = default_backbone(ready)
+            if named is None:
+                raise HTTPException(503, no_default())
+            wanted = [f"{named}/{default_method()}"]
         if limits.max_models and len(wanted) > limits.max_models:
             raise HTTPException(400, f"compare at most {limits.max_models} models at a time here")
         pairs = []
@@ -2420,9 +2504,13 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             names = []
             for spec in specs:
                 if spec == "default":
-                    if not ready:
-                        raise ValueError("no model has embeddings yet")
-                    spec = f"{ready[0]}/{default_method()}"
+                    named = default_backbone(ready)
+                    if named is None:
+                        raise ValueError(f"MV_DEFAULT_BACKBONE={limits.default_backbone} is "
+                                         f"not served here: {default_refusal(ready)}"
+                                         if limits.default_backbone
+                                         else "no model has embeddings yet")
+                    spec = f"{named}/{default_method()}"
                 backbone, _, method = spec.partition("/")
                 method = method or default_method()
                 if backbone not in limits.allowed_backbones or backbone not in ready:
@@ -2442,6 +2530,23 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             note(f"[preload] {warm.error}")
         finally:
             preload_settled.set()
+
+    # The default model, said once at startup: a named default that isn't served is refused
+    # on every path that names no model (never another model in its place).
+    try:
+        ready_now = ready_backbones()
+        if limits.default_backbone and default_backbone(ready_now) is None:
+            note(f"[default] MV_DEFAULT_BACKBONE={limits.default_backbone} is not served here "
+                 f"({default_refusal(ready_now)}): identifications that name no model are "
+                 "refused, and no other model answers in its place")
+        elif limits.default_backbone:
+            note(f"[default] {limits.default_backbone} answers identifications that name no "
+                 f"model; API v1 answers with {', '.join(sorted(v1_backbones())) or 'none'}")
+        elif len(ready_now) > 1:
+            note(f"[default] MV_DEFAULT_BACKBONE is unset: {ready_now[0]} is the default only "
+                 "because its name sorts first; set it on a server with several models")
+    except Exception as e:  # noqa: BLE001 - the server starts regardless
+        note(f"[default] {type(e).__name__}: {e}")
 
     specs = preload_specs(config.setting("MV_PRELOAD")) if preload is None else preload
     if specs:
@@ -2616,7 +2721,14 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         # Advance predictions with the model people get by default, on the index just
         # rebuilt: what it says before the DNA answer, scored once the record turns green.
         if nightly_settings.predict > 0 and warm.models:
-            report["predictions"] = predict_pending_tonight(report["id"], fetch_pending)
+            answering = default_answering()
+            if answering is None:              # the named default isn't served: no stand-in
+                report["predictions"] = {"skipped": "the default model (MV_DEFAULT_BACKBONE) "
+                                                    f"is not served: {default_refusal()}"}
+                note(f"[nightly] advance predictions skipped: {report['predictions']['skipped']}")
+            else:
+                report["predictions"] = predict_pending_tonight(report["id"], fetch_pending,
+                                                                answering)
         report["early_answers"] = score_early_answers_tonight()
         return report
 
@@ -2635,9 +2747,10 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         finally:
             own.close()
 
-    def predict_pending_tonight(run_id: int, fetch_pending) -> dict:
+    def predict_pending_tonight(run_id: int, fetch_pending,
+                                answering: tuple[str, str] | None = None) -> dict:
         from .prospective import PhotoFetcher
-        backbone, _, method = warm.models[0].partition("/")
+        backbone, method = answering or default_answering()
 
         def served():
             ident = indexes.get((backbone, method),
@@ -2686,10 +2799,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
     def feedback_rescore(record_key: str, who: dict | None = None) -> dict:
         source, number = (("mo", record_key[3:]) if record_key.startswith("mo:")
                           else ("inat", record_key))
-        ready = ready_backbones()
-        if not ready:
-            return {"available": False, "reason": "no model is ready"}
-        backbone, method = ready[0], default_method()
+        named = default_backbone()
+        if named is None:
+            return {"available": False, "reason": ("the default model is not served here"
+                                                   if limits.default_backbone
+                                                   else "no model is ready")}
+        backbone, method = named, default_method()
         timer = apiv1.Timer()
         try:
             ident = served_index(backbone, method, permission_view(), timer)
@@ -2803,9 +2918,8 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         return entry
 
     def excluded_backbone() -> str | None:
-        """The served backbone, whose maps (v1's) are the only ones made here."""
-        ready = ready_backbones()
-        return ready[0] if ready else None
+        """The default backbone, whose maps (v1's) are the only ones made here."""
+        return default_backbone()
 
     def excluded_off() -> None:
         if not excluded_on:
@@ -3189,7 +3303,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             counts = timed("backbone", lambda: dict(run(
                 "select backbone, count(*) from embeddings group by 1")))
             ready = [b for b, n in counts.items() if n and b in limits.allowed_backbones]
-            backbone = ready[0] if ready else None
+            backbone = limits.default_of(ready)
             rel = served_release_dir()
             preload_served.clear()
             preload_served.update(backbone=backbone,
@@ -3345,12 +3459,25 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
 
         def v1_model(spec: str | None) -> tuple[str, str]:
             ready = ready_backbones()
+            offered = v1_backbones(ready)
             if not spec:
-                if not ready:
+                named = default_backbone(ready)
+                if named is None and limits.default_backbone:
+                    # Never another model in its place (MV_DEFAULT_BACKBONE).
+                    raise apiv1.V1Error(503, "not_served", no_default())
+                if named is None:
                     raise apiv1.V1Error(503, "updating", "no model is ready yet", retry_after=30)
-                return ready[0], default_method()
+                if named not in offered:
+                    raise apiv1.V1Error(503, "not_served", "the default model is not offered "
+                                        "through API v1 here (MV_API_V1_BACKBONES)")
+                return named, default_method()
             backbone, _, method = spec.strip().partition("/")
             method = method or default_method()
+            if backbone in limits.allowed_backbones and backbone not in offered:
+                # A model the site offers (the v2 beta) but API v1 does not: no id echoed.
+                raise apiv1.V1Error(400, "model_not_offered", "that model is not offered "
+                                    "through API v1 here; leave model out for the default "
+                                    "(GET /api/v1/models)")
             if (backbone not in limits.allowed_backbones or backbone not in ready
                     or method not in evaluate.METHODS or not limits.method_allowed(method)
                     or not served_ready(method)):
@@ -3454,8 +3581,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             prior = result.pop("prior", None) or {}
             out = {"request_id": "r_" + secrets.token_urlsafe(12),
                    **result,
-                   "model": apiv1.public_model(model_card(),
-                                               str(cal.get("comparison_id") or "")),
+                   "model": answer_model(backbone, str(cal.get("comparison_id") or "")),
                    "prior": {"applied": bool(prior.get("applied"))},
                    "context_used": used,
                    "gate": result.get("gate"),
@@ -3475,7 +3601,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                 ident = v1_index(backbone, method, permission_view(), apiv1.Timer())
                 cal = (ident.calibration or {}).get("comparison_id")
                 doc = apiv1.models_doc(
-                    {**apiv1.public_model(model_card(), str(cal or "")),
+                    {**answer_model(backbone, str(cal or "")),
                      "answers_version": answers_version(backbone, method, permission_view())},
                     {"records": ident.records, "species": len(ident.index.species),
                      "photos": ident.embedded},
@@ -3575,7 +3701,9 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                     body["excluded_reference"] = ({"source": source, "source_id": number}
                                                   if own else None)
                     body["left_out_photos"] = int(left or 0)
-                    if held.get("release") is not None:
+                    if held.get("release") is not None and body["model"].get("data") is not None:
+                        # The release it was kept under, for the model the card describes
+                        # only (answer_model): never a card on another model's answer.
                         body["model"] = {**body["model"], "version": held["release"]}
                 body["model"] = {**body["model"], "answers_version": kept.version}
                 body.update(cached=True, kept_from=kept_from, answered=kept.about(version))
@@ -4252,7 +4380,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
                                     retry_after=60, estimated_wait_seconds=60) from None
             body = {"session_id": s.id, "expires_at": expires_at(s),
                     "ttl_seconds": int(store.idle_ttl), "max_photos": session_store.MAX_PHOTOS,
-                    "model": apiv1.public_model(model_card()),
+                    "model": answer_model(backbone),
                     "context_used": entered_context(s, [])[1]}
             return JSONResponse(body, status_code=201, headers={"Cache-Control": "no-store"})
 
@@ -4368,13 +4496,12 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
         counts_cache: dict = {}
 
         def served_default() -> tuple[str, str]:
-            if warm.models:
-                backbone, _, method = warm.models[0].partition("/")
-                return backbone, method
-            ready = ready_backbones()
-            if not ready:
+            answering = default_answering()
+            if answering is None and limits.default_backbone:
+                raise apiv1.V1Error(503, "not_served", no_default())
+            if answering is None:
                 raise apiv1.V1Error(503, "updating", "no model is ready yet", retry_after=30)
-            return ready[0], default_method()
+            return answering
 
         @app.get("/api/v1/taxon-counts")
         def v1_taxon_counts(request: Request):
@@ -4391,7 +4518,7 @@ def create_app(manifest_path: Path | None = None, embeddings_root: Path | None =
             if key not in counts_cache:
                 doc = apiv1.taxon_counts(
                     ident.rank_counts, records=ident.records,
-                    model=apiv1.public_model(model_card()),
+                    model=answer_model(backbone),
                     nightly_version=version[3] if layer else None)
                 body = apiv1.encode(doc)
                 counts_cache.clear()

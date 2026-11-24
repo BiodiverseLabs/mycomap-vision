@@ -826,6 +826,10 @@ class Identifier:
             return ("Not calibrated yet: relative confidence among candidates. Run "
                     "mv compare for this model to calibrate it.")
         n = self.calibration["n"].get("species", 0)
+        if self.calibration.get("copied"):
+            # calcopy.py: fitted for another model of the same kind, not refitted on this one.
+            return (f"Calibrated with the calibration fitted for an earlier model on {n:,} "
+                    "DNA-verified records (copied, not refitted on this model). Approximate.")
         return (f"Calibrated on {n:,} test records (comparison "
                 f"{self.calibration['comparison_id']}), DNA-verified records the model did not "
                 "learn from. Approximate, and fitted again when a new model or release is built.")
