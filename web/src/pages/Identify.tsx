@@ -33,7 +33,7 @@ import {
   withIncluded, withoutIncluded, withoutKeptAllNote,
 } from "@/lib/photoTypes";
 import { fillFromPhotos, readPhotoPlaceDate, type PhotoPlaceDate } from "@/lib/photoPlaceDate";
-import { locateError, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
+import { locateError, noContextWords, noPhotoPlace, placeNote, platformOf, sourceWords } from "@/lib/photoPlace";
 import { applyPick } from "@/lib/mapPick";
 import { localWhen, runDetails, type Answered } from "@/lib/keptRun";
 import { observationFromQuery, parseObservationLink, sourceName, type ObservationRef, type ObservationSource }
@@ -280,7 +280,8 @@ export function IdentifyPage() {
             {answer && (
               <div className="flex min-w-0 basis-full sm:basis-0 sm:flex-1">
                 <ContextLine used={answer.context_used} sent={viaLink ? undefined : run.variables?.where}
-                             placeModel={usesPlace(answer.results.map((r) => r.model.method))} />
+                             placeModel={usesPlace(answer.results.map((r) => r.model.method))}
+                             excludedReference={viaLink && !!byLink.data?.observation.excluded_reference} />
               </div>
             )}
             <div className="flex gap-2 sm:ml-auto">
@@ -904,13 +905,13 @@ function WhereWhen({ where, setWhere, noPlace, open }: {
   );
 }
 
-export function ContextLine({ used, sent, placeModel }: { used: ContextUsed; sent?: Where; placeModel: boolean }) {
+export function ContextLine({ used, sent, placeModel, excludedReference = false }: {
+  used: ContextUsed; sent?: Where; placeModel: boolean; excludedReference?: boolean;
+}) {
   if (!used.place_from && !used.date_from) {
     return (
-      <p className="min-w-0 flex-1 text-sm text-muted-foreground">
-        {placeModel
-          ? "No place or date given or found in the photos, so models with a range-and-season score used the photos alone."
-          : "From the photos alone (no place or date given)."}
+      <p className="min-w-0 flex-1 text-sm text-muted-foreground" data-testid="text-no-context">
+        {noContextWords(placeModel, excludedReference)}
       </p>
     );
   }
