@@ -944,13 +944,14 @@ def test_observers_are_joined_by_the_accounts_of_the_releases_own_twin_groups():
     conn.execute("create table inat_observations (observation_id text, user_id integer, user_login text)")
     conn.execute("create table mo_observations (observation_id text, owner_id integer, owner_login text)")
     conn.executemany("insert into records values (?, ?)",
-                     [("10", "inat"), ("mo:1", "mo"), ("20", "inat"), ("30", "inat"), ("mo:3", "mo")])
+                     [("10", "inat"), ("mo:1", "mo"), ("20", "inat"), ("40", "inat"), ("30", "inat"),
+                      ("mo:3", "mo")])
     conn.executemany("insert into inat_observations values (?, ?, ?)",
-                     [("10", 7, "alice"), ("20", 8, "bob"), ("30", None, "Carol")])
+                     [("10", 7, "alice"), ("20", 8, "bob"), ("40", 9, "dee"), ("30", None, "Carol")])
     conn.executemany("insert into mo_observations values (?, ?, ?)", [("mo:1", 42, "al"), ("mo:3", None, "cj")])
-    # Finds: 10 + mo:1 (one observer on two sites), 20 + 30 (both iNat: no link across sites),
+    # Finds: 10 + mo:1 (one observer on two sites), 20 + 40 (both iNat: no link across sites),
     # 30 + mo:3 (logins only where there is no id).
-    links = ds.observer_links(conn, {"10": 0, "mo:1": 0, "20": 1, "30": 2, "mo:3": 2})
+    links = ds.observer_links(conn, {"10": 0, "mo:1": 0, "20": 1, "40": 1, "30": 2, "mo:3": 2})
     assert links == {"inat:7": {"mo:42"}, "mo:42": {"inat:7"},
                      "inat:@carol": {"mo:@cj"}, "mo:@cj": {"inat:@carol"}}
     assert ds.accounts_of(conn, ["10", "30", "mo:3", "missing"]) == {
