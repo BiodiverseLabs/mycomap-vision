@@ -75,6 +75,21 @@ def notes(block: dict | None, now: datetime | None = None,
                 f"paper's seal, {pr.get('refused_held', 0):,} held")
         out.append(("warn", line + "; it failed, see `mv nightly`") if pr.get("failed")
                    else ("ok", line))
+    mo = block.get("mo")
+    if isinstance(mo, dict):        # the Mushroom Observer step (MV_NIGHTLY_MO), when on or run
+        if not mo.get("on"):
+            out.append(("ok", "Mushroom Observer step off (MV_NIGHTLY_MO)"))
+        elif "added" not in mo:
+            out.append(("ok", "Mushroom Observer step on, no run yet"))
+        else:
+            line = (f"Mushroom Observer: {mo.get('added', 0):,} records gained MO details, "
+                    f"{mo.get('photos_new', 0):,} new photos, {mo.get('still_pending', 0):,} "
+                    "records still without")
+            if mo.get("failed"):
+                out.append(("warn", line + "; it failed, see `mv nightly`"))
+            else:
+                out.append(("ok", line + ("; stopped for time, the rest follow"
+                                          if mo.get("stopped_for_time") else "")))
     cw = block.get("confused_with")
     if isinstance(cw, dict):
         failed = int(cw.get("failures_in_a_row") or 0)

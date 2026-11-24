@@ -289,9 +289,12 @@ def fetch_batch(session: requests.Session, mo_ids: list[int], pacer: Pacer) -> l
 
 def fetch_all(conn: sqlite3.Connection, refresh: bool = False, north_america_only: bool = True,
               limit: int | None = None, raw_dir: Path | None = None, session=None,
-              pacer: Pacer | None = None, fetch=fetch_batch, log=print) -> dict:
+              pacer: Pacer | None = None, fetch=fetch_batch, max_minutes: float | None = None,
+              clock=time.monotonic, log=print) -> dict:
     """MO's images for MO records not read before (all of them with `refresh`). Each
-    answer is kept gzipped in `raw_dir` (default <data>/raw/mo)."""
+    answer is kept gzipped in `raw_dir` (default <data>/raw/mo). `max_minutes`: no new
+    batch is asked once that long has passed (the nightly update's bound; the records
+    left are asked next time), counted as `stopped_for_time`."""
     config.ensure_dirs()
     todo = pending(conn, refresh, north_america_only)
     ids = sorted(todo)
@@ -305,9 +308,12 @@ def fetch_all(conn: sqlite3.Connection, refresh: bool = False, north_america_onl
     pacer = pacer or Pacer()
     totals = {"requested": len(ids), "ok": 0, "missing": 0, "photos_new": 0,
               "license_changes": 0, "photos": 0, "batches": 0}
-    started = time.monotonic()
+    started = clock()
     totals["gone_on_mo"] = 0
     for batch in chunks(ids, BATCH):
+        if max_minutes is not None and clock() - started > max_minutes * 60:
+            totals["stopped_for_time"] = 1
+            break
         # MO refuses a whole request for one observation it no longer has: that one is
         # left out (it gets no photos, status 'missing') and the rest asked again.
         ask = list(batch)
@@ -330,7 +336,7 @@ def fetch_all(conn: sqlite3.Connection, refresh: bool = False, north_america_onl
         totals["batches"] += 1
         if totals["batches"] % 10 == 0:
             log(f"  {totals['ok'] + totals['missing']:,}/{len(ids):,} MO observations, "
-                f"{totals['photos']:,} photos, {time.monotonic() - started:.0f}s")
+                f"{totals['photos']:,} photos, {clock() - started:.0f}s")
     return totals
 
 
