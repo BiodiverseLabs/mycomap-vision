@@ -252,6 +252,11 @@ def test_a_reference_record_run_through_the_api_opens_on_the_site_too(conn, tmp_
     assert obs["excluded_reference"] is True and obs["left_out_photos"] >= 1
     assert len(obs["photos_shown"]) == obs["photos_used"] == obs["photos"]
     assert "100" not in {s["observation_id"] for s in body["results"][0]["specimens"]}
+    # Its CC0 photo may be shown, from the licence Vision holds, with its credit (its run
+    # card); MycoBLAST showed none (11/24/2026).
+    assert obs["photos_shown"] == [
+        "https://inaturalist-open-data.s3.amazonaws.com/photos/1000/large.jpg"]
+    assert obs["photos_credit"] == [{"licence": "cc0", "by": "Alice"}]
 
 
 def test_a_site_run_answers_identify_by_observation_without_running_again(conn, tmp_path):
